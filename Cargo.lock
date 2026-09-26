@@ -2460,7 +2460,11 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "textline",
  "tzrules",
+ "unsaved",
 ]
 
 [[package]]

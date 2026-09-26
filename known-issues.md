@@ -166062,7 +166062,17 @@ asks) in a form, and kept in `calendar/events.txt` in the settings directory,
 written after every change and read whole or not at all (design-decisions
 §1209). Its empty line now says how to add one; what the last import or export
 did has a line of its own under the top bar, where it had been drawn across the
-top bar's buttons. The reminders list remains.
+top bar's buttons.
+
+**The reminders list, the same day.** Reminders are added (N), changed (E) and
+deleted (Delete, which asks) in a form, from the keyboard like the rest of the
+program; their steps -- which the model had and nothing could reach -- are
+added, ticked and taken off in the form, and Shift+1-9 ticks one from the list.
+The list is kept in `reminders/tasks.txt` in the settings directory (§1210).
+Found on the way: a repeating reminder, once done, was finished for good -- it
+now comes round at its next time still to come -- and the snooze question and
+what the last save did were drawn at the foot of the window, over the list's
+last row; they have lines in the strip under the header now.
 
 ### [E] The explorer's file-type columns showed the same invented values for every file -- 2026-09-25
 **Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25); OPEN for audio files, a picture's colour depth, and tar, gzip, 7z and rar archives -- lane E's.

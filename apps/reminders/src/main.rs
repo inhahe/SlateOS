@@ -1,14 +1,16 @@
 //! `Slate OS` Reminders & Tasks Application
 //!
 //! A comprehensive desktop reminders and task management application with:
-//! - Task creation, editing, deletion with title, description, due date/time,
-//!   priority (low/medium/high/critical), and category assignment
-//! - Recurring reminders: daily, weekly, monthly, yearly, custom interval
-//! - Categories: work, personal, health, finance, shopping, custom with colors
+//! - Reminders added (N), changed (E) and deleted (Delete, which asks) in a
+//!   form: title, due date and time, priority, category, repeat, description,
+//!   notes and steps -- all from the keyboard, which is how this program is
+//!   driven
+//! - Kept in the settings folder as they change, and read back at the next start
+//! - Repeating reminders: daily, weekly, monthly, yearly, every N days -- done,
+//!   one comes round again at its next time
+//! - Categories: work, personal, health, finance, shopping, and more, with colours
 //! - Multiple views: today, upcoming (7 days), all, by category, overdue, completed
-//! - Subtasks exist on the model and cannot be reached: `add_subtask`,
-//!   `remove_subtask` and `toggle_subtask` are written, tested, and have
-//!   no production caller, so every task has none
+//! - Steps: added and ticked in the form; Shift+1-9 ticks one from the list
 //! - Snooze support: Z offers 5min, 15min, 30min and 1hr. `SnoozeDuration`
 //!   also has a `Custom { minutes }`, which nothing can reach: there is
 //!   nowhere to type a number, and the four fixed durations are the four
@@ -51,6 +53,8 @@ use guitk::render::RenderTree;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textfmt::tsv;
+use unsaved::{Choice, Question};
 // The shared civil-date arithmetic. This app used to carry its own copy of
 // all of it: a Zeller's congruence for the weekday, a *separate* Julian day
 // number for differences, its own leap rule, and month-stepping `while` loops
@@ -64,6 +68,8 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -73,20 +79,36 @@ use guitk::text;
 // Layout constants
 // ============================================================================
 
-/// What the window says before any task exists.
+/// What the window says while it has no reminders: how to add one.
 ///
-/// Three lines, and the third is the one this app cannot do without. Once the
-/// invented tasks are gone an empty list reads as **"you have nothing due"**,
-/// which is a statement about the user's commitments -- and a reminders app
-/// with nowhere to store a task is in no position to make it. Worse, it is the
-/// `apps/weather` alert shape: a list that has shown you something teaches you
-/// that it would show you something, and its silence tomorrow reads as an
-/// all-clear.
-const NO_TASKS_LINES: [&str; 3] = [
-    "No reminders.",
-    "This app opened with five tasks until 2026-09-15, one of them overdue. Nobody had been given any of them.",
-    "Nothing is kept automatically -- press Ctrl+S to write the list to a file, or an empty list here does not mean nothing is due.",
-];
+/// It said three other things until 2026-09-26: that it had opened on five
+/// invented tasks until 2026-09-15, which had stopped being news; that nothing
+/// was kept -- so an empty list did not mean nothing was due -- which stopped
+/// being so when the list came to be kept as it changes; and, before either,
+/// there was no way to add a reminder at all (design-decisions §1210).
+const NO_TASKS_LINE: &str =
+    "No reminders yet -- press N to add one, or Ctrl+O to open a list saved as a file.";
+
+/// What the snooze prompt offers.
+const SNOOZE_PROMPT: &str =
+    "Snooze:  1) 5 min   2) 15 min   3) 30 min   4) 1 hour   (any other key cancels)";
+
+/// The step a digit key names, from 0, for Shift+1-9.
+fn step_for_digit(key: Key) -> Option<usize> {
+    [
+        Key::Num1,
+        Key::Num2,
+        Key::Num3,
+        Key::Num4,
+        Key::Num5,
+        Key::Num6,
+        Key::Num7,
+        Key::Num8,
+        Key::Num9,
+    ]
+    .iter()
+    .position(|k| *k == key)
+}
 
 /// The most of a file one open will read.
 ///
@@ -107,6 +129,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("4 / 5", "Overdue / completed"),
     ("Up / Down", "Move the selection"),
     ("Space / Enter", "Mark this reminder done, or not"),
+    ("N", "New reminder"),
+    ("E", "Change this reminder"),
+    ("Delete", "Delete this reminder (asks first)"),
+    ("Shift+1-9", "Tick step 1-9 of this reminder, or untick it"),
+    ("Tab / Shift+Tab", "In the form: next / previous field"),
     ("S", "Next sort order"),
     ("Z", "Snooze this reminder"),
     ("B", "Show or hide the sidebar"),
@@ -1085,6 +1112,10 @@ pub struct Notification {
 pub struct TaskStore {
     tasks: Vec<Task>,
     next_id: u64,
+    /// How many changes the store has had. The window keeps the list on disk
+    /// and writes it when this moves: counted here, where every change
+    /// happens, rather than by each place that makes one (§1206).
+    revision: u64,
 }
 
 impl Default for TaskStore {
@@ -1098,7 +1129,33 @@ impl TaskStore {
         Self {
             tasks: Vec::new(),
             next_id: 1,
+            revision: 0,
         }
+    }
+
+    /// A store holding `tasks`, as read back from the file: new ids go past
+    /// every id they use.
+    pub fn from_tasks(tasks: Vec<Task>) -> Self {
+        let next_id = tasks
+            .iter()
+            .map(|t| t.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        Self {
+            tasks,
+            next_id,
+            revision: 0,
+        }
+    }
+
+    /// How many changes the store has had.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn add(&mut self, mut task: Task) -> u64 {
@@ -1108,21 +1165,30 @@ impl TaskStore {
         self.next_id = self.next_id.saturating_add(1);
         task.id = id;
         self.tasks.push(task);
+        self.changed();
         id
     }
 
     pub fn remove(&mut self, id: u64) -> bool {
         let before = self.tasks.len();
         self.tasks.retain(|t| t.id != id);
-        self.tasks.len() < before
+        let removed = self.tasks.len() < before;
+        if removed {
+            self.changed();
+        }
+        removed
     }
 
     pub fn get(&self, id: u64) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
     }
 
+    /// Task `id`, to change -- counted as changed: nothing borrows a task
+    /// mutably but to change it.
     pub fn get_mut(&mut self, id: u64) -> Option<&mut Task> {
-        self.tasks.iter_mut().find(|t| t.id == id)
+        let at = self.tasks.iter().position(|t| t.id == id)?;
+        self.changed();
+        self.tasks.get_mut(at)
     }
 
     pub fn len(&self) -> usize {
@@ -1265,14 +1331,26 @@ impl TaskStore {
     }
 
     /// Complete a task by ID. Returns true if found.
+    ///
+    /// A repeating reminder with a due date is not finished by being done:
+    /// it comes round again. Its due date moves to the next time it repeats
+    /// that is still to come -- past any it missed -- and it stays on the
+    /// list. It was marked complete like any other, and a daily reminder
+    /// ticked off once never came back.
     pub fn complete_task(&mut self, id: u64, now: DateTime) -> bool {
-        if let Some(task) = self.get_mut(id) {
-            task.completed = true;
-            task.completed_at = Some(now);
-            true
-        } else {
-            false
+        let Some(task) = self.get_mut(id) else {
+            return false;
+        };
+        if let Some(due) = task.due
+            && let Some(next) = next_due_after(&task.recurrence, due, now)
+        {
+            task.due = Some(next);
+            task.snoozed_until = None;
+            return true;
         }
+        task.completed = true;
+        task.completed_at = Some(now);
+        true
     }
 
     /// Uncomplete a task by ID. Returns true if found.
@@ -1314,6 +1392,256 @@ impl TaskStore {
         }
         false
     }
+}
+
+/// The next time a reminder repeating by `rule` from `due` is due that is
+/// later than `now`, or `None` if it does not repeat.
+///
+/// Stepped one repeat at a time, and bounded: a daily reminder last done ten
+/// years ago is 3,650 steps, which is nothing; one that cannot step (every no
+/// days) is not a repeat at all.
+fn next_due_after(rule: &RecurrenceRule, due: DateTime, now: DateTime) -> Option<DateTime> {
+    let mut date = rule.next_occurrence(due.date)?;
+    for _ in 0..100_000 {
+        let next = DateTime::new(date, due.time);
+        if next > now {
+            return Some(next);
+        }
+        date = rule.next_occurrence(date)?;
+    }
+    None
+}
+
+// ============================================================================
+// The kept list
+// ============================================================================
+
+/// The first line of the tasks file, and the format it names.
+const TASKS_FORMAT: &str = "slateos-reminders\t1";
+
+/// The largest tasks file this will read. One cut short would be read as a
+/// list missing its last reminders, with nothing to say so, and the next
+/// change would write the loss back -- so a larger file is refused whole.
+const MAX_TASKS_BYTES: usize = 16 * 1024 * 1024;
+
+/// Why nothing is kept, when the environment names no home directory.
+const NO_HOME: &str = "Nothing is kept: no home directory is set";
+
+/// Where the reminders are kept, or `None` when the environment names no home
+/// directory.
+fn tasks_path() -> Option<std::path::PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("reminders").join("tasks.txt"))
+}
+
+/// A moment as written: `YYYY-MM-DD HH:MM`.
+fn when_text(at: DateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        at.date.year, at.date.month, at.date.day, at.time.hour, at.time.minute
+    )
+}
+
+/// A moment read back from `YYYY-MM-DD HH:MM`.
+fn parse_when_text(text: &str) -> Option<DateTime> {
+    let (date, time) = text.split_once(' ')?;
+    Some(DateTime::new(
+        parse_date_text(date)?,
+        parse_time_text(time)?,
+    ))
+}
+
+/// A date read back from `YYYY-MM-DD` -- a thirty-first of April refused.
+fn parse_date_text(text: &str) -> Option<Date> {
+    let mut parts = text.trim().splitn(3, '-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<u32>().ok()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    Date::new(year, month, day)
+}
+
+/// A time read back from `HH:MM` (or `H:MM`).
+fn parse_time_text(text: &str) -> Option<Time> {
+    let (h, m) = text.trim().split_once(':')?;
+    if m.len() != 2 {
+        return None;
+    }
+    Time::new(h.parse().ok()?, m.parse().ok()?)
+}
+
+/// An optional moment as written: `-` for none.
+fn optional_when(at: Option<DateTime>) -> String {
+    at.map_or_else(|| String::from("-"), when_text)
+}
+
+/// An optional moment read back, or `Err` if it is neither `-` nor a moment.
+fn parse_optional_when(text: &str) -> Result<Option<DateTime>, ()> {
+    if text == "-" {
+        Ok(None)
+    } else {
+        parse_when_text(text).map(Some).ok_or(())
+    }
+}
+
+/// A repeat read back from its spelling, strictly: `RecurrenceRule::from_json_str`
+/// takes anything it does not know for "does not repeat", which is right for
+/// someone else's file and wrong for this program's own.
+fn parse_repeat_key(text: &str) -> Option<RecurrenceRule> {
+    Some(match text {
+        "none" => RecurrenceRule::None,
+        "daily" => RecurrenceRule::Daily,
+        "weekly" => RecurrenceRule::Weekly,
+        "monthly" => RecurrenceRule::Monthly,
+        "yearly" => RecurrenceRule::Yearly,
+        _ => RecurrenceRule::Custom {
+            interval_days: text.strip_prefix("custom:")?.parse().ok()?,
+        },
+    })
+}
+
+/// The reminders as the file holds them: the format line, then each
+/// reminder on a line of its own, each of its steps on a line after it.
+///
+/// Tab-separated, as the notes library, the address book and the calendar
+/// keep theirs (design-decisions §1205, §1206, §1209); the free text escaped
+/// with `textfmt::tsv`, so a tab or a line break cannot start a new field.
+fn tasks_text(store: &TaskStore) -> String {
+    let mut out = String::from(TASKS_FORMAT);
+    out.push('\n');
+    for t in store.all() {
+        let fields = [
+            String::from("task"),
+            t.id.to_string(),
+            when_text(t.created),
+            optional_when(t.due),
+            t.priority.label().to_lowercase(),
+            t.category.label().to_lowercase(),
+            t.recurrence.to_json_str(),
+            String::from(if t.completed { "y" } else { "n" }),
+            optional_when(t.completed_at),
+            optional_when(t.snoozed_until),
+            tsv::escape(&t.title),
+            tsv::escape(&t.description),
+            tsv::escape(&t.notes),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+        for step in &t.subtasks {
+            out.push_str("step\t");
+            out.push_str(if step.completed { "y" } else { "n" });
+            out.push('\t');
+            out.push_str(&tsv::escape(&step.title));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The reminders read back from [`tasks_text`]'s format, or why they cannot
+/// be: read whole or not at all (design-decisions §1202), the refusal naming
+/// the line.
+fn parse_tasks(text: &str) -> Result<Vec<Task>, String> {
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(first) if first == TASKS_FORMAT => {}
+        Some(first) if first.starts_with("slateos-reminders\t") => {
+            return Err(format!(
+                "it is written in a later format ({}) than this version reads",
+                first.trim_start_matches("slateos-reminders\t")
+            ));
+        }
+        _ => return Err(String::from("it is not a SlateOS reminders list")),
+    }
+    let mut tasks: Vec<Task> = Vec::new();
+    for (i, line) in lines.enumerate() {
+        let n = i.saturating_add(2);
+        if line.is_empty() {
+            continue;
+        }
+        let bad = |why: &str| format!("line {n}: {why}");
+        let fields: Vec<&str> = line.split('\t').collect();
+        let text = |t: &str, what: &str| {
+            tsv::unescape(t).ok_or_else(|| bad(&format!("its {what} has a broken escape")))
+        };
+        let flag = |t: &str, what: &str| match t {
+            "y" => Ok(true),
+            "n" => Ok(false),
+            _ => Err(bad(&format!("whether it is {what} is not said"))),
+        };
+        match fields.as_slice() {
+            ["step", done, title] => {
+                let step = Subtask {
+                    title: text(title, "title")?,
+                    completed: flag(done, "done")?,
+                };
+                tasks
+                    .last_mut()
+                    .ok_or_else(|| bad("a step with no reminder before it"))?
+                    .subtasks
+                    .push(step);
+            }
+            [
+                "task",
+                id,
+                created,
+                due,
+                priority,
+                category,
+                repeats,
+                completed,
+                completed_at,
+                snoozed,
+                title,
+                description,
+                notes,
+            ] => {
+                let id = id
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|&id| id > 0 && id < u64::MAX)
+                    .ok_or_else(|| bad("its number is not one"))?;
+                if tasks.iter().any(|t| t.id == id) {
+                    return Err(bad(&format!("another reminder has its number ({id})")));
+                }
+                let when = |t: &str, what: &str| {
+                    parse_optional_when(t).map_err(|()| bad(&format!("its {what} is not a moment")))
+                };
+                let created = parse_when_text(created)
+                    .ok_or_else(|| bad("when it was made is not a moment"))?;
+                tasks.push(Task {
+                    id,
+                    title: text(title, "title")?,
+                    description: text(description, "description")?,
+                    due: when(due, "due time")?,
+                    created,
+                    priority: Priority::from_str_label(priority)
+                        .ok_or_else(|| bad(&format!("its priority ({priority}) is not one")))?,
+                    category: TaskCategory::from_str_label(category)
+                        .ok_or_else(|| bad(&format!("its category ({category}) is not one")))?,
+                    recurrence: parse_repeat_key(repeats).ok_or_else(|| {
+                        bad(&format!(
+                            "how it repeats ({repeats}) is not one this version reads"
+                        ))
+                    })?,
+                    completed: flag(completed, "done")?,
+                    completed_at: when(completed_at, "completion")?,
+                    snoozed_until: when(snoozed, "snooze")?,
+                    subtasks: Vec::new(),
+                    notes: text(notes, "notes")?,
+                });
+            }
+            ["step", ..] => {
+                return Err(bad(&format!("{} fields where a step has 3", fields.len())));
+            }
+            ["task", ..] => {
+                return Err(bad(&format!(
+                    "{} fields where a reminder has 13",
+                    fields.len()
+                )));
+            }
+            _ => return Err(bad("it is neither a reminder nor a step")),
+        }
+    }
+    Ok(tasks)
 }
 
 // ============================================================================
@@ -1648,6 +1976,324 @@ fn parse_subtasks_json(json: &str) -> Vec<Subtask> {
 }
 
 // ============================================================================
+// The reminder form
+// ============================================================================
+
+/// The size a form field's text is drawn at, which moving its caret needs.
+const FORM_TEXT_SIZE: f32 = 13.0;
+/// A form row's height.
+const FORM_ROW_H: f32 = 36.0;
+/// How many steps the form lists at once.
+const FORM_STEPS_SHOWN: usize = 4;
+
+/// A field of the reminder form, in the order Tab walks them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskField {
+    Title,
+    DueDate,
+    DueTime,
+    Priority,
+    Category,
+    Repeats,
+    Description,
+    Notes,
+    /// The steps already on the reminder: Up and Down choose one, Space
+    /// ticks it, Delete takes it off.
+    Steps,
+    /// A step being written: Enter adds it.
+    NewStep,
+}
+
+impl TaskField {
+    const ALL: [Self; 10] = [
+        Self::Title,
+        Self::DueDate,
+        Self::DueTime,
+        Self::Priority,
+        Self::Category,
+        Self::Repeats,
+        Self::Description,
+        Self::Notes,
+        Self::Steps,
+        Self::NewStep,
+    ];
+
+    /// Whether the field is typed into.
+    fn is_text(self) -> bool {
+        matches!(
+            self,
+            Self::Title
+                | Self::DueDate
+                | Self::DueTime
+                | Self::Description
+                | Self::Notes
+                | Self::NewStep
+        )
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Title => "Title",
+            Self::DueDate => "Due date",
+            Self::DueTime => "Due time",
+            Self::Priority => "Priority",
+            Self::Category => "Category",
+            Self::Repeats => "Repeats",
+            Self::Description => "Description",
+            Self::Notes => "Notes",
+            Self::Steps => "Steps",
+            Self::NewStep => "Add a step",
+        }
+    }
+
+    /// What an empty text field says it wants.
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::Title => "What to be reminded of",
+            Self::DueDate => "YYYY-MM-DD, or empty for no due date",
+            Self::DueTime => "HH:MM, 24-hour",
+            Self::Description | Self::Notes => "Optional",
+            Self::NewStep => "Type a step, then Enter",
+            Self::Priority | Self::Category | Self::Repeats | Self::Steps => "",
+        }
+    }
+
+    /// The most characters the field holds.
+    fn capacity(self) -> usize {
+        match self {
+            Self::Title | Self::NewStep => 200,
+            Self::Description | Self::Notes => 2000,
+            Self::DueDate => 16,
+            Self::DueTime => 5,
+            Self::Priority | Self::Category | Self::Repeats | Self::Steps => 0,
+        }
+    }
+}
+
+/// The repeats the form offers, in order.
+fn standard_repeats() -> [RecurrenceRule; 5] {
+    [
+        RecurrenceRule::None,
+        RecurrenceRule::Daily,
+        RecurrenceRule::Weekly,
+        RecurrenceRule::Monthly,
+        RecurrenceRule::Yearly,
+    ]
+}
+
+/// A repeat in words.
+fn describe_repeat(rule: &RecurrenceRule) -> String {
+    match rule {
+        RecurrenceRule::Custom { interval_days } => format!("Every {interval_days} days"),
+        other => other.label().to_owned(),
+    }
+}
+
+/// The value after (or before) `at` in a list of `len`, round from the last
+/// to the first.
+fn step_index(at: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        at.saturating_add(1).checked_rem(len).unwrap_or(0)
+    } else {
+        at.checked_sub(1).unwrap_or(len.saturating_sub(1))
+    }
+}
+
+/// A text field holding `value`.
+fn field_with(value: &str) -> TextInput {
+    let mut input = TextInput::new();
+    input.set_text(value);
+    input
+}
+
+/// The form a reminder is added or changed in.
+///
+/// There was no way to add one: `TaskStore::add` had no caller but the tests
+/// and the JSON import, and nothing could change or delete a reminder, or
+/// reach its steps.
+#[derive(Clone, Debug)]
+pub struct TaskForm {
+    /// The reminder being changed, or `None` for a new one.
+    pub id: Option<u64>,
+    title: TextInput,
+    due_date: TextInput,
+    due_time: TextInput,
+    priority: Priority,
+    category: TaskCategory,
+    repeats: RecurrenceRule,
+    /// An every-N-days repeat, which the list does not have, offered beside
+    /// it so that changing a reminder's title does not change its repeat.
+    other_repeat: Option<RecurrenceRule>,
+    description: TextInput,
+    notes: TextInput,
+    steps: Vec<Subtask>,
+    /// Which step Up and Down have chosen.
+    step_at: usize,
+    new_step: TextInput,
+}
+
+impl TaskForm {
+    /// A new reminder, due at the next whole hour after `now`.
+    pub fn new_at(now: DateTime) -> Self {
+        // The next whole hour: after 23:00, the first hour of tomorrow.
+        let date = now.date.add_days(i32::from(now.time.hour >= 23));
+        let hour = now.time.hour.saturating_add(1).checked_rem(24).unwrap_or(0);
+        let due_at = DateTime::new(date, Time::new(hour, 0).unwrap_or(now.time));
+        Self {
+            id: None,
+            title: TextInput::new(),
+            due_date: field_with(&due_at.date.format_short()),
+            due_time: field_with(&due_at.time.format_24h()),
+            priority: Priority::Medium,
+            category: TaskCategory::Personal,
+            repeats: RecurrenceRule::None,
+            other_repeat: None,
+            description: TextInput::new(),
+            notes: TextInput::new(),
+            steps: Vec::new(),
+            step_at: 0,
+            new_step: TextInput::new(),
+        }
+    }
+
+    /// Reminder `t`, to change.
+    pub fn editing(t: &Task) -> Self {
+        Self {
+            id: Some(t.id),
+            title: field_with(&t.title),
+            due_date: field_with(&t.due.map(|d| d.date.format_short()).unwrap_or_default()),
+            due_time: field_with(&t.due.map(|d| d.time.format_24h()).unwrap_or_default()),
+            priority: t.priority,
+            category: t.category,
+            repeats: t.recurrence.clone(),
+            other_repeat: (!standard_repeats().contains(&t.recurrence))
+                .then(|| t.recurrence.clone()),
+            description: field_with(&t.description),
+            notes: field_with(&t.notes),
+            steps: t.subtasks.clone(),
+            step_at: 0,
+            new_step: TextInput::new(),
+        }
+    }
+
+    /// Text field `which`, to type into.
+    fn input(&mut self, which: TaskField) -> Option<&mut TextInput> {
+        match which {
+            TaskField::Title => Some(&mut self.title),
+            TaskField::DueDate => Some(&mut self.due_date),
+            TaskField::DueTime => Some(&mut self.due_time),
+            TaskField::Description => Some(&mut self.description),
+            TaskField::Notes => Some(&mut self.notes),
+            TaskField::NewStep => Some(&mut self.new_step),
+            _ => None,
+        }
+    }
+
+    /// Text field `which`, to read.
+    fn input_ref(&self, which: TaskField) -> Option<&TextInput> {
+        match which {
+            TaskField::Title => Some(&self.title),
+            TaskField::DueDate => Some(&self.due_date),
+            TaskField::DueTime => Some(&self.due_time),
+            TaskField::Description => Some(&self.description),
+            TaskField::Notes => Some(&self.notes),
+            TaskField::NewStep => Some(&self.new_step),
+            _ => None,
+        }
+    }
+
+    /// The repeats this form offers.
+    fn repeat_choices(&self) -> Vec<RecurrenceRule> {
+        let mut out = standard_repeats().to_vec();
+        out.extend(self.other_repeat.clone());
+        out
+    }
+
+    /// Step chosen field `which` on (`forward`) or back. Whether it is one.
+    fn step(&mut self, which: TaskField, forward: bool) -> bool {
+        match which {
+            TaskField::Priority => {
+                let all = Priority::all();
+                let at = all.iter().position(|p| *p == self.priority).unwrap_or(0);
+                if let Some(next) = all.get(step_index(at, all.len(), forward)) {
+                    self.priority = *next;
+                }
+            }
+            TaskField::Category => {
+                let all = TaskCategory::all();
+                let at = all.iter().position(|c| *c == self.category).unwrap_or(0);
+                if let Some(next) = all.get(step_index(at, all.len(), forward)) {
+                    self.category = *next;
+                }
+            }
+            TaskField::Repeats => {
+                let choices = self.repeat_choices();
+                let at = choices.iter().position(|r| *r == self.repeats).unwrap_or(0);
+                if let Some(next) = choices.get(step_index(at, choices.len(), forward)) {
+                    self.repeats = next.clone();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// What chosen field `which` shows.
+    fn choice_label(&self, which: TaskField) -> String {
+        match which {
+            TaskField::Priority => format!("{} {}", self.priority.icon(), self.priority.label()),
+            TaskField::Category => format!("{} {}", self.category.icon(), self.category.label()),
+            TaskField::Repeats => describe_repeat(&self.repeats),
+            _ => String::new(),
+        }
+    }
+
+    /// Add the step being written, if anything is written. Whether it did.
+    fn add_step(&mut self) -> bool {
+        let title = self.new_step.text().trim().to_owned();
+        if title.is_empty() {
+            return false;
+        }
+        self.steps.push(Subtask::new(&title));
+        self.step_at = self.steps.len().saturating_sub(1);
+        self.new_step.clear();
+        true
+    }
+
+    /// The reminder the form describes -- `base` for what the form does not
+    /// show -- or what is wrong with it, said in the form.
+    pub fn to_task(&self, base: &Task) -> Result<Task, String> {
+        let title = self.title.text().trim();
+        if title.is_empty() {
+            return Err(String::from("Give it a title"));
+        }
+        let due = if self.due_date.text().trim().is_empty() {
+            None
+        } else {
+            let date = parse_date_text(self.due_date.text())
+                .ok_or("The due date is not one -- write it as YYYY-MM-DD, or leave it empty")?;
+            let time = parse_time_text(self.due_time.text())
+                .ok_or("The due time is not one -- write it as HH:MM, like 09:30")?;
+            Some(DateTime::new(date, time))
+        };
+        let mut task = base.clone();
+        title.clone_into(&mut task.title);
+        // A new due time makes an old snooze meaningless.
+        if due != task.due {
+            task.snoozed_until = None;
+        }
+        task.due = due;
+        task.priority = self.priority;
+        task.category = self.category;
+        task.recurrence = self.repeats.clone();
+        self.description.text().clone_into(&mut task.description);
+        self.notes.text().clone_into(&mut task.notes);
+        self.steps.clone_into(&mut task.subtasks);
+        Ok(task)
+    }
+}
+
+// ============================================================================
 // Reminders application state
 // ============================================================================
 
@@ -1685,6 +2331,27 @@ pub struct RemindersApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the list is kept: set by `from_settings`, never by `new`, so a
+    /// window a test makes writes nothing.
+    persist: bool,
+    /// The store's revision when the list was last written or read.
+    kept_revision: u64,
+    /// Why the list is not being kept, when it is not.
+    store_error: Option<String>,
+    /// "Your latest changes are not saved", while it is being asked.
+    question: Option<Question<()>>,
+    /// Cleared when the window may close.
+    running: bool,
+    /// The reminder form, while it is up.
+    pub form: Option<TaskForm>,
+    /// Which of the form's fields has the keys.
+    pub form_field: TaskField,
+    /// What the last Save found wrong with the form.
+    pub form_error: Option<String>,
+    /// The reminder a delete is waiting on its answer for.
+    pub pending_delete: Option<u64>,
+    /// What was last copied or cut from a field of the form.
+    clipboard: String,
 }
 
 impl RemindersApp {
@@ -1708,7 +2375,262 @@ impl RemindersApp {
             sidebar_visible: true,
             detail_visible: true,
             show_completed_subtasks: true,
+            persist: false,
+            kept_revision: 0,
+            store_error: None,
+            question: None,
+            running: true,
+            form: None,
+            form_field: TaskField::Title,
+            form_error: None,
+            pending_delete: None,
+            clipboard: String::new(),
         }
+    }
+
+    /// The window's list: the reminders kept last time, and every change
+    /// kept from here on.
+    pub fn from_settings(width: f32, height: f32, now: DateTime) -> Self {
+        let mut app = Self::new(width, height, now);
+        match tasks_path() {
+            Some(path) => {
+                app.persist = true;
+                app.load_tasks(&path);
+            }
+            // Nowhere to keep anything, and never will be while this window
+            // is open: said once, and not asked about again at every close.
+            None => app.store_error = Some(String::from(NO_HOME)),
+        }
+        app.check_notifications();
+        app
+    }
+
+    /// Read the reminders at `path`; with none there yet, this is a first
+    /// run. A file that cannot be read whole is left exactly as it is:
+    /// nothing is saved over it, and the window says so while it is open.
+    fn load_tasks(&mut self, path: &std::path::Path) {
+        self.load_tasks_within(path, MAX_TASKS_BYTES);
+    }
+
+    /// [`load_tasks`](Self::load_tasks) with the size limit given, so a test
+    /// can reach it without writing sixteen megabytes.
+    fn load_tasks_within(&mut self, path: &std::path::Path, max_bytes: usize) {
+        let refused = |why: String| {
+            format!(
+                "{} was not read ({why}), so nothing is saved over it",
+                path.display()
+            )
+        };
+        let read = match safeio::read_to_string_capped(path, max_bytes) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                self.persist = false;
+                self.store_error = Some(refused(err.to_string()));
+                return;
+            }
+        };
+        if read.truncated {
+            self.persist = false;
+            self.store_error = Some(refused(format!(
+                "it is larger than {} MiB",
+                max_bytes / (1024 * 1024)
+            )));
+            return;
+        }
+        match parse_tasks(&read.text) {
+            Ok(tasks) => {
+                self.store = TaskStore::from_tasks(tasks);
+                self.kept_revision = self.store.revision();
+                self.selected_task_id = self.current_tasks().first().map(|t| t.id);
+            }
+            Err(why) => {
+                self.persist = false;
+                self.store_error = Some(refused(why));
+            }
+        }
+    }
+
+    /// Write the list, if it has changed since it was last written and this
+    /// window keeps anything. A failure is said under the header, and the
+    /// next event tries again.
+    fn keep(&mut self) {
+        if !self.persist || self.store.revision() == self.kept_revision {
+            return;
+        }
+        let Some(path) = tasks_path() else {
+            self.store_error = Some(String::from(NO_HOME));
+            return;
+        };
+        let text = tasks_text(&self.store);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| safeio::write_str_atomically(&path, &text));
+        match written {
+            Ok(()) => {
+                self.kept_revision = self.store.revision();
+                self.store_error = None;
+            }
+            Err(err) => {
+                self.store_error = Some(format!(
+                    "Your reminders were not saved to {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    /// Whether the list holds a change that is not written.
+    fn unkept(&self) -> bool {
+        self.persist && self.store.revision() != self.kept_revision
+    }
+
+    /// Whether the window may close now: at once, unless the list has
+    /// changes a save is failing to write, which closing would lose.
+    fn request_close(&mut self) -> bool {
+        self.keep();
+        if !self.unkept() {
+            return true;
+        }
+        // The question replaces whatever is up: the picker would take the keys
+        // it needs, and be drawn over it.
+        self.picker.close();
+        self.show_help = false;
+        let detail = self.store_error.clone().unwrap_or_default();
+        self.question = Some(Question::new(
+            "Your latest changes to your reminders are not saved.",
+            &format!("{detail} -- try saving again before closing?"),
+            (),
+        ));
+        false
+    }
+
+    /// Act on the close question's answer.
+    fn answer(&mut self, choice: Choice) {
+        match choice {
+            // Leave only if the save now works.
+            Choice::Save => {
+                self.keep();
+                self.running = self.unkept();
+            }
+            Choice::Discard => self.running = false,
+            Choice::Cancel => {}
+        }
+    }
+
+    /// N: a new reminder.
+    pub fn open_new_task(&mut self) {
+        self.form = Some(TaskForm::new_at(self.now));
+        self.form_field = TaskField::Title;
+        self.form_error = None;
+        self.choosing_snooze = false;
+        self.show_help = false;
+    }
+
+    /// E: change the selected reminder.
+    pub fn open_edit_task(&mut self, id: u64) {
+        let Some(task) = self.store.get(id) else {
+            return;
+        };
+        self.form = Some(TaskForm::editing(task));
+        self.form_field = TaskField::Title;
+        self.form_error = None;
+        self.choosing_snooze = false;
+        self.show_help = false;
+    }
+
+    /// Keep what the form holds, or say in the form what is wrong with it.
+    pub fn save_form(&mut self) {
+        let Some(form) = self.form.as_ref() else {
+            return;
+        };
+        let base = match form.id.and_then(|id| self.store.get(id)) {
+            Some(task) => task.clone(),
+            None => Task::new(0, "", self.now),
+        };
+        let task = match form.to_task(&base) {
+            Ok(task) => task,
+            Err(why) => {
+                self.form_error = Some(why);
+                return;
+            }
+        };
+        let id = match form.id {
+            Some(id) => {
+                if let Some(kept) = self.store.get_mut(id) {
+                    *kept = task;
+                }
+                id
+            }
+            None => self.store.add(task),
+        };
+        self.form = None;
+        self.form_error = None;
+        // Where it can be seen: a reminder added in Today and due tomorrow
+        // would otherwise vanish the moment it was made.
+        if !self.current_tasks().iter().any(|t| t.id == id) {
+            self.view = ViewFilter::All;
+        }
+        self.select_task(id);
+        self.check_notifications();
+    }
+
+    /// Delete reminder `id` -- after asking, which `pending_delete` holds.
+    pub fn delete_task(&mut self, id: u64) {
+        self.store.remove(id);
+        self.notifications.retain(|n| n.task_id != id);
+        self.pending_delete = None;
+        if self.selected_task_id == Some(id) {
+            self.selected_task_id = self.current_tasks().first().map(|t| t.id);
+        }
+    }
+
+    /// Shift+1-9: tick step `index` (from 0) of the selected reminder, or
+    /// untick it. Whether there was one.
+    fn toggle_step(&mut self, index: usize) -> bool {
+        let Some(id) = self.selected_task_id else {
+            return false;
+        };
+        let Some(done) = self.store.toggle_subtask(id, index) else {
+            return false;
+        };
+        let title = self
+            .store
+            .get(id)
+            .and_then(|t| t.subtasks.get(index))
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
+        self.last_file_action = Some(format!(
+            "{} \u{201C}{title}\u{201D}",
+            if done { "Ticked" } else { "Unticked" }
+        ));
+        true
+    }
+
+    /// What the window has to say under the header, each line with whether
+    /// it is a warning: the snooze question while it is asked, why the list
+    /// is not being kept, what the last open, save or action did, and -- while
+    /// there are none -- how to add a reminder.
+    ///
+    /// The snooze question and what the last save did were drawn at the foot
+    /// of the window, over the list's last row.
+    fn notice_lines(&self) -> Vec<(String, bool)> {
+        let mut lines = Vec::new();
+        if self.choosing_snooze {
+            lines.push((String::from(SNOOZE_PROMPT), false));
+        }
+        if let Some(error) = &self.store_error {
+            lines.push((error.clone(), true));
+        }
+        if let Some(action) = &self.last_file_action {
+            let failed = action.starts_with("Could not") || action.starts_with("INCOMPLETE");
+            lines.push((action.clone(), failed));
+        }
+        if self.store.is_empty() {
+            lines.push((String::from(NO_TASKS_LINE), false));
+        }
+        lines
     }
 
     /// Check for tasks that should trigger notifications.
@@ -1817,8 +2739,27 @@ impl RemindersApp {
         EventResult::Consumed
     }
 
-    /// Route a compositor event into the app.
+    /// Route a compositor event into the app -- and after it, keep the list
+    /// if it changed.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        let result = self.route_event(event);
+        self.keep();
+        result
+    }
+
+    /// Hand `event` to whatever has it: the close question, the picker, the
+    /// form, the question before a delete, or the list.
+    fn route_event(&mut self, event: &Event) -> EventResult {
+        // The close question has every key and click while it is up.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                self.question = None;
+                self.answer(choice);
+            }
+            return EventResult::Consumed;
+        }
         // The picker takes input first while it is up, or a keystroke meant
         // for a filename lands in the search box behind it.
         //
@@ -1843,8 +2784,20 @@ impl RemindersApp {
             Picked::Ignored => {}
         }
         match event {
+            Event::Key(key_ev) if key_ev.pressed && self.form.is_some() => {
+                self.handle_form_key(key_ev)
+            }
+            Event::Key(key_ev) if key_ev.pressed && self.pending_delete.is_some() => {
+                self.handle_confirm_key(key_ev)
+            }
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Tick { .. } => self.refresh_now(),
+            Event::CloseRequested => {
+                if self.request_close() {
+                    self.running = false;
+                }
+                EventResult::Consumed
+            }
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -1962,7 +2915,36 @@ impl RemindersApp {
         if self.choosing_snooze {
             return self.handle_snooze_key(key);
         }
+        // Shift and a digit ticks that step of the selected reminder: before
+        // the digits' own arms, which are the views.
+        if key.modifiers.shift
+            && let Some(index) = step_for_digit(key.key)
+        {
+            return if self.toggle_step(index) {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
         match key.key {
+            Key::N if !key.modifiers.ctrl => {
+                self.open_new_task();
+                EventResult::Consumed
+            }
+            Key::E if !key.modifiers.ctrl => match self.selected_task_id {
+                Some(id) if self.store.get(id).is_some() => {
+                    self.open_edit_task(id);
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            },
+            Key::Delete => match self.selected_task_id {
+                Some(id) if self.store.get(id).is_some() => {
+                    self.pending_delete = Some(id);
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            },
             Key::Num1 => self.set_view(ViewFilter::Today),
             Key::Num2 => self.set_view(ViewFilter::Upcoming),
             Key::Num3 => self.set_view(ViewFilter::All),
@@ -2029,6 +3011,110 @@ impl RemindersApp {
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Keys while the form is up: Tab walks the fields, Enter saves (or, in
+    /// "Add a step", adds the step), Escape leaves; Left, Right and Space
+    /// step a chosen field; in Steps, Up and Down choose a step, Space ticks
+    /// it and Delete takes it off; the rest edit the text field that has the
+    /// keys.
+    fn handle_form_key(&mut self, key: &KeyEvent) -> EventResult {
+        let field = self.form_field;
+        let Some(form) = self.form.as_mut() else {
+            return EventResult::Ignored;
+        };
+        match key.key {
+            Key::Tab => {
+                let all = TaskField::ALL;
+                let at = all.iter().position(|f| *f == field).unwrap_or(0);
+                let next = step_index(at, all.len(), !key.modifiers.shift);
+                self.form_field = all.get(next).copied().unwrap_or(field);
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                if field == TaskField::NewStep && form.add_step() {
+                    return EventResult::Consumed;
+                }
+                self.save_form();
+                EventResult::Consumed
+            }
+            Key::Escape => {
+                self.form = None;
+                self.form_error = None;
+                EventResult::Consumed
+            }
+            Key::Up | Key::Down if field == TaskField::Steps => {
+                let len = form.steps.len();
+                if len == 0 {
+                    return EventResult::Ignored;
+                }
+                form.step_at = step_index(
+                    form.step_at.min(len.saturating_sub(1)),
+                    len,
+                    key.key == Key::Down,
+                );
+                EventResult::Consumed
+            }
+            Key::Space if field == TaskField::Steps => {
+                let at = form.step_at;
+                match form.steps.get_mut(at) {
+                    Some(step) => {
+                        step.completed = !step.completed;
+                        EventResult::Consumed
+                    }
+                    None => EventResult::Ignored,
+                }
+            }
+            Key::Delete if field == TaskField::Steps => {
+                if form.step_at < form.steps.len() {
+                    form.steps.remove(form.step_at);
+                    form.step_at = form.step_at.min(form.steps.len().saturating_sub(1));
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Key::Left | Key::Right | Key::Space if !field.is_text() => {
+                if form.step(field, key.key != Key::Left) {
+                    self.form_error = None;
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            _ => {
+                let clipboard = self.clipboard.clone();
+                let Some(input) = form.input(field) else {
+                    return EventResult::Ignored;
+                };
+                let done =
+                    textline::apply_key(input, key, field.capacity(), &clipboard, FORM_TEXT_SIZE);
+                if let Some(copied) = done.copied {
+                    self.clipboard = copied;
+                }
+                if done.handled {
+                    self.form_error = None;
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+        }
+    }
+
+    /// Keys while "Delete this reminder?" is up: Enter or Y deletes it,
+    /// Escape or N keeps it, and every other key is swallowed -- a key that
+    /// reached the list would be acted on under a question not yet answered.
+    fn handle_confirm_key(&mut self, key: &KeyEvent) -> EventResult {
+        let Some(id) = self.pending_delete else {
+            return EventResult::Ignored;
+        };
+        match key.key {
+            Key::Enter | Key::Y => self.delete_task(id),
+            Key::Escape | Key::N => self.pending_delete = None,
+            _ => {}
+        }
+        EventResult::Consumed
     }
 
     /// Switch views, reporting whether anything changed.
@@ -2179,34 +3265,35 @@ impl RemindersApp {
         // Header
         self.render_header(&mut cmds, notification_offset);
 
-        // The empty list's lines, in a strip of their own under the header,
-        // until the first task. They were drawn at the top of the window,
-        // before the header -- which drew its title over them.
-        let notice: &[&str] = if self.store.tasks.is_empty() {
-            &NO_TASKS_LINES
-        } else {
-            &[]
-        };
+        // What the window has to say, in a strip of its own under the header
+        // that the content starts below. The empty list's lines were drawn at
+        // the top of the window, before the header -- which drew its title
+        // over them -- and the snooze question and what the last save did at
+        // the foot, over the list's last row.
+        let notice = self.notice_lines();
         let notice_y = HEADER_HEIGHT + notification_offset;
-        #[allow(clippy::cast_precision_loss, reason = "three lines at most")]
+        #[allow(clippy::cast_precision_loss, reason = "four lines at most")]
         let notice_h = if notice.is_empty() {
             0.0
         } else {
             notice.len() as f32 * NOTICE_LINE_H + 6.0
         };
-        for (i, line) in notice.iter().enumerate() {
+        for (i, (line, warning)) in notice.into_iter().enumerate() {
+            let question = line == SNOOZE_PROMPT;
             cmds.push(RenderCommand::Text {
                 x: 8.0,
-                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                #[expect(clippy::cast_precision_loss, reason = "four lines; index is 0..4")]
                 y: notice_y + 3.0 + i as f32 * NOTICE_LINE_H,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
+                text: line,
+                color: if warning {
+                    self.palette.ink(self.palette.red)
+                } else if question {
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 },
-                font_size: if i == 0 { 11.0 } else { 10.0 },
-                font_weight: if i == 0 {
+                font_size: 11.0,
+                font_weight: if warning || question {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
@@ -2245,42 +3332,13 @@ impl RemindersApp {
         // Main task list
         self.render_task_list(&mut cmds, main_x, content_y, main_w, content_h);
 
-        // What the last open or save did.
-        //
-        // `last_file_action` was written on every open and save and read by
-        // nothing, so a save that failed said so to no one -- in the one place
-        // this application's data leaves the process. Its own doc comment
-        // said "for the banner line"; the banner line was never written.
-        //
-        // Neither instrument caught it: `dead_code` is silent on it even with
-        // the field private, and `check-fields-written-never-read` reports
-        // only fields a *test* reads, deliberately leaving "read by nothing"
-        // to `dead_code`. It fell in the seam between the two.
-        // The snooze prompt outranks the banner: it is a question waiting for
-        // an answer, and the line it shares is the only place either appears.
-        if self.choosing_snooze {
-            cmds.push(RenderCommand::Text {
-                x: 12.0,
-                y: self.height - 18.0,
-                text: "Snooze:  1) 5 min   2) 15 min   3) 30 min   4) 1 hour   (any other key cancels)"
-                    .to_owned(),
-                color: self.palette.ink(self.palette.blue),
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some((self.width - 24.0).max(0.0)),
-                overflow: TextOverflow::Ellipsis,
-            });
-        } else if let Some(action) = &self.last_file_action {
-            cmds.push(RenderCommand::Text {
-                x: 12.0,
-                y: self.height - 18.0,
-                text: action.clone(),
-                color: self.palette.ink(self.palette.subtext0),
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some((self.width - 24.0).max(0.0)),
-                overflow: TextOverflow::Ellipsis,
-            });
+        // The form, or the question before a delete, over the list they are
+        // about. Neither is up with the picker: both take the keys that open
+        // it.
+        if let Some(form) = &self.form {
+            self.render_form(&mut cmds, form);
+        } else if let Some(id) = self.pending_delete {
+            self.render_confirm_delete(&mut cmds, id);
         }
 
         // Last, so it is above everything.
@@ -2299,6 +3357,304 @@ impl RemindersApp {
         }
 
         cmds
+    }
+
+    // ------------------------------------------------------------------
+    // The form and the question before a delete
+    // ------------------------------------------------------------------
+
+    /// Where the form's card is.
+    fn form_card(&self) -> (f32, f32, f32, f32) {
+        #[allow(clippy::cast_precision_loss, reason = "a dozen rows")]
+        let rows = TaskField::ALL.len().saturating_add(FORM_STEPS_SHOWN) as f32;
+        let w = 560.0_f32.min(self.width - 24.0).max(0.0);
+        let h = (64.0 + rows * FORM_ROW_H * 0.8 + 80.0)
+            .min(self.height - 24.0)
+            .max(0.0);
+        ((self.width - w) / 2.0, (self.height - h) / 2.0, w, h)
+    }
+
+    /// The form over the list: a row per field, the steps under their row,
+    /// what the last Save found wrong, and the keys that work it.
+    fn render_form(&self, cmds: &mut Vec<RenderCommand>, form: &TaskForm) {
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: Color::rgba(0, 0, 0, 150),
+            corner_radii: CornerRadii::ZERO,
+        });
+        let (cx, cy, cw, ch) = self.form_card();
+        self.palette
+            .push_surface(cmds, cx, cy, cw, ch, 12.0, Surface::Card);
+        cmds.push(RenderCommand::Text {
+            x: cx + 20.0,
+            y: cy + 16.0,
+            text: String::from(if form.id.is_some() {
+                "Change reminder"
+            } else {
+                "New reminder"
+            }),
+            font_size: 16.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((cw - 40.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let label_w = 100.0;
+        let control_w = (cw - 40.0 - label_w).max(0.0);
+        let row_h = FORM_ROW_H * 0.8;
+        let mut y = cy + 48.0;
+        for field in TaskField::ALL {
+            let focused = self.form_field == field;
+            cmds.push(RenderCommand::Text {
+                x: cx + 20.0,
+                y: y + 7.0,
+                text: field.label().to_owned(),
+                font_size: 12.0,
+                color: if focused {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext1
+                },
+                font_weight: if focused {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(label_w - 8.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            let (x, w, h) = (cx + 20.0 + label_w, control_w, row_h - 4.0);
+            self.palette
+                .push_surface(cmds, x, y, w, h, 4.0, Surface::Card);
+            cmds.push(RenderCommand::StrokeRect {
+                x,
+                y,
+                width: w,
+                height: h,
+                color: if focused {
+                    self.palette.blue
+                } else {
+                    self.palette.surface1
+                },
+                line_width: if focused { 2.0 } else { 1.0 },
+                corner_radii: CornerRadii::all(4.0),
+            });
+            if field == TaskField::Steps {
+                self.render_form_steps(cmds, form, focused, (x, y, w));
+                #[allow(clippy::cast_precision_loss, reason = "a handful of rows")]
+                let shown = form.steps.len().clamp(1, FORM_STEPS_SHOWN) as f32;
+                y += row_h + (shown - 1.0) * 18.0;
+                continue;
+            }
+            if let Some(input) = form.input_ref(field) {
+                if input.text().is_empty() && !focused {
+                    cmds.push(RenderCommand::Text {
+                        x: x + 8.0,
+                        y: y + 6.0,
+                        text: field.placeholder().to_owned(),
+                        font_size: FORM_TEXT_SIZE,
+                        color: self.palette.subtext0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some((w - 16.0).max(0.0)),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                } else {
+                    let mut tree = RenderTree::new();
+                    textedit::draw(
+                        &mut tree,
+                        &textedit::SingleLine {
+                            text: input.text(),
+                            cursor: if focused {
+                                input.cursor()
+                            } else {
+                                guitk::text::TextCursor::default()
+                            },
+                            selection_anchor: if focused {
+                                input.selection_anchor()
+                            } else {
+                                None
+                            },
+                            focused,
+                            x: x + 8.0,
+                            y: y + 5.0,
+                            width: (w - 16.0).max(0.0),
+                            line_height: 18.0,
+                            font_size: FORM_TEXT_SIZE,
+                            weight: FontWeightHint::Regular,
+                            color: self.palette.text,
+                            selection_bg: self.palette.blue,
+                            selection_fg: self.palette.crust,
+                            caret_width: textedit::CARET_WIDTH,
+                        },
+                    );
+                    cmds.extend(tree.commands);
+                }
+            } else {
+                let value = form.choice_label(field);
+                cmds.push(RenderCommand::Text {
+                    x: x + 8.0,
+                    y: y + 6.0,
+                    text: format!("\u{25C0}  {value}  \u{25B6}"),
+                    font_size: FORM_TEXT_SIZE,
+                    color: self.palette.text,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some((w - 16.0).max(0.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+            y += row_h;
+        }
+        if let Some(error) = &self.form_error {
+            cmds.push(RenderCommand::Text {
+                x: cx + 20.0,
+                y: y + 4.0,
+                text: error.clone(),
+                font_size: 12.0,
+                color: self.palette.ink(self.palette.red),
+                font_weight: FontWeightHint::Bold,
+                max_width: Some((cw - 40.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        cmds.push(RenderCommand::Text {
+            x: cx + 20.0,
+            y: cy + ch - 26.0,
+            text: String::from(
+                "Tab: next field  \u{00B7}  Left/Right: choose  \u{00B7}  Enter: save  \u{00B7}  Esc: cancel",
+            ),
+            font_size: 11.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((cw - 40.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// The steps in the form, a few at a time around the one chosen, each
+    /// with its box ticked or not.
+    fn render_form_steps(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        form: &TaskForm,
+        focused: bool,
+        (x, y, w): (f32, f32, f32),
+    ) {
+        if form.steps.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: x + 8.0,
+                y: y + 6.0,
+                text: String::from("None yet -- add one below"),
+                font_size: FORM_TEXT_SIZE,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((w - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+        let first = form
+            .step_at
+            .saturating_sub(FORM_STEPS_SHOWN.saturating_sub(1))
+            .min(form.steps.len().saturating_sub(FORM_STEPS_SHOWN));
+        for (row, (i, step)) in form
+            .steps
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(FORM_STEPS_SHOWN)
+            .enumerate()
+        {
+            let chosen = focused && i == form.step_at;
+            #[allow(clippy::cast_precision_loss, reason = "four rows")]
+            let ty = y + 6.0 + row as f32 * 18.0;
+            cmds.push(RenderCommand::Text {
+                x: x + 8.0,
+                y: ty,
+                text: format!(
+                    "{}{}. [{}] {}",
+                    if chosen { "\u{25B8} " } else { "  " },
+                    i.saturating_add(1),
+                    if step.completed { "x" } else { " " },
+                    step.title
+                ),
+                font_size: FORM_TEXT_SIZE,
+                color: if chosen {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.text
+                },
+                font_weight: if chosen {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some((w - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+
+    /// "Delete this reminder?", with the keys that answer it.
+    fn render_confirm_delete(&self, cmds: &mut Vec<RenderCommand>, id: u64) {
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: Color::rgba(0, 0, 0, 160),
+            corner_radii: CornerRadii::ZERO,
+        });
+        let w = 440.0_f32.min(self.width - 24.0).max(0.0);
+        let (x, y) = ((self.width - w) / 2.0, (self.height - 120.0) / 2.0);
+        self.palette
+            .push_surface(cmds, x, y, w, 120.0, 12.0, Surface::Card);
+        let (title, repeats) = self.store.get(id).map_or_else(
+            || (String::new(), false),
+            |t| (t.title.clone(), t.recurrence != RecurrenceRule::None),
+        );
+        for (i, (text, size, weight, color)) in [
+            (
+                format!("Delete \u{201C}{title}\u{201D}?"),
+                15.0,
+                FontWeightHint::Bold,
+                self.palette.text,
+            ),
+            (
+                String::from(if repeats {
+                    "Every time it would come round again goes with it."
+                } else {
+                    "It cannot be brought back."
+                }),
+                12.0,
+                FontWeightHint::Regular,
+                self.palette.subtext0,
+            ),
+            (
+                String::from("Enter or Y deletes it  \u{00B7}  Esc or N keeps it"),
+                12.0,
+                FontWeightHint::Bold,
+                self.palette.ink(self.palette.blue),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            #[allow(clippy::cast_precision_loss, reason = "three lines")]
+            let ty = y + 18.0 + i as f32 * 30.0;
+            cmds.push(RenderCommand::Text {
+                x: x + 20.0,
+                y: ty,
+                text,
+                font_size: size,
+                color,
+                font_weight: weight,
+                max_width: Some((w - 40.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
     /// Render notification banners at the top. Returns total height consumed.
@@ -3743,11 +5099,17 @@ impl App for RemindersApp {
         Some(Duration::from_secs(30))
     }
 
+    /// Closing asks first only when the latest changes cannot be saved; the
+    /// window then waits for the answer (`KeepOpen`) with the question drawn.
     fn on_event(&mut self, event: &Event) -> Response {
-        if matches!(event, Event::CloseRequested) {
+        let result = self.handle_event(event);
+        if !self.running {
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        if matches!(event, Event::CloseRequested) {
+            return Response::KeepOpen;
+        }
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -3759,9 +5121,15 @@ impl App for RemindersApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.width = width;
         self.height = height;
-        RenderTree {
+        let mut tree = RenderTree {
             commands: self.render_commands(),
+        };
+        // Over everything, the picker included: they are never up together.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
         }
+        tree
     }
 }
 
@@ -3782,11 +5150,11 @@ fn main() -> ExitCode {
             },
         )
     });
-    let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, now);
-
-    // Opens empty. It used to call `sample_tasks`, and then
-    // `check_notifications` over the result -- so the app raised notices about
-    // deadlines nobody had.
+    // The reminders kept last time -- and the notices for any that fell due
+    // while the window was shut. It used to call `sample_tasks`, and then
+    // `check_notifications` over the result, raising notices about deadlines
+    // nobody had; and then it opened empty, and kept nothing.
+    let mut app = RemindersApp::from_settings(WINDOW_WIDTH, WINDOW_HEIGHT, now);
 
     app::launch("reminders", &mut app)
 }
@@ -3914,7 +5282,19 @@ mod tests {
             dismissed: false,
         });
 
-        vec![plain, elsewhere, moved, notified]
+        // The selected reminder with nine steps, so Shift+1 to Shift+9 each
+        // have one to tick.
+        let mut steps = populated();
+        let id = steps.selected_task_id.expect("control: a selection");
+        for i in 1..=9 {
+            steps.store.add_subtask(id, &format!("Step {i}"));
+        }
+
+        // With the form up, where Tab walks the fields.
+        let mut form = populated();
+        form.open_new_task();
+
+        vec![plain, elsewhere, moved, notified, steps, form]
     }
 
     /// **Completed subtasks can be put out of the way.**
@@ -4496,7 +5876,7 @@ mod tests {
     /// that has shown you something teaches you that it would show you
     /// something, and its silence tomorrow reads as an all-clear.
     #[test]
-    fn a_fresh_window_holds_no_tasks_and_says_the_silence_means_nothing() {
+    fn a_fresh_window_holds_no_tasks_and_says_how_to_add_one() {
         let app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
         assert!(app.store.tasks.is_empty(), "tasks appeared from nowhere");
 
@@ -4508,17 +5888,17 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in NO_TASKS_LINES {
-            assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
-            );
-        }
         assert!(
-            NO_TASKS_LINES
-                .iter()
-                .any(|l| l.contains("does not mean nothing is due")),
-            "nothing forecloses reading the empty list as an all-clear",
+            texts.iter().any(|t| t == NO_TASKS_LINE),
+            "the window never said {NO_TASKS_LINE:?}"
+        );
+        assert!(
+            NO_TASKS_LINE.contains("press N"),
+            "the line does not say how"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("Nothing is kept")),
+            "a claim that nothing is kept, which is no longer so"
         );
     }
 
@@ -6305,9 +7685,15 @@ mod tests {
     /// `[E] Warnings drawn where the next thing drawn covers them`.
     #[test]
     fn the_warning_lines_are_not_painted_over() {
-        let app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
-        let commands: Vec<RenderCommand> = app.render_commands();
-        for line in NO_TASKS_LINES {
+        let mut app = RemindersApp::new(1200.0, 800.0, make_now());
+        // Every line the strip can hold at once.
+        app.choosing_snooze = true;
+        app.store_error = Some(String::from("Your reminders were not saved to /x: no room"));
+        app.last_file_action = Some(String::from("Could not read /y: gone"));
+        let lines: Vec<String> = app.notice_lines().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(lines.len(), 4, "control: {lines:?}");
+        let commands = app.render_commands();
+        for line in &lines {
             let (at, x, y, reach) = commands
                 .iter()
                 .enumerate()
@@ -6327,16 +7713,614 @@ mod tests {
                     if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
             });
             assert!(!covered, "{line:?} is painted over");
-            // Nor drawn on the same row as other text: a header's title over
-            // a warning is as unreadable as a fill over it.
             let crowded = commands.iter().any(|c| {
                 matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
-                    if !NO_TASKS_LINES.contains(&text.as_str())
+                    if !lines.contains(text)
                         && (ty - y).abs() < 10.0
                         && *tx < reach
                         && tx + tw.unwrap_or(f32::INFINITY) > x)
             });
             assert!(!crowded, "{line:?} shares its row with other text");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Reminders added, changed and deleted, steps reached, and the list kept
+    // ------------------------------------------------------------------
+
+    fn key(app: &mut RemindersApp, k: Key) -> EventResult {
+        app.handle_event(&press(k))
+    }
+
+    fn with_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn with_ctrl(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// Type `text` a character at a time, as a keyboard does.
+    fn type_in(app: &mut RemindersApp, text: &str) {
+        for c in text.chars() {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: c.to_string(),
+            }));
+        }
+    }
+
+    /// Put `text` in the form's field `field`, over what it held.
+    fn fill_field(app: &mut RemindersApp, field: TaskField, text: &str) {
+        app.form_field = field;
+        app.handle_event(&with_ctrl(Key::A));
+        key(app, Key::Backspace);
+        type_in(app, text);
+    }
+
+    /// Every string the window draws, joined.
+    fn drawn(app: &RemindersApp) -> String {
+        app.render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A reminder with something in every field the file keeps, text that
+    /// needs escaping in every free field, and steps.
+    fn awkward_task(title: &str, now: DateTime) -> Task {
+        let mut t = Task::new(0, title, now);
+        t.description = String::from("two\nlines\tand \\ a backslash");
+        t.notes = String::from("a note\twith a tab");
+        t.due = Some(DateTime::new(
+            now.date.add_days(3),
+            Time::new(7, 5).unwrap(),
+        ));
+        t.priority = Priority::Critical;
+        t.category = TaskCategory::Finance;
+        t.recurrence = RecurrenceRule::Custom { interval_days: 10 };
+        t.snoozed_until = Some(DateTime::new(now.date, Time::new(23, 0).unwrap()));
+        t.subtasks = vec![
+            Subtask {
+                title: String::from("first\tstep"),
+                completed: true,
+            },
+            Subtask::new("second"),
+        ];
+        t
+    }
+
+    #[test]
+    fn the_kept_list_reads_back_what_it_wrote_whatever_the_text() {
+        let now = make_now();
+        let mut store = TaskStore::new();
+        store.add(awkward_task(
+            "Tab\there, a line\nbreak, and \\t written out",
+            now,
+        ));
+        for (i, (priority, category)) in Priority::all()
+            .iter()
+            .cycle()
+            .zip(TaskCategory::all())
+            .enumerate()
+        {
+            let mut t = Task::new(0, &format!("Task {i}"), now);
+            t.priority = *priority;
+            t.category = *category;
+            t.recurrence = standard_repeats()[i % 5].clone();
+            t.completed = i % 2 == 0;
+            t.completed_at = t.completed.then_some(now);
+            t.due = (i % 3 != 0).then_some(now);
+            store.add(t);
+        }
+        let text = tasks_text(&store);
+        let back = parse_tasks(&text).expect("it reads back");
+        assert_eq!(back, store.all(), "the list came back different");
+        assert_eq!(
+            tasks_text(&TaskStore::from_tasks(back)),
+            text,
+            "one list, two spellings"
+        );
+    }
+
+    #[test]
+    fn a_list_that_cannot_be_read_whole_is_refused_and_says_why() {
+        let now = make_now();
+        let mut store = TaskStore::new();
+        store.add(awkward_task("One", now));
+        store.add(awkward_task("Two", now));
+        let good = tasks_text(&store);
+        let cases: [(&str, String, &str); 9] = [
+            (
+                "later",
+                good.replacen("slateos-reminders\t1", "slateos-reminders\t2", 1),
+                "later format (2)",
+            ),
+            (
+                "not ours",
+                String::from("{\"tasks\":[]}\n"),
+                "not a SlateOS reminders list",
+            ),
+            (
+                "orphan step",
+                good.replacen(
+                    "slateos-reminders\t1\n",
+                    "slateos-reminders\t1\nstep\tn\tearly\n",
+                    1,
+                ),
+                "a step with no reminder before it",
+            ),
+            (
+                "twins",
+                good.replacen("task\t2\t", "task\t1\t", 1),
+                "another reminder has its number (1)",
+            ),
+            (
+                "priority",
+                good.replacen("\tcritical\t", "\turgent\t", 1),
+                "its priority (urgent)",
+            ),
+            (
+                "repeat",
+                good.replacen("custom:10", "fortnightly", 1),
+                "how it repeats (fortnightly)",
+            ),
+            (
+                "due",
+                good.replacen("2026-05-21 07:05", "2026-05-21 7:5", 1),
+                "its due time is not a moment",
+            ),
+            (
+                "flag",
+                good.replacen("\ty\tfirst", "\tmaybe\tfirst", 1),
+                "whether it is done is not said",
+            ),
+            ("short", good.replacen("\tcritical", "", 1), "12 fields"),
+        ];
+        for (name, text, why) in cases {
+            assert_ne!(text, good, "control: case {name} changed nothing");
+            let said = parse_tasks(&text).map(|_| ()).unwrap_err();
+            assert!(said.contains(why), "{name}: {said}");
+        }
+    }
+
+    #[test]
+    fn a_reminder_is_added_from_the_keyboard_and_is_there_next_time() {
+        settingsfile::testing::with_scratch_config("reminders-kept", |_| {
+            let now = make_now();
+            let mut app = RemindersApp::from_settings(1200.0, 800.0, now);
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            key(&mut app, Key::Num3);
+            assert!(
+                !tasks_path().unwrap().exists(),
+                "a first run wrote a list nobody had touched"
+            );
+            assert_eq!(key(&mut app, Key::N), EventResult::Consumed);
+            assert!(app.form.is_some(), "N did not open the form");
+            type_in(&mut app, "Pay rent");
+            fill_field(&mut app, TaskField::DueDate, "2026-06-01");
+            fill_field(&mut app, TaskField::DueTime, "08:15");
+            app.form_field = TaskField::Priority;
+            key(&mut app, Key::Right);
+            app.form_field = TaskField::Repeats;
+            key(&mut app, Key::Right);
+            key(&mut app, Key::Right);
+            key(&mut app, Key::Right);
+            fill_field(&mut app, TaskField::NewStep, "Check the account");
+            key(&mut app, Key::Enter);
+            assert!(app.form.is_some(), "Enter in the step field saved the form");
+            type_in(&mut app, "Transfer");
+            key(&mut app, Key::Enter);
+            assert_eq!(app.form.as_ref().unwrap().steps.len(), 2);
+            app.form_field = TaskField::Title;
+            key(&mut app, Key::Enter);
+            assert!(app.form.is_none(), "{:?}", app.form_error);
+            assert_eq!(app.store.len(), 1);
+            let made = app.store.all()[0].clone();
+            assert_eq!(made.title, "Pay rent");
+            assert_eq!(
+                made.due,
+                Some(DateTime::new(
+                    Date::new(2026, 6, 1).unwrap(),
+                    Time::new(8, 15).unwrap()
+                ))
+            );
+            assert_eq!(made.priority, Priority::High);
+            assert_eq!(made.recurrence, RecurrenceRule::Monthly);
+            assert_eq!(made.subtasks.len(), 2);
+            assert_eq!(made.created, now);
+            assert_eq!(
+                app.selected_task_id,
+                Some(made.id),
+                "the new reminder is not selected"
+            );
+            assert!(
+                drawn(&app).contains("Pay rent"),
+                "the new reminder is not drawn"
+            );
+
+            let again = RemindersApp::from_settings(1200.0, 800.0, now);
+            assert!(again.store_error.is_none(), "{:?}", again.store_error);
+            assert_eq!(again.store.all(), [made]);
+        });
+    }
+
+    #[test]
+    fn a_window_made_by_new_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("reminders-quiet", |dir| {
+            let mut app = RemindersApp::new(1200.0, 800.0, make_now());
+            key(&mut app, Key::N);
+            type_in(&mut app, "Scratch");
+            key(&mut app, Key::Enter);
+            assert_eq!(app.store.len(), 1);
+            assert!(!dir.join("slateos").join("reminders").exists());
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn the_form_says_what_is_wrong_and_keeps_what_was_typed() {
+        let mut app = RemindersApp::new(1200.0, 800.0, make_now());
+        key(&mut app, Key::N);
+        key(&mut app, Key::Enter);
+        assert_eq!(app.form_error.as_deref(), Some("Give it a title"));
+        type_in(&mut app, "Call");
+        assert!(
+            app.form_error.is_none(),
+            "typing did not clear the complaint"
+        );
+        fill_field(&mut app, TaskField::DueDate, "2026-02-30");
+        key(&mut app, Key::Enter);
+        assert!(
+            app.form_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("The due date is not one")),
+            "{:?}",
+            app.form_error
+        );
+        assert!(
+            drawn(&app).contains("The due date is not one"),
+            "the complaint is not drawn"
+        );
+        fill_field(&mut app, TaskField::DueDate, "2026-06-01");
+        fill_field(&mut app, TaskField::DueTime, "25:00");
+        key(&mut app, Key::Enter);
+        assert!(
+            app.form_error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("The due time is not one")),
+            "{:?}",
+            app.form_error
+        );
+        // No date is no due date, whatever the time says.
+        fill_field(&mut app, TaskField::DueDate, "");
+        key(&mut app, Key::Enter);
+        assert!(app.form.is_none(), "{:?}", app.form_error);
+        assert_eq!(app.store.all()[0].due, None);
+        assert_eq!(
+            app.view,
+            ViewFilter::All,
+            "a reminder with no due date is not in Today"
+        );
+    }
+
+    #[test]
+    fn e_changes_the_selected_reminder_and_keeps_what_the_form_does_not_show() {
+        let now = make_now();
+        let mut app = RemindersApp::new(1200.0, 800.0, now);
+        let mut t = awkward_task("Old", now);
+        t.completed = true;
+        t.completed_at = Some(now);
+        let id = app.store.add(t);
+        app.view = ViewFilter::Completed;
+        app.selected_task_id = Some(id);
+        key(&mut app, Key::E);
+        let form = app.form.as_ref().expect("E did not open the reminder");
+        assert_eq!(form.id, Some(id));
+        assert_eq!(form.choice_label(TaskField::Repeats), "Every 10 days");
+        fill_field(&mut app, TaskField::Title, "New");
+        key(&mut app, Key::Enter);
+        assert!(app.form.is_none(), "{:?}", app.form_error);
+        assert_eq!(app.store.len(), 1, "a change made a second reminder");
+        let kept = app.store.get(id).expect("the reminder lost its number");
+        assert_eq!(kept.title, "New");
+        assert!(kept.completed, "a change undid the completion");
+        assert_eq!(kept.completed_at, Some(now));
+        assert_eq!(
+            kept.recurrence,
+            RecurrenceRule::Custom { interval_days: 10 }
+        );
+        assert_eq!(kept.created, now);
+        assert!(
+            kept.snoozed_until.is_some(),
+            "an unchanged due time lost its snooze"
+        );
+        // A new due time makes the snooze meaningless.
+        key(&mut app, Key::E);
+        fill_field(&mut app, TaskField::DueTime, "10:00");
+        key(&mut app, Key::Enter);
+        assert_eq!(app.store.get(id).unwrap().snoozed_until, None);
+        // The every-ten-days repeat, which the list lacks, is offered beside
+        // it: stepping all the way round comes back to it.
+        let mut form = TaskForm::editing(app.store.get(id).unwrap());
+        for _ in 0..6 {
+            form.step(TaskField::Repeats, true);
+        }
+        assert_eq!(form.choice_label(TaskField::Repeats), "Every 10 days");
+    }
+
+    #[test]
+    fn steps_are_added_ticked_and_taken_off_in_the_form_and_ticked_from_the_list() {
+        let now = make_now();
+        let mut app = RemindersApp::new(1200.0, 800.0, now);
+        let id = app.store.add(awkward_task("With steps", now));
+        app.view = ViewFilter::All;
+        app.selected_task_id = Some(id);
+        // Shift+2 ticks the second step from the list; Shift+9 has none.
+        assert_eq!(
+            app.handle_event(&with_shift(Key::Num2)),
+            EventResult::Consumed
+        );
+        assert!(app.store.get(id).unwrap().subtasks[1].completed);
+        assert_eq!(app.view, ViewFilter::All, "Shift+2 changed the view");
+        assert_eq!(
+            app.handle_event(&with_shift(Key::Num9)),
+            EventResult::Ignored
+        );
+        // In the form: Down to the second, Space unticks it, Delete takes the first off.
+        key(&mut app, Key::E);
+        app.form_field = TaskField::Steps;
+        key(&mut app, Key::Down);
+        key(&mut app, Key::Space);
+        key(&mut app, Key::Up);
+        key(&mut app, Key::Delete);
+        assert!(
+            drawn(&app).contains("1. [ ] second"),
+            "the steps are not drawn: {}",
+            drawn(&app)
+        );
+        key(&mut app, Key::Tab);
+        assert_eq!(app.form_field, TaskField::NewStep);
+        type_in(&mut app, "third");
+        key(&mut app, Key::Enter);
+        app.form_field = TaskField::Title;
+        key(&mut app, Key::Enter);
+        let steps: Vec<(String, bool)> = app
+            .store
+            .get(id)
+            .unwrap()
+            .subtasks
+            .iter()
+            .map(|s| (s.title.clone(), s.completed))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                (String::from("second"), false),
+                (String::from("third"), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn delete_asks_first_and_each_answer_does_what_it_says() {
+        let now = make_now();
+        let mut app = RemindersApp::new(1200.0, 800.0, now);
+        let id = app.store.add(awkward_task("Doomed", now));
+        app.view = ViewFilter::All;
+        app.selected_task_id = Some(id);
+        key(&mut app, Key::Delete);
+        assert_eq!(app.pending_delete, Some(id));
+        assert!(
+            drawn(&app).contains("Delete \u{201C}Doomed\u{201D}?"),
+            "the question is not drawn"
+        );
+        // A key under the question reaches nothing.
+        key(&mut app, Key::Num5);
+        assert_eq!(app.view, ViewFilter::All, "a key reached the list");
+        key(&mut app, Key::Escape);
+        assert_eq!(app.pending_delete, None);
+        assert_eq!(app.store.len(), 1, "Escape deleted it");
+        key(&mut app, Key::Delete);
+        key(&mut app, Key::Y);
+        assert!(app.store.is_empty(), "Y did not delete");
+        assert_eq!(app.selected_task_id, None);
+    }
+
+    #[test]
+    fn the_form_takes_every_key_while_it_is_up() {
+        let mut app = populated();
+        let view = app.view;
+        key(&mut app, Key::N);
+        // "2" is a view's key; in the form it is a character.
+        type_in(&mut app, "2");
+        assert_eq!(app.view, view, "a key reached the list");
+        assert_eq!(app.form.as_ref().unwrap().title.text(), "2");
+        // So is Ctrl+S: no picker comes up over the form.
+        app.handle_event(&with_ctrl(Key::S));
+        assert!(
+            !app.picker.is_open(),
+            "Ctrl+S reached the list under the form"
+        );
+        key(&mut app, Key::Escape);
+        assert!(app.form.is_none());
+    }
+
+    #[test]
+    fn a_repeating_reminder_comes_round_again_when_it_is_done() {
+        let now = make_now();
+        let mut store = TaskStore::new();
+        let mut t = Task::new(0, "Water the plants", now);
+        // Due three days ago, every two days: done now, it is next due at the
+        // first repeat still to come -- tomorrow -- not at one already missed.
+        t.due = Some(DateTime::new(
+            now.date.add_days(-3),
+            Time::new(9, 0).unwrap(),
+        ));
+        t.recurrence = RecurrenceRule::Custom { interval_days: 2 };
+        let id = store.add(t);
+        assert!(store.complete_task(id, now));
+        let t = store.get(id).unwrap();
+        assert!(!t.completed, "a repeating reminder was finished for good");
+        assert_eq!(
+            t.due,
+            Some(DateTime::new(
+                now.date.add_days(1),
+                Time::new(9, 0).unwrap()
+            ))
+        );
+        // One that does not repeat is done.
+        let once = store.add(Task::new(0, "Once", now));
+        store.complete_task(once, now);
+        assert!(store.get(once).unwrap().completed);
+    }
+
+    #[test]
+    fn a_list_file_that_cannot_be_read_is_left_as_it_is() {
+        settingsfile::testing::with_scratch_config("reminders-broken", |_| {
+            let path = tasks_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let broken = "slateos-reminders\t1\ntask\t1\tnot a moment\n";
+            std::fs::write(&path, broken).unwrap();
+            let mut app = RemindersApp::from_settings(1200.0, 800.0, make_now());
+            let error = app
+                .store_error
+                .clone()
+                .expect("an unreadable file was taken without a word");
+            assert!(error.contains("line 2"), "{error}");
+            assert!(drawn(&app).contains(&error), "the refusal is not on screen");
+            key(&mut app, Key::N);
+            type_in(&mut app, "New");
+            key(&mut app, Key::Enter);
+            assert_eq!(app.store.len(), 1);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "the unreadable file was saved over"
+            );
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn a_list_file_too_big_to_read_whole_is_refused() {
+        settingsfile::testing::with_scratch_config("reminders-big", |_| {
+            let mut store = TaskStore::new();
+            store.add(awkward_task("One", make_now()));
+            let text = tasks_text(&store);
+            let path = tasks_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &text).unwrap();
+            let mut app = RemindersApp::new(1200.0, 800.0, make_now());
+            app.persist = true;
+            app.load_tasks_within(&path, text.len() - 1);
+            assert!(app.store_error.clone().unwrap().contains("larger than"));
+            assert!(!app.persist, "a file read in part would be saved over");
+            let mut whole = RemindersApp::new(1200.0, 800.0, make_now());
+            whole.persist = true;
+            whole.load_tasks_within(&path, text.len());
+            assert!(whole.store_error.is_none(), "{:?}", whole.store_error);
+            assert_eq!(whole.store.len(), 1, "control: the whole file reads");
+        });
+    }
+
+    #[test]
+    fn closing_while_a_save_fails_asks_first() {
+        settingsfile::testing::with_scratch_config("reminders-failing", |_| {
+            let mut app = RemindersApp::from_settings(1200.0, 800.0, make_now());
+            let path = tasks_path().unwrap();
+            std::fs::create_dir_all(&path).unwrap();
+            key(&mut app, Key::N);
+            type_in(&mut app, "Unkept");
+            key(&mut app, Key::Enter);
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(
+                error.starts_with("Your reminders were not saved to "),
+                "{error}"
+            );
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            let question: String = app
+                .render(1200.0, 800.0)
+                .commands
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                question.contains("not saved"),
+                "the question is not drawn: {question}"
+            );
+            // A key under the question reaches nothing.
+            key(&mut app, Key::N);
+            assert!(app.form.is_none(), "a key reached the list");
+            // Save while it still fails: the window stays.
+            assert!(matches!(app.on_event(&press(Key::S)), Response::Redraw));
+            assert!(app.running);
+            // Put right, then Save: it goes.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            std::fs::remove_dir(&path).unwrap();
+            assert!(matches!(app.on_event(&press(Key::S)), Response::Exit));
+            assert_eq!(
+                RemindersApp::from_settings(1200.0, 800.0, make_now())
+                    .store
+                    .len(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn the_store_counts_its_changes_and_nothing_else() {
+        let now = make_now();
+        let mut store = TaskStore::new();
+        let r0 = store.revision();
+        let id = store.add(awkward_task("A", now));
+        let r1 = store.revision();
+        assert_ne!(r1, r0);
+        let _ = store.get(id);
+        assert!(!store.remove(id + 99));
+        assert!(store.get_mut(id + 99).is_none());
+        assert_eq!(store.toggle_subtask(id + 99, 0), None);
+        assert_eq!(store.revision(), r1, "nothing changed and it counted");
+        store.toggle_subtask(id, 0);
+        let r2 = store.revision();
+        assert_ne!(r2, r1, "ticking a step was not counted");
+        assert!(store.complete_task(id, now));
+        assert_ne!(store.revision(), r2, "completing was not counted");
     }
 }

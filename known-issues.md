@@ -165963,6 +165963,27 @@ against the same commits: nothing with `xargs -r git diff-tree`, the five
 given in the request with a regression case for `test-pre-push-gates.py`.
 Until then, run a script's `test-<stem>.py` by hand before pushing it.
 
+### [E] The mind map's undo acts on whichever map is showing, and can delete a node of another map -- 2026-09-26
+**Status:** OPEN -- lane E's next, with the mind map's own file.
+
+**In short:** the mind map app holds several maps, as tabs, and keeps one undo
+history for the window. Undo replays the last change onto whichever map is
+showing. Each map is given a copy of the id counter when it is made, so node
+numbers repeat from map to map -- and undoing "add a node" made on one map,
+while another is showing, deletes that other map's node with the same number,
+with everything under it. Deleting a map leaves its changes in the history too.
+
+**Where.** `apps/mindmap/src/main.rs`: `MindMapApp::{undo, redo, apply_reverse,
+apply_forward, switch_map, delete_active_map}`, `MindMap::new` (the cloned
+`IdGenerator`).
+
+**The proper fix** is the whiteboard's (known-issues, the document
+applications entry): each map keeps its own history, and a change is undone on
+the map it was made on. With it, the mind map wants what the diagram and the
+whiteboard got -- a file of its own that keeps every colour, shape and fold (its
+outline save keeps only the words and the tree, as its notice says), the
+unsaved mark, and the question before a close or an Open.
+
 ### [E] Warnings drawn where the next thing drawn covers them -- 2026-09-25
 **Status:** FIXED (lane E, 2026-09-25) -- all fifteen apps.
 

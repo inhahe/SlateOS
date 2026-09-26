@@ -3,6 +3,17 @@
 //! A feature-rich Kanban board for Slate OS with multiple boards, customizable
 //! columns, rich cards (labels, priority, due dates, checklists, comments),
 //! filtering, sorting, WIP limits, swimlanes, archiving, and JSON export/import.
+//!
+//! # What is kept
+//!
+//! Every board, in one file in the settings directory (`kanban/boards.txt`),
+//! written after every key or click that changed one -- there is no Save.
+//! Until 2026-09-25 nothing was: every card was gone when the window closed,
+//! and a board's JSON export (Ctrl+E) was the only way to keep one. The file is
+//! the notes library's kind (design-decisions §1205): tab-separated text, a
+//! record a line (`boards_text`, `parse_boards`), read whole or not at all.
+//! The window compares the boards' text after each event with what it last
+//! wrote, so no change can go unkept whichever path made it.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -18,7 +29,10 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+use textfmt::tsv;
 
 // =============================================================================
 // Catppuccin Mocha palette
@@ -34,6 +48,10 @@ mod palette {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Id(u64);
 
+/// The next id [`Id::new`] hands out. Every id read from a file moves it past
+/// that id ([`Id::from_stored`]).
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
 impl Id {
     /// The identifier a file says a thing has.
     ///
@@ -41,14 +59,17 @@ impl Id {
     /// from the counter: a column stores `card_ids`, so renumbering the cards
     /// would leave every column pointing at nothing while the board still
     /// looked whole.
-    const fn from_stored(raw: u64) -> Self {
+    ///
+    /// And the counter is moved past it. It was not, so after an import the
+    /// next card made could be given the id of one just read -- and cards are
+    /// kept in a map by id, so the new card replaced the imported one.
+    fn from_stored(raw: u64) -> Self {
+        NEXT_ID.fetch_max(raw.saturating_add(1), Ordering::Relaxed);
         Self(raw)
     }
 
     fn new() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
 }
 
@@ -131,7 +152,7 @@ impl Label {
 }
 
 /// A checklist item on a card.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ChecklistItem {
     // A stable identifier assigned and never read: this app addresses
     // boards, columns and cards by position. Kept because it is what to
@@ -154,7 +175,7 @@ impl ChecklistItem {
 }
 
 /// A comment on a card.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Comment {
     // A stable identifier assigned and never read: this app addresses
     // boards, columns and cards by position. Kept because it is what to
@@ -223,7 +244,7 @@ impl SimpleDate {
 }
 
 /// A Kanban card with all associated metadata.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Card {
     id: Id,
     title: String,
@@ -388,7 +409,7 @@ impl SortBy {
 }
 
 /// A Kanban column holding an ordered list of cards.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Column {
     // A stable identifier assigned and never read: this app addresses
     // boards, columns and cards by position. Kept because it is what to
@@ -441,7 +462,7 @@ impl Column {
 }
 
 /// A Kanban board containing columns and cards.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Board {
     // A stable identifier assigned and never read: this app addresses boards,
     // columns and cards by position. Kept because it is what to switch to
@@ -904,6 +925,461 @@ impl JsonExporter {
     }
 }
 
+// =============================================================================
+// The boards file
+// =============================================================================
+
+/// The boards file's first field, which says what the file is.
+const BOARDS_MAGIC: &str = "slateos-kanban";
+
+/// The version of the boards file this writes, and the newest it reads.
+const BOARDS_FORMAT: u32 = 1;
+
+/// The largest boards file this will read. One cut short would be read as
+/// fewer boards with no sign any were missing, so a larger file is refused
+/// rather than read in part.
+const MAX_BOARDS_BYTES: usize = 64 * 1024 * 1024;
+
+/// Why nothing is kept, when the environment names no home directory.
+const NO_HOME: &str = "Nothing is kept: no home directory is set";
+
+/// Where the boards are kept, or `None` when the environment names no home
+/// directory.
+fn boards_path() -> Option<std::path::PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("kanban").join("boards.txt"))
+}
+
+/// Milliseconds since 1970 by the clock; 0 if it reads earlier than that.
+fn clock_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// A yes-or-no as written.
+fn flag(on: bool) -> &'static str {
+    if on { "1" } else { "0" }
+}
+
+/// A yes-or-no as read, or `None` for anything [`flag`] never writes.
+fn read_flag(field: &str) -> Option<bool> {
+    match field {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// A colour as written: `#RRGGBB`, or `#RRGGBBAA` when it is not opaque.
+fn colour_hex(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour(text: &str) -> Option<Color> {
+    let hex = text.strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+fn priority_key(p: Priority) -> &'static str {
+    match p {
+        Priority::Low => "low",
+        Priority::Medium => "medium",
+        Priority::High => "high",
+        Priority::Critical => "critical",
+    }
+}
+
+fn priority_from_key(key: &str) -> Option<Priority> {
+    Some(match key {
+        "low" => Priority::Low,
+        "medium" => Priority::Medium,
+        "high" => Priority::High,
+        "critical" => Priority::Critical,
+        _ => return None,
+    })
+}
+
+fn sort_key(sort: SortBy) -> &'static str {
+    match sort {
+        SortBy::Priority => "priority",
+        SortBy::DueDate => "due",
+        SortBy::CreatedAt => "created",
+        SortBy::Title => "title",
+    }
+}
+
+fn sort_from_key(key: &str) -> Option<SortBy> {
+    Some(match key {
+        "priority" => SortBy::Priority,
+        "due" => SortBy::DueDate,
+        "created" => SortBy::CreatedAt,
+        "title" => SortBy::Title,
+        _ => return None,
+    })
+}
+
+/// Ids as the trailing fields of a line.
+fn push_ids(out: &mut String, ids: &[Id]) {
+    for id in ids {
+        out.push('\t');
+        out.push_str(&id.0.to_string());
+    }
+}
+
+/// Every board as text: a first line naming the format, the board that was
+/// open, then each board -- its swimlanes, labels and cards (each followed by
+/// its labels, checklist and comments), then its columns, each naming its
+/// cards in order, and the archived.
+///
+/// ```text
+/// slateos-kanban  1
+/// active   <index of the board that was open>
+/// board    <id>  <swimlanes 1|0>  <name>
+/// lane     <name>
+/// label    <id>  <#RRGGBB>  <name>
+/// card     <id>  <low|medium|high|critical>  <due YYYY-MM-DD, or nothing>
+///          <created>  <archived 1|0>  <title>  <assignee>  <swimlane>  <description>
+/// tag      <label id>
+/// item     <id>  <done 1|0>  <text>
+/// comment  <id>  <time>  <author>  <text>
+/// column   <id>  <limit, or nothing>  <priority|due|created|title>  <collapsed 1|0>
+///          <name>  <card id>...
+/// archived <card id>...
+/// ```
+///
+/// Fields are separated by tabs and escaped with `textfmt::tsv`; times are
+/// milliseconds since 1970. A card is written once, and a column lists the
+/// ids of the cards in it, so a card in no column and not archived is kept
+/// too.
+fn boards_text(boards: &[Board], active: usize) -> String {
+    let mut out = format!("{BOARDS_MAGIC}\t{BOARDS_FORMAT}\nactive\t{active}\n");
+    for board in boards {
+        out.push_str(&format!(
+            "board\t{}\t{}\t{}\n",
+            board.id.0,
+            flag(board.swimlanes_enabled),
+            tsv::escape(&board.name)
+        ));
+        for lane in &board.swimlane_names {
+            out.push_str(&format!("lane\t{}\n", tsv::escape(lane)));
+        }
+        for label in &board.labels {
+            out.push_str(&format!(
+                "label\t{}\t{}\t{}\n",
+                label.id.0,
+                colour_hex(label.color),
+                tsv::escape(&label.name)
+            ));
+        }
+        // By id, so the same board is always the same text.
+        let mut cards: Vec<&Card> = board.cards.values().collect();
+        cards.sort_by_key(|c| c.id.0);
+        for card in cards {
+            out.push_str(&format!(
+                "card\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                card.id.0,
+                priority_key(card.priority),
+                card.due_date.map_or_else(String::new, |d| format!(
+                    "{:04}-{:02}-{:02}",
+                    d.year, d.month, d.day
+                )),
+                card.created_at,
+                flag(card.archived),
+                tsv::escape(&card.title),
+                tsv::escape(&card.assignee),
+                tsv::escape(&card.swimlane),
+                tsv::escape(&card.description)
+            ));
+            for label in &card.labels {
+                out.push_str(&format!("tag\t{}\n", label.0));
+            }
+            for item in &card.checklist {
+                out.push_str(&format!(
+                    "item\t{}\t{}\t{}\n",
+                    item.id.0,
+                    flag(item.done),
+                    tsv::escape(&item.text)
+                ));
+            }
+            for comment in &card.comments {
+                out.push_str(&format!(
+                    "comment\t{}\t{}\t{}\t{}\n",
+                    comment.id.0,
+                    comment.timestamp,
+                    tsv::escape(&comment.author),
+                    tsv::escape(&comment.text)
+                ));
+            }
+        }
+        for column in &board.columns {
+            out.push_str(&format!(
+                "column\t{}\t{}\t{}\t{}\t{}",
+                column.id.0,
+                column.wip_limit.map_or_else(String::new, |l| l.to_string()),
+                sort_key(column.sort_by),
+                flag(column.collapsed),
+                tsv::escape(&column.name)
+            ));
+            push_ids(&mut out, &column.card_ids);
+            out.push('\n');
+        }
+        out.push_str("archived");
+        push_ids(&mut out, &board.archived_card_ids);
+        out.push('\n');
+    }
+    out
+}
+
+/// Every board read from its text, and the one that was open -- or why they
+/// cannot be, naming the line.
+///
+/// All or nothing, for the finance ledger's reason (design-decisions §1202):
+/// boards read in part and then kept again would lose, without a word,
+/// whatever was not read. So is a board with two cards of one number, a
+/// column or the archive naming a card the board does not have, or a card in
+/// two places.
+fn parse_boards(text: &str) -> Result<(Vec<Board>, usize), String> {
+    let mut lines = text.lines().enumerate();
+    let first = lines.next().map_or("", |(_, line)| line);
+    let head: Vec<&str> = first.split('\t').collect();
+    let version = match head.as_slice() {
+        [BOARDS_MAGIC, version] => version
+            .parse::<u32>()
+            .map_err(|_| String::from("line 1 names no format"))?,
+        _ => return Err(String::from("it is not a SlateOS kanban file")),
+    };
+    if version > BOARDS_FORMAT {
+        return Err(format!(
+            "it is a later format ({version}) than this version reads ({BOARDS_FORMAT})"
+        ));
+    }
+    if version < BOARDS_FORMAT {
+        return Err(format!("format {version} is not one this program wrote"));
+    }
+
+    let mut boards: Vec<Board> = Vec::new();
+    let mut active: Option<(usize, usize)> = None;
+    // The card lines of the board being read, in order, for its sub-lines.
+    let mut last_card: Option<Id> = None;
+    // Every card placed so far on the board being read.
+    let mut placed: HashSet<Id> = HashSet::new();
+    let mut board_ids = HashSet::new();
+    for (i, line) in lines {
+        let at = i.saturating_add(1);
+        if line.is_empty() {
+            continue;
+        }
+        let bad = |why: &str| format!("line {at}: {why}");
+        let text = |field: &str| {
+            tsv::unescape(field)
+                .ok_or_else(|| bad("a text holds an escape this program never writes"))
+        };
+        let number = |field: &str, what: &str| {
+            field
+                .parse::<u64>()
+                .map_err(|_| bad(&format!("{what} is not a number")))
+        };
+        let yes_no =
+            |field: &str| read_flag(field).ok_or_else(|| bad("a yes-or-no is neither 1 nor 0"));
+        let fields: Vec<&str> = line.split('\t').collect();
+        match fields.as_slice() {
+            ["active", index] => {
+                if active.is_some() {
+                    return Err(bad("the open board is named twice"));
+                }
+                let index = usize::try_from(number(index, "the open board")?)
+                    .map_err(|_| bad("the open board is not a number"))?;
+                active = Some((at, index));
+            }
+            ["board", id, swimlanes, name] => {
+                let id = number(id, "a board's number")?;
+                if !board_ids.insert(id) {
+                    return Err(bad("two boards have one number"));
+                }
+                let mut board = Board::new(&text(name)?);
+                board.id = Id::from_stored(id);
+                board.swimlanes_enabled = yes_no(swimlanes)?;
+                boards.push(board);
+                last_card = None;
+                placed.clear();
+            }
+            ["lane", name] => {
+                let name = text(name)?;
+                boards
+                    .last_mut()
+                    .ok_or_else(|| bad("a swimlane comes before any board"))?
+                    .swimlane_names
+                    .push(name);
+            }
+            ["label", id, colour, name] => {
+                let mut label = Label::new(
+                    &text(name)?,
+                    parse_colour(colour).ok_or_else(|| bad("a colour is not one"))?,
+                );
+                label.id = Id::from_stored(number(id, "a label's number")?);
+                boards
+                    .last_mut()
+                    .ok_or_else(|| bad("a label comes before any board"))?
+                    .labels
+                    .push(label);
+            }
+            [
+                "card",
+                id,
+                priority,
+                due,
+                created,
+                archived,
+                title,
+                assignee,
+                swimlane,
+                description,
+            ] => {
+                let board = boards
+                    .last_mut()
+                    .ok_or_else(|| bad("a card comes before any board"))?;
+                let id = Id::from_stored(number(id, "a card's number")?);
+                if board.cards.contains_key(&id) {
+                    return Err(bad("two cards on one board have one number"));
+                }
+                let mut card = Card::new(&text(title)?);
+                card.id = id;
+                card.priority = priority_from_key(priority)
+                    .ok_or_else(|| bad("a priority this version does not know"))?;
+                card.due_date = if due.is_empty() {
+                    None
+                } else {
+                    Some(SimpleDate::parse(due).ok_or_else(|| bad("a due date is not a date"))?)
+                };
+                card.created_at = number(created, "when a card was made")?;
+                card.archived = yes_no(archived)?;
+                card.assignee = text(assignee)?;
+                card.swimlane = text(swimlane)?;
+                card.description = text(description)?;
+                board.cards.insert(id, card);
+                last_card = Some(id);
+            }
+            ["tag", label] => {
+                let label = Id::from_stored(number(label, "a label's number")?);
+                card_of(&mut boards, last_card)
+                    .ok_or_else(|| bad("a card's label comes before any card"))?
+                    .labels
+                    .push(label);
+            }
+            ["item", id, done, item] => {
+                let item = ChecklistItem {
+                    id: Id::from_stored(number(id, "a checklist item's number")?),
+                    text: text(item)?,
+                    done: yes_no(done)?,
+                };
+                card_of(&mut boards, last_card)
+                    .ok_or_else(|| bad("a checklist item comes before any card"))?
+                    .checklist
+                    .push(item);
+            }
+            ["comment", id, time, author, said] => {
+                let comment = Comment {
+                    id: Id::from_stored(number(id, "a comment's number")?),
+                    author: text(author)?,
+                    text: text(said)?,
+                    timestamp: number(time, "when a comment was made")?,
+                };
+                card_of(&mut boards, last_card)
+                    .ok_or_else(|| bad("a comment comes before any card"))?
+                    .comments
+                    .push(comment);
+            }
+            ["column", id, limit, sort, collapsed, name, cards @ ..] => {
+                let board = boards
+                    .last_mut()
+                    .ok_or_else(|| bad("a column comes before any board"))?;
+                let mut column = Column::new(&text(name)?);
+                column.id = Id::from_stored(number(id, "a column's number")?);
+                column.wip_limit = if limit.is_empty() {
+                    None
+                } else {
+                    Some(
+                        usize::try_from(number(limit, "a column's limit")?)
+                            .map_err(|_| bad("a column's limit is not a number"))?,
+                    )
+                };
+                column.sort_by = sort_from_key(sort)
+                    .ok_or_else(|| bad("a sort order this version does not know"))?;
+                column.collapsed = yes_no(collapsed)?;
+                column.card_ids = placed_ids(cards, board, &mut placed, &bad)?;
+                board.columns.push(column);
+            }
+            ["archived", cards @ ..] => {
+                let board = boards
+                    .last_mut()
+                    .ok_or_else(|| bad("the archive comes before any board"))?;
+                board.archived_card_ids = placed_ids(cards, board, &mut placed, &bad)?;
+            }
+            _ => {
+                return Err(bad(
+                    "it is not a line this version reads, or has the wrong number of fields",
+                ));
+            }
+        }
+    }
+    if boards.is_empty() {
+        return Err(String::from("it holds no boards"));
+    }
+    let active = match active {
+        None => 0,
+        Some((at, index)) if index >= boards.len() => {
+            return Err(format!("line {at}: the open board is not one of them"));
+        }
+        Some((_, index)) => index,
+    };
+    Ok((boards, active))
+}
+
+/// The card `id` names on the last board read, to hang its sub-lines on.
+fn card_of(boards: &mut [Board], id: Option<Id>) -> Option<&mut Card> {
+    boards.last_mut()?.cards.get_mut(&id?)
+}
+
+/// Card ids listed on a column or archive line: each a card the board has,
+/// and none placed before.
+fn placed_ids(
+    fields: &[&str],
+    board: &Board,
+    placed: &mut HashSet<Id>,
+    bad: &dyn Fn(&str) -> String,
+) -> Result<Vec<Id>, String> {
+    let mut ids = Vec::with_capacity(fields.len());
+    for field in fields {
+        let raw = field
+            .parse::<u64>()
+            .map_err(|_| bad("a card's number is not a number"))?;
+        let id = Id::from_stored(raw);
+        if !board.cards.contains_key(&id) {
+            return Err(bad(&format!("card {raw} is not on the board")));
+        }
+        if !placed.insert(id) {
+            return Err(bad(&format!("card {raw} is in two places")));
+        }
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
 /// `#rrggbb` as written by `export_label`.
 fn parse_hex_color(text: &str) -> Option<Color> {
     let body = text.strip_prefix('#')?;
@@ -1275,6 +1751,17 @@ impl JsonImporter {
             board.columns.push(column);
         }
 
+        // A column may name a card only once, and only one that is on the
+        // board, and a card may be in only one column: the JSON says what it
+        // says, but a board that breaks those is not one this program can
+        // keep, and the first place a card is named is where it is.
+        let mut placed = HashSet::new();
+        for column in &mut board.columns {
+            column
+                .card_ids
+                .retain(|id| board.cards.contains_key(id) && placed.insert(*id));
+        }
+
         board.swimlanes_enabled = value
             .get("swimlanes_enabled")
             .and_then(JsonValue::as_bool)
@@ -1490,7 +1977,27 @@ struct KanbanApp {
     show_filter_bar: bool,
     input_buffer: String,
     input_mode: InputMode,
-    timestamp_counter: u64,
+    /// The last stamp [`stamp`](Self::stamp) gave, so the next is later.
+    ///
+    /// It was a counter from 1000, which after a restart would have stamped
+    /// every new card earlier than every kept one.
+    last_stamp: u64,
+    /// Whether changes are kept. Off in `new`, so no test can write the user's
+    /// boards; `from_settings`, which `main` uses, turns it on, and a file that
+    /// cannot be read turns it off again.
+    persist: bool,
+    /// The boards' text as last written or read. What they say now is
+    /// compared with it after every key or click, and written when it
+    /// differs.
+    kept_text: String,
+    /// Why the boards are not being kept, drawn for as long as it is true:
+    /// the file could not be read (and so is left exactly as it is), there is
+    /// nowhere to keep it, or the last save failed.
+    store_error: Option<String>,
+    /// The question asked when the window is closed while a save is failing.
+    question: Option<unsaved::Question<Pending>>,
+    /// Set when the question has been answered with leave.
+    quit: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1546,19 +2053,181 @@ impl KanbanApp {
             show_filter_bar: false,
             input_buffer: String::new(),
             input_mode: InputMode::None,
-            timestamp_counter: 1000,
+            last_stamp: 0,
+            persist: false,
+            kept_text: String::new(),
+            store_error: None,
+            question: None,
+            quit: false,
         }
     }
 
-    // `expect` rather than a fallback, because the invariant it asserts is
-    // enforced at every site that could break it and there are only three:
-    // `new()` seeds exactly one board with the index at 0, `switch_board`
-    // assigns only an index it has already bounds-checked, and `add_board`
-    // assigns `len() - 1` immediately after a push. Nothing removes a board, so
-    // `boards` is never empty. Returning `Option<&Board>` instead would push
-    // that unreachable `None` into all 40-odd call sites, where each would
-    // invent its own way of ignoring it — which is strictly worse than one
-    // documented assertion here.
+    /// The window's boards: the ones kept last time -- or, on a first run,
+    /// the one board `new` starts with -- and every change kept from here on.
+    fn from_settings() -> Self {
+        let mut app = Self::new();
+        match boards_path() {
+            Some(path) => {
+                app.persist = true;
+                app.load_boards(&path);
+            }
+            // Nowhere to keep anything, and never will be while this window
+            // is open: said once, and not asked about again at every close.
+            None => app.store_error = Some(String::from(NO_HOME)),
+        }
+        // What is there now is what is kept: a first run's starting board is
+        // not written until something on it changes.
+        app.kept_text = boards_text(&app.boards, app.active_board_idx);
+        app
+    }
+
+    /// Read the boards at `path`; with none there yet, this is a first run.
+    ///
+    /// A file that cannot be read whole is left exactly as it is: nothing is
+    /// saved over it, and the window says so for as long as it is open.
+    fn load_boards(&mut self, path: &std::path::Path) {
+        self.load_boards_within(path, MAX_BOARDS_BYTES);
+    }
+
+    /// [`load_boards`](Self::load_boards) with the size limit given, so a
+    /// test can reach it without writing sixty-four megabytes.
+    fn load_boards_within(&mut self, path: &std::path::Path, max_bytes: usize) {
+        let refused = |why: String| {
+            format!(
+                "{} was not read ({why}), so nothing is saved over it",
+                path.display()
+            )
+        };
+        let read = match safeio::read_to_string_capped(path, max_bytes) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                self.persist = false;
+                self.store_error = Some(refused(err.to_string()));
+                return;
+            }
+        };
+        if read.truncated {
+            self.persist = false;
+            self.store_error = Some(refused(format!(
+                "it is larger than {} MiB",
+                max_bytes / (1024 * 1024)
+            )));
+            return;
+        }
+        match parse_boards(&read.text) {
+            Ok((boards, active)) => {
+                // Every time on a card or a comment, so a change made now is
+                // later than all of them even if the clock has been set back.
+                let latest = boards
+                    .iter()
+                    .flat_map(|b| b.cards.values())
+                    .flat_map(|c| {
+                        std::iter::once(c.created_at).chain(c.comments.iter().map(|m| m.timestamp))
+                    })
+                    .max()
+                    .unwrap_or(0);
+                self.last_stamp = self.last_stamp.max(latest);
+                self.boards = boards;
+                self.active_board_idx = active;
+                self.selected_card = None;
+                self.selected_column = 0;
+            }
+            Err(why) => {
+                self.persist = false;
+                self.store_error = Some(refused(why));
+            }
+        }
+    }
+
+    /// Write the boards, if they have changed since they were last written
+    /// and this window keeps anything.
+    ///
+    /// A failure is kept in `store_error`, drawn on the status line, and the
+    /// next event tries again.
+    fn keep(&mut self) {
+        if !self.persist {
+            return;
+        }
+        let text = boards_text(&self.boards, self.active_board_idx);
+        if text == self.kept_text {
+            return;
+        }
+        let Some(path) = boards_path() else {
+            self.store_error = Some(String::from(NO_HOME));
+            return;
+        };
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| safeio::write_str_atomically(&path, &text));
+        match written {
+            Ok(()) => {
+                self.kept_text = text;
+                self.store_error = None;
+            }
+            Err(err) => {
+                self.store_error = Some(format!("Not saved to {}: {err}", path.display()));
+            }
+        }
+    }
+
+    /// Whether the boards say something that is not written.
+    fn unkept(&self) -> bool {
+        self.persist && boards_text(&self.boards, self.active_board_idx) != self.kept_text
+    }
+
+    /// Where the boards are kept -- or why they are not -- for the status
+    /// line.
+    fn keeping_line(&self) -> String {
+        if let Some(error) = &self.store_error {
+            return error.clone();
+        }
+        // Asked first, so a window that keeps nothing never reads where the
+        // settings are.
+        if !self.persist {
+            return String::from("Nothing here is kept.");
+        }
+        boards_path().map_or_else(
+            || String::from(NO_HOME),
+            |path| format!("The boards are kept in {}.", path.display()),
+        )
+    }
+
+    /// Whether the window may close now: at once, unless the boards have
+    /// changes a save is failing to write, which closing would lose.
+    fn request_close(&mut self) -> bool {
+        self.keep();
+        if !self.unkept() {
+            return true;
+        }
+        // The question replaces whatever is up: a picker would take the keys
+        // it needs, and be drawn over it.
+        self.picker.close();
+        self.show_help = false;
+        let detail = self.store_error.clone().unwrap_or_default();
+        self.question = Some(unsaved::Question::new(
+            "Your latest changes to your boards are not saved.",
+            &format!("{detail} -- try saving again before closing?"),
+            Pending::Close,
+        ));
+        false
+    }
+
+    /// Act on the close question's answer.
+    fn answer(&mut self, choice: unsaved::Choice) {
+        match choice {
+            // Leave only if the save now works; if it fails again the error is
+            // on screen and the window stays, which is what Save asked for.
+            unsaved::Choice::Save => {
+                self.keep();
+                self.quit = !self.unkept();
+            }
+            unsaved::Choice::Discard => self.quit = true,
+            unsaved::Choice::Cancel => {}
+        }
+    }
+
     /// Write the active board to `path` as JSON.
     ///
     /// Refuses a board with no cards rather than writing one. A board file
@@ -1600,6 +2269,16 @@ impl KanbanApp {
         }
     }
 
+    // `expect` rather than a fallback, because the invariant it asserts is
+    // enforced at every site that could break it and there are only four:
+    // `new()` seeds exactly one board with the index at 0, `switch_board`
+    // assigns only an index it has already bounds-checked, `add_board` and
+    // `read_board` assign `len() - 1` immediately after a push, and a boards
+    // file is read only if it holds a board and names an open one it has.
+    // Nothing removes a board, so `boards` is never empty. Returning
+    // `Option<&Board>` instead would push that unreachable `None` into all
+    // 40-odd call sites, where each would invent its own way of ignoring it —
+    // which is strictly worse than one documented assertion here.
     #[allow(clippy::expect_used)]
     fn active_board(&self) -> &Board {
         self.boards
@@ -1614,9 +2293,13 @@ impl KanbanApp {
             .expect("active_board_idx must be valid")
     }
 
+    /// A stamp for a change made now: the clock's reading in milliseconds
+    /// since 1970 -- but always later than every stamp already given or read,
+    /// so a later card sorts later even within one millisecond, or after the
+    /// clock has been set back.
     fn next_timestamp(&mut self) -> u64 {
-        self.timestamp_counter = self.timestamp_counter.saturating_add(1);
-        self.timestamp_counter
+        self.last_stamp = clock_ms().max(self.last_stamp.saturating_add(1));
+        self.last_stamp
     }
 
     fn add_card(&mut self, title: &str, col_idx: usize) -> Option<Id> {
@@ -2010,11 +2693,17 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
 // *reserves* for a card and the height it *draws* cannot disagree — which is
 // what lets a column work out which cards fit before drawing any of them.
 /// Blank space above the priority bar.
-/// What the board says before anything is on it.
-const NOTHING_YET_LINES: [&str; 2] = [
-    "No cards yet.",
-    "Nothing is saved automatically -- press Ctrl+E to write the board to a file, Ctrl+O to read one back, or it is gone when the window closes.",
-];
+/// What the status line says on a board with no cards, before where the
+/// boards are kept.
+///
+/// These were two lines drawn at the top of the window -- on every board, not
+/// only an empty one -- under the toolbar, which painted over them: they were
+/// never seen. The second said nothing was kept, which stopped being true
+/// when the boards were (2026-09-25).
+const NO_CARDS_YET: &str = "No cards yet -- N adds one.";
+
+/// How tall the status line along the bottom of the window is.
+const STATUS_H: f32 = 22.0;
 
 const CARD_TOP_PAD: f32 = 12.0;
 /// The coloured priority stripe across the top of a card.
@@ -3374,29 +4063,6 @@ fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
         corner_radii: CornerRadii::ZERO,
     });
 
-    // After the background, or it would be painted over.
-    for (i, line) in NOTHING_YET_LINES.iter().enumerate() {
-        tree.push(RenderCommand::Text {
-            x: 8.0,
-            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-            y: 2.0 + i as f32 * 12.0,
-            text: (*line).to_string(),
-            color: if i == 0 {
-                app.palette.ink(app.palette.yellow)
-            } else {
-                app.palette.subtext0
-            },
-            font_size: if i == 0 { 11.0 } else { 9.0 },
-            font_weight: if i == 0 {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            },
-            max_width: Some(width - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
-
     // Toolbar
     render_toolbar(&mut tree, app, width);
     let mut content_y: f32 = 40.0;
@@ -3404,16 +4070,24 @@ fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
     // Filter bar
     content_y = render_filter_bar(&mut tree, app, width, content_y);
 
+    // The views stop above the status line, which is drawn after them.
+    let body_h = (height - STATUS_H).max(content_y);
+
     // Main view
     match app.view {
-        View::Board => render_board_view(&mut tree, app, width, height, content_y),
+        View::Board => render_board_view(&mut tree, app, width, body_h, content_y),
         View::CardDetail => {
-            render_board_view(&mut tree, app, width, height, content_y);
+            render_board_view(&mut tree, app, width, body_h, content_y);
+            render_status(&mut tree, app, width, height);
             render_card_detail(&mut tree, app, width, height);
         }
         View::Archive => render_archive_view(&mut tree, app, width, content_y),
         View::Statistics => render_stats_view(&mut tree, app, width, content_y),
         View::BoardList => render_board_list(&mut tree, app, width, content_y),
+    }
+    // Under the card detail modal, which covers it, and over every other view.
+    if app.view != View::CardDetail {
+        render_status(&mut tree, app, width, height);
     }
 
     // Input overlay
@@ -3433,6 +4107,53 @@ fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
     }
 
     tree
+}
+
+/// The status line along the bottom: why the boards are not being kept, if
+/// they are not; else what the last import or export did -- which was
+/// recorded and drawn nowhere -- else, on a board with no cards, how to start
+/// and where the boards are kept.
+fn render_status(tree: &mut RenderTree, app: &KanbanApp, width: f32, height: f32) {
+    let y = (height - STATUS_H).max(0.0);
+    app.palette.push_surface(
+        tree,
+        0.0,
+        y,
+        width,
+        STATUS_H,
+        0.0,
+        Surface::Strip(Edge::Top),
+    );
+    let (text, colour) = if let Some(error) = &app.store_error {
+        (error.clone(), app.palette.ink(app.palette.red))
+    } else if let Some(action) = &app.last_file_action {
+        let failed = action.starts_with("Could not");
+        (
+            action.clone(),
+            if failed {
+                app.palette.ink(app.palette.red)
+            } else {
+                app.palette.subtext0
+            },
+        )
+    } else if app.active_board().cards.is_empty() {
+        (
+            format!("{NO_CARDS_YET} {}", app.keeping_line()),
+            app.palette.subtext0,
+        )
+    } else {
+        return;
+    };
+    tree.push(RenderCommand::Text {
+        x: 8.0,
+        y: y + 5.0,
+        text,
+        color: colour,
+        font_size: 11.0,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some((width - 16.0).max(0.0)),
+        overflow: TextOverflow::Ellipsis,
+    });
 }
 
 // =============================================================================
@@ -3853,7 +4574,65 @@ impl App for KanbanApp {
 
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            return if self.request_close() {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        let error_before = self.store_error.clone();
+        let response = self.route_event(event);
+        // Whatever a key or a click changed is kept before the next event.
+        if matches!(event, Event::Key(_) | Event::Mouse(_)) {
+            self.keep();
+        }
+        if self.quit {
             return Response::Exit;
+        }
+        if self.store_error == error_before {
+            response
+        } else {
+            Response::Redraw
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The renderer is a free function taking the size, so there is no
+        // stored dimension to reconcile: whatever the compositor grants is what
+        // gets drawn, including on the first frame before any `Resize`.
+        //
+        // Remembered anyway, because a click on the picker has to be answered
+        // against the window the user is looking at, and `on_event` is handed
+        // no size.
+        self.win_width = width;
+        self.win_height = height;
+        let mut tree = render_app(self, width, height);
+        // Last, so it is above everything. Forgetting this is how a picker
+        // ends up open and invisible, taking every keystroke with nothing on
+        // screen to say why.
+        tree.commands
+            .extend(self.picker.render(&self.palette, width, height));
+        // Over everything, the picker included: they are never up together.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+        tree
+    }
+}
+
+impl KanbanApp {
+    /// What an event does, before the boards are kept.
+    fn route_event(&mut self, event: &Event) -> Response {
+        // The close question takes every key and click while it is up.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                self.question = None;
+                self.answer(choice);
+            }
+            return Response::Redraw;
         }
         // The picker takes input first while it is up, or a keystroke meant
         // for a filename reaches the board -- where a bare letter starts a
@@ -3895,25 +4674,14 @@ impl App for KanbanApp {
             _ => Response::Idle,
         }
     }
+}
 
-    fn render(&mut self, width: f32, height: f32) -> RenderTree {
-        // The renderer is a free function taking the size, so there is no
-        // stored dimension to reconcile: whatever the compositor grants is what
-        // gets drawn, including on the first frame before any `Resize`.
-        //
-        // Remembered anyway, because a click on the picker has to be answered
-        // against the window the user is looking at, and `on_event` is handed
-        // no size.
-        self.win_width = width;
-        self.win_height = height;
-        let mut tree = render_app(self, width, height);
-        // Last, so it is above everything. Forgetting this is how a picker
-        // ends up open and invisible, taking every keystroke with nothing on
-        // screen to say why.
-        tree.commands
-            .extend(self.picker.render(&self.palette, width, height));
-        tree
-    }
+/// What the close question is holding up. Only the close: nothing else in
+/// this app can lose the boards' changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pending {
+    /// The window, asked to close while a save is failing.
+    Close,
 }
 
 /// A board name reduced to something that can be a filename.
@@ -3955,11 +4723,10 @@ const INITIAL_WIDTH: u32 = 1200;
 const INITIAL_HEIGHT: u32 = 800;
 
 fn main() -> ExitCode {
-    // Opens empty. The line removed here said "until a store on disk
-    // exists this is what there is to show" -- the seventh appearance of that
-    // reasoning in this sweep. It is right that an empty board looks unhelpful
-    // and wrong that filling it is the remedy.
-    let mut app = KanbanApp::new();
+    // Opens on the boards kept last time; on a first run, on one empty board.
+    // An empty board looks unhelpful, and filling it with made-up cards --
+    // which this did until 2026-09-15 -- is not the remedy.
+    let mut app = KanbanApp::from_settings();
     app::launch("kanban", &mut app)
 }
 
@@ -4235,52 +5002,48 @@ mod tests {
 
     use super::*;
 
-    /// The empty board says what happens to the work, and how to keep it.
+    /// An empty board says how to start and whether it is kept -- where it
+    /// can be seen.
     ///
-    /// **There was no test for this banner at all.** `NOTHING_YET_LINES` was
-    /// referenced once, by the renderer, and nothing checked that it reached
-    /// the screen or that it said anything useful. That was found by running
-    /// the checklist from TD-C-A-TEST-THAT-PINS-WORDING-PASSES-UNTIL-THE-
-    /// WORDING-IS-WRONG before editing it -- grep the app's tests for
-    /// `contains(` first -- which was written for stale assertions and turned
-    /// up a missing one instead.
-    ///
-    /// It asserts the property rather than the sentence: the banner must name
-    /// the cost and the remedy. Rewording either is free; dropping either is
-    /// not.
+    /// The two lines this replaced were in the frame and on no screen: drawn
+    /// at the top of the window before the toolbar, whose surface covered
+    /// them. The test that pinned them read the command list, where they
+    /// were, and so passed. This one also asks that nothing drawn after the
+    /// line covers it.
     #[test]
-    fn the_empty_board_names_the_cost_and_the_remedy() {
+    fn the_empty_board_says_how_to_start_where_it_can_be_seen() {
         let mut app = KanbanApp::new();
         app.active_board_mut().cards.clear();
         for column in &mut app.active_board_mut().columns {
             column.card_ids.clear();
         }
+        let commands = render_app(&app, TEST_W, TEST_H).commands;
+        let want = format!("{NO_CARDS_YET} Nothing here is kept.");
+        let (at, x, y) = commands
+            .iter()
+            .enumerate()
+            .find_map(|(i, c)| match c {
+                RenderCommand::Text { text, x, y, .. } if *text == want => Some((i, *x, *y)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the window never said {want:?}"));
+        let covered = commands.iter().skip(at + 1).any(|c| {
+            matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+        });
+        assert!(!covered, "the empty board's line is painted over");
 
+        // With a card on the board, the line is not drawn.
+        app.add_card("One", 0);
         let texts: Vec<String> = render_app(&app, TEST_W, TEST_H)
             .commands
-            .iter()
+            .into_iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
+                RenderCommand::Text { text, .. } => Some(text),
                 _ => None,
             })
             .collect();
-
-        for line in NOTHING_YET_LINES {
-            assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
-            );
-        }
-        assert!(
-            NOTHING_YET_LINES.iter().any(|l| l.contains("Ctrl+E")),
-            "the banner does not say how to keep the board",
-        );
-        assert!(
-            NOTHING_YET_LINES
-                .iter()
-                .any(|l| l.contains("gone when the window closes")),
-            "the banner does not say what happens if you do not",
-        );
+        assert!(!texts.iter().any(|t| t.starts_with(NO_CARDS_YET)));
     }
 
     /// A board survives a write and a read through the door.
@@ -6628,5 +7391,439 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The boards file
+    //
+    // Nothing was kept: every card was gone when the window closed, and a
+    // board's JSON export was the only way to keep one.
+    // ------------------------------------------------------------------
+
+    fn key_ev(key: Key, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    fn type_in(app: &mut KanbanApp, text: &str) {
+        for c in text.chars() {
+            app.on_event(&key_ev(Key::Unknown(0), &c.to_string()));
+        }
+    }
+
+    /// Text a card is full of and a line-based file mangles.
+    const AWKWARD: [&str; 7] = [
+        "plain",
+        "tab\there",
+        "new\nline",
+        "cr\rhere",
+        "back\\slash",
+        "caf\u{e9} \u{1F4CB}",
+        "",
+    ];
+
+    /// Two boards with one of everything the file has to carry.
+    fn full_boards() -> Vec<Board> {
+        let mut first = Board::default_board();
+        first.swimlanes_enabled = true;
+        first.swimlane_names = vec![AWKWARD[1].to_owned(), AWKWARD[6].to_owned()];
+        first
+            .labels
+            .push(Label::new(AWKWARD[2], Color::rgba(1, 2, 3, 4)));
+        let label = first.labels[0].id;
+        for (i, awkward) in AWKWARD.iter().enumerate() {
+            let mut card = Card::new(awkward)
+                .with_description(awkward)
+                .with_assignee(awkward)
+                .with_priority(
+                    [
+                        Priority::Low,
+                        Priority::Medium,
+                        Priority::High,
+                        Priority::Critical,
+                    ][i % 4],
+                )
+                .with_created_at(1_000 + i as u64)
+                .with_label(label);
+            if i % 2 == 0 {
+                card = card.with_due_date(SimpleDate::new(2026, 2, 30));
+            }
+            card.swimlane = (*awkward).to_owned();
+            card.add_checklist_item(awkward);
+            card.checklist[0].done = i % 3 == 0;
+            card.add_comment(awkward, awkward, 5_000 + i as u64);
+            first.add_card_to_column(card, i % first.columns.len());
+        }
+        let archived = *first.columns[0].card_ids.first().unwrap();
+        assert!(first.archive_card(archived));
+        // In no column and not archived: kept all the same.
+        let loose = Card::new("loose");
+        first.cards.insert(loose.id, loose);
+        first.columns[1].wip_limit = Some(2);
+        first.columns[2].sort_by = SortBy::Title;
+        first.columns[3].collapsed = true;
+
+        let mut second = Board::new(AWKWARD[3]);
+        second.add_column(AWKWARD[4]);
+        vec![first, second]
+    }
+
+    #[test]
+    fn boards_written_and_read_again_are_the_same_boards() {
+        let boards = full_boards();
+        let text = boards_text(&boards, 1);
+        let (back, active) = parse_boards(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        assert_eq!(active, 1);
+        assert_eq!(back, boards);
+        // The same boards are the same text, whatever order the map is in.
+        assert_eq!(boards_text(&back, 1), text);
+        for line in text.lines().skip(1) {
+            let kind = line.split('\t').next().unwrap();
+            assert!(
+                [
+                    "active", "board", "lane", "label", "card", "tag", "item", "comment", "column",
+                    "archived"
+                ]
+                .contains(&kind),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn boards_that_cannot_be_read_whole_are_refused_and_say_where() {
+        let head = "slateos-kanban\t1";
+        let board = "board\t1\t0\tWork";
+        let card = |id: u64| format!("card\t{id}\tmedium\t\t5\t0\tTitle\t\t\t");
+        let cases: [(String, &str); 14] = [
+            (String::new(), "not a SlateOS kanban file"),
+            (String::from("slateos-kanban\t2"), "a later format (2)"),
+            (String::from(head), "it holds no boards"),
+            (
+                format!("{head}\n{board}\n{board}"),
+                "line 3: two boards have one number",
+            ),
+            (
+                format!("{head}\n{board}\n{}\n{}", card(7), card(7)),
+                "line 4: two cards on one board have one number",
+            ),
+            (
+                format!("{head}\n{board}\ncolumn\t2\t\tpriority\t0\tTodo\t9"),
+                "line 3: card 9 is not on the board",
+            ),
+            (
+                format!(
+                    "{head}\n{board}\n{}\ncolumn\t2\t\tpriority\t0\tA\t7\ncolumn\t3\t\tpriority\t0\tB\t7",
+                    card(7)
+                ),
+                "line 5: card 7 is in two places",
+            ),
+            (
+                format!(
+                    "{head}\n{board}\n{}\ncolumn\t2\t\tpriority\t0\tA\t7\narchived\t7",
+                    card(7)
+                ),
+                "line 5: card 7 is in two places",
+            ),
+            (
+                format!("{head}\n{board}\ncard\t7\turgent\t\t5\t0\tT\t\t\t"),
+                "line 3: a priority this version does not know",
+            ),
+            (
+                format!("{head}\n{board}\ncolumn\t2\t\tchaos\t0\tTodo"),
+                "line 3: a sort order this version does not know",
+            ),
+            (
+                format!("{head}\n{board}\nlabel\t3\tred\tBug"),
+                "line 3: a colour is not one",
+            ),
+            (
+                format!("{head}\nactive\t4\n{board}"),
+                "line 2: the open board is not one of them",
+            ),
+            (
+                format!("{head}\n{board}\ntag\t3"),
+                "line 3: a card's label comes before any card",
+            ),
+            (
+                format!("{head}\n{board}\nsticker\t1"),
+                "line 3: it is not a line this version reads",
+            ),
+        ];
+        for (text, want) in &cases {
+            match parse_boards(text) {
+                Ok(_) => panic!("read {text:?}"),
+                Err(why) => assert!(why.contains(want), "{text:?}: said {why:?}, not {want:?}"),
+            }
+        }
+        // The control: the pieces above make boards that read.
+        let good = format!(
+            "{head}\n{board}\n{}\ncolumn\t2\t\tpriority\t0\tTodo\t7\narchived\n",
+            card(7)
+        );
+        let (boards, active) = parse_boards(&good).unwrap();
+        assert_eq!((boards.len(), active), (1, 0));
+        assert_eq!(boards[0].columns[0].card_ids, [Id(7)]);
+    }
+
+    #[test]
+    fn what_is_put_on_a_board_is_there_next_time() {
+        settingsfile::testing::with_scratch_config("kanban-kept", |_| {
+            let mut app = KanbanApp::from_settings();
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            // An event that changes nothing writes nothing either.
+            app.on_event(&key_ev(Key::Unknown(0), ""));
+            assert!(
+                !boards_path().unwrap().exists(),
+                "a first run wrote a board nobody had touched"
+            );
+            app.on_event(&key_ev(Key::N, "n"));
+            type_in(&mut app, "Write the report");
+            app.on_event(&key_ev(Key::Enter, ""));
+            assert_eq!(app.active_board().cards.len(), 1, "no card was made");
+            app.on_event(&key_ev(Key::P, "p"));
+
+            let again = KanbanApp::from_settings();
+            assert!(again.store_error.is_none(), "{:?}", again.store_error);
+            assert_eq!(again.boards, app.boards);
+            let card = again.active_board().cards.values().next().unwrap();
+            assert_eq!(card.title, "Write the report");
+            assert!(card.created_at > 1_000_000, "the card was not given a time");
+            let kept = card.id;
+
+            // A card made after the restart takes no kept card's number.
+            let mut again = again;
+            let fresh = again.add_card("Next", 0).unwrap();
+            assert_ne!(fresh, kept);
+            assert_eq!(again.active_board().cards.len(), 2);
+        });
+    }
+
+    #[test]
+    fn a_window_made_by_new_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("kanban-quiet", |dir| {
+            let mut app = KanbanApp::new();
+            app.on_event(&key_ev(Key::N, "n"));
+            type_in(&mut app, "Scratch");
+            app.on_event(&key_ev(Key::Enter, ""));
+            assert!(!dir.join("slateos").join("kanban").exists());
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_left_as_it_is() {
+        settingsfile::testing::with_scratch_config("kanban-broken", |_| {
+            let path = boards_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let broken = "slateos-kanban\t1\nboard\t1\t0\tWork\ncard\t7\turgent\t\t5\t0\tT\t\t\t\n";
+            std::fs::write(&path, broken).unwrap();
+            let mut app = KanbanApp::from_settings();
+            let error = app
+                .store_error
+                .clone()
+                .expect("an unreadable file was taken without a word");
+            assert!(error.contains("line 3"), "{error}");
+            let texts: Vec<String> = render_app(&app, TEST_W, TEST_H)
+                .commands
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect();
+            assert!(texts.contains(&error), "the refusal is not on screen");
+            app.on_event(&key_ev(Key::N, "n"));
+            type_in(&mut app, "New");
+            app.on_event(&key_ev(Key::Enter, ""));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "the unreadable file was saved over"
+            );
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn a_file_too_big_to_read_whole_is_refused() {
+        settingsfile::testing::with_scratch_config("kanban-big", |_| {
+            let text = boards_text(&full_boards(), 0);
+            let path = boards_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &text).unwrap();
+            let mut app = KanbanApp::new();
+            app.persist = true;
+            app.load_boards_within(&path, text.len() - 1);
+            assert!(app.store_error.clone().unwrap().contains("larger than"));
+            assert!(!app.persist, "a file read in part would be saved over");
+            let mut whole = KanbanApp::new();
+            whole.persist = true;
+            whole.load_boards_within(&path, text.len());
+            assert!(whole.store_error.is_none(), "{:?}", whole.store_error);
+            assert_eq!(
+                whole.boards,
+                full_boards_ids_of(&text),
+                "control: the whole file reads"
+            );
+        });
+    }
+
+    /// The boards a text holds, for comparing with a load of it.
+    fn full_boards_ids_of(text: &str) -> Vec<Board> {
+        parse_boards(text).unwrap().0
+    }
+
+    #[test]
+    fn closing_while_a_save_fails_asks_first() {
+        settingsfile::testing::with_scratch_config("kanban-failing", |_| {
+            let mut app = KanbanApp::from_settings();
+            let path = boards_path().unwrap();
+            std::fs::create_dir_all(&path).unwrap();
+            app.on_event(&key_ev(Key::N, "n"));
+            type_in(&mut app, "Unkept");
+            app.on_event(&key_ev(Key::Enter, ""));
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            // A key under the question reaches nothing.
+            let cards = app.active_board().cards.len();
+            app.on_event(&key_ev(Key::N, "n"));
+            assert_eq!(app.input_mode, InputMode::None, "a key reached the board");
+            assert_eq!(app.active_board().cards.len(), cards);
+            // Save while it still fails: the window stays.
+            assert!(matches!(
+                app.on_event(&key_ev(Key::S, "s")),
+                Response::Redraw
+            ));
+            assert!(!app.quit);
+            // Put right while the question is up, then Save: it goes.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            std::fs::remove_dir(&path).unwrap();
+            assert!(matches!(app.on_event(&key_ev(Key::S, "s")), Response::Exit));
+            assert_eq!(KanbanApp::from_settings().boards, app.boards);
+            // And Don't save leaves without it.
+            let mut other = KanbanApp::from_settings();
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir_all(&path).unwrap();
+            other.on_event(&key_ev(Key::N, "n"));
+            type_in(&mut other, "Lost");
+            other.on_event(&key_ev(Key::Enter, ""));
+            other.on_event(&Event::CloseRequested);
+            assert!(matches!(
+                other.on_event(&key_ev(Key::D, "d")),
+                Response::Exit
+            ));
+        });
+    }
+
+    /// An import kept the ids the file carried and did not move the counter
+    /// past them, so the next card made could be given the id of one just
+    /// read -- and cards are kept in a map by id, so the new card replaced it.
+    #[test]
+    fn a_card_made_after_an_import_replaces_nothing() {
+        // The counter moves past every id read, so nothing made later can be
+        // given one. Checked directly, because other tests take ids from the
+        // same counter at the same time: an id handed out after the read is
+        // later than it whatever else was handed out meanwhile.
+        let read = NEXT_ID.load(Ordering::Relaxed).saturating_add(10);
+        let _ = Id::from_stored(read);
+        assert!(
+            Id::new().0 > read,
+            "an id was handed out that a file already used"
+        );
+
+        // And through the importer, with the imported card just ahead of the
+        // counter, where the next cards made would have landed on it.
+        let far = NEXT_ID.load(Ordering::Relaxed).saturating_add(2);
+        let json = format!(
+            "{{\"name\":\"Imported\",\"labels\":[],\"cards\":[{{\"id\":{far},\"title\":\"Theirs\"}}],\
+             \"columns\":[{{\"id\":{},\"name\":\"Todo\",\"card_ids\":[{far}]}}]}}",
+            far + 1
+        );
+        let mut app = KanbanApp::new();
+        let board = JsonImporter::import_board(&json).unwrap();
+        app.boards.push(board);
+        app.active_board_idx = app.boards.len() - 1;
+        for _ in 0..5 {
+            app.add_card("Mine", 0);
+        }
+        assert!(
+            app.active_board()
+                .cards
+                .values()
+                .any(|c| c.title == "Theirs"),
+            "an imported card was replaced by a new one"
+        );
+        assert_eq!(app.active_board().cards.len(), 6);
+    }
+
+    /// A board file may name a card twice, or one it does not have; the board
+    /// imported from it may not.
+    #[test]
+    fn an_import_leaves_a_board_that_can_be_kept() {
+        let json = "{\"name\":\"Messy\",\"labels\":[],\
+                    \"cards\":[{\"id\":900001,\"title\":\"A\"},{\"id\":900002,\"title\":\"B\"}],\
+                    \"columns\":[{\"id\":900010,\"name\":\"X\",\"card_ids\":[900001,900001,900099]},\
+                                 {\"id\":900011,\"name\":\"Y\",\"card_ids\":[900001,900002]}]}";
+        let board = JsonImporter::import_board(json).unwrap();
+        assert_eq!(board.columns[0].card_ids, [Id(900_001)]);
+        assert_eq!(board.columns[1].card_ids, [Id(900_002)]);
+        let text = boards_text(&[board], 0);
+        assert!(parse_boards(&text).is_ok(), "{text}");
+    }
+
+    /// What an import or an export did was recorded and drawn nowhere.
+    #[test]
+    fn what_an_import_did_is_on_the_status_line() {
+        let mut app = KanbanApp::new();
+        app.add_card("One", 0);
+        let said = app.read_board(std::path::Path::new("/nowhere/board.json"));
+        app.last_file_action = Some(said.clone());
+        assert!(said.starts_with("Could not read"), "{said}");
+        let drawn = render_app(&app, TEST_W, TEST_H)
+            .commands
+            .into_iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == said));
+        assert!(drawn, "what the import did is not on screen");
+    }
+
+    #[test]
+    fn stamps_are_the_clocks_and_always_later() {
+        let mut app = KanbanApp::new();
+        let before = clock_ms();
+        let first = app.next_timestamp();
+        let second = app.next_timestamp();
+        assert!(first >= before && second > first);
+        let late = 4_000_000_000_000_u64;
+        let text = format!(
+            "slateos-kanban\t1\nboard\t1\t0\tW\ncard\t2\tmedium\t\t{late}\t0\tT\t\t\t\ncolumn\t3\t\tpriority\t0\tC\t2\narchived\n"
+        );
+        settingsfile::testing::with_scratch_config("kanban-stamps", |_| {
+            let path = boards_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &text).unwrap();
+            let mut app = KanbanApp::from_settings();
+            assert!(
+                app.next_timestamp() > late,
+                "a stamp after a restart is earlier than a kept one"
+            );
+        });
     }
 }

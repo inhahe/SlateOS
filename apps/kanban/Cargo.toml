@@ -16,5 +16,22 @@ oswindow = { path = "../../gui/window" }
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
 
+# The boards are kept in the user's settings directory
+# (`settingsfile::config_dir`), as the notes library and the address book are.
+settingsfile = { path = "../../gui/settingsfile" }
+
+# The boards file's text fields are escaped with `textfmt::tsv`, the record
+# files' four escapes.
+textfmt = { path = "../../textfmt" }
+
+# "Your boards could not be saved -- close anyway?", asked the way every
+# editor here asks it.
+unsaved = { path = "../unsaved" }
+
+[dev-dependencies]
+# `with_scratch_config`, so the tests that keep boards keep them in a scratch
+# directory and never in the developer's own.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

@@ -165991,7 +165991,14 @@ keeps what it read per file while the file's size and time are unchanged
   exist (`parse_id3v2`, `parse_flac_header`, `parse_wav_header`) inside
   `apps/musicplayer`'s binary, where nothing else can reach them. The proper
   fix is to move them into a crate both use, then fill the six audio columns
-  from it. Lane E's next.
+  from it. They are not finished readers, and the move is the time to finish
+  them: `decode_id3_text` decodes an ISO-8859-1 frame as UTF-8, so a title
+  with an "e acute" in a Latin-1 tag is dropped whole, and it keeps the NUL a
+  text frame may end in; `parse_flac_header` computes the bit depth as
+  `hi | (lo + 1)` rather than `(hi | lo) + 1`, so a 32-bit FLAC reads as 16;
+  and nothing reads an MP3's length or bitrate (MPEG frame headers, a Xing or
+  VBRI header), an Ogg file at all, or a FLAC's own tags (its Vorbis comment
+  block -- FLAC does not use ID3).
 - **Colour depth** -- `imagecodec` does not report a picture's bit depth; a
   header-only `info` beside `dimensions` would be lane F's.
 - **Tar, gzip, 7z, rar** -- `apps/explorer` reads no archive but zip.
@@ -166710,7 +166717,7 @@ buttons; it is the next candidate for the same treatment, not a reason to
 have left this one hand-drawn.
 
 ### [E] Notes, contacts, snippets and kanban keep nothing -- 2026-09-25
-**Status:** FIXED for notes and contacts (lane E, 2026-09-25); OPEN for snippets and kanban -- lane E's next.
+**Status:** FIXED for notes, contacts and kanban (lane E, 2026-09-25); OPEN for snippets -- lane E's next, which wants a way to edit a snippet first.
 
 **In short:** the notes app, the address book, the snippet library and the
 kanban boards each hold everything the user puts in them in memory only. There
@@ -166794,6 +166801,32 @@ Also fixed on the way:
   write a vCard file"; it says where the book is kept.
 Mutation table `apps/contacts/mutate.py`: 31 rows added, and four of its
 older rows moved to where the code now is.
+
+**Kanban, the same day.** Every board is `kanban/boards.txt` in the settings
+directory, the same kind of file, read whole or not at all; a card is written
+once and each column lists its cards by id (design-decisions §1207). After
+every key or click the window compares the boards' text with what it last
+wrote, and writes it when they differ; a first run's starting board is not
+written until something on it changes. A failed save is on the status line and
+retried; closing while it fails asks. Also fixed:
+- **A card made after an import could replace an imported one.** The import
+  keeps the ids its file carries, and did not move the id counter past them,
+  so the next card made could be given the id of one just read -- and cards
+  are kept in a map by id. Every id read moves the counter now
+  (`Id::from_stored`).
+- **An import could hold a card in two columns**, or a column naming a card
+  the board does not have; it drops them, keeping the first place a card is
+  named.
+- **What an import or an export did was drawn nowhere** (`last_file_action`,
+  "for the status line", which there was not). There is a status line now.
+- **The empty board's two lines were never seen**: drawn at the top of the
+  window, on every board, before the toolbar, which painted over them -- and
+  pinned by a test that read the command list rather than the screen. The
+  status line says how to start and where boards are kept; the test now also
+  asks that nothing drawn after it covers it.
+- Card times were a counter from 1000; they are the clock's, never earlier
+  than a time already kept.
+Mutation table `apps/kanban/mutate.py` (new).
 
 ### [E] The JSON viewer's text input cannot be reached -- 2026-09-25
 **Status:** OPEN -- lane E

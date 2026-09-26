@@ -1902,10 +1902,11 @@ word; text inside them that says "lane C" is history.
   `.whiteboard`, read back whole; the whiteboard's undo could not undo a
   deletion and acted on whichever page was showing), `spreadsheet` (a
   workbook of its own, `.spreadsheet`, where it could write only the sheet in
-  front as CSV; design-decisions §1204), `notes` and `contacts` (which kept
-  nothing at all: each a file in the settings folder, kept as it changes;
-  §1205, §1206).
-  **To do:** `snippets`, `kanban`, which keep nothing at all
+  front as CSV; design-decisions §1204), `notes`, `contacts` and `kanban`
+  (which kept nothing at all: each a file in the settings folder, kept as it
+  changes; §1205-§1207).
+  **To do:** `snippets`, which keeps nothing at all -- and cannot edit a
+  snippet, so there is little yet to keep
   between runs (`known-issues.md` → `[E] Notes, contacts, snippets and
   kanban keep nothing`) and want a store kept as it changes, not a question. **One
   question, not thirteen:** `apps/unsaved` asks the toolkit's own

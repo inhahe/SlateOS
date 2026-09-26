@@ -54,7 +54,6 @@ userspace/findmnt/src/main.rs:argv-as-string
 userspace/finger/src/main.rs:argv-as-string
 userspace/fio/src/main.rs:argv-as-string
 userspace/firejail/src/main.rs:argv-as-string
-userspace/flock/src/main.rs:argv-as-string
 userspace/fmt/src/main.rs:argv-as-string
 userspace/fsck/src/main.rs:argv-as-string
 userspace/ftp/src/main.rs:argv-as-string

@@ -1,837 +1,693 @@
-//! Slate OS file locking utilities.
+//! flock -- manage file locks from shell scripts.
 //!
-//! Multi-personality binary providing:
-//! - **flock** — manage locks from shell scripts
-//! - **lockfile** — conditional semaphore-file creator
+//! A port of util-linux 2.39.3's `sys-utils/flock.c`, function by function
+//! and with upstream's names; measured against `flock from util-linux 2.39.3`
+//! by `scripts/flock-diff.sh`.
 //!
-//! `flock` applies advisory locks to files, optionally running a command
-//! while holding the lock. `lockfile` creates semaphore files with retry logic.
+//! This replaces a program that never called `flock(2)` at all: it created
+//! `FILE.lock` beside the file and called that a lock, so it excluded only
+//! other copies of itself, left the file behind when killed, and could not
+//! lock a descriptor. `lockfile`, which was a personality of it, is its own
+//! crate now.
+//!
+//! # What is not upstream's
+//!
+//! * **How `-w` waits.** Upstream blocks in `flock()` and has a POSIX timer
+//!   interrupt it with a signal. SlateOS's blocking `flock()` cannot be
+//!   interrupted -- it is a loop in the C library that retries until the lock
+//!   is free (known-issues TD-B-FLOCK-WAIT-POLLS) -- so `-w` here tries
+//!   `LOCK_NB` until the deadline, sleeping at most 25 ms between tries. What
+//!   a caller sees is the same: the lock as soon as it is free, or the
+//!   conflict exit status at the deadline; `-w 0` is `-n`; a negative or
+//!   unrepresentable timeout is refused as upstream's timer refuses it. Only
+//!   the latency of noticing a release differs, by at most a few ms. A lock
+//!   with no `-w` blocks in `flock()` exactly as upstream's does.
+//! * **A name in a diagnostic** has its unprintable bytes escaped, where
+//!   upstream pastes it: a file name holding a newline must not print a line
+//!   of its own (design-decisions §370, §1033).
 
-#![deny(clippy::all)]
+mod sys;
 
-use std::env;
-use std::fs;
-use std::io::Write;
-use std::process;
-use std::thread;
+use getoptlong::{Opt, Program, Takes};
+use quoting::{escape_unprintable, os_bytes};
+use std::ffi::{OsStr, OsString};
+use std::io::{self, IsTerminal, Write};
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
+use ulstrutils::{num_error_message, strtotimeval, ul_strtos32};
 
-const VERSION: &str = "0.1.0";
+/// `<sysexits.h>`.
+const EX_OK: u8 = 0;
+const EX_USAGE: u8 = 64;
+const EX_DATAERR: u8 = 65;
+const EX_NOINPUT: u8 = 66;
+const EX_UNAVAILABLE: u8 = 69;
+const EX_OSERR: u8 = 71;
+const EX_CANTCREAT: u8 = 73;
+/// `close_stdout`'s status when stdout cannot be written: flock.c does not
+/// define `CLOSE_EXIT_CODE`, so it is `EXIT_FAILURE`.
+const CLOSE_EXIT_CODE: u8 = 1;
 
-// ============================================================================
-// Lock types
-// ============================================================================
+/// Only the sentences of its errors are used; each is printed after argv[0].
+const FLOCK: Program = Program::new("flock", EX_USAGE as i32);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum LockType {
-    Shared,
-    Exclusive,
-    Unlock,
+/// Upstream's option string: `+`, so the first operand -- the file or the
+/// descriptor -- ends the options, and `?` is an option of its own that asks
+/// only for the referral to `--help`.
+const SHORTS: &str = "+sexnoFuw:E:hV?";
+
+/// Upstream's `long_options[]`, in its order.
+const LONGS: &[(&str, Takes)] = &[
+    ("shared", Takes::Nothing),
+    ("exclusive", Takes::Nothing),
+    ("unlock", Takes::Nothing),
+    ("nonblocking", Takes::Nothing),
+    ("nb", Takes::Nothing),
+    ("timeout", Takes::Required),
+    ("wait", Takes::Required),
+    ("conflict-exit-code", Takes::Required),
+    ("close", Takes::Nothing),
+    ("no-fork", Takes::Nothing),
+    ("verbose", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
+];
+
+/// The two pairs upstream gives one `val`: getopt_long does not count them
+/// ambiguous with each other.
+const ALIASES: &[(&str, &str)] = &[("nb", "nonblocking"), ("wait", "timeout")];
+
+/// `LOCK_SH`, `LOCK_EX`, `LOCK_UN`, `LOCK_NB`.
+const LOCK_SH: i32 = 1;
+const LOCK_EX: i32 = 2;
+const LOCK_NB: i32 = 4;
+const LOCK_UN: i32 = 8;
+
+/// Longest sleep between two tries of a `-w` wait.
+const POLL_MAX: Duration = Duration::from_millis(25);
+
+fn main() -> ExitCode {
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let mut out = Out::new();
+    let status = run(&argv, &mut out);
+    ExitCode::from(out.close(status))
 }
 
-// ============================================================================
-// flock command
-// ============================================================================
-
-#[derive(Debug)]
-struct FlockOpts {
-    lock_type: LockType,
-    nonblock: bool,
-    timeout: Option<u64>,
-    close: bool,
-    verbose: bool,
-    conflict_exit: i32,
-    fd: Option<i32>,
-    file: Option<String>,
-    command: Vec<String>,
+/// stdout as C's stdio would hold it: line-buffered on a terminal, and
+/// otherwise kept until exit -- which is observable, because `--verbose`'s
+/// lines then follow the command's output, and vanish if flock `exec`s it.
+struct Out {
+    tty: bool,
+    held: Vec<u8>,
+    short: Vec<u8>,
 }
 
-/// The `--help` text, extracted so `-h` and the `Try 'flock --help'`
-/// pointer on a refusal describe the same set of options.
-fn usage() {
-    println!("Usage: flock [options] <file|fd> [command ...]");
-    println!("       flock [options] <file|fd> -c command");
-    println!();
-    println!("Manage file locks from shell scripts.");
-    println!();
-    println!("Options:");
-    println!("  -s, --shared         Shared lock");
-    println!("  -x, --exclusive      Exclusive lock (default)");
-    println!("  -u, --unlock         Remove a lock");
-    println!("  -n, --nonblock       Fail rather than wait");
-    println!("  -w, --timeout SECS   Wait at most SECS seconds");
-    println!("  -o, --close          Close fd before running command");
-    println!("  -E, --conflict-exit-code N  Exit code on conflict (default 1)");
-    println!("  -v, --verbose        Verbose mode");
-    println!("  -h, --help           Show this help");
-    println!("  -V, --version        Show version");
-}
+impl Out {
+    fn new() -> Self {
+        Out {
+            tty: io::stdout().is_terminal(),
+            held: Vec::new(),
+            short: b"flock".to_vec(),
+        }
+    }
 
-/// Why `flock` or `lockfile` refused its command line.
-///
-/// Returned rather than printed so a test can prove the refusal happens at
-/// all: an unknown option used to become the *file to lock*, so `flock
-/// --list f` created a file called `--list.lock` in the working directory
-/// and locked it. `cmd_flock` renders this and exits 64 (`EX_USAGE`), which
-/// is what util-linux `flock` exits with for a bad option.
-#[derive(Debug, PartialEq, Eq)]
-enum UsageError {
-    /// An option this build does not know, as it appeared in argv.
-    ///
-    /// The whole word is kept rather than a parsed letter, because whether
-    /// it renders as `unrecognized option '--list'` or as `invalid option
-    /// -- 'Z'` is getopt's rule, not this parser's, and `usageerror` owns
-    /// it.
-    UnknownOption(String),
-    /// `-c` was given without exactly one command argument after it.
-    CommandArity,
-}
+    /// `printf` of one whole line.
+    fn line(&mut self, text: &[u8]) {
+        self.held.extend_from_slice(text);
+        if self.tty {
+            let held = std::mem::take(&mut self.held);
+            // A terminal that cannot be written loses the line, as a failed
+            // line-buffered flush does; `close` still reports it.
+            if io::stdout().lock().write_all(&held).is_err() {
+                self.held = held;
+            }
+        }
+    }
 
-impl UsageError {
-    /// The diagnostic body, without the `flock: ` prefix. The wording is
-    /// getopt's, shared with every other program here through `usageerror`
-    /// and measured rather than invented: `unrecognized option` for a long
-    /// one, `invalid option -- 'c'` for a short one, and they are not
-    /// interchangeable.
-    fn message(&self) -> String {
-        match self {
-            Self::UnknownOption(arg) => usageerror::unknown_option(arg.as_bytes()),
-            Self::CommandArity => "-c requires exactly one command argument".to_string(),
+    /// What `exec` does to a buffer: drops it.
+    fn discard(&mut self) {
+        self.held.clear();
+    }
+
+    /// `close_stdout`: write what is held, or report why not.
+    fn close(&mut self, status: u8) -> u8 {
+        let held = std::mem::take(&mut self.held);
+        let mut stdout = io::stdout().lock();
+        match stdout.write_all(&held).and_then(|()| stdout.flush()) {
+            Ok(()) => status,
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => status,
+            Err(e) => {
+                warn_msg(
+                    &self.short,
+                    &format!("write error: {}", errmsg::strerror(&e)),
+                );
+                CLOSE_EXIT_CODE
+            }
         }
     }
 }
 
-fn parse_flock_args(args: &[String]) -> Result<FlockOpts, UsageError> {
-    let mut opts = FlockOpts {
-        lock_type: LockType::Exclusive,
-        nonblock: false,
+/// `program_invocation_short_name`: argv[0] past its last `/`.
+fn short_name(arg0: &OsStr) -> Vec<u8> {
+    let bytes = os_bytes(arg0);
+    let start = bytes
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    bytes.get(start..).unwrap_or_default().to_vec()
+}
+
+/// A name in a diagnostic: upstream's text, unprintable bytes escaped.
+fn shown(text: &[u8]) -> String {
+    escape_unprintable(text)
+}
+
+/// `warnx`: `NAME: MSG`.
+fn warn_msg(short: &[u8], msg: &str) {
+    let line = format!("{}: {msg}\n", shown(short));
+    // A diagnostic that cannot be written has nowhere else to go.
+    let _ = io::stderr().lock().write_all(line.as_bytes());
+}
+
+/// `warn`: `NAME: MSG: strerror`.
+fn warn_err(short: &[u8], msg: &str, e: &io::Error) {
+    warn_msg(short, &format!("{msg}: {}", errmsg::strerror(e)));
+}
+
+/// `errtryhelp(status)`.
+fn errtryhelp(short: &[u8], status: u8) -> u8 {
+    let line = format!("Try '{} --help' for more information.\n", shown(short));
+    // As in `warn_msg`: stderr is the last resort.
+    let _ = io::stderr().lock().write_all(line.as_bytes());
+    status
+}
+
+/// `usage()`.
+fn usage(short: &[u8]) -> Vec<u8> {
+    let mut out = b"\nUsage:\n".to_vec();
+    for form in [
+        &b" [options] <file>|<directory> <command> [<argument>...]\n"[..],
+        b" [options] <file>|<directory> -c <command>\n",
+        b" [options] <file descriptor number>\n",
+    ] {
+        out.push(b' ');
+        out.extend_from_slice(short);
+        out.extend_from_slice(form);
+    }
+    out.extend_from_slice(
+        b"\nManage file locks from shell scripts.\n\
+\nOptions:\n\
+\x20-s, --shared             get a shared lock\n\
+\x20-x, --exclusive          get an exclusive lock (default)\n\
+\x20-u, --unlock             remove a lock\n\
+\x20-n, --nonblock           fail rather than wait\n\
+\x20-w, --timeout <secs>     wait for a limited amount of time\n\
+\x20-E, --conflict-exit-code <number>  exit code after conflict or timeout\n\
+\x20-o, --close              close file descriptor before running command\n\
+\x20-c, --command <command>  run a single command string through the shell\n\
+\x20-F, --no-fork            execute command without forking\n\
+\x20    --verbose            increase verbosity\n\
+\n\
+\x20-h, --help               display this help\n\
+\x20-V, --version            display version\n\
+\nFor more details see flock(1).\n",
+    );
+    out
+}
+
+/// `-w`'s time, as `strtotimeval_or_err` leaves `struct timeval`.
+enum Wait {
+    /// Seconds and microseconds, each truncated toward zero.
+    Timeval(i64, i64),
+    /// A value `time_t` cannot hold, which upstream's timer then refuses.
+    Unrepresentable,
+}
+
+/// The settings `main` collects.
+struct Ctl {
+    /// `LOCK_SH`, `LOCK_EX` or `LOCK_UN`.
+    lock: i32,
+    /// `LOCK_NB` for `-n`, else 0.
+    block: i32,
+    /// `-w`, as `strtotimeval_or_err` made it.
+    timeout: Option<Wait>,
+    conflict_exit_code: u8,
+    do_close: bool,
+    no_fork: bool,
+    verbose: bool,
+}
+
+/// `main()`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "upstream's main, kept in one piece so it can be read against it"
+)]
+fn run(argv: &[OsString], out: &mut Out) -> u8 {
+    let arg0: &OsStr = argv
+        .first()
+        .map_or(OsStr::new("flock"), OsString::as_os_str);
+    let short = short_name(arg0);
+    out.short.clone_from(&short);
+
+    if argv.len() < 2 {
+        warn_msg(&short, "not enough arguments");
+        return errtryhelp(&short, EX_USAGE);
+    }
+
+    let mut ctl = Ctl {
+        lock: LOCK_EX,
+        block: 0,
         timeout: None,
-        close: false,
+        conflict_exit_code: 1,
+        do_close: false,
+        no_fork: false,
         verbose: false,
-        conflict_exit: 1,
-        fd: None,
-        file: None,
-        command: Vec::new(),
     };
-
-    let mut i = 0;
-
-    // Option processing stops at the first operand. util-linux passes a
-    // leading `+` to `getopt_long`, so the file name terminates the options
-    // and everything after it belongs to the command being run -- `flock f
-    // echo -n hi` gives `-n` to `echo`, and printed `hi` with no newline
-    // when measured. Reading it as `--nonblock` here would both change
-    // flock's own behaviour and silently drop a flag from the command.
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                usage();
-                process::exit(0);
+    let own = argv.get(1..).unwrap_or_default();
+    let mut parser = FLOCK.parse_aliased(own, SHORTS, LONGS, ALIASES);
+    let mut optind = own.len();
+    while let Some(item) = parser.next() {
+        let opt = match item {
+            Ok(opt) => opt,
+            Err(e) => {
+                // glibc names the program by argv[0] as given.
+                let line = format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence);
+                // stderr is the last resort, as in `warn_msg`.
+                let _ = io::stderr().lock().write_all(line.as_bytes());
+                return errtryhelp(&short, EX_USAGE);
             }
-            "-V" | "--version" => {
-                println!("flock {VERSION}");
-                process::exit(0);
-            }
-            "-s" | "--shared" => opts.lock_type = LockType::Shared,
-            "-x" | "--exclusive" => opts.lock_type = LockType::Exclusive,
-            "-u" | "--unlock" => opts.lock_type = LockType::Unlock,
-            "-n" | "--nonblock" | "--nb" => opts.nonblock = true,
-            "-o" | "--close" => opts.close = true,
-            "-v" | "--verbose" => opts.verbose = true,
-            "-w" | "--timeout" | "--wait" => {
-                i = i.saturating_add(1);
-                if let Some(v) = args.get(i) {
-                    opts.timeout = v.parse().ok();
-                }
-            }
-            "-E" | "--conflict-exit-code" | "--conflict-exit" => {
-                i = i.saturating_add(1);
-                if let Some(v) = args.get(i) {
-                    opts.conflict_exit = v.parse().unwrap_or(1);
-                }
-            }
-            // An explicit end-of-options marker: the next word is the file
-            // even if it begins with a dash.
-            "--" => {
-                i = i.saturating_add(1);
+        };
+        let (flag, value) = match opt {
+            Opt::Short(c, value) => (c, value),
+            Opt::Long(name, value) => (long_flag(name), value),
+            Opt::Operand(_) => {
+                optind = parser.optind().saturating_sub(1);
                 break;
             }
-            s if s.starts_with("--") => {
-                return Err(UsageError::UnknownOption(s.to_string()));
-            }
-            // A lone `-` is an operand, not an option, so it is excluded by
-            // the length test and falls through to the operand arm.
-            s if s.starts_with('-') && s.len() > 1 => {
-                return Err(UsageError::UnknownOption(s.to_string()));
-            }
-            // The first operand: option processing ends here.
-            _ => break,
-        }
-        i = i.saturating_add(1);
-    }
-
-    // First operand is the file, or an fd number.
-    if let Some(first) = args.get(i) {
-        if let Ok(fd) = first.parse::<i32>() {
-            opts.fd = Some(fd);
-        } else {
-            opts.file = Some(first.clone());
-        }
-        i = i.saturating_add(1);
-    }
-
-    // `-c` is positional, not an option: util-linux checks for it only in the
-    // word immediately after the operand, which is why `flock -c cmd file`
-    // reports `invalid option -- 'c'` while `flock file -c cmd` runs. It
-    // takes exactly one argument; two is an error rather than a join.
-    match args.get(i).map(String::as_str) {
-        Some("-c" | "--command") => match args.get(i.saturating_add(1)..).unwrap_or(&[]) {
-            [only] => {
-                opts.command = vec!["/bin/sh".to_string(), "-c".to_string(), only.clone()];
-            }
-            _ => return Err(UsageError::CommandArity),
-        },
-        // Anything else is the command verbatim, dashes and all.
-        Some(_) => opts.command = args.get(i..).unwrap_or(&[]).to_vec(),
-        None => {}
-    }
-
-    Ok(opts)
-}
-
-/// Advisory lock implementation using lock files.
-/// Since we can't use flock(2) syscall directly in our simulated environment,
-/// we use atomic file creation as a lock mechanism.
-fn acquire_lock(path: &str, opts: &FlockOpts) -> bool {
-    let lock_path = format!("{path}.lock");
-    let deadline = opts
-        .timeout
-        .map(|t| Instant::now() + Duration::from_secs(t));
-
-    loop {
-        // Try to create lock file exclusively.
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-        {
-            Ok(mut f) => {
-                // Write our PID (simulated).
-                let pid = process::id();
-                let lock_info = match opts.lock_type {
-                    LockType::Shared => format!("shared:{pid}\n"),
-                    LockType::Exclusive => format!("exclusive:{pid}\n"),
-                    LockType::Unlock => return true,
-                };
-                let _ = f.write_all(lock_info.as_bytes());
-                if opts.verbose {
-                    eprintln!("flock: acquired lock on {path}");
-                }
-                return true;
-            }
-            Err(_) => {
-                if opts.nonblock {
-                    if opts.verbose {
-                        eprintln!("flock: failed to acquire lock (nonblock)");
-                    }
-                    return false;
-                }
-
-                if let Some(dl) = deadline
-                    && Instant::now() >= dl
-                {
-                    if opts.verbose {
-                        eprintln!("flock: timeout waiting for lock");
-                    }
-                    return false;
-                }
-
-                // Shared locks can coexist.
-                if opts.lock_type == LockType::Shared
-                    && let Ok(content) = fs::read_to_string(&lock_path)
-                    && content.starts_with("shared:")
-                {
-                    if opts.verbose {
-                        eprintln!("flock: shared lock compatible, proceeding");
-                    }
-                    return true;
-                }
-
-                // Wait and retry.
-                thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-}
-
-fn release_lock(path: &str, verbose: bool) {
-    let lock_path = format!("{path}.lock");
-    let _ = fs::remove_file(&lock_path);
-    if verbose {
-        eprintln!("flock: released lock on {path}");
-    }
-}
-
-fn cmd_flock(args: &[String]) {
-    let opts = match parse_flock_args(args) {
-        Ok(opts) => opts,
-        Err(why) => {
-            eprintln!("flock: {}", why.message());
-            eprintln!("Try 'flock --help' for more information.");
-            // EX_USAGE, as util-linux exits for a bad option.
-            process::exit(64);
-        }
-    };
-
-    if opts.file.is_none() && opts.fd.is_none() {
-        eprintln!("flock: no file or fd specified");
-        eprintln!("Try 'flock --help' for more information.");
-        process::exit(1);
-    }
-
-    let file_path = opts.file.clone().unwrap_or_else(|| {
-        // For fd mode, use /dev/fd/N as the lock target.
-        format!("/dev/fd/{}", opts.fd.unwrap_or(0))
-    });
-
-    if opts.lock_type == LockType::Unlock {
-        release_lock(&file_path, opts.verbose);
-        process::exit(0);
-    }
-
-    if !acquire_lock(&file_path, &opts) {
-        process::exit(opts.conflict_exit);
-    }
-
-    if opts.command.is_empty() {
-        // Fd mode: just hold the lock and exit (the fd inherits).
-        if opts.verbose {
-            eprintln!("flock: holding lock (fd mode)");
-        }
-        process::exit(0);
-    }
-
-    // Run command with lock held.
-    let status = process::Command::new(&opts.command[0])
-        .args(&opts.command[1..])
-        .status();
-
-    release_lock(&file_path, opts.verbose);
-
-    match status {
-        Ok(s) => process::exit(s.code().unwrap_or(1)),
-        Err(e) => {
-            eprintln!("flock: failed to execute command: {e}");
-            process::exit(127);
-        }
-    }
-}
-
-// ============================================================================
-// lockfile command
-// ============================================================================
-
-#[derive(Debug)]
-struct LockfileOpts {
-    sleeptime: u64,
-    retries: i32,
-    locktimeout: u64,
-    suspend: u64,
-    invert: bool,
-    ml: bool,
-    files: Vec<String>,
-}
-
-fn parse_lockfile_args(args: &[String]) -> Result<LockfileOpts, UsageError> {
-    let mut opts = LockfileOpts {
-        sleeptime: 8,
-        retries: -1, // -1 = infinite
-        locktimeout: 0,
-        suspend: 16,
-        invert: false,
-        ml: false,
-        files: Vec::new(),
-    };
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                println!("Usage: lockfile [-sleeptime | -r retries |");
-                println!(
-                    "               -l locktimeout | -s suspend | -!  | -ml | -mu ] filename ..."
-                );
-                println!();
-                println!("Create semaphore files.");
-                println!();
-                println!("Options:");
-                println!("  -<N>              Sleep N seconds between retries (default 8)");
-                println!("  -r N              Retry N times (-1 = forever, default -1)");
-                println!("  -l N              Lock timeout in seconds (0 = no timeout)");
-                println!("  -s N              Suspend N seconds after removing stale lock");
-                println!("  -!                Invert return value");
-                println!("  -ml               Create lock using strstrstrstr of lock (strstr)");
-                println!("  -mu               Remove lock");
-                println!("  -h, --help        Show this help");
-                println!("  --version         Show version");
-                process::exit(0);
-            }
-            "--version" => {
-                println!("lockfile {VERSION}");
-                process::exit(0);
-            }
-            "-r" => {
-                i += 1;
-                if i < args.len() {
-                    opts.retries = args[i].parse().unwrap_or(-1);
-                }
-            }
-            "-l" => {
-                i += 1;
-                if i < args.len() {
-                    opts.locktimeout = args[i].parse().unwrap_or(0);
-                }
-            }
-            "-s" => {
-                i += 1;
-                if i < args.len() {
-                    opts.suspend = args[i].parse().unwrap_or(16);
-                }
-            }
-            "-!" => opts.invert = true,
-            "-ml" => opts.ml = true,
-            "-mu" => {
-                // Unlock mode: the remaining words are the lock files to
-                // remove. A failure here used to be discarded and the exit
-                // status was 0 either way, so a script writing
-                // `lockfile -mu "$lock" || recover` never learned that the
-                // lock it thought it had dropped was still held.
-                let mut failed = 0usize;
-                for f in args.iter().skip(i.saturating_add(1)) {
-                    match fs::remove_file(f) {
-                        Ok(()) => {}
-                        // Already absent is the state unlocking wanted.
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => {
-                            eprintln!(
-                                "lockfile: cannot remove {}: {e}",
-                                quoting::quotef(f.as_bytes())
-                            );
-                            failed = failed.saturating_add(1);
-                        }
-                    }
-                }
-                process::exit(i32::from(failed > 0));
-            }
-            s if s.starts_with('-')
-                && s.len() > 1
-                && s[1..].chars().all(|c| c.is_ascii_digit()) =>
-            {
-                opts.sleeptime = s[1..].parse().unwrap_or(8);
-            }
-            // Everything else beginning with a dash is an option this build
-            // does not have. It used to fall through to the arm below and
-            // become a *file to create*, so `lockfile --typo f` created a
-            // file named `--typo` and exited 0 -- reporting success for a
-            // command line it had not understood.
-            s if s.starts_with("--") => {
-                return Err(UsageError::UnknownOption(s.to_string()));
-            }
-            // A lone `-` is a file named `-`, not an option, so the length
-            // test lets it through to the operand arm.
-            s if s.starts_with('-') && s.len() > 1 => {
-                return Err(UsageError::UnknownOption(s.to_string()));
-            }
-            _ => {
-                opts.files.push(args[i].to_string());
-            }
-        }
-        i += 1;
-    }
-
-    Ok(opts)
-}
-
-fn cmd_lockfile(args: &[String]) {
-    let opts = match parse_lockfile_args(args) {
-        Ok(opts) => opts,
-        Err(why) => {
-            eprintln!("lockfile: {}", why.message());
-            eprintln!("Try 'lockfile --help' for more information.");
-            process::exit(64);
-        }
-    };
-
-    if opts.files.is_empty() {
-        eprintln!("lockfile: no files specified");
-        process::exit(1);
-    }
-
-    let mut success = true;
-
-    for file in &opts.files {
-        let mut attempts = 0;
-        let deadline = if opts.locktimeout > 0 {
-            Some(Instant::now() + Duration::from_secs(opts.locktimeout))
-        } else {
-            None
         };
+        match flag {
+            b's' => ctl.lock = LOCK_SH,
+            b'e' | b'x' => ctl.lock = LOCK_EX,
+            b'u' => ctl.lock = LOCK_UN,
+            b'o' => ctl.do_close = true,
+            b'F' => ctl.no_fork = true,
+            b'n' => ctl.block = LOCK_NB,
+            b'w' => {
+                let value = value.unwrap_or_default();
+                match strtotimeval(&os_bytes(&value)) {
+                    Ok(Some((sec, usec))) => ctl.timeout = Some(Wait::Timeval(sec, usec)),
+                    Ok(None) => ctl.timeout = Some(Wait::Unrepresentable),
+                    Err(e) => {
+                        warn_msg(
+                            &short,
+                            &num_error_message("invalid timeout value", &value, e),
+                        );
+                        return EX_USAGE;
+                    }
+                }
+            }
+            b'E' => {
+                let value = value.unwrap_or_default();
+                match ul_strtos32(&os_bytes(&value), 10) {
+                    Ok(code) => match u8::try_from(code) {
+                        Ok(code) => ctl.conflict_exit_code = code,
+                        Err(_) => {
+                            warn_msg(&short, "exit code out of range (expected 0 to 255)");
+                            return EX_USAGE;
+                        }
+                    },
+                    Err(e) => {
+                        warn_msg(&short, &num_error_message("invalid exit code", &value, e));
+                        return EX_USAGE;
+                    }
+                }
+            }
+            b'v' => ctl.verbose = true,
+            b'V' => {
+                let mut line = short.clone();
+                line.extend_from_slice(b" from util-linux 2.39.3\n");
+                out.line(&line);
+                return EX_OK;
+            }
+            b'h' => {
+                out.line(&usage(&short));
+                return EX_OK;
+            }
+            _ => return errtryhelp(&short, EX_USAGE),
+        }
+    }
+    if optind == own.len() {
+        optind = parser.optind();
+    }
 
-        loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(file)
+    if ctl.no_fork && ctl.do_close {
+        warn_msg(&short, "the --no-fork and --close options are incompatible");
+        return EX_USAGE;
+    }
+
+    let rest = own.get(optind..).unwrap_or_default();
+    let mut open_flags = 0;
+    let mut filename: Option<&OsString> = None;
+    let mut cmd_argv: Option<Vec<OsString>> = None;
+    let mut fd = match rest {
+        [file, second, more @ ..] => {
+            let second_bytes = os_bytes(second);
+            if *second_bytes == *b"-c" || *second_bytes == *b"--command" {
+                let [command] = more else {
+                    warn_msg(
+                        &short,
+                        &format!(
+                            "{} requires exactly one command argument",
+                            shown(&second_bytes)
+                        ),
+                    );
+                    return EX_USAGE;
+                };
+                let shell = std::env::var_os("SHELL")
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| OsString::from("/bin/sh"));
+                cmd_argv = Some(vec![shell, OsString::from("-c"), command.clone()]);
+            } else {
+                cmd_argv = Some(rest.get(1..).unwrap_or_default().to_vec());
+            }
+            filename = Some(file);
+            match open_file(&short, file, &mut open_flags, ctl.do_close) {
+                Ok(fd) => fd,
+                Err(status) => return status,
+            }
+        }
+        [fd_word] => match ul_strtos32(&os_bytes(fd_word), 10) {
+            Ok(fd) => fd,
+            Err(e) => {
+                warn_msg(
+                    &short,
+                    &num_error_message("bad file descriptor", fd_word, e),
+                );
+                return EX_USAGE;
+            }
+        },
+        [] => {
+            warn_msg(&short, "requires file descriptor, file or directory");
+            return EX_USAGE;
+        }
+    };
+
+    let mut deadline: Option<Instant> = None;
+    let mut waiting = false;
+    if let Some(timeout) = ctl.timeout {
+        match timeout {
+            // `-w 0` is `-n`: a zero itimer would mean "disabled".
+            Wait::Timeval(0, 0) => ctl.block = LOCK_NB,
+            Wait::Timeval(sec, usec) if sec >= 0 && usec >= 0 => {
+                waiting = true;
+                let secs = u64::try_from(sec).unwrap_or(u64::MAX);
+                let micros = u64::try_from(usec).unwrap_or(0);
+                // A deadline too far off to represent is never reached.
+                deadline = Instant::now().checked_add(
+                    Duration::from_secs(secs).saturating_add(Duration::from_micros(micros)),
+                );
+            }
+            // What `timer_settime` refuses: a negative time, or one
+            // `time_t` could not hold.
+            _ => {
+                warn_err(
+                    &short,
+                    "cannot set up timer",
+                    &io::Error::from_raw_os_error(sys::EINVAL),
+                );
+                return EX_OSERR;
+            }
+        }
+    }
+
+    let started = Instant::now();
+    let mut pause = Duration::from_millis(1);
+    loop {
+        let op = if waiting && ctl.block == 0 {
+            ctl.lock | LOCK_NB
+        } else {
+            ctl.lock | ctl.block
+        };
+        let Err(e) = sys::flock(fd, op) else {
+            break;
+        };
+        match e.raw_os_error() {
+            Some(sys::EWOULDBLOCK) if waiting && ctl.block == 0 => {
+                let now = Instant::now();
+                if deadline.is_some_and(|d| now >= d) {
+                    if ctl.verbose {
+                        warn_msg(&short, "timeout while waiting to get lock");
+                    }
+                    return ctl.conflict_exit_code;
+                }
+                let left = deadline.map_or(pause, |d| d.saturating_duration_since(now));
+                std::thread::sleep(pause.min(left));
+                pause = pause.saturating_mul(2).min(POLL_MAX);
+            }
+            Some(sys::EWOULDBLOCK) => {
+                if ctl.verbose {
+                    warn_msg(&short, "failed to get lock");
+                }
+                return ctl.conflict_exit_code;
+            }
+            Some(sys::EINTR) => {}
+            Some(sys::EIO | sys::EBADF)
+                if open_flags & sys::O_RDWR == 0
+                    && ctl.lock != LOCK_SH
+                    && filename.is_some_and(|f| sys::access_rw(f)) =>
             {
-                Ok(mut f) => {
-                    let _ = f.write_all(format!("{}\n", process::id()).as_bytes());
-                    break;
-                }
-                Err(_) => {
-                    attempts += 1;
-                    if opts.retries >= 0 && attempts > opts.retries {
-                        eprintln!("lockfile: giving up on lock file \"{file}\"");
-                        success = false;
-                        break;
-                    }
-
-                    if let Some(dl) = deadline
-                        && Instant::now() >= dl
-                    {
-                        // Check for stale lock.
-                        let _ = fs::remove_file(file);
-                        thread::sleep(Duration::from_secs(opts.suspend));
-                        continue;
-                    }
-
-                    thread::sleep(Duration::from_secs(opts.sleeptime));
+                // Probably NFSv4, where flock() is emulated by fcntl() and
+                // wants a descriptor open for writing: reopen read-write.
+                sys::close(fd);
+                open_flags = sys::O_RDWR;
+                let Some(file) = filename else {
+                    return EX_DATAERR;
+                };
+                fd = match open_file(&short, file, &mut open_flags, ctl.do_close) {
+                    Ok(fd) => fd,
+                    Err(status) => return status,
+                };
+                if open_flags & sys::O_RDWR == 0 {
+                    // Only a directory reopens without write access, and
+                    // `errno` is then still the `EISDIR` that sent it there.
+                    let why = io::Error::from_raw_os_error(sys::EISDIR);
+                    return lock_failed(&short, filename, fd, &why);
                 }
             }
+            _ => return lock_failed(&short, filename, fd, &e),
         }
     }
 
-    let exit_code = if success { 0 } else { 1 };
-    let exit_code = if opts.invert {
-        if exit_code == 0 { 1 } else { 0 }
+    if ctl.verbose {
+        let took = started.elapsed();
+        out.line(
+            format!(
+                "{}: getting lock took {}.{:06} seconds\n",
+                shown(&short),
+                took.as_secs(),
+                took.subsec_micros()
+            )
+            .as_bytes(),
+        );
+    }
+
+    let Some(cmd_argv) = cmd_argv else {
+        return EX_OK;
+    };
+    let Some((program, args)) = cmd_argv.split_first() else {
+        return EX_OK;
+    };
+    if ctl.verbose {
+        out.line(
+            format!(
+                "{}: executing {}\n",
+                shown(&short),
+                shown(&os_bytes(program))
+            )
+            .as_bytes(),
+        );
+    }
+    // "Clear any inherited settings."
+    sys::default_sigchld();
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    if ctl.no_fork {
+        // The C buffer does not survive `exec`, and neither does ours.
+        out.discard();
+        let e = sys::exec(&mut command);
+        return exec_failed(&short, program, &e);
+    }
+    match command.status() {
+        Ok(status) => sys::status_code(status),
+        // The command ran, and its status could not be had: upstream's
+        // `waitpid failed`, and `EXIT_FAILURE`.
+        Err(e) if e.raw_os_error() == Some(sys::ECHILD) => {
+            warn_err(&short, "waitpid failed", &e);
+            1
+        }
+        Err(e) => exec_failed(&short, program, &e),
+    }
+}
+
+/// The short option a long one stands for (`OPT_VERBOSE` as `v`).
+fn long_flag(name: &str) -> u8 {
+    match name {
+        "shared" => b's',
+        "exclusive" => b'x',
+        "unlock" => b'u',
+        "nonblocking" | "nb" => b'n',
+        "timeout" | "wait" => b'w',
+        "conflict-exit-code" => b'E',
+        "close" => b'o',
+        "no-fork" => b'F',
+        "verbose" => b'v',
+        "help" => b'h',
+        "version" => b'V',
+        // Every name in LONGS is above; this is upstream's `default:`.
+        _ => b'?',
+    }
+}
+
+/// `open_file`: read-only unless `flags` says otherwise, created if absent;
+/// a directory, which cannot be opened with `O_CREAT`, read-only without it.
+/// `cloexec` is `-o`: the descriptor is closed as the command is `exec`ed,
+/// which is what upstream's close in the child before `execvp` amounts to.
+///
+/// # Errors
+///
+/// The status to exit with, the reason already printed.
+fn open_file(short: &[u8], filename: &OsStr, flags: &mut i32, cloexec: bool) -> Result<i32, u8> {
+    let cloexec_flag = if cloexec { sys::O_CLOEXEC } else { 0 };
+    let mut fl = if *flags == 0 { sys::O_RDONLY } else { *flags };
+    fl |= sys::O_NOCTTY | sys::O_CREAT;
+    let mut opened = sys::open(filename, fl | cloexec_flag, 0o666);
+    if opened
+        .as_ref()
+        .is_err_and(|e| e.raw_os_error() == Some(sys::EISDIR))
+    {
+        fl = sys::O_RDONLY | sys::O_NOCTTY;
+        opened = sys::open(filename, fl | cloexec_flag, 0);
+    }
+    match opened {
+        Ok(fd) => {
+            *flags = fl;
+            Ok(fd)
+        }
+        Err(e) => {
+            warn_err(
+                short,
+                &format!("cannot open lock file {}", shown(&os_bytes(filename))),
+                &e,
+            );
+            Err(match e.raw_os_error() {
+                Some(sys::ENOMEM | sys::EMFILE | sys::ENFILE) => EX_OSERR,
+                Some(sys::EROFS | sys::ENOSPC) => EX_CANTCREAT,
+                _ => EX_NOINPUT,
+            })
+        }
+    }
+}
+
+/// The default case of the lock loop: name the file, or the descriptor.
+fn lock_failed(short: &[u8], filename: Option<&OsString>, fd: i32, e: &io::Error) -> u8 {
+    let name = match filename {
+        Some(f) => shown(&os_bytes(f)),
+        None => fd.to_string(),
+    };
+    warn_err(short, &name, e);
+    match e.raw_os_error() {
+        Some(sys::ENOLCK | sys::ENOMEM) => EX_OSERR,
+        _ => EX_DATAERR,
+    }
+}
+
+/// `run_program`'s failure: `failed to execute NAME`, and `EX_OSERR` for
+/// `ENOMEM`, `EX_UNAVAILABLE` otherwise.
+fn exec_failed(short: &[u8], program: &OsStr, e: &io::Error) -> u8 {
+    warn_err(
+        short,
+        &format!("failed to execute {}", shown(&os_bytes(program))),
+        e,
+    );
+    if e.raw_os_error() == Some(sys::ENOMEM) {
+        EX_OSERR
     } else {
-        exit_code
-    };
-    process::exit(exit_code);
-}
-
-// ============================================================================
-// Entry point
-// ============================================================================
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("flock");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "lockfile" => cmd_lockfile(&rest),
-        _ => cmd_flock(&rest),
+        EX_UNAVAILABLE
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+/// How `strtos32_or_err` refuses, for the tests: the message after `flock: `.
+#[cfg(test)]
+fn refusal(errmesg: &str, arg: &str, e: ulstrutils::NumErr) -> String {
+    num_error_message(errmesg, OsStr::new(arg), e)
+}
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_lock_type_equality() {
-        assert_eq!(LockType::Shared, LockType::Shared);
-        assert_eq!(LockType::Exclusive, LockType::Exclusive);
-        assert_ne!(LockType::Shared, LockType::Exclusive);
+    fn every_long_option_has_its_letter() {
+        for (name, _) in LONGS {
+            assert_ne!(long_flag(name), b'?', "{name}");
+        }
     }
 
     #[test]
-    fn test_parse_flock_shared() {
-        let args = vec!["-s".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert_eq!(opts.lock_type, LockType::Shared);
-        assert_eq!(opts.file, Some("/tmp/test".to_string()));
-    }
-
-    #[test]
-    fn test_parse_flock_exclusive() {
-        let args = vec!["-x".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert_eq!(opts.lock_type, LockType::Exclusive);
-    }
-
-    #[test]
-    fn test_parse_flock_nonblock() {
-        let args = vec!["-n".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert!(opts.nonblock);
-    }
-
-    #[test]
-    fn test_parse_flock_timeout() {
-        let args = vec!["-w".to_string(), "10".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert_eq!(opts.timeout, Some(10));
-    }
-
-    #[test]
-    fn test_parse_flock_unlock() {
-        let args = vec!["-u".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert_eq!(opts.lock_type, LockType::Unlock);
-    }
-
-    #[test]
-    fn test_parse_flock_verbose() {
-        let args = vec!["-v".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert!(opts.verbose);
-    }
-
-    #[test]
-    fn test_parse_flock_fd() {
-        let args = vec!["9".to_string()];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert_eq!(opts.fd, Some(9));
-        assert!(opts.file.is_none());
-    }
-
-    #[test]
-    fn test_parse_flock_with_command() {
-        let args = vec![
-            "/tmp/lockfile".to_string(),
-            "echo".to_string(),
-            "hello".to_string(),
-        ];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert_eq!(opts.file, Some("/tmp/lockfile".to_string()));
-        assert_eq!(opts.command, vec!["echo", "hello"]);
-    }
-
-    /// Build an argv the way a shell would.
-    fn argv(words: &[&str]) -> Vec<String> {
-        words.iter().map(|w| (*w).to_string()).collect()
-    }
-
-    /// The bug that started this: an unknown option was not refused, it was
-    /// taken as the *file to lock*, so `flock --list f` created and locked a
-    /// file named `--list.lock` in the working directory. One was found
-    /// sitting in the repository root.
-    #[test]
-    fn an_unknown_long_option_is_refused_not_taken_as_the_file() {
-        let err = parse_flock_args(&argv(&["--list", "/tmp/t"])).unwrap_err();
-        assert_eq!(err, UsageError::UnknownOption("--list".to_string()));
-        assert_eq!(err.message(), "unrecognized option '--list'");
-    }
-
-    #[test]
-    fn an_unknown_short_option_is_refused_and_names_its_letter() {
-        let err = parse_flock_args(&argv(&["-Z", "/tmp/t"])).unwrap_err();
-        assert_eq!(err, UsageError::UnknownOption("-Z".to_string()));
-        assert_eq!(err.message(), "invalid option -- 'Z'");
-    }
-
-    /// Measured against util-linux: `flock -c cmd file` is rejected, because
-    /// `-c` is not in the option set getopt sees -- it is recognised only in
-    /// the word after the operand.
-    #[test]
-    fn dash_c_before_the_operand_is_an_invalid_option() {
-        let err = parse_flock_args(&argv(&["-c", "echo hi", "/tmp/t"])).unwrap_err();
-        assert_eq!(err, UsageError::UnknownOption("-c".to_string()));
-    }
-
-    #[test]
-    fn dash_c_after_the_operand_runs_the_shell() {
-        let opts = parse_flock_args(&argv(&["/tmp/t", "-c", "echo hi"])).expect("valid");
-        assert_eq!(opts.file, Some("/tmp/t".to_string()));
-        assert_eq!(opts.command, vec!["/bin/sh", "-c", "echo hi"]);
-    }
-
-    #[test]
-    fn long_command_form_is_accepted_after_the_operand() {
-        let opts = parse_flock_args(&argv(&["/tmp/t", "--command", "echo hi"])).expect("valid");
-        assert_eq!(opts.command, vec!["/bin/sh", "-c", "echo hi"]);
-    }
-
-    /// `flock f -c echo extra` is an error, not a join of the two words.
-    #[test]
-    fn dash_c_takes_exactly_one_argument() {
-        let two = parse_flock_args(&argv(&["/tmp/t", "-c", "echo", "extra"])).unwrap_err();
-        assert_eq!(two, UsageError::CommandArity);
-        let none = parse_flock_args(&argv(&["/tmp/t", "-c"])).unwrap_err();
-        assert_eq!(none, UsageError::CommandArity);
-        assert_eq!(none.message(), "-c requires exactly one command argument");
-    }
-
-    /// The option set stops at the operand. `flock f echo -n hi` prints `hi`
-    /// with no trailing newline under util-linux, which is only possible if
-    /// `-n` reached `echo` instead of setting flock's own --nonblock.
-    #[test]
-    fn a_dash_flag_after_the_operand_belongs_to_the_command() {
-        let opts = parse_flock_args(&argv(&["/tmp/t", "echo", "-n", "hi"])).expect("valid");
-        assert!(
-            !opts.nonblock,
-            "-n after the operand is echo's, not flock's"
+    fn the_aliases_are_not_ambiguous_with_each_other() {
+        let argv: Vec<OsString> = ["--nonb", "--wai", "1", "f"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let items: Vec<_> = FLOCK
+            .parse_aliased(&argv, SHORTS, LONGS, ALIASES)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            items,
+            vec![
+                Opt::Long("nonblocking", None),
+                Opt::Long("wait", Some("1".into())),
+                Opt::Operand(&argv[3]),
+            ]
         );
-        assert_eq!(opts.command, vec!["echo", "-n", "hi"]);
+        // `--n` is nonblocking, nb or no-fork: the last is another option.
+        let argv: Vec<OsString> = ["--n"].iter().map(OsString::from).collect();
+        let err = FLOCK
+            .parse_aliased(&argv, SHORTS, LONGS, ALIASES)
+            .next()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            err.sentence,
+            "option '--n' is ambiguous; possibilities: '--nonblocking' '--no-fork'"
+        );
     }
 
-    /// And when the command *is* a dash word, it stays the command name --
-    /// util-linux reports `failed to execute -n` for this line.
-    #[test]
-    fn a_dash_word_can_be_the_command_name() {
-        let opts = parse_flock_args(&argv(&["/tmp/t", "-n", "echo", "after"])).expect("valid");
-        assert!(!opts.nonblock);
-        assert_eq!(opts.command, vec!["-n", "echo", "after"]);
-    }
+    use ulstrutils::NumErr;
 
     #[test]
-    fn options_before_the_operand_still_bind_to_flock() {
-        let opts = parse_flock_args(&argv(&["-n", "-s", "/tmp/t", "echo"])).expect("valid");
-        assert!(opts.nonblock);
-        assert_eq!(opts.lock_type, LockType::Shared);
-        assert_eq!(opts.file, Some("/tmp/t".to_string()));
-        assert_eq!(opts.command, vec!["echo"]);
-    }
-
-    #[test]
-    fn double_dash_ends_the_options_so_a_dashed_file_can_be_locked() {
-        let opts = parse_flock_args(&argv(&["-n", "--", "-weird-name"])).expect("valid");
-        assert!(opts.nonblock);
-        assert_eq!(opts.file, Some("-weird-name".to_string()));
-    }
-
-    /// A lone `-` is an operand to getopt, not an option, so it must not be
-    /// mistaken for an unknown short option.
-    #[test]
-    fn a_lone_dash_is_an_operand() {
-        let opts = parse_flock_args(&argv(&["-"])).expect("valid");
-        assert_eq!(opts.file, Some("-".to_string()));
+    fn the_refusals_are_upstreams() {
+        assert_eq!(
+            refusal("invalid exit code", "abc", NumErr::Invalid),
+            "invalid exit code: 'abc'"
+        );
+        assert_eq!(
+            refusal("bad file descriptor", "99999999999", NumErr::Range),
+            "bad file descriptor: '99999999999': Numerical result out of range"
+        );
     }
 
     #[test]
-    fn test_parse_flock_conflict_exit() {
-        let args = vec!["-E".to_string(), "42".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert_eq!(opts.conflict_exit, 42);
+    fn the_short_name_is_argv0_past_its_last_slash() {
+        assert_eq!(short_name(OsStr::new("/usr/bin/flock")), b"flock");
     }
 
     #[test]
-    fn test_parse_flock_close() {
-        let args = vec!["-o".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args).expect("valid command line");
-        assert!(opts.close);
-    }
-
-    /// `lockfile`'s whole job is to create the files it is named, so an
-    /// unknown option falling through to the operand list is not a parsing
-    /// nicety -- it creates a file called `--typo` and exits 0.
-    #[test]
-    fn lockfile_refuses_an_unknown_long_option() {
-        let err = parse_lockfile_args(&argv(&["--typo", "lock"])).unwrap_err();
-        assert_eq!(err, UsageError::UnknownOption("--typo".to_string()));
-    }
-
-    #[test]
-    fn lockfile_refuses_an_unknown_short_option() {
-        let err = parse_lockfile_args(&argv(&["-q", "lock"])).unwrap_err();
-        assert_eq!(err, UsageError::UnknownOption("-q".to_string()));
-    }
-
-    /// The refusal must not swallow `-<N>`, which is how lockfile spells its
-    /// sleep interval -- the digit arm has to be tried before the dash arm.
-    #[test]
-    fn lockfile_still_reads_a_numeric_sleeptime() {
-        let opts = parse_lockfile_args(&argv(&["-5", "lock"])).expect("valid");
-        assert_eq!(opts.sleeptime, 5);
-        assert_eq!(opts.files, vec!["lock"]);
-    }
-
-    /// A lone dash names a file, so it must survive the refusal arms.
-    #[test]
-    fn lockfile_treats_a_lone_dash_as_a_file() {
-        let opts = parse_lockfile_args(&argv(&["-"])).expect("valid");
-        assert_eq!(opts.files, vec!["-"]);
-    }
-
-    #[test]
-    fn lockfile_keeps_its_real_options_working() {
-        let opts = parse_lockfile_args(&argv(&["-r", "3", "-!", "-ml", "a", "b"])).expect("valid");
-        assert_eq!(opts.retries, 3);
-        assert!(opts.invert);
-        assert!(opts.ml);
-        assert_eq!(opts.files, vec!["a", "b"]);
-    }
-
-    #[test]
-    fn test_parse_lockfile_defaults() {
-        let args = vec!["test.lock".to_string()];
-        let opts = parse_lockfile_args(&args).expect("valid command line");
-        assert_eq!(opts.sleeptime, 8);
-        assert_eq!(opts.retries, -1);
-        assert_eq!(opts.locktimeout, 0);
-        assert_eq!(opts.suspend, 16);
-        assert!(!opts.invert);
-        assert_eq!(opts.files, vec!["test.lock"]);
-    }
-
-    #[test]
-    fn test_parse_lockfile_retries() {
-        let args = vec!["-r".to_string(), "5".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args).expect("valid command line");
-        assert_eq!(opts.retries, 5);
-    }
-
-    #[test]
-    fn test_parse_lockfile_sleeptime() {
-        let args = vec!["-3".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args).expect("valid command line");
-        assert_eq!(opts.sleeptime, 3);
-    }
-
-    #[test]
-    fn test_parse_lockfile_invert() {
-        let args = vec!["-!".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args).expect("valid command line");
-        assert!(opts.invert);
-    }
-
-    #[test]
-    fn test_parse_lockfile_locktimeout() {
-        let args = vec!["-l".to_string(), "60".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args).expect("valid command line");
-        assert_eq!(opts.locktimeout, 60);
-    }
-
-    #[test]
-    fn test_parse_lockfile_suspend() {
-        let args = vec!["-s".to_string(), "30".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args).expect("valid command line");
-        assert_eq!(opts.suspend, 30);
-    }
-
-    #[test]
-    fn test_parse_lockfile_multiple_files() {
-        let args = vec!["a.lock".to_string(), "b.lock".to_string()];
-        let opts = parse_lockfile_args(&args).expect("valid command line");
-        assert_eq!(opts.files.len(), 2);
+    fn usage_names_the_program_as_invoked() {
+        let text = String::from_utf8(usage(b"myflock")).unwrap();
+        assert!(text.starts_with("\nUsage:\n myflock [options] <file>|<directory> <command>"));
+        assert!(text.ends_with("For more details see flock(1).\n"));
     }
 }

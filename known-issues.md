@@ -166618,12 +166618,13 @@ loop has its own edge cases around values, `=`, and operands.
 
 **Where:** the standalone ports that already share `usageerror` (the
 diagnostic wording) but not a parser -- `blockdev`, `capsh`, `chattr`,
-`flock`, `hostnamectl`, `lscpu`, `lsmem`, `objdump`, `resolvectl`,
+`hostnamectl`, `lscpu`, `lsmem`, `objdump`, `resolvectl`,
 `route`, `sanitize`, `systemctl`, `tput` -- plus hand-parsed programs that do
 not use it yet. (`logger` was one; its port uses `getoptlong`, 413e56f1d. So
 was `getopt` itself -- now a port of util-linux's, whose script-facing parse
 is `getoptlong` with the knobs it gained for it: keep-going, long-only,
-distinct entries, `W;`.)
+distinct entries, `W;`. And `flock`, now a port of util-linux's, whose
+old hand parser took an unknown option for the file to lock.)
 
 **The proper fix,** now possible: `getoptlong` (extracted from
 `coreutils/src/getopt.rs` on 2026-09-26) is the shared parser. Converting a
@@ -166659,3 +166660,49 @@ and delete a lock file only when its directory is a member's. **Not dead,
 and not to be deleted:** `netipc/`, `netproto/`, `netring/`, `tzrules/` and
 six under `services/` (`hello`, `httpget`, `init`, `netstack`, `ticker`,
 `udpget`) are outside the workspace, so cargo does read their lock files.
+
+## TD-B-FLOCK-WAIT-POLLS (lane B, 2026-09-26) — **open**, the fix is lane D's
+
+**In short:** `flock -w SECONDS` (wait for a lock, but not forever) cannot
+wait the way util-linux's does on SlateOS, so ours waits a slightly different
+way everywhere. Upstream calls the blocking `flock()` and has a timer
+interrupt it with a signal when the time is up. SlateOS's C library
+implements a blocking `flock()` as a loop that retries until the lock is free
+(`posix/src/file.rs`, `do_flock`: `SYS_SLEEP` then `continue` on `EAGAIN`),
+and nothing in that loop returns `EINTR` when a signal handler has run -- so
+the timer would fire, the handler would set its flag, and `flock` would go on
+waiting forever.
+
+**What was done instead** (`userspace/flock/src/main.rs`, the lock loop):
+with `-w`, `flock` tries `LOCK_NB` until the deadline, sleeping 1 ms,
+doubling to at most 25 ms, between tries. A caller sees the same outcomes --
+`scripts/flock-diff.sh` checks them against util-linux -- and only notices a
+release up to 25 ms late. Without `-w`, the blocking call is upstream's.
+
+**The proper fix, lane D:** the libc's blocking `flock()` should return
+`EINTR` when a caught signal is delivered while it waits, as Linux's does
+(the kernel's `SYS_SLEEP` would have to report the interruption). Then `-w`
+can be upstream's timer again (design-decisions §1035), and every other
+program that relies on a signal interrupting a blocking call benefits. Worth a request once lane D's
+signal delivery is known to reach that loop; until then the polling is
+correct, only less exact.
+
+## TD-B-LOCKFILE-IS-NOT-PROCMAILS (lane B, 2026-09-26) — **open**
+
+**In short:** `lockfile` -- the command scripts use to create a lock file
+the way procmail does -- is a SlateOS approximation, not a port. It became
+its own program on 2026-09-26 (it had been an unreachable personality of
+`flock`), and its code moved unchanged, so its differences from procmail's
+`lockfile(1)` did too. Found while splitting it out; not yet measured against
+procmail's, which WSL can provide (`apt install procmail`).
+
+**Where it is known to differ** (`userspace/lockfile/src/main.rs`):
+- `-l locktimeout` is used as a deadline for giving up; in procmail it is the
+  age after which an existing lock file is considered stale and removed.
+- A bad number (`-r x`, `-l x`, `-s x`) silently becomes a default rather
+  than being refused.
+- The messages (`giving up on lock file`) and the exit statuses are not
+  procmail's, and `-ml`/`-mu` (the user's mailbox) are approximated.
+
+**The proper fix:** a port of procmail 3.24's `lockfile.c`, measured by a
+`lockfile-diff.sh` against WSL's, as `flock` and `getopt` were.

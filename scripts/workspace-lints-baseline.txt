@@ -71,7 +71,6 @@ userspace/fdisk
 userspace/findmnt  # bare deny(clippy::all)
 userspace/fio  # bare deny(clippy::all)
 userspace/firejail  # bare deny(clippy::all)
-userspace/flock  # bare deny(clippy::all)
 userspace/fmt
 userspace/fsck
 userspace/fuser  # bare deny(clippy::all)

@@ -929,8 +929,10 @@ dependencies = [
 name = "flock"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "getoptlong",
  "quoting",
- "usageerror",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -1504,6 +1506,14 @@ name = "localtime"
 version = "0.1.0"
 dependencies = [
  "tzrules",
+]
+
+[[package]]
+name = "lockfile"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+ "usageerror",
 ]
 
 [[package]]

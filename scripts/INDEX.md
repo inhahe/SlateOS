@@ -188,6 +188,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/find-swallowed-ticks.py` | Which event dispatchers can return before reaching their own Tick arm? |
 | `scripts/find-unpinned-picker-routing.py` | Whose tests would notice if the file picker stopped receiving events? |
 | `scripts/flake-hunt.sh` | flake-hunt.sh — run a crate's test suite N times and report only the runs |
+| `scripts/flock-diff.sh` | Differential test: our `flock` against util-linux 2.39.3's. |
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
@@ -422,4 +423,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_412 scripts._
+_413 scripts._

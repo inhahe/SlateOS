@@ -509,10 +509,116 @@ py=$(command -v python3 || command -v python) || skip=1
 # own stdin, and every element is a positive revision here. If nothing is being
 # published the list is empty, `rev-list` has no positive ref, prints nothing,
 # and every gate skips — which is the right answer to "judge nothing".
-touches() {
+#
+# WHY IT IS USUALLY ANSWERED WITHOUT ASKING GIT. Asked of git, every call costs
+# a fork for the command substitution and a git process, and on a loaded
+# Windows host -- where MSYS emulates fork by copying the whole shell -- that
+# is a second or more apiece. Forty-odd gates ask on every push. Measured on
+# 2026-09-25 with six lanes building, one fixture push in
+# test-checkers-honour-head.py spent 130 s of its 172 s here, and the tooling
+# suites push through this hook well over a hundred times per boot.
+#
+# So when the push publishes no merge commit, the answer is worked out once:
+# one `git log --name-only` lists every path the published commits change, and
+# each call matches its own paths against that list in the shell. That is the
+# same answer, not an approximation of it. Without a merge, history
+# simplification -- the only thing that makes `rev-list -- <paths>` mean more
+# than "some published commit changes a matching path" -- has nothing to act
+# on: it prunes only at merges, and a commit reachable from the pushed shas
+# only through an already-published merge is itself already published. The
+# path rules are git's own, for the spellings the gates use: `dir/` matches
+# what is below dir; `name` matches name and what is below it; `*suffix`
+# matches any path ending in suffix, since `*` crosses `/` (and a wildcard
+# never matches a leading directory). scripts/test-pre-push-touches.py holds
+# the two answers equal over roots, renames, deletions, mode changes, empty
+# commits, several refs and odd names, and fails if a gate's scope is ever
+# spelled in a way the list cannot answer.
+#
+# Whatever the list cannot answer exactly still goes to git, call by call: a
+# push that publishes a merge, a path git had to quote, a scope with any other
+# wildcard or pathspec magic, or a list that could not be built. `--max-count`
+# rather than `| head -n 1` there, which is one fork fewer and lets git stop at
+# the first commit it finds.
+touches_mode=""
+touches_paths=""
+touches_nl='
+'
+
+# Decide how `touches` will answer for this push: `none` (nothing is being
+# published), `list` (from `touches_paths`), or `git` (ask on every call).
+touches_prepare() {
+    touches_mode=git
+    if [ -z "$pushed_shas" ]; then
+        # Not `git log`: given no positive revision, it would read HEAD.
+        touches_mode=none
+        return 0
+    fi
     # shellcheck disable=SC2086
-    [ -n "$(git rev-list $pushed_shas --not --remotes="$remote_name" \
-                -- "$@" 2>/dev/null | head -n 1)" ]
+    touches_merge=$(git rev-list $pushed_shas --min-parents=2 --max-count=1 \
+                        --not --remotes="$remote_name" 2>/dev/null) || return 0
+    [ -z "$touches_merge" ] || return 0
+    # --root: a root commit's paths count, as rev-list counts them, whatever
+    # log.showRoot says. --no-renames: a rename changes both of its paths.
+    # core.quotePath=false: only names git cannot print as themselves are
+    # quoted, and those send the push to git below.
+    # shellcheck disable=SC2086
+    touches_paths=$(git -c core.quotePath=false log $pushed_shas \
+                        --no-renames --root --name-only --format= \
+                        --not --remotes="$remote_name" -- 2>/dev/null) || return 0
+    touches_paths="$touches_nl$touches_paths$touches_nl"
+    case $touches_paths in
+        *"$touches_nl\""*) touches_paths=""; return 0 ;;
+    esac
+    touches_mode=list
+}
+
+# 0: a published path matches one of "$@"; 1: none does; 2: one of "$@" is
+# spelled in a way `touches_paths` cannot answer, so git has to be asked.
+touches_from_list() {
+    touches_unanswered=0
+    for touches_spec in "$@"; do
+        case $touches_spec in
+            *\?*|*\[*|*\\*|:*|''|.|..|./*|../*|/*|*/.|*/..|*/./*|*/../*|*//*)
+                touches_unanswered=1 ;;
+            *"$touches_nl"*)
+                touches_unanswered=1 ;;
+            \*|\**\**|\**/*)
+                touches_unanswered=1 ;;
+            \**)
+                touches_suffix=${touches_spec#?}
+                case $touches_paths in
+                    *"$touches_suffix$touches_nl"*) return 0 ;;
+                esac ;;
+            *\**)
+                touches_unanswered=1 ;;
+            */)
+                case $touches_paths in
+                    *"$touches_nl$touches_spec"*) return 0 ;;
+                esac ;;
+            *)
+                case $touches_paths in
+                    *"$touches_nl$touches_spec$touches_nl"*) return 0 ;;
+                    *"$touches_nl$touches_spec/"*) return 0 ;;
+                esac ;;
+        esac
+    done
+    [ "$touches_unanswered" = 0 ] || return 2
+    return 1
+}
+
+touches() {
+    [ -n "$touches_mode" ] || touches_prepare
+    case $touches_mode in
+        none)
+            return 1 ;;
+        list)
+            touches_from_list "$@"
+            touches_rc=$?
+            [ "$touches_rc" = 2 ] || return "$touches_rc" ;;
+    esac
+    # shellcheck disable=SC2086
+    [ -n "$(git rev-list $pushed_shas --max-count=1 --not --remotes="$remote_name" \
+                -- "$@" 2>/dev/null)" ]
 }
 
 # Where run_checker parks a failing checker's output. Inside the git dir, which

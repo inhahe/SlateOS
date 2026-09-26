@@ -363,6 +363,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-pre-push-gates.py` | Structural tests for `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-identity-gate.py` | Behavioural tests for pre-push gate 10 (fixture-identity refusal). |
 | `scripts/test-pre-push-run-checker.py` | Tests for `run_checker`, the shared checker-invocation helper. |
+| `scripts/test-pre-push-touches.py` | Tests for the pre-push hook's `touches` helper (scripts/hooks/pre-push). |
 | `scripts/test-pre-push-unixhalf-gate.py` | Behavioural tests for pre-push gate 12 (coreutils' unix half). |
 | `scripts/test-proctree.py` | test-proctree.py — tests for `proctree.resolve_command` and friends. |
 | `scripts/test-prune-build-cache.py` | Run `prune-build-cache.py`'s self-test under the boot test's tooling gate. |
@@ -399,4 +400,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_389 scripts._
+_390 scripts._

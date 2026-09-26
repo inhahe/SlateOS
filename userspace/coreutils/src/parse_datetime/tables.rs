@@ -8,17 +8,22 @@
 //! Source: `lib/parse-datetime.c`, GNU Bison 3.8.2,
 //! sha256 `5f90d75475a1df335922deaea2697d65dffaa3bfed1a2687d6a47d847c283bb3`.
 
-// The driver reads only the arrays and the few scalars it needs; the
-// rest describe the tables' shape, which the tests check against them.
-#![allow(dead_code)]
+// The driver in grammar.rs reads every array and most of the scalars.
+// The four that only describe the tables' shape -- which the tests check
+// the arrays against -- carry their own `allow`, item by item, so that
+// anything the driver stops reading is still reported.
 
 pub(super) const YYFINAL: usize = 12;
 pub(super) const YYLAST: usize = 114;
 pub(super) const YYNTOKENS: usize = 29;
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const YYNNTS: usize = 26;
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const YYNRULES: usize = 92;
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const YYNSTATES: usize = 115;
 pub(super) const YYPACT_NINF: i8 = -91;
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const YYTABLE_NINF: i8 = -1;
 
 #[rustfmt::skip]

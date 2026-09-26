@@ -69,6 +69,17 @@ def array(src, name):
     return [int(v) for v in m.group(1).replace("\n", " ").split(",") if v.strip()]
 
 
+# Scalars the driver has no use for: they describe the tables' shape, and only
+# the tests read them. `YYTABLE_NINF` is among them because
+# `yytable_value_is_error` is constant 0 for these tables (checked in main),
+# so the driver never compares against it.
+#
+# Named one by one rather than covered by a module-wide `#![allow(dead_code)]`:
+# that would hide an ARRAY the driver stopped reading, which is a real finding
+# (scripts/check-dead-code-allows.py refuses the module-wide form).
+SHAPE_ONLY = {"YYNNTS", "YYNRULES", "YYNSTATES", "YYTABLE_NINF"}
+
+
 def emit(name, ty, values, out):
     lo, hi = RANGES[ty]
     for v in values:
@@ -110,13 +121,16 @@ def main():
         "//! Source: `lib/parse-datetime.c`, GNU Bison %s," % bison,
         "//! sha256 `%s`." % hashlib.sha256(raw).hexdigest(),
         "",
-        "// The driver reads only the arrays and the few scalars it needs; the",
-        "// rest describe the tables' shape, which the tests check against them.",
-        "#![allow(dead_code)]",
+        "// The driver in grammar.rs reads every array and most of the scalars.",
+        "// The four that only describe the tables' shape -- which the tests check",
+        "// the arrays against -- carry their own `allow`, item by item, so that",
+        "// anything the driver stops reading is still reported.",
         "",
     ]
     for name in SCALARS:
         ty = "i8" if name.endswith("NINF") else "usize"
+        if name in SHAPE_ONLY:
+            out.append("#[cfg_attr(not(test), allow(dead_code))]")
         out.append("pub(super) const %s: %s = %d;" % (name, ty, scalar(src, name)))
     out.append("")
     for name, ty in ARRAYS:

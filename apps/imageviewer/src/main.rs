@@ -4,7 +4,8 @@
 //! - Image display with zoom, pan, rotation, and flip transforms
 //! - Directory browsing (next/prev image navigation)
 //! - Slideshow mode with configurable intervals
-//! - Every format `imagecodec` decodes, and SVG drawings
+//! - Every format `imagecodec` decodes, and SVG drawings; animated GIFs and
+//!   WebPs play (`player`), unless the user has turned animation off
 //! - Pictures read and decoded off the window's thread, so the window never
 //!   freezes on a large one (`offloop`)
 //! - Image information panel with metadata/EXIF display
@@ -26,6 +27,8 @@ use guitk::theme::with_alpha;
 use guitk::wheel;
 
 use std::path::{Path, PathBuf};
+
+mod player;
 
 /// `path`'s file name as the window shows it: the name itself when it is
 /// text, its bytes as escapes (`quoting::escape_unprintable`) when it is not
@@ -73,7 +76,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("S", "Show or hide the status bar"),
     ("D", "How long each slide stays up"),
     ("F5", "Start or stop the slideshow"),
-    ("Space", "Pause or resume the slideshow"),
+    ("Space", "Pause or resume the slideshow, or the animation"),
     ("F11", "Full screen"),
     ("Delete", "Delete this image"),
     ("Escape", "Leave full screen or the slideshow"),
@@ -707,6 +710,21 @@ pub struct ViewerState {
     /// The picture on screen -- or the file whose failure is -- and how it is
     /// turned.
     shown: Option<(PathBuf, View)>,
+
+    /// The animation playing, when the picture on screen is one.
+    ///
+    /// An animated GIF or WebP showed its first frame and stopped there: the
+    /// decoders give the first frame, and nothing asked for the rest.
+    player: Option<player::Player>,
+    /// How long the frame on screen has left, in milliseconds. Zero while the
+    /// next frame is awaited.
+    frame_left_ms: u64,
+    /// Whether the user has paused the animation (Space, with no slideshow).
+    animation_paused: bool,
+    /// Whether animations play at all: off when the user has turned animation
+    /// off (`AppearanceSettings::animations_enabled`), when a picture shows
+    /// its first frame only, as lane F's request asks.
+    animations: bool,
 }
 
 /// What asking for a picture came to.
@@ -732,6 +750,9 @@ pub struct Loaded {
     info: ImageInfo,
     /// The pixels, turned as `view` says; or what to say instead.
     picture: Result<Picture, String>,
+    /// The file's bytes, when it is an animation: its frames are decoded as
+    /// they are shown, by a `player::Player`.
+    animation: Option<Vec<u8>>,
 }
 
 /// Pixels ready to show.
@@ -807,7 +828,60 @@ impl ViewerState {
             loader: None,
             wanted: None,
             shown: None,
+            player: None,
+            frame_left_ms: 0,
+            animation_paused: false,
+            animations: true,
         }
+    }
+
+    /// Move the animation on by `elapsed_ms`: show each frame whose time has
+    /// come. Whether anything new is on screen.
+    fn advance_animation(&mut self, elapsed_ms: u64) -> bool {
+        if self.animation_paused || self.player.is_none() {
+            return false;
+        }
+        self.frame_left_ms = self.frame_left_ms.saturating_sub(elapsed_ms);
+        let mut shown = false;
+        while self.frame_left_ms == 0 {
+            let Some(next) = self.player.as_mut().map(player::Player::next) else {
+                break;
+            };
+            match next {
+                player::Next::Frame(frame) => {
+                    // Never zero, or a frame could be skipped unseen.
+                    self.frame_left_ms = u64::from(frame.delay_ms).max(1);
+                    // The first frame of the first play is on screen already,
+                    // decoded with the picture; only its time was wanted.
+                    if !frame.first {
+                        self.show_frame(&frame.image);
+                        shown = true;
+                    }
+                }
+                // Not decoded yet: `tick_interval` asks again shortly.
+                player::Next::NotYet => break,
+                // Played as many times as the file says: the last frame stays.
+                player::Next::Ended => {
+                    self.player = None;
+                    break;
+                }
+            }
+        }
+        shown
+    }
+
+    /// Put one frame of the animation on screen, in place of the last.
+    fn show_frame(&mut self, image: &imagecodec::Image) {
+        self.pending_images.clear();
+        self.pending_images
+            .push(oswindow::app::ImageChange::Upload {
+                id: VIEWER_IMAGE_ID,
+                width: image.width,
+                height: image.height,
+                stride: image.stride(),
+                format: oswindow::PixelFormat::Argb8888,
+                bytes: guitk::canvas::WireBytes::from_le_argb(&image.pixels),
+            });
     }
 
     /// The file being read and decoded off this thread, if one is.
@@ -1049,7 +1123,12 @@ impl ViewerState {
             view,
             info,
             picture,
+            animation,
         } = loaded;
+        // Whatever was playing belonged to the picture this replaces.
+        self.player = None;
+        self.frame_left_ms = 0;
+        self.animation_paused = false;
         // Another turn of the same file keeps the user's zoom; a new file
         // opens whole.
         let new_file = self.shown.as_ref().is_none_or(|(shown, _)| *shown != path);
@@ -1096,6 +1175,10 @@ impl ViewerState {
             self.transform.reset();
         }
         self.refit();
+        if let Some(bytes) = animation.filter(|_| self.animations) {
+            // A player that cannot be started leaves the first frame up.
+            self.player = player::Player::start(bytes, view.orientation()).ok();
+        }
         Opened::Shown
     }
 
@@ -1277,6 +1360,8 @@ impl ViewerState {
             ViewerAction::PauseSlideshow => {
                 if self.slideshow.active {
                     self.slideshow.paused = !self.slideshow.paused;
+                } else if self.player.is_some() {
+                    self.animation_paused = !self.animation_paused;
                 }
             }
             ViewerAction::ToggleInfo => {
@@ -1307,6 +1392,7 @@ impl ViewerState {
 
     /// Handle a tick event for slideshow progression.
     pub fn handle_tick(&mut self, elapsed_ms: u64) {
+        self.advance_animation(elapsed_ms);
         if !self.slideshow.active || self.slideshow.paused {
             return;
         }
@@ -2387,6 +2473,7 @@ fn load_picture(path: &Path, view: View) -> Loaded {
         view,
         info,
         picture: Err(why),
+        animation: None,
     };
 
     let data = match safeio::read_capped(path, ViewerState::MAX_PICTURE_BYTES) {
@@ -2473,11 +2560,14 @@ fn load_picture(path: &Path, view: View) -> Loaded {
         size: turn.shown(picture.size),
         image: turn.apply(picture.image),
     };
+    // The first frame is the picture above; the rest are the player's.
+    let animation = player::is_animation(&data).then_some(data);
     Loaded {
         path: path.to_path_buf(),
         view,
         info,
         picture: Ok(picture),
+        animation,
     }
 }
 
@@ -2567,9 +2657,28 @@ impl oswindow::app::App for ViewerState {
     /// interval is the slideshow's own, not a fixed frame rate: a five-second
     /// slideshow that woke sixty times a second to discover that four seconds
     /// remained would be 299 wake-ups spent on arithmetic.
+    ///
+    /// And while an animation plays, the time its frame has left -- or a
+    /// hundredth of a second while the next frame is awaited from the player.
     fn tick_interval(&self) -> Option<std::time::Duration> {
-        (self.slideshow.active && !self.slideshow.paused)
-            .then(|| std::time::Duration::from_millis(self.slideshow.interval.millis()))
+        let slideshow = (self.slideshow.active && !self.slideshow.paused)
+            .then(|| self.slideshow.interval.millis());
+        let animation =
+            (self.player.is_some() && !self.animation_paused).then(|| self.frame_left_ms.max(10));
+        slideshow
+            .into_iter()
+            .chain(animation)
+            .min()
+            .map(std::time::Duration::from_millis)
+    }
+
+    /// Animations follow the user's setting: with animation off, a picture
+    /// shows its first frame only, and one playing stops where it is.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.animations = settings.animations_enabled();
+        if !self.animations {
+            self.player = None;
+        }
     }
 
     fn on_event(&mut self, event: &Event) -> oswindow::app::Response {
@@ -4554,6 +4663,375 @@ the picture at once, which reads as D advancing the slideshow"
         ));
         assert!(!looks_like_svg(b"<?xml version=\"1.0\"?>\n<html/>"));
         assert!(!looks_like_svg(b"not a drawing at all"));
+    }
+
+    /// An animated GIF, every frame 2 x 2 in one colour of `colours` (as a
+    /// palette of up to four), each shown `delay_cs` hundredths, played
+    /// `loops` times after the first (0: forever).
+    fn animated_gif(colours: &[[u8; 3]], delay_cs: u16, loops: u16) -> Vec<u8> {
+        let frames: Vec<[u8; 4]> = (0..colours.len())
+            .map(|i| [u8::try_from(i).unwrap(); 4])
+            .collect();
+        gif_of(colours, &frames, delay_cs, loops)
+    }
+
+    /// An animated GIF of 2 x 2 frames, each given as its four pixels'
+    /// indices into `colours` (a palette of up to four).
+    fn gif_of(colours: &[[u8; 3]], frames: &[[u8; 4]], delay_cs: u16, loops: u16) -> Vec<u8> {
+        let mut out = b"GIF89a".to_vec();
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        // A global table of four colours; background 0; no aspect.
+        out.extend_from_slice(&[0x81, 0, 0]);
+        for i in 0..4 {
+            out.extend_from_slice(colours.get(i).unwrap_or(&[0, 0, 0]));
+        }
+        // NETSCAPE2.0: the loop count.
+        out.extend_from_slice(&[0x21, 0xFF, 0x0B]);
+        out.extend_from_slice(b"NETSCAPE2.0");
+        out.extend_from_slice(&[0x03, 0x01]);
+        out.extend_from_slice(&loops.to_le_bytes());
+        out.push(0);
+        for pixels in frames {
+            // Graphic control: no disposal, the delay, no transparency.
+            out.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00]);
+            out.extend_from_slice(&delay_cs.to_le_bytes());
+            out.extend_from_slice(&[0x00, 0x00]);
+            // The image: at 0,0, 2 x 2, no local table.
+            out.push(0x2C);
+            for v in [0u16, 0, 2, 2] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+            out.push(0);
+            // LZW, minimum code size 2: a clear before every pixel keeps the
+            // codes three bits wide, so the stream can be written by hand.
+            out.push(2);
+            let [a, b, c, d] = *pixels;
+            let codes = [4u8, a, 4, b, 4, c, 4, d, 5];
+            let mut bits: u32 = 0;
+            let mut filled = 0;
+            let mut data = Vec::new();
+            for code in codes {
+                bits |= u32::from(code) << filled;
+                filled += 3;
+                while filled >= 8 {
+                    data.push(u8::try_from(bits & 0xFF).unwrap());
+                    bits >>= 8;
+                    filled -= 8;
+                }
+            }
+            if filled > 0 {
+                data.push(u8::try_from(bits & 0xFF).unwrap());
+            }
+            out.push(u8::try_from(data.len()).unwrap());
+            out.extend_from_slice(&data);
+            out.push(0);
+        }
+        out.push(0x3B);
+        out
+    }
+
+    /// The colour of the frame last put up, as `0xAARRGGBB`.
+    fn frame_colour(state: &ViewerState) -> Option<u32> {
+        match state.pending_images.last()? {
+            oswindow::app::ImageChange::Upload { bytes, .. } => {
+                let b = bytes.as_slice();
+                Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            }
+            oswindow::app::ImageChange::Drop(_) => None,
+        }
+    }
+
+    /// Tick by `elapsed_ms`, then until the player has handed over what is
+    /// due (it decodes on its own thread), and return the frame put up.
+    fn tick(state: &mut ViewerState, elapsed_ms: u64) -> Option<u32> {
+        state.pending_images.clear();
+        state.handle_tick(elapsed_ms);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while state.frame_left_ms == 0 && state.player.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the player never answered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            state.handle_tick(0);
+        }
+        frame_colour(state)
+    }
+
+    const RED: [u8; 3] = [255, 0, 0];
+    const GREEN: [u8; 3] = [0, 255, 0];
+    const BLUE: [u8; 3] = [0, 0, 255];
+
+    /// **An animated GIF plays**, each frame for its time. It showed its
+    /// first frame and stopped: nothing asked for the rest.
+    #[test]
+    fn an_animated_gif_plays_its_frames_in_time() {
+        use oswindow::app::App;
+        let guard = scratch("gif-plays");
+        let file = guard.dir().join("spin.gif");
+        std::fs::write(&file, animated_gif(&[RED, GREEN, BLUE], 20, 0)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(
+            state.open_file(&file),
+            Opened::Shown,
+            "{:?}",
+            state.load_error
+        );
+        assert_eq!(frame_colour(&state), Some(0xFFFF_0000), "the first frame");
+        assert!(state.player.is_some(), "no player for an animation");
+        // The first frame's time is learnt, and it stays up for it.
+        assert_eq!(tick(&mut state, 0), None);
+        assert_eq!(state.frame_left_ms, 200);
+        assert_eq!(
+            state.tick_interval(),
+            Some(std::time::Duration::from_millis(200))
+        );
+        assert_eq!(tick(&mut state, 150), None, "a frame came early");
+        assert_eq!(tick(&mut state, 50), Some(0xFF00_FF00));
+        assert_eq!(tick(&mut state, 200), Some(0xFF00_00FF));
+        // Forever: round again.
+        assert_eq!(tick(&mut state, 200), Some(0xFFFF_0000));
+        assert!(state.player.is_some());
+    }
+
+    /// An animation plays as many times as its file says, then keeps its
+    /// last frame up.
+    #[test]
+    fn an_animation_stops_on_its_last_frame_when_its_plays_are_done() {
+        let guard = scratch("gif-ends");
+        let file = guard.dir().join("twice.gif");
+        // One loop after the first play: two plays in all.
+        std::fs::write(&file, animated_gif(&[RED, GREEN], 10, 1)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        let mut shown = Vec::new();
+        tick(&mut state, 0);
+        for _ in 0..6 {
+            if let Some(colour) = tick(&mut state, 100) {
+                shown.push(colour);
+            }
+        }
+        assert_eq!(shown, [0xFF00_FF00, 0xFFFF_0000, 0xFF00_FF00], "{shown:x?}");
+        assert!(state.player.is_none(), "it played on");
+    }
+
+    /// Space pauses an animation (with no slideshow to pause), and again
+    /// resumes it.
+    #[test]
+    fn space_pauses_and_resumes_an_animation() {
+        let guard = scratch("gif-pause");
+        let file = guard.dir().join("spin.gif");
+        std::fs::write(&file, animated_gif(&[RED, GREEN], 10, 0)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        tick(&mut state, 0);
+        assert!(state.handle_event(&Event::Key(plain(Key::Space))));
+        assert_eq!(tick(&mut state, 1000), None, "a paused animation moved");
+        assert_eq!(oswindow::app::App::tick_interval(&state), None);
+        assert!(state.handle_event(&Event::Key(plain(Key::Space))));
+        assert_eq!(tick(&mut state, 100), Some(0xFF00_FF00));
+    }
+
+    /// With animation turned off, an animated picture shows its first frame
+    /// only; turning it off stops one playing.
+    #[test]
+    fn with_animation_off_the_first_frame_stays() {
+        use oswindow::app::App;
+        let guard = scratch("gif-off");
+        let file = guard.dir().join("spin.gif");
+        std::fs::write(&file, animated_gif(&[RED, GREEN], 10, 0)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        assert!(state.player.is_some());
+        let off = appearance::AppearanceSettings {
+            animation_speed: appearance::AnimationSpeed::Off,
+            ..appearance::AppearanceSettings::default()
+        };
+        state.appearance_changed(&off);
+        assert!(
+            state.player.is_none(),
+            "turning animation off left it playing"
+        );
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        assert!(
+            state.player.is_none(),
+            "an animation played with animation off"
+        );
+        assert_eq!(frame_colour(&state), Some(0xFFFF_0000));
+    }
+
+    /// **A turned animation's frames are turned too**, on the player's
+    /// thread, as the first frame is.
+    #[test]
+    fn a_turned_animation_plays_turned() {
+        use imagecodec::orientation::Orientation;
+        let guard = scratch("gif-turned");
+        let file = guard.dir().join("turned.gif");
+        // Four colours in the first frame, so any turn shows.
+        let frames = [[0, 1, 2, 3], [3, 2, 1, 0]];
+        std::fs::write(
+            &file,
+            gif_of(&[RED, GREEN, BLUE, [9, 9, 9]], &frames, 10, 0),
+        )
+        .expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&file), Opened::Shown);
+        assert!(state.handle_event(&ctrl(Key::R)));
+        tick(&mut state, 0);
+        tick(&mut state, 100);
+        let (_, _, bytes) = uploaded(&state);
+        let second = imagecodec::Image {
+            width: 2,
+            height: 2,
+            pixels: vec![0xFF09_0909, 0xFF00_00FF, 0xFF00_FF00, 0xFFFF_0000],
+        };
+        let turned = Orientation::RightTop.apply(second);
+        assert_eq!(
+            bytes,
+            guitk::canvas::WireBytes::from_le_argb(&turned.pixels).into_vec(),
+            "the second frame was not turned with the picture"
+        );
+    }
+
+    /// Opening the next picture stops the last one's animation: its frames
+    /// must not go on landing over the new picture.
+    #[test]
+    fn the_next_picture_stops_the_last_ones_animation() {
+        let guard = scratch("gif-next");
+        let dir = guard.dir();
+        std::fs::write(dir.join("a.gif"), animated_gif(&[RED, GREEN], 10, 0)).expect("write");
+        std::fs::write(dir.join("b.png"), png_bytes(2, 2)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(state.open_file(&dir.join("a.gif")), Opened::Shown);
+        assert!(state.player.is_some());
+        state.next_image();
+        assert_eq!(state.image_info.filename, "b.png");
+        assert!(state.player.is_none(), "the GIF played on over the PNG");
+    }
+
+    /// A lossless WebP bitstream (VP8L) for a `w` x `h` picture all of one
+    /// colour. Each of the five prefix codes is a "simple" code of a single
+    /// symbol, which takes no bits at all -- so the whole picture is its
+    /// header, and can be written by hand.
+    fn solid_vp8l(w: u32, h: u32, [a, r, g, b]: [u8; 4]) -> Vec<u8> {
+        let mut bits: u64 = 0;
+        let mut filled = 0;
+        let mut out = vec![0x2F];
+        let mut put = |value: u64, width: u32, out: &mut Vec<u8>| {
+            bits |= value << filled;
+            filled += width;
+            while filled >= 8 {
+                out.push(u8::try_from(bits & 0xFF).unwrap());
+                bits >>= 8;
+                filled -= 8;
+            }
+        };
+        put(u64::from(w - 1), 14, &mut out);
+        put(u64::from(h - 1), 14, &mut out);
+        put(u64::from(a != 0xFF), 1, &mut out); // alpha used
+        put(0, 3, &mut out); // version
+        put(0, 1, &mut out); // no transform
+        put(0, 1, &mut out); // no colour cache
+        put(0, 1, &mut out); // no meta prefix codes
+        // Green, red, blue and alpha: one eight-bit symbol each.
+        for symbol in [g, r, b, a] {
+            put(1, 1, &mut out); // a simple code
+            put(0, 1, &mut out); // of one symbol
+            put(1, 1, &mut out); // eight bits wide
+            put(u64::from(symbol), 8, &mut out);
+        }
+        // Distance: one one-bit symbol.
+        put(1, 1, &mut out);
+        put(0, 1, &mut out);
+        put(0, 1, &mut out);
+        put(0, 1, &mut out);
+        put(0, 7, &mut out); // flush
+        out
+    }
+
+    /// A RIFF chunk: its kind, its length, its data, padded to even.
+    fn riff_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = kind.to_vec();
+        out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    /// Three little-endian bytes, as WebP writes its 24-bit fields.
+    fn u24(n: u32) -> [u8; 3] {
+        let [a, b, c, _] = n.to_le_bytes();
+        [a, b, c]
+    }
+
+    /// An animated WebP of 2 x 2 frames, each one colour (`0xAARRGGBB`
+    /// bytes), shown `duration_ms` each, played `plays` times in all (0:
+    /// forever).
+    fn animated_webp(colours: &[[u8; 4]], duration_ms: u32, plays: u16) -> Vec<u8> {
+        let mut vp8x = vec![0x02, 0, 0, 0]; // animation
+        vp8x.extend_from_slice(&u24(1));
+        vp8x.extend_from_slice(&u24(1));
+        let mut anim = vec![0, 0, 0, 0]; // background
+        anim.extend_from_slice(&plays.to_le_bytes());
+        let mut body = b"WEBP".to_vec();
+        body.extend(riff_chunk(b"VP8X", &vp8x));
+        body.extend(riff_chunk(b"ANIM", &anim));
+        for &colour in colours {
+            let mut frame = Vec::new();
+            frame.extend_from_slice(&u24(0));
+            frame.extend_from_slice(&u24(0));
+            frame.extend_from_slice(&u24(1));
+            frame.extend_from_slice(&u24(1));
+            frame.extend_from_slice(&u24(duration_ms));
+            frame.push(0x02); // not blended, not disposed
+            frame.extend(riff_chunk(b"VP8L", &solid_vp8l(2, 2, colour)));
+            body.extend(riff_chunk(b"ANMF", &frame));
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+        out.extend(body);
+        out
+    }
+
+    /// **An animated WebP plays**, each frame for its duration, as many
+    /// times as its file says -- WebP counts plays in all, the first
+    /// included -- and stays on its last frame.
+    #[test]
+    fn an_animated_webp_plays_its_count() {
+        let guard = scratch("webp-plays");
+        let file = guard.dir().join("spin.webp");
+        let (red, green) = ([0xFF, 0xFF, 0, 0], [0xFF, 0, 0xFF, 0]);
+        std::fs::write(&file, animated_webp(&[red, green], 50, 2)).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(
+            state.open_file(&file),
+            Opened::Shown,
+            "{:?}",
+            state.load_error
+        );
+        assert_eq!(frame_colour(&state), Some(0xFFFF_0000), "the first frame");
+        assert!(state.player.is_some(), "no player for an animated WebP");
+        assert_eq!(tick(&mut state, 0), None);
+        assert_eq!(state.frame_left_ms, 50);
+        let mut shown = Vec::new();
+        for _ in 0..6 {
+            if let Some(colour) = tick(&mut state, 50) {
+                shown.push(colour);
+            }
+        }
+        assert_eq!(shown, [0xFF00_FF00, 0xFFFF_0000, 0xFF00_FF00], "{shown:x?}");
+        assert!(state.player.is_none(), "it played past its count");
+    }
+
+    /// A still GIF, and a PNG, are not animations.
+    #[test]
+    fn a_still_picture_is_not_played() {
+        assert!(player::is_animation(&animated_gif(&[RED, GREEN], 10, 0)));
+        assert!(!player::is_animation(&animated_gif(&[RED], 10, 0)));
+        assert!(!player::is_animation(&png_bytes(2, 2)));
     }
 
     /// **The info panel tells the camera's story**: the EXIF fields it drew

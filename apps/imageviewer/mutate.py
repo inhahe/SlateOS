@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
-SRC = Path(__file__).parent / "src" / "main.rs"
+SRC = Path(__file__).parent / "src"
 
 BUTTONS = "every_toolbar_button_answers_a_click"
 HIDDEN = "a_hidden_toolbar_takes_no_click"
@@ -62,6 +62,13 @@ SVG_KNOWN = "a_drawing_is_known_by_its_first_element"
 DATE = "the_info_panel_says_when_the_file_was_changed"
 FAILS_OFF = "a_failure_off_the_window_takes_the_last_picture_down"
 EXIF = "the_info_panel_shows_the_cameras_exif"
+PLAYS = "an_animated_gif_plays_its_frames_in_time"
+ENDS = "an_animation_stops_on_its_last_frame_when_its_plays_are_done"
+PAUSE = "space_pauses_and_resumes_an_animation"
+OFF = "with_animation_off_the_first_frame_stays"
+TURNED = "a_turned_animation_plays_turned"
+WEBP = "an_animated_webp_plays_its_count"
+NEXT = "the_next_picture_stops_the_last_ones_animation"
 
 MUTATIONS = [
     # -- the layout ---------------------------------------------------------
@@ -460,6 +467,68 @@ MUTATIONS = [
         "        format!(\"{date}{rest}\")",
         [EXIF],
     ),
+    # -- animations ---------------------------------------------------------
+    (
+        "an animation is never played",
+        "        if let Some(bytes) = animation.filter(|_| self.animations) {",
+        "        if let Some(bytes) = animation.filter(|_| false) {",
+        [PLAYS],
+    ),
+    (
+        "an animation plays with animation off",
+        "        if let Some(bytes) = animation.filter(|_| self.animations) {",
+        "        if let Some(bytes) = animation.filter(|_| true) {",
+        [OFF],
+    ),
+    (
+        "turning animation off leaves one playing",
+        "        if !self.animations {\n            self.player = None;\n        }",
+        "",
+        [OFF],
+    ),
+    (
+        "a frame is shown before its time",
+        "        self.frame_left_ms = self.frame_left_ms.saturating_sub(elapsed_ms);",
+        "        self.frame_left_ms = 0;",
+        [PLAYS],
+    ),
+    (
+        "the first frame is put up twice",
+        "                    if !frame.first {",
+        "                    if true {",
+        [PLAYS],
+    ),
+    (
+        "a paused animation moves",
+        "        if self.animation_paused || self.player.is_none() {",
+        "        if self.player.is_none() {",
+        [PAUSE],
+    ),
+    (
+        "Space does not pause an animation",
+        "                } else if self.player.is_some() {\n                    self.animation_paused = !self.animation_paused;\n                }",
+        "                }",
+        [PAUSE],
+    ),
+    (
+        "the next picture keeps the last one's animation",
+        "        // Whatever was playing belonged to the picture this replaces.\n        self.player = None;",
+        "        // Whatever was playing belonged to the picture this replaces.",
+        [NEXT],
+    ),
+    (
+        "an ended animation is kept",
+        "                player::Next::Ended => {\n                    self.player = None;",
+        "                player::Next::Ended => {",
+        [ENDS],
+    ),
+    (
+        "a playing animation asks for no tick",
+        "            (self.player.is_some() && !self.animation_paused).then(|| self.frame_left_ms.max(10));",
+        "            (false && !self.animation_paused).then(|| self.frame_left_ms.max(10));",
+        # Not PAUSE: a paused animation asks for no tick either way.
+        [PLAYS],
+    ),
     (
         "a chosen picture is not opened",
         "                let _ = self.open_file(&path);",
@@ -468,6 +537,78 @@ MUTATIONS = [
     ),
 ]
 
+# The WebP half is tested with a hand-built animated WebP (solid-colour
+# lossless frames, whose prefix codes take no bits): `animated_webp`.
+PLAYER = [
+    (
+        "a GIF's loop count is the plays in all",
+        "            Repeat::Count(more) if plays <= u32::from(more) => {}",
+        "            Repeat::Count(more) if plays < u32::from(more) => {}",
+        [ENDS],
+    ),
+    (
+        "a GIF that loops forever plays once",
+        "        match animation.repeat() {\n            Repeat::Forever => {}\n            // The loop count is the plays after the first.",
+        "        match animation.repeat() {\n            Repeat::Forever => return,\n            // The loop count is the plays after the first.",
+        [PLAYS],
+    ),
+    (
+        "no frame is the first",
+        "        while let Ok(Some(frame)) = animation.next_frame() {\n            let first = plays == 0 && index == 0;",
+        "        while let Ok(Some(frame)) = animation.next_frame() {\n            let first = false;",
+        [PLAYS],
+    ),
+    (
+        "frames are not turned",
+        "        image: turn.apply(image.clone()),",
+        "        image: image.clone(),",
+        [TURNED],
+    ),
+    (
+        "every GIF is a still picture",
+        "            imagecodec::gif::Animation::new(bytes, limits).is_ok_and(|a| a.frame_count() > 1)",
+        "            imagecodec::gif::Animation::new(bytes, limits).is_ok_and(|a| a.frame_count() > 99)",
+        [PLAYS, "a_still_picture_is_not_played"],
+    ),
+    (
+        "a WebP's count is the plays after the first",
+        "            Repeat::Times(all) if plays < u32::from(all) => {}",
+        "            Repeat::Times(all) if plays <= u32::from(all) => {}",
+        [WEBP],
+    ),
+    (
+        "no WebP frame is the first",
+        "                Err(_) => return,\n            };\n            let first = plays == 0 && index == 0;",
+        "                Err(_) => return,\n            };\n            let first = false;",
+        [WEBP],
+    ),
+    (
+        "every WebP is a still picture",
+        "            imagecodec::webp::Animation::new(bytes, limits).is_ok_and(|a| a.frame_count() > 1)",
+        "            imagecodec::webp::Animation::new(bytes, limits).is_ok_and(|a| a.frame_count() > 99)",
+        [WEBP],
+    ),
+]
+
+TABLES = {
+    "main.rs": MUTATIONS,
+    "player.rs": PLAYER,
+}
+
 if __name__ == "__main__":
-    only = sys.argv[1:] or None
-    raise SystemExit(sweep(SRC, MUTATIONS, "imageviewer", timeout=600, only=only))
+    only = sys.argv[1:]
+    names = [name for rows in TABLES.values() for name, *_ in rows]
+    unmatched = [o for o in only if not any(o in n for n in names)]
+    if unmatched:
+        print(f"{len(unmatched)} filter(s) name no row in any table:")
+        for o in unmatched:
+            print(f"  {o!r}")
+        raise SystemExit(2)
+    worst = 0
+    for file, rows in TABLES.items():
+        mine = [o for o in only if any(o in name for name, *_ in rows)]
+        if only and not mine:
+            continue
+        print(f"\n######## {file} ########")
+        worst = max(worst, sweep(SRC / file, rows, "imageviewer", timeout=600, only=mine))
+    raise SystemExit(worst)

@@ -78,3 +78,12 @@ if animation.frame_count() > 1 && !reduced_motion {
 
 The decoder's choices: `design-decisions.md` §1311 (lossless), §1312
 (lossy) and §1313 (the container and animations).
+
+**Lane E, 2026-09-26: the viewer plays WebP animations too** -- the same
+`Player` as GIF (see the GIF request's note), with WebP's rules: the loop
+count is the plays in all, and a frame that will not decode ends the
+animation on the last good one. The info panel's format and size were done
+on 2026-09-25. Tested with a hand-built animated WebP -- solid-colour
+lossless frames, whose five prefix codes are single symbols that take no bits,
+so the file can be written by hand (`animated_webp` in the viewer's tests);
+both halves of the player are swept.

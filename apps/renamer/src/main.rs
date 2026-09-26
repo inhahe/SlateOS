@@ -107,7 +107,10 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("E / X", "Add a rule: lower-case the extension / remove it"),
     ("N", "Add a rule: number the files"),
     ("R", "Add a rule of any kind, from a menu"),
-    ("F2", "Edit the selected rule; Tab moves between its boxes"),
+    (
+        "F2",
+        "Edit the selected rule; Tab moves between its boxes, Ctrl+V pastes",
+    ),
     ("Ctrl+Up / Ctrl+Down", "Select the rule above / below"),
     ("Delete", "Remove the selected rule"),
     ("PageUp / PageDown", "Move the selected rule up / down"),

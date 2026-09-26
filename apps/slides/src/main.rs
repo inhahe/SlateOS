@@ -836,6 +836,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Space / Backspace",
         "Next / previous slide while presenting; Esc stops",
     ),
+    ("N / P", "Also next / previous slide while presenting"),
     ("Ctrl+O / Ctrl+S", "Open a deck / save this one"),
     ("Ctrl+Shift+S", "Save this deck under another name"),
     ("Ctrl+E", "Export a web page"),
@@ -4450,7 +4451,7 @@ impl SlidesApp {
         f.push(RenderCommand::Text {
             x: menu.x + 12.0,
             y: menu.y + 10.0,
-            text: String::from("New slide -- 1 to 6, or Esc"),
+            text: String::from("New slide -- 1-6, or Esc"),
             color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,

@@ -76,9 +76,10 @@ impl<P: Copy> Question<P> {
     #[must_use]
     pub fn new(message: &str, prompt: &str, pending: P) -> Self {
         let buttons = ButtonSet::custom(vec![
-            DialogButton::new("Save", DialogResult::Yes, ButtonRole::Primary),
+            // Each labelled with the key that answers it (`handle`).
+            DialogButton::new("Save (S)", DialogResult::Yes, ButtonRole::Primary),
             // In the error colour: the one answer that loses something.
-            DialogButton::new("Don't save", DialogResult::No, ButtonRole::Destructive),
+            DialogButton::new("Don't save (D)", DialogResult::No, ButtonRole::Destructive),
             DialogButton::cancel(),
         ]);
         let mut dialog = AlertDialog::warning("Unsaved changes", message)

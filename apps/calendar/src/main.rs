@@ -3345,9 +3345,9 @@ impl CalendarApp {
         let card_w = 420.0_f32.min(self.width - 24.0).max(0.0);
         let card = Rect::new(
             (self.width - card_w) / 2.0,
-            (self.height - 140.0) / 2.0,
+            (self.height - 160.0) / 2.0,
             card_w,
-            140.0,
+            160.0,
         );
         self.palette
             .push_surface(frame, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
@@ -3374,6 +3374,17 @@ impl CalendarApp {
             } else {
                 "It cannot be brought back."
             },
+            12.0,
+            self.palette.subtext0,
+            FontWeightHint::Regular,
+            Some((card.w - 40.0).max(0.0)),
+        );
+        // The keys `handle_confirm_key` answers, where the question is asked.
+        label(
+            frame,
+            card.x + 20.0,
+            card.y + 68.0,
+            "Enter or Y deletes it; Esc or N keeps it.",
             12.0,
             self.palette.subtext0,
             FontWeightHint::Regular,

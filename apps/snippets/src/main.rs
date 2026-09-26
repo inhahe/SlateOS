@@ -165,7 +165,8 @@ const TWISTY_OPEN: &str = "v";
 const TWISTY_SHUT: &str = ">";
 const USE_LABEL: &str = "Use";
 const DELETE_LABEL: &str = "Delete";
-const EDIT_LABEL: &str = "Edit";
+// F2 presses it, and a key named nowhere is a key nobody finds.
+const EDIT_LABEL: &str = "Edit (F2)";
 const TEMPLATE_LABEL: &str = "TEMPLATE";
 const NEW_FOLDER_LABEL: &str = "+ New folder";
 const EMPTY_LIST: &str = "Nothing here";

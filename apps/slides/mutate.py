@@ -302,15 +302,91 @@ MUTATIONS = [
     ),
     (
         "open does not ask",
-        "            self.confirm_open = true;",
-        "            self.confirm_open = false;",
+        "            self.question = Some(Pending::Open);",
+        "            self.question = None;",
         ["open_asks_before_losing_unsaved_changes"],
     ),
     (
         "any key opens over unsaved changes",
-        "            if key.key == Key::Y {",
-        "            if true {",
+        "                _ => Answer::Keep,",
+        "                _ => Answer::Discard,",
         ["open_asks_before_losing_unsaved_changes"],
+    ),
+    (
+        "closing over unsaved changes does not ask",
+        "        if !self.dirty {\n            return true;\n        }",
+        "        if true {\n            return true;\n        }",
+        ["closing_over_unsaved_changes_asks_and_each_answer_is_kept"],
+    ),
+    (
+        "the question is drawn into a window the loop has closed",
+        "            } else {\n                Response::KeepOpen\n            };",
+        "            } else {\n                Response::Redraw\n            };",
+        ["closing_over_unsaved_changes_asks_and_each_answer_is_kept"],
+    ),
+    (
+        "saving before going on does not go on",
+        "                    self.status_message = Some(said);\n"
+        "                    if !self.dirty {\n"
+        "                        self.go_on(pending);\n"
+        "                    }",
+        "                    self.status_message = Some(said);",
+        [
+            "closing_over_unsaved_changes_asks_and_each_answer_is_kept",
+            "open_can_save_the_deck_first",
+        ],
+    ),
+    (
+        "a save that failed goes on anyway",
+        "                    self.status_message = Some(said);\n"
+        "                    if !self.dirty {",
+        "                    self.status_message = Some(said);\n"
+        "                    if true {",
+        ["saving_on_close_asks_where_and_a_failure_keeps_the_window"],
+    ),
+    (
+        "a deck saved where the picker said does not go on",
+        "                let said = self.write_deck(path);\n"
+        "                if !self.dirty {\n"
+        "                    self.go_on(pending);\n"
+        "                }",
+        "                let said = self.write_deck(path);",
+        ["saving_on_close_asks_where_and_a_failure_keeps_the_window"],
+    ),
+    (
+        "the question's answers take no click",
+        "                if let Some(pending) = self.question {\n"
+        "                    self.answer(pending, answer);",
+        "                if let Some(pending) = self.question {\n"
+        "                    let _ = (pending, answer);",
+        [
+            "open_asks_before_losing_unsaved_changes",
+            "closing_over_unsaved_changes_asks_and_each_answer_is_kept",
+        ],
+    ),
+    (
+        "words being typed are dropped when the window closes",
+        "        // Words being typed into a box are part of the deck.\n"
+        "        if let Some((edit, buf)) = self.editing.take() {\n"
+        "            self.commit_editing(edit, &buf);\n"
+        "        }",
+        "        // Words being typed into a box are part of the deck.\n"
+        "        self.editing = None;",
+        ["words_being_typed_when_the_window_closes_are_asked_about"],
+    ),
+    (
+        "an edit that changed nothing marks the deck",
+        "                if self.element_words(eid).as_deref() == Some(buf) {\n"
+        "                    return;\n"
+        "                }\n",
+        "",
+        ["typing_nothing_is_no_change"],
+    ),
+    (
+        "a show hides the question",
+        "        self.show = None;\n        self.picker.close();",
+        "        self.picker.close();",
+        ["closing_during_a_show_ends_it_to_ask"],
     ),
     (
         "the picker's answer to Save exports",

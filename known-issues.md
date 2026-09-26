@@ -61627,6 +61627,13 @@ here yet because nothing holds a tab index across a close. `id` is kept rather
 than deleted because it is what to switch to, and it is already maintained
 correctly.
 
+*2026-09-25 (lane E):* the first things to hold a tab across user
+interaction -- the unsaved-changes question and the picker choosing where to
+save -- name their tab by `id`, and `id` is read at last. `close_tab` now moves
+the active index when a tab before it closes, which a click on another tab's
+close mark made reachable. Everything else still addresses the *active* tab by
+position, which is safe within one event.
+
 **Neither is urgent.** No data is lost: an edit that cannot be made is a feature
 that is absent rather than a feature that is wrong, and the tab indices are
 consistent within a single operation. Written down because both look done from
@@ -165688,7 +165695,7 @@ recipe had staged everything else.
    with.
 
 ### [E] Every document application closes over unsaved work, and the event loop will not let one ask -- 2026-09-25
-**Status:** OPEN -- blocked on lane F for the loop, `requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`; the per-application dialogs are lane E's and follow
+**Status:** FIXED for the text editor, the markdown editor, the hex editor and the JSON viewer (lane E, 2026-09-25), on lane F's `Response::KeepOpen` (b82f06a11); OPEN for `apps/slides` and, in a narrower form, `apps/stickynotes` -- see `[E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all` below
 
 **In short:** click a window's X and every change since the last save is gone,
 without a question, in the text editor, the markdown editor, the hex editor and
@@ -165727,7 +165734,7 @@ document that has a file when auto-save is on, since auto-save is the user
 having said "save for me" and the close is the last chance to.
 
 ### [E] Nothing produces a double-click, so every double-click handler is dead -- 2026-09-25
-**Status:** OPEN -- lane F's, ask 2 of `requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`
+**Status:** FIXED by lane F, 2026-09-25 -- `oswindow` recognises a double click once for every application (029bf1d50) and delivers `MouseEventKind::DoubleClick` after the second press, so every handler below now runs in a real window
 
 **In short:** double-clicking a file in the file picker does not open it,
 double-clicking a word in a text view does not select it, and the same goes
@@ -166495,7 +166502,7 @@ JPEG decoder with the file's `JPEGTables`; then the rare codecs. Fixtures from
 the same libtiff oracle.
 
 ### [E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all -- 2026-09-25
-**Status:** FIXED for the text editor, the markdown editor and the hex editor (lane E, 2026-09-25); OPEN for the JSON viewer, which edits and still cannot save -- lane E's next.
+**Status:** FIXED for the text editor, the markdown editor, the hex editor, the JSON viewer, slides and sticky notes (lane E, 2026-09-25); OPEN for four more that save to a file and keep no record of unsaved changes at all -- `paint`, `whiteboard`, `diagram`, `spreadsheet` -- lane E's next, see the end of this entry.
 
 **In short:** closing the window of an editor threw away every unsaved change
 without a word -- the window library closed a window on any close request,
@@ -166525,6 +166532,112 @@ valid UTF-8 is saved to itself rather than to some other name.
 `TOOLBAR_BUTTONS`, `tab_rects`, `request_quit`). Mutation tables: `apps/editor/mutate.py`
 (new), `apps/markdowneditor/mutate.py`, `apps/hexeditor/mutate.py` (new).
 
-**Still open: `apps/jsonviewer`.** It sets `dirty` on every edit and has no
-save; the fix is the hex editor's -- a save path through `safeio`, Save As
-through the picker, and the close question.
+**The JSON viewer, the same day.** It saves (Ctrl+S, Ctrl+Shift+S, a Save
+button) through `safeio`, refuses to save a partly read file over itself as
+the hex editor does, and asks before a modified tab or the window closes. The
+close question and the picker name their document by `Document::id` rather
+than by position -- the arrangement `TD-C-JSONVIEWER-CAN-EDIT-A-VALUE-BUT-NOT-ADD-ONE`
+warned about, and the first code to hold a tab across user interaction. Save As
+starts beside the document's own file. Looking at it turned up six more
+faults, all fixed in the same change:
+
+| what | what the user saw |
+|---|---|
+| the toolbar (New, Search, Edit) sat above a click handler that began at the tab bar | three buttons that did nothing; Open and Save were not there to draw |
+| a tab's "x" close mark was part of the tab's select area | clicking it selected the tab it was meant to close |
+| `close_tab` never moved the active index when a tab *before* it closed | the next click-to-close would have shown a different document as the active one |
+| the find bar lay over the tree and took none of its clicks | a click on the bar -- or on its "Aa" -- selected a tree row under it; "Aa" and "Esc" could not be clicked |
+| an edit in progress was only a *path*, and survived a tab switch or close | Enter wrote the typed value into the next tab's document at the same path |
+| a tree edit rewrote the whole text as `format_json(value, indent)`, `indent` being the raw view's two-space default | changing one number in a one-line or four-space file reformatted all of it -- harmless while nothing could save, a rewrite of the user's file once something could |
+
+Also: the redraw fingerprint gained the tab list and the status line, so a
+save (which changes neither content nor selection) and closing the first of
+two fresh tabs (which left every other field equal) redraw; and the find bar's
+matches are recomputed for the tab on screen instead of kept from the last
+one. A tree edit now keeps the text's layout -- one line stays one line, an
+indented file keeps its indent ([`IndentStyle::detect`]), a final newline is
+kept or left off -- and the raw view opens in the file's own indent. Mutation
+table `apps/jsonviewer/mutate.py` (new, 24 rows).
+
+**Slides and sticky notes, the same day.** `apps/slides` asks before its
+window closes over unsaved changes, with the question it already asked before
+Open -- which now offers Save as well: S saves (asking where for a deck with no
+file) and goes on only if the save worked, D goes on without saving, any other
+key keeps the deck. A close during a slide show ends the show, which draws
+nothing but the slide. Words being typed into a box when the window closes are
+committed first, so they are asked about rather than dropped -- and a box
+clicked into and out of again, unchanged, no longer marks the deck unsaved
+(every finished edit counted as a change, and a box still showing its prompt
+was emptied). `apps/stickynotes`: **Ctrl+Q quit without saving at all**, so
+whatever had been typed since the last autosave went with the window; and the
+close button saved and quit whether or not the save worked. Both now save
+first, and a failed save keeps the window open once, with the reason on the
+toolbar -- asking again quits, so a disk that stays broken cannot make the
+window impossible to close. Mutation tables: `apps/slides/mutate.py` (eleven
+rows new or rewritten), `apps/stickynotes/mutate.py` (new, 5 rows).
+
+**Still open: four document applications with nothing to ask about.**
+`paint`, `whiteboard`, `diagram` and `spreadsheet` each open and save a file
+through the picker and answer a close with `Exit` -- and none records whether
+anything has changed since the last save, so none could ask even if it tried.
+Each needs that record first (set by every change, cleared by a save or an
+open), then the question. Four more that looked like the same case are a worse
+one -- see `[E] Notes, contacts, snippets and kanban keep nothing` below.
+
+**One question, not thirteen.** The six applications fixed so far each drew
+the question by hand, beside the toolkit's own `guitk::modal::AlertDialog`,
+which has focus, hover, Escape, a scrim and the destructive colour for the one
+button that loses work. `apps/unsaved` (new, lane E) is that dialog asked the
+one way -- Save, Don't save, Cancel; S, D, Escape -- and the six move onto it as
+the four get theirs.
+
+### [E] Notes, contacts, snippets and kanban keep nothing -- 2026-09-25
+**Status:** OPEN -- lane E
+
+**In short:** the notes app, the address book, the snippet library and the
+kanban boards each hold everything the user puts in them in memory only. There
+is no store on disk: each opens empty (or, for snippets, on a built-in sample)
+and forgets every note, contact, snippet and board the moment its window
+closes. The one way to keep anything is an export -- the selected note as
+Markdown, the whole book as vCard, a snippet as JSON, one board as JSON (Ctrl+E)
+-- which the user has to remember to do, and which does not come back on the
+next start. Asking "save your changes?" on close would be the wrong fix: nobody
+expects to save a notes app.
+
+**Where.** `apps/notes/src/main.rs` (`main`: "Until there is a store on disk
+this is what there is to show"; `save_selected_note` is an export),
+`apps/contacts/src/main.rs` (`ContactsApp::new`, `write_vcards`/`read_vcards`
+are import and export), `apps/snippets/src/main.rs` (`App::new`, the JSON
+export), `apps/kanban/src/main.rs` (`KanbanApp::boards`; `write_board` and
+`read_board` export one board and import one as a new board).
+
+**The proper fix** is the one `apps/stickynotes`, `apps/flashcards`,
+`apps/finance` and `apps/habits` already use: the library is a file in the
+settings directory, read at start and written -- atomically, through `safeio`
+or `settingsfile` -- as it changes, with a failed write said on screen and the
+record kept marked unsaved so the next change tries again. The exports stay as
+exports. See `todo.txt` -> Lane E -> "The habit tracker keeps its record in the
+settings directory" for why the settings directory rather than a data one.
+
+### [E] The JSON viewer's text input cannot be reached -- 2026-09-25
+**Status:** OPEN -- lane E
+
+**In short:** a new JSON viewer tab says "Enter JSON in the input area or
+paste a document" (now "press Ctrl+O to open a JSON file", which is true), and
+there is no input area. `handle_input_key` is a complete little text editor --
+insert, Backspace, Delete, arrows, Home, End, Enter -- guarded by
+`input_focused`, and nothing ever sets `input_focused` to `true`; only Escape
+sets it, to `false`. So a new document can never be given any content, and an
+opened file with a parse error -- the commonest reason to open JSON in an
+editor -- can be looked at but not repaired.
+
+**Where.** `apps/jsonviewer/src/main.rs`: `App::input_focused`,
+`App::handle_input_key`, and the raw view (`render_raw_view`), which draws the
+*formatted* text rather than `input` and has no caret, so it cannot simply be
+made focusable.
+
+**The proper fix** is a source-editing mode for the raw view: a click (or
+Enter) in it edits `input` itself -- drawn verbatim, with a caret, Up/Down by
+line, the caret kept on screen, the parse re-run as the text changes -- and
+Escape returns to the formatted view. `guitk` has no multi-line editor to lend
+(`textedit` is single-line), so the editing stays in this crate.

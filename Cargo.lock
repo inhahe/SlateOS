@@ -1340,6 +1340,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]
@@ -3229,6 +3230,13 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+]
+
+[[package]]
+name = "unsaved"
+version = "0.1.0"
+dependencies = [
+ "guitk",
 ]
 
 [[package]]

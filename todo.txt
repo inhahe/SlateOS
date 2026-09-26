@@ -58794,6 +58794,21 @@ test of the fixture, not of the bound.
   and an editor that opens on someone else's deck makes every new deck start
   with five deletions.
 
+- **The JSON viewer saves the document's text, not the raw view's
+  formatting.** (2026-09-25, `apps/jsonviewer/src/main.rs` ->
+  `save_to_own_file`, `save_to`, `Document::regenerate_input`.) What is
+  written is `input` -- the file as read, or as a tree edit left it -- never
+  the raw view's re-indented or minified rendering, so the `I` and `M` keys
+  stay view settings and saving an unedited file changes nothing. A tree edit
+  regenerates the text from the parsed value (it cannot do otherwise), and
+  does so in the text's own layout: one line stays one line, an indented file
+  keeps its indent, a final newline is kept or left off. The spacing inside a
+  line is not remembered. The alternative -- "save what the raw view shows" --
+  would make M-then-Ctrl+S a way to minify a file, and would also silently
+  reformat every file saved after a glance at the raw view. If the operator
+  wants reformatting, it belongs in an explicit "Format document" command;
+  reversing this is the one `as_bytes()` in each save function.
+
 ### Deferred, each with the condition that un-defers it
 
 - **The terminal polls for its shell's output** -- 16 ms while the shell is

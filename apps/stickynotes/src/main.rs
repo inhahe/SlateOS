@@ -1989,6 +1989,10 @@ pub struct StickyNotesApp {
     /// silently is how a day of notes disappears.
     status: String,
     saves: u32,
+    /// Set when a quit was refused because the save made on the way out
+    /// failed, so the next request goes anyway. Cleared by any save that
+    /// works. See [`quit_requested`](Self::quit_requested).
+    quit_despite_failure: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -2023,6 +2027,7 @@ impl StickyNotesApp {
             storage: None,
             status: String::new(),
             saves: 0,
+            quit_despite_failure: false,
         }
     }
 
@@ -2071,10 +2076,35 @@ impl StickyNotesApp {
                 self.store.mark_clean();
                 self.saves = self.saves.saturating_add(1);
                 self.status = String::from("Saved");
+                self.quit_despite_failure = false;
             }
             Err(err) => self.status = format!("Save failed: {err}"),
         }
         Action::Redraw
+    }
+
+    /// Quit -- the window's close button or Ctrl+Q -- saving first.
+    ///
+    /// Ctrl+Q quit without saving at all, losing whatever had been typed since
+    /// the last autosave; the close button saved and quit whether or not the
+    /// save worked, so on a failing disk the "Save failed" it set was never
+    /// seen and the notes went with the window. Now both save, and a failed
+    /// save keeps the window open with the reason on the toolbar. Asking again
+    /// quits anyway: a disk that stays broken must not make the window
+    /// impossible to close.
+    fn quit_requested(&mut self) -> Action {
+        self.commit_focus();
+        // Unconditionally, as the close always did: a change that forgot to
+        // mark the store is still written.
+        self.persist();
+        let unsaved = self.storage.is_some() && self.store.is_dirty();
+        if unsaved && !self.quit_despite_failure {
+            self.quit_despite_failure = true;
+            self.status
+                .push_str(" -- the notes are still open; quit again to lose the changes");
+            return Action::Redraw;
+        }
+        Action::Quit
     }
 
     /// Write a plain-text copy of every live note beside the notes file.
@@ -3119,7 +3149,7 @@ impl StickyNotesApp {
         if m.ctrl && !m.alt {
             let canvas = self.canvas_rect(size.0, size.1);
             return match event.key {
-                Key::Q => Action::Quit,
+                Key::Q => self.quit_requested(),
                 Key::N => {
                     self.commit_focus();
                     self.new_note(canvas)
@@ -3567,11 +3597,7 @@ impl StickyNotesApp {
             // before the window dispatch this feeds. Listed rather than
             // wildcarded for the reason given just above.
             Event::TrayIconClicked { .. } => Action::None,
-            Event::CloseRequested => {
-                self.commit_focus();
-                self.persist();
-                Action::Quit
-            }
+            Event::CloseRequested => self.quit_requested(),
             Event::FocusIn | Event::Moved { .. } | Event::ScaleChanged { .. } => Action::None,
         }
     }
@@ -3634,7 +3660,13 @@ impl App for StickyNotesApp {
 
     fn on_event(&mut self, event: &Event) -> Response {
         let size = self.window_size;
-        match self.handle_event(event, size) {
+        let action = self.handle_event(event, size);
+        // A close the program declined -- its save failed -- must say so in
+        // the one answer the loop does not take as "close anyway".
+        if matches!(event, Event::CloseRequested) && action != Action::Quit {
+            return Response::KeepOpen;
+        }
+        match action {
             Action::None => Response::Idle,
             Action::Redraw => Response::Redraw,
             Action::Quit => Response::Exit,
@@ -5705,6 +5737,50 @@ mod tests {
             reopened.store.get_note(id).map(Note::body_text).as_deref(),
             Some("remember this"),
             "what was typed must be on disk before the window goes away"
+        );
+    }
+
+    /// Ctrl+Q saves before it quits. It quit without saving at all, so what
+    /// had been typed since the last autosave went with the window.
+    #[test]
+    fn ctrl_q_saves_first() {
+        let scratch = ScratchDir::new("stickynotes-ctrl-q");
+        let path = scratch.path("notes.txt");
+        let mut app = StickyNotesApp::with_storage(path.clone());
+        let id = app.store.create_note(30.0, 30.0);
+        probe::click(&mut app, Target::NoteLine(id, 0));
+        probe::type_str(&mut app, "before quitting");
+        assert_eq!(probe::key(&mut app, &probe::ctrl(Key::Q)), Action::Quit);
+        let reopened = StickyNotesApp::with_storage(path);
+        assert_eq!(
+            reopened.store.get_note(id).map(Note::body_text).as_deref(),
+            Some("before quitting")
+        );
+    }
+
+    /// A close whose save fails keeps the window, saying why; asking again
+    /// closes anyway, so a broken disk cannot make the window unclosable.
+    #[test]
+    fn a_close_whose_save_fails_keeps_the_window_once() {
+        let scratch = ScratchDir::new("stickynotes-close-fails");
+        // A directory where the file should be: every write to it fails.
+        let path = scratch.path("notes.txt");
+        std::fs::create_dir_all(&path).expect("a directory in the file's place");
+        let mut app = StickyNotesApp::with_storage(path);
+        let id = app.store.create_note(30.0, 30.0);
+        probe::click(&mut app, Target::NoteLine(id, 0));
+        probe::type_str(&mut app, "only copy");
+
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert!(
+            app.status.starts_with("Save failed"),
+            "the reason is not shown: {}",
+            app.status
+        );
+        assert_eq!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit,
+            "a second close must go, or the window cannot be closed"
         );
     }
 

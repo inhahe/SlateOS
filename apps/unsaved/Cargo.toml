@@ -1,0 +1,13 @@
+[package]
+name = "unsaved"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS shared question a document application asks before unsaved work is lost: Save, Don't save, Cancel, on the toolkit's own dialog."
+
+[dependencies]
+# The dialog itself: `guitk::modal::AlertDialog`, whose focus, hover, Escape
+# and scrim every application should share rather than redraw.
+guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

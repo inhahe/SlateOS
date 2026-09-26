@@ -48,13 +48,15 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
-use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, EventResult, MouseEventKind};
+use guitk::dialog::{FileDialog, FilePicker, Picked};
+use guitk::event::{Event, EventResult, MouseButton, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use oswindow::app::{self, Response};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -80,6 +82,11 @@ const HEADER_TEXT: f32 = 16.0;
 const TITLE_TEXT: f32 = 18.0;
 const TREE_INDENT: f32 = 20.0;
 const TREE_ICON_SIZE: f32 = 14.0;
+/// The find bar's height, and its "Aa" (match case) button's left edge and
+/// width -- read by the drawing and the click alike.
+const SEARCH_BAR_HEIGHT: f32 = 36.0;
+const CASE_BUTTON_X: f32 = 500.0;
+const CASE_BUTTON_W: f32 = 28.0;
 
 /// The text drawn on `doc`'s tab, dirty marker included.
 fn tab_label(doc: &Document) -> String {
@@ -693,6 +700,29 @@ impl IndentStyle {
             Self::Spaces4 => Self::Spaces8,
             Self::Spaces8 => Self::Tabs,
             Self::Tabs => Self::Spaces2,
+        }
+    }
+
+    /// The indent `text` is written with, judged by its first indented line,
+    /// or `None` when no line is indented or the step is not one of these.
+    ///
+    /// The first indented line is enough because JSON has no multi-line
+    /// strings: every line break is structural, so the first line that starts
+    /// with whitespace is one level in, and its whitespace is one step.
+    fn detect(text: &str) -> Option<Self> {
+        let lead = text.lines().find_map(|line| {
+            let rest = line.trim_start_matches([' ', '\t']);
+            let lead = line.len() - rest.len();
+            (lead > 0 && !rest.is_empty()).then(|| line.get(..lead).unwrap_or(""))
+        })?;
+        if lead.starts_with('\t') {
+            return Some(Self::Tabs);
+        }
+        match lead.len() {
+            2 => Some(Self::Spaces2),
+            4 => Some(Self::Spaces4),
+            8 => Some(Self::Spaces8),
+            _ => None,
         }
     }
 }
@@ -1756,18 +1786,29 @@ const VIEW_MODES: [ViewMode; 5] = [
 
 /// A single JSON document tab.
 struct Document {
-    /// Tab identifier.
+    /// Tab identifier, unique for the life of the window.
     ///
-    /// Assigned and, at present, never read: tabs are addressed by index
-    /// throughout, which is the arrangement that made the selection in three
-    /// other apps point at the wrong thing after a deletion. It is kept rather
-    /// than deleted because it is the thing to switch to when that is fixed
-    /// here, and `next_tab_id` already maintains it correctly.
-    /// See known-issues.md -> TD-C-JSONVIEWER-ADDRESSES-TABS-BY-INDEX.
-    #[allow(dead_code, reason = "the identity tabs should be addressed by")]
+    /// What anything that outlives one event names a tab by -- the close
+    /// question, and the picker choosing where to save -- because a position
+    /// in `documents` moves when a tab before it closes. Most of the program
+    /// still addresses the *active* tab by index, which is safe within one
+    /// event; see known-issues.md -> TD-C-JSONVIEWER-CAN-EDIT-A-VALUE-BUT-NOT-ADD-ONE.
     id: u64,
     /// Tab title.
     title: String,
+    /// The file this document was read from or last saved to, or `None` for
+    /// one never saved.
+    ///
+    /// The path itself and not the title: a name that is not valid UTF-8 is
+    /// shown with replacement characters, and saving to *that* would write a
+    /// different file from the one that was opened.
+    path: Option<PathBuf>,
+    /// `Some(whole)` when only the first part of a `whole`-byte file was read.
+    ///
+    /// Such a document is never written back over its file, which would cut
+    /// the file off where the reading stopped. Save As may write it elsewhere,
+    /// and the new file then holds all of it.
+    whole_len: Option<usize>,
     /// Raw input text.
     input: String,
     /// Parsed JSON value (if valid).
@@ -1812,6 +1853,8 @@ impl Document {
         Self {
             id,
             title,
+            path: None,
+            whole_len: None,
             input: String::new(),
             parsed: None,
             error: None,
@@ -1911,6 +1954,50 @@ impl Document {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    /// Rewrite `input` from `parsed` after a change made in the tree, in the
+    /// layout the text already had.
+    ///
+    /// Saving writes `input`, so this is what a tree edit does to the file. It
+    /// was `format_json(value, self.indent)` whatever the file looked like, so
+    /// changing one number in a one-line file saved it pretty-printed, and a
+    /// file indented by four spaces came back at two -- `indent` being the raw
+    /// view's setting, not the file's. Now a one-line text stays one line, an
+    /// indented one keeps the indent it has ([`IndentStyle::detect`]), and a
+    /// final newline is kept or left off as it was. The spacing *inside* a line
+    /// is not kept: the text is regenerated from the parsed value, which does
+    /// not remember it.
+    fn regenerate_input(&mut self) {
+        let Some(value) = self.parsed.as_ref() else {
+            return;
+        };
+        let one_line = !self.input.trim().contains('\n');
+        let final_newline = self.input.ends_with('\n');
+        let mut text = if one_line {
+            minify_json(value)
+        } else {
+            format_json(
+                value,
+                IndentStyle::detect(&self.input).unwrap_or(IndentStyle::Spaces2),
+            )
+        };
+        match (final_newline, text.ends_with('\n')) {
+            (true, false) => text.push('\n'),
+            (false, true) => {
+                text.pop();
+            }
+            _ => {}
+        }
+        self.input = text;
+    }
+
+    /// The name to offer when saving this document somewhere new.
+    fn save_name(&self) -> OsString {
+        self.path.as_deref().and_then(Path::file_name).map_or_else(
+            || OsString::from(format!("{}.json", self.title)),
+            OsString::from,
+        )
+    }
+
     fn run_diff(&mut self) {
         if self.diff_source.trim().is_empty() {
             self.diff_results.clear();
@@ -1971,8 +2058,15 @@ struct App {
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
     pub picker: FilePicker,
-    /// What the last open attempt did, for the status line.
-    last_open: Option<String>,
+    /// What the picker is choosing a path for, since one picker serves
+    /// opening and saving.
+    picker_purpose: PickerPurpose,
+    /// "Unsaved changes -- save them?", while it is being asked.
+    close_prompt: Option<CloseScope>,
+    /// Set once the window may close; the next answer to the loop is `Exit`.
+    quit: bool,
+    /// What the last open or save did, for the status line.
+    note: Option<String>,
     /// Width of the window.
     width: f32,
     /// Height of the window.
@@ -2096,6 +2190,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("I", "Cycle the indent, in the raw view"),
     ("M", "Minify or pretty-print, in the raw view"),
     ("Ctrl+O", "Open a file"),
+    ("Ctrl+S", "Save"),
+    ("Ctrl+Shift+S", "Save as a new file"),
     ("Ctrl+N / Ctrl+W", "New tab / close this tab"),
     ("Ctrl+Tab", "Next tab"),
     ("Ctrl+F", "Find"),
@@ -2104,6 +2200,89 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+E", "Editing on or off"),
     ("F1 / ?", "This list"),
 ];
+
+/// What the file picker is choosing a path for. Each names its document by
+/// [`Document::id`], since the picker outlives the event that put it up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerPurpose {
+    /// A file to read into a new tab.
+    Open,
+    /// Where to write this document, which then belongs to that file.
+    SaveAs(u64),
+    /// Where to write this document before its tab closes.
+    SaveThenClose(u64),
+    /// Where to write this document before the window goes on closing.
+    SaveThenQuit(u64),
+}
+
+/// What a pending close would close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseScope {
+    /// One document's tab, by [`Document::id`].
+    Tab(u64),
+    /// The whole window.
+    Window,
+}
+
+/// The answers to "this has unsaved changes".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseChoice {
+    /// Save, then close if the save worked.
+    Save,
+    /// Close without saving.
+    Discard,
+    /// Do not close.
+    Cancel,
+}
+
+/// What a toolbar button does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolbarAction {
+    New,
+    Open,
+    Save,
+    Search,
+    Edit,
+}
+
+/// The toolbar's buttons, in the order they are drawn.
+///
+/// New, Search and Edit were drawn and answered nothing -- the toolbar sat
+/// above a click handler that began at the tab bar -- and there was no Save to
+/// draw, because nothing could save.
+const TOOLBAR: [(ToolbarAction, &str); 5] = [
+    (ToolbarAction::New, "New"),
+    (ToolbarAction::Open, "Open"),
+    (ToolbarAction::Save, "Save"),
+    (ToolbarAction::Search, "Search"),
+    (ToolbarAction::Edit, "Edit"),
+];
+
+/// Where the first toolbar button starts, clear of the title.
+const TOOLBAR_FIRST_X: f32 = 200.0;
+/// A toolbar button's top, and its height.
+const TOOLBAR_BUTTON_Y: f32 = 8.0;
+const TOOLBAR_BUTTON_H: f32 = 28.0;
+
+/// Each toolbar button's action, label, left edge and width.
+///
+/// The one walk the drawing and the click both take, so a button answers
+/// exactly where it is drawn.
+fn toolbar_buttons() -> Vec<(ToolbarAction, &'static str, f32, f32)> {
+    let mut x = TOOLBAR_FIRST_X;
+    TOOLBAR
+        .iter()
+        .map(|&(action, label)| {
+            let w = text::width(label, SMALL_TEXT) + 16.0;
+            let at = (action, label, x, w);
+            x += w + 8.0;
+            at
+        })
+        .collect()
+}
+
+/// How much of a tab's right end is its close mark, which is drawn 18 px in.
+const TAB_CLOSE_ZONE: f32 = 22.0;
 
 /// Everything that decides whether a frame is worth drawing.
 ///
@@ -2151,6 +2330,16 @@ struct Fingerprint {
     tree_scroll: f32,
     raw_scroll: f32,
     diff_scroll: f32,
+    /// Every tab's title and unsaved mark: a save clears the mark and Save As
+    /// renames the tab without touching the content, so no number above moves.
+    /// Closing a tab shows here too -- closing the active tab of two fresh
+    /// ones left every other field equal, and the closed tab stayed drawn.
+    tabs: Vec<(String, bool)>,
+    /// What the status line says about the last open or save.
+    note: Option<String>,
+    /// The close question, raised or answered.
+    close_prompt: Option<CloseScope>,
+    quit: bool,
 }
 
 impl App {
@@ -2165,7 +2354,10 @@ impl App {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             documents: vec![doc],
             picker: FilePicker::new(),
-            last_open: Some(String::from("Press Ctrl+O to open a JSON file")),
+            picker_purpose: PickerPurpose::Open,
+            close_prompt: None,
+            quit: false,
+            note: Some(String::from("Press Ctrl+O to open a JSON file")),
             active_tab: 0,
             next_tab_id: 2,
             search_query: String::new(),
@@ -2196,33 +2388,71 @@ impl App {
         self.next_tab_id = self.next_tab_id.saturating_add(1);
         let title = format!("Untitled {id}");
         self.documents.push(Document::new(id, title));
-        self.active_tab = self.documents.len() - 1;
+        self.switch_to(self.documents.len() - 1);
+    }
+
+    /// Make tab `index` the active one.
+    ///
+    /// A value being typed over belongs to the tab it was started in, but
+    /// `editing_path` is only a path: it names a node in *whichever* document
+    /// is active. Switching tabs without settling it left the path pointing
+    /// into the next tab, where Enter wrote the typed value into a different
+    /// document at the same path. So it is committed first, the way clicking
+    /// another cell commits the one being typed in a spreadsheet. The search
+    /// is re-run for the same reason: its matches are paths into one document.
+    fn switch_to(&mut self, index: usize) {
+        if index == self.active_tab {
+            return;
+        }
+        if self.editing_path.is_some() {
+            self.commit_edit();
+        }
+        self.active_tab = index;
+        self.perform_search();
+    }
+
+    /// Where tab `id` is now, if it is still open.
+    fn index_of(&self, id: u64) -> Option<usize> {
+        self.documents.iter().position(|d| d.id == id)
     }
 
     fn close_tab(&mut self, index: usize) {
-        if self.documents.len() <= 1 {
+        if self.documents.len() <= 1 || index >= self.documents.len() {
             return;
         }
-        if index < self.documents.len() {
-            self.documents.remove(index);
-            if self.active_tab >= self.documents.len() {
-                self.active_tab = self.documents.len() - 1;
-            }
+        if index == self.active_tab {
+            // The edit's document is going; the edit goes with it.
+            self.cancel_edit();
         }
+        self.documents.remove(index);
+        // A tab closed before the active one moves it one place left; the
+        // active tab closed hands over to the one after it, or the last.
+        if index < self.active_tab {
+            self.active_tab -= 1;
+        } else if self.active_tab >= self.documents.len() {
+            self.active_tab = self.documents.len() - 1;
+        }
+        self.perform_search();
     }
 
     fn perform_search(&mut self) {
-        if self.search_query.is_empty() {
-            self.search_results.clear();
-            self.search_index = 0;
-            return;
-        }
-        if let Some(doc) = self.documents.get(self.active_tab)
-            && let Some(ref value) = doc.parsed
-        {
-            self.search_results =
-                search_json(value, &self.search_query, self.search_case_sensitive);
-            if self.search_index >= self.search_results.len() {
+        let value = self
+            .documents
+            .get(self.active_tab)
+            .and_then(|doc| doc.parsed.as_ref());
+        match value {
+            Some(value) if !self.search_query.is_empty() => {
+                self.search_results =
+                    search_json(value, &self.search_query, self.search_case_sensitive);
+                if self.search_index >= self.search_results.len() {
+                    self.search_index = 0;
+                }
+            }
+            // Nothing to search, or nothing to search for: no matches. This
+            // kept the last document's matches when the active one had no
+            // parsed value, drawing them against a document they are not in.
+            _ => {
+                self.search_results.clear();
                 self.search_index = 0;
             }
         }
@@ -2279,6 +2509,23 @@ impl App {
     ) {
         use guitk::event::Key;
 
+        // The close question has the keyboard while it is up: a key that
+        // reached the document under it would be a change nobody was asked
+        // about, made while being asked whether to keep the changes.
+        if self.close_prompt.is_some() {
+            let typed = text.map(|c| c.to_ascii_lowercase());
+            let choice = match (key, typed) {
+                (Key::Enter | Key::S, _) | (_, Some('s')) => Some(CloseChoice::Save),
+                (Key::D, _) | (_, Some('d')) => Some(CloseChoice::Discard),
+                (Key::Escape, _) => Some(CloseChoice::Cancel),
+                _ => None,
+            };
+            if let Some(choice) = choice {
+                self.answer_close(choice);
+            }
+            return;
+        }
+
         // The shortcut list, before anything else -- but **not** while the
         // find bar or a value edit is open, because both of those take typed
         // characters and `?` belongs in somebody's query or their string.
@@ -2311,9 +2558,16 @@ impl App {
                     self.new_tab();
                     return;
                 }
+                Key::S => {
+                    if modifiers.shift {
+                        self.save_active_as();
+                    } else {
+                        self.save_active();
+                    }
+                    return;
+                }
                 Key::W => {
-                    let idx = self.active_tab;
-                    self.close_tab(idx);
+                    self.request_close_tab(self.active_tab);
                     return;
                 }
                 Key::F => {
@@ -2346,15 +2600,14 @@ impl App {
                 }
                 Key::Tab => {
                     if !self.documents.is_empty() {
-                        if modifiers.shift {
-                            if self.active_tab == 0 {
-                                self.active_tab = self.documents.len() - 1;
-                            } else {
-                                self.active_tab -= 1;
-                            }
+                        let next = if modifiers.shift {
+                            self.active_tab
+                                .checked_sub(1)
+                                .unwrap_or(self.documents.len() - 1)
                         } else {
-                            self.active_tab = (self.active_tab + 1) % self.documents.len();
-                        }
+                            (self.active_tab + 1) % self.documents.len()
+                        };
+                        self.switch_to(next);
                     }
                     return;
                 }
@@ -2540,9 +2793,7 @@ impl App {
         if written {
             doc.dirty = true;
             doc.invalidate_caches();
-            if let Some(ref value) = doc.parsed {
-                doc.input = format_json(value, doc.indent);
-            }
+            doc.regenerate_input();
         }
         self.edit_buffer.clear();
     }
@@ -2638,10 +2889,7 @@ impl App {
                         if deleted {
                             d.dirty = true;
                             d.invalidate_caches();
-                            // Re-borrow parsed immutably to regenerate input text
-                            if let Some(ref value) = d.parsed {
-                                d.input = format_json(value, d.indent);
-                            }
+                            d.regenerate_input();
                         }
                     }
                 }
@@ -2739,12 +2987,37 @@ impl App {
         }
     }
 
-    fn handle_mouse(&mut self, x: f32, y: f32, button: guitk::event::MouseButton) {
-        let _ = button;
+    fn handle_mouse(&mut self, x: f32, y: f32, button: MouseButton) {
+        // The close question is modal: its buttons, and nothing else.
+        if self.close_prompt.is_some() {
+            if button == MouseButton::Left
+                && let Some((choice, ..)) = self
+                    .close_prompt_buttons()
+                    .into_iter()
+                    .find(|&(_, bx, by, bw, bh)| x >= bx && x < bx + bw && y >= by && y < by + bh)
+            {
+                self.answer_close(choice);
+            }
+            return;
+        }
+
+        // The toolbar. Its buttons were drawn above a handler that began at
+        // the tab bar, so none of them could be clicked.
+        if y < TOOLBAR_HEIGHT {
+            if button == MouseButton::Left
+                && (TOOLBAR_BUTTON_Y..TOOLBAR_BUTTON_Y + TOOLBAR_BUTTON_H).contains(&y)
+                && let Some((action, ..)) = toolbar_buttons()
+                    .into_iter()
+                    .find(|&(_, _, bx, bw)| x >= bx && x < bx + bw)
+            {
+                self.toolbar(action);
+            }
+            return;
+        }
 
         // Tab bar clicks
         if (TOOLBAR_HEIGHT..TOOLBAR_HEIGHT + TAB_BAR_HEIGHT).contains(&y) {
-            self.handle_tab_click(x);
+            self.handle_tab_click(x, button);
             return;
         }
 
@@ -2755,8 +3028,25 @@ impl App {
             return;
         }
 
-        // Tree view clicks
+        // The find bar lies over the top of the content. A click on it went
+        // through to the tree, selecting whatever row was under the bar.
         let content_y = mode_bar_y + 30.0;
+        if self.search_visible
+            && (content_y..content_y + SEARCH_BAR_HEIGHT).contains(&y)
+            && x < self.width - SIDEBAR_WIDTH
+        {
+            if button == MouseButton::Left {
+                if (CASE_BUTTON_X..CASE_BUTTON_X + CASE_BUTTON_W).contains(&x) {
+                    self.search_case_sensitive = !self.search_case_sensitive;
+                    self.perform_search();
+                } else if x >= self.search_close_x() {
+                    self.search_visible = false;
+                }
+            }
+            return;
+        }
+
+        // Tree view clicks
         if y >= content_y
             && x < self.width - SIDEBAR_WIDTH
             && let Some(doc) = self.documents.get_mut(self.active_tab)
@@ -2780,20 +3070,49 @@ impl App {
         }
     }
 
-    fn handle_tab_click(&mut self, x: f32) {
-        let mut tab_x = PADDING;
-        for (i, doc) in self.documents.iter().enumerate() {
-            let tab_width = tab_width(doc);
-            if x >= tab_x && x < tab_x + tab_width {
-                self.active_tab = i;
-                return;
+    /// Where each tab is drawn, as (index, left edge, width), and then where
+    /// the "+" button starts: the one walk the drawing and the click share.
+    fn tab_rects(&self) -> (Vec<(usize, f32, f32)>, f32) {
+        let mut x = PADDING;
+        let tabs = self
+            .documents
+            .iter()
+            .enumerate()
+            .map(|(i, doc)| {
+                let w = tab_width(doc);
+                let at = (i, x, w);
+                x += w + 4.0;
+                at
+            })
+            .collect();
+        (tabs, x)
+    }
+
+    fn handle_tab_click(&mut self, x: f32, button: MouseButton) {
+        let (tabs, plus_x) = self.tab_rects();
+        if let Some(&(i, tab_x, w)) = tabs.iter().find(|&&(_, tx, w)| x >= tx && x < tx + w) {
+            // The "x" drawn at a tab's right end, drawn only while there is
+            // more than one tab -- and until now a click on it only selected
+            // the tab it was meant to close.
+            if button == MouseButton::Left
+                && self.documents.len() > 1
+                && x >= tab_x + w - TAB_CLOSE_ZONE
+            {
+                self.request_close_tab(i);
+            } else {
+                self.switch_to(i);
             }
-            tab_x += tab_width + 4.0;
+            return;
         }
         // Click on "+" button area
-        if x >= tab_x && x < tab_x + 30.0 {
+        if x >= plus_x && x < plus_x + 30.0 {
             self.new_tab();
         }
+    }
+
+    /// Where the find bar's "Esc" -- its close button -- begins.
+    fn search_close_x(&self) -> f32 {
+        self.width - SIDEBAR_WIDTH - 34.0
     }
 
     fn handle_mode_click(&mut self, x: f32) {
@@ -2838,7 +3157,364 @@ impl App {
     /// `handle_key` takes.
     /// Put the file picker up, listing the directory it starts in.
     pub fn open_file_dialog(&mut self) {
+        self.picker_purpose = PickerPurpose::Open;
         self.picker.open_to_read();
+    }
+
+    /// Document `id`, if it is still open.
+    fn doc_mut(&mut self, id: u64) -> Option<&mut Document> {
+        self.documents.iter_mut().find(|d| d.id == id)
+    }
+
+    /// Save the active document: over its own file, or through the picker
+    /// when it has none.
+    ///
+    /// It could not be saved at all. The tree edited values and deleted nodes
+    /// and marked the tab modified, and every one of those changes was lost
+    /// when the window closed.
+    fn save_active(&mut self) {
+        // A value half typed is part of what the user means to save.
+        if self.editing_path.is_some() {
+            self.commit_edit();
+        }
+        let Some(doc) = self.documents.get(self.active_tab) else {
+            return;
+        };
+        let id = doc.id;
+        if doc.path.is_none() {
+            self.ask_where_to_save(PickerPurpose::SaveAs(id));
+        } else {
+            self.note = Some(self.save_to_own_file(id));
+        }
+    }
+
+    /// Save As: the picker, starting beside the document's own file.
+    fn save_active_as(&mut self) {
+        if self.editing_path.is_some() {
+            self.commit_edit();
+        }
+        if let Some(id) = self.documents.get(self.active_tab).map(|d| d.id) {
+            self.ask_where_to_save(PickerPurpose::SaveAs(id));
+        }
+    }
+
+    /// Put the picker up to choose where the document `purpose` names goes.
+    fn ask_where_to_save(&mut self, purpose: PickerPurpose) {
+        let (PickerPurpose::SaveAs(id)
+        | PickerPurpose::SaveThenClose(id)
+        | PickerPurpose::SaveThenQuit(id)) = purpose
+        else {
+            return;
+        };
+        let Some(doc) = self.documents.iter().find(|d| d.id == id) else {
+            return;
+        };
+        // Beside the file it came from, when it came from one: a copy of a
+        // file is nearly always wanted near the original, not in `$HOME`.
+        let start = doc
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map_or_else(FilePicker::default_start, Path::to_path_buf);
+        let dialog = FileDialog::save()
+            .with_initial_path(start)
+            .with_filename(doc.save_name());
+        self.picker_purpose = purpose;
+        self.picker.put_up(dialog, true);
+    }
+
+    /// Write document `id` over its own file. What to say about it.
+    ///
+    /// Refused for a document holding only part of its file: writing it back
+    /// would cut the file off where the reading stopped.
+    fn save_to_own_file(&mut self, id: u64) -> String {
+        let Some(doc) = self.doc_mut(id) else {
+            return String::from("Nothing to save");
+        };
+        let Some(path) = doc.path.clone() else {
+            return String::from("Not saved: it has no file yet -- use Save As");
+        };
+        if let Some(whole) = doc.whole_len {
+            return format!(
+                "Not saved: only part of {} was read ({whole} bytes is over the {MAX_OPEN_BYTES} read), and writing it back would cut the file short -- save as a new file instead",
+                path.display()
+            );
+        }
+        match safeio::write_atomically(&path, doc.input.as_bytes()) {
+            Ok(()) => {
+                doc.dirty = false;
+                format!("Saved {}", path.display())
+            }
+            Err(err) => format!("Not saved: could not write {}: {err}", path.display()),
+        }
+    }
+
+    /// Write document `id` to `path`, which becomes its file. What to say.
+    fn save_to(&mut self, id: u64, path: &Path) -> Result<String, String> {
+        let Some(doc) = self.doc_mut(id) else {
+            return Err(String::from("Nothing to save"));
+        };
+        match safeio::write_atomically(path, doc.input.as_bytes()) {
+            Ok(()) => {
+                doc.path = Some(path.to_path_buf());
+                // All of the document is in the new file: nothing left to cut.
+                doc.whole_len = None;
+                doc.dirty = false;
+                if let Some(name) = path.file_name() {
+                    // The tab's label only; the real name is `path`.
+                    doc.title = name.to_string_lossy().into_owned();
+                }
+                Ok(format!("Saved {}", path.display()))
+            }
+            Err(err) => Err(format!(
+                "Not saved: could not write {}: {err}",
+                path.display()
+            )),
+        }
+    }
+
+    /// The picker chose `path`: do what it was put up for.
+    fn picked(&mut self, path: &Path) {
+        match self.picker_purpose {
+            PickerPurpose::Open => self.note = Some(self.open_path(path)),
+            PickerPurpose::SaveAs(id) => {
+                self.note = Some(match self.save_to(id, path) {
+                    Ok(said) | Err(said) => said,
+                });
+            }
+            PickerPurpose::SaveThenClose(id) => {
+                let said = match self.save_to(id, path) {
+                    Ok(said) => {
+                        if let Some(index) = self.index_of(id) {
+                            self.close_tab(index);
+                        }
+                        said
+                    }
+                    Err(said) => said,
+                };
+                self.note = Some(said);
+            }
+            PickerPurpose::SaveThenQuit(id) => match self.save_to(id, path) {
+                Ok(_) => self.continue_quitting(),
+                Err(said) => self.note = Some(said),
+            },
+        }
+    }
+
+    /// Close tab `index`, asking first if it has unsaved changes.
+    fn request_close_tab(&mut self, index: usize) {
+        // The last tab is never closed -- `close_tab` keeps one -- so there
+        // is no close to ask about.
+        if self.documents.len() <= 1 {
+            return;
+        }
+        if index == self.active_tab && self.editing_path.is_some() {
+            // A value half typed is a change too.
+            self.commit_edit();
+        }
+        match self.documents.get(index) {
+            Some(doc) if doc.dirty => {
+                let id = doc.id;
+                self.switch_to(index);
+                self.close_prompt = Some(CloseScope::Tab(id));
+            }
+            Some(_) => self.close_tab(index),
+            None => {}
+        }
+    }
+
+    /// The window has been asked to close. Whether it may go now; if not,
+    /// the question is up.
+    fn request_quit(&mut self) -> bool {
+        if self.editing_path.is_some() {
+            self.commit_edit();
+        }
+        if self.documents.iter().any(|d| d.dirty) {
+            // The question replaces whatever was up: a picker left open would
+            // take the keys the question needs, and be drawn over it.
+            self.picker.close();
+            self.show_help = false;
+            self.close_prompt = Some(CloseScope::Window);
+            false
+        } else {
+            self.quit = true;
+            true
+        }
+    }
+
+    /// Answer the pending close.
+    fn answer_close(&mut self, choice: CloseChoice) {
+        let Some(scope) = self.close_prompt.take() else {
+            return;
+        };
+        match (scope, choice) {
+            (_, CloseChoice::Cancel) => {}
+            (CloseScope::Tab(id), CloseChoice::Discard) => {
+                if let Some(index) = self.index_of(id) {
+                    self.close_tab(index);
+                }
+            }
+            (CloseScope::Tab(id), CloseChoice::Save) => {
+                let Some(index) = self.index_of(id) else {
+                    return;
+                };
+                self.switch_to(index);
+                let own_file = self
+                    .documents
+                    .get(index)
+                    .is_some_and(|d| d.path.is_some() && d.whole_len.is_none());
+                if own_file {
+                    let said = self.save_to_own_file(id);
+                    if self.documents.get(index).is_some_and(|d| !d.dirty) {
+                        self.close_tab(index);
+                    }
+                    self.note = Some(said);
+                } else {
+                    self.ask_where_to_save(PickerPurpose::SaveThenClose(id));
+                }
+            }
+            (CloseScope::Window, CloseChoice::Discard) => self.quit = true,
+            (CloseScope::Window, CloseChoice::Save) => self.continue_quitting(),
+        }
+    }
+
+    /// Carry on closing the window: save everything that can go back to its
+    /// own file, ask where to put the first thing that cannot, and quit once
+    /// nothing is left unsaved. A failed save stops it, with the window open
+    /// and the failure on the status line.
+    fn continue_quitting(&mut self) {
+        let own_files: Vec<u64> = self
+            .documents
+            .iter()
+            .filter(|d| d.dirty && d.path.is_some() && d.whole_len.is_none())
+            .map(|d| d.id)
+            .collect();
+        for id in own_files {
+            let said = self.save_to_own_file(id);
+            if self.documents.iter().any(|d| d.id == id && d.dirty) {
+                self.note = Some(format!("{said} -- so the window stays open"));
+                return;
+            }
+        }
+        match self.documents.iter().find(|d| d.dirty).map(|d| d.id) {
+            Some(id) => {
+                if let Some(index) = self.index_of(id) {
+                    self.switch_to(index);
+                }
+                self.ask_where_to_save(PickerPurpose::SaveThenQuit(id));
+            }
+            None => self.quit = true,
+        }
+    }
+
+    /// Do what a toolbar button does -- the same as its key.
+    fn toolbar(&mut self, action: ToolbarAction) {
+        match action {
+            ToolbarAction::New => self.new_tab(),
+            ToolbarAction::Open => self.open_file_dialog(),
+            ToolbarAction::Save => self.save_active(),
+            ToolbarAction::Search => self.search_visible = !self.search_visible,
+            ToolbarAction::Edit => self.edit_mode = !self.edit_mode,
+        }
+    }
+
+    /// Where the close question's card is.
+    fn close_prompt_card(&self) -> (f32, f32, f32, f32) {
+        let w = 440.0_f32.min(self.width - 40.0).max(0.0);
+        let h = 150.0_f32;
+        ((self.width - w) / 2.0, (self.height - h) / 2.0, w, h)
+    }
+
+    /// The close question's three answers, where each is drawn and clicked.
+    fn close_prompt_buttons(&self) -> [(CloseChoice, f32, f32, f32, f32); 3] {
+        let (x, y, w, h) = self.close_prompt_card();
+        let bw = ((w - 48.0) / 3.0).max(0.0);
+        let by = y + h - 44.0;
+        [
+            (CloseChoice::Save, x + 12.0, by, bw, 30.0),
+            (CloseChoice::Discard, x + 24.0 + bw, by, bw, 30.0),
+            (CloseChoice::Cancel, x + 36.0 + bw * 2.0, by, bw, 30.0),
+        ]
+    }
+
+    /// The close question, over everything else the window draws.
+    fn render_close_prompt(&self, cmds: &mut Vec<RenderCommand>, scope: CloseScope) {
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: self.palette.scrim(),
+            corner_radii: CornerRadii::ZERO,
+        });
+        let (x, y, w, h) = self.close_prompt_card();
+        self.palette
+            .push_surface(cmds, x, y, w, h, 8.0, Surface::Panel);
+        let body = match scope {
+            CloseScope::Tab(id) => format!(
+                "{} has changes that are not saved.",
+                self.documents
+                    .iter()
+                    .find(|d| d.id == id)
+                    .map_or("This document", |d| d.title.as_str())
+            ),
+            CloseScope::Window => {
+                let names: Vec<&str> = self
+                    .documents
+                    .iter()
+                    .filter(|d| d.dirty)
+                    .map(|d| d.title.as_str())
+                    .collect();
+                format!("Not saved: {}.", names.join(", "))
+            }
+        };
+        let lines = [
+            (
+                String::from("Unsaved changes"),
+                HEADER_TEXT,
+                self.palette.ink(self.palette.yellow),
+            ),
+            (body, NORMAL_TEXT, self.palette.text),
+            (
+                String::from("Save them before closing?"),
+                NORMAL_TEXT,
+                self.palette.subtext0,
+            ),
+        ];
+        let mut line_y = y + 14.0;
+        for (text, size, color) in lines {
+            cmds.push(RenderCommand::Text {
+                x: x + 12.0,
+                y: line_y,
+                text,
+                color,
+                font_size: size,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((w - 24.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            line_y += 24.0;
+        }
+        for (choice, bx, by, bw, bh) in self.close_prompt_buttons() {
+            let label = match choice {
+                CloseChoice::Save => "S — Save",
+                CloseChoice::Discard => "D — Don't save",
+                CloseChoice::Cancel => "Esc — Cancel",
+            };
+            self.palette
+                .push_surface(cmds, bx, by, bw, bh, 4.0, Surface::Card);
+            cmds.push(RenderCommand::Text {
+                x: bx + 8.0,
+                y: by + 9.0,
+                text: label.to_string(),
+                color: self.palette.text,
+                font_size: SMALL_TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((bw - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
     /// Read `path` into a new tab. Returns what to say about it.
@@ -2878,10 +3554,15 @@ impl App {
         let id = self.next_tab_id;
         self.next_tab_id = self.next_tab_id.saturating_add(1);
         let mut doc = Document::new(id, name);
+        doc.path = Some(path.to_path_buf());
+        doc.whole_len = truncated.then_some(whole);
+        // The raw view starts in the file's own indent rather than always in
+        // two spaces, so what it shows is how the file is written.
+        doc.indent = IndentStyle::detect(&input).unwrap_or(IndentStyle::Spaces2);
         doc.input = input;
         doc.reparse();
         self.documents.push(doc);
-        self.active_tab = self.documents.len().saturating_sub(1);
+        self.switch_to(self.documents.len().saturating_sub(1));
 
         if truncated {
             // Front-loaded on purpose. This lands in a status bar with a
@@ -2902,7 +3583,7 @@ impl App {
         // for a filename lands on the tree behind it.
         match self.picker.handle(event, self.width, self.height) {
             Picked::Chose(path) => {
-                self.last_open = Some(self.open_path(&path));
+                self.picked(&path);
                 return EventResult::Consumed;
             }
             // Cancelled grouped with Handled: this caller keeps no dialog
@@ -2987,6 +3668,14 @@ impl App {
             tree_scroll: doc.map_or(0.0, |d| d.tree_scroll),
             raw_scroll: doc.map_or(0.0, |d| d.raw_scroll),
             diff_scroll: doc.map_or(0.0, |d| d.diff_scroll),
+            tabs: self
+                .documents
+                .iter()
+                .map(|d| (d.title.clone(), d.dirty))
+                .collect(),
+            note: self.note.clone(),
+            close_prompt: self.close_prompt,
+            quit: self.quit,
         }
     }
 
@@ -3045,34 +3734,32 @@ impl App {
         });
 
         // Toolbar buttons
-        let buttons = [
-            ("New", self.palette.blue),
-            ("Search", self.palette.teal),
-            (
-                "Edit",
-                if self.edit_mode {
-                    self.palette.green
-                } else {
-                    self.palette.subtext0
-                },
-            ),
-        ];
-        let mut bx = 200.0;
-        for (label, color) in &buttons {
-            let bw = text::width(label, SMALL_TEXT) + 16.0;
-            self.palette
-                .push_surface(cmds, bx, 8.0, bw, 28.0, 4.0, Surface::Card);
+        for (action, label, bx, bw) in toolbar_buttons() {
+            let color = match action {
+                ToolbarAction::New | ToolbarAction::Open | ToolbarAction::Save => self.palette.blue,
+                ToolbarAction::Search => self.palette.teal,
+                ToolbarAction::Edit if self.edit_mode => self.palette.green,
+                ToolbarAction::Edit => self.palette.subtext0,
+            };
+            self.palette.push_surface(
+                cmds,
+                bx,
+                TOOLBAR_BUTTON_Y,
+                bw,
+                TOOLBAR_BUTTON_H,
+                4.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: bx + 8.0,
                 y: 18.0,
-                text: (*label).to_string(),
-                color: *color,
+                text: label.to_string(),
+                color,
                 font_size: SMALL_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            bx += bw + 8.0;
         }
 
         // Separator line
@@ -3100,10 +3787,12 @@ impl App {
             Surface::Strip(Edge::Bottom),
         );
 
-        let mut tab_x = PADDING;
-        for (i, doc) in self.documents.iter().enumerate() {
+        let (tabs, plus_x) = self.tab_rects();
+        for (i, tab_x, tab_width) in tabs {
+            let Some(doc) = self.documents.get(i) else {
+                continue;
+            };
             let is_active = i == self.active_tab;
-            let tab_width = tab_width(doc);
 
             // Tab background
             cmds.push(RenderCommand::FillRect {
@@ -3158,15 +3847,13 @@ impl App {
                     overflow: TextOverflow::Clip,
                 });
             }
-
-            tab_x += tab_width + 4.0;
         }
 
         // New tab button
         self.palette
-            .push_surface(cmds, tab_x, y + 6.0, 28.0, 24.0, 4.0, Surface::Card);
+            .push_surface(cmds, plus_x, y + 6.0, 28.0, 24.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
-            x: tab_x + 8.0,
+            x: plus_x + 8.0,
             y: y + 16.0,
             text: String::from("+"),
             color: self.palette.subtext0,
@@ -3318,7 +4005,7 @@ impl App {
                 cmds.push(RenderCommand::Text {
                     x: PADDING,
                     y: top + 30.0,
-                    text: String::from("Enter JSON in the input area or paste a document"),
+                    text: String::from("Nothing here yet -- press Ctrl+O to open a JSON file"),
                     color: self.palette.subtext0,
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Regular,
@@ -4239,7 +4926,7 @@ impl App {
             width: 1.0,
         });
 
-        // What the last open attempt did.
+        // What the last open or save did.
         //
         // Drawn before the document lookup below, which returns early when
         // there is no document -- and "there is no document" is exactly when a
@@ -4253,7 +4940,7 @@ impl App {
         // saying it was incomplete -- a JSON file cut in half is invalid JSON,
         // so the user would have seen a parse error about their file that was
         // really about our cap.
-        if let Some(note) = &self.last_open {
+        if let Some(note) = &self.note {
             let x = PADDING + 110.0;
             let right = if self.edit_mode {
                 self.width * 0.4
@@ -4332,7 +5019,7 @@ impl App {
 
     fn render_search_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let bar_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
-        let bar_height = 36.0;
+        let bar_height = SEARCH_BAR_HEIGHT;
 
         // Overlay background
         cmds.push(RenderCommand::FillRect {
@@ -4409,9 +5096,9 @@ impl App {
 
         // Case sensitivity toggle
         cmds.push(RenderCommand::FillRect {
-            x: 500.0,
+            x: CASE_BUTTON_X,
             y: bar_y + 6.0,
-            width: 28.0,
+            width: CASE_BUTTON_W,
             height: 24.0,
             color: if self.search_case_sensitive {
                 self.palette.blue
@@ -4421,7 +5108,7 @@ impl App {
             corner_radii: CornerRadii::all(3.0),
         });
         cmds.push(RenderCommand::Text {
-            x: 507.0,
+            x: CASE_BUTTON_X + 7.0,
             y: bar_y + 18.0,
             text: String::from("Aa"),
             color: if self.search_case_sensitive {
@@ -4437,7 +5124,7 @@ impl App {
 
         // Close button
         cmds.push(RenderCommand::Text {
-            x: self.width - SIDEBAR_WIDTH - 30.0,
+            x: self.search_close_x() + 4.0,
             y: bar_y + 18.0,
             text: String::from("Esc"),
             color: self.palette.subtext0,
@@ -4616,10 +5303,22 @@ impl oswindow::app::App for App {
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
+        // Closing over unsaved work asks first, and the window waits for the
+        // answer: `KeepOpen` declines the close and draws the question.
         if matches!(event, Event::CloseRequested) {
+            return if self.request_quit() {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        let result = self.handle_event(event);
+        if self.quit {
+            // The question was answered, or the last save it asked for was
+            // made: nothing is left unsaved.
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -4632,6 +5331,12 @@ impl oswindow::app::App for App {
         self.width = width;
         self.height = height;
         let mut commands = self.render_commands();
+        // The close question over the document it is asking about. It and the
+        // picker are never up together: answering the question takes it down
+        // before any picker goes up, and raising it takes the picker down.
+        if let Some(scope) = self.close_prompt {
+            self.render_close_prompt(&mut commands, scope);
+        }
         // Last, so it is above everything -- the same order in which
         // `handle_event` gives it the click.
         commands.extend(self.picker.render(&self.palette, width, height));
@@ -4675,7 +5380,7 @@ mod tests {
 
     /// What an open did reaches the window.
     ///
-    /// `last_open` was assigned by `open_path` and rendered by nothing between
+    /// `note` (then `last_open`) was assigned by `open_path` and rendered by nothing between
     /// 2026-09-15 and the same evening, when lane A's
     /// `check-fields-written-never-read` gate caught it on `main` and blocked
     /// their boot test. The gate was right to refuse rather than be
@@ -4725,7 +5430,7 @@ mod tests {
     #[test]
     fn the_status_bar_says_what_the_last_open_did() {
         let mut app = App::new();
-        app.last_open = Some(String::from("INCOMPLETE: only the first 4 bytes are shown"));
+        app.note = Some(String::from("INCOMPLETE: only the first 4 bytes are shown"));
         let tree = app.render(900.0, 700.0);
         assert!(
             tree.commands.iter().any(|c| matches!(
@@ -4979,6 +5684,10 @@ mod tests {
     }
 
     /// Two tabs holding documents that differ in one field.
+    ///
+    /// Each with its own id, as `App` gives them: the close question and the
+    /// picker find their document by id, and two tabs sharing one would send
+    /// a save meant for the second to the first.
     fn two_tabs() -> App {
         let mut app = App::new();
         app.documents.clear();
@@ -4986,7 +5695,8 @@ mod tests {
             ("left", r#"{"a":1,"b":"x"}"#),
             ("right", r#"{"a":2,"b":"x"}"#),
         ] {
-            let mut doc = Document::new(0, title.to_owned());
+            let mut doc = Document::new(app.next_tab_id, title.to_owned());
+            app.next_tab_id += 1;
             doc.input = text.to_owned();
             doc.parsed = parse_json(text).ok();
             app.documents.push(doc);
@@ -5200,6 +5910,546 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Saving, and asking before unsaved work is lost
+    // ------------------------------------------------------------------
+
+    /// A file in the temporary directory, removed when dropped.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn with(tag: &str, text: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "slateos-jsonviewer-{tag}-{}-{unique}.json",
+                std::process::id()
+            ));
+            std::fs::write(&path, text).expect("scratch file");
+            Self(path)
+        }
+
+        fn read(&self) -> String {
+            std::fs::read_to_string(&self.0).expect("read the file back")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            drop(std::fs::remove_file(&self.0));
+        }
+    }
+
+    /// `scratch` opened into a fresh window, with editing on.
+    fn opened(scratch: &Scratch) -> App {
+        let mut app = App::new();
+        let said = app.open_path(&scratch.0);
+        assert!(said.starts_with("Opened"), "{said}");
+        app.edit_mode = true;
+        app
+    }
+
+    /// Set top-level key `key` of the active document to `value`, through the
+    /// same commit a typed edit ends in.
+    fn set_key(app: &mut App, key: &str, value: &str) {
+        app.editing_path = Some(vec![PathSegment::Key(key.to_owned())]);
+        app.edit_buffer = value.to_owned();
+        app.commit_edit();
+    }
+
+    fn press_ctrl_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = true;
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// The picker chose `path`, as it does in a window: it takes itself down,
+    /// then says what was chosen. Calling `picked` with the dialog still up
+    /// would leave it to swallow the next keystroke.
+    fn choose(app: &mut App, path: &Path) {
+        assert!(app.picker.is_open(), "nothing was asking for a file");
+        app.picker.close();
+        app.picked(path);
+    }
+
+    fn click(app: &mut App, x: f32, y: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// **An edited file is saved back to itself, in its own layout.**
+    ///
+    /// It could not be saved at all: the tree changed values and deleted nodes
+    /// and marked the tab modified, and the changes went when the window did.
+    /// And the text a tree edit leaves is the file's own indent, not the raw
+    /// view's two spaces.
+    #[test]
+    fn an_edited_file_is_saved_back_to_itself() {
+        let file = Scratch::with("save", "{\n    \"a\": 1,\n    \"b\": \"x\"\n}\n");
+        let mut app = opened(&file);
+
+        // Saving a file that has not changed is still a save, and says so.
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::S)),
+            EventResult::Consumed,
+            "the status line's news of a save was not a redraw"
+        );
+        assert!(
+            app.note.as_deref().is_some_and(|n| n.starts_with("Saved")),
+            "{:?}",
+            app.note
+        );
+
+        set_key(&mut app, "a", "2");
+        assert!(
+            app.documents[app.active_tab].dirty,
+            "control: an edit marks the tab"
+        );
+        assert_eq!(app.handle_event(&press_ctrl(Key::S)), EventResult::Consumed);
+        assert_eq!(
+            file.read(),
+            "{\n    \"a\": 2,\n    \"b\": \"x\"\n}\n",
+            "saved, in the file's own four-space indent"
+        );
+        assert!(
+            !app.documents[app.active_tab].dirty,
+            "a save clears the mark"
+        );
+    }
+
+    /// A one-line file stays one line, and gains no final newline it lacked.
+    #[test]
+    fn a_one_line_file_is_saved_on_one_line() {
+        let file = Scratch::with("oneline", r#"{"a":1,"b":[true,null]}"#);
+        let mut app = opened(&file);
+        set_key(&mut app, "a", "2");
+        app.handle_event(&press_ctrl(Key::S));
+        assert_eq!(file.read(), r#"{"a":2,"b":[true,null]}"#);
+    }
+
+    #[test]
+    fn the_indent_is_read_from_the_first_indented_line() {
+        for (text, expected) in [
+            ("{\n  \"a\": 1\n}", Some(IndentStyle::Spaces2)),
+            (
+                "{\n    \"a\": {\n        \"b\": 1\n    }\n}",
+                Some(IndentStyle::Spaces4),
+            ),
+            ("{\n        \"a\": 1\n}", Some(IndentStyle::Spaces8)),
+            ("{\n\t\"a\": 1\n}", Some(IndentStyle::Tabs)),
+            // Three is not a step this program writes.
+            ("{\n   \"a\": 1\n}", None),
+            // Nothing is indented.
+            (r#"{"a":1}"#, None),
+            // A blank line, or one of only spaces, says nothing.
+            ("{\n\n  \n    \"a\": 1\n}", Some(IndentStyle::Spaces4)),
+        ] {
+            assert_eq!(IndentStyle::detect(text), expected, "{text:?}");
+        }
+    }
+
+    /// **A file read only in part is never saved over.**
+    ///
+    /// At most `MAX_OPEN_BYTES` is read, and writing that back would cut the
+    /// file off where the reading stopped. Save As writes it to a new file,
+    /// which then holds all of the document and may be saved over.
+    #[test]
+    fn a_file_read_only_in_part_is_never_saved_over() {
+        let mut text = String::from(r#"{"a":1}"#);
+        text.push_str(&" ".repeat(MAX_OPEN_BYTES));
+        let file = Scratch::with("partial", &text);
+        let mut app = App::new();
+        let said = app.open_path(&file.0);
+        assert!(said.starts_with("INCOMPLETE"), "{said}");
+        set_key(&mut app, "a", "2");
+        assert!(
+            app.documents[app.active_tab].dirty,
+            "control: the cut text still parses, so it can be edited"
+        );
+
+        app.handle_event(&press_ctrl(Key::S));
+        assert_eq!(
+            std::fs::metadata(&file.0).map(|m| m.len()).ok(),
+            u64::try_from(text.len()).ok(),
+            "the file was cut short"
+        );
+        assert!(
+            app.note
+                .as_deref()
+                .is_some_and(|n| n.starts_with("Not saved")),
+            "{:?}",
+            app.note
+        );
+        assert!(
+            app.documents[app.active_tab].dirty,
+            "a refused save is not a save"
+        );
+
+        let copy = Scratch::with("partial-copy", "");
+        app.handle_event(&press_ctrl_shift(Key::S));
+        assert!(app.picker.is_saving(), "Save As asks where");
+        choose(&mut app, &copy.0);
+        assert_eq!(copy.read(), r#"{"a":2}"#);
+        assert_eq!(
+            app.documents[app.active_tab].path.as_deref(),
+            Some(copy.0.as_path())
+        );
+
+        // The copy holds all of the document, so it may be saved over.
+        set_key(&mut app, "a", "3");
+        app.handle_event(&press_ctrl(Key::S));
+        assert_eq!(copy.read(), r#"{"a":3}"#, "{:?}", app.note);
+    }
+
+    #[test]
+    fn an_untitled_document_is_saved_where_the_picker_says() {
+        let out = Scratch::with("untitled-out", "");
+        let mut app = two_tabs();
+        set_key(&mut app, "a", "5");
+        app.handle_event(&press_ctrl(Key::S));
+        assert!(app.picker.is_saving(), "no file yet, so it asks where");
+        choose(&mut app, &out.0);
+        assert_eq!(out.read(), r#"{"a":5,"b":"x"}"#);
+        let doc = &app.documents[0];
+        assert_eq!(doc.path.as_deref(), Some(out.0.as_path()));
+        assert!(!doc.dirty);
+        assert_eq!(
+            Some(doc.title.as_str()),
+            out.0.file_name().and_then(|n| n.to_str()),
+            "the tab is named for its new file"
+        );
+    }
+
+    /// Save As starts beside the file, not in `$HOME`.
+    ///
+    /// In a directory of its own, which is neither `$HOME` nor the temporary
+    /// directory the picker falls back to without one -- a file in either
+    /// would pass whether or not the picker looked at it.
+    #[test]
+    fn save_as_starts_beside_the_documents_own_file() {
+        let dir =
+            std::env::temp_dir().join(format!("slateos-jsonviewer-beside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory of its own");
+        let path = dir.join("doc.json");
+        std::fs::write(&path, "{}").expect("the file");
+        let mut app = App::new();
+        app.open_path(&path);
+        app.handle_event(&press_ctrl_shift(Key::S));
+        let start = app.picker.dialog().map(|d| d.current_path().to_path_buf());
+        drop(std::fs::remove_dir_all(&dir));
+        assert_eq!(start, Some(dir));
+    }
+
+    /// **Closing the window over unsaved work asks, and each answer is kept.**
+    ///
+    /// The window closed on any close request, answered `Exit` without
+    /// looking, and the edits went with it.
+    #[test]
+    fn closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept() {
+        let mut clean = App::new();
+        assert_eq!(
+            clean.on_event(&Event::CloseRequested),
+            Response::Exit,
+            "nothing unsaved: the window just goes"
+        );
+
+        let original = "{\n  \"a\": 1\n}\n";
+        let file = Scratch::with("close", original);
+        let mut app = opened(&file);
+        set_key(&mut app, "a", "2");
+        assert_eq!(
+            app.on_event(&Event::CloseRequested),
+            Response::KeepOpen,
+            "the window must wait for the answer"
+        );
+        assert_eq!(app.close_prompt, Some(CloseScope::Window));
+        assert!(
+            help_text(&mut app).contains("Unsaved changes"),
+            "the question is not drawn"
+        );
+
+        // A key meant as a shortcut goes to the question, not the document.
+        app.on_event(&press(Key::Num2));
+        assert_eq!(app.documents[app.active_tab].view_mode, ViewMode::Tree);
+
+        // Cancel: the window stays, and so do the changes.
+        assert_eq!(app.on_event(&press(Key::Escape)), Response::Redraw);
+        assert_eq!(app.close_prompt, None);
+        assert!(app.documents[app.active_tab].dirty);
+        assert_eq!(file.read(), original);
+
+        // Save: the file is written, and the window goes.
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(app.on_event(&press(Key::S)), Response::Exit);
+        assert_eq!(file.read(), "{\n  \"a\": 2\n}\n");
+
+        // Don't save, clicked: the window goes and the file is untouched.
+        let other = Scratch::with("discard", original);
+        let mut app = opened(&other);
+        set_key(&mut app, "a", "3");
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        let (_, x, y, w, h) = app.close_prompt_buttons()[1];
+        let discard = Event::Mouse(MouseEvent {
+            x: x + w / 2.0,
+            y: y + h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(app.on_event(&discard), Response::Exit);
+        assert_eq!(other.read(), original);
+    }
+
+    #[test]
+    fn saving_on_close_writes_the_files_and_asks_where_for_the_untitled() {
+        let file = Scratch::with("quit-own", "{\n  \"a\": 1\n}\n");
+        let out = Scratch::with("quit-untitled", "");
+        let mut app = opened(&file);
+        set_key(&mut app, "a", "2");
+        // The untitled tab App::new opens with, given something unsaved.
+        app.switch_to(0);
+        if let Some(doc) = app.documents.first_mut() {
+            doc.input = String::from("[1]");
+            doc.reparse();
+        }
+        app.editing_path = Some(vec![PathSegment::Index(0)]);
+        app.edit_buffer = String::from("7");
+        app.commit_edit();
+        assert!(app.documents[0].dirty, "control: both tabs have changes");
+
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(
+            app.on_event(&press(Key::S)),
+            Response::Redraw,
+            "one document has no file, so the window waits while it asks where"
+        );
+        assert_eq!(
+            file.read(),
+            "{\n  \"a\": 2\n}\n",
+            "the one with a file is saved without asking"
+        );
+        assert!(app.picker.is_saving());
+        choose(&mut app, &out.0);
+        assert_eq!(out.read(), "[7]");
+        assert!(app.quit, "nothing is left unsaved, so the window may go");
+    }
+
+    #[test]
+    fn a_tab_with_unsaved_changes_asks_before_it_closes() {
+        let mut app = two_tabs();
+        set_key(&mut app, "a", "9");
+        app.handle_event(&press_ctrl(Key::W));
+        assert_eq!(app.documents.len(), 2, "closed without asking");
+        let id = app.documents[0].id;
+        assert_eq!(app.close_prompt, Some(CloseScope::Tab(id)));
+
+        app.handle_event(&typed('d'));
+        assert_eq!(app.documents.len(), 1, "Don't save did not close it");
+        assert_eq!(app.documents[0].title, "right");
+    }
+
+    /// A tab's "x" closes *that* tab, and the active tab stays the same
+    /// document -- closing a tab before it shifts every index after it.
+    #[test]
+    fn a_tabs_close_mark_closes_that_tab_and_the_active_one_stays() {
+        // Three tabs with the middle one active: were it the last, closing an
+        // earlier tab would leave the index past the end, and the clamp back
+        // onto the last tab would land on the right document by accident.
+        let mut app = two_tabs();
+        app.new_tab();
+        app.switch_to(1);
+        let active = app.documents[app.active_tab].id;
+        let (tabs, _) = app.tab_rects();
+        let (_, x, w) = tabs[0];
+        assert_eq!(
+            click(&mut app, x + w - 8.0, TOOLBAR_HEIGHT + 16.0),
+            EventResult::Consumed
+        );
+        assert_eq!(app.documents.len(), 2, "the close mark did not close it");
+        assert!(app.documents.iter().all(|d| d.title != "left"));
+        assert_eq!(
+            app.documents[app.active_tab].id, active,
+            "the selection moved to a different document"
+        );
+
+        // The rest of the tab still only selects it.
+        let (tabs, _) = app.tab_rects();
+        let (_, x, _) = tabs[0];
+        click(&mut app, x + 4.0, TOOLBAR_HEIGHT + 16.0);
+        assert_eq!(app.documents.len(), 2);
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn every_toolbar_button_does_what_it_says() {
+        let centre = |action| {
+            toolbar_buttons()
+                .into_iter()
+                .find(|b| b.0 == action)
+                .map(|(_, _, x, w)| (x + w / 2.0, TOOLBAR_BUTTON_Y + TOOLBAR_BUTTON_H / 2.0))
+                .expect("a button")
+        };
+        let mut app = two_tabs();
+
+        let (x, y) = centre(ToolbarAction::New);
+        assert_eq!(click(&mut app, x, y), EventResult::Consumed);
+        assert_eq!(app.documents.len(), 3);
+
+        let (x, y) = centre(ToolbarAction::Open);
+        click(&mut app, x, y);
+        assert!(app.picker.is_open() && !app.picker.is_saving());
+        app.picker.close();
+
+        let (x, y) = centre(ToolbarAction::Save);
+        click(&mut app, x, y);
+        assert!(app.picker.is_saving(), "a document with no file asks where");
+        app.picker.close();
+
+        let (x, y) = centre(ToolbarAction::Search);
+        click(&mut app, x, y);
+        assert!(app.search_visible);
+
+        let (x, y) = centre(ToolbarAction::Edit);
+        click(&mut app, x, y);
+        assert!(app.edit_mode);
+    }
+
+    /// The find bar lies over the tree; a click on it is the bar's.
+    #[test]
+    fn the_find_bar_takes_its_own_clicks() {
+        // The root is always expanded, so row 1 is key "a".
+        let mut app = two_tabs();
+        app.handle_event(&press_ctrl(Key::F));
+        let bar_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+
+        assert_eq!(
+            click(&mut app, CASE_BUTTON_X + 4.0, bar_y + 12.0),
+            EventResult::Consumed
+        );
+        assert!(
+            app.search_case_sensitive,
+            "Aa did not turn matching case on"
+        );
+
+        // Row 1 of the tree lies under the bar here.
+        click(&mut app, 200.0, bar_y + LINE_HEIGHT + 4.0);
+        assert_eq!(
+            app.documents[0].selected_node, 0,
+            "a click on the find bar went through to the tree"
+        );
+
+        let close_x = app.search_close_x();
+        click(&mut app, close_x + 6.0, bar_y + 12.0);
+        assert!(!app.search_visible, "Esc on the bar did not close it");
+    }
+
+    /// A value being typed is committed to its own tab when the tab changes,
+    /// not carried into the next one.
+    #[test]
+    fn a_value_being_typed_stays_with_its_own_tab() {
+        let mut app = two_tabs();
+        app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
+        app.edit_buffer = "7".to_owned();
+        app.handle_event(&press_ctrl(Key::Tab));
+        assert_eq!(app.active_tab, 1);
+        assert!(
+            app.editing_path.is_none(),
+            "the edit followed into the next tab"
+        );
+        assert_eq!(app.documents[0].input, r#"{"a":7,"b":"x"}"#);
+        assert_eq!(
+            app.documents[1].input, r#"{"a":2,"b":"x"}"#,
+            "the other tab was changed"
+        );
+    }
+
+    /// Closing a tab redraws even when the tab that takes its place looks the
+    /// same in every other respect -- two fresh tabs did, and the closed one
+    /// stayed on screen.
+    #[test]
+    fn closing_a_tab_is_a_redraw_even_when_the_next_looks_the_same() {
+        let mut app = App::new();
+        app.new_tab();
+        app.switch_to(0);
+        assert_eq!(app.handle_event(&press_ctrl(Key::W)), EventResult::Consumed);
+        assert_eq!(app.documents.len(), 1);
+    }
+
+    /// A tree edit leaves the text in the layout it had: one line or indented,
+    /// with or without a final newline.
+    #[test]
+    fn a_tree_edit_keeps_the_texts_layout() {
+        for (before, after) in [
+            (r#"{"a":1,"b":[true,null]}"#, r#"{"a":2,"b":[true,null]}"#),
+            ("{\"a\":1}\n", "{\"a\":2}\n"),
+            ("{\n  \"a\": 1\n}", "{\n  \"a\": 2\n}"),
+            ("{\n\t\"a\": 1\n}\n", "{\n\t\"a\": 2\n}\n"),
+        ] {
+            let mut doc = Document::new(1, String::from("layout"));
+            doc.input = before.to_owned();
+            doc.reparse();
+            let root = doc.parsed.as_mut().expect("the fixture parses");
+            assert!(set_value_at_path(
+                root,
+                &[PathSegment::Key(String::from("a"))],
+                JsonValue::Number(2.0)
+            ));
+            doc.regenerate_input();
+            assert_eq!(doc.input, after, "from {before:?}");
+        }
+    }
+
+    /// The find bar's matches belong to the document on screen. Moving to a
+    /// tab with nothing parsed kept the last tab's matches, highlighted against
+    /// a document they are not in.
+    #[test]
+    fn the_matches_belong_to_the_document_on_screen() {
+        let mut app = two_tabs();
+        app.handle_event(&press_ctrl(Key::F));
+        app.handle_event(&typed('a'));
+        assert!(
+            !app.search_results.is_empty(),
+            "control: the search matches"
+        );
+        app.new_tab();
+        assert!(
+            app.search_results.is_empty(),
+            "an empty tab shows the last tab's matches: {:?}",
+            app.search_results
+        );
+    }
+
+    /// A value half typed when the window closes is a change like any other:
+    /// it is asked about, not dropped.
+    #[test]
+    fn a_value_being_typed_when_the_window_closes_is_asked_about() {
+        let mut app = two_tabs();
+        app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
+        app.edit_buffer = "8".to_owned();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(app.documents[0].input, r#"{"a":8,"b":"x"}"#);
+    }
+
+    /// Ctrl+S in the middle of typing a value saves the value.
+    #[test]
+    fn saving_keeps_the_value_being_typed() {
+        let file = Scratch::with("save-mid-edit", r#"{"a":1}"#);
+        let mut app = opened(&file);
+        app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
+        app.edit_buffer = "6".to_owned();
+        app.handle_event(&press_ctrl(Key::S));
+        assert_eq!(file.read(), r#"{"a":6}"#);
+        assert!(app.editing_path.is_none(), "the edit was left open");
     }
 
     // --- Parser tests ---

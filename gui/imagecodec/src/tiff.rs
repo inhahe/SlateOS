@@ -48,16 +48,18 @@
 //!
 //! # What is not here yet
 //!
-//! Old-style JPEG, and the rarer codecs (NeXT, ThunderScan, SGI LogLuv,
-//! PixarLog), are refused by name. The first page only is read, as libtiff's
-//! viewers read it; the others are not reached.
+//! Old-style JPEG, SGI LogLuv and PixarLog are refused by name. The first
+//! page only is read, as libtiff's viewers read it; the others are not
+//! reached.
 
 mod color;
 mod dir;
 mod fax;
 mod lzw;
+mod next;
 mod read;
 mod rgba;
+mod thunder;
 
 use alloc::vec::Vec;
 

@@ -338,23 +338,28 @@ impl WidgetKind {
         }
     }
 
-    /// Icon character.
-    pub fn icon(&self) -> &str {
+    /// The icon this kind is drawn with, by its name in the icon theme -- in
+    /// its title bar, in the picker, and as the placeholder of a kind with no
+    /// content yet.
+    ///
+    /// Emoji until 2026-09-26, which no font the desktop has can draw, so
+    /// every widget's title bar began with a box (design-decisions.md §881).
+    #[must_use]
+    pub const fn icon_name(&self) -> &'static str {
         match self {
-            Self::Clock => "\u{1F552}",
-            Self::Weather => "\u{2600}",
-            Self::SystemMonitor => "\u{1F4CA}",
-            Self::Calendar => "\u{1F4C5}",
-            Self::Notes => "\u{1F4DD}",
-            Self::RssFeed => "\u{1F4F0}",
-            Self::MusicPlayer => "\u{1F3B5}",
-            Self::PhotoFrame => "\u{1F5BC}",
-            Self::WorldClock => "\u{1F30D}",
-            Self::Reminders => "\u{1F514}",
-            Self::DiskUsage => "\u{1F4BE}",
-            Self::NetworkMonitor => "\u{1F310}",
-            Self::BatteryStatus => "\u{1F50B}",
-            Self::Custom { .. } => "\u{1F50C}",
+            Self::Clock | Self::WorldClock => "preferences-system-time",
+            Self::Weather => "weather-clear",
+            Self::SystemMonitor => "utilities-system-monitor",
+            Self::Calendar => "x-office-calendar",
+            Self::Notes => "accessories-text-editor",
+            Self::RssFeed => "internet-news-reader",
+            Self::MusicPlayer => "audio-x-generic",
+            Self::PhotoFrame => "image-x-generic",
+            Self::Reminders => "notifications",
+            Self::DiskUsage => "drive-harddisk",
+            Self::NetworkMonitor => "network-idle",
+            Self::BatteryStatus => "battery",
+            Self::Custom { .. } => "application-x-executable",
         }
     }
 
@@ -692,6 +697,8 @@ pub struct DesktopWidgetManager {
     /// How wide to draw a note's caret -- the user's accessibility setting,
     /// passed in by the shell as it is to the icons' rename field.
     caret_width: f32,
+    /// The icons the widgets drew, by image id, for the session to upload.
+    icon_registry: crate::IconRegistry,
 }
 
 /// A note open for writing: which widget, and the field its text is in.
@@ -743,7 +750,43 @@ impl DesktopWidgetManager {
             selected_widget: None,
             note: None,
             caret_width: guitk::textedit::CARET_WIDTH,
+            icon_registry: crate::IconRegistry::default(),
         }
+    }
+
+    /// What the icon a widget drew under `id` is, if one did.
+    #[must_use]
+    pub fn icon_request(&self, id: u64) -> Option<crate::IconRequest> {
+        self.icon_registry.request(id)
+    }
+
+    /// Forget the icons drawn: the appearance changed, and they are drawn
+    /// again in new colours under new ids.
+    pub fn clear_icon_requests(&self) {
+        self.icon_registry.clear();
+    }
+
+    /// The icon `name`, `side` pixels square at `(x, y)`, in `color` (its
+    /// alpha fades the icon, as it would a glyph's).
+    fn icon(
+        &self,
+        commands: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        side: f32,
+        name: &'static str,
+        color: Color,
+    ) {
+        // A few dozen pixels; `as` saturates rather than wrapping.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let px = side.round().max(1.0) as u32;
+        commands.push(RenderCommand::Image {
+            x,
+            y,
+            width: side,
+            height: side,
+            image_id: self.icon_registry.icon(name, px, color),
+        });
     }
 
     /// How wide to draw a note's caret, from the user's settings.
@@ -1353,21 +1396,19 @@ impl DesktopWidgetManager {
         });
 
         // Icon and title.
-        commands.push(RenderCommand::Text {
-            x: x + 8.0,
-            y: y + 4.0,
-            text: w.kind.icon().to_string(),
-            font_size: 12.0,
-            color: Color::rgba(
+        self.icon(
+            commands,
+            x + 8.0,
+            y + (TITLE_HEIGHT - 12.0) / 2.0,
+            12.0,
+            w.kind.icon_name(),
+            Color::rgba(
                 p.subtext0.r,
                 p.subtext0.g,
                 p.subtext0.b,
                 (w.bg_opacity as f32 * 1.2) as u8,
             ),
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        );
         commands.push(RenderCommand::Text {
             x: x + 24.0,
             y: y + 5.0,
@@ -1526,25 +1567,34 @@ impl DesktopWidgetManager {
             }
             WidgetKind::BatteryStatus => {
                 let b = &live.battery;
-                commands.push(RenderCommand::Text {
+                // The battery as it is: missing, charging, nearly flat, or
+                // just a battery.
+                let name = if !b.present {
+                    "battery-missing"
+                } else {
+                    match b.state {
+                        crate::power::BatteryState::Charging => "battery-charging",
+                        crate::power::BatteryState::Critical => "battery-caution",
+                        _ => WidgetKind::BatteryStatus.icon_name(),
+                    }
+                };
+                self.icon(
+                    commands,
                     x,
                     y,
-                    text: "\u{1F50B}".to_string(),
-                    font_size: 28.0,
+                    28.0,
+                    name,
                     // Green when there is a battery, neutral when there is
-                    // not. A green battery glyph over "No battery" is a
-                    // small claim of its own -- green is the colour of a
-                    // healthy thing, and there is no thing.
-                    color: if b.present {
+                    // not. A green battery over "No battery" is a small claim
+                    // of its own -- green is the colour of a healthy thing,
+                    // and there is no thing.
+                    if b.present {
                         let g = p.ink(p.green);
                         Color::rgba(g.r, g.g, g.b, alpha)
                     } else {
                         Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha)
                     },
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
+                );
                 // `present`, not a charge of zero: "no battery" and "a flat
                 // battery" are different facts and a desktop reader acts on
                 // them differently.
@@ -1583,16 +1633,14 @@ impl DesktopWidgetManager {
             }
             _ => {
                 // Generic placeholder for other widget types.
-                commands.push(RenderCommand::Text {
+                self.icon(
+                    commands,
                     x,
-                    y: y + height / 2.0 - 10.0,
-                    text: w.kind.icon().to_string(),
-                    font_size: 32.0,
-                    color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
+                    y + height / 2.0 - 16.0,
+                    32.0,
+                    w.kind.icon_name(),
+                    Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),
+                );
                 commands.push(RenderCommand::Text {
                     x: x + 40.0,
                     y: y + height / 2.0 - 4.0,
@@ -1656,16 +1704,14 @@ impl DesktopWidgetManager {
             if cy + 32.0 > py + picker_h {
                 break;
             }
-            commands.push(RenderCommand::Text {
-                x: px + 16.0,
-                y: cy + 4.0,
-                text: kind.icon().to_string(),
-                font_size: 16.0,
-                color: p.ink(p.blue),
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.icon(
+                commands,
+                px + 16.0,
+                cy + 4.0,
+                16.0,
+                kind.icon_name(),
+                p.ink(p.blue),
+            );
             commands.push(RenderCommand::Text {
                 x: px + 40.0,
                 y: cy + 6.0,
@@ -1895,7 +1941,62 @@ mod tests {
     fn kind_labels_not_empty() {
         for kind in WidgetKind::all_builtin() {
             assert!(!kind.label().is_empty());
-            assert!(!kind.icon().is_empty());
+        }
+    }
+
+    /// **Every kind is drawn with an icon the built-in set draws**, and so are
+    /// the battery's states. They were emoji, which no font the desktop has
+    /// can draw.
+    #[test]
+    fn every_widget_picture_is_an_icon_the_built_in_set_draws() {
+        let drawn = appearance::icons::built_in_names();
+        for kind in WidgetKind::all_builtin()
+            .into_iter()
+            .chain([WidgetKind::Custom {
+                app_name: "x".into(),
+            }])
+        {
+            assert!(
+                drawn.contains(&kind.icon_name()),
+                "{kind:?}: {} is not in the built-in set",
+                kind.icon_name()
+            );
+        }
+        for name in ["battery-missing", "battery-charging", "battery-caution"] {
+            assert!(drawn.contains(&name), "{name}");
+        }
+    }
+
+    /// The battery widget draws the battery as it is.
+    #[test]
+    fn the_battery_widget_draws_the_state_the_battery_is_in() {
+        let p = Palette::for_mode(false);
+        let mut mgr = DesktopWidgetManager::new();
+        mgr.add_widget(WidgetKind::BatteryStatus, GridPos::new(0, 0))
+            .unwrap();
+        for (present, state, want) in [
+            (
+                false,
+                crate::power::BatteryState::NoBattery,
+                "battery-missing",
+            ),
+            (
+                true,
+                crate::power::BatteryState::Charging,
+                "battery-charging",
+            ),
+            (
+                true,
+                crate::power::BatteryState::Critical,
+                "battery-caution",
+            ),
+            (true, crate::power::BatteryState::Discharging, "battery"),
+        ] {
+            let mut live = sample_readings();
+            live.battery.present = present;
+            live.battery.state = state;
+            let cmds = render_named(&mgr, &p, &live);
+            assert_eq!(texts_saying(&cmds, want, 28.0).len(), 1, "{state:?}");
         }
     }
 
@@ -2336,6 +2437,43 @@ mod tests {
     /// than once at different sizes — a widget's icon appears in its title bar
     /// at 12pt and again as the generic arm's placeholder at 32pt, and every
     /// kind's label appears in the picker as well as on the widget.
+    /// `mgr`'s render of `live` in `p`, with each icon it drew stood in for
+    /// by a text of the icon's name, at the icon's size and in its colour --
+    /// so the tables in this module find an icon the way they find a text.
+    fn render_named(
+        mgr: &DesktopWidgetManager,
+        p: &Palette,
+        live: &LiveReadings,
+    ) -> Vec<RenderCommand> {
+        mgr.render(p, live)
+            .into_iter()
+            .map(|command| {
+                if let RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } = command
+                {
+                    if let Some(icon) = mgr.icon_request(image_id) {
+                        return RenderCommand::Text {
+                            x,
+                            y,
+                            text: icon.name.to_string(),
+                            color: icon.color,
+                            font_size: width,
+                            font_weight: FontWeightHint::Regular,
+                            max_width: None,
+                            overflow: TextOverflow::Clip,
+                        };
+                    }
+                }
+                command
+            })
+            .collect()
+    }
+
     fn texts_saying(cmds: &[RenderCommand], want: &str, size: f32) -> Vec<Color> {
         // `RichText` too: a note's lines are drawn by its text field, which
         // colours a selection by span and so draws every line that way. With
@@ -2417,7 +2555,7 @@ mod tests {
             for accent in SAFE_ACCENTS {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
-                let cmds = full_mgr().render(&p, &sample_readings());
+                let cmds = render_named(&full_mgr(), &p, &sample_readings());
                 assert_drawn_from(
                     &p,
                     &cmds,
@@ -2437,8 +2575,8 @@ mod tests {
     #[test]
     fn the_fixture_takes_every_branch_the_widget_layer_has() {
         let p = Palette::for_mode(false);
-        let body = body_mgr().render(&p, &sample_readings());
-        let full = full_mgr().render(&p, &sample_readings());
+        let body = render_named(&body_mgr(), &p, &sample_readings());
+        let full = render_named(&full_mgr(), &p, &sample_readings());
 
         assert_eq!(
             strokes_of_width(&body, 1.0).len(),
@@ -2478,11 +2616,15 @@ mod tests {
             ("CPU", 10.0, "a meter's label"),
             (EMPTY_NOTE, 12.0, "the placeholder an empty note draws"),
             (WRITTEN_NOTE, 12.0, "a written note"),
-            (WidgetKind::BatteryStatus.icon(), 28.0, "the battery glyph"),
+            (
+                WidgetKind::BatteryStatus.icon_name(),
+                28.0,
+                "the battery glyph",
+            ),
             ("37%", 20.0, "the battery's reading"),
             ("2h 30m remaining", 11.0, "the battery's estimate"),
             (
-                WidgetKind::Weather.icon(),
+                WidgetKind::Weather.icon_name(),
                 32.0,
                 "the generic arm's placeholder icon",
             ),
@@ -2498,7 +2640,7 @@ mod tests {
         // The picker's own three text colours.
         for (glyph, size, what) in [
             ("Add Widget", 16.0, "the picker's title"),
-            (WidgetKind::Clock.icon(), 16.0, "a picker row's icon"),
+            (WidgetKind::Clock.icon_name(), 16.0, "a picker row's icon"),
             (WidgetKind::Clock.label(), 13.0, "a picker row's label"),
             ("1x1", 10.0, "a picker row's size hint"),
         ] {
@@ -2539,7 +2681,8 @@ mod tests {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
 
-                let ring = strokes_of_width(&full_mgr().render(&p, &sample_readings()), 2.0);
+                let ring =
+                    strokes_of_width(&render_named(&full_mgr(), &p, &sample_readings()), 2.0);
                 assert_eq!(ring.len(), 1, "expected exactly one selection ring");
                 assert_eq!(
                     ring[0], p.accent,
@@ -2583,7 +2726,7 @@ mod tests {
             for accent in SAFE_ACCENTS {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
-                let cmds = full_mgr().render(&p, &sample_readings());
+                let cmds = render_named(&full_mgr(), &p, &sample_readings());
 
                 let bars = meter_rects(&cmds);
                 assert_eq!(bars.len(), 6);
@@ -2610,7 +2753,7 @@ mod tests {
                     );
                 }
 
-                let batt = texts_saying(&cmds, WidgetKind::BatteryStatus.icon(), 28.0);
+                let batt = texts_saying(&cmds, WidgetKind::BatteryStatus.icon_name(), 28.0);
                 assert_eq!(batt.len(), 1);
                 assert_eq!(
                     rgb(batt[0]),
@@ -2807,9 +2950,10 @@ mod tests {
         // ever walks the green branch -- sabotaging the glyph to stay green
         // unconditionally left every test passing. Green is the colour of a
         // healthy thing, and over "No battery" there is no thing.
+        // The picture of no battery, and not a battery's.
         let glyph = texts_saying(
-            &full_mgr().render(&p, &readings),
-            WidgetKind::BatteryStatus.icon(),
+            &render_named(&full_mgr(), &p, &readings),
+            "battery-missing",
             28.0,
         );
         assert_eq!(glyph.len(), 1, "control: the glyph should be drawn once");
@@ -2849,7 +2993,7 @@ mod tests {
 
         // The control: with readings there are six rects, a track and a fill
         // for each meter. This is the same fixture minus the readings.
-        let with_readings = meter_rects(&full_mgr().render(&p, &sample_readings()));
+        let with_readings = meter_rects(&render_named(&full_mgr(), &p, &sample_readings()));
         assert_eq!(
             with_readings.len(),
             6,
@@ -2941,7 +3085,7 @@ mod tests {
     fn the_three_meters_never_look_alike() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let bars = meter_rects(&full_mgr().render(&p, &sample_readings()));
+            let bars = meter_rects(&render_named(&full_mgr(), &p, &sample_readings()));
             let fills = [rgb(bars[1]), rgb(bars[3]), rgb(bars[5])];
             for i in 0..fills.len() {
                 for j in (i + 1)..fills.len() {
@@ -2963,7 +3107,7 @@ mod tests {
     fn an_empty_note_and_a_written_one_never_look_alike() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let cmds = body_mgr().render(&p, &sample_readings());
+            let cmds = render_named(&body_mgr(), &p, &sample_readings());
 
             let empty = texts_saying(&cmds, EMPTY_NOTE, 12.0);
             let written = texts_saying(&cmds, WRITTEN_NOTE, 12.0);
@@ -3002,7 +3146,7 @@ mod tests {
     fn every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let cmds = body_mgr().render(&p, &sample_readings());
+            let cmds = render_named(&body_mgr(), &p, &sample_readings());
 
             // The grid's wash is a fixed 80, independent of any widget: it is a
             // property of the grid, which no widget owns.
@@ -3032,7 +3176,7 @@ mod tests {
             // The title bar's icon and text are emphasised: 1.2x the panel's
             // opacity, so a widget you can barely see still has a readable name.
             for (glyph, size) in [
-                (WidgetKind::Clock.icon(), 12.0),
+                (WidgetKind::Clock.icon_name(), 12.0),
                 (WidgetKind::Clock.label(), 11.0),
             ] {
                 let t = texts_saying(&cmds, glyph, size);
@@ -3061,10 +3205,10 @@ mod tests {
                 ("Disk", 10.0, p.subtext0),
                 (WRITTEN_NOTE, 12.0, p.text),
                 (EMPTY_NOTE, 12.0, p.subtext0),
-                (WidgetKind::BatteryStatus.icon(), 28.0, p.ink(p.green)),
+                (WidgetKind::BatteryStatus.icon_name(), 28.0, p.ink(p.green)),
                 ("37%", 20.0, p.text),
                 ("2h 30m remaining", 11.0, p.subtext0),
-                (WidgetKind::Weather.icon(), 32.0, p.surface2),
+                (WidgetKind::Weather.icon_name(), 32.0, p.surface2),
                 (WidgetKind::Weather.label(), 13.0, p.subtext0),
             ] {
                 let t = texts_saying(&cmds, glyph, size);
@@ -3095,7 +3239,7 @@ mod tests {
     fn the_picker_casts_the_shared_popup_shadow() {
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            let s = shadows_with_blur(&full_mgr().render(&p, &sample_readings()), 20.0);
+            let s = shadows_with_blur(&render_named(&full_mgr(), &p, &sample_readings()), 20.0);
             assert_eq!(s.len(), 1, "expected exactly one picker shadow");
             assert_eq!(
                 s[0],
@@ -3115,7 +3259,7 @@ mod tests {
     fn a_translucent_widget_casts_a_translucent_shadow() {
         let p = Palette::for_mode(false);
 
-        for s in shadows_with_blur(&body_mgr().render(&p, &sample_readings()), 12.0) {
+        for s in shadows_with_blur(&render_named(&body_mgr(), &p, &sample_readings()), 12.0) {
             assert_eq!(rgb(s), (0, 0, 0), "a widget's shadow is not black");
             assert_eq!(
                 s.a, ODD_SHADOW,
@@ -3152,7 +3296,7 @@ mod tests {
             for accent in SAFE_ACCENTS {
                 let mut p = Palette::for_mode(light);
                 p.accent = accent;
-                let cmds = full_mgr().render(&p, &sample_readings());
+                let cmds = render_named(&full_mgr(), &p, &sample_readings());
 
                 assert_eq!(
                     fills_exactly(&cmds, p.painted(appearance::Surface::Card)),
@@ -3175,7 +3319,7 @@ mod tests {
 
                 for (glyph, size, role, what) in [
                     ("Add Widget", 16.0, p.text, "the picker's title"),
-                    (WidgetKind::Clock.icon(), 16.0, p.blue, "a row's icon"),
+                    (WidgetKind::Clock.icon_name(), 16.0, p.blue, "a row's icon"),
                     (WidgetKind::Clock.label(), 13.0, p.text, "a row's label"),
                     ("1x1", 10.0, p.subtext0, "a row's size hint"),
                 ] {

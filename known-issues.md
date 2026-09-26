@@ -24338,14 +24338,15 @@ at the size they are drawn. Twelve tests, fourteen mutations, all killed.
 **Also gone:** `SvgDocument::render_commands`, which approximated every path
 fill by its bounding box and which nothing called.
 
-## TD-C-THE-SHELL-DREW-ITS-PICTURES-AS-EMOJI-NO-FONT-IT-HAS-CAN-DRAW (lane C, 2026-09-26) -- PARTLY FIXED the same day
+## TD-C-THE-SHELL-DREW-ITS-PICTURES-AS-EMOJI-NO-FONT-IT-HAS-CAN-DRAW (lane C, 2026-09-26) -- FIXED the same day
 
-**Status:** PARTLY FIXED 2026-09-26 -- the taskbar's start button, bell and
-tray chevron are icons (design-decisions §881), and so is every overlay's
-picture (volume, brightness, media, lock keys, devices, screenshots,
-microphone, network, battery, and the ten generic ones), and the login
-screen's (an account's default picture, the password eye, the bar's power,
-accessibility and keyboard buttons, the power menu); the widgets are next.
+**Status:** FIXED 2026-09-26 -- the taskbar's start button, bell and tray
+chevron are icons (design-decisions §881), and so is every overlay's picture
+(volume, brightness, media, lock keys, devices, screenshots, microphone,
+network, battery, and the ten generic ones), the login screen's (an account's
+default picture, the password eye, the bar's power, accessibility and keyboard
+buttons, the power menu), and the widgets' (each kind's title icon, the
+picker's rows, the battery by state, a placeholder).
 
 **In short:** the shell drew its small pictures as characters -- a bell, a
 speaker, a sun, a padlock, a person, a power symbol, the start button's `≡` --

@@ -1808,10 +1808,23 @@ live.
   icon pack. The shell names an icon by a deterministic image id and the
   session uploads each once before the frame that names it. The start
   menu's places and power button are drawn with them, and the desktop's
-  icons -- each type its own picture in its own hue, where they were emoji;
-  the taskbar and the tray are next. The toolkit's SVG renderer learned to
-  inherit the root element's style, which is how most icon sets are
-  written.
+  icons -- each type its own picture in its own hue, where they were emoji.
+  The toolkit's SVG renderer learned to inherit the root element's style,
+  which is how most icon sets are written.
+
+- `[C]` **The shell's pictures are icons, not emoji** -- done 2026-09-26
+  (`design-decisions.md` §881). No font the desktop has draws emoji, so every
+  picture the shell drew as a character was a box: the taskbar's start
+  button, bell and chevron, every on-screen overlay (volume, brightness,
+  media, lock keys, devices, network, battery), the login screen's account
+  picture, eye and buttons, and every widget's title. All are icons from the
+  theme now, forty-five more of them in the built-in set, and every surface
+  uploads the icons its frame names first. Found on the way and fixed: the
+  SVG renderer drew strokes two pixels wide at every size and curves at half
+  strength, and filled a shape's parts one by one (holes filled in); it now
+  fills a shape and its stroke each in one coverage pass, with joins, caps
+  and fill rules, scaled to the size drawn. Programs' tray icons are still
+  characters (a wire change, lane F's).
 
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing

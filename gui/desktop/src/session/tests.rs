@@ -5819,6 +5819,36 @@ fn an_overlays_icon_goes_up_before_the_frame_that_names_it() {
     );
 }
 
+/// **A widget's icon reaches the background with the frame that names it** --
+/// drawn by the widget layer and answered for by the shell.
+#[test]
+fn a_widgets_icon_goes_up_with_the_background() {
+    settingsfile::testing::with_scratch_config("session-widget-icon", |_root| {
+        let (mut session, desktop, _turn) = session();
+        session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        session.paint_background().expect("paint");
+        let background = session.background().window();
+        let tree = session.background_drawn.clone().expect("drawn");
+        let (clock, _) = icon_ids(&tree)
+            .into_iter()
+            .find(|(id, _)| {
+                session
+                    .shell()
+                    .icon_request(*id)
+                    .is_some_and(|r| r.name == "preferences-system-time")
+            })
+            .expect("the clock widget drew no icon the shell knows");
+        assert!(
+            icon_uploads(&desktop)
+                .iter()
+                .any(|u| u.0 == background && u.1 == clock),
+            "the clock widget's icon was not sent to the background"
+        );
+    });
+}
+
 /// **A change of appearance puts the icons back to the compositor** -- the
 /// old ones dropped, the new ones (in the new colours, under new ids) sent
 /// when a frame next names them.

@@ -3394,7 +3394,27 @@ fn the_shell_answers_for_the_desktops_icons_and_forgets_them_on_a_change() {
         "the shell does not know the overlay's icon"
     );
 
+    // And a widget's, which the widget layer keeps.
+    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+    let widget: Vec<u64> = shell
+        .render_widgets()
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image { image_id, .. } => Some(*image_id),
+            _ => None,
+        })
+        .collect();
+    assert!(!widget.is_empty(), "the clock widget drew no icon");
+    assert!(
+        shell.icon_request(widget[0]).is_some(),
+        "the shell does not know the widget's icon"
+    );
+
     shell.set_appearance(AppearanceSettings::default());
+    assert!(
+        shell.icon_request(widget[0]).is_none(),
+        "a widget's icon request outlived the appearance it was drawn in"
+    );
     assert!(
         shell.icon_request(ids[0]).is_none(),
         "a desktop icon's request outlived the appearance it was drawn in"

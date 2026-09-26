@@ -2203,6 +2203,7 @@ impl DesktopShell {
         self.icon_registry.clear();
         self.icons.clear_icon_requests();
         self.osd.clear_icon_requests();
+        self.widgets.clear_icon_requests();
         // The caret width goes to the surface that draws one. Pushed here
         // rather than read at draw time because `render` is handed a
         // `Palette`, and a palette is colours: 839 put the caret's width in
@@ -3164,6 +3165,7 @@ impl DesktopShell {
             .request(id)
             .or_else(|| self.icons.icon_request(id))
             .or_else(|| self.osd.icon_request(id))
+            .or_else(|| self.widgets.icon_request(id))
     }
 
     /// Draw the icon `name`, `logical` pixels square at this scale and in

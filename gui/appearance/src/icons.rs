@@ -682,7 +682,7 @@ fn render_raster(path: &Path, size: u32, color: Color) -> Option<Icon> {
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "icon sizes are at most MAX_ICON_PX and images are bounded by imagecodec's limits;               every float is a pixel coordinate or a colour channel well inside f32's exact range"
+    reason = "icon sizes are at most MAX_ICON_PX and images are bounded by imagecodec's limits; every float is a pixel coordinate or a colour channel well inside f32's exact range"
 )]
 fn fit_square(image: &imagecodec::Image, size: u32) -> Vec<u32> {
     let side = size as usize;

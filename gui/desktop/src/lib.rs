@@ -5717,7 +5717,7 @@ impl DesktopShell {
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
-                reason = "clamped to 0.0..=1.0 first, so the product is 0.0..=255.0                           and rounds into a u8 exactly"
+                reason = "clamped to 0.0..=1.0 first, so the product is 0.0..=255.0 and rounds into a u8 exactly"
             )]
             let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
             out.push(ShellRequest::SetOpacity { window: id, alpha });
@@ -9181,7 +9181,7 @@ impl DesktopShell {
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "guarded above: budget and slot are both positive and                       budget >= slot, and the quotient of two taskbar-sized                       lengths cannot approach usize's range"
+            reason = "guarded above: budget and slot are both positive and budget >= slot, and the quotient of two taskbar-sized lengths cannot approach usize's range"
         )]
         let slots = (budget / slot) as usize;
         slots
@@ -9239,7 +9239,7 @@ impl DesktopShell {
         // positions cannot disagree about how many slots there are.
         #[allow(
             clippy::cast_precision_loss,
-            reason = "bounded by tray_slot_budget, which is a fraction of the                       taskbar measured in 24-pixel slots"
+            reason = "bounded by tray_slot_budget, which is a fraction of the taskbar measured in 24-pixel slots"
         )]
         let count = slots as f32;
         slot.mul_add(count, padding)

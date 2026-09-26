@@ -165963,6 +165963,43 @@ against the same commits: nothing with `xargs -r git diff-tree`, the five
 given in the request with a regression case for `test-pre-push-gates.py`.
 Until then, run a script's `test-<stem>.py` by hand before pushing it.
 
+### [E] The explorer's file-type columns showed the same invented values for every file -- 2026-09-25
+**Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25); OPEN for audio files, a picture's colour depth, and tar, gzip, 7z and rar archives -- lane E's.
+
+**In short:** the file explorer's detail view can show extra columns for
+pictures (size, colour depth, shape), songs (length, bitrate, artist...),
+source files (lines) and archives (files inside, compressed size). Every one of
+those cells was made up: every picture was "1920 x 1080, 24-bit, 16:9", every
+song "3:42, 320 kbps, Unknown Artist", every source file 0 lines, every archive
+0 files. A user who turned a column on saw the same numbers down the whole
+list. The code said so -- "Stub: in a real implementation, read image headers"
+-- and a test pinned the invented 3:42.
+
+**Fixed.** Pictures are measured by `imagecodec::dimensions`, which reads the
+header only (64 KiB first; a TIFF whose directory is further in, up to 64 MiB),
+and turns the size the way the picture is shown; the ratio is worked out from
+it (`16:9`, or `1.78:1` when the lowest terms are not small). WebP, ICO and TIFF
+joined the column's formats. Source files are counted (line feeds, plus an
+unfinished last line; files over 16 MiB are left blank). A zip archive's own
+directory is read through `ziparchive::parse_at` from the end of the file:
+files inside, their compressed size, and the share that saves. Each provider
+keeps what it read per file while the file's size and time are unchanged
+(`FactCache`), because a provider is asked for every visible row every frame.
+
+**Still open, and blank rather than guessed:**
+- **Audio** -- nothing in `apps/explorer` reads an audio file. The readers
+  exist (`parse_id3v2`, `parse_flac_header`, `parse_wav_header`) inside
+  `apps/musicplayer`'s binary, where nothing else can reach them. The proper
+  fix is to move them into a crate both use, then fill the six audio columns
+  from it. Lane E's next.
+- **Colour depth** -- `imagecodec` does not report a picture's bit depth; a
+  header-only `info` beside `dimensions` would be lane F's.
+- **Tar, gzip, 7z, rar** -- `apps/explorer` reads no archive but zip.
+
+**Where.** `apps/explorer/src/columns.rs`: `ImageColumns`, `AudioColumns`,
+`CodeColumns`, `ArchiveColumns`, `FactCache`, `image_size`, `line_count`,
+`zip_facts`.
+
 ### [E] The torrent client transfers nothing: it has no tracker or peer transport -- 2026-09-25
 **Status:** OPEN -- `apps/torrent/src/main.rs`; nothing blocks it but the
 work itself.

@@ -22,10 +22,28 @@
 //! | Provider | Extensions | Columns |
 //! |---|---|---|
 //! | [`StandardColumns`] | *(all files)* | Name, Size, Date Modified, Type, Date Created, Attributes |
-//! | [`ImageColumns`] | png, jpg, gif, bmp, svg | Dimensions, Color Depth, Aspect Ratio |
+//! | [`ImageColumns`] | png, jpg, gif, bmp, webp, ico, tiff, svg | Dimensions, Color Depth, Aspect Ratio |
 //! | [`AudioColumns`] | mp3, wav, flac, ogg | Duration, Bitrate, Sample Rate, Artist, Album, Title |
 //! | [`CodeColumns`] | rs, c, cpp, py, js, ts, ... | Line Count, Language |
 //! | [`ArchiveColumns`] | zip, tar, gz | Compressed Size, Compression Ratio, File Count Inside |
+//!
+//! ## Nothing made up
+//!
+//! Until 2026-09-25 three of the four file-type providers invented their
+//! cells: every picture was "1920 x 1080", "24-bit", "16:9"; every song was
+//! 3:42 at 320 kbps by "Unknown Artist"; every source file had 0 lines and
+//! every archive 0 files. A column a user turned on showed the same numbers
+//! for every row. A cell now holds what was read from the file, or nothing:
+//! pictures are measured by `imagecodec`, source files counted, zip archives
+//! read through `ziparchive`. What nothing here reads yet -- a picture's
+//! colour depth, anything in an audio file, the inside of a tar, 7z or rar --
+//! is blank rather than a guess (known-issues.md,
+//! `[E] The explorer's file-type columns showed the same invented values for
+//! every file`).
+//!
+//! A provider is asked for every visible row in every frame, so what it reads
+//! is kept per file while the file's size and modification time are unchanged
+//! ([`FactCache`]): a stat per cell, and a read per version of a file.
 
 use appearance::Palette;
 use guitk::color::Color;
@@ -35,6 +53,8 @@ use guitk::text;
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::SystemTime;
 
 // ============================================================================
 // Column identity
@@ -884,22 +904,34 @@ impl ColumnProvider for ImageColumns {
         COLS.get_or_init(ImageColumns::make_defs)
     }
 
+    /// The picture's size as `imagecodec` reads its header, and the ratio
+    /// of the two. Colour depth is blank: `imagecodec` does not report one,
+    /// and the cell said "24-bit" for every picture.
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
-        // Stub: in a real implementation, read image headers for metadata.
-        let _ = path;
+        static SIZES: OnceLock<FactCache<Option<(u32, u32)>>> = OnceLock::new();
+        let size = || {
+            SIZES
+                .get_or_init(FactCache::new)
+                .get(path, image_size)
+                .flatten()
+        };
         match column_id {
-            ColumnId::DIMENSIONS => {
-                // Placeholder — would parse image header.
-                ColumnValue::Text("1920 \u{00d7} 1080".to_string())
-            }
-            ColumnId::COLOR_DEPTH => ColumnValue::Text("24-bit".to_string()),
-            ColumnId::ASPECT_RATIO => ColumnValue::Text("16:9".to_string()),
+            ColumnId::DIMENSIONS => size().map_or(ColumnValue::Empty, |(w, h)| {
+                ColumnValue::Text(format!("{w} \u{00d7} {h}"))
+            }),
+            ColumnId::ASPECT_RATIO => size()
+                .and_then(|(w, h)| aspect_ratio(w, h))
+                .map_or(ColumnValue::Empty, ColumnValue::Text),
             _ => ColumnValue::Empty,
         }
     }
 
+    /// Every format `imagecodec` measures, and SVG, whose cells stay blank:
+    /// nothing here reads an SVG's size.
     fn supported_extensions(&self) -> &[&str] {
-        &["png", "jpg", "jpeg", "gif", "bmp", "svg"]
+        &[
+            "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "cur", "tif", "tiff", "svg",
+        ]
     }
 }
 
@@ -999,23 +1031,14 @@ impl ColumnProvider for AudioColumns {
         COLS.get_or_init(AudioColumns::make_defs)
     }
 
+    /// Nothing, for now: this crate reads no audio file. Every cell was
+    /// invented -- 3:42, 320 kbps, 44.1 kHz, "Unknown Artist" for every song
+    /// -- and the title was the file name cut at its *first* dot. The readers
+    /// exist, in `apps/musicplayer`'s binary where nothing else can reach
+    /// them; the columns come back when they are a crate both can use.
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
-        // Stub: would read ID3/Vorbis/FLAC tags.
-        let _ = path;
-        match column_id {
-            ColumnId::DURATION => ColumnValue::Duration(222), // 3:42
-            ColumnId::BITRATE => ColumnValue::Text("320 kbps".to_string()),
-            ColumnId::SAMPLE_RATE => ColumnValue::Text("44.1 kHz".to_string()),
-            ColumnId::ARTIST => ColumnValue::Text("Unknown Artist".to_string()),
-            ColumnId::ALBUM => ColumnValue::Text("Unknown Album".to_string()),
-            ColumnId::TITLE => {
-                // Derive title from filename as a fallback.
-                let name = path.rsplit('/').next().unwrap_or(path);
-                let title = name.rsplit('.').next_back().unwrap_or(name);
-                ColumnValue::Text(title.to_string())
-            }
-            _ => ColumnValue::Empty,
-        }
+        let _ = (path, column_id);
+        ColumnValue::Empty
     }
 
     fn supported_extensions(&self) -> &[&str] {
@@ -1091,9 +1114,14 @@ impl ColumnProvider for CodeColumns {
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
         let ext = path_extension(path);
         match column_id {
+            // Counted, once per version of the file. It was 0 for every file.
             ColumnId::LINE_COUNT => {
-                // Stub: would read and count newlines. Return placeholder.
-                ColumnValue::Number(0)
+                static LINES: OnceLock<FactCache<Option<i64>>> = OnceLock::new();
+                LINES
+                    .get_or_init(FactCache::new)
+                    .get(path, line_count)
+                    .flatten()
+                    .map_or(ColumnValue::Empty, ColumnValue::Number)
             }
             ColumnId::LANGUAGE => ColumnValue::Text(Self::language_for_ext(&ext).to_string()),
             _ => ColumnValue::Empty,
@@ -1161,13 +1189,30 @@ impl ColumnProvider for ArchiveColumns {
         COLS.get_or_init(ArchiveColumns::make_defs)
     }
 
+    /// A zip archive's own directory, read through `ziparchive`: how many
+    /// files it holds, what they take up compressed, and how much of their
+    /// size that saves. Every cell was 0 for every archive. Tar, gzip, 7z and
+    /// rar are blank: nothing here reads them yet.
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
-        // Stub: would parse archive headers for real metadata.
-        let _ = path;
+        static ZIPS: OnceLock<FactCache<Option<ArchiveFacts>>> = OnceLock::new();
+        if path_extension(path) != "zip" {
+            return ColumnValue::Empty;
+        }
+        let Some(facts) = ZIPS
+            .get_or_init(FactCache::new)
+            .get(path, zip_facts)
+            .flatten()
+        else {
+            return ColumnValue::Empty;
+        };
         match column_id {
-            ColumnId::COMPRESSED_SIZE => ColumnValue::Size(0),
-            ColumnId::COMPRESSION_RATIO => ColumnValue::Percentage(0.0),
-            ColumnId::FILE_COUNT_INSIDE => ColumnValue::Number(0),
+            ColumnId::COMPRESSED_SIZE => ColumnValue::Size(facts.compressed),
+            ColumnId::COMPRESSION_RATIO => facts
+                .saved()
+                .map_or(ColumnValue::Empty, ColumnValue::Percentage),
+            ColumnId::FILE_COUNT_INSIDE => {
+                i64::try_from(facts.files).map_or(ColumnValue::Empty, ColumnValue::Number)
+            }
             _ => ColumnValue::Empty,
         }
     }
@@ -1175,6 +1220,227 @@ impl ColumnProvider for ArchiveColumns {
     fn supported_extensions(&self) -> &[&str] {
         &["zip", "tar", "gz", "7z", "rar"]
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reading files for the providers
+// ---------------------------------------------------------------------------
+
+/// A file's length and modification time: what says it is the version a
+/// cached fact was read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileStamp {
+    /// The stamp of the regular file at `path`, or `None` if there is none.
+    fn of(path: &str) -> Option<Self> {
+        let md = std::fs::metadata(path).ok()?;
+        md.is_file().then(|| Self {
+            len: md.len(),
+            modified: md.modified().ok(),
+        })
+    }
+}
+
+/// The most files a provider remembers facts about. Past it the cache is
+/// emptied and refilled by whatever is on screen: a bound, not an eviction
+/// policy, since what matters is that a long browse cannot grow it forever.
+const MAX_CACHED_FILES: usize = 4096;
+
+/// Facts a provider read from files, kept while each file is unchanged.
+///
+/// A provider's `value` is asked for every visible row in every frame, so
+/// reading the file each time would read a folder of photographs many times a
+/// second. A stat is cheap; the read happens once per version of a file.
+struct FactCache<T> {
+    entries: Mutex<HashMap<String, (FileStamp, T)>>,
+}
+
+impl<T: Clone> FactCache<T> {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// `read(path)`, or what it said last time if the file has not changed
+    /// since. `None` for a path that is not a regular file.
+    fn get(&self, path: &str, read: impl FnOnce(&str) -> T) -> Option<T> {
+        let stamp = FileStamp::of(path)?;
+        // A poisoned lock holds a map that is still a map; nothing to recover.
+        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((kept, facts)) = entries.get(path)
+            && *kept == stamp
+        {
+            return Some(facts.clone());
+        }
+        // Not held while the file is read: another window's frame can use the
+        // cache meanwhile.
+        drop(entries);
+        let facts = read(path);
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if entries.len() >= MAX_CACHED_FILES {
+            entries.clear();
+        }
+        entries.insert(path.to_owned(), (stamp, facts.clone()));
+        Some(facts)
+    }
+}
+
+/// Up to `max` bytes from the start of the file at `path`.
+fn read_prefix(path: &str, max: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(u64::try_from(max).ok()?)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
+}
+
+/// How much of a picture is read for its size at first. Every format keeps its
+/// size near the start except TIFF, whose directory may be anywhere, and a
+/// JPEG with a large thumbnail ahead of its frame.
+const IMAGE_HEAD_BYTES: usize = 64 * 1024;
+
+/// How much is read when the size is not in the first [`IMAGE_HEAD_BYTES`].
+/// A picture larger than this whose size lies past it is left blank.
+const IMAGE_WHOLE_BYTES: usize = 64 * 1024 * 1024;
+
+/// A picture's size, as shown -- `imagecodec` turns it by the orientation the
+/// file records -- or `None` if it is not a picture `imagecodec` measures.
+fn image_size(path: &str) -> Option<(u32, u32)> {
+    let head = read_prefix(path, IMAGE_HEAD_BYTES)?;
+    match imagecodec::dimensions(&head) {
+        Ok(size) => Some(size),
+        // The start did not hold it, and there is more of the file.
+        Err(_) if head.len() == IMAGE_HEAD_BYTES => {
+            imagecodec::dimensions(&read_prefix(path, IMAGE_WHOLE_BYTES)?).ok()
+        }
+        Err(_) => None,
+    }
+}
+
+/// `w:h` in lowest terms when those are small -- `16:9`, `4:3`, `1:1` --
+/// otherwise as a decimal to one, as `1.78:1`. `None` for a zero side.
+fn aspect_ratio(w: u32, h: u32) -> Option<String> {
+    let divisor = greatest_common_divisor(w, h);
+    let (a, b) = (w.checked_div(divisor)?, h.checked_div(divisor)?);
+    if a == 0 || b == 0 {
+        return None;
+    }
+    Some(if a <= 32 && b <= 32 {
+        format!("{a}:{b}")
+    } else {
+        format!("{:.2}:1", f64::from(w) / f64::from(h))
+    })
+}
+
+fn greatest_common_divisor(mut a: u32, mut b: u32) -> u32 {
+    while let Some(rest) = a.checked_rem(b) {
+        a = b;
+        b = rest;
+    }
+    a
+}
+
+/// The largest file whose lines are counted. A larger one is left blank rather
+/// than read whole into memory for one cell.
+const MAX_COUNTED_BYTES: usize = 16 * 1024 * 1024;
+
+/// How many lines the file at `path` has: its line feeds, and one more if it
+/// does not end with one. An empty file has none.
+#[allow(
+    clippy::naive_bytecount,
+    reason = "one pass per version of a file, for one cell; not worth a dependency"
+)]
+fn line_count(path: &str) -> Option<i64> {
+    let bytes = read_prefix(path, MAX_COUNTED_BYTES.saturating_add(1))?;
+    if bytes.len() > MAX_COUNTED_BYTES {
+        return None;
+    }
+    let feeds = bytes.iter().filter(|&&b| b == b'\n').count();
+    let unfinished = usize::from(bytes.last().is_some_and(|&b| b != b'\n'));
+    i64::try_from(feeds.saturating_add(unfinished)).ok()
+}
+
+/// What a zip archive's directory says about what it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ArchiveFacts {
+    /// Its files, not counting directories.
+    files: u64,
+    /// What they take up in the archive.
+    compressed: u64,
+    /// What they take up taken out of it.
+    uncompressed: u64,
+}
+
+impl ArchiveFacts {
+    /// The share of the files' size the archive saves, or `None` for
+    /// archives of empty files, where there is nothing to save.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a ratio for a percentage cell; a u64 byte count's last bits are below what it shows"
+    )]
+    fn saved(self) -> Option<f32> {
+        if self.uncompressed == 0 {
+            return None;
+        }
+        let kept = self.compressed as f64 / self.uncompressed as f64;
+        #[allow(clippy::cast_possible_truncation, reason = "clamped to 0..=1 first")]
+        Some((1.0 - kept).clamp(0.0, 1.0) as f32)
+    }
+}
+
+/// A file read at any offset, for `ziparchive`, which reads a zip's directory
+/// from its end without reading the rest.
+struct FileSource(std::fs::File);
+
+impl ziparchive::ReadAt for FileSource {
+    type Error = std::io::Error;
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::{Read, Seek, SeekFrom};
+        self.0.seek(SeekFrom::Start(offset))?;
+        let mut filled = 0_usize;
+        while let Some(rest) = buf.get_mut(filled..) {
+            if rest.is_empty() {
+                break;
+            }
+            match self.0.read(rest)? {
+                0 => break,
+                got => filled = filled.saturating_add(got),
+            }
+        }
+        Ok(filled)
+    }
+
+    fn len(&mut self) -> std::io::Result<u64> {
+        self.0.metadata().map(|md| md.len())
+    }
+}
+
+/// A zip archive's directory, or `None` if the file is not a zip archive
+/// `ziparchive` can read.
+fn zip_facts(path: &str) -> Option<ArchiveFacts> {
+    let mut source = FileSource(std::fs::File::open(path).ok()?);
+    let entries = ziparchive::parse_at(&mut source).ok()?;
+    let files = entries.iter().filter(|e| !e.is_dir);
+    Some(files.fold(
+        ArchiveFacts {
+            files: 0,
+            compressed: 0,
+            uncompressed: 0,
+        },
+        |facts, e| ArchiveFacts {
+            files: facts.files.saturating_add(1),
+            compressed: facts.compressed.saturating_add(e.compressed_size),
+            uncompressed: facts.uncompressed.saturating_add(e.uncompressed_size),
+        },
+    ))
 }
 
 // ============================================================================
@@ -1970,13 +2236,6 @@ mod tests {
         assert_eq!(val, ColumnValue::Text("Rust".to_string()));
     }
 
-    #[test]
-    fn test_audio_duration_value() {
-        let prov = AudioColumns;
-        let val = prov.value("/music/song.mp3", ColumnId::DURATION);
-        assert_eq!(val, ColumnValue::Duration(222));
-    }
-
     // ------------------------------------------------------------------
     // Sort
     // ------------------------------------------------------------------
@@ -2237,9 +2496,10 @@ mod tests {
     #[test]
     fn test_manager_get_value_matching_extension() {
         let mgr = ColumnManager::with_defaults();
+        // A picture that is not there has no size: the cell is blank. It was
+        // "1920 x 1080", whatever the file.
         let val = mgr.get_value("/photos/sunset.png", ColumnId::DIMENSIONS);
-        // ImageColumns returns the stub "1920 x 1080".
-        assert!(matches!(val, ColumnValue::Text(_)));
+        assert_eq!(val, ColumnValue::Empty);
     }
 
     // ------------------------------------------------------------------
@@ -2563,5 +2823,197 @@ mod tests {
             seen.push(def.key);
         }
         assert!(seen.len() >= 20, "only {} columns have keys", seen.len());
+    }
+
+    // ------------------------------------------------------------------
+    // What the file-type columns read
+    //
+    // Every cell was invented: "1920 x 1080" for every picture, 0 lines for
+    // every source file, 0 files in every archive, 3:42 for every song.
+    // ------------------------------------------------------------------
+
+    /// A scratch directory of the test's own, removed when dropped.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "slateos-explorer-columns-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            drop(std::fs::remove_dir_all(&dir));
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+
+        fn file(&self, name: &str, bytes: &[u8]) -> String {
+            let path = self.0.join(name);
+            std::fs::write(&path, bytes).expect("write");
+            path.to_str().expect("a text path").to_owned()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.0));
+        }
+    }
+
+    #[test]
+    fn a_picture_is_measured_and_its_ratio_is_worked_out() {
+        let dir = Scratch::new("pictures");
+        let wide = dir.file("wide.png", &imagecodec::testing::png_gradient(160, 90));
+        let square = dir.file("square.png", &imagecodec::testing::png_gradient(33, 33));
+        let odd = dir.file("odd.png", &imagecodec::testing::png_gradient(137, 100));
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.get_value(&wide, ColumnId::DIMENSIONS),
+            ColumnValue::Text(String::from("160 \u{00d7} 90"))
+        );
+        assert_eq!(
+            mgr.get_value(&wide, ColumnId::ASPECT_RATIO),
+            ColumnValue::Text(String::from("16:9"))
+        );
+        assert_eq!(
+            mgr.get_value(&square, ColumnId::ASPECT_RATIO),
+            ColumnValue::Text(String::from("1:1"))
+        );
+        assert_eq!(
+            mgr.get_value(&odd, ColumnId::ASPECT_RATIO),
+            ColumnValue::Text(String::from("1.37:1"))
+        );
+        // Not a picture, or not one this system measures: blank, not a guess.
+        let fake = dir.file("fake.png", b"not a picture at all");
+        assert_eq!(
+            mgr.get_value(&fake, ColumnId::DIMENSIONS),
+            ColumnValue::Empty
+        );
+        assert_eq!(
+            mgr.get_value(&wide, ColumnId::COLOR_DEPTH),
+            ColumnValue::Empty
+        );
+    }
+
+    #[test]
+    fn a_changed_file_is_read_again() {
+        let dir = Scratch::new("changed");
+        let path = dir.file("grows.png", &imagecodec::testing::png_gradient(10, 10));
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.get_value(&path, ColumnId::DIMENSIONS),
+            ColumnValue::Text(String::from("10 \u{00d7} 10"))
+        );
+        // A different size of file, so the stamp moves even where the clock's
+        // resolution would not.
+        dir.file("grows.png", &imagecodec::testing::png_gradient(300, 20));
+        assert_eq!(
+            mgr.get_value(&path, ColumnId::DIMENSIONS),
+            ColumnValue::Text(String::from("300 \u{00d7} 20")),
+            "the size of the file that was there before was shown"
+        );
+    }
+
+    #[test]
+    fn a_source_file_is_counted() {
+        let dir = Scratch::new("lines");
+        let mgr = ColumnManager::with_defaults();
+        let cases: [(&str, &[u8], i64); 5] = [
+            ("empty.rs", b"", 0),
+            ("one.rs", b"fn main() {}\n", 1),
+            ("unfinished.rs", b"a\nb\nc", 3),
+            ("finished.rs", b"a\nb\nc\n", 3),
+            ("crlf.rs", b"a\r\nb\r\n", 2),
+        ];
+        for (name, text, lines) in cases {
+            let path = dir.file(name, text);
+            assert_eq!(
+                mgr.get_value(&path, ColumnId::LINE_COUNT),
+                ColumnValue::Number(lines),
+                "{name}"
+            );
+        }
+        // A file that is not there has no count, where it had 0.
+        assert_eq!(
+            mgr.get_value("/nowhere/missing.rs", ColumnId::LINE_COUNT),
+            ColumnValue::Empty
+        );
+    }
+
+    #[test]
+    fn a_zip_archive_says_what_it_holds() {
+        let dir = Scratch::new("zips");
+        let entry = |name: &str, data: Vec<u8>, store_only: bool| ziparchive::ZipWriteEntry {
+            name: name.as_bytes().to_vec(),
+            data,
+            store_only,
+            dos_datetime: 0,
+        };
+        let bytes = ziparchive::create(&[
+            entry("folder/", Vec::new(), true),
+            entry("folder/repeats.txt", vec![b'a'; 10_000], false),
+            entry("stored.bin", vec![7; 1_000], true),
+        ]);
+        let path = dir.file("two.zip", &bytes);
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.get_value(&path, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Number(2),
+            "the folder was counted as a file, or the files were not"
+        );
+        let ColumnValue::Size(compressed) = mgr.get_value(&path, ColumnId::COMPRESSED_SIZE) else {
+            panic!("no compressed size");
+        };
+        assert!(
+            compressed > 1_000 && compressed < 2_000,
+            "10,000 repeats deflate to almost nothing, 1,000 stored stay: {compressed}"
+        );
+        let ColumnValue::Percentage(saved) = mgr.get_value(&path, ColumnId::COMPRESSION_RATIO)
+        else {
+            panic!("no ratio");
+        };
+        assert!(saved > 0.8 && saved < 1.0, "{saved}");
+        // Not a zip, or another kind of archive: blank.
+        let fake = dir.file("fake.zip", b"PK not really");
+        assert_eq!(
+            mgr.get_value(&fake, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Empty
+        );
+        let tar = dir.file("one.tar", &[0; 1024]);
+        assert_eq!(
+            mgr.get_value(&tar, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Empty
+        );
+    }
+
+    #[test]
+    fn nothing_is_invented_for_an_audio_file() {
+        let dir = Scratch::new("audio");
+        let song = dir.file("my.song.mp3", b"ID3");
+        let mgr = ColumnManager::with_defaults();
+        for id in [
+            ColumnId::DURATION,
+            ColumnId::BITRATE,
+            ColumnId::SAMPLE_RATE,
+            ColumnId::ARTIST,
+            ColumnId::ALBUM,
+            ColumnId::TITLE,
+        ] {
+            assert_eq!(mgr.get_value(&song, id), ColumnValue::Empty, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn a_ratio_is_in_lowest_terms_or_a_decimal() {
+        assert_eq!(aspect_ratio(1920, 1080).as_deref(), Some("16:9"));
+        assert_eq!(aspect_ratio(4000, 3000).as_deref(), Some("4:3"));
+        assert_eq!(aspect_ratio(1080, 1920).as_deref(), Some("9:16"));
+        assert_eq!(aspect_ratio(1366, 768).as_deref(), Some("1.78:1"));
+        assert_eq!(aspect_ratio(0, 10), None);
+        assert_eq!(aspect_ratio(10, 0), None);
+        assert_eq!(greatest_common_divisor(12, 18), 6);
+        assert_eq!(greatest_common_divisor(7, 0), 7);
     }
 }

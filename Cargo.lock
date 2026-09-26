@@ -818,6 +818,7 @@ dependencies = [
  "textfind",
  "thumbs",
  "yamldoc",
+ "ziparchive",
 ]
 
 [[package]]

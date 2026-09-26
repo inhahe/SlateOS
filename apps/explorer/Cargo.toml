@@ -36,6 +36,11 @@ byteread = { path = "../../byteread" }
 # TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING.
 imagecodec = { path = "../../gui/imagecodec" }
 
+# A zip archive's own directory, for the archive columns: how many files it
+# holds and what they take up. Read from the end of the file through
+# `ziparchive::parse_at`, without reading the rest.
+ziparchive = { path = "../../ziparchive" }
+
 # The window, the event loop, and the hook that gets thumbnail pixels to the
 # compositor. Without it `main` was a scripted print-only demo: the explorer
 # could lay out a frame but had nowhere to put it and no way to be clicked.

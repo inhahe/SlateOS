@@ -11328,8 +11328,7 @@ of TIFF are not read yet (listed below) and are refused by name.
 
 ### Not yet read
 
-SGI LogLuv and PixarLog: libtiff reads them, and this refuses them by name,
-for now.
+PixarLog: libtiff reads it, and this refuses it by name, for now.
 (`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
 23 more fixtures, and 12,000 mutants of them without a disagreement. So did
 fax, whose leniency is kept whole -- a bad code word ends only its row, a
@@ -11370,7 +11369,14 @@ things libtiff does that this did not: a strip array the directory lacks
 fails the read, and an alpha plane promised past a separate-planes file's
 samples is read from strip 0 (`TIFFComputeStrip`), whatever the codec.
 Three corners are not modelled, each needing input built to reach it
-(`known-issues.md`).) Only the first page of a multi-page TIFF is read -- as
+(`known-issues.md`). Then SGI LogLuv, whose codec turns high-dynamic-range
+luminance and chroma into the 8-bit grey or RGB the reader asks for, through
+`exp` -- exact only as glibc's `exp` is, which here is a correctly rounded
+double-double `exp` plus glibc's own answers for the 21 of its 33,790
+possible arguments where glibc is not correctly rounded, checked against
+glibc for every one; and through `sqrt`, done in integers, the crate having
+no maths library. 16 fixtures, written by an encoder in the generator, and
+8,000 mutants.) Only the first page of a multi-page TIFF is read -- as
 gdk-pixbuf reads it.
 
 ### How it is held

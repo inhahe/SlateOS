@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 
 use super::dir::{self, Directory, File, compression, photometric};
 use super::fax::{self, Fax};
+use super::luv::{self, Luv};
 use super::lzw::Lzw;
 use super::ojpeg::Ojpeg;
 use super::{next, thunder};
@@ -53,6 +54,8 @@ pub(super) struct Reader<'a> {
     jpeg: Option<Jpeg>,
     /// The old-style JPEG codec's state, which spans strips.
     ojpeg: Option<Ojpeg>,
+    /// The SGI LogLuv codec's state, once set up.
+    luv: Option<Luv>,
     /// The codec's one-time setup (`tif_setupdecode`), once it has run.
     setup: Option<bool>,
     /// What a JPEG strip's decode may allocate.
@@ -71,6 +74,7 @@ impl<'a> Reader<'a> {
             fax: None,
             jpeg: None,
             ojpeg: None,
+            luv: None,
             setup: None,
             limits,
         }
@@ -203,7 +207,8 @@ impl<'a> Reader<'a> {
                 && self.setup_fax()
                 && self.setup_jpeg()
                 && (self.dir.compression != compression::THUNDERSCAN
-                    || thunder::setup(self.dir.bits_per_sample));
+                    || thunder::setup(self.dir.bits_per_sample))
+                && self.setup_luv();
             self.setup = Some(ok);
         }
         if self.setup == Some(true) {
@@ -213,6 +218,18 @@ impl<'a> Reader<'a> {
                 "TIFF compression for these samples",
             ))
         }
+    }
+
+    /// `LogLuvSetupDecode`, for SGI LogLuv: true for any other scheme.
+    fn setup_luv(&mut self) -> bool {
+        if !matches!(
+            self.dir.compression,
+            compression::SGILOG | compression::SGILOG24
+        ) {
+            return true;
+        }
+        self.luv = luv::setup(self.dir, self.limits.max_decompressed_bytes);
+        self.luv.is_some()
     }
 
     /// `Fax3SetupState`, for the fax schemes: true for any other.
@@ -466,6 +483,25 @@ impl<'a> Reader<'a> {
                     .map_err(|_| ImageError::Malformed("TIFF width"))?;
                 thunder::decode(bytes, out, scanline(self.dir)?, width)
             }
+            compression::SGILOG | compression::SGILOG24 => {
+                // A row at a time: the image's scanline, or a tile's row, of
+                // the 8-bit samples the codec was asked for.
+                let row = if self.dir.tiled {
+                    self.dir.tile_row_size()
+                } else {
+                    self.dir.scanline_size()
+                };
+                let row = row.and_then(|r| usize::try_from(r).ok()).unwrap_or(0);
+                let luv = self
+                    .luv
+                    .as_mut()
+                    .ok_or(ImageError::Unsupported("TIFF LogLuv"))?;
+                if luv.decode(bytes, out, row) {
+                    Ok(())
+                } else {
+                    Err(ImageError::Malformed("TIFF LogLuv strip"))
+                }
+            }
             compression::DEFLATE | compression::ADOBE_DEFLATE => {
                 let full = if self.dir.tiled {
                     self.dir.tile_size()
@@ -490,8 +526,12 @@ impl<'a> Reader<'a> {
     /// predictor does itself when it runs.
     fn after(&self, out: &mut [u8]) -> ImageResult<()> {
         let dir = self.dir;
-        // `JPEGSetupDecode` takes the byte swap away (`_TIFFNoPostDecode`).
-        if dir.compression == compression::JPEG {
+        // `JPEGSetupDecode` and `LogLuvSetupDecode` take the byte swap away
+        // (`_TIFFNoPostDecode`).
+        if matches!(
+            dir.compression,
+            compression::JPEG | compression::SGILOG | compression::SGILOG24
+        ) {
             return Ok(());
         }
         let swab16 = self.file.big_endian && dir.bits_per_sample == 16;

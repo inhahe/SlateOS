@@ -165419,18 +165419,18 @@ ported (design-decisions §1318), and fuzz it against the same oracle.
 
 **Status:** OPEN — lane F's, in progress.
 
-**In short:** TIFFs compressed with SGI LogLuv or PixarLog are refused
-(`ImageError::Unsupported`) though libtiff reads them. Both are rare, single
-vendors' formats. (`YCbCr` and CIELab samples, fax, JPEG, old-style JPEG,
-NeXT and ThunderScan were on this list; they decode now.)
+**In short:** TIFFs compressed with PixarLog are refused
+(`ImageError::Unsupported`) though libtiff reads them. It is a rare, single
+vendor's format. (`YCbCr` and CIELab samples, fax, JPEG, old-style JPEG,
+NeXT, ThunderScan and SGI LogLuv were on this list; they decode now.)
 
 **Where.** `gui/imagecodec/src/tiff/read.rs` (`run_codec`) and `rgba.rs`
 (`pick_contig`, `pick_separate`, `begin`).
 
 **The proper fix.** Port the rest of libtiff's reader, as the first stages were
-(design-decisions §1317): `tif_luv.c` and `tif_pixarlog.c`, whose floating
-point has to round as glibc's does -- tables generated from glibc, as
-CIELab's were. Fixtures from the same libtiff oracle.
+(design-decisions §1317): `tif_pixarlog.c`, whose tables are made with
+glibc's `exp` and `log` and must come out as glibc's do -- generated from
+glibc, as CIELab's were. Fixtures from the same libtiff oracle.
 
 ### [F] Old-style JPEG TIFFs: three corners of libtiff's reading not modelled -- 2026-09-25
 

@@ -1518,6 +1518,165 @@ def ojpeg_fixtures() -> dict[str, bytes]:
     return out
 
 
+SGILOG, SGILOG24 = 34676, 34677
+LOGL, LOGLUV = 32844, 32845
+# glibc 2.39's `exp` is not correctly rounded for these LogL codes: the
+# fixtures carry every one of them.
+GLIBC_EXP_EXCEPTIONS = [1446, 1731, 3281, 4127, 7617, 10550, 11288, 14113, 15572, 17888, 18453,
+                        19618, 22517, 27488, 29305, 29382, 30029, 30706, 31690, 31814, 32285]
+
+
+def luv_rle(plane: bytes) -> bytes:
+    """One byte plane run-length coded as libtiff's LogLuv encoder codes it:
+    runs of 4 or more as `count + 126` and the byte (at most 129), the rest
+    as literals of at most 127 bytes after their count."""
+    out, i, n = bytearray(), 0, len(plane)
+    while i < n:
+        j = i
+        while j < n and plane[j] == plane[i] and j - i < 129:
+            j += 1
+        if j - i >= 4:
+            out += bytes([j - i + 126, plane[i]])
+            i = j
+            continue
+        k = i
+        while k < n and k - i < 127:
+            m = k
+            while m < n and plane[m] == plane[k] and m - k < 4:
+                m += 1
+            if m - k >= 4:
+                break
+            k += 1
+        out += bytes([k - i]) + plane[i:k]
+        i = k
+    return bytes(out)
+
+
+def luv_rows(values: list[list[int]], kind: str) -> list[bytes]:
+    """Each row of stored codes as a LogLuv strip holds it: LogL's two
+    planes and LogLuv32's four, each run-length coded, or LogLuv24's three
+    bytes a pixel."""
+    rows = []
+    for row in values:
+        if kind == "24":
+            rows.append(b"".join(v.to_bytes(3, "big") for v in row))
+            continue
+        shifts = (8, 0) if kind == "L" else (24, 16, 8, 0)
+        rows.append(b"".join(luv_rle(bytes((v >> sh) & 255 for v in row)) for sh in shifts))
+    return rows
+
+
+def luv_codes(w: int, h: int, kind: str, seed: int) -> list[list[int]]:
+    """Codes a picture's worth: luminance mostly where the 8-bit reading
+    shows it (2^-16 to 2^0), the glibc exceptions, the extremes and signs;
+    chroma across the table, and past it for LogLuv24."""
+    rng = random.Random(seed)
+    specials = GLIBC_EXP_EXCEPTIONS + [0, 1, 0x3dff, 0x3e00, 0x3fff, 0x4000, 0x7fff]
+    rows = []
+    for y in range(h):
+        row = []
+        for x in range(w):
+            k = y * w + x
+            if kind == "24":
+                le = specials[k] % 1024 if k < len(specials) else rng.randrange(600, 780)
+                ce = rng.randrange(16384) if rng.random() < 0.1 else rng.randrange(16289)
+                row.append(le << 14 | ce)
+                continue
+            if k < len(specials):
+                le = specials[k]
+            elif rng.random() < 0.05:
+                le = rng.randrange(32768)
+            else:
+                le = rng.randrange(12288, 16500)
+            sign = 0x8000 if rng.random() < 0.03 else 0
+            if kind == "L":
+                row.append(sign | le)
+            else:
+                ue = rng.randrange(40, 200) if rng.random() < 0.95 else rng.randrange(256)
+                ve = rng.randrange(120, 220) if rng.random() < 0.95 else rng.randrange(256)
+                row.append((sign | le) << 16 | ue << 8 | ve)
+        rows.append(row)
+    return rows
+
+
+def luv_tiff(kind: str, w: int = 29, h: int = 23, *, rows_per_strip: int = 8, seed: int = 1,
+             big_endian: bool = False, tiles: tuple[int, int] | None = None,
+             extra: list[tuple[int, int, object]] | None = None, damage=None) -> bytes:
+    """A LogL (`kind` "L"), LogLuv32 ("32") or LogLuv24 ("24") TIFF of
+    synthetic codes, 16-bit signed samples as libtiff writes them."""
+    spp = 1 if kind == "L" else 3
+    if tiles is None:
+        codes = luv_codes(w, h, kind, seed)
+        rows = luv_rows(codes, kind)
+        chunks = [b"".join(rows[i:i + rows_per_strip]) for i in range(0, h, rows_per_strip)]
+    else:
+        tw, tl = tiles
+        codes = luv_codes(w, h, kind, seed)
+        chunks = []
+        for ty in range(0, h, tl):
+            for tx in range(0, w, tw):
+                tile = [[codes[y][x] if y < h and x < w else 0 for x in range(tx, tx + tw)]
+                        for y in range(ty, ty + tl)]
+                chunks.append(b"".join(luv_rows(tile, kind)))
+    if damage:
+        chunks = damage(chunks)
+    entries = [(WIDTH, LONG, [w]), (LENGTH, LONG, [h]), (BITS, SHORT, [16] * spp),
+               (COMPRESSION, SHORT, [SGILOG24 if kind == "24" else SGILOG]),
+               (PHOTOMETRIC, SHORT, [LOGL if kind == "L" else LOGLUV]), (SAMPLES, SHORT, [spp]),
+               (SAMPLE_FORMAT, SHORT, [2] * spp)]
+    if tiles is None:
+        entries.append((ROWS_PER_STRIP, LONG, [rows_per_strip]))
+    else:
+        entries += [(TILE_WIDTH, LONG, [tiles[0]]), (TILE_LENGTH, LONG, [tiles[1]])]
+    ours = {tag for tag, _, _ in (extra or [])}
+    entries = [e for e in entries if e[0] not in ours] + list(extra or [])
+    if tiles is None:
+        return write_tiff(entries, chunks, big_endian=big_endian)
+    return write_tiff(entries, chunks, big_endian=big_endian, offsets_tag=TILE_OFFSETS,
+                      counts_tag=TILE_BYTE_COUNTS)
+
+
+def luv_overrun() -> bytes:
+    """A LogL row whose high plane has a literal three bytes longer than the
+    row: libtiff reads what is left over as the low plane's first codes --
+    here a run of five, then an empty literal -- before the low plane's own."""
+    w, h = 6, 1
+    high = bytes([9]) + bytes([0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f]) + bytes([131, 0x40, 0x00])
+    low = bytes([2, 0x11, 0x22])
+    entries = [(WIDTH, LONG, [w]), (LENGTH, LONG, [h]), (BITS, SHORT, [16]), (COMPRESSION, SHORT, [SGILOG]),
+               (PHOTOMETRIC, SHORT, [LOGL]), (SAMPLES, SHORT, [1]), (ROWS_PER_STRIP, LONG, [h])]
+    return write_tiff(entries, [high + low])
+
+
+def luv_fixtures() -> dict[str, bytes]:
+    """SGI LogLuv (34676, 34677): Greg Ward Larson's high-dynamic-range
+    encodings, which libtiff's RGBA reader turns to 8-bit grey or RGB --
+    luminance through glibc's `exp`, colour through CCIR 709 primaries."""
+    out: dict[str, bytes] = {}
+    out["luv_logl"] = luv_tiff("L")
+    out["luv_logl_one_strip"] = luv_tiff("L", rows_per_strip=23, seed=2)
+    out["luv_32"] = luv_tiff("32")
+    out["luv_32_big_endian"] = luv_tiff("32", seed=3, big_endian=True)
+    out["luv_32_tiled"] = luv_tiff("32", 37, 29, tiles=(16, 16), seed=4)
+    out["luv_24"] = luv_tiff("24")
+    out["luv_24_tiled"] = luv_tiff("24", 37, 29, tiles=(16, 16), seed=5)
+    # The RGBA reader asks for 8-bit samples whatever the file says -- but
+    # only after checking what it says.
+    out["luv_24_bits8"] = luv_tiff("24", seed=6, extra=[(BITS, SHORT, [8, 8, 8])])
+    out["luv_32_uint"] = luv_tiff("32", seed=7, extra=[(SAMPLE_FORMAT, SHORT, [1, 1, 1])])
+    out["luv_logl_bits32_refused"] = luv_tiff("L", seed=8, extra=[(BITS, SHORT, [32])])
+    out["luv_32_float_refused"] = luv_tiff("32", seed=9, extra=[(SAMPLE_FORMAT, SHORT, [3, 3, 3])])
+    out["luv_overrun"] = luv_overrun()
+    # A strip cut short, LogL of three samples, planes apart, and LogLuv
+    # data called RGB: each refused, at a different step.
+    out["luv_32_cut_refused"] = luv_tiff("32", seed=10, damage=lambda c: [c[0][: len(c[0]) // 2]] + c[1:])
+    out["luv_logl_three_samples_refused"] = luv_tiff(
+        "L", seed=11, extra=[(SAMPLES, SHORT, [3]), (BITS, SHORT, [16, 16, 16])])
+    out["luv_32_planar_refused"] = luv_tiff("32", seed=12, extra=[(PLANAR, SHORT, [2])])
+    out["luv_32_rgb_refused"] = luv_tiff("32", seed=13, extra=[(PHOTOMETRIC, SHORT, [2])])
+    return out
+
+
 def pillow_fixtures() -> dict[str, bytes]:
     """Pictures written by Pillow's writer, which is libtiff's encoder."""
     rng = random.Random(99)
@@ -1540,7 +1699,7 @@ def main() -> None:
     oracle = build_oracle()
     made = {f"tiff_{name}": data for name, data in
             (fixtures() | pillow_fixtures() | fax_fixtures() | jpeg_fixtures()
-             | next_thunder_fixtures() | ojpeg_fixtures()).items()}
+             | next_thunder_fixtures() | ojpeg_fixtures() | luv_fixtures()).items()}
     for old in HERE.glob("tiff_*.tif"):
         old.unlink()
     for old in HERE.glob("tiff_*.txt"):

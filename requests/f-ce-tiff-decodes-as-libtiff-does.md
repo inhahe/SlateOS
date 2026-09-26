@@ -11,8 +11,9 @@ CIE L*a*b* pictures of every depth libtiff's viewer path takes, in strips or til
 PackBits, LZW, Deflate, CCITT fax (scanned documents) or JPEG, the 1990s
 "old-style" kind included (photographs and colour scans), turned by the
 `Orientation` tag. The picture is exactly what a libtiff-based viewer
-shows. A few rare TIFFs are refused by name -- `ImageError::Unsupported` --
-those of two vendor codecs, SGI LogLuv and PixarLog. Anything that decodes
+shows, high-dynamic-range SGI LogLuv included. A few rare TIFFs are
+refused by name -- `ImageError::Unsupported` -- those of one vendor codec,
+PixarLog. Anything that decodes
 through `imagecodec` needs no change; the few places that sniff formats
 themselves do.
 

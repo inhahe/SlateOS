@@ -150,11 +150,14 @@ pub struct Track {
 impl Track {
     /// Create a track from a file path with parsed metadata.
     pub fn from_path(path: PathBuf) -> Self {
-        let filename = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Unknown")
-            .to_string();
+        // The file's name as its bytes. One that was not UTF-8 read
+        // "Unknown", so two such songs looked the same and neither could be
+        // found by its name; a control character in one would break the line
+        // it is drawn on. `escape_unprintable` writes both as escapes.
+        let filename = path.file_stem().map_or_else(
+            || String::from("Unknown"),
+            |stem| quoting::escape_unprintable(stem.as_encoded_bytes()),
+        );
 
         Self {
             path,
@@ -2841,6 +2844,33 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A song without tags is named by its file, as the file's bytes: a
+    /// control character is escaped rather than drawn, and a name that is
+    /// not UTF-8 keeps its bytes rather than becoming "Unknown".
+    #[test]
+    fn a_song_is_named_by_its_file_as_it_is() {
+        assert_eq!(
+            Track::from_path(PathBuf::from("/m/Blue Train.flac")).title,
+            "Blue Train"
+        );
+        assert_eq!(
+            Track::from_path(PathBuf::from("/m/two\nlines.mp3")).title,
+            r"two\012lines"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let odd =
+                |b: &[u8]| Track::from_path(PathBuf::from(std::ffi::OsStr::from_bytes(b))).title;
+            assert_eq!(odd(b"/m/caf\xe9.mp3"), r"caf\351");
+            assert_ne!(
+                odd(b"/m/a\xfe.mp3"),
+                odd(b"/m/a\xff.mp3"),
+                "two names became one"
+            );
+        }
+    }
 
     /// A fresh player has no library.
     ///

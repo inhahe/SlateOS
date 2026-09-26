@@ -22,6 +22,9 @@ safeio = { path = "../safeio" }
 # What an audio file is and says -- its length, rate and tags -- shared with
 # the explorer's audio columns.
 audiotags = { path = "../audiotags" }
+# A song named by its file is shown by its bytes: what is not UTF-8, or is a
+# control character, written as an escape rather than lost.
+quoting = { path = "../../userspace/quoting" }
 
 [dev-dependencies]
 # `appearance::palette_check`.

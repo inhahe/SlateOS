@@ -78,7 +78,6 @@ userspace/fuser  # bare deny(clippy::all)
 userspace/fw
 userspace/fwupd  # bare deny(clippy::all)
 userspace/getent  # bare deny(clippy::all)
-userspace/getopt
 userspace/getty
 userspace/grub2  # bare deny(clippy::all)
 userspace/gzip

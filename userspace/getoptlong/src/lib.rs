@@ -734,8 +734,8 @@ impl Program {
     /// Yielded rather than returned: an unknown short option, a long name
     /// resolving to none or to several, a value given to an option that takes
     /// none, or a required value missing. The iterator ends after its first
-    /// error — glibc's own loop carries on, which only `nl` makes visible, and
-    /// no converted utility does.
+    /// error — glibc's own loop carries on, which only `nl` and `getopt(1)`
+    /// make visible; see [`Parser::keep_going`].
     #[must_use]
     pub fn parse<'a>(
         self,
@@ -757,9 +757,34 @@ impl Program {
         longs: &'a [(&'a str, Takes)],
         aliases: &'a [(&'a str, &'a str)],
     ) -> Parser<'a> {
-        let (ordering, shorts) = if let Some(rest) = shorts.strip_prefix('+') {
+        self.parse_bytes_aliased(argv, shorts.as_bytes(), longs, aliases)
+    }
+
+    /// [`parse`](Self::parse) for an option string that is data rather than
+    /// a literal -- `getopt(1)`'s, which a shell script hands it and which
+    /// may hold any byte. An option is a byte, not a character, so nothing
+    /// here needs the string to be UTF-8.
+    #[must_use]
+    pub fn parse_bytes<'a>(
+        self,
+        argv: &'a [OsString],
+        shorts: &'a [u8],
+        longs: &'a [(&'a str, Takes)],
+    ) -> Parser<'a> {
+        self.parse_bytes_aliased(argv, shorts, longs, &[])
+    }
+
+    /// The walk itself, over an option string of bytes.
+    fn parse_bytes_aliased<'a>(
+        self,
+        argv: &'a [OsString],
+        shorts: &'a [u8],
+        longs: &'a [(&'a str, Takes)],
+        aliases: &'a [(&'a str, &'a str)],
+    ) -> Parser<'a> {
+        let (ordering, shorts) = if let Some(rest) = shorts.strip_prefix(b"+") {
             (Ordering::RequireOrder, rest)
-        } else if let Some(rest) = shorts.strip_prefix('-') {
+        } else if let Some(rest) = shorts.strip_prefix(b"-") {
             (Ordering::ReturnInOrder, rest)
         } else {
             (Ordering::Permute, shorts)
@@ -820,7 +845,8 @@ pub struct Parser<'a> {
     /// an option that consumes the following word as its value, which is why
     /// this is an index rather than a `for` loop over `argv`.
     at: usize,
-    shorts: &'a str,
+    /// The option string past its `+` or `-`, as bytes.
+    shorts: &'a [u8],
     longs: &'a [(&'a str, Takes)],
     aliases: &'a [(&'a str, &'a str)],
     /// Where in `argv` the word being read now begins. See
@@ -1172,7 +1198,7 @@ impl<'a> Parser<'a> {
                 // `strchr(optstring, c)`, as glibc asks it: any byte of the
                 // option string counts, `:` included, which is what decides
                 // `-:` the way glibc decides it.
-                let listed = |c: Option<&u8>| c.is_some_and(|c| self.shorts.as_bytes().contains(c));
+                let listed = |c: Option<&u8>| c.is_some_and(|c| self.shorts.contains(c));
                 if self.long_only && (body.len() > 1 || !listed(body.first())) {
                     match self.long_item(body, &bytes, "-", true) {
                         Ok(Some(opt)) => return Some(Ok(opt)),
@@ -1196,7 +1222,7 @@ impl<'a> Parser<'a> {
 ///
 /// `None` for a letter the string does not list, which is
 /// `invalid option -- 'x'`.
-fn short_takes(shorts: &str, flag: u8) -> Option<Takes> {
+fn short_takes(shorts: &[u8], flag: u8) -> Option<Takes> {
     if flag == b':' || flag == b';' {
         // In this string a colon is punctuation, never an option; glibc gives
         // `-:` no way to be declared and coreutils has no such option. A
@@ -1204,7 +1230,7 @@ fn short_takes(shorts: &str, flag: u8) -> Option<Takes> {
         // ever appears in `W;`.
         return None;
     }
-    let bytes = shorts.as_bytes();
+    let bytes = shorts;
     let at = bytes.iter().position(|&c| c == flag)?;
     let mut colons = 0usize;
     let mut i = at.saturating_add(1);
@@ -1221,8 +1247,8 @@ fn short_takes(shorts: &str, flag: u8) -> Option<Takes> {
 
 /// Whether the option string makes `-W foo` mean `--foo`: glibc's test is on
 /// the FIRST `W` in the string (`strchr`), and whether a `;` follows it.
-fn w_is_long(shorts: &str) -> bool {
-    let bytes = shorts.as_bytes();
+fn w_is_long(shorts: &[u8]) -> bool {
+    let bytes = shorts;
     bytes
         .iter()
         .position(|&c| c == b'W')
@@ -2174,15 +2200,15 @@ mod tests {
 
     #[test]
     fn the_shorts_string_is_read_as_getopt_reads_it() {
-        assert_eq!(short_takes("acd:fhmr:t:", b'a'), Some(Takes::Nothing));
-        assert_eq!(short_takes("acd:fhmr:t:", b'd'), Some(Takes::Required));
-        assert_eq!(short_takes("c::k:", b'c'), Some(Takes::Optional));
-        assert_eq!(short_takes("c::k:", b'k'), Some(Takes::Required));
+        assert_eq!(short_takes(b"acd:fhmr:t:", b'a'), Some(Takes::Nothing));
+        assert_eq!(short_takes(b"acd:fhmr:t:", b'd'), Some(Takes::Required));
+        assert_eq!(short_takes(b"c::k:", b'c'), Some(Takes::Optional));
+        assert_eq!(short_takes(b"c::k:", b'k'), Some(Takes::Required));
         // A letter the string does not list, and the colon itself.
-        assert_eq!(short_takes("acd:fhmr:t:", b'z'), None);
-        assert_eq!(short_takes("acd:fhmr:t:", b':'), None);
+        assert_eq!(short_takes(b"acd:fhmr:t:", b'z'), None);
+        assert_eq!(short_takes(b"acd:fhmr:t:", b':'), None);
         // A trailing letter has no colon after it and takes nothing.
-        assert_eq!(short_takes("ab", b'b'), Some(Takes::Nothing));
+        assert_eq!(short_takes(b"ab", b'b'), Some(Takes::Nothing));
     }
 
     #[test]

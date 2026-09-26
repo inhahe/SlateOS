@@ -196,6 +196,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
 | `scripts/gen-script-index.py` | Generate a searchable one-line index of every script, and refuse a stale one. |
 | `scripts/getopt-ambiguity-check.py` | Differential check: does our long-option resolution agree with GNU's? |
+| `scripts/getopt-diff.sh` | Differential test: our `getopt` against util-linux 2.39.3's. |
 | `scripts/gitenv.py` | Choosing which git repository a subprocess talks to. |
 | `scripts/gittree.py` | Read many blobs out of *one* git process instead of one process per blob. |
 | `scripts/grade-positional.py` | Grade the positional drift model against a *known* disturbance window. |
@@ -421,4 +422,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_411 scripts._
+_412 scripts._

@@ -166618,9 +166618,12 @@ loop has its own edge cases around values, `=`, and operands.
 
 **Where:** the standalone ports that already share `usageerror` (the
 diagnostic wording) but not a parser -- `blockdev`, `capsh`, `chattr`,
-`flock`, `getopt`, `hostnamectl`, `lscpu`, `lsmem`, `objdump`, `resolvectl`,
+`flock`, `hostnamectl`, `lscpu`, `lsmem`, `objdump`, `resolvectl`,
 `route`, `sanitize`, `systemctl`, `tput` -- plus hand-parsed programs that do
-not use it yet. (`logger` was one; its port uses `getoptlong`, 413e56f1d.)
+not use it yet. (`logger` was one; its port uses `getoptlong`, 413e56f1d. So
+was `getopt` itself -- now a port of util-linux's, whose script-facing parse
+is `getoptlong` with the knobs it gained for it: keep-going, long-only,
+distinct entries, `W;`.)
 
 **The proper fix,** now possible: `getoptlong` (extracted from
 `coreutils/src/getopt.rs` on 2026-09-26) is the shared parser. Converting a

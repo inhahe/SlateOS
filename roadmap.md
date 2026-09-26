@@ -4265,7 +4265,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pv/truncate/shred/fuser: pipe/file management (progress bar, rate limit, secure overwrite, process finder via /proc)
   - [x] xdg-open/xdg-mime/mimeopen: file association (200+ MIME types, 25+ magic signatures, mimeapps.list, .desktop files)
   - [x] nproc/arch/pathchk/logname/users/tty: simple system info (CPU count, architecture, path validation, login/tty)
-  - [x] getopt/cksum/sync/printenv: shell scripting helpers (enhanced getopt, POSIX CRC, filesystem sync, env display)
+  - [x] getopt/cksum/sync/printenv: shell scripting helpers (enhanced getopt, POSIX CRC, filesystem sync, env display) — getopt is now a port of util-linux 2.39.3's (glibc getopt_long via `getoptlong`: keep-going, `-a` long-only, `W;`, bash/tcsh quoting, the old form; checked by `scripts/getopt-diff.sh`); cksum/sync/printenv are coreutils' own (design-decisions §1005)
   - [x] dc: desk calculator (reverse Polish notation, registers, conditionals, base conversion, modular exponentiation)
   - [x] crond: cron daemon with anacron (crontab scheduling, catch-up missed jobs, idle delay, daemon mode, mail notifications)
   - [x] ntpd: NTP time synchronization (NTP v4 packet format, drift correction, stratum hierarchy, poll intervals, jitter detection)

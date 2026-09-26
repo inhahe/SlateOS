@@ -1,607 +1,636 @@
-//! Slate OS getopt — parse command-line options for shell scripts, as
-//! util-linux's getopt(1) does.
+//! getopt -- parse command options for a shell script.
 //!
-//! This was a multi-personality binary chosen by argv[0], and is `getopt`
-//! alone now. `printenv`, `sync` and `cksum` were personalities here too,
-//! which nothing could reach: no link was ever staged for any of them. Each is
-//! `userspace/coreutils`'s own bin since 2026-09-24/25 -- ports of GNU's,
-//! differentially tested; `cksum` with all eleven of 9.4's `-a` algorithms
-//! where this one had the CRC alone -- and `coreutils` is the one home for such
-//! a name, the duplicate going (design-decisions.md §1005). With one mode
-//! left, the dispatch went too.
+//! A port of util-linux 2.39.3's `misc-utils/getopt.c`, function by function
+//! and with upstream's names; measured against `getopt from util-linux
+//! 2.39.3` by `scripts/getopt-diff.sh`.
+//!
+//! getopt(1) is glibc's `getopt_long` handed to a shell script, so what it
+//! does with the script's arguments is [`getoptlong`]'s, with the four
+//! switches glibc has that no utility of ours had needed: it keeps going
+//! after an error ([`getoptlong::Parser::keep_going`]), `-a` is
+//! `getopt_long_only` ([`getoptlong::Parser::long_only`]), every `-l` entry
+//! is its own option ([`getoptlong::Parser::distinct_entries`]), and `W;` in
+//! an option string makes `-W foo` mean `--foo`.
+//!
+//! This replaces a hand-written approximation that read argv as `String`
+//! (so a script passing a file name that is not UTF-8 made it panic), had
+//! its own idea of long-option matching, and neither permuted like glibc
+//! nor quoted for tcsh.
+//!
+//! # Exit status, as upstream's
+//!
+//! | status | meaning |
+//! |---|---|
+//! | 0 | parsed |
+//! | 1 | `getopt(3)` refused something in the script's arguments |
+//! | 2 | getopt(1)'s own arguments were wrong |
+//! | 3 | the output could not be written |
+//! | 4 | `-T`: this is the enhanced getopt |
+//!
+//! # What is not upstream's
+//!
+//! * **A name in a diagnostic** -- an option the script's caller typed, or
+//!   `-n`'s name -- has its control bytes escaped, where glibc writes them
+//!   raw: an argument holding a newline must not be able to print a line of
+//!   its own into the script's stderr. Printable text is glibc's.
+//! * **A long option whose name is not UTF-8** (`-l` with such bytes) can
+//!   never be matched, since [`getoptlong`]'s table holds text; glibc
+//!   compares bytes. It is still counted where glibc would count it, in the
+//!   table's positions.
 
-use quoting::quoteaf_os;
-use std::env;
-use std::process;
+use getoptlong::{Opt, Program, Takes};
+use quoting::{escape_unprintable, os_bytes};
+use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
+use std::process::ExitCode;
 
-// ── getopt ─────────────────────────────────────────────────────────
-// Enhanced getopt(1) compatible with util-linux getopt
+/// `GETOPT_EXIT_CODE`: `getopt(3)` refused an option in the script's
+/// arguments.
+const GETOPT_EXIT_CODE: u8 = 1;
+/// `PARAMETER_EXIT_CODE`: getopt(1)'s own arguments were wrong.
+const PARAMETER_EXIT_CODE: u8 = 2;
+/// `CLOSE_EXIT_CODE` (= `XALLOC_EXIT_CODE`): stdout could not be written.
+const CLOSE_EXIT_CODE: u8 = 3;
+/// `TEST_EXIT_CODE`: `-T`.
+const TEST_EXIT_CODE: u8 = 4;
 
-fn run_getopt() -> Result<(), String> {
-    let argv: Vec<String> = env::args().collect();
-    let mut optstring: Option<String> = None;
-    let mut longopts: Vec<LongOpt> = Vec::new();
-    let mut name = "getopt".to_string();
-    let mut shell = "bash".to_string();
-    let mut args_to_parse: Vec<String> = Vec::new();
-    let mut alternative = false; // Allow long options with single dash
-    let mut enhanced = false;
+/// getopt(1)'s own options, and the parse of the script's. Only the
+/// sentences are used: each is printed after a name this program chooses.
+const GETOPT: Program = Program::new("getopt", 2);
 
-    let mut i = 1;
-    while i < argv.len() {
-        match argv[i].as_str() {
-            "-h" | "--help" => {
-                eprintln!("Usage: getopt [OPTIONS] -- OPTSTRING PARAMETERS");
-                eprintln!("   or: getopt [OPTIONS] -o OPTSTRING -- PARAMETERS");
-                eprintln!();
-                eprintln!("Parse command-line options.");
-                eprintln!();
-                eprintln!("  -a, --alternative  allow long options with single dash");
-                eprintln!("  -l, --longoptions=OPTS  long options (comma-separated)");
-                eprintln!("  -n, --name=PROGNAME  program name for errors");
-                eprintln!("  -o, --options=OPTSTRING  short option string");
-                eprintln!("  -s, --shell=SHELL  quoting for shell (bash, sh, csh, tcsh)");
-                eprintln!("  -q, --quiet        suppress error messages");
-                eprintln!("  -Q, --quiet-output suppress normal output");
-                eprintln!("  -T, --test         test for enhanced getopt");
-                process::exit(0);
-            }
-            "-T" | "--test" => {
-                // Return 4 to indicate enhanced getopt
-                process::exit(4);
-            }
-            "-o" | "--options" => {
-                i += 1;
-                if i >= argv.len() {
-                    return Err("option '-o' requires an argument".to_string());
-                }
-                optstring = Some(argv[i].clone());
-                enhanced = true;
-            }
-            _ if argv[i].starts_with("--options=") => {
-                optstring = Some(argv[i]["--options=".len()..].to_string());
-                enhanced = true;
-            }
-            "-l" | "--longoptions" => {
-                i += 1;
-                if i >= argv.len() {
-                    return Err("option '-l' requires an argument".to_string());
-                }
-                longopts = parse_longopts(&argv[i]);
-                enhanced = true;
-            }
-            _ if argv[i].starts_with("--longoptions=") => {
-                longopts = parse_longopts(&argv[i]["--longoptions=".len()..]);
-                enhanced = true;
-            }
-            "-n" | "--name" => {
-                i += 1;
-                if i >= argv.len() {
-                    return Err("option '-n' requires an argument".to_string());
-                }
-                name = argv[i].clone();
-                enhanced = true;
-            }
-            _ if argv[i].starts_with("--name=") => {
-                name = argv[i]["--name=".len()..].to_string();
-                enhanced = true;
-            }
-            "-s" | "--shell" => {
-                i += 1;
-                if i >= argv.len() {
-                    return Err("option '-s' requires an argument".to_string());
-                }
-                shell = argv[i].clone();
-                enhanced = true;
-            }
-            _ if argv[i].starts_with("--shell=") => {
-                shell = argv[i]["--shell=".len()..].to_string();
-                enhanced = true;
-            }
-            "-a" | "--alternative" => {
-                alternative = true;
-                enhanced = true;
-            }
-            "-q" | "--quiet" => {
-                enhanced = true;
-            }
-            "-Q" | "--quiet-output" => {
-                enhanced = true;
-            }
-            "--" => {
-                i += 1;
-                // Everything after -- is the optstring (if not set) and parameters
-                if !enhanced && optstring.is_none() && i < argv.len() {
-                    optstring = Some(argv[i].clone());
-                    i += 1;
-                }
-                while i < argv.len() {
-                    args_to_parse.push(argv[i].clone());
-                    i += 1;
-                }
-                break;
-            }
-            // Before any operand, a dashed word is one of getopt's *own*
-            // options; after one, everything belongs to the command line
-            // being parsed. Measured against util-linux, and the two cases
-            // fail differently, which is the point:
-            //
-            //   getopt -o ab -x   invalid option -- 'x', exit 2 -- no
-            //                     operand yet, so `-x` is getopt's own
-            //   getopt abc -x     `abc` is the optstring and `-x` goes to
-            //                     the parse, which prints the same words
-            //                     and exits 1
-            //
-            // `args_to_parse.is_empty()` is "no operand seen yet"; in
-            // enhanced mode `-o` has already filled `optstring`, so that
-            // alone cannot stand in for it.
-            //
-            // This used to fall through below and *become the optstring*,
-            // so `getopt --zzq` parsed an empty command line against an
-            // optstring of `--zzq` and exited 0.
-            other
-                if other.starts_with('-')
-                    && other.len() > 1
-                    && args_to_parse.is_empty()
-                    && (enhanced || optstring.is_none()) =>
-            {
-                eprintln!(
-                    "getopt: {}",
-                    usageerror::with_help_pointer(
-                        "getopt",
-                        &usageerror::unknown_option(other.as_bytes())
-                    )
-                );
-                // 2 for getopt's own bad option; `main` exits 1, which is
-                // what a bad option in the *parsed* line gets.
-                process::exit(2);
-            }
-            _ => {
-                if !enhanced && optstring.is_none() {
-                    optstring = Some(argv[i].clone());
-                } else {
-                    args_to_parse.push(argv[i].clone());
-                }
-            }
-        }
-        i += 1;
-    }
+/// Upstream's own option string: `+`, so that the first word that is not an
+/// option -- the script's option string, in the old form -- ends the scan.
+const SHORTS: &str = "+ao:l:n:qQs:TuhV";
 
-    let opts = optstring.unwrap_or_default();
-    let (result, had_error) = parse_options(&opts, &longopts, &args_to_parse, &name, alternative);
+/// Upstream's `longopts[]`, in its order (which the ambiguity message
+/// shows).
+const LONGS: &[(&str, Takes)] = &[
+    ("options", Takes::Required),
+    ("longoptions", Takes::Required),
+    ("quiet", Takes::Nothing),
+    ("quiet-output", Takes::Nothing),
+    ("shell", Takes::Required),
+    ("test", Takes::Nothing),
+    ("unquoted", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("alternative", Takes::Nothing),
+    ("name", Takes::Required),
+    ("version", Takes::Nothing),
+];
 
-    let quoted = quote_for_shell(&result, &shell);
-    println!("{quoted}");
-
-    if had_error {
-        // The output is still printed -- the caller needs the `--` -- so
-        // this cannot be an early return. 1, not the 2 that a bad option of
-        // getopt's own gets.
-        process::exit(1);
-    }
-
-    Ok(())
+/// `shell_t`: whose quoting the output follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shell {
+    Bash,
+    Tcsh,
 }
 
-#[derive(Debug, Clone)]
-struct LongOpt {
-    name: String,
-    has_arg: ArgReq,
+/// `struct getopt_control`.
+#[derive(Debug)]
+struct Ctl {
+    shell: Shell,
+    /// The script's option string, as given (with any `+` getopt added).
+    optstr: Option<Vec<u8>>,
+    /// `-n`: the name the script's errors are reported under.
+    name: Option<Vec<u8>>,
+    /// `-l`, in the order given: each entry is its own option.
+    long_options: Vec<(Vec<u8>, Takes)>,
+    /// `-a`: `getopt_long_only`.
+    long_only: bool,
+    quiet_errors: bool,
+    quiet_output: bool,
+    quote: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ArgReq {
-    None,
-    Required,
-    Optional,
-}
-
-fn parse_longopts(spec: &str) -> Vec<LongOpt> {
-    let mut opts = Vec::new();
-    for part in spec.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if let Some(name) = part.strip_suffix("::") {
-            opts.push(LongOpt {
-                name: name.to_string(),
-                has_arg: ArgReq::Optional,
-            });
-        } else if let Some(name) = part.strip_suffix(':') {
-            opts.push(LongOpt {
-                name: name.to_string(),
-                has_arg: ArgReq::Required,
-            });
-        } else {
-            opts.push(LongOpt {
-                name: part.to_string(),
-                has_arg: ArgReq::None,
-            });
+impl Default for Ctl {
+    fn default() -> Self {
+        Ctl {
+            shell: Shell::Bash,
+            optstr: None,
+            name: None,
+            long_options: Vec::new(),
+            long_only: false,
+            quiet_errors: false,
+            quiet_output: false,
+            quote: true,
         }
     }
-    opts
 }
 
-/// Parse `args` against `optstring`, returning the shell-ready words and
-/// whether anything in `args` was rejected.
-///
-/// The flag is the point: this used to report a bad option on stderr and
-/// return only the words, so `run_getopt` had no way to know and exited 0.
-/// util-linux exits **1** when the command line it was asked to parse holds
-/// an option the optstring does not have -- distinct from the **2** it exits
-/// for a bad option of its own -- and a script writing
-/// `args=$(getopt ...) || exit` depends on the difference.
-fn parse_options(
-    optstring: &str,
-    longopts: &[LongOpt],
-    args: &[String],
-    _name: &str,
-    _alternative: bool,
-) -> (Vec<String>, bool) {
-    let mut had_error = false;
-    let mut result = Vec::new();
-    let opt_chars: Vec<char> = optstring.chars().collect();
-    let mut i = 0;
-    let mut non_option_args: Vec<String> = Vec::new();
+/// The program's end: nothing more to print, only a status to exit with.
+#[derive(Debug, PartialEq, Eq)]
+struct Exit(u8);
 
-    while i < args.len() {
-        let arg = &args[i];
-
-        if arg == "--" {
-            i += 1;
-            while i < args.len() {
-                non_option_args.push(args[i].clone());
-                i += 1;
-            }
-            break;
-        }
-
-        if arg.starts_with("--") && arg.len() > 2 {
-            // Long option
-            let rest = &arg[2..];
-            let (opt_name, opt_val) = if let Some(eq_pos) = rest.find('=') {
-                (&rest[..eq_pos], Some(rest[eq_pos + 1..].to_string()))
-            } else {
-                (rest, None)
-            };
-
-            if let Some(lo) = longopts.iter().find(|o| o.name == opt_name) {
-                result.push(format!("--{}", lo.name));
-                match lo.has_arg {
-                    ArgReq::Required => {
-                        if let Some(val) = opt_val {
-                            result.push(val);
-                        } else {
-                            i += 1;
-                            if i < args.len() {
-                                result.push(args[i].clone());
-                            }
-                        }
-                    }
-                    ArgReq::Optional => {
-                        if let Some(val) = opt_val {
-                            result.push(val);
-                        }
-                    }
-                    ArgReq::None => {}
-                }
-            } else {
-                // Unknown long option
-                had_error = true;
-                eprintln!(
-                    "getopt: {}",
-                    usageerror::unrecognized_option(format!("--{opt_name}").as_bytes())
-                );
-            }
-            i += 1;
-            continue;
-        }
-
-        if arg.starts_with('-') && arg.len() > 1 {
-            // Short options
-            let chars: Vec<char> = arg[1..].chars().collect();
-            let mut j = 0;
-            while j < chars.len() {
-                let c = chars[j];
-                // Find this option in optstring
-                if let Some(pos) = opt_chars.iter().position(|&oc| oc == c) {
-                    result.push(format!("-{c}"));
-                    // Check if it takes an argument
-                    let next_is_colon = pos + 1 < opt_chars.len() && opt_chars[pos + 1] == ':';
-                    let next_is_double =
-                        next_is_colon && pos + 2 < opt_chars.len() && opt_chars[pos + 2] == ':';
-
-                    if next_is_double {
-                        // Optional argument (must be attached)
-                        if j + 1 < chars.len() {
-                            let val: String = chars[j + 1..].iter().collect();
-                            result.push(val);
-                            break;
-                        }
-                    } else if next_is_colon {
-                        // Required argument
-                        if j + 1 < chars.len() {
-                            let val: String = chars[j + 1..].iter().collect();
-                            result.push(val);
-                            break;
-                        } else {
-                            i += 1;
-                            if i < args.len() {
-                                result.push(args[i].clone());
-                            }
-                        }
-                    }
-                } else {
-                    // A genuine `char` off `.chars()`: one whole scalar value,
-                    // so `to_string` is lossless. Not the `byte as char` this
-                    // sweep keeps finding elsewhere, which is a Latin-1
-                    // widening that reports 0xE9 as an 'é' nobody typed.
-                    had_error = true;
-                    eprintln!("getopt: invalid option -- {}", quoteaf_os(c.to_string()));
-                }
-                j += 1;
-            }
-            i += 1;
-            continue;
-        }
-
-        // Non-option argument
-        non_option_args.push(arg.clone());
-        i += 1;
-    }
-
-    result.push("--".to_string());
-    result.extend(non_option_args);
-    (result, had_error)
+fn main() -> ExitCode {
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let Exit(code) = run(&argv);
+    ExitCode::from(code)
 }
 
-fn quote_for_shell(parts: &[String], shell: &str) -> String {
-    let is_csh = shell == "csh" || shell == "tcsh";
-    let mut out = String::new();
+/// `program_invocation_short_name`: argv[0] past its last `/`.
+fn short_name(arg0: &OsStr) -> Vec<u8> {
+    let bytes = os_bytes(arg0);
+    let start = bytes
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    bytes.get(start..).unwrap_or_default().to_vec()
+}
 
-    for (idx, part) in parts.iter().enumerate() {
-        if idx > 0 {
-            out.push(' ');
-        }
-        if part == "--" {
-            out.push_str("--");
-        } else if is_csh {
-            // C-shell quoting
-            out.push('\'');
-            for c in part.chars() {
-                if c == '\'' {
-                    out.push_str("'\\''");
-                } else {
-                    out.push(c);
-                }
-            }
-            out.push('\'');
-        } else {
-            // Bourne shell quoting
-            out.push('\'');
-            for c in part.chars() {
-                if c == '\'' {
-                    out.push_str("'\\''");
-                } else {
-                    out.push(c);
-                }
-            }
-            out.push('\'');
+/// A name or argument in a diagnostic: as upstream prints it, except that
+/// what is not printable is escaped (module docs).
+fn shown(text: &[u8]) -> String {
+    escape_unprintable(text)
+}
+
+/// `warnx`: `NAME: MSG` on stderr, NAME being the short name.
+fn warnx(short: &[u8], msg: &str) {
+    let line = format!("{}: {msg}\n", shown(short));
+    // A diagnostic that cannot be written has nowhere else to go.
+    let _ = io::stderr().lock().write_all(line.as_bytes());
+}
+
+/// `parse_error`: MESSAGE (if any), then `errtryhelp(PARAMETER_EXIT_CODE)`.
+fn parse_error(short: &[u8], message: Option<&str>) -> Exit {
+    if let Some(message) = message {
+        warnx(short, message);
+    }
+    let line = format!("Try '{} --help' for more information.\n", shown(short));
+    // As in `warnx`: stderr is the last resort.
+    let _ = io::stderr().lock().write_all(line.as_bytes());
+    Exit(PARAMETER_EXIT_CODE)
+}
+
+/// `close_stdout_atexit`: write what was printed, or say why not. A reader
+/// that went away (`EPIPE`) is not an error, as upstream's `close_stdout`
+/// has it.
+fn finish(short: &[u8], out: &[u8], status: u8) -> Exit {
+    let mut stdout = io::stdout().lock();
+    match stdout.write_all(out).and_then(|()| stdout.flush()) {
+        Ok(()) => Exit(status),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Exit(status),
+        Err(e) => {
+            warnx(short, &format!("write error: {}", errmsg::strerror(&e)));
+            Exit(CLOSE_EXIT_CODE)
         }
     }
+}
+
+/// `usage()`, with upstream's text and the short name where it puts it.
+fn usage(short: &[u8]) -> Vec<u8> {
+    let mut out = b"\nUsage:\n".to_vec();
+    for form in [
+        &b" <optstring> <parameters>\n"[..],
+        b" [options] [--] <optstring> <parameters>\n",
+        b" [options] -o|--options <optstring> [options] [--] <parameters>\n",
+    ] {
+        out.push(b' ');
+        out.extend_from_slice(short);
+        out.extend_from_slice(form);
+    }
+    out.extend_from_slice(
+        b"\nParse command options.\n\
+\nOptions:\n\
+\x20-a, --alternative             allow long options starting with single -\n\
+\x20-l, --longoptions <longopts>  the long options to be recognized\n\
+\x20-n, --name <progname>         the name under which errors are reported\n\
+\x20-o, --options <optstring>     the short options to be recognized\n\
+\x20-q, --quiet                   disable error reporting by getopt(3)\n\
+\x20-Q, --quiet-output            no normal output\n\
+\x20-s, --shell <shell>           set quoting conventions to those of <shell>\n\
+\x20-T, --test                    test for getopt(1) version\n\
+\x20-u, --unquoted                do not quote the output\n\
+\n\
+\x20-h, --help                    display this help\n\
+\x20-V, --version                 display version\n\
+\nFor more details see getopt(1).\n",
+    );
     out
 }
 
-// ── Main ───────────────────────────────────────────────────────────
+/// `main()`.
+fn run(argv: &[OsString]) -> Exit {
+    let arg0: &OsStr = argv
+        .first()
+        .map_or(OsStr::new("getopt"), OsString::as_os_str);
+    let short = short_name(arg0);
+    let mut ctl = Ctl::default();
+    let compatible = std::env::var_os("GETOPT_COMPATIBLE").is_some();
 
-fn main() {
-    if let Err(e) = run_getopt() {
-        let prog = env::args().next().unwrap_or_else(|| "getopt".to_string());
-        let name = prog.rsplit(['/', '\\']).next().unwrap_or(&prog);
-        eprintln!("{name}: {e}");
-        process::exit(1);
+    let Some(first) = argv.get(1) else {
+        if compatible {
+            // "For some reason, the original getopt gave no error when there
+            // were no arguments."
+            return finish(&short, b" --\n", 0);
+        }
+        return parse_error(&short, Some("missing optstring argument"));
+    };
+
+    // The old form, `getopt OPTSTRING PARAMETERS`: anything not starting
+    // with `-`, or everything under GETOPT_COMPATIBLE. The option string loses
+    // its leading run of `-` and `+`, and the output is not quoted.
+    let first_bytes = os_bytes(first);
+    if first_bytes.first() != Some(&b'-') || compatible {
+        ctl.quote = false;
+        let skip = first_bytes
+            .iter()
+            .take_while(|&&b| b == b'-' || b == b'+')
+            .count();
+        ctl.optstr = Some(first_bytes.get(skip..).unwrap_or_default().to_vec());
+        let params = argv.get(2..).unwrap_or_default();
+        return generate_output(&ctl, &os_bytes(arg0), &short, params);
+    }
+
+    let own = argv.get(1..).unwrap_or_default();
+    let mut parser = GETOPT.parse(own, SHORTS, LONGS);
+    // Where the script's part of argv begins, in `own`: past the last option,
+    // and past a `--` (glibc's `optind`).
+    let mut optind = own.len();
+    while let Some(item) = parser.next() {
+        let opt = match item {
+            Ok(opt) => opt,
+            Err(e) => {
+                // glibc names the program by argv[0] as given; the referral
+                // that follows uses the short name.
+                let line = format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence);
+                // stderr is the last resort, as in `warnx`.
+                let _ = io::stderr().lock().write_all(line.as_bytes());
+                return parse_error(&short, None);
+            }
+        };
+        let flag = match opt {
+            Opt::Short(c, value) => (c, value),
+            Opt::Long(name, value) => (long_flag(name), value),
+            Opt::Operand(_) => {
+                // `+`: the first word that is not an option ends the scan,
+                // and belongs to the script.
+                optind = parser.optind().saturating_sub(1);
+                break;
+            }
+        };
+        match flag {
+            (b'a', _) => ctl.long_only = true,
+            (b'o', Some(v)) => add_short_options(&mut ctl, &os_bytes(&v)),
+            (b'l', Some(v)) => {
+                if let Err(e) = add_long_options(&mut ctl, &os_bytes(&v)) {
+                    return parse_error(&short, Some(e));
+                }
+            }
+            (b'n', Some(v)) => ctl.name = Some(os_bytes(&v).into_owned()),
+            (b'q', _) => ctl.quiet_errors = true,
+            (b'Q', _) => ctl.quiet_output = true,
+            (b's', Some(v)) => match shell_type(&os_bytes(&v)) {
+                Some(shell) => ctl.shell = shell,
+                None => {
+                    return parse_error(&short, Some("unknown shell after -s or --shell argument"));
+                }
+            },
+            (b'T', _) => return Exit(TEST_EXIT_CODE),
+            (b'u', _) => ctl.quote = false,
+            (b'V', _) => {
+                let mut out = short.clone();
+                out.extend_from_slice(b" from util-linux 2.39.3\n");
+                return finish(&short, &out, 0);
+            }
+            (b'h', _) => return finish(&short, &usage(&short), 0),
+            _ => {
+                return parse_error(&short, Some("internal error, contact the author."));
+            }
+        }
+    }
+    if optind == own.len() {
+        // The walk ended without an operand: everything was an option, or a
+        // `--` came last. glibc's `optind` is then the end, or past the `--`.
+        optind = parser.optind();
+    }
+    let mut params = own.get(optind..).unwrap_or_default();
+
+    if ctl.optstr.is_none() {
+        let Some((optstr, rest)) = params.split_first() else {
+            return parse_error(&short, Some("missing optstring argument"));
+        };
+        add_short_options(&mut ctl, &os_bytes(optstr));
+        params = rest;
+    }
+
+    let name = ctl
+        .name
+        .clone()
+        .unwrap_or_else(|| os_bytes(arg0).into_owned());
+    generate_output(&ctl, &name, &short, params)
+}
+
+/// The short option a long one of getopt's own stands for.
+fn long_flag(name: &str) -> u8 {
+    match name {
+        "options" => b'o',
+        "longoptions" => b'l',
+        "quiet" => b'q',
+        "quiet-output" => b'Q',
+        "shell" => b's',
+        "test" => b'T',
+        "unquoted" => b'u',
+        "help" => b'h',
+        "alternative" => b'a',
+        "name" => b'n',
+        "version" => b'V',
+        // Every name in LONGS is above; this is the `default:` upstream has.
+        _ => 0,
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────────
+/// `add_short_options`: under `POSIXLY_CORRECT` an option string that does
+/// not already begin with `+` gets one, so glibc stops at the first operand.
+fn add_short_options(ctl: &mut Ctl, options: &[u8]) {
+    let mut optstr = Vec::with_capacity(options.len().saturating_add(1));
+    if options.first() != Some(&b'+') && std::env::var_os("POSIXLY_CORRECT").is_some() {
+        optstr.push(b'+');
+    }
+    optstr.extend_from_slice(options);
+    ctl.optstr = Some(optstr);
+}
+
+/// `add_long_options`: names separated by commas or whitespace (`strtok`'s
+/// `", \t\n"`), each ending in `:` for a required argument or `::` for an
+/// optional one.
+///
+/// # Errors
+///
+/// A name that is nothing but its colons: "empty long option after -l or
+/// --long argument".
+fn add_long_options(ctl: &mut Ctl, options: &[u8]) -> Result<(), &'static str> {
+    for token in options
+        .split(|&b| matches!(b, b',' | b' ' | b'\t' | b'\n'))
+        .filter(|t| !t.is_empty())
+    {
+        let (name, takes) = if let Some(name) = token.strip_suffix(b"::") {
+            (name, Takes::Optional)
+        } else if let Some(name) = token.strip_suffix(b":") {
+            (name, Takes::Required)
+        } else {
+            (token, Takes::Nothing)
+        };
+        if takes != Takes::Nothing && name.is_empty() {
+            return Err("empty long option after -l or --long argument");
+        }
+        ctl.long_options.push((name.to_vec(), takes));
+    }
+    Ok(())
+}
+
+/// `shell_type`: `sh` and `bash` quote alike, as do `csh` and `tcsh`.
+fn shell_type(shell: &[u8]) -> Option<Shell> {
+    match shell {
+        b"bash" | b"sh" => Some(Shell::Bash),
+        b"tcsh" | b"csh" => Some(Shell::Tcsh),
+        _ => None,
+    }
+}
+
+/// `isspace` in the C locale.
+fn is_c_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// `print_normalized`: ` ARG`, quoted for the shell unless `-u`.
+///
+/// Inside single quotes a shell of the Bourne family needs only `'` handled
+/// (`'\''`); tcsh also sees `!` there, and loses whitespace, so a backslash is
+/// doubled, `!` becomes `'\!'`, a newline `\n`, and other white space `'\ '`.
+fn print_normalized(out: &mut Vec<u8>, ctl: &Ctl, arg: &[u8]) {
+    out.push(b' ');
+    if !ctl.quote {
+        out.extend_from_slice(arg);
+        return;
+    }
+    out.push(b'\'');
+    for &c in arg {
+        if ctl.shell == Shell::Tcsh {
+            match c {
+                b'\\' => {
+                    out.extend_from_slice(b"\\\\");
+                    continue;
+                }
+                b'!' => {
+                    out.extend_from_slice(b"'\\!'");
+                    continue;
+                }
+                b'\n' => {
+                    out.extend_from_slice(b"\\n");
+                    continue;
+                }
+                _ => {}
+            }
+            if is_c_space(c) {
+                out.extend_from_slice(b"'\\");
+                out.push(c);
+                out.push(b'\'');
+                continue;
+            }
+        }
+        if c == b'\'' {
+            out.extend_from_slice(b"'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push(b'\'');
+}
+
+/// Whether the option string gives `c` an argument: upstream's
+/// `strchr(optstr, c)` then a look at the next byte, on the string as given.
+fn short_has_arg(optstr: &[u8], c: u8) -> bool {
+    optstr
+        .iter()
+        .position(|&b| b == c)
+        .is_some_and(|at| optstr.get(at.saturating_add(1)) == Some(&b':'))
+}
+
+/// `generate_output`: parse `params` against the script's options, and print
+/// them normalized -- every option, with its argument, then `--`, then every
+/// operand -- or, with `-Q`, nothing. `name` is what the script's errors are
+/// reported under.
+fn generate_output(ctl: &Ctl, name: &[u8], short: &[u8], params: &[OsString]) -> Exit {
+    let optstr: &[u8] = ctl.optstr.as_deref().unwrap_or_default();
+    // glibc prints nothing when the option string, past its `+` or `-`,
+    // begins with `:`; `-q` is `opterr = 0`.
+    let body = optstr
+        .strip_prefix(b"+")
+        .or_else(|| optstr.strip_prefix(b"-"))
+        .unwrap_or(optstr);
+    let silent = ctl.quiet_errors || body.first() == Some(&b':');
+    let return_in_order = optstr.first() == Some(&b'-');
+
+    // The table borrows the names; one that is not UTF-8 keeps its place
+    // with a name nothing typed can match (module docs).
+    let names: Vec<Option<&str>> = ctl
+        .long_options
+        .iter()
+        .map(|(n, _)| std::str::from_utf8(n).ok())
+        .collect();
+    let table: Vec<(&str, Takes)> = ctl
+        .long_options
+        .iter()
+        .zip(&names)
+        .map(|((_, takes), name)| (name.unwrap_or("\u{0}unmatchable"), *takes))
+        .collect();
+
+    let mut parser = GETOPT
+        .parse_bytes(params, optstr, &table)
+        .keep_going(true)
+        .distinct_entries(true)
+        .long_only(ctl.long_only);
+    let mut status = 0;
+    let mut out = Vec::new();
+    let mut remaining: Vec<&OsString> = Vec::new();
+    while let Some(item) = parser.next() {
+        match item {
+            Err(e) => {
+                status = GETOPT_EXIT_CODE;
+                if !silent {
+                    let line = format!("{}: {}\n", shown(name), e.sentence);
+                    // As in `warnx`: stderr is the last resort.
+                    let _ = io::stderr().lock().write_all(line.as_bytes());
+                }
+            }
+            Ok(Opt::Long(long, value)) => {
+                if !ctl.quiet_output {
+                    out.extend_from_slice(b" --");
+                    out.extend_from_slice(long.as_bytes());
+                    let takes = table
+                        .iter()
+                        .find(|(n, _)| *n == long)
+                        .map_or(Takes::Nothing, |(_, t)| *t);
+                    if takes != Takes::Nothing {
+                        print_normalized(
+                            &mut out,
+                            ctl,
+                            &value.as_deref().map(os_bytes).unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+            Ok(Opt::Short(c, value)) => {
+                if !ctl.quiet_output {
+                    out.extend_from_slice(&[b' ', b'-', c]);
+                    if short_has_arg(optstr, c) {
+                        print_normalized(
+                            &mut out,
+                            ctl,
+                            &value.as_deref().map(os_bytes).unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+            // A `-` option string hands each operand back where it stood
+            // (glibc's `NON_OPT`), until a `--`; every other operand is left
+            // for after the `--` getopt prints.
+            Ok(Opt::Operand(word)) => {
+                if return_in_order && !parser.stopped() {
+                    if !ctl.quiet_output {
+                        print_normalized(&mut out, ctl, &os_bytes(word));
+                    }
+                } else {
+                    remaining.push(word);
+                }
+            }
+        }
+    }
+    if ctl.quiet_output {
+        return finish(short, &[], status);
+    }
+    out.extend_from_slice(b" --");
+    for word in remaining {
+        print_normalized(&mut out, ctl, &os_bytes(word));
+    }
+    out.push(b'\n');
+    finish(short, &out, status)
+}
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
-    /// The flag exists so `run_getopt` can exit 1. Before it, a rejected
-    /// option was printed and then reported as success.
+    fn normalized(ctl: &Ctl, arg: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        print_normalized(&mut out, ctl, arg);
+        out
+    }
+
     #[test]
-    fn a_rejected_option_sets_the_error_flag() {
-        let (_out, had_error) = parse_options("abc", &[], &["-x".to_string()], "test", false);
-        assert!(
-            had_error,
-            "an option outside the optstring must be reported"
+    fn bash_quoting_handles_only_the_single_quote() {
+        let ctl = Ctl::default();
+        assert_eq!(normalized(&ctl, b"a b"), b" 'a b'");
+        assert_eq!(normalized(&ctl, b"it's"), b" 'it'\\''s'");
+        assert_eq!(normalized(&ctl, b"a\\b!\n"), b" 'a\\b!\n'");
+        assert_eq!(normalized(&ctl, b""), b" ''");
+        assert_eq!(normalized(&ctl, b"\xff"), b" '\xff'");
+    }
+
+    #[test]
+    fn tcsh_quoting_also_handles_backslash_bang_and_white_space() {
+        let ctl = Ctl {
+            shell: Shell::Tcsh,
+            ..Ctl::default()
+        };
+        assert_eq!(normalized(&ctl, b"a\\b"), b" 'a\\\\b'");
+        assert_eq!(normalized(&ctl, b"hi!"), b" 'hi'\\!''");
+        assert_eq!(normalized(&ctl, b"a\nb"), b" 'a\\nb'");
+        assert_eq!(normalized(&ctl, b"a b\tc"), b" 'a'\\ 'b'\\\t'c'");
+        assert_eq!(normalized(&ctl, b"it's"), b" 'it'\\''s'");
+    }
+
+    #[test]
+    fn unquoted_output_is_the_bytes() {
+        let ctl = Ctl {
+            quote: false,
+            ..Ctl::default()
+        };
+        assert_eq!(normalized(&ctl, b"a 'b'"), b" a 'b'");
+    }
+
+    #[test]
+    fn long_options_are_split_as_strtok_splits_them() {
+        let mut ctl = Ctl::default();
+        add_long_options(&mut ctl, b",alpha, beta:\tgamma::\n,,delta:::").unwrap();
+        assert_eq!(
+            ctl.long_options,
+            vec![
+                (b"alpha".to_vec(), Takes::Nothing),
+                (b"beta".to_vec(), Takes::Required),
+                (b"gamma".to_vec(), Takes::Optional),
+                // Only one strip: `delta:::` is `delta:`, optional.
+                (b"delta:".to_vec(), Takes::Optional),
+            ]
         );
+        for empty in [&b":"[..], b"::", b"a,:"] {
+            assert_eq!(
+                add_long_options(&mut Ctl::default(), empty),
+                Err("empty long option after -l or --long argument")
+            );
+        }
     }
 
     #[test]
-    fn a_clean_line_does_not_set_the_error_flag() {
-        let (_out, had_error) = parse_options("abc", &[], &["-a".to_string()], "test", false);
-        assert!(!had_error);
-    }
-
-    // ── Longopt parsing ──
-
-    #[test]
-    fn test_parse_longopts() {
-        let opts = parse_longopts("verbose,output:,debug::");
-        assert_eq!(opts.len(), 3);
-        assert_eq!(opts[0].name, "verbose");
-        assert_eq!(opts[0].has_arg, ArgReq::None);
-        assert_eq!(opts[1].name, "output");
-        assert_eq!(opts[1].has_arg, ArgReq::Required);
-        assert_eq!(opts[2].name, "debug");
-        assert_eq!(opts[2].has_arg, ArgReq::Optional);
+    fn an_optional_or_required_argument_is_whatever_follows_the_letter() {
+        assert!(short_has_arg(b"ab:c::", b'b'));
+        assert!(short_has_arg(b"ab:c::", b'c'));
+        assert!(!short_has_arg(b"ab:c::", b'a'));
+        // The first occurrence decides, as strchr does.
+        assert!(!short_has_arg(b"aa:", b'a'));
     }
 
     #[test]
-    fn test_parse_longopts_empty() {
-        let opts = parse_longopts("");
-        assert!(opts.is_empty());
+    fn the_short_name_is_argv0_past_its_last_slash() {
+        assert_eq!(short_name(OsStr::new("/usr/bin/getopt")), b"getopt");
+        assert_eq!(short_name(OsStr::new("getopt")), b"getopt");
     }
 
     #[test]
-    fn test_parse_longopts_single() {
-        let opts = parse_longopts("help");
-        assert_eq!(opts.len(), 1);
-        assert_eq!(opts[0].name, "help");
-        assert_eq!(opts[0].has_arg, ArgReq::None);
-    }
-
-    // ── Option parsing ──
-
-    #[test]
-    fn test_parse_short_options() {
-        let (result, _had_error) = parse_options(
-            "abc:",
-            &[],
-            &[
-                "-a".to_string(),
-                "-b".to_string(),
-                "-c".to_string(),
-                "value".to_string(),
-            ],
-            "test",
-            false,
-        );
-        assert!(result.contains(&"-a".to_string()));
-        assert!(result.contains(&"-b".to_string()));
-        assert!(result.contains(&"-c".to_string()));
-        assert!(result.contains(&"value".to_string()));
-    }
-
-    #[test]
-    fn test_parse_combined_short() {
-        let (result, _had_error) = parse_options("ab", &[], &["-ab".to_string()], "test", false);
-        assert!(result.contains(&"-a".to_string()));
-        assert!(result.contains(&"-b".to_string()));
-    }
-
-    #[test]
-    fn test_parse_long_options() {
-        let longopts = parse_longopts("verbose,output:");
-        let (result, _had_error) = parse_options(
-            "",
-            &longopts,
-            &[
-                "--verbose".to_string(),
-                "--output".to_string(),
-                "file.txt".to_string(),
-            ],
-            "test",
-            false,
-        );
-        assert!(result.contains(&"--verbose".to_string()));
-        assert!(result.contains(&"--output".to_string()));
-        assert!(result.contains(&"file.txt".to_string()));
-    }
-
-    #[test]
-    fn test_parse_long_option_with_equals() {
-        let longopts = parse_longopts("output:");
-        let (result, _had_error) = parse_options(
-            "",
-            &longopts,
-            &["--output=file.txt".to_string()],
-            "test",
-            false,
-        );
-        assert!(result.contains(&"--output".to_string()));
-        assert!(result.contains(&"file.txt".to_string()));
-    }
-
-    #[test]
-    fn test_parse_separator() {
-        let (result, _had_error) = parse_options(
-            "a",
-            &[],
-            &["-a".to_string(), "--".to_string(), "non-opt".to_string()],
-            "test",
-            false,
-        );
-        let sep_pos = result.iter().position(|s| s == "--").unwrap_or(0);
-        assert!(sep_pos > 0);
-        assert!(result[sep_pos + 1..].contains(&"non-opt".to_string()));
-    }
-
-    #[test]
-    fn test_parse_non_option_args() {
-        let (result, _had_error) = parse_options(
-            "a",
-            &[],
-            &["-a".to_string(), "file1".to_string(), "file2".to_string()],
-            "test",
-            false,
-        );
-        let sep_pos = result.iter().position(|s| s == "--").unwrap_or(0);
-        let non_opts = &result[sep_pos + 1..];
-        assert!(non_opts.contains(&"file1".to_string()));
-        assert!(non_opts.contains(&"file2".to_string()));
-    }
-
-    // ── Shell quoting ──
-
-    #[test]
-    fn test_quote_simple() {
-        let parts = vec!["-a".to_string(), "--".to_string(), "file".to_string()];
-        let quoted = quote_for_shell(&parts, "bash");
-        assert!(quoted.contains("'-a'"));
-        assert!(quoted.contains("--"));
-        assert!(quoted.contains("'file'"));
-    }
-
-    #[test]
-    fn test_quote_with_spaces() {
-        let parts = vec!["hello world".to_string()];
-        let quoted = quote_for_shell(&parts, "bash");
-        assert_eq!(quoted, "'hello world'");
-    }
-
-    #[test]
-    fn test_quote_with_single_quote() {
-        let parts = vec!["it's".to_string()];
-        let quoted = quote_for_shell(&parts, "bash");
-        assert!(quoted.contains("'\\''"));
-    }
-
-    // ── Edge cases ──
-
-    #[test]
-    fn test_parse_empty_args() {
-        let (result, _had_error) = parse_options("", &[], &[], "test", false);
-        assert_eq!(result, vec!["--".to_string()]);
-    }
-
-    #[test]
-    fn test_parse_only_separator() {
-        let (result, _had_error) = parse_options("", &[], &["--".to_string()], "test", false);
-        assert_eq!(result, vec!["--".to_string()]);
-    }
-
-    #[test]
-    fn test_longopts_trailing_comma() {
-        let opts = parse_longopts("help,verbose,");
-        assert_eq!(opts.len(), 2);
-    }
-
-    #[test]
-    fn test_quote_separator() {
-        let parts = vec!["--".to_string()];
-        let quoted = quote_for_shell(&parts, "bash");
-        assert_eq!(quoted, "--");
-    }
-
-    #[test]
-    fn test_quote_empty_parts() {
-        let parts: Vec<String> = Vec::new();
-        let quoted = quote_for_shell(&parts, "bash");
-        assert_eq!(quoted, "");
+    fn the_shells() {
+        assert_eq!(shell_type(b"sh"), Some(Shell::Bash));
+        assert_eq!(shell_type(b"csh"), Some(Shell::Tcsh));
+        assert_eq!(shell_type(b"zsh"), None);
     }
 }

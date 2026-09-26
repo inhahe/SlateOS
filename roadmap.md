@@ -1859,6 +1859,13 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **Shutting down asks the programs first** -- done 2026-09-26
+  (`design-decisions.md` §1405). "Shut down" switched the machine off at once,
+  and a document with unsaved changes went with it. Shut down, restart and log
+  out now ask every window to close -- the request its close button makes, so
+  a program can ask about unsaved work -- and happen once they have; after
+  five seconds the ones still open are listed, with "... anyway" and "Cancel".
+
 - `[C]` **The clock is the time over the date** -- done 2026-09-26
   (`design-decisions.md` §1404). Two lines, as the reference's: the time,
   bold, over the weekday and date, smaller and dimmer, each centred; the slot

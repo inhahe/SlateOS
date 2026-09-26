@@ -1803,6 +1803,10 @@ impl<T: Transport> ShellSession<T> {
             // `handle_hotkey_inner` both offer the chooser every event
             // before the box sees one.
             self.shell.render_run_browser(),
+            // Over everything, the Run box and its chooser included: a shut
+            // down waiting on the programs still open, which owns every key
+            // and press while it is up.
+            self.shell.render_ending(),
         ]
         .into_iter()
         .flatten()
@@ -1939,6 +1943,11 @@ impl<T: Transport> ShellSession<T> {
             };
             for request in requests {
                 self.request(request)?;
+            }
+            // A shut down, restart or log out whose programs have all closed
+            // is carried out now.
+            if let Some(action) = self.shell.take_ending_action() {
+                self.act(action)?;
             }
             self.dirty = true;
             worked = true;
@@ -3002,6 +3011,11 @@ impl<T: Transport> ShellSession<T> {
         // to saturate the `u32` above must not be quietly shortened to 49 days
         // when the whole point of that frame is to retire everything on screen.
         self.shell.advance_osd(elapsed_ms);
+        // The programs a shut down is waiting for are listed once its grace
+        // has run out, and the list is drawn by the next paint.
+        if self.shell.tick_ending() {
+            self.dirty = true;
+        }
         // A tooltip whose delay this frame ended is on the overlay surface
         // only once that is drawn again.
         if self.shell.take_hover_changed() {
@@ -3122,7 +3136,13 @@ impl<T: Transport> ShellSession<T> {
             .shell
             .tooltip_due_in()
             .map(|ms| Duration::from_millis(ms.max(1)));
-        if let Some(delay) = [widget, schedule, theme, wallpaper, tooltip]
+        // A shut down waiting for its programs: the moment it stops waiting
+        // and lists the ones still open.
+        let ending = self
+            .shell
+            .ending_due_in()
+            .map(|ms| Duration::from_millis(ms.max(1)));
+        if let Some(delay) = [widget, schedule, theme, wallpaper, tooltip, ending]
             .into_iter()
             .flatten()
             .min()

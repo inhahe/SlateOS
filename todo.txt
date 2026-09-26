@@ -58817,6 +58817,10 @@ is already waiting, not whether the setter exists.
 
 ## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
 
+- **The trigger below was met the same day** (design-decisions §1405): shut
+  down, restart and log out ask every window to close first, and list the
+  ones that do not. The button is next.
+
 - **Deferred: a one-click "Shut down" with the other power actions behind a
   caret**, as the Aero reference draws it (`.aero-sm-power-main` beside
   `.aero-sm-power-caret` in `Aero Desktop (offline).html`) and

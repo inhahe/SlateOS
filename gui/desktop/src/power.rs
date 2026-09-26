@@ -179,6 +179,28 @@ impl PowerChoice {
         }
     }
 
+    /// Whether the programs are asked to close before this is carried out:
+    /// the three that end the session. Sleep, hibernate and lock leave the
+    /// session as it was, so there is nothing to ask.
+    #[must_use]
+    pub const fn ends_the_session(self) -> bool {
+        matches!(self, Self::ShutDown | Self::Restart | Self::LogOut)
+    }
+
+    /// The verb for what it does, in lower case, for a sentence: "Closing
+    /// programs to shut down", "Restart anyway".
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::ShutDown => "shut down",
+            Self::Restart => "restart",
+            Self::Sleep => "sleep",
+            Self::Hibernate => "hibernate",
+            Self::Lock => "lock",
+            Self::LogOut => "log out",
+        }
+    }
+
     /// The program that carries this out, or `None` for [`LogOut`], which
     /// the shell does itself: it owns the login screen the user returns to.
     ///

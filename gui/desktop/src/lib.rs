@@ -373,6 +373,21 @@ const CLOCK_LINE_HEIGHT: f32 = 1.18;
 /// How strongly the clock's date line is drawn under the time: the bar's text
 /// colour at this alpha, the reference's `opacity: 0.85`.
 const CLOCK_DATE_ALPHA: u8 = 217;
+/// How long a shut down, restart or log out waits for the programs it asked to
+/// close before listing the ones that have not: long enough for a program to
+/// close on its own, short enough that a user who has walked away is not left
+/// with a machine that stayed on for a program that never answered.
+const ENDING_GRACE_MS: u64 = 5_000;
+/// How many of the programs still open the list names before "and N more".
+const ENDING_LIST_MAX: usize = 6;
+/// The list's panel: width, padding, row height, button size.
+const ENDING_PANEL_WIDTH: f32 = 460.0;
+const ENDING_PANEL_PADDING: f32 = 20.0;
+const ENDING_ROW_HEIGHT: f32 = 28.0;
+const ENDING_BUTTON_WIDTH: f32 = 150.0;
+const ENDING_BUTTON_HEIGHT: f32 = 32.0;
+/// The dimming behind the list, as it dims behind every modal the shell has.
+const ENDING_SCRIM: Color = Color::rgba(0, 0, 0, 110);
 /// Width of the "Show desktop" strip at the taskbar's right end: the Aero
 /// reference's 14.
 const SHOW_DESKTOP_WIDTH: f32 = 14.0;
@@ -652,6 +667,21 @@ enum PinTarget {
     /// knows it (`program_for_app_id`) -- and the window itself, which can be
     /// asked to close.
     Window(WindowId),
+}
+
+/// A shut down, restart or log out the user chose, in progress: every window
+/// has been asked to close -- which lets a program with unsaved work ask what
+/// to do with it -- and the choice is carried out once they have, or once the
+/// user says to go ahead without them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Ending {
+    /// What was chosen.
+    choice: power::PowerChoice,
+    /// When the windows were asked, on the overlay clock.
+    asked_at_ms: u64,
+    /// Whether the windows that did not close are listed, for the user to
+    /// decide: once [`ENDING_GRACE_MS`] has passed.
+    listing: bool,
 }
 
 /// What a tooltip on the taskbar names, kept beside it so that sliding along a
@@ -977,6 +1007,13 @@ pub enum Hit {
     Clock,
     /// The "Show desktop" strip at the taskbar's right end.
     ShowDesktop,
+    /// The "... anyway" button of the list of programs a shut down, restart
+    /// or log out is waiting for.
+    EndingAnyway,
+    /// That list's "Cancel" button.
+    EndingCancel,
+    /// Anywhere else while that list is up: it covers the screen.
+    EndingPanel,
     /// The tray's notification bell, which opens the notification pane.
     NotificationBell,
     /// The chevron at the left of the icon run, which lists the icons the
@@ -1606,6 +1643,13 @@ pub struct DesktopShell {
     /// shown again on this desktop, by any means (`apply_window_list`): the
     /// desktop is no longer what was shown.
     desktop_shown: Option<Vec<WindowId>>,
+    /// A shut down, restart or log out waiting for the programs to close --
+    /// see [`Ending`].
+    ending: Option<Ending>,
+    /// Whether the last window of an [`Ending`] has gone, so that it is to be
+    /// carried out -- by the session, which [`take_ending_action`](Self::take_ending_action)
+    /// hands it to.
+    ending_ready: bool,
     /// The popup listing icons the bar had no room for, and which icons
     /// those were when it opened.
     ///
@@ -2312,6 +2356,8 @@ impl DesktopShell {
             hover_tile: None,
             show_desktop_lit: false,
             desktop_shown: None,
+            ending: None,
+            ending_ready: false,
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -4036,6 +4082,18 @@ impl DesktopShell {
     /// What is under a point, topmost surface first.
     #[must_use]
     pub fn hit_test(&self, x: f32, y: f32) -> Hit {
+        // The list of programs a shut down is waiting for covers the screen,
+        // and is the one thing answering while it is up.
+        if self.ending_listing() {
+            let (anyway, cancel) = self.ending_button_rects();
+            return if anyway.contains(x, y) {
+                Hit::EndingAnyway
+            } else if cancel.contains(x, y) {
+                Hit::EndingCancel
+            } else {
+                Hit::EndingPanel
+            };
+        }
         // The tiling overlay is tested before everything else because it is
         // drawn over everything else, and because opening it closes the menus
         // (`open_zone_overlay`) — so a point that matched both would be a point
@@ -4923,6 +4981,9 @@ impl DesktopShell {
 
         self.sync_snap_area();
         let hit = self.hit_test(x, y);
+        if self.ending_listing() {
+            return self.press_ending(hit);
+        }
 
         // The tiling overlay answers its own presses and nothing else's. It is
         // a modal choice — the user is picking where one window goes — so every
@@ -5105,10 +5166,7 @@ impl DesktopShell {
             Hit::PowerMenuEntry(index) => match power::PowerChoice::ALL.get(index) {
                 Some(choice) => {
                     self.close_start_menu();
-                    match choice.command() {
-                        Some(launch) => ShellAction::Launch(launch),
-                        None => ShellAction::LogOut,
-                    }
+                    self.choose_power(*choice)
                 }
                 None => ShellAction::Consumed,
             },
@@ -5135,6 +5193,9 @@ impl DesktopShell {
             // letting the press fall through to whatever is behind it would
             // act on something they were not pointing at.
             Hit::TrayIcon(_) => ShellAction::Consumed,
+            // Answered above, before anything else looks at the press
+            // (`press_ending`); unreachable here, and consumed if it were not.
+            Hit::EndingAnyway | Hit::EndingCancel | Hit::EndingPanel => ShellAction::Consumed,
             // Likewise: opened above. Reaching here is a non-primary press on
             // the chevron, which the shell owns and so swallows.
             Hit::TrayOverflow => ShellAction::Consumed,
@@ -5548,6 +5609,11 @@ impl DesktopShell {
         }
 
         self.windows = kept;
+        // Every window gone, of an ending waiting for them: it is to be
+        // carried out, by the session (`take_ending_action`).
+        if self.ending.is_some() && self.windows.is_empty() {
+            self.ending_ready = true;
+        }
         // A window shown again on this desktop -- restored from its tile,
         // opened, or brought back by the second "Show desktop" itself -- means
         // the desktop is no longer what was shown, and the next press puts
@@ -5952,6 +6018,14 @@ impl DesktopShell {
     /// Should the pane grow an "Enter opens the selected card" key, it needs a
     /// launch channel here rather than a path quietly dropped — see todo.txt.
     pub fn handle_hotkey(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        // The list of programs a shut down is waiting for is modal: Escape is
+        // Cancel, and no other key reaches anything behind it.
+        if self.ending_listing() {
+            if key.pressed && key.key == Key::Escape {
+                self.ending = None;
+            }
+            return HotkeyOutcome::consumed();
+        }
         let outcome = self.handle_hotkey_inner(key);
         drop(self.apply_pane_events());
         outcome
@@ -7977,6 +8051,282 @@ impl DesktopShell {
             self.desktop_shown = Some(hidden);
         }
         requests
+    }
+
+    /// Carry out a power choice from the start menu. The three that end the
+    /// session ask every window to close first, and are carried out once they
+    /// have ([`Ending`]); the others -- sleep, hibernate, lock -- leave the
+    /// session as it was, and are carried out at once.
+    ///
+    /// Until this, "Shut down" ran `powerctl` straight away: a document open
+    /// in an editor with unsaved changes was gone, and the editor was never
+    /// asked.
+    fn choose_power(&mut self, choice: power::PowerChoice) -> ShellAction {
+        if !choice.ends_the_session() || self.windows.is_empty() {
+            return Self::power_action(choice);
+        }
+        // Asked, not destroyed: the request a window's own close button
+        // makes, so a program with unsaved work puts up its dialog.
+        let requests: Vec<ShellRequest> = self
+            .windows
+            .keys()
+            .map(|id| ShellRequest::window(*id, ShellControlAction::Close))
+            .collect();
+        self.ending = Some(Ending {
+            choice,
+            asked_at_ms: self.osd_clock_ms,
+            listing: false,
+        });
+        self.ending_ready = false;
+        // Said where it takes no input: a program's "save your changes?" is
+        // what the user may need to reach next, and nothing here may stand
+        // in front of it.
+        self.osd.show(
+            osd::OsdKind::Custom {
+                icon: osd::OsdIcon::Info,
+                message: format!("Closing programs to {}\u{2026}", choice.verb()),
+            },
+            self.osd_clock_ms,
+        );
+        ShellAction::ControlAll(requests)
+    }
+
+    /// What carrying out `choice` asks of the session: its program, or --
+    /// for log out, whose login screen is the shell's own -- the session end.
+    fn power_action(choice: power::PowerChoice) -> ShellAction {
+        match choice.command() {
+            Some(launch) => ShellAction::Launch(launch),
+            None => ShellAction::LogOut,
+        }
+    }
+
+    /// Whether the programs a shut down, restart or log out is waiting for
+    /// are listed for the user to decide.
+    fn ending_listing(&self) -> bool {
+        self.ending.is_some_and(|ending| ending.listing)
+    }
+
+    /// The shut down, restart or log out whose programs have all closed, as
+    /// the action that carries it out -- once, clearing it. For the session,
+    /// after each window list.
+    pub fn take_ending_action(&mut self) -> Option<ShellAction> {
+        if !core::mem::take(&mut self.ending_ready) {
+            return None;
+        }
+        let ending = self.ending.take()?;
+        Some(Self::power_action(ending.choice))
+    }
+
+    /// How long until the programs still open are listed, in milliseconds of
+    /// the overlay clock: a deadline the session wakes for.
+    #[must_use]
+    pub fn ending_due_in(&self) -> Option<u64> {
+        let ending = self.ending.filter(|ending| !ending.listing)?;
+        Some(
+            ending
+                .asked_at_ms
+                .saturating_add(ENDING_GRACE_MS)
+                .saturating_sub(self.osd_clock_ms),
+        )
+    }
+
+    /// Whether the grace has run out on this frame, so that the list of
+    /// programs still open has just gone up -- for the session, to draw it.
+    pub fn tick_ending(&mut self) -> bool {
+        match self.ending.as_mut() {
+            Some(ending)
+                if !ending.listing
+                    && self.osd_clock_ms.saturating_sub(ending.asked_at_ms) >= ENDING_GRACE_MS =>
+            {
+                ending.listing = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A press while the list of programs still open is up: its buttons, and
+    /// nothing else -- it covers the screen.
+    fn press_ending(&mut self, hit: Hit) -> ShellAction {
+        match hit {
+            Hit::EndingAnyway => match self.ending.take() {
+                Some(ending) => Self::power_action(ending.choice),
+                None => ShellAction::Consumed,
+            },
+            Hit::EndingCancel => {
+                self.ending = None;
+                ShellAction::Consumed
+            }
+            _ => ShellAction::Consumed,
+        }
+    }
+
+    /// The list's panel, in the middle of the screen, as tall as what it says.
+    fn ending_panel_rect(&self) -> Rect {
+        let (sw, sh) = self.viewport();
+        let rows = self.windows.len().min(ENDING_LIST_MAX.saturating_add(1));
+        #[allow(clippy::cast_precision_loss)]
+        let rows = rows as f32;
+        let pad = self.scale(ENDING_PANEL_PADDING);
+        let heading = self.font_size(TextRole::Heading) * 1.4;
+        let body = self.font_size(TextRole::Body) * 1.3 * 3.0;
+        let h = pad * 4.0
+            + heading
+            + body
+            + rows * self.scale(ENDING_ROW_HEIGHT)
+            + self.scale(ENDING_BUTTON_HEIGHT);
+        let w = self.scale(ENDING_PANEL_WIDTH).min(sw);
+        Rect::new((sw - w) / 2.0, ((sh - h) / 2.0).max(0.0), w, h.min(sh))
+    }
+
+    /// The list's two buttons, "... anyway" and "Cancel", right-aligned at
+    /// its foot, Cancel rightmost.
+    fn ending_button_rects(&self) -> (Rect, Rect) {
+        let panel = self.ending_panel_rect();
+        let pad = self.scale(ENDING_PANEL_PADDING);
+        let (w, h) = (
+            self.scale(ENDING_BUTTON_WIDTH),
+            self.scale(ENDING_BUTTON_HEIGHT),
+        );
+        let y = panel.y + panel.h - pad - h;
+        let cancel = Rect::new(panel.x + panel.w - pad - w, y, w, h);
+        let anyway = Rect::new(cancel.x - self.scale(10.0) - w, y, w, h);
+        (anyway, cancel)
+    }
+
+    /// The list of programs a shut down, restart or log out is still waiting
+    /// for, when it is up: over a dimmed screen, what is still open -- its
+    /// program's picture and its title -- and the choice to go ahead anyway or
+    /// not.
+    #[must_use]
+    pub fn render_ending(&self) -> Option<RenderTree> {
+        let ending = self.ending.filter(|ending| ending.listing)?;
+        let mut tree = RenderTree::new();
+        let (sw, sh) = self.viewport();
+        fill(&mut tree, Rect::new(0.0, 0.0, sw, sh), ENDING_SCRIM);
+        let panel = self.ending_panel_rect();
+        let radii = self.corner_radii();
+        shadow(&mut tree, panel, radii);
+        fill_round(&mut tree, panel, self.theme.start_menu_bg, radii);
+        stroke_round(
+            &mut tree,
+            panel,
+            self.theme.panel_border_color,
+            self.scale(1.0),
+            radii,
+        );
+        let fg = self.theme.start_menu_fg;
+        let pad = self.scale(ENDING_PANEL_PADDING);
+        let x = panel.x + pad;
+        let inner = (panel.w - pad * 2.0).max(0.0);
+        let mut y = panel.y + pad;
+        let heading = self.font_size(TextRole::Heading);
+        let open = self.windows.len();
+        let title = if open == 1 {
+            "A program is still open".to_string()
+        } else {
+            format!("{open} programs are still open")
+        };
+        tree.text_in_weighted(
+            x,
+            y,
+            inner,
+            &title,
+            fg,
+            heading,
+            guitk::render::FontWeightHint::Bold,
+        );
+        y += heading * 1.4 + pad / 2.0;
+        let body = self.font_size(TextRole::Body);
+        for line in [
+            "They were asked to close and have not. One may be asking",
+            "whether to keep your work: Cancel, and close it yourself --",
+            &format!(
+                "or {} anyway, and lose what is not saved.",
+                ending.choice.verb()
+            ),
+        ] {
+            tree.text_in(x, y, inner, line, with_alpha(fg, START_SECTION_ALPHA), body);
+            y += body * 1.3;
+        }
+        y += pad / 2.0;
+        let px = self.icon_px(START_ROW_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        let row_h = self.scale(ENDING_ROW_HEIGHT);
+        let mut windows: Vec<&ManagedWindow> = self.windows.values().collect();
+        windows.sort_by_key(|w| w.id.0);
+        for window in windows.iter().take(ENDING_LIST_MAX) {
+            let program = self.program_for_app_id(&window.app_id);
+            let image_id = self.picture_of(program, px, fg);
+            tree.push(guitk::render::RenderCommand::Image {
+                x,
+                y: y + (row_h - side) / 2.0,
+                width: side,
+                height: side,
+                image_id,
+            });
+            let text_x = x + side + self.scale(10.0);
+            let name = if window.title.is_empty() {
+                program.map_or("A window with no title", |p| p.name.as_str())
+            } else {
+                window.title.as_str()
+            };
+            tree.text_in(
+                text_x,
+                y + (row_h - body).max(0.0) / 2.0,
+                (x + inner - text_x).max(0.0),
+                name,
+                fg,
+                body,
+            );
+            y += row_h;
+        }
+        if open > ENDING_LIST_MAX {
+            tree.text_in(
+                x,
+                y + (row_h - body).max(0.0) / 2.0,
+                inner,
+                &format!("and {} more", open.saturating_sub(ENDING_LIST_MAX)),
+                with_alpha(fg, START_SECTION_ALPHA),
+                body,
+            );
+        }
+        let (anyway, cancel) = self.ending_button_rects();
+        let button_radii = CornerRadii::all(self.scale(4.0));
+        fill_round(&mut tree, anyway, self.theme.accent_color, button_radii);
+        fill_round(
+            &mut tree,
+            cancel,
+            self.theme.taskbar_active_bg,
+            button_radii,
+        );
+        stroke_round(
+            &mut tree,
+            cancel,
+            self.theme.panel_border_color,
+            self.scale(1.0),
+            button_radii,
+        );
+        let verb = ending.choice.label();
+        for (rect, label, color) in [
+            (
+                anyway,
+                format!("{verb} anyway"),
+                readable_on(self.theme.accent_color),
+            ),
+            (cancel, "Cancel".to_string(), fg),
+        ] {
+            let w = text::width(&label, body);
+            tree.text(
+                rect.x + (rect.w - w).max(0.0) / 2.0,
+                rect.y + (rect.h - body).max(0.0) / 2.0,
+                &label,
+                color,
+                body,
+            );
+        }
+        Some(tree)
     }
 
     /// The image id of `program`'s picture, `px` square in `color` -- or the
@@ -10947,6 +11297,7 @@ impl DesktopShell {
             || self.tray_overflow_menu.is_some()
             || self.pin_menu.is_some()
             || self.taskbar_menu.is_some()
+            || self.ending_listing()
             || self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
@@ -10968,6 +11319,11 @@ impl DesktopShell {
         self.tray_overflow_menu = None;
         self.pin_menu = None;
         self.taskbar_menu = None;
+        // The list, not the wait: dismissing the popups -- opening a menu,
+        // say -- is not the user changing their mind about shutting down.
+        if self.ending_listing() {
+            self.ending = None;
+        }
         // Through the one exit, which also ends a drag from the menu: Escape
         // in the middle of carrying a program used to close the menu and
         // leave the drag to finish on the release.
@@ -19491,6 +19847,177 @@ mod taskbar_pin_tests {
                 "lit after the pointer left"
             );
         });
+    }
+
+    // ---- shutting down asks the programs first ----
+
+    /// The power choice `choice`, as the power menu's row carries it out.
+    fn press_power(shell: &mut DesktopShell, choice: crate::power::PowerChoice) -> ShellAction {
+        shell.choose_power(choice)
+    }
+
+    /// **With nothing open, shutting down is at once.**
+    #[test]
+    fn with_nothing_open_shutting_down_is_at_once() {
+        let mut shell = shell();
+        assert_eq!(
+            press_power(&mut shell, crate::power::PowerChoice::ShutDown),
+            ShellAction::Launch(
+                crate::power::PowerChoice::ShutDown
+                    .command()
+                    .expect("a program")
+            )
+        );
+    }
+
+    /// **Shutting down asks every window to close first**, and is carried out
+    /// once they have -- so a program with unsaved work is asked, where it
+    /// used to be switched off.
+    #[test]
+    fn shutting_down_asks_every_window_to_close_first() {
+        use super::{ShellControlAction, ShellRequest, WindowId};
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![stacked(1, true), stacked(2, false)],
+        ));
+        let action = press_power(&mut shell, crate::power::PowerChoice::ShutDown);
+        let ShellAction::ControlAll(asked) = action else {
+            panic!("shutting down with windows open did not ask them: {action:?}");
+        };
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        for id in [1, 2] {
+            assert!(
+                asked.contains(&ShellRequest::window(
+                    WindowId(id),
+                    ShellControlAction::Close
+                )),
+                "window {id} was not asked to close: {asked:?}"
+            );
+        }
+        assert_eq!(
+            shell.take_ending_action(),
+            None,
+            "carried out before they closed"
+        );
+
+        // One goes: still waiting.
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(2, false)]));
+        assert_eq!(shell.take_ending_action(), None);
+        // The last goes: now.
+        shell.apply_window_list(&WindowList::new(0, Vec::new()));
+        assert_eq!(
+            shell.take_ending_action(),
+            Some(ShellAction::Launch(
+                crate::power::PowerChoice::ShutDown
+                    .command()
+                    .expect("a program")
+            ))
+        );
+        assert_eq!(shell.take_ending_action(), None, "carried out twice");
+    }
+
+    /// **Log out asks too**, and ends the session once they have gone.
+    #[test]
+    fn logging_out_asks_the_windows_and_then_ends_the_session() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        assert!(matches!(
+            press_power(&mut shell, crate::power::PowerChoice::LogOut),
+            ShellAction::ControlAll(_)
+        ));
+        shell.apply_window_list(&WindowList::new(0, Vec::new()));
+        assert_eq!(shell.take_ending_action(), Some(ShellAction::LogOut));
+    }
+
+    /// **Sleep and lock leave the session as it was**, so nothing is asked.
+    #[test]
+    fn sleeping_and_locking_ask_nothing() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        for choice in [
+            crate::power::PowerChoice::Sleep,
+            crate::power::PowerChoice::Lock,
+        ] {
+            assert!(
+                matches!(press_power(&mut shell, choice), ShellAction::Launch(_)),
+                "{choice:?} asked the windows"
+            );
+        }
+    }
+
+    /// **Programs that do not close are listed, after a grace**, over the
+    /// whole screen: going ahead anyway carries it out; Cancel, or Escape,
+    /// does not, and leaves them open.
+    #[test]
+    fn programs_that_do_not_close_are_listed_to_decide() {
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![window_of(1, "terminal", "notes.txt -- unsaved")],
+        ));
+        drop(press_power(&mut shell, crate::power::PowerChoice::Restart));
+        assert!(shell.render_ending().is_none(), "listed before the grace");
+        let due = shell.ending_due_in().expect("the grace is a deadline");
+        shell.advance_osd(due);
+        assert!(
+            shell.tick_ending(),
+            "the grace ran out and nothing was listed"
+        );
+        assert!(!shell.tick_ending(), "listed twice");
+        let drawn = format!("{:?}", shell.render_ending().expect("not listed"));
+        assert!(drawn.contains("notes.txt -- unsaved"), "{drawn}");
+        assert!(drawn.contains("Restart anyway"), "{drawn}");
+        assert!(shell.any_popup_open(), "the list does not hold Escape");
+
+        let (anyway, cancel) = shell.ending_button_rects();
+        let centre = |r: super::Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        // Everything else on the screen is the list's.
+        let (x, y) = shell.show_desktop_rect().centre();
+        assert_eq!(
+            shell.handle_press(x, y, MouseButton::Left),
+            ShellAction::Consumed
+        );
+        assert!(
+            shell.render_ending().is_some(),
+            "a press behind it reached the bar"
+        );
+
+        let (x, y) = centre(anyway);
+        assert_eq!(
+            shell.handle_press(x, y, MouseButton::Left),
+            ShellAction::Launch(
+                crate::power::PowerChoice::Restart
+                    .command()
+                    .expect("a program")
+            )
+        );
+        assert!(shell.render_ending().is_none());
+
+        // Again, and Cancel.
+        drop(press_power(&mut shell, crate::power::PowerChoice::Restart));
+        shell.advance_osd(super::ENDING_GRACE_MS);
+        assert!(shell.tick_ending());
+        let (x, y) = centre(cancel);
+        assert_eq!(
+            shell.handle_press(x, y, MouseButton::Left),
+            ShellAction::Consumed
+        );
+        assert!(shell.render_ending().is_none(), "Cancel left the list up");
+        shell.apply_window_list(&WindowList::new(0, Vec::new()));
+        assert_eq!(
+            shell.take_ending_action(),
+            None,
+            "cancelled, and carried out anyway"
+        );
+
+        // And Escape.
+        shell.apply_window_list(&WindowList::new(0, vec![stacked(1, true)]));
+        drop(press_power(&mut shell, crate::power::PowerChoice::Restart));
+        shell.advance_osd(super::ENDING_GRACE_MS);
+        assert!(shell.tick_ending());
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        assert!(shell.render_ending().is_none(), "Escape left the list up");
     }
 
     // ---- "Show desktop" ----

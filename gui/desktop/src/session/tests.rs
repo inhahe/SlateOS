@@ -686,6 +686,46 @@ fn show_desktop_asks_for_every_window() {
     assert_eq!(minimised, [1, 2], "not every window was asked");
 }
 
+/// **Shutting down asks the programs first, through the real session**: the
+/// windows are asked to close, and `powerctl` is started only once the window
+/// list says they have gone.
+#[test]
+fn shutting_down_waits_for_the_windows_to_close() {
+    let (mut session, desktop, _turn) = session();
+    desktop
+        .borrow_mut()
+        .send_window_list(&[WindowInfo::new(7, 7, "unsaved".to_string())]);
+    session.pump().expect("pump");
+    let before = controls(&desktop).len();
+
+    let action = session
+        .shell_mut()
+        .choose_power(crate::power::PowerChoice::ShutDown);
+    session.act(action).expect("act");
+    assert!(
+        controls(&desktop)[before..].contains(&(7, ShellControlAction::Close)),
+        "the window was not asked to close"
+    );
+    assert!(
+        session.take_launches().is_empty(),
+        "the machine was shut down under an open window"
+    );
+
+    // The compositor reports the window gone.
+    desktop.borrow_mut().send_window_list(&[]);
+    session.pump().expect("pump");
+    let launched: Vec<_> = session.take_launches();
+    assert_eq!(
+        launched,
+        vec![
+            crate::power::PowerChoice::ShutDown
+                .command()
+                .expect("a program")
+        ],
+        "the windows closed and the machine was not shut down"
+    );
+}
+
 /// **The bar's own menu is put on the screen** -- the part list the
 /// surface is mapped from has it, which is the whole of what a menu needs to
 /// be seen (see `right_clicking_a_pinned_tile_draws_its_menu`).

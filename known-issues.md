@@ -24215,6 +24215,13 @@ is a way to ask, and the session id to ask about.
 right people in; what it cannot do is clear the desk. A single-user machine --
 the common case -- is unaffected in practice.
 
+**Narrowed 2026-09-26 (design-decisions §1405):** log out now asks every
+window to close first, as shut down and restart do, and returns to the login
+screen once they have -- or when the user says to go ahead without the ones
+that did not. What is left is a program with no window: a background process,
+or one that closed its window and kept running. That still needs the session
+manager.
+
 ## TD-C-THE-DESKTOP-STARTED-WITHOUT-THE-USERS-APPEARANCE (lane C, 2026-09-25) -- FIXED the same day
 
 **In short:** the real desktop ignored the user's saved appearance when it

@@ -4,6 +4,10 @@
 **Status:** OPEN — the mechanism is on `lane-f`; using it is lane E's, and closing the entry lane C's.
 Lane C (2026-09-25): nothing to do until lane E's worker lands; the entry
 (`TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`) is closed when it does.
+Lane C (2026-09-26): the desktop shell used it first -- its wallpaper and
+login picture had the same stall, and now decode on a thread that wakes the
+loop through `EventLoop::waker` (`gui/desktop/src/pictures.rs`,
+design-decisions §882). The two applications are still lane E's.
 
 **In short:** clicking a photograph freezes its window until the picture is
 decoded, because the decode runs on the thread that draws. Lane C's entry

@@ -1826,6 +1826,17 @@ live.
   and fill rules, scaled to the size drawn. Programs' tray icons are still
   characters (a wire change, lane F's).
 
+- `[C]` **The desktop no longer stops while a wallpaper decodes** -- done
+  2026-09-26 (`design-decisions.md` §882). The shell read and decoded the
+  wallpaper and the login screen's picture on the thread that draws, so at
+  login, whenever a wallpaper was chosen and at every step of a slideshow the
+  desktop drew nothing and took no clicks for as long as a photograph takes
+  -- about a second. A thread of the shell's own decodes them now
+  (`gui/desktop/src/pictures.rs`) and wakes the loop when one is ready. The
+  picture on screen stays up until the next replaces it; of several asked
+  for in a row only the newest is decoded; and a login screen showing the
+  desktop's picture shares its decode.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

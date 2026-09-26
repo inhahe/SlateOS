@@ -83,6 +83,7 @@ use oswindow::{
 use crate::animations::{AnimationManager, WindowAnimation};
 use crate::login_screen::{LoginAction, LoginScreen};
 use crate::notif_pane;
+use crate::pictures::{Decoded, Job, PictureWorker, Slot};
 use crate::taskbar_autohide::{AutoHideConfig, AutoHideManager, ScreenEdge};
 use crate::wallpaper::WallpaperManager;
 use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
@@ -101,16 +102,22 @@ use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
 /// `design-decisions.md` §521 §1.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
-/// One window the shell draws on, and where it sits on screen.
+/// Whether `held` -- what a slot last asked the decoding thread for, as an
+/// image id and a path -- is the request `job` answers.
 ///
-/// Deliberately not a `Window`: [`oswindow::Window`] is what the compositor
-/// last said about a window, and this is what the *shell* needs to know about
-/// one, which is only its id and its origin.
+/// Both halves, as when the request was made: the id alone would take a
+/// picture read before an edit in place for the one read after it, and the
+/// path alone would take the answer to an old request for a file asked for
+/// again under a new id.
+fn asked_for(held: Option<&(u64, PathBuf)>, job: &Job) -> bool {
+    held.is_some_and(|(id, path)| *id == job.id && *path == job.path)
+}
+
 /// What became of an attempt to put a picture on a surface.
 ///
 /// Distinguishes the two kinds of failure that must not be confused: one
 /// costs a picture, the other costs the connection. See
-/// [`Session::upload_picture`].
+/// [`Session::upload_decoded`].
 enum PictureUpload {
     /// The compositor holds the pixels. Carries the picture's own size, which
     /// is known nowhere else in the tree and which every fit mode needs.
@@ -120,6 +127,11 @@ enum PictureUpload {
     Failed(String),
 }
 
+/// One window the shell draws on, and where it sits on screen.
+///
+/// Deliberately not a `Window`: [`oswindow::Window`] is what the compositor
+/// last said about a window, and this is what the *shell* needs to know about
+/// one, which is only its id and its origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Surface {
     window: u64,
@@ -304,14 +316,16 @@ pub struct ShellSession<T: Transport> {
     /// settings change -- scanning each time would read a folder of photographs
     /// off the disk because the user adjusted the taskbar's opacity.
     rotation_loaded: Option<PathBuf>,
-    /// The picture the background surface was last *asked* to hold, as the
-    /// wallpaper's image id and the path it was read from.
+    /// The picture the background was last *asked* to hold, as the
+    /// wallpaper's image id and the path it is read from: requested of the
+    /// decoding thread, and perhaps not yet decoded.
     ///
     /// Both halves are needed. The id alone would not notice a user who edited
     /// the file in place and asked for the same wallpaper again; the path alone
     /// would not notice that [`WallpaperManager`] has issued a fresh id, which
     /// it does on every `set_image` and every slideshow step, and an upload
-    /// under the *old* id would leave the new one naming nothing.
+    /// under the *old* id would leave the new one naming nothing. It is also
+    /// how an answer from the decoding thread is known to be still wanted.
     ///
     /// "Asked to hold" rather than "holds", because a failed attempt is
     /// recorded here too — paired with a `wallpaper_error` that says so. That
@@ -319,6 +333,12 @@ pub struct ShellSession<T: Transport> {
     /// was *not* remembered on failure would re-read and re-inflate a corrupt
     /// full-screen `.png` on every mouse click.
     wallpaper_image: Option<(u64, PathBuf)>,
+    /// The picture the background surface does hold: the id it was uploaded
+    /// under, released before the next is uploaded.
+    wallpaper_uploaded: Option<u64>,
+    /// The thread that decodes pictures, so a photograph's second of decoding
+    /// is not a second the desktop stops drawing (`crate::pictures`).
+    pictures: PictureWorker,
     /// The login screen, while the machine has not let anyone in yet.
     ///
     /// `None` is a session in use. It is *not* "login is disabled": a machine
@@ -370,13 +390,18 @@ pub struct ShellSession<T: Transport> {
     /// per change -- and two that are both failing do not take turns
     /// reposting each other's news. See [`report_save`](Self::report_save).
     save_errors: BTreeMap<&'static str, String>,
-    /// The picture uploaded to the greeter's surface, and which file it is.
+    /// The picture asked for the greeter's surface, and which file it is --
+    /// requested of the decoding thread, as `wallpaper_image` is.
     ///
     /// Separate from `wallpaper_image` even when they name the same file,
     /// because an image belongs to the window that uploaded it: the greeter
     /// has its own surface, so `SameAsDesktop` is two uploads of one picture
     /// rather than one upload shown twice.
     login_image: Option<(u64, PathBuf)>,
+    /// The picture the greeter's surface does hold, with its size: kept so a
+    /// greeter built afresh -- logging out builds one -- can be shown it again
+    /// without decoding it again.
+    login_uploaded: Option<(u64, f32, f32)>,
     /// Next id to hand the greeter's surface. Never zero, which means "none".
     login_image_next: u64,
     /// Why the greeter has no picture, when it wanted one.
@@ -615,6 +640,12 @@ impl<T: Transport> ShellSession<T> {
             events.watch_idle(panel.window, after)?;
         }
 
+        // Taken before `events` moves into the session. A transport that
+        // cannot make one -- out of descriptors, most likely -- costs only
+        // promptness: finished pictures are still collected on the loop's next
+        // pass, the next event or frame, so the error is dropped rather than
+        // failing the desktop over its wallpaper.
+        let picture_waker = events.waker().ok().flatten();
         let mut session = Self {
             events,
             global_held,
@@ -650,10 +681,13 @@ impl<T: Transport> ShellSession<T> {
             clock_ms: 0,
             rotation_loaded: None,
             wallpaper_image: None,
+            wallpaper_uploaded: None,
+            pictures: PictureWorker::spawn(picture_waker),
             wallpaper_error: None,
             save_errors: BTreeMap::new(),
             focus_left_shell: false,
             login_image: None,
+            login_uploaded: None,
             login_image_next: 1,
             login_background_error: None,
             theme_problem: None,
@@ -1016,11 +1050,12 @@ impl<T: Transport> ShellSession<T> {
     ///
     /// As [`EventLoop::submit`].
     fn refresh_background(&mut self) -> Result<(), Error<T>> {
-        // Before the picture, the pixels the picture refers to. `render_image`
-        // emits an `Image` command naming `current_image_id`, and the
-        // compositor draws *nothing, silently* for an id it has never been
-        // given bytes for — so an upload that has not happened is a wallpaper
-        // that does not appear and says nothing about why.
+        // First, ask for the picture the wallpaper wants now if it is not the
+        // one already asked for: this is where a wallpaper chosen or a slide
+        // stepped is noticed and handed to the decoding thread. The frame
+        // below draws only a picture that is up (`WallpaperManager::
+        // shown_picture`), never one still decoding -- the compositor draws
+        // *nothing, silently* for an id it holds no pixels under.
         self.refresh_wallpaper_image()?;
         let tree = self.background.localize(&self.background_tree());
         if self.background_drawn.as_ref() == Some(&tree) {
@@ -1174,19 +1209,23 @@ impl<T: Transport> ShellSession<T> {
         self.theme_problem = problem;
     }
 
-    /// Make sure the compositor holds the pixels that the background surface's
-    /// `Image` command is about to name.
+    /// Ask for the picture the wallpaper wants, if it is not the one already
+    /// asked for.
     ///
     /// [`WallpaperManager`] performs no I/O by design — that is what keeps its
-    /// tests runnable with no filesystem — so it allocates an image id and
-    /// emits a command naming it, and something else has to put bytes under
-    /// that id. This is that something else, and it lives here rather than in
-    /// the manager because this is the layer that owns the connection.
+    /// tests runnable with no filesystem — so it allocates an image id for the
+    /// picture it wants, and something else has to put bytes under that id.
+    /// This is that something else, and it lives here rather than in the
+    /// manager because this is the layer that owns the connection. The bytes
+    /// arrive later: the decoding thread reads the file, and
+    /// [`Self::adopt_picture`] uploads it and tells the manager it is up. The
+    /// manager draws the picture that is up, never one still decoding, so the
+    /// frame never names an id the compositor holds nothing under.
     ///
     /// Called on every `paint_background` and almost always does nothing: the
-    /// `(id, path)` pair it remembers is unchanged, so there is no read, no
-    /// decode and no upload. It does work exactly when the wallpaper actually
-    /// changed, which is what the id was allocated to signal.
+    /// `(id, path)` pair it remembers is unchanged, so there is no request. It
+    /// does work exactly when the wallpaper actually changed, which is what
+    /// the id was allocated to signal.
     fn refresh_wallpaper_image(&mut self) -> Result<(), Error<T>> {
         let id = self.wallpaper.current_image_id();
         let want = self.wallpaper.current_image_path().map(Path::to_path_buf);
@@ -1196,6 +1235,11 @@ impl<T: Transport> ShellSession<T> {
         // the link's image budget for nothing.
         let Some(path) = want.filter(|_| id != 0) else {
             self.release_wallpaper_image()?;
+            // Nothing asked for, so an answer still on its way is dropped
+            // when it lands, and the manager stops drawing the picture that
+            // was just released.
+            self.wallpaper_image = None;
+            self.wallpaper.picture_gone();
             self.set_wallpaper_error(None);
             return Ok(());
         };
@@ -1208,32 +1252,140 @@ impl<T: Transport> ShellSession<T> {
             return Ok(());
         }
 
-        // Released before the read rather than after the upload. The old
-        // picture is already unreachable — the render tree names the new id —
-        // and holding it across a decode is what would make a slideshow of
-        // full-screen images charge the link's budget for two at once, so a
-        // budget that fits the wallpaper would still refuse the next slide.
-        self.release_wallpaper_image()?;
+        // Asked for, not decoded here: the decoding thread answers, and
+        // `adopt_picture` uploads it. Until then the picture before it stays
+        // up -- the manager draws the one that is up, not the one wanted.
         self.wallpaper_image = Some((id, path.clone()));
+        self.pictures.request(Slot::Wallpaper, id, path);
+        Ok(())
+    }
 
-        match self.upload_picture(self.background.window, id, &path)? {
-            PictureUpload::Loaded { width, height } => {
-                // The only moment in the tree at which a wallpaper's pixel size
-                // is known. The manager allocates ids and picks fits but never
-                // opens a file, so without this it has to assume the picture is
-                // exactly the size of the screen -- an assumption under which
-                // all six fit modes produce the same full-screen rectangle,
-                // which is what the setting did until this existed.
-                self.wallpaper
-                    .note_image_size(id, width as f32, height as f32);
-                self.set_wallpaper_error(None);
+    /// Adopt every picture the decoding thread has finished, answering whether
+    /// there were any.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::adopt_picture`].
+    fn collect_pictures(&mut self) -> Result<bool, Error<T>> {
+        let ready = self.pictures.take();
+        let any = !ready.is_empty();
+        for decoded in ready {
+            self.adopt_picture(decoded)?;
+        }
+        Ok(any)
+    }
+
+    /// Put one decoded picture up, if it is still the one wanted.
+    ///
+    /// What is wanted is asked *first*, of the wallpaper and the greeter's
+    /// style as they are now: either may have moved on since the request --
+    /// a slide stepped, a colour chosen, a style changed -- with no paint since
+    /// to notice. Asking sends the new request at once, and an answer it makes
+    /// stale is dropped with its pixels rather than uploaded, shown for a
+    /// moment, and released again.
+    ///
+    /// The one wanted goes up in the order a budget that fits one full-screen
+    /// picture needs: the old one released, then the new uploaded. The frame
+    /// that shows it is sent here, after the upload and before anything else
+    /// can be drawn, so the old picture is on screen until the new one
+    /// replaces it and no frame names a picture the compositor does not hold.
+    ///
+    /// Only the surface the picture is for is drawn again. A picture arriving
+    /// changes nothing on the taskbar, so it does not mark the shell dirty --
+    /// a failure does, through the notice that says why.
+    ///
+    /// # Errors
+    ///
+    /// A connection that failed: a refusal or an undecodable file costs the
+    /// picture, not the desktop, and comes back as the reason on screen.
+    fn adopt_picture(&mut self, decoded: Decoded) -> Result<(), Error<T>> {
+        let Decoded { job, result } = decoded;
+        match job.slot {
+            Slot::Wallpaper => {
+                self.refresh_wallpaper_image()?;
+                if !asked_for(self.wallpaper_image.as_ref(), &job) {
+                    return Ok(());
+                }
+                self.release_wallpaper_image()?;
+                let outcome = match result {
+                    Ok(image) => {
+                        self.upload_decoded(self.background.window, job.id, &job.path, &image)?
+                    }
+                    Err(why) => PictureUpload::Failed(why),
+                };
+                match outcome {
+                    PictureUpload::Loaded { width, height } => {
+                        self.wallpaper_uploaded = Some(job.id);
+                        // The only moment in the tree at which a wallpaper's
+                        // pixel size is known. The manager allocates ids and
+                        // picks fits but never opens a file.
+                        self.wallpaper
+                            .picture_ready(job.id, width as f32, height as f32);
+                        self.set_wallpaper_error(None);
+                    }
+                    PictureUpload::Failed(why) => {
+                        // The plain colour underneath, and the reason.
+                        self.wallpaper.picture_gone();
+                        self.set_wallpaper_error(Some(why));
+                    }
+                }
+                self.refresh_background()?;
             }
-            PictureUpload::Failed(why) => self.set_wallpaper_error(Some(why)),
+            Slot::Greeter => {
+                self.refresh_login_image()?;
+                if !asked_for(self.login_image.as_ref(), &job) {
+                    return Ok(());
+                }
+                self.release_login_image()?;
+                let fit = self.wallpaper.config.fit;
+                let outcome = match result {
+                    Ok(image) => {
+                        self.upload_decoded(self.login_surface.window, job.id, &job.path, &image)?
+                    }
+                    Err(why) => PictureUpload::Failed(why),
+                };
+                match outcome {
+                    PictureUpload::Loaded { width, height } => {
+                        // Recorded, not shown: `paint_login` below shows it,
+                        // through `refresh_login_image` -- the one place that
+                        // decides what the greeter shows, against the style it
+                        // has now.
+                        self.login_uploaded = Some((job.id, width as f32, height as f32));
+                        self.login_background_error = None;
+                    }
+                    PictureUpload::Failed(why) => {
+                        // The theme colour underneath is a perfectly usable
+                        // greeter.
+                        self.clear_login_picture(fit);
+                        self.login_background_error = Some(why);
+                    }
+                }
+                self.paint_login()?;
+            }
         }
         Ok(())
     }
 
-    /// Read `path`, decode it, and upload it to `window` under `id`.
+    /// Every picture still being decoded, waited for and adopted, and the
+    /// background drawn with it: what a test that paints a picture and then
+    /// looks at the result needs, since the decoding is on another thread.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::adopt_picture`] and [`EventLoop::submit`].
+    #[cfg(test)]
+    pub(crate) fn settle_pictures(&mut self) -> Result<(), Error<T>> {
+        for decoded in self.pictures.settle(std::time::Duration::from_mins(1)) {
+            self.adopt_picture(decoded)?;
+        }
+        if core::mem::take(&mut self.dirty) {
+            self.refresh_background()?;
+            self.paint_chrome()?;
+        }
+        Ok(())
+    }
+
+    /// Upload `image`, decoded from `path`, to `window` under `id`.
     ///
     /// The half of "put a picture on a surface" that is the same for every
     /// surface. Two of them want it -- the desktop's background and the
@@ -1241,36 +1393,23 @@ impl<T: Transport> ShellSession<T> {
     /// afterwards: where to record the size, and where to put the reason when
     /// it does not work. So that part is the caller's and this is shared,
     /// rather than the whole thing being written twice and drifting, which is
-    /// what happened to the path encoder in `apps/` and cost a day.
+    /// what happened to the path encoder in `apps/` and cost a day. Reading and
+    /// decoding are the decoding thread's (`crate::pictures`); `path` is here
+    /// only to name the file in a reason.
     ///
     /// Failures that cost a *picture* come back as [`PictureUpload::Failed`]
-    /// with a reason fit to show a user: an unreadable file, an undecodable
-    /// one, a surface the compositor has lost, and a refusal (the picture is
-    /// over the link's image budget). None of those should cost the desktop or
-    /// lock anybody out of the machine. Failures that cost the *connection*
-    /// propagate, because the `submit` that follows would fail the same way and
-    /// swallowing them here would only delay it.
-    fn upload_picture(
+    /// with a reason fit to show a user: a surface the compositor has lost,
+    /// and a refusal (the picture is over the link's image budget). Neither
+    /// should cost the desktop or lock anybody out of the machine. Failures
+    /// that cost the *connection* propagate, because the `submit` that follows
+    /// would fail the same way and swallowing them here would only delay it.
+    fn upload_decoded(
         &mut self,
         window: u64,
         id: u64,
         path: &Path,
+        image: &imagecodec::Image,
     ) -> Result<PictureUpload, Error<T>> {
-        let decoded = std::fs::read(path)
-            .map_err(|e| format!("{}: {e}", path.display()))
-            .and_then(|bytes| {
-                // The default limit is the compositor's own buffer ceiling, so
-                // a picture refused here is one the compositor would have
-                // refused anyway — and refusing it from the header costs a
-                // header rather than a decompressed framebuffer.
-                imagecodec::decode(&bytes, imagecodec::Limits::default())
-                    .map_err(|e| format!("{}: {e}", path.display()))
-            });
-        let image = match decoded {
-            Ok(image) => image,
-            Err(why) => return Ok(PictureUpload::Failed(why)),
-        };
-
         let (width, height, stride) = (image.width, image.height, image.stride());
         // Through `WireBytes` rather than `Image::to_argb_bytes`, which returns
         // a bare `Vec<u8>`: the upload takes the typed form so that the other
@@ -1330,40 +1469,35 @@ impl<T: Transport> ShellSession<T> {
 
         let Some(path) = want else {
             self.release_login_image()?;
+            self.login_image = None;
             self.clear_login_picture(fit);
             self.login_background_error = None;
             return Ok(());
         };
 
-        // Already up, and still drawing.
-        if self
-            .login_image
-            .as_ref()
-            .is_some_and(|(id, from)| *from == path && self.login_shows(*id))
-        {
+        // Asked for already -- decoding, up, or failed with its reason shown.
+        // A greeter that has let go of it since it went up (a change of style
+        // that came back to the same file does that) is shown it again, with
+        // no second decode. Only *this* request's picture: one from an older
+        // request, still up while this one decodes, belongs to a style the
+        // user has since left.
+        if let Some((asked, _)) = self.login_image.as_ref().filter(|(_, from)| *from == path) {
+            let asked = *asked;
+            if let Some((id, w, h)) = self.login_uploaded.filter(|(id, _, _)| *id == asked) {
+                if !self.login_shows(id) {
+                    if let Some(screen) = self.login.as_mut() {
+                        screen.set_background_image(id, w, h, fit);
+                    }
+                }
+            }
             return Ok(());
         }
 
-        // Released before the read, as the wallpaper's is: holding the old
-        // picture across a decode charges the link's image budget for two
-        // full-screen pictures at once.
-        self.release_login_image()?;
+        // Asked for, not decoded here; `adopt_picture` releases the old
+        // picture and uploads this one when it is ready, as the wallpaper's.
         let id = self.alloc_login_image_id();
         self.login_image = Some((id, path.clone()));
-
-        match self.upload_picture(self.login_surface.window, id, &path)? {
-            PictureUpload::Loaded { width, height } => {
-                if let Some(screen) = self.login.as_mut() {
-                    screen.set_background_image(id, width as f32, height as f32, fit);
-                }
-                self.login_background_error = None;
-            }
-            PictureUpload::Failed(why) => {
-                // The theme colour underneath is a perfectly usable greeter.
-                self.clear_login_picture(fit);
-                self.login_background_error = Some(why);
-            }
-        }
+        self.pictures.request(Slot::Greeter, id, path);
         Ok(())
     }
 
@@ -1393,7 +1527,7 @@ impl<T: Transport> ShellSession<T> {
 
     /// Give back whatever the greeter's surface is holding, if anything.
     fn release_login_image(&mut self) -> Result<(), Error<T>> {
-        let Some((id, _)) = self.login_image.take() else {
+        let Some((id, _, _)) = self.login_uploaded.take() else {
             return Ok(());
         };
         if let Some(mut handle) = self.events.window_mut(self.login_surface.window) {
@@ -1408,7 +1542,7 @@ impl<T: Transport> ShellSession<T> {
     /// see [`oswindow::WindowHandle::drop_image`] — which is what lets this be
     /// called without first asking whether the last attempt worked.
     fn release_wallpaper_image(&mut self) -> Result<(), Error<T>> {
-        let Some((id, _)) = self.wallpaper_image.take() else {
+        let Some(id) = self.wallpaper_uploaded.take() else {
             return Ok(());
         };
         if let Some(mut handle) = self.events.window_mut(self.background.window) {
@@ -1615,7 +1749,9 @@ impl<T: Transport> ShellSession<T> {
     ///
     /// As [`EventLoop::poll`] and [`Self::paint_chrome`].
     pub fn pump(&mut self) -> Result<bool, Error<T>> {
-        let mut worked = false;
+        // Pictures the decoding thread finished while the loop was parked --
+        // it woke the loop to say so -- or while it was busy.
+        let mut worked = self.collect_pictures()?;
         while let Some((window, event)) = self.events.poll()? {
             worked = true;
             self.dispatch(window, event)?;
@@ -2092,25 +2228,6 @@ impl<T: Transport> ShellSession<T> {
         });
     }
 
-    /// Adopt the wallpaper named in the appearance settings.
-    ///
-    /// `WallpaperManager` could already crop, tile, tint and rotate pictures
-    /// before this existed, and `set_image` was called four times in the whole
-    /// tree -- all four in this file's tests. Nothing in production had ever
-    /// set a wallpaper, because there was nowhere for a user to say which one.
-    ///
-    /// **Guarded on the path, and that is not an optimisation.** `set_image`
-    /// issues a fresh image id every time it is called, and `paint_background`
-    /// re-reads and re-inflates whatever id it has not seen before. This runs
-    /// on every `load_appearance`, which the shell calls whenever
-    /// `appearance.yaml` changes for any reason at all -- a comment edited, a
-    /// key this desktop does not read. Unguarded, changing the accent colour
-    /// would re-decode a full-screen photograph.
-    ///
-    /// `follow_desktop_base` rather than a solid colour for "no wallpaper":
-    /// the two draw the same pixels today and diverge the moment the user
-    /// switches between light and dark, and only one of them is a decision the
-    /// user made.
     /// Adopt the greeter's background from the appearance settings.
     ///
     /// Assigning the style is the whole of it: the picture itself is fetched by
@@ -2137,6 +2254,25 @@ impl<T: Transport> ShellSession<T> {
         }
     }
 
+    /// Adopt the wallpaper named in the appearance settings.
+    ///
+    /// `WallpaperManager` could already crop, tile, tint and rotate pictures
+    /// before this existed, and `set_image` was called four times in the whole
+    /// tree -- all four in this file's tests. Nothing in production had ever
+    /// set a wallpaper, because there was nowhere for a user to say which one.
+    ///
+    /// **Guarded on the path, and that is not an optimisation.** `set_image`
+    /// issues a fresh image id every time it is called, and `paint_background`
+    /// has whatever id it has not seen before read and decoded again. This runs
+    /// on every `load_appearance`, which the shell calls whenever
+    /// `appearance.yaml` changes for any reason at all -- a comment edited, a
+    /// key this desktop does not read. Unguarded, changing the accent colour
+    /// would re-decode a full-screen photograph.
+    ///
+    /// `follow_desktop_base` rather than a solid colour for "no wallpaper":
+    /// the two draw the same pixels today and diverge the moment the user
+    /// switches between light and dark, and only one of them is a decision the
+    /// user made.
     fn sync_wallpaper(&mut self) {
         // A rotation folder wins over a fixed picture: a rotation *is* the
         // wallpaper, and honouring both would leave the fixed picture visible

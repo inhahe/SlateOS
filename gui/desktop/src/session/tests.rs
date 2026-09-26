@@ -1484,6 +1484,7 @@ fn a_wallpaper_chosen_while_running_is_adopted_without_a_restart() {
 
         announce(&desktop, session.panel(), SettingsGroup::Appearance);
         session.pump().expect("pump");
+        session.settle_pictures().expect("the picture went up");
 
         assert_eq!(
             session.wallpaper_mut().current_image_path(),
@@ -3104,6 +3105,7 @@ fn a_wallpaper_file_is_uploaded_under_the_id_the_render_tree_names() {
     assert_ne!(id, 0, "setting an image did not allocate an id");
 
     session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("the picture went up");
 
     assert_eq!(session.wallpaper_error(), None);
     assert_eq!(
@@ -3111,6 +3113,17 @@ fn a_wallpaper_file_is_uploaded_under_the_id_the_render_tree_names() {
         vec![(background, id, 9, 7, 9 * 4, 9 * 7 * 4)],
         "the wallpaper did not reach the compositor, or reached it padded"
     );
+    // And the frame on the background names it.
+    assert!(background_names(&session, id), "no frame names the picture");
+}
+
+/// Whether the background frame last sent draws the picture uploaded as `id`.
+fn background_names(session: &Session, id: u64) -> bool {
+    session.background_drawn.as_ref().is_some_and(|tree| {
+        tree.commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == id))
+    })
 }
 
 #[test]
@@ -3119,13 +3132,24 @@ fn the_picture_goes_up_before_the_frame_that_draws_it() {
     // an id it has no bytes for, so a frame that overtook its upload would be
     // one blank repaint with no error anywhere to explain it.
     let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
     session
         .wallpaper_mut()
         .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
-    // Flush whatever `start` drew, so the count below moves only for this paint.
+    let id = session.wallpaper_mut().current_image_id();
+
+    // Asked for, and still decoding: the frame this paint sends must not
+    // name a picture the compositor has no bytes for yet.
+    session.paint_background().expect("the harness refused");
+    assert!(
+        !background_names(&session, id),
+        "a frame named the picture before it was decoded, let alone sent"
+    );
+    // Flush what was drawn so far, so the count below moves only for the
+    // picture's arrival.
     let before = desktop.borrow_mut().drawn().len();
 
-    session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("the picture went up");
 
     // The upload is a round trip and the frame is not, so at this instant the
     // compositor has necessarily read and answered the upload, while the frame
@@ -3137,7 +3161,7 @@ fn the_picture_goes_up_before_the_frame_that_draws_it() {
             .borrow()
             .seen
             .iter()
-            .any(|r| matches!(r.body, RequestBody::UploadImage { .. })),
+            .any(|r| matches!(r.body, RequestBody::UploadImage { image_id, .. } if image_id == id)),
         "the frame was built before the upload reached the compositor"
     );
     assert_eq!(
@@ -3145,11 +3169,189 @@ fn the_picture_goes_up_before_the_frame_that_draws_it() {
         before,
         "the frame overtook its own upload"
     );
+    let drawn = desktop.borrow_mut().drawn();
     assert_eq!(
-        desktop.borrow_mut().drawn().len(),
+        drawn.len(),
         before + 1,
-        "the background surface drew nothing, or drew twice"
+        "the picture's arrival drew nothing, or drew more than the background"
     );
+    assert_eq!(drawn.last().map(|d| d.0), Some(background));
+    assert!(
+        background_names(&session, id),
+        "the frame sent does not show it"
+    );
+}
+
+/// **The desktop keeps drawing while a picture decodes**: the picture on
+/// screen stays there, and nothing is uploaded or released, until the next
+/// one is ready -- then it is replaced in one step.
+///
+/// The point of decoding off the loop's thread. Until 2026-09-26 the session
+/// decoded where it draws, so each slideshow step and each wallpaper chosen
+/// froze the desktop for as long as the decode took -- a second or more for
+/// a photograph.
+#[test]
+fn the_picture_on_screen_stays_up_while_the_next_one_decodes() {
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    session
+        .wallpaper_mut()
+        .set_slideshow(std::path::Path::new("/pics"), 60, false);
+    session
+        .wallpaper_mut()
+        .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
+    let first = session.wallpaper_mut().current_image_id();
+    session.paint_background().expect("paint");
+    session
+        .settle_pictures()
+        .expect("the first picture went up");
+    assert!(background_names(&session, first));
+
+    session.wallpaper_mut().next_wallpaper();
+    let second = session.wallpaper_mut().current_image_id();
+    session.paint_background().expect("paint");
+
+    // Decoding: the first is still drawn, still held, and nothing new sent.
+    assert!(
+        background_names(&session, first),
+        "the picture on screen went away while the next one decoded"
+    );
+    assert!(
+        drops(&desktop).is_empty(),
+        "released before its successor was ready"
+    );
+    assert_eq!(uploads(&desktop).len(), 1);
+
+    session
+        .settle_pictures()
+        .expect("the second picture went up");
+    assert!(background_names(&session, second));
+    assert!(!background_names(&session, first));
+    assert_eq!(drops(&desktop), vec![(background, first)]);
+}
+
+/// **A picture replaced while it was decoding is never sent**: only the one
+/// wanted when the decodes finish goes up, however many were asked for on the
+/// way.
+///
+/// A user trying wallpapers one after another in Settings asks for each in
+/// turn; uploading every one of them as it landed would charge the link for
+/// pictures nobody will see, and flash each one on the screen.
+#[test]
+fn a_picture_replaced_while_it_decoded_is_never_sent() {
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    for name in ["rgb8", "gray8", "rgba8"] {
+        session
+            .wallpaper_mut()
+            .set_image(&fixture(name), crate::wallpaper::ImageFit::Fill);
+        session.paint_background().expect("paint");
+    }
+    let last = session.wallpaper_mut().current_image_id();
+
+    session.settle_pictures().expect("the pictures settled");
+
+    let sent: Vec<(u64, u64)> = uploads(&desktop).iter().map(|u| (u.0, u.1)).collect();
+    assert_eq!(
+        sent,
+        vec![(background, last)],
+        "a replaced picture was sent"
+    );
+    assert!(drops(&desktop).is_empty(), "nothing was up to release");
+    assert!(background_names(&session, last));
+    assert_eq!(session.wallpaper_error(), None);
+}
+
+/// **A picture replaced before anything repainted is never sent** -- even
+/// though nothing had yet asked for its replacement.
+///
+/// The wallpaper can move on between a request and its answer with no paint
+/// between to notice: a slide stepped, or a picture chosen in Settings, while
+/// the loop was busy. The answer is checked against what the wallpaper wants
+/// *now*, which asks for the replacement at once, rather than put up for a
+/// moment and released when the replacement lands.
+#[test]
+fn a_picture_replaced_before_anything_repainted_is_never_sent() {
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    session.paint_background().expect("paint");
+
+    // Replaced, with no paint since.
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("gray8"), crate::wallpaper::ImageFit::Fill);
+    let wanted = session.wallpaper_mut().current_image_id();
+    session.settle_pictures().expect("the first answer landed");
+    assert!(
+        uploads(&desktop).is_empty(),
+        "a picture already replaced was sent"
+    );
+
+    // And the replacement was asked for when the stale answer was seen.
+    session.settle_pictures().expect("the replacement landed");
+    let sent: Vec<(u64, u64)> = uploads(&desktop).iter().map(|u| (u.0, u.1)).collect();
+    assert_eq!(sent, vec![(background, wanted)]);
+    assert!(background_names(&session, wanted));
+}
+
+/// **A picture that finishes decoding after the wallpaper went back to a
+/// colour is dropped**, not put up behind the user's back.
+#[test]
+fn a_picture_that_lands_after_the_wallpaper_went_plain_is_dropped() {
+    let (mut session, desktop, _turn) = session();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    session.paint_background().expect("paint");
+    session
+        .wallpaper_mut()
+        .set_solid_color(guitk::color::Color::rgb(20, 20, 30));
+    session.paint_background().expect("paint");
+
+    session.settle_pictures().expect("the picture settled");
+
+    assert!(
+        uploads(&desktop).is_empty(),
+        "a picture no longer wanted was sent"
+    );
+    assert!(drops(&desktop).is_empty());
+    assert_eq!(session.wallpaper_error(), None);
+    assert!(background_is_current(&session));
+}
+
+/// **A picture that is ready is collected by the loop itself**: the next pump
+/// puts it up, with no test helper in between -- what the running desktop
+/// does after the decoding thread wakes it.
+#[test]
+fn the_pump_puts_up_a_picture_that_is_ready() {
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    let id = session.wallpaper_mut().current_image_id();
+    session.paint_background().expect("paint");
+
+    // Bounded: a decode of a nine-pixel fixture that took a minute would be a
+    // hang, not a slow machine.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    while !background_names(&session, id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pump never put the picture up"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        session.pump().expect("pump");
+    }
+    assert!(
+        uploads(&desktop)
+            .iter()
+            .any(|u| u.0 == background && u.1 == id)
+    );
+    assert!(background_is_current(&session));
 }
 
 #[test]
@@ -3164,7 +3366,9 @@ fn painting_the_background_twice_uploads_the_picture_once() {
 
     session.paint_background().expect("the harness refused");
     session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("the picture went up");
     session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("nothing more to settle");
 
     assert_eq!(uploads(&desktop).len(), 1, "one picture, one upload");
     assert!(
@@ -3189,11 +3393,17 @@ fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
         .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
     let first = session.wallpaper_mut().current_image_id();
     session.paint_background().expect("the harness refused");
+    session
+        .settle_pictures()
+        .expect("the first picture went up");
 
     session.wallpaper_mut().next_wallpaper();
     let second = session.wallpaper_mut().current_image_id();
     assert_ne!(first, second, "a slideshow step reused the image id");
     session.paint_background().expect("the harness refused");
+    session
+        .settle_pictures()
+        .expect("the second picture went up");
 
     assert_eq!(drops(&desktop), vec![(background, first)]);
     let sent = uploads(&desktop);
@@ -3252,6 +3462,9 @@ fn an_idle_desktop_is_woken_for_the_slideshows_next_picture() {
         .wallpaper_mut()
         .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
     session.paint_background().expect("paint");
+    session
+        .settle_pictures()
+        .expect("the first picture went up");
     let first = session.wallpaper_mut().current_image_id();
 
     // A frame starts the picture's interval, and the loop arms for its end.
@@ -3263,8 +3476,9 @@ fn an_idle_desktop_is_woken_for_the_slideshows_next_picture() {
         "the wake-up is not the next picture: {until:?}"
     );
 
-    // Woken then, the frame brings the next picture, on the screen.
+    // Woken then, the frame asks for the next picture, and it goes up.
     woken_after(&mut session, &desktop, 60_000);
+    session.settle_pictures().expect("the next picture went up");
     let second = session.wallpaper_mut().current_image_id();
     assert_ne!(second, first, "the slideshow did not move");
     assert!(
@@ -3346,15 +3560,19 @@ fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
     // run of the same test in another process.
     let _ = std::fs::remove_file(&missing);
     let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
     session.wallpaper_mut().set_image(
         std::path::Path::new(&missing),
         crate::wallpaper::ImageFit::Fill,
     );
-    let before = desktop.borrow_mut().drawn().len();
+    let before = frames_on(&desktop, background);
 
     session
         .paint_background()
         .expect("a missing wallpaper failed the whole repaint");
+    session
+        .settle_pictures()
+        .expect("a missing wallpaper failed the repaint after it");
 
     let why = session.wallpaper_error().expect("no error was recorded");
     assert!(
@@ -3363,10 +3581,11 @@ fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
     );
     assert!(uploads(&desktop).is_empty());
     assert_eq!(
-        desktop.borrow_mut().drawn().len(),
+        frames_on(&desktop, background),
         before + 1,
         "the background surface drew nothing at all"
     );
+    assert!(background_is_current(&session));
 }
 
 #[test]
@@ -3381,6 +3600,7 @@ fn a_corrupt_wallpaper_is_attempted_once_and_not_on_every_repaint() {
     session
         .paint_background()
         .expect("a corrupt wallpaper failed the repaint");
+    session.settle_pictures().expect("settle");
     let first = session
         .wallpaper_error()
         .expect("no error was recorded")
@@ -3388,6 +3608,7 @@ fn a_corrupt_wallpaper_is_attempted_once_and_not_on_every_repaint() {
     session
         .paint_background()
         .expect("a corrupt wallpaper failed the repaint");
+    session.settle_pictures().expect("settle");
 
     assert_eq!(session.wallpaper_error(), Some(first.as_str()));
     assert!(uploads(&desktop).is_empty());
@@ -3403,10 +3624,59 @@ fn a_corrupt_wallpaper_is_attempted_once_and_not_on_every_repaint() {
     session
         .paint_background()
         .expect("a corrupt wallpaper failed the repaint");
+    session.settle_pictures().expect("settle");
     assert_eq!(
         session.wallpaper_error(),
         Some(first.as_str()),
         "the file was read again on a repaint that changed nothing"
+    );
+}
+
+/// **A wallpaper that will not decode replaces the picture before it with
+/// the plain colour and a reason** -- the setting names a picture that
+/// cannot be shown, and keeping the old one up would say it worked -- and a
+/// picture that does load afterwards clears the reason.
+#[test]
+fn a_broken_wallpaper_takes_the_old_one_down_and_a_good_one_clears_the_reason() {
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    let good = session.wallpaper_mut().current_image_id();
+    session.paint_background().expect("paint");
+    session.settle_pictures().expect("the picture went up");
+    assert!(background_names(&session, good));
+
+    session.wallpaper_mut().set_image(
+        &scratch("broken-next.png", b"\x89PNG\r\n\x1a\nnonsense"),
+        crate::wallpaper::ImageFit::Fill,
+    );
+    session.paint_background().expect("paint");
+    session.settle_pictures().expect("settle");
+
+    assert!(
+        session.wallpaper_error().is_some(),
+        "the failure was not recorded"
+    );
+    assert!(
+        !background_names(&session, good),
+        "a picture released for its successor is still drawn"
+    );
+    assert_eq!(drops(&desktop), vec![(background, good)]);
+    assert!(background_is_current(&session));
+
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("gray8"), crate::wallpaper::ImageFit::Fill);
+    let fixed = session.wallpaper_mut().current_image_id();
+    session.paint_background().expect("paint");
+    session.settle_pictures().expect("the picture went up");
+    assert!(background_names(&session, fixed));
+    assert_eq!(
+        session.wallpaper_error(),
+        None,
+        "a wallpaper that loaded still carries the last one's complaint"
     );
 }
 
@@ -3422,15 +3692,32 @@ fn going_back_to_a_solid_colour_gives_the_picture_back() {
         .set_image(&fixture("palette8_trns"), crate::wallpaper::ImageFit::Fill);
     let id = session.wallpaper_mut().current_image_id();
     session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("the picture went up");
+    assert!(background_names(&session, id));
 
     session
         .wallpaper_mut()
         .set_solid_color(guitk::color::Color::rgb(20, 20, 30));
     session.paint_background().expect("the harness refused");
 
+    assert!(
+        !background_names(&session, id),
+        "a released picture is still drawn"
+    );
     assert_eq!(drops(&desktop), vec![(background, id)]);
     assert_eq!(uploads(&desktop).len(), 1);
     assert_eq!(session.wallpaper_error(), None);
+
+    // And a picture chosen again does not bring the released one back while
+    // it decodes: the compositor holds nothing under that id any more.
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("gray8"), crate::wallpaper::ImageFit::Fill);
+    session.paint_background().expect("the harness refused");
+    assert!(
+        !background_names(&session, id),
+        "a frame names a picture that was given back"
+    );
 }
 
 #[test]
@@ -3448,6 +3735,9 @@ fn a_compositor_that_refuses_the_picture_still_gets_a_painted_desktop() {
     session
         .paint_background()
         .expect("a refused upload failed the whole repaint");
+    session
+        .settle_pictures()
+        .expect("a refused upload failed the repaint after it");
 
     let why = session
         .wallpaper_error()
@@ -3488,6 +3778,7 @@ fn a_wallpaper_that_will_not_decode_says_so_where_the_user_can_read_it() {
     );
 
     session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("settle");
 
     let notes = posted(&session);
     assert_eq!(
@@ -3523,6 +3814,7 @@ fn a_failure_is_reported_once_and_not_once_per_repaint() {
 
     for _ in 0..5 {
         session.paint_background().expect("the harness refused");
+        session.settle_pictures().expect("settle");
     }
 
     assert_eq!(
@@ -3544,6 +3836,7 @@ fn reporting_a_failure_does_not_shove_the_pane_over_the_screen() {
     );
 
     session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("settle");
 
     assert!(
         !session.shell().notifications.pane_state().is_visible(),
@@ -3558,9 +3851,14 @@ fn a_wallpaper_that_loads_reports_nothing() {
     session
         .wallpaper_mut()
         .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    let id = session.wallpaper_mut().current_image_id();
 
     session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("the picture went up");
 
+    // Loaded -- so the silence below is about a success, not about a decode
+    // that has not finished yet.
+    assert!(background_names(&session, id));
     assert_eq!(session.wallpaper_error(), None);
     assert!(
         posted(&session).is_empty(),
@@ -3579,12 +3877,14 @@ fn a_second_broken_wallpaper_gets_its_own_notification() {
         crate::wallpaper::ImageFit::Fill,
     );
     session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("settle");
 
     session.wallpaper_mut().set_image(
         &scratch("second-bad.png", b"\x89PNG\r\n\x1a\nnonsense"),
         crate::wallpaper::ImageFit::Fill,
     );
     session.paint_background().expect("the harness refused");
+    session.settle_pictures().expect("settle");
 
     let notes = posted(&session);
     assert_eq!(
@@ -4152,6 +4452,7 @@ fn the_greeter_shows_the_picture_the_desktop_is_showing() {
     session.sync_wallpaper();
     session.sync_login_background();
     session.repaint().expect("repaint");
+    session.settle_pictures().expect("the pictures went up");
 
     let screen = session.login().expect("the greeter went away");
     assert_ne!(
@@ -4171,13 +4472,14 @@ fn the_greeter_shows_the_picture_the_desktop_is_showing() {
 /// still calling itself "same as desktop".
 #[test]
 fn the_greeter_follows_the_desktop_when_the_desktop_changes() {
-    let (mut session, _desktop, _dir, _turn) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
 
     session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
     session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
     session.sync_wallpaper();
     session.sync_login_background();
     session.repaint().expect("repaint");
+    session.settle_pictures().expect("the pictures went up");
     let first = session.login().expect("greeter").background_image();
     assert_ne!(first, 0, "no picture to begin with");
 
@@ -4185,6 +4487,28 @@ fn the_greeter_follows_the_desktop_when_the_desktop_changes() {
     session.shell_mut().appearance.wallpaper = Some(fixture("gray8"));
     session.sync_wallpaper();
     session.repaint().expect("repaint");
+    // Until the new one is decoded the greeter keeps the picture it has,
+    // rather than going to its plain colour in between.
+    assert_eq!(
+        session.login().expect("greeter").background_image(),
+        first,
+        "the greeter dropped its picture before the next was ready"
+    );
+    let greeter = session.login_surface().window();
+    let frames_before = frames_on(&desktop, greeter);
+    session.settle_pictures().expect("the pictures went up");
+    assert_eq!(
+        drops(&desktop)
+            .iter()
+            .filter(|d| d.0 == greeter)
+            .collect::<Vec<_>>(),
+        [&(greeter, first)],
+        "the greeter's old picture was not given back"
+    );
+    assert!(
+        frames_on(&desktop, greeter) > frames_before,
+        "the greeter was not drawn again with its new picture"
+    );
 
     let second = session.login().expect("greeter").background_image();
     assert_ne!(
@@ -4214,6 +4538,9 @@ fn a_greeter_picture_that_cannot_be_read_still_leaves_a_usable_greeter() {
     session
         .repaint()
         .expect("a missing picture must not cost the repaint");
+    session
+        .settle_pictures()
+        .expect("a missing picture must not cost the repaint after it");
 
     let screen = session
         .login()
@@ -4250,6 +4577,7 @@ fn going_back_to_the_theme_gives_the_picture_back() {
     session.sync_wallpaper();
     session.sync_login_background();
     session.repaint().expect("repaint");
+    session.settle_pictures().expect("the pictures went up");
     assert_ne!(session.login().expect("greeter").background_image(), 0);
 
     session.shell_mut().appearance.login_background = appearance::LoginBackground::Theme;
@@ -4261,6 +4589,190 @@ fn going_back_to_the_theme_gives_the_picture_back() {
         0,
         "the greeter kept a picture it no longer draws"
     );
+}
+
+/// **A style that comes back to the picture the greeter already holds shows it
+/// again at once**, with no second decode and no second upload.
+///
+/// Changing the style lets go of the picture on screen (`sync_login_background`
+/// -- the old picture is for the old style). When the new style names the same
+/// file, the upload the greeter's surface still holds is the picture wanted,
+/// and decoding it again would put the greeter on its plain colour for as long
+/// as a decode takes, for nothing.
+#[test]
+fn a_style_that_names_the_same_picture_keeps_it_without_decoding_again() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    let greeter = session.login_surface().window();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.login_background =
+        appearance::LoginBackground::CustomImage(fixture("rgb8"));
+    session.sync_wallpaper();
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+    session.settle_pictures().expect("the pictures went up");
+    let held = session.login().expect("greeter").background_image();
+    assert_ne!(held, 0, "no picture to begin with");
+    let sent_before = uploads(&desktop).iter().filter(|u| u.0 == greeter).count();
+
+    // The same file, by way of the desktop.
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+
+    assert_eq!(
+        session.login().expect("greeter").background_image(),
+        held,
+        "the greeter went without the picture it holds"
+    );
+    session.settle_pictures().expect("nothing was asked for");
+    assert_eq!(
+        uploads(&desktop).iter().filter(|u| u.0 == greeter).count(),
+        sent_before,
+        "the picture the greeter holds was decoded and sent again"
+    );
+    assert!(
+        !drops(&desktop).iter().any(|d| d.0 == greeter),
+        "the picture wanted was released"
+    );
+}
+
+/// **The picture of a style since left is not brought back** when a later
+/// style names the file still decoding.
+///
+/// The greeter's surface still holds the older picture while the newer one
+/// decodes; showing it again because the *path* matches the newest request
+/// would put up a picture from a style the user has already left.
+#[test]
+fn a_greeter_picture_from_a_style_since_left_is_not_shown_again() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+    session.shell_mut().appearance.login_background =
+        appearance::LoginBackground::CustomImage(fixture("rgb8"));
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+    session.settle_pictures().expect("the picture went up");
+    let old = session.login().expect("greeter").background_image();
+    assert_ne!(old, 0);
+
+    // A second picture, asked for and still decoding...
+    session.shell_mut().appearance.login_background =
+        appearance::LoginBackground::CustomImage(fixture("gray8"));
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+    // ...and then the same file by way of the desktop.
+    session.shell_mut().appearance.wallpaper = Some(fixture("gray8"));
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
+    session.sync_wallpaper();
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+
+    assert_eq!(
+        session.login().expect("greeter").background_image(),
+        0,
+        "the first style's picture came back"
+    );
+    session.settle_pictures().expect("the picture went up");
+    let now = session.login().expect("greeter").background_image();
+    assert_ne!(now, 0, "the picture asked for never went up");
+    assert_ne!(now, old);
+}
+
+/// **A greeter following the desktop to a file that is not there goes to its
+/// plain colour and says why**, rather than keeping a picture it has given
+/// back.
+#[test]
+fn a_greeter_following_the_desktop_to_a_missing_file_goes_plain() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
+    session.sync_wallpaper();
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+    session.settle_pictures().expect("the pictures went up");
+    assert_ne!(session.login().expect("greeter").background_image(), 0);
+
+    session.shell_mut().appearance.wallpaper =
+        Some(std::path::PathBuf::from("/no/such/wallpaper/here.png"));
+    session.sync_wallpaper();
+    session.repaint().expect("repaint");
+    session.settle_pictures().expect("settle");
+
+    assert_eq!(
+        session.login().expect("greeter").background_image(),
+        0,
+        "the greeter still names a picture it gave back"
+    );
+    assert!(
+        session.login_background_error().is_some(),
+        "the reason was swallowed"
+    );
+}
+
+/// **A greeter picture that arrives after the greeter's style changed is not
+/// shown**, even before anything repaints: the greeter shows what its style
+/// names now, and the picture it names is asked for at once.
+#[test]
+fn a_greeter_picture_that_arrives_after_its_style_changed_is_not_shown() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    let greeter = session.login_surface().window();
+    session.shell_mut().appearance.login_background =
+        appearance::LoginBackground::CustomImage(fixture("rgb8"));
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+
+    // Changed before the answer is collected, and before anything repaints.
+    session.shell_mut().appearance.login_background =
+        appearance::LoginBackground::CustomImage(fixture("gray8"));
+    session.sync_login_background();
+    session.settle_pictures().expect("the first answer landed");
+
+    assert_eq!(
+        session.login().expect("greeter").background_image(),
+        0,
+        "a picture for a style the user has left was shown"
+    );
+    assert!(
+        !uploads(&desktop).iter().any(|u| u.0 == greeter),
+        "a picture no style wants was sent"
+    );
+
+    session
+        .settle_pictures()
+        .expect("the picture wanted landed");
+    assert_ne!(
+        session.login().expect("greeter").background_image(),
+        0,
+        "the picture the new style names never went up"
+    );
+    assert_eq!(
+        uploads(&desktop).iter().filter(|u| u.0 == greeter).count(),
+        1
+    );
+}
+
+/// **A greeter picture that finishes decoding after the greeter has gone is
+/// dropped**, not uploaded to a surface nobody is looking at -- an upload
+/// nothing draws still holds the link's image budget.
+#[test]
+fn a_greeter_picture_that_lands_after_the_greeter_went_is_dropped() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    let greeter = session.login_surface().window();
+    session.shell_mut().appearance.login_background =
+        appearance::LoginBackground::CustomImage(fixture("rgb8"));
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+
+    // Gone before the decode was collected -- by hand rather than by typing
+    // the password, because the pump that reads the keystrokes also collects
+    // finished pictures first, which would make this test a race.
+    session.login = None;
+    session.repaint().expect("repaint");
+    session.settle_pictures().expect("settle");
+
+    assert!(
+        !uploads(&desktop).iter().any(|u| u.0 == greeter),
+        "a picture for a greeter that had gone was sent"
+    );
+    assert_eq!(session.login_background_error(), None);
 }
 
 // ---- the login screen ----

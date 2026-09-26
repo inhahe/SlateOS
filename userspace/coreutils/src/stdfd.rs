@@ -193,6 +193,13 @@ mod imp {
         use std::mem::ManuallyDrop;
         use std::os::fd::FromRawFd;
 
+        // `fstat` answers `EBADF` for a negative number too, but
+        // `File::from_raw_fd` asserts that it is not handed -1, so the answer
+        // is given here rather than asked for.
+        const EBADF: i32 = 9;
+        if fd < 0 {
+            return Err(io::Error::from_raw_os_error(EBADF));
+        }
         // SAFETY: `fd` is an integer the caller names, and `File::metadata` on
         // it is `fstat(2)` — which is defined for any `int` and reports `EBADF`
         // rather than misbehaving. `ManuallyDrop` is what makes the borrow a
@@ -1138,6 +1145,11 @@ impl Stream {
     /// * only an earlier flush failed -- an error carrying no `errno`, which
     ///   [`write_error`] prints as a bare `write error`, since gnulib zeroes
     ///   `errno` when `fclose` itself succeeded;
+    /// * unless the descriptor is not open at all: then `fclose`'s `close`
+    ///   fails too, with `EBADF`, and gnulib keeps that `errno` -- `wc f >&-`
+    ///   says `write error: Bad file descriptor` although every line failed
+    ///   long before the close. This asks `fstat` rather than closing, since
+    ///   nothing else would learn from the close;
     /// * except that an earlier `EPIPE` comes back as itself, so that
     ///   [`reader_gone`] still recognises the reader leaving -- upstream never
     ///   reaches the close in that case, having died of `SIGPIPE` at the
@@ -1149,7 +1161,13 @@ impl Stream {
         match (earlier, at_close) {
             (_, Some(e)) => Err(e),
             (Some(e), None) if reader_gone(&e) => Err(e),
-            (Some(_), None) => Err(io::Error::other(EarlierFailure)),
+            (Some(_), None) => {
+                let fd = self.with(|_, fd| fd);
+                match imp::probe(fd) {
+                    Err(closed) => Err(closed),
+                    Ok(()) => Err(io::Error::other(EarlierFailure)),
+                }
+            }
             (None, None) => Ok(()),
         }
     }
@@ -1287,16 +1305,49 @@ mod tests {
         );
     }
 
+    /// A stream on a descriptor that is open and refuses every write:
+    /// `/dev/full`, on Linux. The host has no such device, and its `probe`
+    /// calls every descriptor open, so -1 stands in for it there. The file
+    /// is returned to keep the descriptor open for the test.
+    #[cfg(target_os = "linux")]
+    fn full(mode: Buffering) -> (Stream, std::fs::File) {
+        use std::os::fd::AsRawFd;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        (Stream::new(f.as_raw_fd(), mode), f)
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn full(mode: Buffering) -> (Stream, ()) {
+        (broken(mode), ())
+    }
+
     /// `close_stream`: a line-buffered stream's failure happened before the
-    /// close and left nothing to flush, so the verdict carries no `errno`.
+    /// close and left nothing to flush, and the close itself succeeds, so the
+    /// verdict carries no `errno`.
     #[test]
     fn an_earlier_failure_alone_is_reported_without_a_reason() {
-        let mut s = broken(Buffering::Line);
+        let (mut s, _keep) = full(Buffering::Line);
         let _ = s.write(b"a line\n");
         assert!(s.errored(), "the newline sent it, and it failed");
         let e = s.finish().unwrap_err();
         assert!(super::is_earlier_failure(&e));
         assert_eq!(e.raw_os_error(), None);
+    }
+
+    /// ... but on a descriptor that was never open, `fclose`'s close fails as
+    /// well, with `EBADF`, and gnulib reports that: `wc f >&-` says
+    /// `write error: Bad file descriptor`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_earlier_failure_on_a_descriptor_never_open_keeps_ebadf() {
+        let mut s = broken(Buffering::Line);
+        let _ = s.write(b"a line\n");
+        assert!(s.errored());
+        let e = s.finish().unwrap_err();
+        assert!(!super::is_earlier_failure(&e));
+        assert_eq!(e.raw_os_error(), Some(9));
     }
 
     /// ... whereas a close that has something to flush, and fails, keeps its

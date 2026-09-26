@@ -19,12 +19,14 @@
 //!   unassociated alpha into its raster; the compositor wants straight
 //!   alpha, which is what the file holds, so it is kept (see [`Alpha`]).
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use super::color::{self, Lab, YCbCr};
 use super::dir::{self, Directory, File, compression, extra, photometric};
 use super::read::Reader;
-use crate::{ImageError, ImageResult};
+use crate::{ImageError, ImageResult, Limits};
 
 /// How a raster's alpha relates to its colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +94,19 @@ enum Put {
     SepRgbaa16,
     SepRgbua16,
     SepCmyk8,
+    /// Packed `YCbCr` in blocks of this many samples across and down, each
+    /// followed by its Cb and Cr.
+    YCbCr(u16, u16),
+    SepYCbCr,
+    Lab8,
+    Lab16,
+}
+
+/// The colour conversion a routine needs.
+enum Convert {
+    None,
+    YCbCr(Box<YCbCr>),
+    Lab(Lab),
 }
 
 /// Lookup tables the routines use.
@@ -112,6 +127,7 @@ struct Image {
     contig: bool,
     put: Put,
     maps: Maps,
+    convert: Convert,
 }
 
 /// Read the whole picture, as `TIFFReadRGBAImageOriented` does with
@@ -121,11 +137,11 @@ struct Image {
 ///
 /// Anything libtiff's RGBA reader refuses: a kind of sample it cannot
 /// convert, or a strip that will not read.
-pub(crate) fn read(file: File<'_>, dir: &Directory) -> ImageResult<Raster> {
+pub(crate) fn read(file: File<'_>, dir: &Directory, limits: &Limits) -> ImageResult<Raster> {
     check(dir)?;
     let img = begin(dir)?;
     let mut raster = vec![0u32; (img.width as usize).saturating_mul(img.height as usize)];
-    let mut reader = Reader::new(file, dir);
+    let mut reader = Reader::new(file, dir, *limits);
     match (img.contig, dir.tiled) {
         (true, false) => strips_contig(&img, dir, &mut reader, &mut raster)?,
         (true, true) => tiles_contig(&img, dir, &mut reader, &mut raster)?,
@@ -150,6 +166,19 @@ pub(crate) fn read(file: File<'_>, dir: &Directory) -> ImageResult<Raster> {
         pixels: raster,
         alpha,
     })
+}
+
+/// What `TIFFRGBAImageBegin` asks of the JPEG codec before anything is read:
+/// for contiguous `YCbCr` JPEG, RGB (`JPEGCOLORMODE_RGB`), which libjpeg makes
+/// by upsampling the chroma itself -- so the strips hand back three samples a
+/// pixel and every size counts them (`TIFF_UPSAMPLED`).
+pub(crate) fn jpeg_color_mode(dir: &mut Directory) {
+    if dir.compression == compression::JPEG
+        && dir.photometric == Some(photometric::YCBCR)
+        && dir.planar_config == 1
+    {
+        dir.upsampled = true;
+    }
 }
 
 /// `TIFFRGBAImageOK`.
@@ -284,6 +313,15 @@ fn begin(dir: &Directory) -> ImageResult<Image> {
         }
         _ => return Err(refuse("TIFF photometric interpretation")),
     }
+    // Contiguous `YCbCr` JPEG comes out of libjpeg as RGB.
+    let p = if p == photometric::YCBCR
+        && dir.planar_config == 1
+        && dir.compression == compression::JPEG
+    {
+        photometric::RGB
+    } else {
+        p
+    };
     let contig = !(dir.planar_config == 2 && samples > 1);
     let mut img = Image {
         width: dir.width,
@@ -295,17 +333,22 @@ fn begin(dir: &Directory) -> ImageResult<Image> {
         contig,
         put: Put::Grey8,
         maps: Maps { unpack: Vec::new() },
+        convert: Convert::None,
     };
     img.put = if contig {
-        pick_contig(&mut img, color_map)?
+        pick_contig(&mut img, dir, color_map)?
     } else {
-        pick_separate(&mut img)?
+        pick_separate(&mut img, dir)?
     };
     Ok(img)
 }
 
 /// `PickContigCase`.
-fn pick_contig(img: &mut Image, color_map: Option<[Vec<u16>; 3]>) -> ImageResult<Put> {
+fn pick_contig(
+    img: &mut Image,
+    dir: &Directory,
+    color_map: Option<[Vec<u16>; 3]>,
+) -> ImageResult<Put> {
     let refuse = ImageError::Unsupported("TIFF sample layout");
     let (bits, samples, alpha) = (img.bits, img.samples, img.alpha);
     let put = match img.photometric {
@@ -344,18 +387,54 @@ fn pick_contig(img: &mut Image, color_map: Option<[Vec<u16>; 3]>) -> ImageResult
             }
         }
         photometric::YCBCR => {
-            return Err(ImageError::Unsupported("TIFF YCbCr, not yet decoded here"));
+            if bits != 8 || samples != 3 {
+                return Err(refuse);
+            }
+            img.convert = Convert::YCbCr(Box::new(ycbcr(dir)?));
+            // The seven PickContigCase enumerates: not 1x4 or 2x4.
+            match dir.ycbcr_subsampling {
+                [h @ (1 | 2 | 4), v @ (1 | 2 | 4)] if v <= h || (h, v) == (1, 2) => {
+                    Put::YCbCr(h, v)
+                }
+                _ => return Err(refuse),
+            }
         }
         photometric::CIELAB => {
-            return Err(ImageError::Unsupported("TIFF CIELab, not yet decoded here"));
+            if samples != 3 {
+                return Err(refuse);
+            }
+            let white = dir.white_point.unwrap_or(color::DEFAULT_WHITE_POINT);
+            img.convert =
+                Convert::Lab(Lab::new(white).ok_or(ImageError::Malformed("TIFF WhitePoint"))?);
+            match bits {
+                8 => Put::Lab8,
+                16 => Put::Lab16,
+                _ => return Err(refuse),
+            }
         }
         _ => return Err(refuse),
     };
     Ok(put)
 }
 
+/// `initYCbCrConversion`: the file's coefficients and reference range, or
+/// the defaults, checked as libtiff checks them.
+fn ycbcr(dir: &Directory) -> ImageResult<YCbCr> {
+    let luma = dir.ycbcr_coefficients.unwrap_or(color::DEFAULT_LUMA);
+    if luma.iter().any(|v| v.is_nan()) || luma[1] == 0.0 {
+        return Err(ImageError::Malformed("TIFF YCbCrCoefficients"));
+    }
+    let reference = dir
+        .reference_black_white
+        .unwrap_or(color::DEFAULT_YCBCR_REFERENCE);
+    if !reference.iter().all(|&v| color::in_reference_range(v)) {
+        return Err(ImageError::Malformed("TIFF ReferenceBlackWhite"));
+    }
+    Ok(YCbCr::new(luma, reference))
+}
+
 /// `PickSeparateCase`.
-fn pick_separate(img: &mut Image) -> ImageResult<Put> {
+fn pick_separate(img: &mut Image, dir: &Directory) -> ImageResult<Put> {
     let refuse = ImageError::Unsupported("TIFF sample layout");
     let (bits, samples, alpha) = (img.bits, img.samples, img.alpha);
     let put = match img.photometric {
@@ -379,7 +458,15 @@ fn pick_separate(img: &mut Image) -> ImageResult<Put> {
             }
         }
         photometric::YCBCR => {
-            return Err(ImageError::Unsupported("TIFF YCbCr, not yet decoded here"));
+            if bits != 8 || samples != 3 {
+                return Err(refuse);
+            }
+            img.convert = Convert::YCbCr(Box::new(ycbcr(dir)?));
+            if dir.ycbcr_subsampling == [1, 1] {
+                Put::SepYCbCr
+            } else {
+                return Err(refuse);
+            }
         }
         _ => return Err(refuse),
     };
@@ -633,9 +720,112 @@ fn put_contig(
                 pp = step(pp, fromskew);
             }
         }
+        Put::YCbCr(hs, vs) => {
+            put_ycbcr(img, raster, span, buf, pp, (u32::from(hs), u32::from(vs)))?;
+        }
+        Put::Lab8 | Put::Lab16 => {
+            let Convert::Lab(lab) = &img.convert else {
+                return Err(ImageError::Unsupported("TIFF sample layout"));
+            };
+            let sixteen = img.put == Put::Lab16;
+            // Three samples a pixel, whatever SamplesPerPixel says; the skew
+            // is in samples.
+            let sample: isize = if sixteen { 2 } else { 1 };
+            let pixel_bytes = sample.wrapping_mul(3);
+            let fromskew = fromskew.wrapping_mul(pixel_bytes);
+            for _ in 0..h {
+                for _ in 0..w {
+                    let (r, g, b) = if sixteen {
+                        let l = u32::from(word(buf, pp)?);
+                        let a = i32::from(word(buf, step(pp, 2))?.cast_signed());
+                        let b = i32::from(word(buf, step(pp, 4))?.cast_signed());
+                        lab.rgb16(l, a, b)
+                    } else {
+                        let l = byte(buf, pp)?;
+                        let signed = |v: u32| i32::from(u8::try_from(v).unwrap_or(0).cast_signed());
+                        let a = signed(byte(buf, step(pp, 1))?);
+                        let b = signed(byte(buf, step(pp, 2))?);
+                        lab.rgb8(l, a, b)
+                    };
+                    store(raster, cp, pack(r, g, b))?;
+                    cp = step(cp, 1);
+                    pp = step(pp, pixel_bytes);
+                }
+                cp = step(cp, toskew);
+                pp = step(pp, fromskew);
+            }
+        }
         _ => return Err(ImageError::Unsupported("TIFF sample layout")),
     }
     Ok(())
+}
+
+/// The packed `YCbCr` routines (`putcontig8bitYCbCr44tile` and its six
+/// siblings), which are one routine at seven block sizes: each block holds
+/// `hs` x `vs` luma samples, row by row, then one Cb and one Cr; a block at
+/// the picture's right or bottom edge is read whole and written only where
+/// the picture is.
+fn put_ycbcr(
+    img: &Image,
+    raster: &mut [u32],
+    span: Span,
+    buf: &[u8],
+    mut pp: isize,
+    sub: (u32, u32),
+) -> ImageResult<()> {
+    let Convert::YCbCr(convert) = &img.convert else {
+        return Err(ImageError::Unsupported("TIFF sample layout"));
+    };
+    let Span {
+        cp,
+        w,
+        h,
+        fromskew,
+        toskew,
+    } = span;
+    let (hs, vs) = sub;
+    let lumas = isize::try_from(hs.wrapping_mul(vs)).unwrap_or(1);
+    let block = lumas.wrapping_add(2);
+    // `fromskew = (fromskew / hs) * (hs * vs + 2)`: whole blocks skipped.
+    let across = isize::try_from(hs).unwrap_or(1);
+    let fromskew = fromskew
+        .checked_div(across)
+        .unwrap_or(0)
+        .wrapping_mul(block);
+    let row = isize::try_from(w).unwrap_or(0).wrapping_add(toskew);
+    let down = isize::try_from(vs).unwrap_or(1);
+    let mut top = cp;
+    let mut left_rows = h;
+    loop {
+        let rows = left_rows.min(vs);
+        let mut at = top;
+        let mut left_cols = w;
+        while left_cols > 0 {
+            let cols = left_cols.min(hs);
+            let cb = byte(buf, step(pp, lumas))?;
+            let cr = byte(buf, step(pp, lumas.wrapping_add(1)))?;
+            for r in 0..isize::try_from(rows).unwrap_or(0) {
+                for c in 0..isize::try_from(cols).unwrap_or(0) {
+                    let y = byte(buf, step(pp, r.wrapping_mul(across).wrapping_add(c)))?;
+                    let (red, green, blue) = convert.rgb(y, cb, cr);
+                    store(
+                        raster,
+                        step(at, r.wrapping_mul(row).wrapping_add(c)),
+                        pack(red, green, blue),
+                    )?;
+                }
+            }
+            at = step(at, isize::try_from(cols).unwrap_or(0));
+            left_cols = left_cols.saturating_sub(cols);
+            pp = step(pp, block);
+        }
+        if left_rows <= vs {
+            return Ok(());
+        }
+        left_rows = left_rows.saturating_sub(vs);
+        top = step(top, down.wrapping_mul(row));
+        pp = step(pp, fromskew);
+    }
 }
 
 /// A separate-plane routine (`DECLARESepPutFunc`): red, green, blue and
@@ -685,6 +875,15 @@ fn put_separate(
                     )
                 }
                 Put::SepRgb16 => pack(to8(word(buf, r)?), to8(word(buf, g)?), to8(word(buf, b)?)),
+                // Y, Cb and Cr in the red, green and blue planes' places.
+                Put::SepYCbCr => {
+                    let Convert::YCbCr(convert) = &img.convert else {
+                        return Err(ImageError::Unsupported("TIFF sample layout"));
+                    };
+                    let (red, green, blue) =
+                        convert.rgb(byte(buf, r)?, byte(buf, g)?, byte(buf, b)?);
+                    pack(red, green, blue)
+                }
                 Put::SepRgbaa16 | Put::SepRgbua16 => pack4(
                     to8(word(buf, r)?),
                     to8(word(buf, g)?),

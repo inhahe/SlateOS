@@ -3,8 +3,8 @@
 //! One picture, stored under each orientation as a JPEG and as a PNG
 //! (`tests/data/generate_orientation.py`), against Pillow's decode turned by
 //! `ImageOps.exif_transpose`; and the cases where Chrome reads the orientation
-//! otherwise than Pillow, against Chrome's answer. The JPEGs are compared to
-//! within rounding, as every JPEG fixture is; the PNGs exactly.
+//! otherwise than Pillow, against Chrome's answer. JPEGs and PNGs alike are
+//! compared exactly.
 
 #![allow(
     clippy::unwrap_used,
@@ -33,7 +33,7 @@ fn every_orientation_of_a_jpeg_is_shown_as_pillow_shows_it() {
         let name = format!("orient_jpeg_{value}");
         let bytes = common::read(&name);
         let image = decode(&bytes, Limits::default()).unwrap();
-        common::assert_agrees(&name, &image, &common::answer(&name));
+        common::assert_exact(&name, &image, &common::answer(&name));
         assert_eq!(
             dimensions(&bytes).unwrap(),
             (image.width, image.height),
@@ -83,7 +83,7 @@ fn where_chrome_reads_orientation_otherwise_than_pillow_this_reads_it_as_chrome_
         let bytes = common::read(name);
         assert_eq!(jpeg::orientation(&bytes), orientation, "{name}");
         let image = decode(&bytes, Limits::default()).unwrap();
-        common::assert_agrees(name, &image, &common::answer(name));
+        common::assert_exact(name, &image, &common::answer(name));
     }
     let bytes = read_png("orient_png_exif_after_idat");
     assert_eq!(png::orientation(&bytes), Orientation::TopLeft);

@@ -58909,14 +58909,28 @@ test of the fixture, not of the bound.
   everywhere else. It also follows libjpeg in *not* filtering an eighth-scale
   decode (a thumbnail, box-filtered after), which is libjpeg's implementation
   limit rather than a quality choice. To go back to repetition, make
-  `Filter::choose` return `Repeat` for every plane that is not `Same`.
-- **A JPEG thumbnail averages, as libjpeg-turbo's does, rather than
-  truncating the transform** (`gui/imagecodec/src/jpeg.rs` `idct_scaled`,
-  design-decisions §1307). IJG libjpeg 9 truncates instead, which is sharper
-  with some ringing; averaging was chosen because libjpeg-turbo is what users'
-  other programs show, and because it gives the scaled path a reference to be
-  tested against. The cost is that a progressive thumbnail keeps 7x7 or 5x5
-  coefficients a block at half or quarter scale rather than 4x4 or 2x2.
+  `Filter::choose` return `Repeat` for every plane that is not `Same` -- and
+  give up agreeing with libjpeg-turbo to the bit (design-decisions §1318).
+- **A JPEG thumbnail is libjpeg-turbo's reduced-size decode**
+  (`gui/imagecodec/src/jpeg/idct.rs`, `jidctred.c` ported; design-decisions
+  §1307, §1318). IJG libjpeg 9 truncates the transform instead, which is
+  sharper with some ringing; libjpeg-turbo's was chosen because it is what
+  users' other programs show. The cost is that a progressive thumbnail keeps
+  7x7 or 5x5 coefficients a block at half or quarter scale rather than 4x4 or
+  2x2.
+- **JPEG follows libjpeg-turbo's C code, not its SIMD arithmetic**
+  (`gui/imagecodec/src/jpeg/idct.rs`, design-decisions §1318). The two agree
+  on every file whose coefficients fit 16 bits -- every valid one -- and give
+  different garbage on the damaged files that overflow; the C code is the one
+  reference and is the same on every machine. Reversible only by porting the
+  SIMD lanes' saturating arithmetic.
+- **The crate's JPEG entry points take libjpeg's leftover choices as Chrome
+  does** (`gui/imagecodec/src/jpeg.rs` `decode_at`, design-decisions §1318):
+  RGB out, CMYK/YCCK converted as inverted CMYK, two or five-plus components
+  refused, 100 scans at most, and `jpeg_finish_decompress` never called, so
+  what follows the last row cannot refuse a picture whose rows all decoded.
+  TIFF's JPEG path makes libtiff's choices instead (`tiff/read.rs`
+  `decode_jpeg`), finish included.
 - **The pointer is drawn over fullscreen direct-scanout frames**
   (`POINTER_OVER_DIRECT_SCANOUT = true`, `gui/compositor/src/server.rs`;
   design-decisions §1301). C-Q18 put the fullscreen case to the operator as a

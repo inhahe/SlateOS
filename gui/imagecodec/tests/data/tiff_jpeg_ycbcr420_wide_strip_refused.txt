@@ -1,0 +1,1 @@
+REFUSED read: JPEG strip/tile size exceeds expected dimensions, expected 29x8, got 33x8

@@ -166483,23 +166483,41 @@ stream or a stream damaged past the strip's end.
 semantics (the request above spells them out); `inflate` becomes a call to it.
 Not a second inflater in `imagecodec`: design-decisions §555.
 
+### [F] Lossless JPEG is refused though libjpeg-turbo decodes it -- 2026-09-25
+
+**Status:** OPEN — lane F's, next.
+
+**In short:** a JPEG coded losslessly (`SOF3`) -- used by medical imaging and
+some scientific instruments, almost never for photographs -- is refused
+(`ImageError::Unsupported`), where libjpeg-turbo 3, which the rest of the
+JPEG decoder is a port of, decodes it at up to 8 bits a sample. Nothing
+else about JPEG is affected.
+
+**Where.** `gui/imagecodec/src/jpeg/decompress.rs` (`start`, which refuses a
+lossless frame).
+
+**The proper fix.** Port libjpeg-turbo's lossless decompressor -- `jdlossls.c`
+(prediction and undifferencing), `jddiffct.c` (the difference buffer
+controller) and `jdlhuff.c` (its Huffman decoder) -- as the rest was
+ported (design-decisions §1318), and fuzz it against the same oracle.
+
 ### [F] Some TIFFs are refused that libtiff shows -- 2026-09-25
 
 **Status:** OPEN — lane F's, in progress.
 
-**In short:** TIFFs whose samples are `YCbCr` or CIELab, or compressed with
-CCITT fax, JPEG or old-style JPEG, NeXT, ThunderScan, SGI LogLuv or
-PixarLog, are refused (`ImageError::Unsupported`) though libtiff reads them.
-Fax (scanned documents) and JPEG (photographs) are the ones in real use.
+**In short:** TIFFs compressed with old-style JPEG, NeXT, ThunderScan, SGI
+LogLuv or PixarLog are refused (`ImageError::Unsupported`) though libtiff
+reads them. All are rare: old-style JPEG is a 1990s scheme superseded in
+1995, and the others are single vendors' formats. (`YCbCr` and CIELab
+samples, fax and JPEG were on this list; they decode now.)
 
 **Where.** `gui/imagecodec/src/tiff/read.rs` (`run_codec`) and `rgba.rs`
 (`pick_contig`, `pick_separate`, `begin`).
 
-**The proper fix.** Port the rest of libtiff's reader, as the first stage was
-(design-decisions §1317): `tif_color.c`'s `YCbCr` and CIELab conversions and
-`tif_getimage.c`'s `YCbCr` routines; `tif_fax3.c`; JPEG through this crate's
-JPEG decoder with the file's `JPEGTables`; then the rare codecs. Fixtures from
-the same libtiff oracle.
+**The proper fix.** Port the rest of libtiff's reader, as the first stages were
+(design-decisions §1317): the rare codecs, old-style JPEG
+through this crate's libjpeg-turbo port as `tif_ojpeg.c` drives libjpeg.
+Fixtures from the same libtiff oracle.
 
 ### [E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all -- 2026-09-25
 **Status:** FIXED for the text editor, the markdown editor, the hex editor, the JSON viewer, slides and sticky notes (lane E, 2026-09-25), and paint, the diagram editor, the whiteboard and the spreadsheet (2026-09-25). What remains is the entry below it: notes, contacts, snippets and kanban keep nothing at all.

@@ -17,11 +17,14 @@
 //!   `StripByteCounts`, colour channels that should have been extra
 //!   samples, a palette image with no palette).
 //! - **Strips and tiles** ([`read`]): where the bytes are, `FillOrder`, and
-//!   the codecs -- none, PackBits, LZW (both styles), Deflate -- with the
+//!   the codecs -- none, PackBits, LZW (both styles), Deflate, and CCITT fax
+//!   ([`fax`]: Group 3 1-D and 2-D, Group 4, Modified Huffman) -- with the
 //!   horizontal predictor and big-endian 16-bit samples.
 //! - **Samples to pixels** ([`rgba`]): grey of 1 to 16 bits, palettes, RGB
-//!   of 8 and 16 bits with or without alpha, CMYK, in contiguous or
-//!   separate planes.
+//!   of 8 and 16 bits with or without alpha, CMYK, `YCbCr` at every
+//!   subsampling libtiff converts, and CIE L*a*b*, in contiguous or separate
+//!   planes -- the colour conversions ([`color`]) in libtiff's own single
+//!   precision, so they agree to the bit.
 //!
 //! Where libtiff's reader stops at a strip that will not read, this refuses
 //! the file: the viewers ask libtiff to stop on the first error, and show
@@ -45,12 +48,13 @@
 //!
 //! # What is not here yet
 //!
-//! `YCbCr` and CIELab samples, CCITT fax compression, JPEG and old-style
-//! JPEG, and the rarer codecs (NeXT, ThunderScan, SGI LogLuv, PixarLog) are
-//! refused by name. libtiff opens the first page only here too; the others
-//! are not reached.
+//! Old-style JPEG, and the rarer codecs (NeXT, ThunderScan, SGI LogLuv,
+//! PixarLog), are refused by name. The first page only is read, as libtiff's
+//! viewers read it; the others are not reached.
 
+mod color;
 mod dir;
+mod fax;
 mod lzw;
 mod read;
 mod rgba;
@@ -195,7 +199,8 @@ pub fn decode_libtiff_raster(bytes: &[u8], limits: Limits) -> ImageResult<Image>
 /// The raster, stored orientation, and the orientation to turn it by.
 fn decode_raster(bytes: &[u8], limits: Limits) -> ImageResult<(rgba::Raster, Orientation)> {
     let (file, offset) = dir::header(bytes)?;
-    let d = dir::read(&file, offset)?;
+    let mut d = dir::read(&file, offset)?;
+    rgba::jpeg_color_mode(&mut d);
     let pixels = u64::from(d.width).saturating_mul(u64::from(d.length));
     if pixels > limits.max_pixels {
         return Err(ImageError::TooLarge {
@@ -218,7 +223,7 @@ fn decode_raster(bytes: &[u8], limits: Limits) -> ImageResult<(rgba::Raster, Ori
         });
     }
     let orientation = Orientation::from_value(d.orientation).unwrap_or(Orientation::TopLeft);
-    let raster = rgba::read(file, &d)?;
+    let raster = rgba::read(file, &d, &limits)?;
     Ok((raster, orientation))
 }
 

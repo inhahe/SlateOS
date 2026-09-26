@@ -1058,7 +1058,7 @@ pub(crate) fn read_capped(path: &Path) -> Option<Vec<u8>> {
 
 /// `__tzfile_read (name, 0, NULL)`: the zone file `name` names, if there is
 /// one -- absolute, or under `dir`.
-fn read_tzfile(name: &[u8], dir: &str) -> Option<Table> {
+fn read_tzfile(name: &[u8], dir: &Path) -> Option<Table> {
     // "User specified the empty string; use UTC with no leap seconds."
     if name.is_empty() {
         return None;
@@ -1077,7 +1077,7 @@ fn read_tzfile(name: &[u8], dir: &str) -> Option<Table> {
 /// * else, if the name is now empty or is `localtime`'s own path, UTC named
 ///   `UTC`;
 /// * else the POSIX rule, with `dir/posixrules` for a rule with no dates.
-pub(crate) fn resolve(tz: Option<&[u8]>, dir: &str, localtime: &Path) -> Engine {
+pub(crate) fn resolve(tz: Option<&[u8]>, dir: &Path, localtime: &Path) -> Engine {
     let tz = tz.map(until_nul);
     let tz: Option<&[u8]> = match tz {
         Some([]) => Some(b"Universal"),
@@ -1094,7 +1094,7 @@ pub(crate) fn resolve(tz: Option<&[u8]>, dir: &str, localtime: &Path) -> Engine 
         return Engine::Rules(Rules::utc());
     }
     parse_tz(name, &mut |std, dst| {
-        let bytes = read_capped(&Path::new(dir).join(TZDEFRULES))?;
+        let bytes = read_capped(&dir.join(TZDEFRULES))?;
         Table::defaulted(&bytes, std, dst)
     })
 }

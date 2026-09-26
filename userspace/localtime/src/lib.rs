@@ -119,7 +119,7 @@ enum Source {
     /// is read against.
     Tz {
         tz: Option<Vec<u8>>,
-        dir: String,
+        dir: PathBuf,
         localtime: PathBuf,
     },
     /// Not a `TZ` value — [`Zone::utc`], [`Zone::from_file`] — and so never
@@ -298,12 +298,15 @@ impl Zone {
     /// resolve that value exactly as it would have resolved the environment's.
     ///
     /// [`from_env`]: Zone::from_env
+    ///
+    /// `TZDIR` is read as glibc reads it: any bytes, and the default only
+    /// when it is unset or empty. A path is bytes here as everywhere, so a
+    /// zoneinfo tree whose name is not UTF-8 is still a zoneinfo tree.
     #[must_use]
     pub fn from_tz(tz: Option<&[u8]>) -> Self {
         let dir = std::env::var_os("TZDIR")
-            .and_then(|d| d.into_string().ok())
             .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| TZDIR_DEFAULT.to_string());
+            .map_or_else(|| PathBuf::from(TZDIR_DEFAULT), PathBuf::from);
         Self::resolve(tz, &dir, Path::new(LOCALTIME_PATH))
     }
 
@@ -317,12 +320,12 @@ impl Zone {
     /// `None` means "the machine's zone": `localtime` is read. An empty value
     /// is the name `Universal`. See the module docs for the rest.
     #[must_use]
-    pub fn resolve(tz: Option<&[u8]>, dir: &str, localtime: &Path) -> Self {
+    pub fn resolve(tz: Option<&[u8]>, dir: &Path, localtime: &Path) -> Self {
         Self {
             engine: RwLock::new(None),
             source: Source::Tz {
                 tz: tz.map(<[u8]>::to_vec),
-                dir: dir.to_string(),
+                dir: dir.to_path_buf(),
                 localtime: localtime.to_path_buf(),
             },
         }
@@ -332,7 +335,7 @@ impl Zone {
     /// absolute), falling back to UTC. No POSIX rule is tried; for what `TZ`
     /// means, use [`Zone::resolve`].
     #[must_use]
-    pub fn from_name(name: &[u8], dir: &str) -> Self {
+    pub fn from_name(name: &[u8], dir: &Path) -> Self {
         match zoneinfo_path(name, dir) {
             Some(path) => Self::from_file(&path),
             None => Self::utc(),
@@ -501,7 +504,7 @@ pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// the same names — two readers of one `TZ` must not disagree about what it
 /// means.
 #[must_use]
-pub fn zoneinfo_path(name: &[u8], dir: &str) -> Option<PathBuf> {
+pub fn zoneinfo_path(name: &[u8], dir: &Path) -> Option<PathBuf> {
     if name.is_empty() || name.contains(&0) {
         return None;
     }
@@ -513,7 +516,7 @@ pub fn zoneinfo_path(name: &[u8], dir: &str) -> Option<PathBuf> {
     if name.starts_with(b"/") {
         return Some(path);
     }
-    Some(Path::new(dir).join(path))
+    Some(dir.join(path))
 }
 
 /// A path from bytes: exact on Unix, where a path is bytes.
@@ -1070,7 +1073,7 @@ mod tests {
         // is being asserted is that it was *looked for*, since a rule would
         // have been named after the value.
         let missing = Path::new("/nonexistent-localtime-for-this-test");
-        let dir = "/nonexistent-zoneinfo-dir";
+        let dir = Path::new("/nonexistent-zoneinfo-dir");
         let name = |tz: Option<&[u8]>| Zone::resolve(tz, dir, missing).lookup(0).name;
         assert_eq!(name(None).as_bytes(), b"UTC");
         // Empty is glibc's `Universal`: no such file here, so the rule.
@@ -1083,7 +1086,7 @@ mod tests {
         // (see the `tzset` tests); with no zoneinfo tree, the rule answers.
         let zone = Zone::resolve(
             Some(b"EST5EDT"),
-            "/nonexistent-zoneinfo-dir",
+            Path::new("/nonexistent-zoneinfo-dir"),
             Path::new("/nonexistent-localtime-for-this-test"),
         );
         // Midsummer: EDT, four hours west.
@@ -1098,7 +1101,7 @@ mod tests {
         // else the rule.
         let zone = Zone::resolve(
             Some(b":EST5EDT"),
-            "/nonexistent-zoneinfo-dir",
+            Path::new("/nonexistent-zoneinfo-dir"),
             Path::new("/nonexistent-localtime-for-this-test"),
         );
         assert_eq!(zone.lookup(0).gmtoff, -5 * 3600);
@@ -1106,13 +1109,13 @@ mod tests {
 
     #[test]
     fn a_dotdot_component_is_refused_but_a_dotdot_inside_a_name_is_not() {
-        assert!(zoneinfo_path(b"../../etc/shadow", TZDIR_DEFAULT).is_none());
-        assert!(zoneinfo_path(b"..", TZDIR_DEFAULT).is_none());
-        assert!(zoneinfo_path(b"America/..", TZDIR_DEFAULT).is_none());
+        assert!(zoneinfo_path(b"../../etc/shadow", Path::new(TZDIR_DEFAULT)).is_none());
+        assert!(zoneinfo_path(b"..", Path::new(TZDIR_DEFAULT)).is_none());
+        assert!(zoneinfo_path(b"America/..", Path::new(TZDIR_DEFAULT)).is_none());
         // Not a traversal: `..` has to be a whole component.
-        assert!(zoneinfo_path(b"a..b", TZDIR_DEFAULT).is_some());
-        assert!(zoneinfo_path(b"", TZDIR_DEFAULT).is_none());
-        assert!(zoneinfo_path(b"a\0b", TZDIR_DEFAULT).is_none());
+        assert!(zoneinfo_path(b"a..b", Path::new(TZDIR_DEFAULT)).is_some());
+        assert!(zoneinfo_path(b"", Path::new(TZDIR_DEFAULT)).is_none());
+        assert!(zoneinfo_path(b"a\0b", Path::new(TZDIR_DEFAULT)).is_none());
     }
 
     #[test]
@@ -1120,7 +1123,7 @@ mod tests {
         // `TZ=/etc/localtime` is a thing people set, and joining it onto TZDIR
         // would look for `/usr/share/zoneinfo/etc/localtime`.
         assert_eq!(
-            zoneinfo_path(b"/etc/localtime", TZDIR_DEFAULT).unwrap(),
+            zoneinfo_path(b"/etc/localtime", Path::new(TZDIR_DEFAULT)).unwrap(),
             PathBuf::from("/etc/localtime")
         );
     }
@@ -1135,7 +1138,11 @@ mod tests {
 
     #[test]
     fn a_zone_is_read_at_first_use_not_when_made() {
-        let zone = Zone::resolve(Some(b"EST5"), "/nonexistent-zoneinfo-dir", Path::new("/x"));
+        let zone = Zone::resolve(
+            Some(b"EST5"),
+            Path::new("/nonexistent-zoneinfo-dir"),
+            Path::new("/x"),
+        );
         assert!(zone.engine.read().unwrap().is_none());
         assert_eq!(zone.lookup(0).gmtoff, -5 * 3600);
         assert!(zone.engine.read().unwrap().is_some());
@@ -1143,7 +1150,7 @@ mod tests {
 
     #[test]
     fn tzset_would_keep_compares_as_glibc_does() {
-        let at = |tz: Option<&[u8]>| Zone::resolve(tz, "/d", Path::new("/x"));
+        let at = |tz: Option<&[u8]>| Zone::resolve(tz, Path::new("/d"), Path::new("/x"));
         // glibc drops one `:` and reads empty as `Universal` before comparing.
         assert!(at(Some(b"EST5")).tzset_would_keep(&at(Some(b":EST5"))));
         assert!(!at(Some(b"EST5")).tzset_would_keep(&at(Some(b"::EST5"))));
@@ -1158,7 +1165,7 @@ mod tests {
 
     #[test]
     fn same_tz_is_a_comparison_of_the_values_as_written() {
-        let at = |tz: Option<&[u8]>| Zone::resolve(tz, "/d", Path::new("/x"));
+        let at = |tz: Option<&[u8]>| Zone::resolve(tz, Path::new("/d"), Path::new("/x"));
         assert!(at(Some(b"EST5")).same_tz(&at(Some(b"EST5"))));
         assert!(!at(Some(b"EST5")).same_tz(&at(Some(b":EST5"))));
         assert!(at(None).same_tz(&at(None)));

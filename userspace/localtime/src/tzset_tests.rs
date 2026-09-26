@@ -9,7 +9,7 @@
 )]
 #![allow(clippy::arithmetic_side_effects)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::*;
@@ -134,8 +134,8 @@ impl ZoneDir {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
     }
-    fn dir(&self) -> &str {
-        self.0.to_str().unwrap()
+    fn dir(&self) -> &Path {
+        &self.0
     }
     fn missing(&self) -> PathBuf {
         self.0.join("no-such-localtime")
@@ -590,7 +590,7 @@ fn a_dotdot_name_is_never_read_and_falls_through_to_the_rule() {
     );
     let sub = d.0.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
-    let z = resolve(Some(b"../zone"), sub.to_str().unwrap(), &d.missing());
+    let z = resolve(Some(b"../zone"), &sub, &d.missing());
     assert_eq!(at_utc(&z, 0), st(0, false, ""));
 }
 
@@ -604,7 +604,11 @@ fn an_absolute_name_is_read_as_given() {
         &tzif(&[], &[(3600, false, "ONE", false, false)], None),
     );
     let path = d.0.join("zone");
-    let z = resolve(Some(&path_bytes(&path)), "/nonexistent", &d.missing());
+    let z = resolve(
+        Some(&path_bytes(&path)),
+        Path::new("/nonexistent"),
+        &d.missing(),
+    );
     assert_eq!(at_utc(&z, 0), st(3600, false, "ONE"));
 }
 

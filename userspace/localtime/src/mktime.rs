@@ -512,7 +512,7 @@ mod tests {
     fn new_york() -> Zone {
         Zone::resolve(
             Some(b"EST5EDT,M3.2.0,M11.1.0"),
-            "/nonexistent",
+            Path::new("/nonexistent"),
             Path::new("/nonexistent"),
         )
     }

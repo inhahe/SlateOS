@@ -106,7 +106,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Read, Seek, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 
@@ -40014,17 +40014,16 @@ impl Shell {
     /// reason [`Self::tzset`] reads `TZ` there: an exported assignment is
     /// what a child `date` would see, so the shell's own rendering must agree
     /// with it. It also keeps the lookup independent of the host the tests run
-    /// on. A non-UTF-8 or empty value falls back to the default — such a
-    /// directory names nothing in any real tzdata tree.
-    fn zoneinfo_dir(&mut self) -> String {
+    /// on. An empty value falls back to the default, as glibc's
+    /// `*tzdir == ' '` test does; any other value is used as the bytes it
+    /// is, since a path need not be UTF-8.
+    fn zoneinfo_dir(&mut self) -> PathBuf {
         if !self.exported.contains("TZDIR") {
-            return localtime::TZDIR_DEFAULT.to_string();
+            return PathBuf::from(localtime::TZDIR_DEFAULT);
         }
         match self.param_value("TZDIR") {
-            Some(raw) if !raw.is_empty() => {
-                String::from_utf8(raw).unwrap_or_else(|_| localtime::TZDIR_DEFAULT.to_string())
-            }
-            _ => localtime::TZDIR_DEFAULT.to_string(),
+            Some(raw) if !raw.is_empty() => PathBuf::from(bytes::bytes_to_os(&raw)),
+            _ => PathBuf::from(localtime::TZDIR_DEFAULT),
         }
     }
 

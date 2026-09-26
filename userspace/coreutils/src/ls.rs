@@ -6769,7 +6769,7 @@ mod tests {
         let mut out = Vec::new();
         let zone = localtime::Zone::resolve(
             Some(b"EST5EDT,M3.2.0,M11.1.0"),
-            "",
+            std::path::Path::new(""),
             std::path::Path::new(""),
         );
         Times::new(&cfg, zone, frozen_clock).format(&mut out, &cfg, true, at(0));

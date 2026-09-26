@@ -44,10 +44,22 @@
 //! to turn "seconds east of Greenwich" into a day of the week — which is where
 //! the off-by-one lives, since 1970-01-01 was a **Thursday** and the obvious
 //! `days % 7` makes it a Sunday.
+//!
+//! # And `mktime`, the way glibc does it
+//!
+//! [`Zone::epoch`] inverts [`Zone::local`] for callers that want an instant
+//! that always exists. A caller porting C that calls `mktime` wants something
+//! else — glibc's answers for the skipped and repeated hours, its handling of
+//! an explicit `tm_isdst`, and its failures — and gets them from
+//! [`Zone::mktime`] and [`Zone::localtime_r`] over a C-shaped [`StructTm`]. See
+//! the `mktime` module for why each of those is observable.
 
 use std::path::{Path, PathBuf};
 
 use tzrules::{Tz, TzFile, TzInfo, TzName};
+
+mod mktime;
+pub use mktime::{StructTm, with_mktime_offset};
 
 /// Where a bare zone name is looked up when `TZDIR` says nothing.
 pub const TZDIR_DEFAULT: &str = "/usr/share/zoneinfo";
@@ -106,15 +118,29 @@ impl Zone {
     #[must_use]
     pub fn from_env() -> Self {
         let tz = std::env::var_os("TZ");
-        let dir = std::env::var_os("TZDIR")
-            .and_then(|d| d.into_string().ok())
-            .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| TZDIR_DEFAULT.to_string());
         // Bytes, not a `String`: `TZ` is environment data, and environment data
         // is not required to be text. A non-UTF-8 `TZ` names no zone, but it
         // must reach the "names no zone" path rather than panic on the way.
         let raw = tz.as_ref().map(|v| os_bytes(v));
-        Self::resolve(raw.as_deref(), &dir, Path::new(LOCALTIME_PATH))
+        Self::from_tz(raw.as_deref())
+    }
+
+    /// The zone a process would run in if its `TZ` were `tz` — resolved
+    /// against this process's `TZDIR` and `/etc/localtime`, as [`from_env`]
+    /// resolves the real one.
+    ///
+    /// This is gnulib's `tzalloc` followed by a `localtime_rz`: what a date
+    /// string's own `TZ="…"` prefix means to `parse_datetime`, which must
+    /// resolve that value exactly as it would have resolved the environment's.
+    ///
+    /// [`from_env`]: Zone::from_env
+    #[must_use]
+    pub fn from_tz(tz: Option<&[u8]>) -> Self {
+        let dir = std::env::var_os("TZDIR")
+            .and_then(|d| d.into_string().ok())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| TZDIR_DEFAULT.to_string());
+        Self::resolve(tz, &dir, Path::new(LOCALTIME_PATH))
     }
 
     /// Resolve an explicit `TZ` value against an explicit zoneinfo tree.

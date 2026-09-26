@@ -1706,8 +1706,8 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 
 #### Start Menu
 - [ ] Applications tree
-- [x] Settings icon — 2026-09-25: a Settings button in the start menu's footer beside Power (`StartShortcut::Settings`).
-- [x] Terminal shortcut — 2026-09-25: a Terminal button beside it (`StartShortcut::Terminal`).
+- [x] Settings icon — 2026-09-25: Settings in the start menu (`StartShortcut::Settings`); since 2026-09-26 a place in its places column.
+- [x] Terminal shortcut — 2026-09-25: a Terminal beside it (`StartShortcut::Terminal`), likewise in the places column.
 - [-] Power options: off, logout, reboot, hibernate, sleep, reboot in safe mode — *2026-09-25: shut down, restart, sleep and hibernate run `powerctl`, lock runs the lock screen, and log out returns to the login screen (its programs keep running until there is a session manager: `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`). Reboot in safe mode needs a safe mode to reboot into -- nothing in the boot path has one yet.*
       _(the shell drives these directly as the user's own gesture; a program
       asking for the same transition needs the matching `power.*` capability —
@@ -1743,7 +1743,7 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [ ] Ship an Aero-inspired theme as the out-of-the-box default. Reference: `Aero Desktop (offline).html` in the project root — match the look of:
   - [ ] **Window frames** — glassy/blurry title bar, rounded top corners, soft drop shadow, gradient highlight on focused window, dimmed/desaturated frame for unfocused windows, Aero-style close/minimize/maximize buttons in the top-right
   - [ ] **Taskbar** — translucent/blurry panel, grouped running-app icons with hover thumbnails, Aero Peek-style preview on hover, distinct visual treatment for pinned vs. running apps
-  - [ ] **Start menu** — two-column layout (pinned/recent on the left, system folders/power on the right), translucent background matching taskbar, search field at the bottom, jump-lists from pinned apps
+  - [-] **Start menu** — two-column layout (pinned/recent on the left, system folders/power on the right), translucent background matching taskbar, search field at the bottom, jump-lists from pinned apps — *2026-09-26 (`design-decisions.md` §879): two columns at the reference's 524×566 -- the programs (pinned and all) with the search field at their foot, and a places column of the user's name, their folders (Home, Documents, Pictures, Music, Downloads), Settings, a terminal and the power button, in a shade of its own and at the panel's transparency. Not yet: the pinned programs as a grid of tiles, jump lists, a Shut down button with the other power actions behind a caret, and icons (there is no icon theme to draw them from).*
   - [ ] **File explorer** — Aero-styled chrome (translucent title bar, Aero address bar, pane splits with the same glass treatment), default view styling that matches the rest of the shell
   - [ ] **Search dialog** — Aero-styled modal: glassy chrome, accent-color focus ring, result rows with the same row styling as file explorer
   - [ ] **File/folder select (open/save) dialog** — same chrome and styling as file explorer (it IS the file explorer component per §4.1), Aero-styled OK/Cancel buttons in the footer

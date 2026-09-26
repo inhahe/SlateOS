@@ -389,11 +389,18 @@ const NOTIF_BELL_GLYPH: &str = "\u{1F514}";
 const TRAY_RESERVE_GAP: f32 = 20.0;
 
 // --- Start menu ------------------------------------------------------------
+//
+// Two columns, as the Aero reference draws them (`Aero Desktop (offline).html`,
+// `.aero-start-menu`): the programs on the left -- the list, and the search
+// field at its foot -- and on the right the user, their places, Settings, a
+// terminal and the power button. `design-decisions.md` §879.
 
-const START_MENU_WIDTH: f32 = 300.0;
-const START_MENU_HEIGHT: f32 = 400.0;
-/// Space above the first application row, holding the "Applications" heading.
-const START_MENU_TOP_PADDING: f32 = 50.0;
+const START_MENU_WIDTH: f32 = 524.0;
+const START_MENU_HEIGHT: f32 = 566.0;
+/// The programs column's width. The places column has the rest.
+const START_MENU_LEFT_WIDTH: f32 = 312.0;
+/// Space above the first application row.
+const START_MENU_TOP_PADDING: f32 = 8.0;
 const START_MENU_ROW_HEIGHT: f32 = 36.0;
 /// How strongly the start menu marks the row the keyboard is on: the accent
 /// at this alpha, under the row's own text.
@@ -403,21 +410,25 @@ const START_MENU_SELECTED_ALPHA: u8 = 70;
 /// menu's text colour at this alpha, quieter than anything that can be
 /// chosen.
 const START_MENU_HINT_ALPHA: u8 = 150;
-/// Space below the last application row, holding the power options.
-const START_MENU_FOOTER: f32 = 48.0;
+/// The band at the foot of the programs column that holds the search field.
+const START_MENU_SEARCH_BAND: f32 = 50.0;
+/// The search field's height inside that band.
+const START_SEARCH_HEIGHT: f32 = 30.0;
 /// Width of the scroll indicator drawn when the list is longer than the menu.
 const START_MENU_SCROLLBAR_WIDTH: f32 = 4.0;
+/// The block at the top of the places column: the user's picture and name.
+const START_MENU_USER_HEIGHT: f32 = 72.0;
+/// The picture's diameter.
+const START_MENU_AVATAR: f32 = 44.0;
+/// One place in the places column.
+const START_LINK_HEIGHT: f32 = 32.0;
+/// The band at the foot of the places column that holds the power button.
+const START_MENU_POWER_BAND: f32 = 52.0;
 
 // --- Power menu ------------------------------------------------------------
 
-/// Width of the power button in the start menu's footer.
-const POWER_BUTTON_WIDTH: f32 = 110.0;
-/// Inset of the power button from the menu's left and bottom edges.
+/// Inset of the power button and the places from their column's edges.
 const POWER_BUTTON_INSET: f32 = 8.0;
-/// Widest a start-menu footer button beside Power gets.
-const START_SHORTCUT_WIDTH: f32 = 80.0;
-/// Gap between the footer's buttons.
-const START_SHORTCUT_GAP: f32 = 6.0;
 const POWER_MENU_WIDTH: f32 = 170.0;
 const POWER_MENU_ROW_HEIGHT: f32 = 32.0;
 /// Space above the first and below the last row of the popup.
@@ -521,11 +532,22 @@ enum PinTarget {
     Pinned(usize),
 }
 
-/// A button in the start menu's footer beside Power, starting a program the
-/// start menu is asked to keep at hand (`design.txt` line 721: "start menu,
-/// contains applications tree, settings icon, terminal, power off, ...").
+/// A place in the start menu's places column: the user's own folders, as the
+/// Aero reference's places column lists them, and the two programs the start
+/// menu is asked to keep at hand (`design.txt` line 721: "start menu, contains
+/// applications tree, settings icon, terminal, power off, ...").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartShortcut {
+    /// The user's home folder.
+    Home,
+    /// `~/Documents`.
+    Documents,
+    /// `~/Pictures`.
+    Pictures,
+    /// `~/Music`.
+    Music,
+    /// `~/Downloads`.
+    Downloads,
     /// The settings application.
     Settings,
     /// A terminal.
@@ -533,24 +555,68 @@ pub enum StartShortcut {
 }
 
 impl StartShortcut {
-    /// Both, in the order they stand, left to right.
-    pub const ALL: &'static [Self] = &[Self::Settings, Self::Terminal];
+    /// Every place, top to bottom.
+    pub const ALL: &'static [Self] = &[
+        Self::Home,
+        Self::Documents,
+        Self::Pictures,
+        Self::Music,
+        Self::Downloads,
+        Self::Settings,
+        Self::Terminal,
+    ];
 
-    /// The program the button starts.
+    /// The program choosing it starts: the file manager for a folder.
     #[must_use]
     pub const fn program(self) -> &'static str {
         match self {
             Self::Settings => launcher::SETTINGS,
             Self::Terminal => launcher::TERMINAL,
+            Self::Home | Self::Documents | Self::Pictures | Self::Music | Self::Downloads => {
+                launcher::FILE_MANAGER
+            }
         }
     }
 
-    /// The word on the button. Words rather than icons: the UI face is not
-    /// guaranteed to have a gear, and a box where a gear should be says
-    /// nothing at all.
+    /// The folder a place opens, under the user's home -- `""` for the home
+    /// itself -- or `None` for the two that start a program. The names the
+    /// desktop's own Documents icon uses, so the two open the same folder.
+    #[must_use]
+    pub const fn folder(self) -> Option<&'static str> {
+        match self {
+            Self::Home => Some(""),
+            Self::Documents => Some("Documents"),
+            Self::Pictures => Some("Pictures"),
+            Self::Music => Some("Music"),
+            Self::Downloads => Some("Downloads"),
+            Self::Settings | Self::Terminal => None,
+        }
+    }
+
+    /// What choosing it starts: the file manager on the folder, in the home
+    /// `home` names, or the program. With no home to find the folder in, the
+    /// file manager opens where it opens by itself, which beats a place that
+    /// does nothing.
+    #[must_use]
+    pub fn launch(self, home: Option<&std::path::Path>) -> hotkeys::Launch {
+        match (self.folder(), home) {
+            (Some(""), Some(home)) => hotkeys::Launch::opening(self.program(), home),
+            (Some(sub), Some(home)) => hotkeys::Launch::opening(self.program(), &home.join(sub)),
+            _ => hotkeys::Launch::program(self.program()),
+        }
+    }
+
+    /// The words in the places column. Words rather than icons: the UI face
+    /// is not guaranteed to have a gear, and a box where a gear should be
+    /// says nothing at all.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Home => "Home",
+            Self::Documents => "Documents",
+            Self::Pictures => "Pictures",
+            Self::Music => "Music",
+            Self::Downloads => "Downloads",
             Self::Settings => "Settings",
             Self::Terminal => "Terminal",
         }
@@ -724,9 +790,9 @@ pub enum Hit {
     StartMenuEntry(usize),
     /// The open start menu, but not one of its rows.
     StartMenuPanel,
-    /// The power button at the foot of the open start menu.
+    /// The power button at the foot of the start menu's places column.
     PowerButton,
-    /// One of the buttons beside it -- Settings, Terminal.
+    /// A place in the places column -- a folder, Settings or the terminal.
     StartMenuShortcut(StartShortcut),
     /// An entry of the open power menu, by index into
     /// [`power_menu_choices`](DesktopShell::power_menu_choices).
@@ -1407,6 +1473,10 @@ pub struct DesktopShell {
     /// The offset is what stops a drag snapping the widget's corner to the
     /// pointer on the first pixel of movement.
     widget_drag: Option<(WidgetInstanceId, f32, f32)>,
+    /// The name of the person using the desktop, for the top of the start
+    /// menu's places column. Empty until somebody is known: a desktop
+    /// started behind a login screen does not know who will sign in.
+    user_name: String,
     /// A selection being dragged out in the open note: the press was on its
     /// writing area and the button is still down. It owns the pointer until
     /// the button comes up, as a widget drag does.
@@ -1714,6 +1784,9 @@ pub struct DesktopTheme {
     pub accent_color: Color,
     pub start_menu_bg: Color,
     pub start_menu_fg: Color,
+    /// The start menu's places column: a shade apart from the programs
+    /// column, as the reference's darker glass is, so the two read as two.
+    pub start_menu_side_bg: Color,
     /// Floating overlays such as the Alt+Tab switcher.
     pub overlay_bg: Color,
     pub overlay_fg: Color,
@@ -1745,7 +1818,7 @@ impl DesktopTheme {
 
     /// Which role of `palette` each surface of the shell is.
     ///
-    /// Two of the twelve fields come from `frame` rather than from `palette`,
+    /// Two of the thirteen fields come from `frame` rather than from `palette`,
     /// and that is the point of taking both. Neither is the shell's to choose:
     /// the desktop background is painted by the compositor and merely
     /// *reported* here, and the border is the one drawn around every window on
@@ -1766,6 +1839,7 @@ impl DesktopTheme {
             accent_color: p.accent,
             start_menu_bg: p.base,
             start_menu_fg: p.text,
+            start_menu_side_bg: p.mantle,
             overlay_bg: p.base,
             overlay_fg: p.text,
             overlay_selected_bg: p.surface1,
@@ -1815,6 +1889,7 @@ impl DesktopTheme {
         let overlay = settings.transparency.panel_alpha();
         theme.overlay_bg = with_alpha(theme.overlay_bg, overlay);
         theme.start_menu_bg = with_alpha(theme.start_menu_bg, overlay);
+        theme.start_menu_side_bg = with_alpha(theme.start_menu_side_bg, overlay);
 
         theme
     }
@@ -1936,6 +2011,7 @@ impl DesktopShell {
             menu_widget: None,
             menu_icon: None,
             widget_drag: None,
+            user_name: String::new(),
             note_selecting: false,
             widgets_dirty: false,
             // `appearance::watcher`, not a plain one: an edit to the chosen
@@ -2741,7 +2817,36 @@ impl DesktopShell {
         Rect::new(0.0, bar.y - h, w, h)
     }
 
-    /// How many application rows fit between the heading and the power options.
+    /// The programs column: the list, and the search field at its foot.
+    #[must_use]
+    pub fn start_menu_left_rect(&self) -> Rect {
+        let menu = self.start_menu_rect();
+        let w = self.scale(START_MENU_LEFT_WIDTH).min(menu.w).max(0.0);
+        Rect::new(menu.x, menu.y, w, menu.h)
+    }
+
+    /// The places column, the rest of the menu to the programs' right: the
+    /// user, their folders, Settings, a terminal, and the power button.
+    #[must_use]
+    pub fn start_menu_right_rect(&self) -> Rect {
+        let menu = self.start_menu_rect();
+        let left = self.start_menu_left_rect();
+        Rect::new(left.x + left.w, menu.y, (menu.w - left.w).max(0.0), menu.h)
+    }
+
+    /// The top of the places column, where the user's picture and name are.
+    #[must_use]
+    pub fn start_user_rect(&self) -> Rect {
+        let right = self.start_menu_right_rect();
+        Rect::new(
+            right.x,
+            right.y,
+            right.w,
+            self.scale(START_MENU_USER_HEIGHT).min(right.h),
+        )
+    }
+
+    /// How many application rows fit above the search field.
     ///
     /// Scale-invariant: it divides one scaled length by another, so the same
     /// programs are on screen at 200% as at 100% — they are simply larger.
@@ -2749,7 +2854,7 @@ impl DesktopShell {
     pub fn start_menu_visible_rows(&self) -> usize {
         let usable = self.start_menu_rect().h
             - self.scale(START_MENU_TOP_PADDING)
-            - self.scale(START_MENU_FOOTER);
+            - self.scale(START_MENU_SEARCH_BAND);
         let row = self.scale(START_MENU_ROW_HEIGHT);
         if row <= 0.0 || usable < row {
             return 0;
@@ -2765,54 +2870,59 @@ impl DesktopShell {
     /// `start_menu_entry_at`.
     #[must_use]
     pub fn start_menu_row_rect(&self, row: usize) -> Rect {
-        let menu = self.start_menu_rect();
+        let left = self.start_menu_left_rect();
         let height = self.scale(START_MENU_ROW_HEIGHT);
         Rect::new(
-            menu.x,
-            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,
-            menu.w,
+            left.x,
+            left.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,
+            left.w,
             height,
         )
     }
 
-    /// The power button in the start menu's footer, which opens the power menu.
+    /// The power button at the foot of the places column, which opens the
+    /// power menu.
     ///
-    /// The footer is the last `START_MENU_FOOTER` of the menu, or the whole
-    /// menu if the menu has been clamped shorter than that — a button drawn
+    /// The band is the last `START_MENU_POWER_BAND` of the column, or the whole
+    /// column if the menu has been clamped shorter than that — a button drawn
     /// above the menu's own top edge would be as unreachable as a row drawn off
     /// the screen.
     #[must_use]
     pub fn power_button_rect(&self) -> Rect {
-        let menu = self.start_menu_rect();
+        let right = self.start_menu_right_rect();
         let inset = self.scale(POWER_BUTTON_INSET);
-        let footer = self.scale(START_MENU_FOOTER).min(menu.h);
-        let h = (footer - inset * 2.0).max(0.0);
-        let w = self
-            .scale(POWER_BUTTON_WIDTH)
-            .min((menu.w - inset * 2.0).max(0.0));
-        Rect::new(menu.x + inset, menu.y + menu.h - footer + inset, w, h)
+        let band = self.scale(START_MENU_POWER_BAND).min(right.h);
+        Rect::new(
+            right.x + inset,
+            right.y + right.h - band + inset,
+            (right.w - inset * 2.0).max(0.0),
+            (band - inset * 2.0).max(0.0),
+        )
     }
 
-    /// A footer button beside Power: the two share what is left of the footer
-    /// to its right, the terminal at the far end. They shrink before they
-    /// overlap -- a menu clamped narrow at a large scale gives them less room
-    /// -- and are the power button's height, so the footer reads as one row.
+    /// A place in the places column, below the user and above the power
+    /// button, in [`StartShortcut::ALL`]'s order.
+    ///
+    /// A place that would reach the power button's band -- a menu clamped
+    /// short at a large scale -- has no room and is an empty rectangle, which
+    /// nothing draws and no press lands in: a place drawn over the power
+    /// button would take the press meant for it.
     #[must_use]
     pub fn start_shortcut_rect(&self, which: StartShortcut) -> Rect {
-        let menu = self.start_menu_rect();
-        let power = self.power_button_rect();
+        let right = self.start_menu_right_rect();
         let inset = self.scale(POWER_BUTTON_INSET);
-        let gap = self.scale(START_SHORTCUT_GAP);
-        let right = menu.x + menu.w - inset;
-        let room = (right - (power.x + power.w + gap)).max(0.0);
-        let w = self
-            .scale(START_SHORTCUT_WIDTH)
-            .min(((room - gap) / 2.0).max(0.0));
-        let x = match which {
-            StartShortcut::Terminal => right - w,
-            StartShortcut::Settings => right - w - gap - w,
-        };
-        Rect::new(x, power.y, w, power.h)
+        let height = self.scale(START_LINK_HEIGHT);
+        let index = StartShortcut::ALL
+            .iter()
+            .position(|w| *w == which)
+            .unwrap_or(0);
+        let y = self.start_user_rect().y + self.start_user_rect().h + index as f32 * height;
+        let floor = self.power_button_rect().y - inset;
+        let w = (right.w - inset * 2.0).max(0.0);
+        if y + height > floor {
+            return Rect::new(right.x + inset, y, 0.0, 0.0);
+        }
+        Rect::new(right.x + inset, y, w, height)
     }
 
     /// The power menu popup, rising from the power button.
@@ -2932,14 +3042,27 @@ impl DesktopShell {
     /// The start menu's search field, in the space above the rows.
     #[must_use]
     pub fn start_search_rect(&self) -> Rect {
-        let menu = self.start_menu_rect();
+        let left = self.start_menu_left_rect();
         let inset = self.scale(12.0);
+        let band = self.scale(START_MENU_SEARCH_BAND).min(left.h);
+        let h = self.scale(START_SEARCH_HEIGHT).min(band);
         Rect::new(
-            menu.x + inset,
-            menu.y + self.scale(10.0),
-            (menu.w - inset * 2.0).max(0.0),
-            self.scale(30.0),
+            left.x + inset,
+            left.y + left.h - band + (band - h) / 2.0,
+            (left.w - inset * 2.0).max(0.0),
+            h,
         )
+    }
+
+    /// Say who is using the desktop, for the start menu's places column.
+    pub fn set_user_name(&mut self, name: &str) {
+        name.clone_into(&mut self.user_name);
+    }
+
+    /// Who the start menu says is using the desktop -- empty until known.
+    #[must_use]
+    pub fn user_name(&self) -> &str {
+        &self.user_name
     }
 
     /// The programs pinned to the top of the start menu, in order.
@@ -4116,7 +4239,8 @@ impl DesktopShell {
             // way of the window it is about to open.
             Hit::StartMenuShortcut(which) => {
                 self.close_start_menu();
-                ShellAction::Launch(hotkeys::Launch::program(which.program()))
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                ShellAction::Launch(which.launch(home.as_deref()))
             }
             // A power action starts a program like a menu entry does: the shell
             // has no more business shutting the machine down itself than it has
@@ -6362,6 +6486,20 @@ impl DesktopShell {
             shadow(&mut tree, menu, radii);
         }
         fill_round(&mut tree, menu, self.theme.start_menu_bg, radii);
+        // The places column, in a shade of its own: rounded where it meets the
+        // menu's own corners and square where it meets the programs.
+        let right = self.start_menu_right_rect();
+        fill_round(
+            &mut tree,
+            right,
+            self.theme.start_menu_side_bg,
+            CornerRadii {
+                top_left: 0.0,
+                top_right: radii.top_right,
+                bottom_right: radii.bottom_right,
+                bottom_left: 0.0,
+            },
+        );
         stroke_round(
             &mut tree,
             menu,
@@ -6370,9 +6508,10 @@ impl DesktopShell {
             radii,
         );
 
-        // The search field, where the title was: the menu is a list of
-        // programs either way, and the field says how to find one in it.
+        // The search field, at the foot of the programs: the menu is a list of
+        // programs, and the field says how to find one in it.
         self.render_start_search(&mut tree);
+        self.render_start_places(&mut tree);
 
         // Application entries. Which entry a row shows is asked of
         // `start_menu_entry_at`, the same function the hit test asks, so a
@@ -6439,9 +6578,10 @@ impl DesktopShell {
             // the menus and `apps/dictionary`. The floor stays half a row --
             // this bar is sized in rows of a start menu, not pixels of a
             // dialog -- which is why the module takes it as an argument.
+            let left = self.start_menu_left_rect();
             let thumb = guitk::scrollbar::thumb_of(
                 guitk::frame::Rect::new(
-                    menu.x + menu.w - bar_w - self.scale(2.0),
+                    left.x + left.w - bar_w - self.scale(2.0),
                     track_top,
                     bar_w,
                     track_h,
@@ -6479,26 +6619,68 @@ impl DesktopShell {
             label_size,
         );
 
-        // Settings and Terminal beside it, in the same words-on-the-footer
-        // style, fitted to their buttons.
-        for which in StartShortcut::ALL {
-            let button = self.start_shortcut_rect(*which);
-            let inset = self.scale(6.0);
-            tree.text_in(
-                button.x + inset,
-                button.y + (button.h - label_size).max(0.0) / 2.0,
-                (button.w - inset * 2.0).max(0.0),
-                which.label(),
-                self.theme.start_menu_fg,
-                label_size,
-            );
-        }
-
         if self.power_menu_open {
             self.render_power_menu(&mut tree);
         }
 
         Some(tree)
+    }
+
+    /// Draw the places column: the user's picture and name, then each place.
+    fn render_start_places(&self, tree: &mut RenderTree) {
+        let user = self.start_user_rect();
+        let d = self.scale(START_MENU_AVATAR).min(user.h);
+        let pad = self.scale(POWER_BUTTON_INSET) * 2.0;
+        if let Some(initial) = self.user_name.chars().next() {
+            // The picture is the first letter of the name on the accent, as
+            // the login screen draws a user it has no picture for.
+            let disc = Rect::new(user.x + pad, user.y + (user.h - d) / 2.0, d, d);
+            fill_round(
+                tree,
+                disc,
+                self.theme.accent_color,
+                CornerRadii::all(d / 2.0),
+            );
+            let size = self.font_size(TextRole::Body) * 1.4;
+            let letter: String = initial.to_uppercase().collect();
+            let lw = text::measure(&letter, size, guitk::render::FontWeightHint::Bold);
+            tree.push(guitk::render::RenderCommand::Text {
+                x: disc.x + (d - lw) / 2.0,
+                y: disc.y + (d - size) / 2.0,
+                text: letter,
+                color: readable_on(self.theme.accent_color),
+                font_size: size,
+                font_weight: guitk::render::FontWeightHint::Bold,
+                max_width: None,
+                overflow: guitk::render::TextOverflow::Clip,
+            });
+            let name_x = disc.x + d + pad / 2.0;
+            let name_size = self.font_size(TextRole::Body);
+            tree.text_in(
+                name_x,
+                user.y + (user.h - name_size) / 2.0,
+                (user.x + user.w - name_x - pad / 2.0).max(0.0),
+                &self.user_name,
+                self.theme.start_menu_fg,
+                name_size,
+            );
+        }
+        let size = self.font_size(TextRole::Body);
+        let inset = self.scale(10.0);
+        for which in StartShortcut::ALL {
+            let place = self.start_shortcut_rect(*which);
+            if place.w <= 0.0 || place.h <= 0.0 {
+                continue;
+            }
+            tree.text_in(
+                place.x + inset,
+                place.y + (place.h - size).max(0.0) / 2.0,
+                (place.w - inset * 2.0).max(0.0),
+                which.label(),
+                self.theme.start_menu_fg,
+                size,
+            );
+        }
     }
 
     /// Draw the start menu's search field: what has been typed, with a caret,
@@ -19078,6 +19260,18 @@ mod start_pin_tests {
     #[test]
     fn unpinning_while_scrolled_to_the_end_leaves_no_blank_row() {
         let mut shell = shell();
+        // More programs than the menu shows, so that there is an end to be
+        // scrolled to.
+        for n in 0..20 {
+            shell.apps.push(super::launcher::AppEntry {
+                name: format!("Program {n:02}"),
+                description: String::new(),
+                executable_path: format!("/opt/fixture/program-{n:02}"),
+                keywords: Vec::new(),
+                category: super::launcher::Category::Application,
+                launch_count: 0,
+            });
+        }
         shell.pin_to_start(UNKNOWN);
         shell.toggle_start_menu();
         shell.scroll_start_menu(10_000);

@@ -5062,6 +5062,26 @@ fn log_out_returns_to_the_login_screen() {
     );
 }
 
+/// **The start menu names who signed in** -- the name the account gives
+/// itself, not its login name -- and forgets it at log out, when nobody is
+/// using the desktop until somebody signs in again.
+#[test]
+fn signing_in_names_the_user_and_logging_out_forgets_them() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    assert_eq!(
+        session.shell().user_name(),
+        "",
+        "known before anyone signed in"
+    );
+    type_password(&desktop, &mut session, "password");
+    assert!(session.login().is_none());
+    assert_eq!(session.shell().user_name(), "Alice");
+
+    session.act(crate::ShellAction::LogOut).expect("log out");
+    assert!(session.login().is_some());
+    assert_eq!(session.shell().user_name(), "");
+}
+
 // ---- the desktop's notes ---------------------------------------------------------
 
 /// **A note is written in through the desktop's own surface, and is on disk as

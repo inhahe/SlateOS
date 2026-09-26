@@ -235,7 +235,8 @@ fn the_start_menu_offers_only_programs_the_launcher_knows() {
 /// property a shared geometry exists to guarantee.
 #[test]
 fn every_visible_row_launches_the_program_named_on_it() {
-    let mut shell = shell();
+    // More programs than rows, so that every visible row has one to launch.
+    let mut shell = shell_with_a_long_menu();
     for row in 0..shell.start_menu_visible_rows() {
         shell.toggle_start_menu();
         let expected = shell.start_menu_entries()[row].executable_path.clone();
@@ -393,8 +394,11 @@ fn a_click_on_the_menu_but_not_on_a_row_does_nothing_but_stay_open() {
     let mut shell = shell();
     shell.toggle_start_menu();
     let menu = shell.start_menu_rect();
-    // The heading strip, above the first row.
-    let action = shell.handle_mouse(&click(menu.x + menu.w / 2.0, menu.y + 8.0));
+    // The places column's top, where the user is: the menu, and not a row
+    // or a place.
+    let user = shell.start_user_rect();
+    assert!(menu.contains(user.x + user.w / 2.0, user.y + user.h / 2.0));
+    let action = shell.handle_mouse(&click(user.x + user.w / 2.0, user.y + user.h / 2.0));
     assert_eq!(action, ShellAction::Consumed);
     assert!(shell.start_menu_open);
 }
@@ -537,19 +541,43 @@ fn the_power_button_toggles_its_menu_and_leaves_the_start_menu_open() {
     );
 }
 
-/// A submenu is allowed to cover the list it opened from — but then a click in
-/// the overlap has to reach the popup, not the row buried under it.
+/// A submenu is allowed to cover the menu it opened from -- but then a click
+/// anywhere in it has to reach the popup, not the place or the row buried
+/// under it. Swept over the popup at three scales rather than tried at one
+/// point: where the popup lands on the places column depends on the scale,
+/// and at 100% it covers nothing at all.
 #[test]
-fn the_power_menu_takes_the_clicks_on_the_rows_it_covers() {
-    let mut shell = shell();
-    shell.toggle_start_menu();
-    shell.toggle_power_menu();
-
-    let (x, y) = centre(shell.power_menu_row_rect(0));
-    let covered = (0..shell.start_menu_visible_rows())
-        .any(|row| shell.start_menu_row_rect(row).contains(x, y));
-    assert!(covered, "the fixture must actually overlap a row");
-    assert_eq!(shell.hit_test(x, y), Hit::PowerMenuEntry(0));
+fn the_power_menu_takes_every_click_inside_it() {
+    let mut covered_something = false;
+    for percent in [100, 150, 200] {
+        let mut shell = scaled(percent);
+        shell.toggle_start_menu();
+        shell.toggle_power_menu();
+        let popup = shell.power_menu_rect();
+        for i in 0..=8 {
+            for j in 0..=8 {
+                let x = popup.x + popup.w * (0.02 + 0.96 * i as f32 / 8.0);
+                let y = popup.y + popup.h * (0.02 + 0.96 * j as f32 / 8.0);
+                covered_something |= crate::StartShortcut::ALL
+                    .iter()
+                    .any(|w| shell.start_shortcut_rect(*w).contains(x, y))
+                    || (0..shell.start_menu_visible_rows())
+                        .any(|row| shell.start_menu_row_rect(row).contains(x, y));
+                assert!(
+                    matches!(
+                        shell.hit_test(x, y),
+                        Hit::PowerMenuEntry(_) | Hit::PowerMenuPanel
+                    ),
+                    "({x}, {y}) inside the popup at {percent}% went to {:?}",
+                    shell.hit_test(x, y)
+                );
+            }
+        }
+    }
+    assert!(
+        covered_something,
+        "the popup never covered anything, so this proves nothing"
+    );
 }
 
 /// Clicking the list behind an open submenu dismisses the submenu and is spent
@@ -3051,78 +3079,221 @@ fn a_full_bar_with_a_divider_still_stops_short_of_the_tray() {
     });
 }
 
-// ---- the start menu's footer: Settings and Terminal beside Power ----------------
+// ---- the start menu's places column ------------------------------------------------
 
 /// `design.txt` line 721: the start menu contains a "settings icon" and a
-/// "terminal". Each footer button starts its program and closes the menu.
+/// "terminal"; the Aero reference's places column lists the user's folders
+/// above them. Each place starts what it names and closes the menu: the
+/// file manager on a folder, or the program.
 #[test]
-fn the_start_menus_footer_starts_settings_and_the_terminal() {
-    for (which, program) in [
-        (crate::StartShortcut::Settings, "/usr/bin/settings"),
-        (crate::StartShortcut::Terminal, "/usr/bin/terminal"),
-    ] {
+fn the_start_menus_places_open_folders_and_start_settings_and_the_terminal() {
+    for which in crate::StartShortcut::ALL {
         let mut shell = shell();
         shell.toggle_start_menu();
-        let rect = shell.start_shortcut_rect(which);
+        let rect = shell.start_shortcut_rect(*which);
         let (x, y) = centre(rect);
-        assert_eq!(shell.hit_test(x, y), Hit::StartMenuShortcut(which));
+        assert_eq!(shell.hit_test(x, y), Hit::StartMenuShortcut(*which));
+        let ShellAction::Launch(launch) = click_at(&mut shell, rect) else {
+            panic!("{which:?} started nothing");
+        };
         assert_eq!(
-            click_at(&mut shell, rect),
-            ShellAction::Launch(crate::hotkeys::Launch::program(program)),
+            launch.program,
+            std::path::PathBuf::from(which.program()),
             "{which:?}"
         );
+        // Whatever the home is here -- the variable is the process's -- a
+        // folder opens *its* folder, and a program is started with nothing.
+        match which.folder() {
+            Some("") | None => assert!(launch.args.len() <= 1, "{which:?}: {launch:?}"),
+            Some(sub) => assert!(
+                launch.args.is_empty() || std::path::Path::new(&launch.args[0]).ends_with(sub),
+                "{which:?} opened {launch:?}"
+            ),
+        }
         assert!(!shell.start_menu_open, "{which:?} left the menu open");
+    }
+    assert_eq!(
+        crate::StartShortcut::Settings.program(),
+        "/usr/bin/settings"
+    );
+    assert_eq!(
+        crate::StartShortcut::Terminal.program(),
+        "/usr/bin/terminal"
+    );
+}
+
+/// A folder is found under the home it is given; with no home, the file
+/// manager opens where it opens by itself.
+#[test]
+fn a_place_opens_its_folder_under_the_home() {
+    use crate::StartShortcut as Place;
+    use std::ffi::OsString;
+    let home = std::path::Path::new("/home/ann");
+    let arg = |place: Place| place.launch(Some(home)).args;
+    assert_eq!(arg(Place::Home), [OsString::from("/home/ann")]);
+    assert_eq!(
+        arg(Place::Documents),
+        [home.join("Documents").into_os_string()]
+    );
+    assert_eq!(
+        arg(Place::Downloads),
+        [home.join("Downloads").into_os_string()]
+    );
+    assert!(arg(Place::Settings).is_empty());
+    assert!(Place::Pictures.launch(None).args.is_empty());
+    assert_eq!(
+        Place::Pictures.launch(None).program,
+        std::path::PathBuf::from(crate::launcher::FILE_MANAGER)
+    );
+}
+
+/// Every place fits the places column at every scale -- below the user,
+/// above the power button, one under another -- and is drawn where it is hit.
+#[test]
+fn the_places_fit_their_column_at_every_scale() {
+    for percent in [100, 150, 200] {
+        let mut shell = scaled(percent);
+        shell.toggle_start_menu();
+        let column = shell.start_menu_right_rect();
+        let user = shell.start_user_rect();
+        let power = shell.power_button_rect();
+        let mut below = user.y + user.h;
+        for which in crate::StartShortcut::ALL {
+            let rect = shell.start_shortcut_rect(*which);
+            assert!(
+                rect.w > 0.0 && rect.h > 0.0,
+                "{which:?} is empty at {percent}%"
+            );
+            assert!(
+                rect.x >= column.x && rect.x + rect.w <= column.x + column.w,
+                "{which:?} runs out of its column at {percent}%"
+            );
+            assert!(
+                rect.y >= below,
+                "{which:?} overlaps the one above at {percent}%"
+            );
+            assert!(
+                rect.y + rect.h <= power.y,
+                "{which:?} reaches the power button at {percent}%"
+            );
+            below = rect.y + rect.h;
+        }
+        let drawn = format!("{:?}", shell.render_start_menu().expect("the menu is open"));
+        for which in crate::StartShortcut::ALL {
+            assert!(
+                drawn.contains(&format!("\"{}\"", which.label())),
+                "{which:?} is not drawn at {percent}%"
+            );
+        }
     }
 }
 
-/// The footer's three buttons fit the menu side by side at every scale,
-/// without overlapping, and are drawn where they are hit.
+/// The two columns keep to themselves at every scale: the rows and the
+/// search field in the programs column, the user, the places and the power
+/// button in the places column, and the two columns side by side filling the
+/// menu. A row as wide as the menu would highlight across the places, and a
+/// power button in the programs column would sit on the search field.
 #[test]
-fn the_footer_buttons_fit_beside_power_at_every_scale() {
+fn the_programs_and_the_places_keep_to_their_columns() {
+    let inside = |outer: Rect, inner: Rect| {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.w <= outer.x + outer.w + 0.01
+            && inner.y + inner.h <= outer.y + outer.h + 0.01
+    };
     for percent in [100, 150, 200] {
         let mut shell = scaled(percent);
         shell.toggle_start_menu();
         let menu = shell.start_menu_rect();
-        let power = shell.power_button_rect();
-        let settings = shell.start_shortcut_rect(crate::StartShortcut::Settings);
-        let terminal = shell.start_shortcut_rect(crate::StartShortcut::Terminal);
-        for (name, rect) in [("settings", settings), ("terminal", terminal)] {
+        let left = shell.start_menu_left_rect();
+        let right = shell.start_menu_right_rect();
+        assert_eq!(left.x, menu.x);
+        assert!(
+            (left.w + right.w - menu.w).abs() < 0.01,
+            "the columns do not fill the menu"
+        );
+        assert!(
+            (right.x - (left.x + left.w)).abs() < 0.01,
+            "a gap between the columns"
+        );
+        for row in 0..shell.start_menu_visible_rows() {
+            let rect = shell.start_menu_row_rect(row);
             assert!(
-                rect.w > 0.0 && rect.h > 0.0,
-                "{name} is empty at {percent}%"
-            );
-            assert!(
-                rect.x >= menu.x && rect.x + rect.w <= menu.x + menu.w,
-                "{name} runs off the menu at {percent}%"
-            );
-            assert!(
-                rect.y >= menu.y && rect.y + rect.h <= menu.y + menu.h,
-                "{name} is outside the menu's height at {percent}%"
+                inside(left, rect),
+                "row {row} leaves the programs at {percent}%"
             );
         }
+        let search = shell.start_search_rect();
         assert!(
-            power.x + power.w <= settings.x,
-            "settings overlaps power at {percent}%"
+            inside(left, search),
+            "the search field leaves the programs at {percent}%"
+        );
+        let last = shell.start_menu_row_rect(shell.start_menu_visible_rows().saturating_sub(1));
+        assert!(
+            last.y + last.h <= search.y + 0.01,
+            "a row covers the search at {percent}%"
         );
         assert!(
-            settings.x + settings.w <= terminal.x,
-            "the two overlap at {percent}%"
+            inside(right, shell.start_user_rect()),
+            "the user at {percent}%"
         );
-
-        let drawn = format!("{:?}", shell.render_start_menu().expect("the menu is open"));
-        assert!(drawn.contains("\"Settings\"") && drawn.contains("\"Terminal\""));
+        assert!(
+            inside(right, shell.power_button_rect()),
+            "the power button at {percent}%"
+        );
     }
 }
 
-/// With the power menu open, a press on a footer button closes the power menu
-/// and nothing else -- the same as a press anywhere else in the start menu.
+/// A menu clamped too short for every place leaves the lower ones out rather
+/// than drawing them over the power button, where they would take its press.
 #[test]
-fn a_press_on_a_footer_button_first_closes_the_power_menu() {
+fn a_menu_too_short_for_every_place_leaves_the_lower_ones_out() {
+    let mut shell = DesktopShell::new(1000, 360);
+    shell.toggle_start_menu();
+    let power = shell.power_button_rect();
+    assert!(power.h > 0.0);
+    let shown: Vec<_> = crate::StartShortcut::ALL
+        .iter()
+        .filter(|w| shell.start_shortcut_rect(**w).w > 0.0)
+        .collect();
+    assert!(
+        shown.len() < crate::StartShortcut::ALL.len(),
+        "the fixture is not short enough"
+    );
+    for which in crate::StartShortcut::ALL {
+        let rect = shell.start_shortcut_rect(*which);
+        assert!(rect.w == 0.0 || rect.y + rect.h <= power.y, "{which:?}");
+    }
+    let (x, y) = centre(power);
+    assert_eq!(shell.hit_test(x, y), Hit::PowerButton);
+}
+
+/// The places column says who is using the desktop, once somebody is known:
+/// their name, and its first letter as their picture.
+#[test]
+fn the_places_column_names_the_user_once_known() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let drawn = format!("{:?}", shell.render_start_menu().expect("open"));
+    assert!(!drawn.contains("\"ann\""));
+    shell.set_user_name("ann");
+    let drawn = format!("{:?}", shell.render_start_menu().expect("open"));
+    assert!(drawn.contains("\"ann\""), "the name is not drawn");
+    assert!(drawn.contains("\"A\""), "the initial is not drawn");
+    let user = shell.start_user_rect();
+    let (x, y) = centre(user);
+    assert_eq!(shell.hit_test(x, y), Hit::StartMenuPanel);
+}
+
+/// With the power menu open, a press on a place closes the power menu and
+/// nothing else -- the same as a press anywhere else in the start menu.
+#[test]
+fn a_press_on_a_place_first_closes_the_power_menu() {
     let mut shell = shell();
     shell.toggle_start_menu();
     shell.toggle_power_menu();
-    let rect = shell.start_shortcut_rect(crate::StartShortcut::Terminal);
-    // Not under the power menu, which rises from the far side of the footer.
+    let rect = shell.start_shortcut_rect(crate::StartShortcut::Home);
+    // Not under the power menu, which rises from the foot of the column.
     let (x, y) = centre(rect);
     assert!(
         !shell.power_menu_rect().contains(x, y),

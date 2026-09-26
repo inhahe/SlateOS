@@ -1789,6 +1789,15 @@ live.
   that edit text (`apps/notes`, whose body can only be typed at the end,
   `apps/stickynotes`, `apps/email`) are lane E's to move onto it.
 
+- `[C]` **The start menu in two columns, as the Aero reference has it** --
+  phase one done 2026-09-26 (`design-decisions.md` §879). The single 300 by
+  400 list with a footer became the reference's 524 by 566: the programs on
+  the left with the search field at their foot, and a places column on the
+  right -- who is signed in (the account's display name, from the login),
+  Home, Documents, Pictures, Music, Downloads, Settings, a terminal, and the
+  power button at the foot. Next: the pinned programs as tiles, jump lists,
+  and a Shut down button with the rest behind a caret.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

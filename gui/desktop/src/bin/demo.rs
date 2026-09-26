@@ -173,8 +173,8 @@ fn main() {
         }
     }
 
-    // Open the power menu from the start menu's footer and pick Shutdown, the
-    // way a user reaching for the power button would.
+    // Open the power menu from the foot of the start menu's places column and
+    // pick Shutdown, the way a user reaching for the power button would.
     desktop.handle_mouse(&click(start.x + 8.0, start.y + 8.0));
     let power = desktop.power_button_rect();
     desktop.handle_mouse(&click(power.x + 8.0, power.y + 8.0));

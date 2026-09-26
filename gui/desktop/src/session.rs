@@ -656,6 +656,16 @@ impl<T: Transport> ShellSession<T> {
                 authlib::Authenticator::with_stores(path)
             }),
         };
+        // With nobody to sign in as there is no login screen, and the person
+        // using the desktop is the one it runs as. Shown through
+        // `display_os`, as every name that may not be text is.
+        if session.login.is_none()
+            && let Some(name) = ["USER", "USERNAME", "LOGNAME"]
+                .iter()
+                .find_map(|var| std::env::var_os(var).filter(|name| !name.is_empty()))
+        {
+            session.shell.set_user_name(&pathcodec::display_os(&name));
+        }
         session.repaint()?;
         Ok(session)
     }
@@ -845,6 +855,14 @@ impl<T: Transport> ShellSession<T> {
                 // not a failure -- the screen opens either way -- but it is the
                 // fact that decides whether this session can ever be locked.
                 self.lockable = outcome != authlib::Outcome::NoPassword;
+                // The start menu says who is using the desktop: the name the
+                // account gives itself, or its login name if it gives none.
+                let shown = screen
+                    .current_user()
+                    .filter(|user| user.username == username && !user.display_name.is_empty())
+                    .map_or(username, |user| user.display_name.as_str())
+                    .to_string();
+                self.shell.set_user_name(&shown);
                 screen.auth_success();
                 // Nothing between this and the desktop: the screen's
                 // `LoggingIn` phase is a frame of feedback, not a step that can
@@ -2707,6 +2725,10 @@ impl<T: Transport> ShellSession<T> {
             self.shell.screen_width,
             self.shell.screen_height,
         );
+        if self.login.is_some() {
+            // Nobody is using the desktop until somebody signs in again.
+            self.shell.set_user_name("");
+        }
         self.dirty = true;
     }
 

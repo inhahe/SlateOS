@@ -500,7 +500,9 @@ pub mod cksum;
 pub mod copy;
 pub mod digest;
 pub mod dirfd;
-pub mod errmsg;
+// strerror(3)'s wording for an io::Error -- the shared `errmsg` crate since
+// 2026-09-26, re-exported here so `coreutils::errmsg` and `crate::errmsg` stand.
+pub use ::errmsg;
 pub mod extfloat;
 pub mod fileid;
 pub mod filekind;

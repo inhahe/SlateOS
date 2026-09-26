@@ -430,6 +430,7 @@ dependencies = [
  "blake2",
  "charwidth",
  "ere",
+ "errmsg",
  "getoptlong",
  "localtime",
  "md5",
@@ -804,6 +805,10 @@ version = "0.1.0"
 dependencies = [
  "bstr",
 ]
+
+[[package]]
+name = "errmsg"
+version = "0.1.0"
 
 [[package]]
 name = "explorer"

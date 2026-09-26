@@ -37,6 +37,9 @@ getoptlong = { path = "../getoptlong" }
 # operands -- which lived in bin/cal.rs until 2026-09-26 and is now shared with
 # the util-linux ports outside coreutils (logger's -S and --id=).
 ulstrutils = { path = "../ulstrutils" }
+# strerror(3)'s wording for an io::Error, which lived here as src/errmsg.rs
+# until 2026-09-26; `coreutils::errmsg` re-exports it.
+errmsg = { path = "../errmsg" }
 # One definition of an exact integer, shared with `bc`, `dc` and `genius-cli`.
 # GNU `expr` is arbitrary-precision — `expr 9223372036854775807 + 1` answers
 # 9223372036854775808 — and a shell script reaches those sizes by accident.

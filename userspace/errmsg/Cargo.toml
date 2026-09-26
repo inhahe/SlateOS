@@ -1,0 +1,12 @@
+[package]
+name = "errmsg"
+version = "0.1.0"
+edition = "2024"
+description = "strerror(3)'s wording for an io::Error, on every host"
+
+[lints]
+workspace = true
+
+# No dependencies: a table of POSIX texts over std's io::Error. It lived in
+# coreutils as src/errmsg.rs until 2026-09-26 and moved out so that programs
+# outside coreutils word their failures the same way.

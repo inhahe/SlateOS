@@ -266,9 +266,13 @@ fn named(name: &[u8]) -> String {
 /// Render a resolved long option, which is a table entry and so always plain
 /// ASCII. It is quoted anyway rather than relying on that staying true.
 ///
+/// `prefix` is how the word introduced it: `--` almost always, `-` under
+/// `getopt_long_only`, `-W ` for glibc's `W;` extension. glibc prints every
+/// name in such a message with the prefix the word actually used.
+///
 /// Straight marks, for the same reason as [`named`].
-fn named_long(resolved: &str) -> String {
-    quote_glibc(format!("--{resolved}").as_bytes())
+fn named_prefixed(prefix: &str, resolved: &str) -> String {
+    quote_glibc(format!("{prefix}{resolved}").as_bytes())
 }
 
 /// Which option a spelling *is*, for the ambiguity test in
@@ -413,18 +417,36 @@ impl Program {
     /// `sort --k` → `option '--key' requires an argument`, naming the resolution.
     #[must_use]
     pub fn long_missing_argument(self, resolved: &str) -> Error {
-        sentence(
-            self,
-            &format!("option {} requires an argument", named_long(resolved)),
-        )
+        self.long_missing_argument_as("--", resolved)
     }
 
     /// `sort --stab=x` → `option '--stable' doesn't allow an argument`.
     #[must_use]
     pub fn long_unwanted_argument(self, resolved: &str) -> Error {
+        self.long_unwanted_argument_as("--", resolved)
+    }
+
+    /// [`Program::long_missing_argument`] for a long option introduced by
+    /// `prefix` (see [`named_prefixed`]).
+    fn long_missing_argument_as(self, prefix: &str, resolved: &str) -> Error {
         sentence(
             self,
-            &format!("option {} doesn't allow an argument", named_long(resolved)),
+            &format!(
+                "option {} requires an argument",
+                named_prefixed(prefix, resolved)
+            ),
+        )
+    }
+
+    /// [`Program::long_unwanted_argument`] for a long option introduced by
+    /// `prefix`.
+    fn long_unwanted_argument_as(self, prefix: &str, resolved: &str) -> Error {
+        sentence(
+            self,
+            &format!(
+                "option {} doesn't allow an argument",
+                named_prefixed(prefix, resolved)
+            ),
         )
     }
 
@@ -520,27 +542,72 @@ impl Program {
         table: &'t [(&'t str, T)],
         aliases: &[(&str, &str)],
     ) -> Result<(&'t str, T), Error> {
+        self.lookup_long(typed, whole, "--", table, aliases, Lookup::default())?
+            .ok_or_else(|| self.unrecognized_option(whole))
+    }
+
+    /// The one resolution behind [`Program::resolve_long_aliased`], with the
+    /// knobs glibc's `process_long_option` has.
+    ///
+    /// `prefix` is how the word introduced the name -- `--`, or `-` under
+    /// `getopt_long_only`, or `-W ` -- and names every option in a message;
+    /// `whole` is the word as a message echoes it. `Ok(None)` is "no such
+    /// option", left to the caller, because under `getopt_long_only` a
+    /// single-dash word that names no long option may still be a bundle of
+    /// short ones.
+    ///
+    /// # Errors
+    ///
+    /// The name is a prefix of more than one option, by `how`'s rule.
+    fn lookup_long<'t, T: Copy>(
+        self,
+        typed: &str,
+        whole: &[u8],
+        prefix: &str,
+        table: &'t [(&'t str, T)],
+        aliases: &[(&str, &str)],
+        how: Lookup,
+    ) -> Result<Option<(&'t str, T)>, Error> {
         if let Some(hit) = table.iter().find(|(n, _)| *n == typed) {
-            return Ok(*hit);
+            return Ok(Some(*hit));
         }
-        let matches: Vec<_> = table.iter().filter(|(n, _)| n.starts_with(typed)).collect();
-        let Some(first) = matches.first() else {
-            return Err(self.unrecognized_option(whole));
+        let matches: Vec<(usize, &(&'t str, T))> = table
+            .iter()
+            .enumerate()
+            .filter(|(_, (n, _))| n.starts_with(typed))
+            .collect();
+        let Some(&(first_at, first)) = matches.first() else {
+            return Ok(None);
         };
         // glibc compares every later match against `pfound` — the first one —
         // and never against each other, so a table `[A, B, B']` where `B'`
         // aliases `B` lists all three. Mirroring that exactly matters: the list
         // is user-visible output.
+        //
+        // What "the same option" means is glibc's `has_arg`/`flag`/`val`
+        // triple. Our stand-in is the alias identity; for a table whose every
+        // entry is its own option (`distinct`) it is the position; and under
+        // `getopt_long_only` glibc counts every second match as ambiguous
+        // whatever it is.
         let first_id = identity(first.0, aliases);
-        let ambiguous: Vec<_> = matches
+        let ambiguous: Vec<&str> = matches
             .iter()
-            .filter(|(n, _)| identity(n, aliases) != first_id)
+            .skip(1)
+            .filter(|&&(at, (n, _))| {
+                how.long_only
+                    || if how.distinct {
+                        at != first_at
+                    } else {
+                        identity(n, aliases) != first_id
+                    }
+            })
+            .map(|&(_, (n, _))| *n)
             .collect();
         if ambiguous.is_empty() {
-            return Ok(**first);
+            return Ok(Some(*first));
         }
-        let mut list: Vec<String> = vec![named_long(first.0)];
-        list.extend(ambiguous.iter().map(|(n, _)| named_long(n)));
+        let mut list: Vec<String> = vec![named_prefixed(prefix, first.0)];
+        list.extend(ambiguous.iter().map(|n| named_prefixed(prefix, n)));
         // Back into table order: `first` is the earliest match by construction,
         // and `ambiguous` preserves the table's order among the rest, so
         // prepending `first` is already sorted. Stated rather than assumed
@@ -709,9 +776,21 @@ impl Program {
             only_operands: false,
             ordering,
             posixly_correct: posixly_correct(),
+            keep_going: false,
+            long_only: false,
+            distinct_entries: false,
             done: false,
         }
     }
+}
+
+/// The rule [`Program::lookup_long`] resolves an abbreviation by.
+#[derive(Clone, Copy, Debug, Default)]
+struct Lookup {
+    /// `getopt_long_only`: every second prefix match is ambiguous.
+    long_only: bool,
+    /// Every table entry is its own option, even where two share a name.
+    distinct: bool,
 }
 
 /// One thing found on the command line, in the order it was typed.
@@ -758,6 +837,12 @@ pub struct Parser<'a> {
     /// walk begins, as glibc reads it; [`Parser::posixly_correct`] overrides.
     /// Only [`Ordering::Permute`] consults it.
     posixly_correct: bool,
+    /// See [`Parser::keep_going`].
+    keep_going: bool,
+    /// See [`Parser::long_only`].
+    long_only: bool,
+    /// See [`Parser::distinct_entries`].
+    distinct_entries: bool,
     done: bool,
 }
 
@@ -849,6 +934,51 @@ impl<'a> Parser<'a> {
         self
     }
 
+    /// Go on after an error, as glibc's `getopt_long` does, instead of
+    /// ending the walk at the first one.
+    ///
+    /// A utility that stops at its first bad option -- every one converted so
+    /// far, since each prints the error and exits -- never sees the
+    /// difference. `getopt(1)` does: it reports every bad option it is
+    /// handed and still prints the good ones. The walk resumes exactly where
+    /// glibc does: after an unknown letter, with the rest of its bundle
+    /// (`-xa` is `x` refused, then `a`); after any long-option error, with
+    /// the next word; a missing argument can only happen at the end.
+    #[must_use]
+    pub fn keep_going(mut self, set: bool) -> Self {
+        self.keep_going = set;
+        self
+    }
+
+    /// `getopt_long_only`: a long option may be introduced by one dash.
+    ///
+    /// glibc's rule, which is what makes it usable: `-f` where `f` is a
+    /// short option is that short option; any other single-dash word is
+    /// looked up as a long option first (`-fu` is `--fubar`), and only if it
+    /// names none and its first letter is a short option is it read as a
+    /// bundle of short ones. And in this mode every second abbreviation
+    /// match is ambiguous, even two entries for the same option.
+    #[must_use]
+    pub fn long_only(mut self, set: bool) -> Self {
+        self.long_only = set;
+        self
+    }
+
+    /// Count every table entry as its own option when judging an
+    /// abbreviation, even two with the same name.
+    ///
+    /// glibc tells options apart by the `val` each `struct option` carries,
+    /// and a table built at run time -- `getopt(1)`'s, from `-l` -- gives
+    /// every entry its own, so `-l foo,foo` makes `--fo` ambiguous between
+    /// the two. (An exact match is still taken, the first one.) A fixed
+    /// table's duplicates are its aliases instead; see
+    /// [`Program::parse_aliased`].
+    #[must_use]
+    pub fn distinct_entries(mut self, set: bool) -> Self {
+        self.distinct_entries = set;
+        self
+    }
+
     /// Whether an operand here ends option parsing.
     fn stops_at_operand(&self) -> bool {
         match self.ordering {
@@ -876,7 +1006,30 @@ impl<'a> Parser<'a> {
             // Unreachable: `next` only calls this with a non-empty bundle.
             return Err(self.program.invalid_option(b'-'));
         };
+        if flag == b'W' && w_is_long(self.shorts) {
+            // `-W foo` is `--foo`: POSIX reserves `-W` for the
+            // implementation, and glibc's use of it is this, when the option
+            // string lists `W;`. The name is the rest of the word, or else
+            // the next word, and is resolved as `process_long_option` does,
+            // never `getopt_long_only`'s way, with `-W ` in its messages.
+            let body = if tail.is_empty() {
+                let next = self
+                    .next_word()
+                    .ok_or_else(|| self.program.short_missing_argument(flag))?;
+                os_bytes(&next).into_owned()
+            } else {
+                tail.to_vec()
+            };
+            let mut shown = b"-W ".to_vec();
+            shown.extend_from_slice(&body);
+            return self
+                .long_item(&body, &shown, "-W ", false)?
+                .ok_or_else(|| self.program.unrecognized_option(&shown));
+        }
         let Some(takes) = short_takes(self.shorts, flag) else {
+            // The rest of the bundle is still to be read, should the walk go
+            // on (`keep_going`): glibc moves to the next letter.
+            self.cluster = tail.to_vec();
             return Err(self.program.invalid_option(flag));
         };
         if takes == Takes::Nothing {
@@ -902,6 +1055,22 @@ impl<'a> Parser<'a> {
 
     /// Handle one `--name[=value]` word.
     fn take_long(&mut self, body: &[u8], whole: &[u8]) -> Result<Opt<'a>, Error> {
+        let long_only = self.long_only;
+        self.long_item(body, whole, "--", long_only)?
+            .ok_or_else(|| self.program.unrecognized_option(whole))
+    }
+
+    /// One long option: `body` is what follows its `prefix` -- `name` or
+    /// `name=value` -- and `whole` the word as a message echoes it.
+    /// `Ok(None)` when it names no option, which [`Parser::take_long`] reports
+    /// and a `getopt_long_only` word may still survive as short options.
+    fn long_item(
+        &mut self,
+        body: &[u8],
+        whole: &[u8],
+        prefix: &str,
+        long_only: bool,
+    ) -> Result<Option<Opt<'a>>, Error> {
         // Split before resolving: the name is what gets matched, and the
         // argument *as typed* — `=VALUE` included — is what gets echoed back if
         // it resolves to nothing.
@@ -915,14 +1084,22 @@ impl<'a> Parser<'a> {
         // Every option name is ASCII, so a name that is not UTF-8 can match
         // none of them. It takes the unrecognised path — reported as the bytes
         // typed — rather than failing in some third way.
-        let typed =
-            std::str::from_utf8(typed).map_err(|_| self.program.unrecognized_option(whole))?;
-        let (name, takes) =
+        let Ok(typed) = std::str::from_utf8(typed) else {
+            return Ok(None);
+        };
+        let how = Lookup {
+            long_only,
+            distinct: self.distinct_entries,
+        };
+        let Some((name, takes)) =
             self.program
-                .resolve_long_aliased(typed, whole, self.longs, self.aliases)?;
+                .lookup_long(typed, whole, prefix, self.longs, self.aliases, how)?
+        else {
+            return Ok(None);
+        };
 
         if inline.is_some() && takes == Takes::Nothing {
-            return Err(self.program.long_unwanted_argument(name));
+            return Err(self.program.long_unwanted_argument_as(prefix, name));
         }
         let value = match takes {
             Takes::Nothing => None,
@@ -934,10 +1111,10 @@ impl<'a> Parser<'a> {
                 Some(text) => os_from_bytes(text),
                 None => self
                     .next_word()
-                    .ok_or_else(|| self.program.long_missing_argument(name))?,
+                    .ok_or_else(|| self.program.long_missing_argument_as(prefix, name))?,
             }),
         };
-        Ok(Opt::Long(name, value))
+        Ok(Some(Opt::Long(name, value)))
     }
 }
 
@@ -949,7 +1126,8 @@ impl<'a> Iterator for Parser<'a> {
             return None;
         }
         let outcome = self.step();
-        if matches!(outcome, Some(Err(_)) | None) {
+        let error = matches!(outcome, Some(Err(_)));
+        if outcome.is_none() || (error && !self.keep_going) {
             self.done = true;
         }
         outcome
@@ -990,7 +1168,24 @@ impl<'a> Parser<'a> {
         Some(match bytes.strip_prefix(b"--") {
             Some(body) => self.take_long(body, &bytes),
             None => {
-                self.cluster = bytes.get(1..).unwrap_or_default().to_vec();
+                let body = bytes.get(1..).unwrap_or_default();
+                // `strchr(optstring, c)`, as glibc asks it: any byte of the
+                // option string counts, `:` included, which is what decides
+                // `-:` the way glibc decides it.
+                let listed = |c: Option<&u8>| c.is_some_and(|c| self.shorts.as_bytes().contains(c));
+                if self.long_only && (body.len() > 1 || !listed(body.first())) {
+                    match self.long_item(body, &bytes, "-", true) {
+                        Ok(Some(opt)) => return Some(Ok(opt)),
+                        Err(e) => return Some(Err(e)),
+                        Ok(None) if !listed(body.first()) => {
+                            return Some(Err(self.program.unrecognized_option(&bytes)));
+                        }
+                        // Not a long option, but its first letter is a short
+                        // one: read it as a bundle.
+                        Ok(None) => {}
+                    }
+                }
+                self.cluster = body.to_vec();
                 self.take_short()
             }
         })
@@ -1002,9 +1197,11 @@ impl<'a> Parser<'a> {
 /// `None` for a letter the string does not list, which is
 /// `invalid option -- 'x'`.
 fn short_takes(shorts: &str, flag: u8) -> Option<Takes> {
-    if flag == b':' {
+    if flag == b':' || flag == b';' {
         // In this string a colon is punctuation, never an option; glibc gives
-        // `-:` no way to be declared and coreutils has no such option.
+        // `-:` no way to be declared and coreutils has no such option. A
+        // semicolon likewise: glibc refuses `-;` outright, since `;` only
+        // ever appears in `W;`.
         return None;
     }
     let bytes = shorts.as_bytes();
@@ -1020,6 +1217,16 @@ fn short_takes(shorts: &str, flag: u8) -> Option<Takes> {
         1 => Takes::Required,
         _ => Takes::Optional,
     })
+}
+
+/// Whether the option string makes `-W foo` mean `--foo`: glibc's test is on
+/// the FIRST `W` in the string (`strchr`), and whether a `;` follows it.
+fn w_is_long(shorts: &str) -> bool {
+    let bytes = shorts.as_bytes();
+    bytes
+        .iter()
+        .position(|&c| c == b'W')
+        .is_some_and(|at| bytes.get(at.saturating_add(1)) == Some(&b';'))
 }
 
 /// `argmatch`'s two diagnostics, which differ only in that first word.
@@ -2055,5 +2262,157 @@ mod tests {
         assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[2]));
         assert_eq!(p.next().unwrap().unwrap(), Opt::Operand(&args[3]));
         assert_eq!(p.optind(), 4);
+    }
+
+    // -- glibc's knobs, which getopt(1) needs ---------------------------------
+
+    const GETOPT: Program = Program::new("getopt", 1);
+
+    /// Every item of a walk to its end, errors as their sentences.
+    fn every(p: Parser<'_>) -> Vec<Result<Opt<'_>, String>> {
+        p.posixly_correct(false)
+            .map(|r| r.map_err(|e| e.sentence))
+            .collect()
+    }
+
+    #[test]
+    fn keep_going_resumes_where_glibc_does() {
+        let longs = [("alpha", Takes::Nothing)];
+        let args = argv(&["-xa", "--nope", "--alpha=1", "-b", "--alpha", "-q"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "ab", &longs).keep_going(true)),
+            vec![
+                // The rest of a bundle survives a bad letter.
+                Err("invalid option -- 'x'".into()),
+                Ok(Opt::Short(b'a', None)),
+                Err("unrecognized option '--nope'".into()),
+                Err("option '--alpha' doesn't allow an argument".into()),
+                Ok(Opt::Short(b'b', None)),
+                Ok(Opt::Long("alpha", None)),
+                Err("invalid option -- 'q'".into()),
+            ]
+        );
+        // Without it the walk ends at the first error, as it always has.
+        assert_eq!(
+            every(GETOPT.parse(&args, "ab", &longs)),
+            vec![Err("invalid option -- 'x'".into())]
+        );
+    }
+
+    #[test]
+    fn long_only_reads_a_single_dash_word_as_glibc_does() {
+        let longs = [("alpha", Takes::Nothing), ("beta", Takes::Required)];
+        let args = argv(&["-a", "-al", "-ab", "-beta=1", "-x", "-alpha=2", "--al"]);
+        assert_eq!(
+            every(
+                GETOPT
+                    .parse(&args, "ab", &longs)
+                    .long_only(true)
+                    .keep_going(true)
+            ),
+            vec![
+                // A short option on its own is that short option.
+                Ok(Opt::Short(b'a', None)),
+                // Anything longer is an abbreviation first...
+                Ok(Opt::Long("alpha", None)),
+                // ...and, naming no long option, a bundle of short ones.
+                Ok(Opt::Short(b'a', None)),
+                Ok(Opt::Short(b'b', None)),
+                Ok(Opt::Long("beta", Some("1".into()))),
+                // Neither: named as typed, with its one dash.
+                Err("unrecognized option '-x'".into()),
+                Err("option '-alpha' doesn't allow an argument".into()),
+                Ok(Opt::Long("alpha", None)),
+            ]
+        );
+        // `-:` is decided as glibc's `strchr` decides it: `:` is in the
+        // string, so the word is not tried as a long option.
+        let args = argv(&["-:"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "a:", &longs).long_only(true)),
+            vec![Err("invalid option -- ':'".into())]
+        );
+    }
+
+    #[test]
+    fn long_only_counts_every_second_match_as_ambiguous() {
+        let longs = [
+            ("verbose", Takes::Nothing),
+            ("verbose", Takes::Nothing),
+            ("version", Takes::Nothing),
+        ];
+        let args = argv(&["--verb"]);
+        // To getopt_long two entries of one name are one option...
+        assert_eq!(
+            every(GETOPT.parse(&args, "", &longs)),
+            vec![Ok(Opt::Long("verbose", None))]
+        );
+        // ...and to getopt_long_only an ambiguity.
+        assert_eq!(
+            every(GETOPT.parse(&args, "", &longs).long_only(true)),
+            vec![Err(
+                "option '--verb' is ambiguous; possibilities: '--verbose' '--verbose'".into()
+            )]
+        );
+        // An exact name is never ambiguous.
+        let args = argv(&["-verbose"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "", &longs).long_only(true)),
+            vec![Ok(Opt::Long("verbose", None))]
+        );
+    }
+
+    #[test]
+    fn distinct_entries_make_a_repeated_name_ambiguous_as_an_abbreviation() {
+        let longs = [("foo", Takes::Nothing), ("foo", Takes::Required)];
+        let args = argv(&["--fo", "--foo", "x"]);
+        assert_eq!(
+            every(
+                GETOPT
+                    .parse(&args, "", &longs)
+                    .distinct_entries(true)
+                    .keep_going(true)
+            ),
+            vec![
+                Err("option '--fo' is ambiguous; possibilities: '--foo' '--foo'".into()),
+                // An exact name takes the first entry.
+                Ok(Opt::Long("foo", None)),
+                Ok(Opt::Operand(&args[2])),
+            ]
+        );
+    }
+
+    #[test]
+    fn w_semicolon_makes_dash_w_a_long_option() {
+        let longs = [("alpha", Takes::Required), ("alps", Takes::Nothing)];
+        let args = argv(&[
+            "-W", "alpha=1", "-Walpha", "x", "-W", "nope", "-W", "al", "-Walps=2", "-W",
+        ]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "aW;", &longs).keep_going(true)),
+            vec![
+                Ok(Opt::Long("alpha", Some("1".into()))),
+                Ok(Opt::Long("alpha", Some("x".into()))),
+                Err("unrecognized option '-W nope'".into()),
+                Err("option '-W al' is ambiguous; possibilities: '-W alpha' '-W alps'".into()),
+                Err("option '-W alps' doesn't allow an argument".into()),
+                Err("option requires an argument -- 'W'".into()),
+            ]
+        );
+        // Without the `;`, `W` is an ordinary letter.
+        let args = argv(&["-W"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "W", &longs)),
+            vec![Ok(Opt::Short(b'W', None))]
+        );
+    }
+
+    #[test]
+    fn a_semicolon_is_never_an_option() {
+        let args = argv(&["-;"]);
+        assert_eq!(
+            every(GETOPT.parse(&args, "W;", &[])),
+            vec![Err("invalid option -- ';'".into())]
+        );
     }
 }

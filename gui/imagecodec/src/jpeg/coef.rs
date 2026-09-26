@@ -134,7 +134,9 @@ pub(super) struct Store {
     /// `u8::MAX`.
     slot: [u8; 64],
     kept: usize,
-    /// Which coefficients of each block are nonzero.
+    /// Which coefficients of each block are nonzero -- kept only when some
+    /// coefficient's value is not (a reduced size), the one case anything
+    /// reads them: at full size every value is there to ask.
     masks: Vec<u64>,
     values: Vec<i16>,
 }
@@ -157,7 +159,8 @@ impl Store {
     /// reconstructed at `size`.
     pub(super) fn bytes(blocks: usize, size: usize) -> u64 {
         let (_, kept) = Self::slots(size);
-        (blocks as u64).saturating_mul(8u64.saturating_add(2u64.saturating_mul(kept as u64)))
+        let mask = if kept < 64 { 8u64 } else { 0 };
+        (blocks as u64).saturating_mul(mask.saturating_add(2u64.saturating_mul(kept as u64)))
     }
 
     pub(super) fn new(blocks_w: usize, blocks_h: usize, size: usize) -> Self {
@@ -168,7 +171,11 @@ impl Store {
             blocks_h,
             slot,
             kept,
-            masks: vec![0; blocks],
+            masks: if kept < 64 {
+                vec![0; blocks]
+            } else {
+                Vec::new()
+            },
             values: vec![0; blocks.saturating_mul(kept)],
         }
     }
@@ -209,6 +216,21 @@ impl Store {
             };
         }
         block
+    }
+
+    /// Block `(bx, by)` as the array it is, when every coefficient is kept
+    /// (a full-size decode): what a decoder works on in place with no
+    /// bookkeeping between it and the values. `None` at a reduced size, and
+    /// for a block outside the store.
+    pub(super) fn full_block_mut(&mut self, bx: usize, by: usize) -> Option<&mut [i16; 64]> {
+        if self.kept != 64 {
+            return None;
+        }
+        let base = self.index(bx, by)?.checked_mul(64)?;
+        self.values
+            .get_mut(base..base.checked_add(64)?)?
+            .try_into()
+            .ok()
     }
 
     /// Block `(bx, by)` in place: see [`StoredBlock`].

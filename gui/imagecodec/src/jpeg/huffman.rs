@@ -932,6 +932,7 @@ impl Progressive {
             return Ok(());
         }
         let scan = &header.scan;
+        let mut w = self.bits.window();
         for (&position, block) in self
             .positions
             .iter()
@@ -947,18 +948,22 @@ impl Progressive {
             else {
                 continue;
             };
-            let mut s = self.bits.decode(input, table);
+            let mut s = w.decode(&mut self.bits, input, table);
             if s != 0 {
-                let r = self.bits.get(input, s);
+                let r = w.get(&mut self.bits, input, s);
                 s = extend(r, s);
             }
             let Some(last) = self.last_dc.get_mut(position) else {
                 continue;
             };
-            s = last.checked_add(s).ok_or(jerr::BAD_DCT_COEF)?;
-            *last = s;
-            block[0] = left_shift(s, scan.al);
+            let Some(sum) = last.checked_add(s) else {
+                self.bits.keep(w);
+                return Err(jerr::BAD_DCT_COEF);
+            };
+            *last = sum;
+            block[0] = left_shift(sum, scan.al);
         }
+        self.bits.keep(w);
         Ok(())
     }
 
@@ -987,26 +992,28 @@ impl Progressive {
         };
         let mut k = usize::from(scan.ss);
         let se = usize::from(scan.se);
+        let mut w = self.bits.window();
         while k <= se {
-            let symbol = self.bits.decode(input, table);
+            let symbol = w.decode(&mut self.bits, input, table);
             let run = symbol >> 4;
             let size = symbol & 15;
             if size != 0 {
                 k = k.saturating_add(run as usize);
-                let r = self.bits.get(input, size);
+                let r = w.get(&mut self.bits, input, size);
                 block.set(natural(k), left_shift(extend(r, size), scan.al));
             } else if run == 15 {
                 k = k.saturating_add(15);
             } else {
                 let mut eobrun = 1u32 << run;
                 if run != 0 {
-                    eobrun = eobrun.wrapping_add(self.bits.get(input, run) as u32);
+                    eobrun = eobrun.wrapping_add(w.get(&mut self.bits, input, run) as u32);
                 }
                 self.eobrun = eobrun.wrapping_sub(1);
                 break;
             }
             k = k.saturating_add(1);
         }
+        self.bits.keep(w);
     }
 
     /// `decode_mcu_DC_refine`: one more bit of each DC. It reads on past the
@@ -1014,11 +1021,13 @@ impl Progressive {
     /// nothing.
     fn dc_refine(&mut self, input: &mut Input<'_>, header: &Header, blocks: &mut [[i16; 64]]) {
         let p1 = 1i32 << header.scan.al;
+        let mut w = self.bits.window();
         for block in blocks.iter_mut().take(self.blocks_in_mcu) {
-            if self.bits.get(input, 1) != 0 {
+            if w.get(&mut self.bits, input, 1) != 0 {
                 block[0] = (i32::from(block[0]) | p1) as i16;
             }
         }
+        self.bits.keep(w);
     }
 
     /// `decode_mcu_AC_refine`.
@@ -1047,9 +1056,10 @@ impl Progressive {
         let se = usize::from(scan.se);
         let mut k = usize::from(scan.ss);
         let mut eobrun = self.eobrun;
+        let mut w = self.bits.window();
         if eobrun == 0 {
             while k <= se {
-                let symbol = self.bits.decode(input, table);
+                let symbol = w.decode(&mut self.bits, input, table);
                 let mut run = symbol >> 4;
                 let size = symbol & 15;
                 let mut value = 0i32;
@@ -1058,11 +1068,15 @@ impl Progressive {
                         // JWRN_HUFF_BAD_CODE.
                         input.warn();
                     }
-                    value = if self.bits.get(input, 1) != 0 { p1 } else { m1 };
+                    value = if w.get(&mut self.bits, input, 1) != 0 {
+                        p1
+                    } else {
+                        m1
+                    };
                 } else if run != 15 {
                     eobrun = 1u32 << run;
                     if run != 0 {
-                        eobrun = eobrun.wrapping_add(self.bits.get(input, run) as u32);
+                        eobrun = eobrun.wrapping_add(w.get(&mut self.bits, input, run) as u32);
                     }
                     break;
                 }
@@ -1072,7 +1086,7 @@ impl Progressive {
                     let at = natural(k);
                     let coefficient = block.at(at);
                     if coefficient != 0 {
-                        if self.bits.get(input, 1) != 0 {
+                        if w.get(&mut self.bits, input, 1) != 0 {
                             refine(block, at, p1, m1);
                         }
                     } else {
@@ -1095,13 +1109,14 @@ impl Progressive {
         if eobrun > 0 {
             while k <= se {
                 let at = natural(k);
-                if block.at(at) != 0 && self.bits.get(input, 1) != 0 {
+                if block.at(at) != 0 && w.get(&mut self.bits, input, 1) != 0 {
                     refine(block, at, p1, m1);
                 }
                 k = k.saturating_add(1);
             }
             eobrun = eobrun.wrapping_sub(1);
         }
+        self.bits.keep(w);
         self.eobrun = eobrun;
     }
 }

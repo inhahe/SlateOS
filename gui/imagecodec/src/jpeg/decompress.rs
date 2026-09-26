@@ -1009,8 +1009,12 @@ impl<'d, 't> Decompress<'d, 't> {
                     self.last_good_imcu_row = self.input_imcu_row;
                 }
                 if let Some(store) = self.stores.get_mut(ci) {
-                    let mut block = store.block(bx, by);
-                    entropy.decode_ac(&mut self.input, &self.header, &mut block);
+                    if let Some(values) = store.full_block_mut(bx, by) {
+                        entropy.decode_ac(&mut self.input, &self.header, values);
+                    } else {
+                        let mut block = store.block(bx, by);
+                        entropy.decode_ac(&mut self.input, &self.header, &mut block);
+                    }
                 } else {
                     let mut scratch = [0i16; 64];
                     entropy.decode_ac(&mut self.input, &self.header, &mut scratch);

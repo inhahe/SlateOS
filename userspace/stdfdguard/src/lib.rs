@@ -163,17 +163,15 @@ pub fn was_closed_at_startup(fd: i32) -> bool {
 mod tests {
     use super::*;
 
+    /// One test on purpose: it is the only one that reads the process-wide
+    /// mask, so no other test can be reading it at the same moment.
     #[test]
-    fn only_the_three_standard_descriptors_are_ever_reported() {
+    fn without_the_macro_nothing_is_recorded_and_nothing_closed() {
         // No macro in a test binary, so nothing was recorded; and a number
         // outside 0..3 is never one of them regardless.
         for fd in [-1, 0, 1, 2, 3, 1024] {
             assert!(!was_closed_at_startup(fd), "{fd}");
         }
-    }
-
-    #[test]
-    fn restore_without_the_macro_closes_nothing() {
         restore();
         // Standard output is still there to be written to.
         use std::io::Write;

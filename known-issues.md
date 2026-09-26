@@ -166431,3 +166431,56 @@ how much of each libjpeg has taken (which needs libjpeg-turbo's fast path,
 since it takes bytes differently), its `in_buffer_file_pos_log`, and its
 file position through every read. No writer's file reaches any of them, and
 20,000 fuzzed files found none.
+
+## TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES (lane B, 2026-09-26) — **open**, waiting on lanes A, D
+
+**Status:** OPEN — waiting on
+`requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`
+(path-bound `AF_UNIX` sockets). Found 2026-09-26 while fixing `logger`'s
+timestamps.
+
+**In short:** there is no system log on SlateOS in the sense a Unix program
+means. A program that logs the POSIX way sends a datagram to `/dev/log` and
+expects a daemon there to file it; here nothing listens on `/dev/log`, and
+nothing *can*, because a Unix-domain socket cannot be bound to a path
+(`socket(AF_UNIX, ...)` is `EAFNOSUPPORT`). So each writer does something
+different, and `journalctl` — which reads `/var/log/syslog.jsonl`, falling
+back to `/var/log/syslog` only when that yields nothing — sees almost none of
+it:
+
+| writer | where its messages go |
+|---|---|
+| libc `syslog()` (lane D) | stderr (`posix/src/syslog.rs`, `let fd = 2`) |
+| `logger` | RFC 3164 text lines appended to `/var/log/syslog`, else stdout |
+| `ntpdate -s` | nowhere: it `open`s `/dev/log` as a file, which fails, and discards the error (`userspace/ntpd/src/main.rs`, the `output` closure in `run_ntpdate`) |
+| `systemd-cat` (`systemctl`) | a `journalrec` record in `/var/log/syslog.jsonl` |
+| `syslogd log` | the same file |
+| `syslogd daemon` | receives nothing (`cmd_daemon`: "the daemon sits idle") |
+
+So `logger`'s lines are invisible to `journalctl` as soon as anything has
+written the JSON-lines file, and `ntpdate -s`'s are simply lost.
+
+**The proper fix:**
+1. Lanes A and D: path-bound `AF_UNIX` sockets (the request above).
+2. `syslogd daemon` binds `/dev/log` (`SOCK_DGRAM`), parses each frame — the
+   local form `<PRI>Mmm dd hh:mm:ss TAG[PID]: MSG`, RFC 3164 with a hostname,
+   and RFC 5424 — and writes it as a `journalrec` record.
+3. `logger` becomes a faithful port of util-linux 2.39.3's `logger.c`, sending
+   to `/dev/log` exactly as upstream does, verified by a `logger-diff.sh`
+   harness against WSL's util-linux. This need not wait for step 1: where the
+   platform has no Unix-domain sockets at all (`EAFNOSUPPORT` — not "no daemon
+   listening", which upstream handles its own way), it appends a `journalrec`
+   record instead, which is what a daemon would have written. On a host with
+   sockets that branch never runs, so the harness compares pure upstream
+   behaviour; on SlateOS it reaches `journalctl` today, and switches to
+   `/dev/log` by itself once step 1 lands.
+4. `ntpdate -s` sends through the same path instead of opening a socket path
+   as a file.
+5. Lane D's libc `syslog()` can then send to `/dev/log` as glibc does (lane
+   D's call).
+
+Step 3's port also needs a real `getopt_long` (permutation, abbreviated long
+options, optional arguments). Only coreutils has one, as a module of its own
+crate; it is to be extracted into a shared crate first, which every
+standalone util-linux port here can then use — today they match long options
+whole, so `--pri` is refused where util-linux accepts it.

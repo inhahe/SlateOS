@@ -165964,7 +165964,7 @@ given in the request with a regression case for `test-pre-push-gates.py`.
 Until then, run a script's `test-<stem>.py` by hand before pushing it.
 
 ### [E] The mind map's undo acts on whichever map is showing, and can delete a node of another map -- 2026-09-26
-**Status:** OPEN -- lane E's next, with the mind map's own file.
+**Status:** FIXED (lane E, 2026-09-26) -- with the mind map's own file (design-decisions §1208).
 
 **In short:** the mind map app holds several maps, as tabs, and keeps one undo
 history for the window. Undo replays the last change onto whichever map is
@@ -165990,6 +165990,22 @@ and closing one (asking first when it has unsaved changes). With it, the mind ma
 whiteboard got -- a file of its own that keeps every colour, shape and fold (its
 outline save keeps only the words and the tree, as its notice says), the
 unsaved mark, and the question before a close or an Open.
+
+**Fixed** the same day. Each map keeps its own history
+(`MindMap::{undo_stack, redo_stack}`), so an undo acts on the map it was made
+on, and a map closed takes its history with it. The tabs answer a click,
+Ctrl+Tab and Ctrl+Shift+Tab; "+" and Ctrl+N add a map; a tab's close mark and
+Ctrl+W close one, asking first when it has changes not saved. Each map saves
+whole to a file of its own and the window asks before losing one (§1208).
+
+Found on the way, and fixed with it: the toolbar's eight buttons were drawn and
+answered no click, and three overlapped the next by five pixels; what the last
+open or save did was kept "for the status line" and never drawn, so every open
+and save said nothing; the status line ran under the selected node's line; and
+a press on the sidebar or the status line was taken as one on empty canvas,
+dropping the selection and starting a pan. The notice strip is gone with what
+it warned of: the map is kept whole now, and the outline export says what it
+leaves out.
 
 ### [E] Warnings drawn where the next thing drawn covers them -- 2026-09-25
 **Status:** FIXED (lane E, 2026-09-25) -- all fifteen apps.
@@ -166024,9 +166040,9 @@ a line's row, two more drawn under other text (`clipmanager`'s under its search
 bar, `startupmanager`'s under its header; `reminders`' lines sat under its
 header's title too, though the default theme draws that header unfilled). Each
 got a place nothing else is drawn: a strip of its own under the top bar that
-the content starts below (`calendar`, `credmanager`, `mindmap`, `musicplayer`,
-`remotedesktop`, `reminders` -- while the notice is shown, where it is keyed
-on an empty list), a strip along the bottom (`podcast`, which has no top bar),
+the content starts below (`calendar`, `credmanager`, `mindmap` -- gone since,
+with what it warned of (§1208) -- `musicplayer`, `remotedesktop`, `reminders`
+-- while the notice is shown, where it is keyed on an empty list), a strip along the bottom (`podcast`, which has no top bar),
 or the empty panel the lines explain (`filediff`, `clipmanager`,
 `startupmanager`, `videoplayer`), wrapped there rather than cut where the panel
 is narrow. `videoplayer`'s empty picture also said "Ctrl+O to open", and Ctrl+O

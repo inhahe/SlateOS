@@ -16,5 +16,12 @@ oswindow = { path = "../../gui/window" }
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
 
+# A map's own file is YAML, as the diagram's and the whiteboard's are: every
+# colour, shape, position and fold, which the outline export does not keep.
+yamldoc = { path = "../../yamldoc" }
+
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
+
 [lints]
 workspace = true

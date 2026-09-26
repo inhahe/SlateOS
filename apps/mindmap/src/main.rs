@@ -10,8 +10,11 @@
 //! - Canvas pan and zoom (10% to 400%)
 //! - Multiple maps with tab switching
 //! - Collapse/expand subtrees
-//! - Full undo/redo stack
-//! - Text export (indented outline)
+//! - Undo/redo, each map its own history
+//! - Each map saved whole to a file of its own (YAML, `.mindmap`), and a
+//!   question before a map with changes not saved is closed or lost with the
+//!   window
+//! - Text export and import (indented outline)
 //! - Search with highlighting
 //! - Keyboard shortcuts for all major actions
 //! - Catppuccin Mocha theme
@@ -45,8 +48,10 @@ use guitk::text;
 
 use oswindow::app::{self, App, Response};
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use unsaved::{Choice, Question};
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -76,17 +81,9 @@ const NODE_COLORS: [Color; 8] = [
 
 /// Height of the top toolbar.
 const TOOLBAR_HEIGHT: f32 = 40.0;
-/// The strip under the tabs that says what a save keeps, and one line of it.
-///
-/// Its own strip, which the canvas and the sidebar start below. The two lines
-/// were drawn at the top of the window, before the toolbar, which filled the
-/// same pixels: in every frame, on no screen.
-const NOTICE_H: f32 = 34.0;
-const NOTICE_LINE_H: f32 = 15.0;
-
 /// Every key this program answers, and what it does.
 ///
-/// Nineteen bindings and, until this list existed, no way to learn one but
+/// Two dozen bindings and, until this list existed, no way to learn one but
 /// reading the source. `B` is the worst of them: it is the only way to bring
 /// the sidebar back, so a user who pressed it once had hidden a panel with no
 /// way to find out how to return it -- a toolbar cannot advertise the key that
@@ -113,9 +110,95 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+0", "Reset the view"),
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
     ("Ctrl+F", "Find a node"),
-    ("Ctrl+O / Ctrl+S", "Open / save an outline"),
+    ("Ctrl+N", "A new map"),
+    ("Ctrl+O", "Open a map or an outline"),
+    ("Ctrl+S / Ctrl+Shift+S", "Save / save as"),
+    ("Ctrl+E", "Write this map as an outline"),
+    ("Ctrl+W", "Close this map"),
+    ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous map"),
     ("F1 / ?", "This list"),
 ];
+
+/// What a toolbar button does -- the same as its key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolbarAction {
+    Open,
+    Save,
+    AddChild,
+    AddSibling,
+    Delete,
+    Undo,
+    Redo,
+    Layout,
+    ZoomIn,
+    ZoomOut,
+}
+
+/// The toolbar's buttons, left to right.
+///
+/// They were drawn from a list of labels and fixed positions, and nothing
+/// answered a click on any of them; three overlapped the next by five pixels.
+/// One list now, which the drawing and the hit test both read, and each
+/// button as wide as its label.
+const TOOLBAR_BUTTONS: [(&str, ToolbarAction); 10] = [
+    ("Open", ToolbarAction::Open),
+    ("Save", ToolbarAction::Save),
+    ("Add Child", ToolbarAction::AddChild),
+    ("Add Sibling", ToolbarAction::AddSibling),
+    ("Delete", ToolbarAction::Delete),
+    ("Undo", ToolbarAction::Undo),
+    ("Redo", ToolbarAction::Redo),
+    ("Layout", ToolbarAction::Layout),
+    ("Zoom+", ToolbarAction::ZoomIn),
+    ("Zoom-", ToolbarAction::ZoomOut),
+];
+/// Where the first toolbar button starts: after the window's name.
+const TOOLBAR_FIRST_X: f32 = 110.0;
+/// The size a button's label is drawn at, which its width is measured at.
+const TOOLBAR_LABEL_SIZE: f32 = 11.0;
+/// Space between buttons.
+const TOOLBAR_GAP: f32 = 6.0;
+
+/// Every toolbar button's rectangle -- x, y, width, height -- in order.
+fn toolbar_button_rects() -> Vec<(f32, f32, f32, f32)> {
+    let mut x = TOOLBAR_FIRST_X;
+    TOOLBAR_BUTTONS
+        .iter()
+        .map(|(label, _)| {
+            let w = (text::measure(label, TOOLBAR_LABEL_SIZE, FontWeightHint::Regular) + 16.0)
+                .max(44.0);
+            let rect = (x, 6.0, w, 28.0);
+            x += w + TOOLBAR_GAP;
+            rect
+        })
+        .collect()
+}
+
+/// The toolbar button at a point, if there is one.
+fn toolbar_action_at(x: f32, y: f32) -> Option<ToolbarAction> {
+    toolbar_button_rects()
+        .into_iter()
+        .zip(TOOLBAR_BUTTONS)
+        .find(|(rect, _)| inside(*rect, x, y))
+        .map(|(_, (_, action))| action)
+}
+
+/// Whether `(x, y)` is inside `rect` (x, y, width, height).
+fn inside((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+    x >= rx && x < rx + rw && y >= ry && y < ry + rh
+}
+
+/// Where the first tab starts, and the space between tabs.
+const TAB_FIRST_X: f32 = 10.0;
+const TAB_GAP: f32 = 4.0;
+/// The widest a tab is drawn, and the narrowest: tabs narrow as maps are
+/// added, so that more of them fit before any runs off the window.
+const TAB_MAX_W: f32 = 140.0;
+const TAB_MIN_W: f32 = 64.0;
+/// The square a tab's close mark is drawn in, at its right end.
+const TAB_CLOSE_W: f32 = 18.0;
+/// The "+" button after the last tab.
+const PLUS_W: f32 = 24.0;
 /// Height of the bottom status bar.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Width the status bar's "Selected: … (ID: n)" line is drawn into.
@@ -407,6 +490,19 @@ pub struct MindMap {
     pub root_id: NodeId,
     /// ID generator for this map.
     pub id_gen: IdGenerator,
+    /// Which map this is, for as long as the window is open. A tab's index
+    /// moves when a tab before it closes, and a question or a save waiting on
+    /// the picker must still find the map it was about.
+    pub id: u64,
+    /// This map's history. It was the window's, replayed onto whichever map
+    /// was showing -- and node numbers repeat from map to map, so undoing a
+    /// change made on one map could delete a node of another.
+    pub undo_stack: VecDeque<Action>,
+    pub redo_stack: Vec<Action>,
+    /// The map's own file, once it has one.
+    pub document_path: Option<std::path::PathBuf>,
+    /// Whether the map has changed since it was last saved or opened.
+    pub dirty: bool,
 }
 
 impl MindMap {
@@ -421,6 +517,11 @@ impl MindMap {
             nodes,
             root_id,
             id_gen: id_gen.clone(),
+            id: 0,
+            undo_stack: VecDeque::new(),
+            redo_stack: Vec::new(),
+            document_path: None,
+            dirty: false,
         }
     }
 
@@ -844,12 +945,248 @@ fn outline_body(line: &str) -> &str {
     t.strip_prefix("- ").unwrap_or(t).trim_end()
 }
 
-/// The most of an outline one open will read.
+/// The first key of a mind map file, and the format it names.
+const MINDMAP_FORMAT: i64 = 1;
+
+/// The most of a file one open will read.
 ///
-/// Reported when it bites. A cut outline parses -- every whole line in it is a
-/// node -- so the tail is simply missing, and **a map short of a branch looks
-/// like a map that never had one.**
-pub const MAX_OUTLINE_BYTES: usize = 8 * 1024 * 1024;
+/// A mind map file larger than this is refused rather than read in part: a
+/// map cut short reads as a smaller map with no sign anything was missing,
+/// and saving it would write the loss over the whole file. An outline larger
+/// than this is opened as far as its last whole line and said to be
+/// incomplete. It becomes a new map, saved nowhere near the file it came
+/// from, so part of one is worth having -- but said, because **a map short of
+/// a branch looks like a map that never had one.**
+const MAX_OPEN_BYTES: usize = 32 * 1024 * 1024;
+
+/// A colour as written: `#RRGGBB`, or `#RRGGBBAA` when it is not opaque.
+fn colour_hex(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour(text: &str) -> Option<Color> {
+    let hex = text.trim().strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+/// The keys under `path` that are positions, in order.
+fn positions(doc: &yamldoc::Document, path: &[&str]) -> Vec<String> {
+    let mut keys: Vec<(u64, String)> = doc
+        .keys(path)
+        .into_iter()
+        .filter_map(|k| k.parse::<u64>().ok().map(|n| (n, k)))
+        .collect();
+    keys.sort_unstable();
+    keys.into_iter().map(|(_, k)| k).collect()
+}
+
+/// A number read back as the `f32` it was written from.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "every number here was written from an f32, so it comes back within range"
+)]
+fn read_f32(doc: &yamldoc::Document, path: &[&str]) -> Option<f32> {
+    doc.get_f64(path)
+        .filter(|v| v.is_finite())
+        .map(|v| v as f32)
+}
+
+/// Whether two paths name one file: the same path, or two that resolve to the
+/// same place. A path that cannot be resolved -- a file since deleted -- is
+/// compared as written.
+fn same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The map as a document: its name, then every node -- the root first, and
+/// each node's children after it in their order -- with every property a
+/// user can set: text, colour, shape, where it is, how big, and whether it is
+/// folded.
+///
+/// Not the outline, which keeps the words and the tree and nothing else. YAML,
+/// as the diagram and the whiteboard keep theirs, versioned under
+/// `slateos-mindmap` so a later format is refused rather than half-read.
+pub fn mindmap_document(map: &MindMap) -> yamldoc::Document {
+    let mut doc = yamldoc::Document::new();
+    doc.set_i64(&["slateos-mindmap"], MINDMAP_FORMAT);
+    doc.set_str(&["name"], &map.name);
+    // Depth first from the root, so a parent is always written before its
+    // children and the children in their order.
+    let mut order = Vec::with_capacity(map.nodes.len());
+    let mut stack = vec![map.root_id];
+    while let Some(id) = stack.pop() {
+        let Some(node) = map.nodes.get(&id) else {
+            continue;
+        };
+        order.push(node);
+        stack.extend(node.children.iter().rev().copied());
+    }
+    for (i, node) in order.iter().enumerate() {
+        let k = i.saturating_add(1).to_string();
+        let at = |f: &'static str| ["nodes", k.as_str(), f];
+        doc.set_i64(&at("id"), i64::from(node.id));
+        if let Some(parent) = node.parent {
+            doc.set_i64(&at("parent"), i64::from(parent));
+        }
+        doc.set_str(&at("text"), &node.text);
+        doc.set_str(&at("colour"), &colour_hex(node.color));
+        doc.set_i64(&at("colour-index"), i64::from(node.color_index));
+        doc.set_str(&at("shape"), node.shape.label());
+        doc.set_f64(&at("x"), f64::from(node.x));
+        doc.set_f64(&at("y"), f64::from(node.y));
+        doc.set_f64(&at("width"), f64::from(node.width));
+        doc.set_f64(&at("height"), f64::from(node.height));
+        doc.set_bool(&at("collapsed"), node.collapsed);
+    }
+    doc
+}
+
+/// A map read back from a document, or why it cannot be.
+///
+/// Read whole or not at all, for the finance ledger's reason
+/// (design-decisions §1202): a map read in part and saved again would lose
+/// what was not read. A later format, two nodes with one number, a node whose
+/// parent is not written before it, a second root, or a node missing a
+/// property this version writes is refused, and the refusal names the node.
+fn mindmap_from_document(doc: &yamldoc::Document) -> Result<MindMap, String> {
+    match doc.get_i64(&["slateos-mindmap"]) {
+        Some(MINDMAP_FORMAT) => {}
+        Some(v) if v > MINDMAP_FORMAT => {
+            return Err(format!(
+                "it is a later format ({v}) than this version reads ({MINDMAP_FORMAT})"
+            ));
+        }
+        Some(v) => return Err(format!("its format ({v}) is not one this version reads")),
+        None => return Err(String::from("it does not say which format it is")),
+    }
+    let name = doc.get_str(&["name"]).unwrap_or_default();
+    let mut nodes: HashMap<NodeId, MindMapNode> = HashMap::new();
+    let mut root: Option<NodeId> = None;
+    for k in positions(doc, &["nodes"]) {
+        let at = |f: &'static str| ["nodes", k.as_str(), f];
+        let bad = |why: &str| format!("node {k}: {why}");
+        // `NodeId::MAX` refused too: the next node added would be given the
+        // same number, and take this one's place.
+        let id = doc
+            .get_i64(&at("id"))
+            .and_then(|n| NodeId::try_from(n).ok())
+            .filter(|&n| n < NodeId::MAX)
+            .ok_or_else(|| bad("its number is missing or not one"))?;
+        if nodes.contains_key(&id) {
+            return Err(bad(&format!("another node has its number ({id})")));
+        }
+        let parent = match doc.get_i64(&at("parent")) {
+            None if doc.contains(&at("parent")) => {
+                return Err(bad("its parent's number is not one"));
+            }
+            // The first node is the root, and only the first: one written
+            // later with no parent would be a second tree.
+            None => {
+                if root.is_some() {
+                    return Err(bad("it is a second node with no parent"));
+                }
+                root = Some(id);
+                None
+            }
+            Some(p) => {
+                let p = NodeId::try_from(p).map_err(|_| bad("its parent's number is not one"))?;
+                if !nodes.contains_key(&p) {
+                    return Err(bad("its parent is not written before it"));
+                }
+                Some(p)
+            }
+        };
+        let text = doc
+            .get_str(&at("text"))
+            .ok_or_else(|| bad("it has no text"))?;
+        let shape_label = doc
+            .get_str(&at("shape"))
+            .ok_or_else(|| bad("it has no shape"))?;
+        let shape = NodeShape::all()
+            .iter()
+            .copied()
+            .find(|s| s.label() == shape_label)
+            .ok_or_else(|| {
+                bad(&format!(
+                    "its shape ({shape_label}) is not one this version draws"
+                ))
+            })?;
+        let color = doc
+            .get_str(&at("colour"))
+            .as_deref()
+            .and_then(parse_colour)
+            .ok_or_else(|| bad("its colour is missing or not one"))?;
+        let color_index = doc
+            .get_i64(&at("colour-index"))
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|&n| usize::from(n) < NODE_COLORS.len())
+            .ok_or_else(|| bad("its colour number is missing or not one"))?;
+        let number = |f: &'static str| {
+            read_f32(doc, &at(f)).ok_or_else(|| bad(&format!("its {f} is missing or not a number")))
+        };
+        let size = |f: &'static str| {
+            number(f).and_then(|v| {
+                if v > 0.0 {
+                    Ok(v)
+                } else {
+                    Err(bad(&format!("its {f} is not above nothing")))
+                }
+            })
+        };
+        let collapsed = doc
+            .get_bool(&at("collapsed"))
+            .ok_or_else(|| bad("whether it is folded is missing"))?;
+        let mut node = MindMapNode::new(id, text, parent, color, color_index);
+        node.shape = shape;
+        node.x = number("x")?;
+        node.y = number("y")?;
+        node.width = size("width")?;
+        node.height = size("height")?;
+        node.collapsed = collapsed;
+        if let Some(p) = parent
+            && let Some(parent_node) = nodes.get_mut(&p)
+        {
+            parent_node.children.push(id);
+        }
+        nodes.insert(id, node);
+    }
+    let root_id = root.ok_or_else(|| String::from("it has no nodes"))?;
+    let highest = nodes.keys().copied().max().unwrap_or(0);
+    Ok(MindMap {
+        name,
+        nodes,
+        root_id,
+        // Past every number the file used, so a node added later cannot take
+        // the number of one already there.
+        id_gen: IdGenerator {
+            next: highest.saturating_add(1),
+        },
+        id: 0,
+        undo_stack: VecDeque::new(),
+        redo_stack: Vec::new(),
+        document_path: None,
+        dirty: false,
+    })
+}
 
 // ============================================================================
 // Radial auto-layout
@@ -1050,10 +1387,16 @@ pub struct MindMapApp {
     /// Current drag state.
     pub drag: DragState,
 
-    /// Undo stack.
-    pub undo_stack: VecDeque<Action>,
-    /// Redo stack.
-    pub redo_stack: Vec<Action>,
+    /// What the picker is up for, while it is up.
+    picker_for: PickerFor,
+    /// The unsaved-changes question, while it is being asked, and what it is
+    /// about.
+    question: Option<Question<CloseScope>>,
+    /// Set when the window may go: the question was answered and nothing
+    /// unsaved is left.
+    quit: bool,
+    /// The id the next map is given (see [`MindMap::id`]).
+    next_map_id: u64,
 
     /// Search query.
     pub search_query: String,
@@ -1087,16 +1430,30 @@ impl Default for MindMapApp {
     }
 }
 
-/// What the window says about what it cannot do.
-///
-/// Nothing in this crate is invented, which is why the fixture scanner
-/// never looked at it. This is the other half of the same discipline,
-/// found by `scripts/find-silent-incapacity.py`: a program that reaches
-/// nothing outside its own process and never says so.
-const NOTHING_KEPT_LINES: [&str; 2] = [
-    "Nothing is saved automatically -- press Ctrl+S to write an outline, Ctrl+O to read one back.",
-    "An outline keeps the words and the branches. Colours, shapes and which branches you folded are not in it.",
-];
+/// What the picker is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerFor {
+    /// A file to open in a tab of its own.
+    Open,
+    /// Where to save map `id`, which then belongs to that file.
+    Save(u64),
+    /// Where to write the map showing as an outline: not a save, since an
+    /// outline keeps the words and the branches and nothing else.
+    Export,
+    /// Where to save map `id` before its tab closes.
+    SaveThenClose(u64),
+    /// Where to save map `id` before the window goes on closing.
+    SaveThenQuit(u64),
+}
+
+/// What the unsaved-changes question would close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseScope {
+    /// One map's tab, by [`MindMap::id`].
+    Map(u64),
+    /// The whole window.
+    Window,
+}
 
 impl MindMapApp {
     /// Create a new mind map application with default state.
@@ -1117,8 +1474,10 @@ impl MindMapApp {
             zoom: 1.0,
             selected_node: None,
             drag: DragState::None,
-            undo_stack: VecDeque::new(),
-            redo_stack: Vec::new(),
+            picker_for: PickerFor::Open,
+            question: None,
+            quit: false,
+            next_map_id: 2,
             search_query: String::new(),
             search_results: Vec::new(),
             search_index: 0,
@@ -1133,6 +1492,7 @@ impl MindMapApp {
         let cy = app.win_height / 2.0;
         if let Some(first) = app.maps.first_mut() {
             auto_layout(first, cx, cy);
+            first.id = 1;
         }
         app
     }
@@ -1177,8 +1537,8 @@ impl MindMapApp {
     /// # Panics
     ///
     /// Never in practice: `active_map` is only ever set to an index that
-    /// exists, `maps` is never emptied (`delete_active_map` refuses to remove
-    /// the last one), and both are private to this type. The alternative — an
+    /// exists, `maps` is never left empty (`close_map` puts a fresh map in
+    /// the place of the last one), and both are private to this type. The alternative — an
     /// `Option` return — would push that same guarantee onto every one of the
     /// hundred-odd call sites, each of which would have to invent a behaviour
     /// for a state that cannot arise.
@@ -1206,39 +1566,145 @@ impl MindMapApp {
     // Map management
     // ========================================================================
 
-    /// Add a new empty mind map.
+    /// Add a new empty mind map, and show it.
     pub fn add_map(&mut self) {
-        let name = format!("Mind Map {}", self.maps.len().saturating_add(1));
-        let map = MindMap::new(name, &mut self.id_gen);
+        let name = self.fresh_name();
+        let mut map = MindMap::new(name, &mut self.id_gen);
+        auto_layout(&mut map, self.win_width / 2.0, self.win_height / 2.0);
+        self.push_map(map);
+    }
+
+    /// "Mind Map N" for the lowest N no open map is called: a count of the
+    /// maps would name a second map after one closed before it.
+    fn fresh_name(&self) -> String {
+        // Of the first `maps.len() + 1` names at least one is free.
+        let tries = u64::try_from(self.maps.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        (1..=tries)
+            .map(|n| format!("Mind Map {n}"))
+            .find(|name| !self.maps.iter().any(|m| &m.name == name))
+            .unwrap_or_else(|| String::from("Mind Map"))
+    }
+
+    /// Give `map` an id, add it as a tab, and show it.
+    fn push_map(&mut self, mut map: MindMap) {
+        self.settle();
+        map.id = self.next_map_id;
+        self.next_map_id = self.next_map_id.saturating_add(1);
         self.maps.push(map);
         self.active_map = self.maps.len().saturating_sub(1);
-        self.selected_node = None;
-        let cx = self.win_width / 2.0;
-        let cy = self.win_height / 2.0;
-        auto_layout(self.active_map_mut(), cx, cy);
+        self.showing_another_map();
     }
 
-    /// Switch to a different map by index.
-    pub fn switch_map(&mut self, index: usize) {
-        if index < self.maps.len() {
-            self.active_map = index;
-            self.selected_node = None;
-            self.editing_node = None;
-        }
-    }
-
-    /// Delete the active map (unless it's the last one).
-    pub fn delete_active_map(&mut self) -> bool {
-        if self.maps.len() <= 1 {
-            return false;
-        }
-        self.maps.remove(self.active_map);
-        if self.active_map >= self.maps.len() {
-            self.active_map = self.maps.len().saturating_sub(1);
-        }
+    /// The map showing is now a different one. The selection, a name being
+    /// typed, a drag and the search results all name nodes by number, and the
+    /// numbers mean something else on another map -- so they are let go, and
+    /// an open search is run again on the map now showing.
+    fn showing_another_map(&mut self) {
         self.selected_node = None;
         self.editing_node = None;
+        self.drag = DragState::None;
+        if self.show_search {
+            let query = self.search_query.clone();
+            self.set_search_query(query);
+        }
+    }
+
+    /// The tab the map with this id is in.
+    fn index_of(&self, id: u64) -> Option<usize> {
+        self.maps.iter().position(|m| m.id == id)
+    }
+
+    /// The map with this id, to change.
+    fn map_mut(&mut self, id: u64) -> Option<&mut MindMap> {
+        self.maps.iter_mut().find(|m| m.id == id)
+    }
+
+    /// Show the next map (`forward`) or the one before, round from the last
+    /// to the first. Whether there was another map to show.
+    fn step_map(&mut self, forward: bool) -> bool {
+        let n = self.maps.len();
+        if n < 2 {
+            return false;
+        }
+        let next = if forward {
+            self.active_map
+                .saturating_add(1)
+                .checked_rem(n)
+                .unwrap_or(0)
+        } else {
+            self.active_map
+                .checked_sub(1)
+                .unwrap_or(n.saturating_sub(1))
+        };
+        self.switch_map(next);
         true
+    }
+
+    /// Close the map in tab `index`: at once when it has nothing unsaved,
+    /// else after asking, with that map showing so it is clear which map the
+    /// question is about.
+    fn request_close_map(&mut self, index: usize) {
+        if index == self.active_map {
+            self.settle();
+        }
+        let Some(map) = self.maps.get(index) else {
+            return;
+        };
+        let id = map.id;
+        if map.dirty {
+            let message = unsaved::message_for(&[&map.name]);
+            self.switch_map(index);
+            self.show_help = false;
+            self.question = Some(Question::new(
+                &message,
+                "Save it before the map closes?",
+                CloseScope::Map(id),
+            ));
+        } else {
+            self.close_map(id);
+        }
+    }
+
+    /// Close the map with this id, whatever it holds. The last map is not
+    /// taken away -- a window with no map has nothing to draw or add to -- but
+    /// replaced with a fresh one.
+    fn close_map(&mut self, id: u64) {
+        let Some(index) = self.index_of(id) else {
+            return;
+        };
+        let was_showing = index == self.active_map;
+        if was_showing {
+            // Whatever was half done on it goes with it.
+            self.editing_node = None;
+            self.drag = DragState::None;
+        }
+        self.maps.remove(index);
+        if self.maps.is_empty() {
+            self.active_map = 0;
+            self.add_map();
+            return;
+        }
+        // The map showing stays showing; closing it shows its neighbour.
+        if index < self.active_map || self.active_map >= self.maps.len() {
+            self.active_map = self.active_map.saturating_sub(1);
+        }
+        if was_showing {
+            self.showing_another_map();
+        }
+    }
+
+    /// Switch to a different map by index. What is half done on the map
+    /// showing -- a name being typed, a node being dragged -- is finished on
+    /// that map first: the search, the selection and the drag all name nodes
+    /// by number, and the numbers mean something else on the next map.
+    pub fn switch_map(&mut self, index: usize) {
+        if index < self.maps.len() && index != self.active_map {
+            self.settle();
+            self.active_map = index;
+            self.showing_another_map();
+        }
     }
 
     // ========================================================================
@@ -1268,10 +1734,9 @@ impl MindMapApp {
         }
     }
 
-    /// Y origin of the canvas area: below the toolbar, the tabs and the
-    /// notice strip.
+    /// Y origin of the canvas area: below the toolbar and the tabs.
     fn canvas_y(&self) -> f32 {
-        TOOLBAR_HEIGHT + TAB_HEIGHT + NOTICE_H
+        TOOLBAR_HEIGHT + TAB_HEIGHT
     }
 
     /// Width of the canvas area.
@@ -1286,7 +1751,7 @@ impl MindMapApp {
 
     /// Height of the canvas area.
     fn canvas_height(&self) -> f32 {
-        (self.win_height - TOOLBAR_HEIGHT - TAB_HEIGHT - NOTICE_H - STATUS_BAR_HEIGHT).max(1.0)
+        (self.win_height - TOOLBAR_HEIGHT - TAB_HEIGHT - STATUS_BAR_HEIGHT).max(1.0)
     }
 
     // ========================================================================
@@ -1488,25 +1953,37 @@ impl MindMapApp {
     // Undo / Redo
     // ========================================================================
 
+    /// Record a change to the map showing, in that map's own history -- and
+    /// mark the map changed. Every change a user makes is recorded here,
+    /// which is what lets this be the one place that marks.
     fn push_undo(&mut self, action: Action) {
-        self.redo_stack.clear();
-        if self.undo_stack.len() >= MAX_UNDO {
-            self.undo_stack.pop_front();
+        let map = self.active_map_mut();
+        map.dirty = true;
+        map.redo_stack.clear();
+        if map.undo_stack.len() >= MAX_UNDO {
+            map.undo_stack.pop_front();
         }
-        self.undo_stack.push_back(action);
+        map.undo_stack.push_back(action);
     }
 
+    /// Undo the last change to the map showing: that map's, from that map's
+    /// own history, whatever was done to other maps in between.
     pub fn undo(&mut self) {
-        if let Some(action) = self.undo_stack.pop_back() {
+        if let Some(action) = self.active_map_mut().undo_stack.pop_back() {
             self.apply_reverse(&action);
-            self.redo_stack.push(action);
+            let map = self.active_map_mut();
+            map.redo_stack.push(action);
+            // Undoing past a save leaves a map its file does not hold.
+            map.dirty = true;
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(action) = self.redo_stack.pop() {
+        if let Some(action) = self.active_map_mut().redo_stack.pop() {
             self.apply_forward(&action);
-            self.undo_stack.push_back(action);
+            let map = self.active_map_mut();
+            map.undo_stack.push_back(action);
+            map.dirty = true;
         }
     }
 
@@ -1629,11 +2106,11 @@ impl MindMapApp {
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
+        !self.active_map_ref().undo_stack.is_empty()
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
+        !self.active_map_ref().redo_stack.is_empty()
     }
 
     // ========================================================================
@@ -1645,6 +2122,142 @@ impl MindMapApp {
         let cx = self.win_width / 2.0;
         let cy = self.win_height / 2.0;
         auto_layout(self.active_map_mut(), cx, cy);
+    }
+
+    /// L, or the Layout button: lay the map out afresh -- a change to be
+    /// saved when it moves anything, and not one when every node was already
+    /// where the layout puts it.
+    pub fn lay_out_again(&mut self) {
+        let before: HashMap<NodeId, (f32, f32)> = self
+            .active_map_ref()
+            .nodes
+            .iter()
+            .map(|(id, n)| (*id, (n.x, n.y)))
+            .collect();
+        self.relayout();
+        let moved = self
+            .active_map_ref()
+            .nodes
+            .iter()
+            .any(|(id, n)| before.get(id) != Some(&(n.x, n.y)));
+        if moved {
+            self.active_map_mut().dirty = true;
+        }
+    }
+
+    /// Do what a toolbar button does.
+    fn toolbar(&mut self, action: ToolbarAction) -> EventResult {
+        match action {
+            ToolbarAction::Open => {
+                self.picker_for = PickerFor::Open;
+                self.picker.open_to_read();
+            }
+            ToolbarAction::Save => self.save(),
+            ToolbarAction::AddChild => {
+                if self
+                    .add_child_to_selected(String::from("New Node"))
+                    .is_none()
+                {
+                    return EventResult::Ignored;
+                }
+            }
+            ToolbarAction::AddSibling => {
+                if self
+                    .add_sibling_to_selected(String::from("New Node"))
+                    .is_none()
+                {
+                    return EventResult::Ignored;
+                }
+            }
+            ToolbarAction::Delete => {
+                if !self.delete_selected() {
+                    return EventResult::Ignored;
+                }
+            }
+            ToolbarAction::Undo => {
+                if !self.can_undo() {
+                    return EventResult::Ignored;
+                }
+                self.undo();
+            }
+            ToolbarAction::Redo => {
+                if !self.can_redo() {
+                    return EventResult::Ignored;
+                }
+                self.redo();
+            }
+            ToolbarAction::Layout => self.lay_out_again(),
+            ToolbarAction::ZoomIn => self.zoom_in(),
+            ToolbarAction::ZoomOut => self.zoom_out(),
+        }
+        EventResult::Consumed
+    }
+
+    /// How wide each tab is drawn: as wide as it may be, narrower when that
+    /// would push the "+" out of the window.
+    fn tab_width(&self) -> f32 {
+        let n = self.maps.len().max(1) as f32;
+        let room = self.win_width - TAB_FIRST_X - PLUS_W - TAB_GAP - 10.0;
+        (room / n - TAB_GAP).clamp(TAB_MIN_W, TAB_MAX_W)
+    }
+
+    /// Tab `i`'s rectangle: x, y, width, height. Tab `maps.len()` is where
+    /// the "+" goes.
+    fn tab_rect(&self, i: usize) -> (f32, f32, f32, f32) {
+        let w = self.tab_width();
+        (
+            TAB_FIRST_X + i as f32 * (w + TAB_GAP),
+            TOOLBAR_HEIGHT + 2.0,
+            w,
+            TAB_HEIGHT - 2.0,
+        )
+    }
+
+    /// Tab `i`'s close mark.
+    fn tab_close_rect(&self, i: usize) -> (f32, f32, f32, f32) {
+        let (x, y, w, h) = self.tab_rect(i);
+        (
+            x + w - TAB_CLOSE_W - 2.0,
+            y + (h - TAB_CLOSE_W) / 2.0,
+            TAB_CLOSE_W,
+            TAB_CLOSE_W,
+        )
+    }
+
+    /// The "+" button, after the last tab.
+    fn plus_rect(&self) -> (f32, f32, f32, f32) {
+        let (x, _, _, _) = self.tab_rect(self.maps.len());
+        (x, TOOLBAR_HEIGHT + 4.0, PLUS_W, 20.0)
+    }
+
+    /// A click on the toolbar or the tab strip: always on a button or on
+    /// nothing, never on the map.
+    fn click_above_canvas(&mut self, x: f32, y: f32) -> EventResult {
+        if y < TOOLBAR_HEIGHT {
+            return match toolbar_action_at(x, y) {
+                Some(action) => self.toolbar(action),
+                None => EventResult::Ignored,
+            };
+        }
+        if inside(self.plus_rect(), x, y) {
+            self.add_map();
+            return EventResult::Consumed;
+        }
+        for i in 0..self.maps.len() {
+            // The close mark first: it is inside the tab.
+            if inside(self.tab_close_rect(i), x, y) {
+                self.request_close_map(i);
+                return EventResult::Consumed;
+            }
+            if inside(self.tab_rect(i), x, y) {
+                if i == self.active_map {
+                    return EventResult::Ignored;
+                }
+                self.switch_map(i);
+                return EventResult::Consumed;
+            }
+        }
+        EventResult::Ignored
     }
 
     // ========================================================================
@@ -1856,24 +2469,19 @@ impl MindMapApp {
     }
 
     // ========================================================================
-    // Rendering
+    // Files
     // ========================================================================
 
-    // ========================================================================
-    // Events
-    // ========================================================================
-
-    /// Route a compositor event into the app.
-    /// Write the active map to `path` as an indented outline.
+    /// Write the map showing to `path` as an indented outline -- an export,
+    /// not a save: the map keeps its own file and its unsaved mark.
     ///
     /// **Says what the format does not carry**, and there are two different
-    /// losses. Colours, shapes and which branches are folded are not in an
-    /// outline at all. And a node whose text contains a line break is written
-    /// with that break turned into a space, because the format puts one node
-    /// on one line -- `outline_text` has always done this and it was never
-    /// reported, which is the part worth fixing: a silent flattening looks
-    /// exactly like a node that was typed on one line.
-    pub fn write_outline(&mut self, path: &std::path::Path) -> String {
+    /// losses. Colours, shapes, positions and which branches are folded are
+    /// not in an outline at all. And a node whose text contains a line break
+    /// is written with that break turned into a space, because the format puts
+    /// one node on one line -- a silent flattening looks exactly like a node
+    /// that was typed on one line.
+    pub fn write_outline(&mut self, path: &Path) -> String {
         let map = self.active_map_ref();
         let text = map.export_text();
         let flattened = map
@@ -1891,7 +2499,7 @@ impl MindMapApp {
                     String::new()
                 };
                 format!(
-                    "Wrote {} node(s) to {}{note}",
+                    "Wrote {} node(s) to {}{note}. An outline keeps the words and the branches, not the colours, shapes or folds -- Ctrl+S saves those.",
                     map.nodes.len(),
                     path.display()
                 )
@@ -1900,51 +2508,336 @@ impl MindMapApp {
         }
     }
 
-    /// Read `path` as an outline and open it as a new map.
+    /// Open `path` in a tab of its own: a mind map file whole, or an
+    /// outline's words and branches as a new map. What to say.
+    ///
+    /// Which of the two is decided by what the file holds, not by its name:
+    /// a name is a claim by whoever gave it, the content is the fact. A mind
+    /// map file names its format in its first key; an outline is lines of
+    /// text.
+    pub fn open_file(&mut self, path: &Path) -> String {
+        self.open_file_within(path, MAX_OPEN_BYTES)
+    }
+
+    /// [`open_file`](Self::open_file), reading at most `max` bytes.
+    fn open_file_within(&mut self, path: &Path, max: usize) -> String {
+        // One file, one tab: two tabs on one file would each save over the
+        // other's changes.
+        if let Some(index) = self.maps.iter().position(|m| {
+            m.document_path
+                .as_deref()
+                .is_some_and(|p| same_file(p, path))
+        }) {
+            self.switch_map(index);
+            return format!("{} is open already -- this is it", path.display());
+        }
+        let read = match safeio::read_to_string_capped(path, max) {
+            Ok(read) => read,
+            Err(err) => return format!("Could not open {}: {err}", path.display()),
+        };
+        let doc = yamldoc::Document::parse(&read.text);
+        if !doc.contains(&["slateos-mindmap"]) {
+            return self.import_outline(path, read.to_last_line(), max);
+        }
+        if read.truncated {
+            return format!(
+                "Could not open {}: at {} bytes it is larger than the {max} this reads",
+                path.display(),
+                read.whole
+            );
+        }
+        match mindmap_from_document(&doc) {
+            Ok(mut map) => {
+                if map.name.trim().is_empty() {
+                    map.name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .filter(|s| !s.is_empty())
+                        .map_or_else(|| self.fresh_name(), str::to_owned);
+                }
+                map.document_path = Some(path.to_path_buf());
+                self.push_map(map);
+                format!("Opened {}", path.display())
+            }
+            Err(why) => format!("Could not open {}: {why}", path.display()),
+        }
+    }
+
+    /// An outline read from `path`, opened as a new map with no file of its
+    /// own -- saving it asks where, so the outline is never written over with
+    /// a different format. What to say.
     ///
     /// The words and the branches come back; the nodes are laid out afresh by
-    /// `auto_layout`, which is why losing their positions costs nothing. What
-    /// an outline cannot return is stated rather than left to be noticed:
-    /// colour, shape and collapse state are not in the file.
-    pub fn read_outline(&mut self, path: &std::path::Path) -> String {
-        let read = match safeio::read_to_string_capped(path, MAX_OUTLINE_BYTES) {
-            Ok(read) => read,
-            Err(err) => return format!("Could not read {}: {err}", path.display()),
-        };
-        let note = read.note(MAX_OUTLINE_BYTES);
+    /// `auto_layout`. What an outline cannot return is stated rather than left
+    /// to be noticed: colour, shape and collapse state are not in the file.
+    fn import_outline(&mut self, path: &Path, read: safeio::CappedRead, max: usize) -> String {
+        let note = read.note(max);
         let title = path
             .file_stem()
             .and_then(|s| s.to_str())
             .filter(|s| !s.is_empty())
             .map_or_else(|| String::from("Imported map"), str::to_owned);
-        let Some(map) = MindMap::from_outline(&title, &read.text, &mut self.id_gen) else {
+        let Some(mut map) = MindMap::from_outline(&title, &read.text, &mut self.id_gen) else {
             return format!(
                 "{note}{} has no outline in it -- every line was blank",
                 path.display()
             );
         };
         let count = map.nodes.len();
-        self.maps.push(map);
-        self.active_map = self.maps.len().saturating_sub(1);
-        let (cx, cy) = (self.win_width / 2.0, self.win_height / 2.0);
-        auto_layout(self.active_map_mut(), cx, cy);
+        auto_layout(&mut map, self.win_width / 2.0, self.win_height / 2.0);
+        self.push_map(map);
         format!(
-            "{note}Opened {count} node(s) from {}. Colours, shapes and folded branches are not in an outline.",
+            "{note}Opened {count} node(s) from {} as a new map. Colours, shapes and folded branches are not in an outline.",
             path.display()
         )
     }
 
+    /// Write map `id` to `path`, which becomes its file. What to say: `Ok`
+    /// once it is written, `Err` if it is not.
+    fn write_map(&mut self, id: u64, path: &Path) -> Result<String, String> {
+        let Some(map) = self.map_mut(id) else {
+            return Err(String::from("Not saved: that map is closed"));
+        };
+        match safeio::write_str_atomically(path, &mindmap_document(map).to_text()) {
+            Ok(()) => {
+                map.document_path = Some(path.to_path_buf());
+                map.dirty = false;
+                Ok(format!("Saved {}", path.display()))
+            }
+            Err(err) => Err(format!("Could not save {}: {err}", path.display())),
+        }
+    }
+
+    /// Save map `id` to a file the picker chose, the map taking the file's
+    /// name as its own -- the name on its tab is the name it is found by.
+    fn save_map_as(&mut self, id: u64, path: &Path) -> Result<String, String> {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned);
+        let Some(map) = self.map_mut(id) else {
+            return Err(String::from("Not saved: that map is closed"));
+        };
+        let old_name = map.name.clone();
+        if let Some(stem) = stem {
+            map.name = stem;
+        }
+        let result = self.write_map(id, path);
+        if result.is_err()
+            && let Some(map) = self.map_mut(id)
+        {
+            // Not saved, so not renamed either.
+            map.name = old_name;
+        }
+        result
+    }
+
+    /// Ctrl+S: the map showing, over its own file, or wherever the picker
+    /// says when it has none.
+    pub fn save(&mut self) {
+        self.settle();
+        let map = self.active_map_ref();
+        let id = map.id;
+        match map.document_path.clone() {
+            Some(path) => {
+                let (Ok(said) | Err(said)) = self.write_map(id, &path);
+                self.last_file_action = Some(said);
+            }
+            None => self.ask_where_to_save(PickerFor::Save(id)),
+        }
+    }
+
+    /// Put the save picker up for `purpose`, beside the map's own file when
+    /// it has one, offering its name.
+    fn ask_where_to_save(&mut self, purpose: PickerFor) {
+        let (id, extension) = match purpose {
+            PickerFor::Save(id) | PickerFor::SaveThenClose(id) | PickerFor::SaveThenQuit(id) => {
+                (id, ".mindmap")
+            }
+            PickerFor::Export => (self.active_map_ref().id, ".outline"),
+            PickerFor::Open => return,
+        };
+        let Some(map) = self.maps.iter().find(|m| m.id == id) else {
+            return;
+        };
+        let start = map
+            .document_path
+            .as_deref()
+            .and_then(Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map_or_else(FilePicker::default_start, Path::to_path_buf);
+        // The file's own name when it has one -- as bytes, since a name that
+        // is not text is still the file's name -- else the map's.
+        let mut name = map
+            .document_path
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map_or_else(
+                || std::ffi::OsString::from(sanitise_map_name(&map.name)),
+                std::ffi::OsString::from,
+            );
+        name.push(extension);
+        self.picker_for = purpose;
+        self.picker.put_up(
+            guitk::dialog::FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(name),
+            true,
+        );
+    }
+
+    /// The picker chose `path`: do what it was put up for.
+    fn picked(&mut self, path: &Path) {
+        let said = match self.picker_for {
+            PickerFor::Open => self.open_file(path),
+            PickerFor::Export => self.write_outline(path),
+            PickerFor::Save(id) => {
+                let (Ok(said) | Err(said)) = self.save_map_as(id, path);
+                said
+            }
+            PickerFor::SaveThenClose(id) => match self.save_map_as(id, path) {
+                Ok(said) => {
+                    self.close_map(id);
+                    said
+                }
+                Err(said) => said,
+            },
+            PickerFor::SaveThenQuit(id) => match self.save_map_as(id, path) {
+                Ok(said) => {
+                    self.last_file_action = Some(said);
+                    self.continue_quitting();
+                    return;
+                }
+                Err(said) => format!("{said} -- so the window stays open"),
+            },
+        };
+        self.last_file_action = Some(said);
+    }
+
+    /// What is half done becomes part of the map before the map is saved,
+    /// asked about or left: text being typed into a node, a node being
+    /// dragged.
+    fn settle(&mut self) {
+        if self.editing_node.is_some() {
+            self.finish_editing();
+        }
+        if matches!(self.drag, DragState::DraggingNode { .. }) {
+            self.end_drag();
+        }
+    }
+
+    /// The window has been asked to close. Whether it may go now; if not, the
+    /// question is up.
+    fn request_quit(&mut self) -> bool {
+        self.settle();
+        let names: Vec<&str> = self
+            .maps
+            .iter()
+            .filter(|m| m.dirty)
+            .map(|m| m.name.as_str())
+            .collect();
+        if names.is_empty() {
+            self.quit = true;
+            return true;
+        }
+        let message = unsaved::message_for(&names);
+        // The question replaces whatever was up: a picker left open would
+        // take the keys the question needs, and be drawn over it.
+        self.picker.close();
+        self.show_help = false;
+        self.question = Some(Question::new(
+            &message,
+            "Save them before closing?",
+            CloseScope::Window,
+        ));
+        false
+    }
+
+    /// Answer the close question put before `scope`. Save goes on only if the
+    /// save worked: a map that could not be written is still the only copy.
+    fn answer_close(&mut self, scope: CloseScope, choice: Choice) {
+        match (scope, choice) {
+            (_, Choice::Cancel) => {}
+            (CloseScope::Map(id), Choice::Discard) => self.close_map(id),
+            (CloseScope::Map(id), Choice::Save) => {
+                let own = self
+                    .maps
+                    .iter()
+                    .find(|m| m.id == id)
+                    .and_then(|m| m.document_path.clone());
+                match own {
+                    Some(path) => {
+                        let said = match self.write_map(id, &path) {
+                            Ok(said) => {
+                                self.close_map(id);
+                                said
+                            }
+                            Err(said) => format!("{said} -- so the map stays open"),
+                        };
+                        self.last_file_action = Some(said);
+                    }
+                    None => self.ask_where_to_save(PickerFor::SaveThenClose(id)),
+                }
+            }
+            (CloseScope::Window, Choice::Discard) => self.quit = true,
+            (CloseScope::Window, Choice::Save) => self.continue_quitting(),
+        }
+    }
+
+    /// Carry on closing the window: save every map that has a file of its
+    /// own over it, ask where to put the first that has none, and quit once
+    /// nothing is left unsaved. A failed save stops it, with the window open
+    /// and the failure on the status line.
+    fn continue_quitting(&mut self) {
+        let own_files: Vec<(u64, PathBuf)> = self
+            .maps
+            .iter()
+            .filter(|m| m.dirty)
+            .filter_map(|m| m.document_path.clone().map(|p| (m.id, p)))
+            .collect();
+        for (id, path) in own_files {
+            if let Err(said) = self.write_map(id, &path) {
+                self.last_file_action = Some(format!("{said} -- so the window stays open"));
+                return;
+            }
+        }
+        match self.maps.iter().find(|m| m.dirty).map(|m| m.id) {
+            Some(id) => {
+                if let Some(index) = self.index_of(id) {
+                    self.switch_map(index);
+                }
+                self.ask_where_to_save(PickerFor::SaveThenQuit(id));
+            }
+            None => self.quit = true,
+        }
+    }
+
+    // ========================================================================
+    // Events
+    // ========================================================================
+
+    /// Route a compositor event into the app.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The unsaved-changes question has every key and click while it is
+        // up: a key that reached the map under it would be a change made
+        // while being asked whether to keep the changes. Each one is a
+        // redraw, since focus and hover move inside it.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let scope = question.pending();
+                self.question = None;
+                self.answer_close(scope, choice);
+            }
+            return EventResult::Consumed;
+        }
         // The picker takes input first while it is up, or a filename is typed
         // into the node being edited behind it.
         match self.picker.handle(event, self.win_width, self.win_height) {
             Picked::Chose(path) => {
-                let saving = self.picker.is_saving();
-                self.last_file_action = Some(if saving {
-                    self.write_outline(&path)
-                } else {
-                    self.read_outline(&path)
-                });
+                self.picked(&path);
                 return EventResult::Consumed;
             }
             // Cancelled grouped with Handled: this caller keeps no dialog
@@ -1978,6 +2871,17 @@ impl MindMapApp {
     /// how a node jumps across the map the moment it is grabbed at any zoom
     /// other than 1.0.
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
+            if ev.y < self.canvas_y() {
+                return self.click_above_canvas(ev.x, ev.y);
+            }
+            // The sidebar and the status line hold nothing to click. A press
+            // there was taken as one on empty canvas: it dropped the
+            // selection and started a pan.
+            if ev.x < self.canvas_x() || ev.y >= self.canvas_y() + self.canvas_height() {
+                return EventResult::Ignored;
+            }
+        }
         let (cx, cy) = self.screen_to_canvas(ev.x, ev.y);
         match ev.kind {
             MouseEventKind::Press(MouseButton::Left) => {
@@ -2068,14 +2972,44 @@ impl MindMapApp {
                 self.show_help = false;
                 EventResult::Consumed
             }
+            // Files. Save As before Save: the one with Shift is the more
+            // particular, and would never be reached after.
+            Key::S if ctrl && key.modifiers.shift => {
+                self.settle();
+                let id = self.active_map_ref().id;
+                self.ask_where_to_save(PickerFor::Save(id));
+                EventResult::Consumed
+            }
             Key::S if ctrl => {
-                let name = sanitise_map_name(&self.active_map_ref().name);
-                self.picker.open_to_write(format!("{name}.outline"));
+                self.save();
                 EventResult::Consumed
             }
             Key::O if ctrl => {
+                self.picker_for = PickerFor::Open;
                 self.picker.open_to_read();
                 EventResult::Consumed
+            }
+            Key::E if ctrl => {
+                self.settle();
+                self.ask_where_to_save(PickerFor::Export);
+                EventResult::Consumed
+            }
+            // Maps.
+            Key::N if ctrl => {
+                self.add_map();
+                EventResult::Consumed
+            }
+            Key::W if ctrl => {
+                self.request_close_map(self.active_map);
+                EventResult::Consumed
+            }
+            // Before plain Tab, which adds a child.
+            Key::Tab if ctrl => {
+                if self.step_map(!key.modifiers.shift) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
             // Structure.
             Key::Tab => {
@@ -2143,7 +3077,7 @@ impl MindMapApp {
                 self.toggle_search();
                 EventResult::Consumed
             }
-            Key::C => {
+            Key::C if !ctrl => {
                 self.cycle_color();
                 EventResult::Consumed
             }
@@ -2155,8 +3089,8 @@ impl MindMapApp {
                 self.toggle_collapse_selected();
                 EventResult::Consumed
             }
-            Key::L => {
-                self.relayout();
+            Key::L if !ctrl => {
+                self.lay_out_again();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -2259,34 +3193,6 @@ impl MindMapApp {
 
         self.render_toolbar(&mut cmds);
         self.render_tabs(&mut cmds);
-        // In the strip under the tabs, which nothing else is drawn in.
-        let strip_y = TOOLBAR_HEIGHT + TAB_HEIGHT;
-        for (i, line) in NOTHING_KEPT_LINES.iter().enumerate() {
-            #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-            let ty = strip_y + 3.0 + i as f32 * NOTICE_LINE_H;
-            let avail = (self.win_width - 16.0).max(0.0);
-            if avail <= 0.0 || ty + NOTICE_LINE_H > self.win_height {
-                break;
-            }
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                y: ty,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 12.0 } else { 11.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(avail),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
         self.render_canvas_background(&mut cmds);
         self.render_connections(&mut cmds);
         self.render_nodes(&mut cmds);
@@ -2348,37 +3254,28 @@ impl MindMapApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Toolbar buttons
-        let buttons = [
-            ("Add Child", 120.0),
-            ("Add Sibling", 220.0),
-            ("Delete", 330.0),
-            ("Undo", 410.0),
-            ("Redo", 475.0),
-            ("Layout", 540.0),
-            ("Zoom+", 615.0),
-            ("Zoom-", 685.0),
-        ];
-
-        for (label, bx) in &buttons {
+        // Toolbar buttons, where a click finds them.
+        let rects = toolbar_button_rects();
+        for ((label, _), &(bx, by, bw, bh)) in TOOLBAR_BUTTONS.iter().zip(&rects) {
             self.palette
-                .push_surface(cmds, *bx, 6.0, 70.0, 28.0, PANEL_CORNER, Surface::Card);
+                .push_surface(cmds, bx, by, bw, bh, PANEL_CORNER, Surface::Card);
             cmds.push(RenderCommand::Text {
-                x: *bx + 6.0,
+                x: bx + 8.0,
                 y: 14.0,
-                text: label.to_string(),
-                font_size: 11.0,
+                text: (*label).to_string(),
+                font_size: TOOLBAR_LABEL_SIZE,
                 color: self.palette.text,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(58.0),
+                max_width: Some((bw - 12.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
 
-        // Zoom indicator
+        // Zoom indicator, after the last button.
+        let after = rects.last().map_or(TOOLBAR_FIRST_X, |&(x, _, w, _)| x + w);
         let zoom_pct = format!("{}%", (self.zoom * 100.0) as u32);
         cmds.push(RenderCommand::Text {
-            x: 770.0,
+            x: after + 14.0,
             y: 14.0,
             text: zoom_pct,
             font_size: 11.0,
@@ -2403,7 +3300,6 @@ impl MindMapApp {
             Surface::Strip(Edge::Bottom),
         );
 
-        let mut tx = 10.0;
         for (i, map) in self.maps.iter().enumerate() {
             let is_active = i == self.active_map;
             let tab_color = if is_active {
@@ -2416,21 +3312,24 @@ impl MindMapApp {
             } else {
                 self.palette.overlay0
             };
-            let tab_w = 120.0f32;
-
+            let (tx, ty, tw, th) = self.tab_rect(i);
             cmds.push(RenderCommand::FillRect {
                 x: tx,
-                y: y + 2.0,
-                width: tab_w,
-                height: TAB_HEIGHT - 2.0,
+                y: ty,
+                width: tw,
+                height: th,
                 color: tab_color,
                 corner_radii: CornerRadii::all(PANEL_CORNER),
             });
-
+            // `*` for a map with changes not saved, as the title marks it.
             cmds.push(RenderCommand::Text {
                 x: tx + 8.0,
                 y: y + 9.0,
-                text: map.name.clone(),
+                text: if map.dirty {
+                    format!("*{}", map.name)
+                } else {
+                    map.name.clone()
+                },
                 font_size: 11.0,
                 color: text_color,
                 font_weight: if is_active {
@@ -2438,19 +3337,29 @@ impl MindMapApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(tab_w - 16.0),
+                max_width: Some((tw - 12.0 - TAB_CLOSE_W).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            tx += tab_w + 4.0;
+            let (cx, cy, cw, _) = self.tab_close_rect(i);
+            cmds.push(RenderCommand::Text {
+                x: cx + 5.0,
+                y: cy + 2.0,
+                text: String::from("\u{d7}"),
+                font_size: 12.0,
+                color: text_color,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(cw),
+                overflow: TextOverflow::Clip,
+            });
         }
 
-        // "+" button to add a new tab
+        // "+" button to add a new map.
+        let (px, py, pw, ph) = self.plus_rect();
         self.palette
-            .push_surface(cmds, tx, y + 4.0, 24.0, 20.0, PANEL_CORNER, Surface::Card);
+            .push_surface(cmds, px, py, pw, ph, PANEL_CORNER, Surface::Card);
         cmds.push(RenderCommand::Text {
-            x: tx + 7.0,
-            y: y + 8.0,
+            x: px + 7.0,
+            y: py + 4.0,
             text: "+".to_string(),
             font_size: 13.0,
             color: self.palette.text,
@@ -3074,15 +3983,26 @@ impl MindMapApp {
         );
 
         let map = self.active_map_ref();
-        let status = format!(
-            "Nodes: {} | Zoom: {}% | Pan: ({:.0}, {:.0}) | Map: {}",
+        // What the last open or save did comes first: a failed save is the
+        // one thing on this line that must not be the part cut off. It was
+        // kept and never drawn -- every open and save said nothing.
+        let counts = format!(
+            "Nodes: {} | Zoom: {}%",
             map.node_count(),
             (self.zoom * 100.0) as u32,
-            self.pan_x,
-            self.pan_y,
-            map.name,
         );
-
+        let status = match &self.last_file_action {
+            Some(said) => format!("{said} | {counts}"),
+            None => counts,
+        };
+        // Stopped short of the selected node's line on the right, which it
+        // ran under.
+        let selected = self.selected_node.is_some_and(|id| map.node(id).is_some());
+        let room = if selected {
+            self.win_width - 20.0 - SEL_INFO_WIDTH - 20.0
+        } else {
+            self.win_width - 20.0
+        };
         cmds.push(RenderCommand::Text {
             x: 10.0,
             y: y + 5.0,
@@ -3090,7 +4010,7 @@ impl MindMapApp {
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(self.win_width - 20.0),
+            max_width: Some(room.max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -3165,8 +4085,14 @@ impl App for MindMapApp {
         self.palette = *palette;
     }
 
+    /// The map showing, marked `*` while it has changes not saved.
     fn title(&self) -> String {
-        format!("Mind Map — {}", self.active_map_ref().name)
+        let map = self.active_map_ref();
+        format!(
+            "{}{} — Mind Map",
+            if map.dirty { "*" } else { "" },
+            map.name
+        )
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -3191,11 +4117,24 @@ impl App for MindMapApp {
         None
     }
 
+    /// Closing over maps with changes not saved asks first, and the window
+    /// waits for the answer: `KeepOpen` declines the close and draws the
+    /// question.
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            return if self.request_quit() {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        let result = self.handle_event(event);
+        if self.quit {
+            // The question was answered, or the last save it asked for was
+            // made: nothing is left unsaved.
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -3207,9 +4146,15 @@ impl App for MindMapApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.win_width = width;
         self.win_height = height;
-        RenderTree {
+        let mut tree = RenderTree {
             commands: self.render_commands(),
+        };
+        // Over everything, the picker included: they are never up together.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
         }
+        tree
     }
 }
 
@@ -3335,7 +4280,11 @@ mod tests {
         undone.handle_event(&press(Key::Tab));
         undone.handle_event(&press_ctrl(Key::Z));
 
-        vec![fresh, budded, second, first, undone]
+        // Two maps, so there is another to go to.
+        let mut two = MindMapApp::new();
+        two.add_map();
+
+        vec![fresh, budded, second, first, undone, two]
     }
 
     /// **The shortcut list reaches the window.**
@@ -3475,8 +4424,11 @@ mod tests {
         // its identity.
         let mut app = MindMapApp::new();
         app.set_zoom(2.0);
-        app.pan_x = 37.0;
-        app.pan_y = -19.0;
+        // Panned so the root, twice as far from the corner at this zoom, is
+        // still inside the window: a press outside the canvas is not one on
+        // the map.
+        app.pan_x = -603.0;
+        app.pan_y = -419.0;
         let root = app.active_map_ref().root_id;
         let (nx, ny) = {
             let n = app.active_map_ref().node(root).expect("the root exists");
@@ -3496,12 +4448,19 @@ mod tests {
         // invisible at the default zoom and obvious at any other.
         let mut app = MindMapApp::new();
         app.set_zoom(2.0);
+        // Panned to keep the root inside the window at this zoom.
+        app.pan_x = -640.0;
+        app.pan_y = -400.0;
         let root = app.active_map_ref().root_id;
         let (nx, ny) = {
             let n = app.active_map_ref().node(root).expect("the root exists");
             (n.x, n.y)
         };
         let (sx, sy) = app.canvas_to_screen(nx, ny);
+        assert!(
+            sx < app.win_width && sy < app.canvas_y() + app.canvas_height(),
+            "control: the root is off the canvas at ({sx}, {sy})"
+        );
         app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), sx, sy));
         app.handle_event(&mouse(MouseEventKind::Move, sx + 100.0, sy));
         let moved = app.active_map_ref().node(root).expect("still there").x;
@@ -3533,15 +4492,14 @@ mod tests {
         let mut app = MindMapApp::new();
         let root = app.active_map_ref().root_id;
         app.selected_node = Some(root);
-        // Far from any node.
-        app.handle_event(&mouse(
-            MouseEventKind::Press(MouseButton::Left),
-            -9000.0,
-            -9000.0,
-        ));
+        // The canvas's top left corner, far from the one node, which is laid
+        // out in the middle.
+        let (x, y) = (app.canvas_x() + 10.0, app.canvas_y() + 10.0);
+        assert_eq!(app.hit_test_screen(x, y), None, "control: a node is there");
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), x, y));
         assert_eq!(app.selected_node, None, "clicking away should deselect");
         let before = app.pan_x;
-        app.handle_event(&mouse(MouseEventKind::Move, -8900.0, -9000.0));
+        app.handle_event(&mouse(MouseEventKind::Move, x + 100.0, y));
         assert!(
             (app.pan_x - before).abs() > 1.0,
             "the canvas should have panned"
@@ -3821,7 +4779,7 @@ mod tests {
         assert!(said.starts_with("Wrote 3 node(s)"), "said: {said}");
 
         let before = app.maps.len();
-        let said = app.read_outline(&path);
+        let said = app.open_file(&path);
         assert!(said.starts_with("Opened 3 node(s)"), "said: {said}");
         assert_eq!(app.maps.len(), before + 1, "no map was opened");
 
@@ -3857,7 +4815,7 @@ mod tests {
         std::fs::write(&path, "Topic\n  - Branch\n").expect("write outline");
 
         let mut app = MindMapApp::new();
-        let said = app.read_outline(&path);
+        let said = app.open_file(&path);
         assert!(
             said.contains("Colours, shapes and folded branches are not in an outline"),
             "said: {said}"
@@ -3923,56 +4881,11 @@ mod tests {
 
         let mut app = MindMapApp::new();
         let before = app.maps.len();
-        let said = app.read_outline(&path);
+        let said = app.open_file(&path);
         assert!(said.contains("every line was blank"), "said: {said}");
         assert_eq!(app.maps.len(), before, "an empty map was opened anyway");
 
         let _ = std::fs::remove_file(&path);
-    }
-
-    /// The window says what this program cannot do.
-    ///
-    /// Nothing here is invented, so `find-reachable-fixtures.py` never looked
-    /// at this app. It came from `find-silent-incapacity.py`, which asks the
-    /// opposite question: does the crate reach anything outside its own
-    /// process, and if not, does it admit that in a string the user can read?
-    #[test]
-    fn the_window_says_what_it_cannot_do() {
-        let app = MindMapApp::new();
-        let texts: Vec<String> = app
-            .render_commands()
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        for line in NOTHING_KEPT_LINES {
-            assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
-            );
-        }
-        // The PROPERTY, not the phrase. This required the words "gone when the
-        // window closes", which stayed true of the test after it stopped being
-        // true of the program. The FOURTH banner assertion in this tree to pin
-        // wording that way -- apps/contacts, apps/diagram and apps/flashcards
-        // were the others -- so the shape is a habit rather than an accident:
-        // the literal is right there in the constant, and asserting on it feels
-        // like asserting on the thing.
-        //
-        // What has to hold is that the banner names the remedy AND what the
-        // format does not carry.
-        assert!(
-            NOTHING_KEPT_LINES.iter().any(|l| l.contains("Ctrl+S")),
-            "the message does not say how to keep the work",
-        );
-        assert!(
-            NOTHING_KEPT_LINES
-                .iter()
-                .any(|l| l.contains("Colours, shapes")),
-            "the message does not say what an outline leaves behind",
-        );
     }
 
     // ---- Outline export ----
@@ -4576,19 +5489,44 @@ mod tests {
     }
 
     #[test]
-    fn test_app_delete_map() {
+    fn a_map_with_nothing_unsaved_closes_at_once() {
         let mut app = MindMapApp::new();
         app.add_map();
         assert_eq!(app.maps.len(), 2);
-        assert!(app.delete_active_map());
+        assert_eq!(app.handle_event(&press_ctrl(Key::W)), EventResult::Consumed);
+        assert!(
+            app.question.is_none(),
+            "asked about a map with nothing unsaved"
+        );
         assert_eq!(app.maps.len(), 1);
+        assert_eq!(app.active_map, 0);
     }
 
     #[test]
-    fn test_app_delete_last_map_fails() {
+    fn closing_the_last_map_leaves_a_fresh_one() {
         let mut app = MindMapApp::new();
-        assert!(!app.delete_active_map());
-        assert_eq!(app.maps.len(), 1);
+        let id = app.active_map_ref().id;
+        app.handle_event(&press_ctrl(Key::W));
+        assert_eq!(app.maps.len(), 1, "the window was left with no map");
+        let fresh = app.active_map_ref();
+        assert_ne!(fresh.id, id, "the closed map is still there");
+        assert_eq!(fresh.node_count(), 1);
+        assert!(!fresh.dirty);
+        assert_eq!(fresh.name, "Mind Map 1");
+    }
+
+    #[test]
+    fn a_new_map_is_not_named_after_one_still_open() {
+        let mut app = MindMapApp::new();
+        app.add_map();
+        app.add_map();
+        // Mind Map 1, 2, 3; close 1, and the next new map is 1 again -- not a
+        // second 3, which a count of the maps would give.
+        app.close_map(app.maps[0].id);
+        app.add_map();
+        let mut names: Vec<&str> = app.maps.iter().map(|m| m.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["Mind Map 1", "Mind Map 2", "Mind Map 3"]);
     }
 
     #[test]
@@ -4857,7 +5795,7 @@ mod tests {
         for i in 0..MAX_UNDO + 50 {
             app.add_child_to_selected(format!("Node {i}"));
         }
-        assert!(app.undo_stack.len() <= MAX_UNDO);
+        assert!(app.active_map_ref().undo_stack.len() <= MAX_UNDO);
     }
 
     // ---- Search ----
@@ -5379,46 +6317,843 @@ mod tests {
         );
     }
 
-    /// The warning lines are where they can be seen: nothing drawn after a
-    /// line fills the point it is drawn at. The sweep that added them drew
-    /// them "after the background, or it would be painted over" -- and in
-    /// several apps a bar was then drawn over the same pixels, while a test
-    /// that read the frame's texts said they were there. known-issues.md,
-    /// `[E] Warnings drawn where the next thing drawn covers them`.
-    #[test]
-    fn the_warning_lines_are_not_painted_over() {
-        let app = MindMapApp::new();
-        let commands: Vec<RenderCommand> = app.render_commands();
-        for line in NOTHING_KEPT_LINES {
-            let (at, x, y, reach) = commands
-                .iter()
-                .enumerate()
-                .find_map(|(i, c)| match c {
-                    RenderCommand::Text {
-                        text,
-                        x,
-                        y,
-                        max_width,
-                        ..
-                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
-            let covered = commands.iter().skip(at + 1).any(|c| {
-                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
-                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
-            });
-            assert!(!covered, "{line:?} is painted over");
-            // Nor drawn on the same row as other text: a header's title over
-            // a warning is as unreadable as a fill over it.
-            let crowded = commands.iter().any(|c| {
-                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
-                    if !NOTHING_KEPT_LINES.contains(&text.as_str())
-                        && (ty - y).abs() < 10.0
-                        && *tx < reach
-                        && tx + tw.unwrap_or(f32::INFINITY) > x)
-            });
-            assert!(!crowded, "{line:?} shares its row with other text");
+    // ------------------------------------------------------------------
+    // A map's own file, and the question before one is lost
+    // ------------------------------------------------------------------
+
+    /// A directory of this test's own, empty.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("slateos-mindmap-{name}-{}", std::process::id()));
+        drop(std::fs::remove_dir_all(&dir));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// A key with Ctrl and Shift held.
+    fn press_ctrl_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::ctrl();
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// A left click at a point.
+    fn click(app: &mut MindMapApp, (x, y): (f32, f32)) -> EventResult {
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), x, y))
+    }
+
+    /// The middle of a rectangle.
+    fn centre((x, y, w, h): (f32, f32, f32, f32)) -> (f32, f32) {
+        (x + w / 2.0, y + h / 2.0)
+    }
+
+    /// A left click in the middle of whatever `rect` finds on the app.
+    fn click_on(
+        app: &mut MindMapApp,
+        rect: impl Fn(&MindMapApp) -> (f32, f32, f32, f32),
+    ) -> EventResult {
+        let at = centre(rect(app));
+        click(app, at)
+    }
+
+    /// Something of every kind a user can set: text with a line break, a
+    /// colon and edge spaces; a colour and a shape cycled; a fold; a node
+    /// dragged where no layout would put it.
+    fn rich_map(app: &mut MindMapApp) {
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        let a = app
+            .add_child_to_selected(String::from("Plans: 2026"))
+            .expect("a");
+        app.selected_node = Some(root);
+        let b = app
+            .add_child_to_selected(String::from("two\nlines"))
+            .expect("b");
+        app.selected_node = Some(a);
+        let c = app
+            .add_child_to_selected(String::from("  spaced  "))
+            .expect("c");
+        app.selected_node = Some(b);
+        app.cycle_color();
+        app.cycle_shape();
+        app.cycle_shape();
+        app.selected_node = Some(a);
+        app.toggle_collapse_selected();
+        app.start_node_drag(c, 0.0, 0.0);
+        app.update_drag(123.5, -45.25);
+        app.end_drag();
+    }
+
+    /// Everything about a map a save must keep, walked from the root so the
+    /// order does not depend on how the nodes are stored.
+    fn describe(map: &MindMap) -> String {
+        let mut out = format!("{:?}\n", map.name);
+        let mut stack = vec![(map.root_id, 0_usize)];
+        while let Some((id, depth)) = stack.pop() {
+            let n = map.node(id).expect("a node its parent names");
+            out.push_str(&format!(
+                "{}{} {:?} parent={:?} {} {} {:?} {} {} {} {} folded={}\n",
+                "  ".repeat(depth),
+                n.id,
+                n.text,
+                n.parent,
+                colour_hex(n.color),
+                n.color_index,
+                n.shape,
+                n.x,
+                n.y,
+                n.width,
+                n.height,
+                n.collapsed
+            ));
+            for child in n.children.iter().rev() {
+                stack.push((*child, depth + 1));
+            }
         }
+        out
+    }
+
+    /// **A map saved and opened again is the same map** -- every node, where
+    /// it hangs, in its order, with every property a user can set.
+    #[test]
+    fn a_map_saved_and_opened_again_is_the_same_map() {
+        let dir = scratch("roundtrip");
+        let path = dir.join("plans.mindmap");
+        let mut app = MindMapApp::new();
+        rich_map(&mut app);
+        assert!(app.active_map_ref().dirty, "control: the map was changed");
+        let id = app.active_map_ref().id;
+        let said = app.save_map_as(id, &path).expect("saved");
+        assert!(said.starts_with("Saved"), "{said}");
+        assert!(!app.active_map_ref().dirty, "a save left the map marked");
+        assert_eq!(
+            app.active_map_ref().name,
+            "plans",
+            "the map did not take its file's name"
+        );
+        let saved = describe(app.active_map_ref());
+        assert!(saved.contains("folded=true"), "control: {saved}");
+
+        let mut other = MindMapApp::new();
+        let said = other.open_file(&path);
+        assert_eq!(said, format!("Opened {}", path.display()));
+        assert_eq!(
+            other.maps.len(),
+            2,
+            "the file did not open in a tab of its own"
+        );
+        let opened = other.active_map_ref();
+        assert_eq!(describe(opened), saved);
+        assert!(!opened.dirty, "a map just opened has nothing unsaved");
+        assert_eq!(opened.document_path.as_deref(), Some(path.as_path()));
+        assert_eq!(other.title(), "plans — Mind Map");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A node added to an opened map takes a number the file did not use.
+    #[test]
+    fn a_node_added_after_opening_takes_a_number_of_its_own() {
+        let dir = scratch("numbers");
+        let path = dir.join("n.mindmap");
+        let mut app = MindMapApp::new();
+        rich_map(&mut app);
+        let id = app.active_map_ref().id;
+        app.save_map_as(id, &path).expect("saved");
+        let mut other = MindMapApp::new();
+        other.open_file(&path);
+        let before = other.active_map_ref().node_count();
+        let root = other.active_map_ref().root_id;
+        other.selected_node = Some(root);
+        other
+            .add_child_to_selected(String::from("new"))
+            .expect("added");
+        assert_eq!(
+            other.active_map_ref().node_count(),
+            before + 1,
+            "the new node took the place of one read from the file"
+        );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Ctrl+S over a map with a file writes it there, without asking; a map
+    /// with none asks where; Ctrl+Shift+S always asks.
+    #[test]
+    fn ctrl_s_saves_over_the_maps_own_file_and_asks_only_when_it_has_none() {
+        let dir = scratch("ctrl-s");
+        let path = dir.join("own.mindmap");
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press_ctrl(Key::S));
+        assert!(app.picker.is_open(), "a map with no file did not ask where");
+        assert_eq!(app.picker_for, PickerFor::Save(app.active_map_ref().id));
+        app.picker.close();
+        app.picked(&path);
+        assert!(!app.active_map_ref().dirty);
+        assert_eq!(
+            app.last_file_action.as_deref(),
+            Some(format!("Saved {}", path.display()).as_str())
+        );
+
+        app.handle_event(&press(Key::Tab));
+        assert!(app.active_map_ref().dirty);
+        app.handle_event(&press_ctrl(Key::S));
+        assert!(!app.picker.is_open(), "asked where, for a map with a file");
+        assert!(!app.active_map_ref().dirty, "not saved over its own file");
+        let on_disk = std::fs::read_to_string(&path).expect("saved");
+        assert_eq!(on_disk, mindmap_document(app.active_map_ref()).to_text());
+
+        app.handle_event(&press_ctrl_shift(Key::S));
+        assert!(app.picker.is_open(), "Ctrl+Shift+S did not ask where");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Every change marks the map, and the title and its tab say so; opening
+    /// or adding a map, moving round the maps and selecting do not.
+    #[test]
+    fn a_change_marks_the_map_and_the_title_and_tab_say_so() {
+        let mut app = MindMapApp::new();
+        assert!(!app.active_map_ref().dirty, "a new map has nothing unsaved");
+        assert!(!app.title().starts_with('*'));
+        app.handle_event(&press(Key::Tab));
+        assert!(app.active_map_ref().dirty);
+        assert!(app.title().starts_with('*'), "{}", app.title());
+        let name = app.active_map_ref().name.clone();
+        assert!(
+            drawn_text(&app).contains(&format!("*{name}")),
+            "the tab does not say its map is unsaved"
+        );
+        // A second map, fresh; moving to it and back changes neither.
+        app.add_map();
+        assert!(!app.active_map_ref().dirty);
+        app.handle_event(&press_ctrl(Key::Tab));
+        app.handle_event(&press_ctrl(Key::Tab));
+        app.handle_event(&press(Key::Up));
+        assert!(!app.active_map_ref().dirty, "looking at a map changed it");
+        // Renaming a node to what it already says is not a change.
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.handle_event(&press(Key::F2));
+        app.handle_event(&press(Key::Enter));
+        assert!(
+            !app.active_map_ref().dirty,
+            "an unchanged name marked the map"
+        );
+        // Undo is a change too: undoing past a save leaves a map its file
+        // does not hold.
+        app.handle_event(&press(Key::Tab));
+        app.active_map_mut().dirty = false;
+        app.handle_event(&press_ctrl(Key::Z));
+        assert!(app.active_map_ref().dirty, "an undo did not mark the map");
+    }
+
+    /// L marks the map only when it moves something.
+    #[test]
+    fn laying_the_map_out_again_marks_it_only_when_it_moves_a_node() {
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::L));
+        assert!(
+            !app.active_map_ref().dirty,
+            "a layout that moved nothing marked the map"
+        );
+        let root = app.active_map_ref().root_id;
+        app.active_map_mut().move_node(root, 5.0, 5.0);
+        app.handle_event(&press(Key::L));
+        assert!(
+            app.active_map_ref().dirty,
+            "a layout that moved a node did not mark it"
+        );
+    }
+
+    /// **Each map keeps its own history.** The window's single history was
+    /// replayed onto whichever map was showing, and node numbers repeat from
+    /// map to map -- so Ctrl+Z on one map acted on another's change.
+    #[test]
+    fn undo_on_one_map_never_touches_another() {
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        let first = describe(app.active_map_ref());
+        app.add_map();
+        assert!(!app.can_undo(), "a new map has the last one's history");
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Tab));
+        let second_before_undo = app.active_map_ref().node_count();
+
+        app.switch_map(0);
+        assert_eq!(describe(app.active_map_ref()), first);
+        assert_eq!(app.handle_event(&press_ctrl(Key::Z)), EventResult::Consumed);
+        assert_eq!(
+            app.active_map_ref().node_count(),
+            1,
+            "the first map's change was not undone"
+        );
+        assert!(!app.can_undo(), "the first map had one change");
+
+        app.switch_map(1);
+        assert_eq!(
+            app.active_map_ref().node_count(),
+            second_before_undo,
+            "an undo on the first map reached the second"
+        );
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(app.active_map_ref().node_count(), second_before_undo - 1);
+        app.handle_event(&press_ctrl(Key::Y));
+        assert_eq!(app.active_map_ref().node_count(), second_before_undo);
+    }
+
+    /// Closing a map with changes asks, and each answer does what it says.
+    #[test]
+    fn closing_a_changed_map_asks_and_each_answer_does_what_it_says() {
+        let dir = scratch("close-map");
+        let path = dir.join("kept.mindmap");
+        let mut app = MindMapApp::new();
+        app.add_map();
+        app.handle_event(&press(Key::Tab));
+        let id = app.active_map_ref().id;
+
+        // Cancel: still open, still changed.
+        app.handle_event(&press_ctrl(Key::W));
+        assert_eq!(
+            app.question.as_ref().map(Question::pending),
+            Some(CloseScope::Map(id))
+        );
+        // A key under the question goes to the question, not the map.
+        let n = app.active_map_ref().node_count();
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(
+            app.active_map_ref().node_count(),
+            n,
+            "a key reached the map under the question"
+        );
+        app.handle_event(&press(Key::Escape));
+        assert!(app.question.is_none());
+        assert_eq!(app.maps.len(), 2);
+        assert!(app.active_map_ref().dirty);
+
+        // Save, with no file yet: asks where, then closes once written.
+        app.handle_event(&press_ctrl(Key::W));
+        app.handle_event(&press(Key::S));
+        assert!(app.picker.is_open(), "Save did not ask where");
+        assert_eq!(app.picker_for, PickerFor::SaveThenClose(id));
+        app.picker.close();
+        app.picked(&path);
+        assert!(app.index_of(id).is_none(), "saved, and not closed");
+        assert!(path.exists(), "closed, and not saved");
+
+        // Don't save: gone, and nothing written.
+        app.handle_event(&press(Key::Tab));
+        let other = app.active_map_ref().id;
+        app.handle_event(&press_ctrl(Key::W));
+        app.handle_event(&press(Key::D));
+        assert!(app.index_of(other).is_none(), "Don't save did not close it");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A map whose save fails is not closed: it is still the only copy.
+    #[test]
+    fn a_map_whose_save_fails_stays_open() {
+        let dir = scratch("save-fails");
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        let id = app.active_map_ref().id;
+        // A file inside a directory that does not exist cannot be written.
+        app.active_map_mut().document_path = Some(dir.join("missing").join("m.mindmap"));
+        app.handle_event(&press_ctrl(Key::W));
+        app.handle_event(&press(Key::S));
+        assert!(
+            app.index_of(id).is_some(),
+            "closed although the save failed"
+        );
+        assert!(app.active_map_ref().dirty);
+        let said = app.last_file_action.clone().unwrap_or_default();
+        assert!(said.starts_with("Could not save"), "{said}");
+        assert!(said.ends_with("so the map stays open"), "{said}");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// The window closes at once with nothing unsaved; with maps unsaved it
+    /// asks about all of them, saves those with files, asks where for the
+    /// rest, and goes once nothing is left.
+    #[test]
+    fn closing_the_window_asks_about_every_unsaved_map() {
+        let dir = scratch("close-window");
+        let own = dir.join("own.mindmap");
+        let new = dir.join("new.mindmap");
+
+        let mut clean = MindMapApp::new();
+        assert_eq!(clean.on_event(&Event::CloseRequested), Response::Exit);
+
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        let first = app.active_map_ref().id;
+        app.save_map_as(first, &own).expect("saved");
+        app.handle_event(&press(Key::Tab));
+        app.add_map();
+        app.handle_event(&press(Key::Tab));
+        let second = app.active_map_ref().id;
+        app.add_map(); // unchanged: not asked about
+
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        let asked = app
+            .question
+            .as_ref()
+            .map(|q| q.message().to_owned())
+            .unwrap_or_default();
+        assert!(asked.starts_with("2 documents"), "{asked}");
+        assert!(
+            asked.contains("own") && asked.contains("Mind Map 1"),
+            "{asked}"
+        );
+        let drawn: String = app
+            .render(1280.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            drawn.contains("Unsaved changes"),
+            "the question is not drawn: {drawn}"
+        );
+
+        // Save: the one with a file is written there; the other asks where.
+        assert_eq!(app.on_event(&press(Key::S)), Response::Redraw);
+        assert!(!app.maps[app.index_of(first).expect("first")].dirty);
+        assert!(app.picker.is_open());
+        assert_eq!(app.picker_for, PickerFor::SaveThenQuit(second));
+        assert_eq!(
+            app.active_map_ref().id,
+            second,
+            "not showing the map it asks about"
+        );
+        app.picker.close();
+        app.picked(&new);
+        assert!(app.quit, "everything is saved and the window did not go");
+        assert!(new.exists());
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A failed save while the window closes keeps the window open, and says
+    /// so.
+    #[test]
+    fn a_failed_save_keeps_the_window_open() {
+        let dir = scratch("quit-fails");
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        app.active_map_mut().document_path = Some(dir.join("missing").join("m.mindmap"));
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(app.on_event(&press(Key::S)), Response::Redraw);
+        assert!(!app.quit);
+        assert!(
+            !app.picker.is_open(),
+            "went on to ask where to save after a save failed"
+        );
+        let said = app.last_file_action.clone().unwrap_or_default();
+        assert!(said.ends_with("so the window stays open"), "{said}");
+        // Don't save lets it go.
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(app.on_event(&press(Key::D)), Response::Exit);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A name half typed is part of the map when the window is asked to
+    /// close: it is kept, and asked about.
+    #[test]
+    fn a_name_being_typed_is_asked_about_on_close() {
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.handle_event(&press(Key::F2));
+        app.handle_event(&typed('!'));
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert!(app.active_map_ref().dirty);
+        assert!(
+            app.active_map_ref()
+                .node(root)
+                .expect("root")
+                .text
+                .ends_with('!')
+        );
+    }
+
+    /// One file, one tab: opening a file that is open already shows it.
+    #[test]
+    fn opening_a_file_that_is_open_already_shows_its_tab() {
+        let dir = scratch("open-twice");
+        let path = dir.join("once.mindmap");
+        let mut app = MindMapApp::new();
+        let id = app.active_map_ref().id;
+        app.save_map_as(id, &path).expect("saved");
+        app.add_map();
+        let said = app.open_file(&path);
+        assert!(said.contains("open already"), "{said}");
+        assert_eq!(app.maps.len(), 2, "a second tab on one file");
+        assert_eq!(app.active_map_ref().id, id);
+        // The same file by another spelling of its path.
+        std::fs::create_dir_all(dir.join("sub")).expect("sub");
+        app.switch_map(1);
+        let said = app.open_file(&dir.join("sub").join("..").join("once.mindmap"));
+        assert!(said.contains("open already"), "{said}");
+        assert_eq!(
+            app.maps.len(),
+            2,
+            "a second tab on one file, named another way"
+        );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Closing a map that is not showing leaves the one showing, selection
+    /// and all; closing the one showing shows its neighbour.
+    #[test]
+    fn closing_another_map_keeps_this_one_showing() {
+        let mut app = MindMapApp::new();
+        app.add_map();
+        app.add_map();
+        app.switch_map(1);
+        let showing = app.active_map_ref().id;
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        let first = app.maps[0].id;
+        app.close_map(first);
+        assert_eq!(
+            app.active_map_ref().id,
+            showing,
+            "closing another map changed the one showing"
+        );
+        assert_eq!(
+            app.selected_node,
+            Some(root),
+            "closing another map dropped the selection"
+        );
+        let last = app.maps[1].id;
+        app.close_map(showing);
+        assert_eq!(app.active_map_ref().id, last);
+        assert!(app.selected_node.is_none());
+    }
+
+    /// A file is read as what it holds, whatever it is called.
+    #[test]
+    fn a_file_is_opened_as_what_it_holds_not_what_it_is_called() {
+        let dir = scratch("by-content");
+        let outline = dir.join("looks-like-a-map.mindmap");
+        std::fs::write(&outline, "Topic\n  - Branch\n").expect("write");
+        let map = dir.join("looks-like-an-outline.outline");
+        let mut app = MindMapApp::new();
+        rich_map(&mut app);
+        let id = app.active_map_ref().id;
+        app.save_map_as(id, &map).expect("saved");
+
+        let mut other = MindMapApp::new();
+        let said = other.open_file(&outline);
+        assert!(said.starts_with("Opened 2 node(s)"), "{said}");
+        assert!(
+            other.active_map_ref().document_path.is_none(),
+            "an imported outline took the outline as its file -- a save would write a map over it"
+        );
+        assert!(!other.active_map_ref().dirty);
+        let said = other.open_file(&map);
+        assert_eq!(said, format!("Opened {}", map.display()));
+        assert_eq!(other.active_map_ref().node_count(), 4);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A map file is read whole or not at all, and the refusal names what is
+    /// wrong.
+    #[test]
+    fn a_map_file_that_cannot_be_read_whole_is_refused_and_says_why() {
+        let dir = scratch("refused");
+        let mut app = MindMapApp::new();
+        rich_map(&mut app);
+        let good = mindmap_document(app.active_map_ref()).to_text();
+        let cases: [(&str, String, &str); 9] = [
+            (
+                "colour-number",
+                good.replacen("colour-index: 0", "colour-index: 9", 1),
+                "colour number is missing or not one",
+            ),
+            (
+                "later",
+                good.replacen("slateos-mindmap: 1", "slateos-mindmap: 2", 1),
+                "later format (2)",
+            ),
+            (
+                "orphan",
+                good.replacen("parent: 1", "parent: 99", 1),
+                "not written before it",
+            ),
+            (
+                "two-roots",
+                good.replacen("    parent: 1\n", "", 1),
+                "second node with no parent",
+            ),
+            (
+                "twins",
+                good.replacen("id: 3", "id: 2", 1),
+                "another node has its number",
+            ),
+            (
+                "shape",
+                good.replacen("shape: Rounded", "shape: Star", 1),
+                "(Star) is not one",
+            ),
+            (
+                "colour",
+                good.replacen("colour: \"#", "colour: \"#Z", 1),
+                "colour is missing or not one",
+            ),
+            (
+                "width",
+                good.replacen("width: 140", "width: 0", 1),
+                "width is not above nothing",
+            ),
+            (
+                "folded",
+                good.replacen("collapsed: false", "collapsed: maybe", 1),
+                "folded is missing",
+            ),
+        ];
+        for (name, text, why) in cases {
+            assert_ne!(text, good, "control: case {name} changed nothing");
+            let path = dir.join(format!("{name}.mindmap"));
+            std::fs::write(&path, &text).expect("write");
+            let mut other = MindMapApp::new();
+            let said = other.open_file(&path);
+            assert!(said.starts_with("Could not open"), "{name}: {said}");
+            assert!(said.contains(why), "{name}: {said}");
+            assert_eq!(other.maps.len(), 1, "{name}: a map was opened anyway");
+        }
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// A map file larger than one open reads is refused, not read in part.
+    #[test]
+    fn a_map_file_larger_than_an_open_reads_is_refused() {
+        let dir = scratch("large");
+        let path = dir.join("big.mindmap");
+        let mut app = MindMapApp::new();
+        rich_map(&mut app);
+        let id = app.active_map_ref().id;
+        app.save_map_as(id, &path).expect("saved");
+        let len = std::fs::metadata(&path).expect("saved").len();
+        let mut other = MindMapApp::new();
+        let said = other.open_file_within(&path, usize::try_from(len).expect("small") - 1);
+        assert!(said.contains("larger than"), "{said}");
+        assert_eq!(other.maps.len(), 1, "a map cut short was opened");
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// An outline larger than one open reads is opened as far as its last
+    /// whole line, and said to be incomplete.
+    #[test]
+    fn an_outline_cut_short_ends_at_a_whole_line_and_says_so() {
+        let dir = scratch("cut-outline");
+        let path = dir.join("long.outline");
+        std::fs::write(&path, "Topic\n  - Alpha\n  - Bravo\n").expect("write");
+        let mut app = MindMapApp::new();
+        // Cut inside "Bravo".
+        let said = app.open_file_within(&path, "Topic\n  - Alpha\n  - Br".len());
+        assert!(said.starts_with("INCOMPLETE"), "{said}");
+        let texts: Vec<&str> = app
+            .active_map_ref()
+            .nodes
+            .values()
+            .map(|n| n.text.as_str())
+            .collect();
+        assert!(
+            !texts.contains(&"Br"),
+            "a line cut in half became a node: {texts:?}"
+        );
+        assert_eq!(app.active_map_ref().node_count(), 2);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Ctrl+E writes the outline and leaves the map's own file and mark alone.
+    #[test]
+    fn exporting_an_outline_is_not_a_save() {
+        let dir = scratch("export");
+        let path = dir.join("words.outline");
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press_ctrl(Key::E));
+        assert!(app.picker.is_open());
+        assert_eq!(app.picker_for, PickerFor::Export);
+        app.picker.close();
+        app.picked(&path);
+        let said = app.last_file_action.clone().unwrap_or_default();
+        assert!(said.starts_with("Wrote 2 node(s)"), "{said}");
+        assert!(said.contains("Ctrl+S saves those"), "{said}");
+        assert!(
+            app.active_map_ref().dirty,
+            "an export cleared the unsaved mark"
+        );
+        assert!(
+            app.active_map_ref().document_path.is_none(),
+            "an export became the map's file"
+        );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// The status line says what the last open or save did. It was kept and
+    /// never drawn.
+    #[test]
+    fn the_status_line_says_what_the_last_save_did() {
+        let mut app = MindMapApp::new();
+        app.last_file_action = Some(String::from("Could not save /x: no room"));
+        assert!(drawn_text(&app).contains("Could not save /x: no room"));
+    }
+
+    /// The tabs answer clicks: a tab shows its map, its mark closes it, and
+    /// "+" adds one.
+    #[test]
+    fn the_tabs_answer_clicks() {
+        let mut app = MindMapApp::new();
+        assert_eq!(click_on(&mut app, |a| a.plus_rect()), EventResult::Consumed);
+        assert_eq!(app.maps.len(), 2);
+        assert_eq!(app.active_map, 1);
+        assert_eq!(click_on(&mut app, |a| a.tab_rect(0)), EventResult::Consumed);
+        assert_eq!(app.active_map, 0);
+        assert_eq!(
+            click_on(&mut app, |a| a.tab_rect(0)),
+            EventResult::Ignored,
+            "a click on the tab showing is not a change"
+        );
+        // A changed map's mark asks first, about that map.
+        app.handle_event(&press(Key::Tab));
+        let id = app.active_map_ref().id;
+        app.switch_map(1);
+        click_on(&mut app, |a| a.tab_close_rect(0));
+        assert_eq!(
+            app.question.as_ref().map(Question::pending),
+            Some(CloseScope::Map(id))
+        );
+        assert_eq!(app.active_map_ref().id, id, "asked without showing the map");
+        app.handle_event(&press(Key::D));
+        assert_eq!(app.maps.len(), 1);
+        // A click on the tabs is never a click on the map.
+        let selected = app.selected_node;
+        let (x, _, w, _) = app.plus_rect();
+        click(&mut app, (x + w + 200.0, TOOLBAR_HEIGHT + 10.0));
+        assert_eq!(app.selected_node, selected);
+        assert!(
+            matches!(app.drag, DragState::None),
+            "a click on the tab strip started a pan"
+        );
+    }
+
+    /// Every toolbar button does what its key does. They were drawn and
+    /// answered nothing.
+    #[test]
+    fn the_toolbar_buttons_answer_clicks() {
+        let rects = toolbar_button_rects();
+        let at = |action: ToolbarAction| {
+            let i = TOOLBAR_BUTTONS
+                .iter()
+                .position(|(_, a)| *a == action)
+                .expect("a button");
+            centre(rects[i])
+        };
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        assert_eq!(
+            click(&mut app, at(ToolbarAction::AddChild)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.active_map_ref().node_count(), 2);
+        assert_eq!(
+            click(&mut app, at(ToolbarAction::AddSibling)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.active_map_ref().node_count(), 3);
+        assert_eq!(
+            click(&mut app, at(ToolbarAction::Delete)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.active_map_ref().node_count(), 2);
+        assert_eq!(
+            click(&mut app, at(ToolbarAction::Undo)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.active_map_ref().node_count(), 3);
+        assert_eq!(
+            click(&mut app, at(ToolbarAction::Redo)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.active_map_ref().node_count(), 2);
+        let zoom = app.zoom;
+        click(&mut app, at(ToolbarAction::ZoomIn));
+        assert!(app.zoom > zoom);
+        click(&mut app, at(ToolbarAction::ZoomOut));
+        assert!((app.zoom - zoom).abs() < 1e-4);
+        let root = app.active_map_ref().root_id;
+        app.active_map_mut().move_node(root, 1.0, 1.0);
+        click(&mut app, at(ToolbarAction::Layout));
+        assert_ne!(app.active_map_ref().node(root).map(|n| n.x), Some(1.0));
+        assert_eq!(
+            click(&mut app, at(ToolbarAction::Save)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.picker_for, PickerFor::Save(app.active_map_ref().id));
+        app.picker.close();
+        assert_eq!(
+            click(&mut app, at(ToolbarAction::Open)),
+            EventResult::Consumed
+        );
+        assert!(app.picker.is_open());
+        assert_eq!(app.picker_for, PickerFor::Open);
+        // No two buttons share a pixel.
+        for pair in rects.windows(2) {
+            assert!(
+                pair[0].0 + pair[0].2 <= pair[1].0,
+                "buttons overlap: {pair:?}"
+            );
+        }
+    }
+
+    /// Ctrl+Tab goes round the maps, Ctrl+Shift+Tab back.
+    #[test]
+    fn ctrl_tab_goes_round_the_maps() {
+        let mut app = MindMapApp::new();
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::Tab)),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            app.active_map_ref().node_count(),
+            1,
+            "Ctrl+Tab added a child"
+        );
+        app.add_map();
+        app.add_map();
+        assert_eq!(app.active_map, 2);
+        app.handle_event(&press_ctrl(Key::Tab));
+        assert_eq!(app.active_map, 0);
+        app.handle_event(&press_ctrl_shift(Key::Tab));
+        assert_eq!(app.active_map, 2);
+        app.handle_event(&press_ctrl_shift(Key::Tab));
+        assert_eq!(app.active_map, 1);
+        app.handle_event(&press_ctrl(Key::N));
+        assert_eq!(app.maps.len(), 4);
+        assert_eq!(app.active_map, 3);
+    }
+
+    /// A press on the sidebar or the status line is not one on empty canvas.
+    #[test]
+    fn a_press_beside_the_canvas_keeps_the_selection() {
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        assert_eq!(click(&mut app, (20.0, 300.0)), EventResult::Ignored);
+        let status_line = app.win_height - 5.0;
+        assert_eq!(click(&mut app, (600.0, status_line)), EventResult::Ignored);
+        assert_eq!(app.selected_node, Some(root));
+        assert!(matches!(app.drag, DragState::None));
     }
 }

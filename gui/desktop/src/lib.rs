@@ -10325,6 +10325,7 @@ impl DesktopShell {
     pub fn any_popup_open(&self) -> bool {
         self.desktop_menu.is_visible()
             || self.tray_overflow_menu.is_some()
+            || self.pin_menu.is_some()
             || self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
@@ -10344,6 +10345,7 @@ impl DesktopShell {
         let any = self.any_popup_open();
         self.desktop_menu.hide();
         self.tray_overflow_menu = None;
+        self.pin_menu = None;
         // Through the one exit, which also ends a drag from the menu: Escape
         // in the middle of carrying a program used to close the menu and
         // leave the drag to finish on the release.
@@ -18065,6 +18067,32 @@ mod taskbar_pin_tests {
         let mut window = WindowInfo::new(id, id, title.to_string());
         window.app_id = app_id.to_string();
         window
+    }
+
+    /// **A program's menu is a popup like the others**: open, it counts as
+    /// one -- so Escape is held for it -- and dismissing the popups closes it.
+    #[test]
+    fn a_programs_menu_is_a_popup_like_the_others() {
+        with_scratch_config("shell-pin-menu-popup", |_root| {
+            let mut shell = shell();
+            shell.pin_app(super::launcher::TERMINAL, "Terminal");
+            assert!(!shell.any_popup_open());
+            let (x, y) = button_centre(&shell, 0);
+            shell.handle_press(x, y, MouseButton::Right);
+            assert!(
+                shell.render_pin_menu().is_some(),
+                "the premise: the menu opened"
+            );
+            assert!(
+                shell.any_popup_open(),
+                "an open program menu is not a popup"
+            );
+            assert!(shell.dismiss_popups(), "dismissing found nothing open");
+            assert!(
+                shell.render_pin_menu().is_none(),
+                "dismissing left the menu open"
+            );
+        });
     }
 
     /// **A pinned program's window has its own button, right of the pins,

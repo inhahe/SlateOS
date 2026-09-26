@@ -1726,7 +1726,83 @@ impl<T: Transport> ShellSession<T> {
         let bar = self.shell.render_taskbar();
         self.send_frame(self.panel, &bar)?;
 
-        let open = self.popups_open();
+        // What the popup surface shows: every part with anything to draw,
+        // bottom to top. Alt-Tab near the top: it is modal, and while it is up
+        // it belongs over whatever was already open rather than under it.
+        //
+        // The surface is mapped exactly when a part draws -- asked of the
+        // parts themselves, not of a second list of what might be open. That
+        // list drifted from this one: it named neither the pin menu nor the
+        // tray's overflow list, so until 2026-09-26 the first was never drawn
+        // and the second was drawn on a surface nobody could see. And a
+        // surface mapped with nothing on it is a full-screen sheet that eats
+        // every click on the desktop.
+        let parts: Vec<RenderTree> = [
+            // The overview first, because it is the only part that covers
+            // the whole screen and dims what is behind it: anything drawn
+            // under it would be dimmed twice and read as a smudge. It is
+            // mutually exclusive with the rest in practice (`dismiss_popups`
+            // closes it, and opening it closes them), so like the three
+            // below this ordering states an invariant rather than resolves
+            // a case that arises.
+            self.shell.render_overview(),
+            self.shell.render_start_menu(),
+            self.shell.render_calendar(),
+            // Over the menus, under Alt-Tab: opening the tiling overlay
+            // dismisses them (`toggle_zone_overlay`), so the order between
+            // the three above is a statement of the invariant rather than a
+            // case that arises.
+            self.shell.render_zone_overlay(),
+            // Over both of the full-screen overlays above, because both dim
+            // what is behind them and a reference card read through a scrim
+            // is a reference card the user opened for nothing — and neither
+            // one closes the card, so this is a case that genuinely arises
+            // rather than an invariant. Under Alt-Tab for the same reason
+            // the menus are: Alt+Tab leaves the card open, and the switcher
+            // is modal while it is up.
+            // Over the menus and under Alt-Tab, with the rest of the
+            // popups. It cannot be on screen beside any of them --
+            // `open_desktop_menu` dismisses everything first, and any other
+            // popup opening dismisses it -- so this position states that
+            // invariant rather than resolving a case.
+            self.shell.render_desktop_menu(),
+            // Beside the desktop menu, and for the same reason: it is a
+            // popup over the bar, and opening it dismisses every other one.
+            self.shell.render_tray_overflow(),
+            // A program's menu -- its jump list, pinning, a shortcut -- from
+            // its tile or its start menu row. Beside the other menus, and
+            // for their reason: opening one dismisses the rest.
+            self.shell.render_pin_menu(),
+            self.shell.render_shortcut_card(),
+            self.shell.render_alt_tab(),
+            // Last of all, over Alt-Tab too, and for the opposite reason to
+            // the overview: the pane's scrim dims what is *behind* it, and
+            // the pane itself is a column that leaves most of the screen
+            // showing. Drawn earlier it would be the thing dimmed, by its
+            // own scrim, under a switcher it is supposed to be in front of.
+            self.shell.render_notifications(),
+            // Last of all. The Run box is the shell's only modal dialog:
+            // while it is up it owns the keyboard
+            // (`DesktopShell::handle_hotkey`) and every press
+            // (`handle_mouse`), and a surface that owns the input has to be
+            // the surface on top or the user is typing into something they
+            // cannot see. Nothing else is open underneath it in practice —
+            // opening it dismisses the popups — so this states the invariant
+            // rather than resolving a case that arises.
+            self.shell.render_run_dialog(),
+            // Over even the Run box, and this one *is* a case that arises
+            // rather than an invariant: the chooser is raised from the box
+            // and the box stays up underneath it, so that cancelling
+            // returns the user to the command line they had typed. The
+            // input routing agrees — `handle_mouse_inner` and
+            // `handle_hotkey_inner` both offer the chooser every event
+            // before the box sees one.
+            self.shell.render_run_browser(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let open = !parts.is_empty();
         if open != self.popups_shown {
             if let Some(mut handle) = self.events.window_mut(self.popups.window) {
                 handle.set_visible(open)?;
@@ -1735,69 +1811,7 @@ impl<T: Transport> ShellSession<T> {
         }
         if open {
             let mut tree = RenderTree::new();
-            // Alt-Tab last: it is modal, and while it is up it belongs over
-            // whatever was already open rather than under it.
-            for part in [
-                // The overview first, because it is the only part that covers
-                // the whole screen and dims what is behind it: anything drawn
-                // under it would be dimmed twice and read as a smudge. It is
-                // mutually exclusive with the rest in practice (`dismiss_popups`
-                // closes it, and opening it closes them), so like the three
-                // below this ordering states an invariant rather than resolves
-                // a case that arises.
-                self.shell.render_overview(),
-                self.shell.render_start_menu(),
-                self.shell.render_calendar(),
-                // Over the menus, under Alt-Tab: opening the tiling overlay
-                // dismisses them (`toggle_zone_overlay`), so the order between
-                // the three above is a statement of the invariant rather than a
-                // case that arises.
-                self.shell.render_zone_overlay(),
-                // Over both of the full-screen overlays above, because both dim
-                // what is behind them and a reference card read through a scrim
-                // is a reference card the user opened for nothing — and neither
-                // one closes the card, so this is a case that genuinely arises
-                // rather than an invariant. Under Alt-Tab for the same reason
-                // the menus are: Alt+Tab leaves the card open, and the switcher
-                // is modal while it is up.
-                // Over the menus and under Alt-Tab, with the rest of the
-                // popups. It cannot be on screen beside any of them --
-                // `open_desktop_menu` dismisses everything first, and any other
-                // popup opening dismisses it -- so this position states that
-                // invariant rather than resolving a case.
-                self.shell.render_desktop_menu(),
-                // Beside the desktop menu, and for the same reason: it is a
-                // popup over the bar, and opening it dismisses every other one.
-                self.shell.render_tray_overflow(),
-                self.shell.render_shortcut_card(),
-                self.shell.render_alt_tab(),
-                // Last of all, over Alt-Tab too, and for the opposite reason to
-                // the overview: the pane's scrim dims what is *behind* it, and
-                // the pane itself is a column that leaves most of the screen
-                // showing. Drawn earlier it would be the thing dimmed, by its
-                // own scrim, under a switcher it is supposed to be in front of.
-                self.shell.render_notifications(),
-                // Last of all. The Run box is the shell's only modal dialog:
-                // while it is up it owns the keyboard
-                // (`DesktopShell::handle_hotkey`) and every press
-                // (`handle_mouse`), and a surface that owns the input has to be
-                // the surface on top or the user is typing into something they
-                // cannot see. Nothing else is open underneath it in practice —
-                // opening it dismisses the popups — so this states the invariant
-                // rather than resolving a case that arises.
-                self.shell.render_run_dialog(),
-                // Over even the Run box, and this one *is* a case that arises
-                // rather than an invariant: the chooser is raised from the box
-                // and the box stays up underneath it, so that cancelling
-                // returns the user to the command line they had typed. The
-                // input routing agrees — `handle_mouse_inner` and
-                // `handle_hotkey_inner` both offer the chooser every event
-                // before the box sees one.
-                self.shell.render_run_browser(),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            for part in parts {
                 tree.commands.extend(part.commands);
             }
             self.send_frame(self.popups, &tree)?;
@@ -1847,24 +1861,6 @@ impl<T: Transport> ShellSession<T> {
     fn send_frame(&mut self, surface: Surface, tree: &RenderTree) -> Result<(), Error<T>> {
         self.upload_icons(surface.window, tree)?;
         self.events.submit(surface.window, &surface.localize(tree))
-    }
-
-    /// Whether anything the popup surface exists to show is showing.
-    ///
-    /// The power menu is not consulted: it is a submenu of the start menu and
-    /// `DesktopShell` keeps it closed whenever the start menu is
-    /// (`close_start_menu`), so a `power_menu_open` term here could only ever
-    /// be redundant — or, if that invariant broke, could hide the break.
-    fn popups_open(&self) -> bool {
-        self.shell.start_menu_open
-            || self.shell.calendar.visible
-            || self.shell.notifications.pane_state().is_visible()
-            || self.shell.alt_tab_active
-            || self.shell.snap.is_overlay_visible()
-            || self.shell.overview.visible
-            || self.shell.run_dialog.is_visible()
-            || self.shell.shortcut_card_open
-            || self.shell.desktop_menu.is_visible()
     }
 
     /// Handle everything waiting, without blocking. Reports whether anything

@@ -512,6 +512,127 @@ fn the_menu_surface_is_unmapped_while_no_menu_is_open() {
     );
 }
 
+/// **A program's menu is drawn.** Right-clicking a pinned tile opened the
+/// menu -- its jump list, Unpin, Pin to Start menu, Add to desktop -- in the
+/// shell's model, and nothing drew it: the session's list of what the popup
+/// surface shows had no entry for it, and its list of when to map the surface
+/// did not name it either. Found 2026-09-26, eleven days after the menu.
+#[test]
+fn right_clicking_a_pinned_tile_draws_its_menu() {
+    settingsfile::testing::with_scratch_config("session-pin-menu-drawn", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let popups = session.popups().window();
+        session
+            .shell_mut()
+            .pin_app(crate::launcher::TERMINAL, "Terminal");
+        session.pump().expect("pump");
+        let tile = session.shell().taskbar_button_rect(0);
+        let before = desktop.borrow().seen.len();
+        let frames = frames_on(&desktop, popups);
+
+        right_click_at(
+            &desktop,
+            session.panel(),
+            tile.x + tile.w / 2.0,
+            tile.y + tile.h / 2.0,
+        );
+        session.pump().expect("pump");
+
+        assert!(
+            session.shell().render_pin_menu().is_some(),
+            "the premise: the right-click opened the menu"
+        );
+        // The menu is the only thing open, so a surface mapped and drawn now
+        // is the menu's.
+        assert!(
+            desktop.borrow().seen[before..].iter().any(|r| r.body
+                == RequestBody::SetVisible {
+                    window: popups,
+                    visible: true
+                }),
+            "the menu opened with nothing to draw it on"
+        );
+        assert!(
+            frames_on(&desktop, popups) > frames,
+            "nothing was drawn on the popup surface"
+        );
+        let (_, commands) = desktop
+            .borrow_mut()
+            .drawn()
+            .into_iter()
+            .rfind(|(w, _)| *w == popups)
+            .expect("nothing was drawn on the popup surface");
+        assert!(
+            commands > 2,
+            "the popup surface got only its translation wrapper, not the menu"
+        );
+
+        // And Escape takes it, and the surface, away again.
+        let before = desktop.borrow().seen.len();
+        desktop
+            .borrow_mut()
+            .send_input(&[InputEvent::new(popups, key(Key::Escape))]);
+        session.pump().expect("pump");
+        assert!(
+            session.shell().render_pin_menu().is_none(),
+            "Escape left the menu open"
+        );
+        assert!(
+            desktop.borrow().seen[before..].iter().any(|r| r.body
+                == RequestBody::SetVisible {
+                    window: popups,
+                    visible: false
+                }),
+            "the menu closed and left its surface covering the desktop"
+        );
+    });
+}
+
+/// **The tray's overflow list is seen.** It was drawn -- onto the popup
+/// surface, which was mapped only for the things on a second list, and the
+/// list was not on it. So the chevron opened a list nobody could see.
+#[test]
+fn the_trays_overflow_list_is_put_on_the_screen() {
+    let (mut session, desktop, _turn) = session();
+    let popups = session.popups().window();
+    let icons: Vec<guiremote::tray::TrayIcon> = (1..=200)
+        .map(|id| guiremote::tray::TrayIcon {
+            owner: 99,
+            id,
+            glyph: "T".to_string(),
+            tooltip: format!("Program {id}"),
+        })
+        .collect();
+    session.shell_mut().apply_tray_icons(icons);
+    session.pump().expect("pump");
+    let chevron = session
+        .shell()
+        .tray_overflow_rect()
+        .expect("the premise: two hundred icons overflow the tray");
+    let before = desktop.borrow().seen.len();
+
+    press_at(
+        &desktop,
+        session.panel(),
+        chevron.x + chevron.w / 2.0,
+        chevron.y + chevron.h / 2.0,
+    );
+    session.pump().expect("pump");
+
+    assert!(
+        session.shell().render_tray_overflow().is_some(),
+        "the premise: the press opened the list"
+    );
+    assert!(
+        desktop.borrow().seen[before..].iter().any(|r| r.body
+            == RequestBody::SetVisible {
+                window: popups,
+                visible: true
+            }),
+        "the overflow list opened on a surface nobody can see"
+    );
+}
+
 #[test]
 fn closing_the_last_menu_takes_the_surface_away_again() {
     let (mut session, desktop, _turn) = session();

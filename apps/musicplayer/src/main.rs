@@ -73,7 +73,7 @@ const FALLBACK_SEED: u64 = 0x4D55_5349_4350_4C52;
 /// thing it does. Found by `scripts/find-stale-admissions.py`.
 const CANNOT_PLAY_LINES: [&str; 3] = [
     "This player has no music library.",
-    "Ctrl+O opens an M3U playlist and Ctrl+S saves one, but nothing here decodes audio, so a track can be listed and never played.",
+    "Ctrl+O opens an M3U playlist or adds a song, and Ctrl+S saves the list, but nothing here decodes audio, so a track can be listed and never played.",
     "The library is empty because this is unfinished, not because the player is broken.",
 ];
 
@@ -960,6 +960,14 @@ impl PlayerState {
     /// length read from its file.
     pub fn load_m3u_from(&mut self, content: &str, folder: Option<&std::path::Path>) {
         self.clear_playlist();
+        self.add_m3u_from(content, folder);
+    }
+
+    /// The tracks an M3U lists, after those the playlist already has, read as
+    /// [`load_m3u_from`](Self::load_m3u_from) reads them. Returns how many
+    /// were added.
+    pub fn add_m3u_from(&mut self, content: &str, folder: Option<&std::path::Path>) -> usize {
+        let before = self.playlist.len();
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -977,6 +985,15 @@ impl PlayerState {
             let mut track = Track::from_path(path);
             track.read_facts();
             self.playlist.push(track);
+        }
+        self.playlist.len().saturating_sub(before)
+    }
+
+    /// Make the first of the tracks from `index` on the current one, if none
+    /// is: a song opened by name is the one the window shows.
+    fn show_from(&mut self, index: usize) {
+        if self.current_track_index.is_none() && index < self.playlist.len() {
+            self.current_track_index = Some(index);
         }
     }
 }
@@ -1976,6 +1993,79 @@ pub fn open_playlist(state: &mut PlayerState, path: &std::path::Path) -> String 
     }
 }
 
+/// Whether `path` names a playlist rather than a song. By its extension,
+/// because nothing else says so: an M3U is lines of text with no mark of its
+/// own.
+fn is_playlist(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("m3u") || e.eq_ignore_ascii_case("m3u8"))
+}
+
+/// Add the song at `path` to the playlist, read for its tags and length, and
+/// say what happened.
+///
+/// Any file is taken: a format the tag readers do not know -- an M4A, say,
+/// which the associations send here -- is still the file the user asked for,
+/// listed by its name.
+pub fn add_song(state: &mut PlayerState, path: &std::path::Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(md) if md.is_dir() => format!("Could not add {}: it is a folder", path.display()),
+        Ok(_) => {
+            let mut track = Track::from_path(path.to_path_buf());
+            track.read_facts();
+            let title = track.title.clone();
+            state.playlist.push(track);
+            state.show_from(state.playlist.len().saturating_sub(1));
+            format!("Added {title}")
+        }
+        Err(err) => format!("Could not add {}: {err}", path.display()),
+    }
+}
+
+/// Add the tracks of the playlist at `path` after those already listed, and
+/// say what happened.
+pub fn add_playlist(state: &mut PlayerState, path: &std::path::Path) -> String {
+    match safeio::read_to_string_capped(path, MAX_M3U_BYTES) {
+        Ok(read) => {
+            let note = read.note(MAX_M3U_BYTES);
+            let first = state.playlist.len();
+            let added = state.add_m3u_from(&read.text, path.parent());
+            state.show_from(first);
+            format!("{note}Added {added} track(s) from {}", path.display())
+        }
+        Err(err) => format!("Could not read {}: {err}", path.display()),
+    }
+}
+
+/// List every song and every playlist's tracks named on the command line --
+/// the file manager's "open with" names one -- and say what happened to each.
+pub fn open_arguments(state: &mut PlayerState, paths: &[String]) -> String {
+    paths
+        .iter()
+        .map(|arg| {
+            let path = std::path::Path::new(arg);
+            if is_playlist(path) {
+                add_playlist(state, path)
+            } else {
+                add_song(state, path)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// What the open picker's choice does: a playlist replaces the list, a song
+/// joins it. Every pick was read as a playlist, so a song chosen with Ctrl+O
+/// was "Could not read: stream did not contain valid UTF-8".
+fn open_picked(state: &mut PlayerState, path: &std::path::Path) -> String {
+    if is_playlist(path) {
+        open_playlist(state, path)
+    } else {
+        add_song(state, path)
+    }
+}
+
 /// Write the playlist to `path`, and say what happened.
 pub fn save_playlist(state: &PlayerState, path: &std::path::Path) -> String {
     let export = state.export_m3u();
@@ -2012,7 +2102,7 @@ pub fn handle_event(state: &mut PlayerState, event: &Event) -> bool {
             state.status_message = if state.picker_saves {
                 save_playlist(state, &path)
             } else {
-                open_playlist(state, &path)
+                open_picked(state, &path)
             };
             return true;
         }
@@ -2596,9 +2686,25 @@ impl App for PlayerState {
 }
 
 fn main() -> ExitCode {
-    // Opens empty. It used to call `load_demo_library`.
+    // Opens empty, or on what it is given. It used to call
+    // `load_demo_library`.
+    //
+    // Parsed here rather than by `app::launch`, which refuses every argument
+    // but `--display`: the file manager opens a song here by naming it, and the
+    // refusal ended the player -- "exit 2, unexpected argument" on a stderr
+    // nobody sees -- before its window opened.
+    let args = match app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("musicplayer: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let mut state = PlayerState::new();
-    app::launch("musicplayer", &mut state)
+    if !args.rest.is_empty() {
+        state.status_message = open_arguments(&mut state, &args.rest);
+    }
+    app::launch_with("musicplayer", args.display.as_deref(), &mut state)
 }
 
 /// A handful of tracks, for tests.
@@ -3775,6 +3881,72 @@ mod tests {
             .collect();
         assert_eq!(paths, vec!["/music/one.mp3", "/music/two.mp3"]);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file manager opens a song here by naming it: every song and every
+    /// playlist named is listed, the first becomes the one the window shows,
+    /// and a name that is not there is said to be so.
+    #[test]
+    fn the_songs_and_playlists_named_on_the_command_line_are_listed() {
+        let dir = mp_scratch("args");
+        let song = dir.join("song.mp3");
+        std::fs::write(&song, audiotags::testing::mp3(40, &[(b"TIT2", "Named")])).unwrap();
+        std::fs::write(dir.join("list.m3u"), "#EXTM3U\nsong.mp3\nsong.mp3\n").unwrap();
+        let arg = |p: PathBuf| p.to_str().expect("a text path").to_owned();
+
+        let mut state = PlayerState::new();
+        let said = open_arguments(
+            &mut state,
+            &[
+                arg(song.clone()),
+                arg(dir.join("list.m3u")),
+                arg(dir.join("gone.mp3")),
+            ],
+        );
+        let titles: Vec<&str> = state.playlist.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["Named", "Named", "Named"], "{said}");
+        assert_eq!(
+            state.current_track_index,
+            Some(0),
+            "the first is the one shown"
+        );
+        assert!(said.contains("Added Named"), "{said}");
+        assert!(said.contains("Added 2 track(s)"), "{said}");
+        assert!(said.contains("Could not add"), "{said}");
+        assert!(said.contains("gone.mp3"), "{said}");
+
+        let mut folder = PlayerState::new();
+        assert!(add_song(&mut folder, &dir).contains("it is a folder"));
+        assert!(folder.playlist.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl+O's choice: a song joins the list, a playlist replaces it. Every
+    /// pick was read as a playlist, so a song could not be opened at all.
+    #[test]
+    fn a_song_picked_to_open_joins_the_list_and_a_playlist_replaces_it() {
+        let dir = mp_scratch("picked");
+        let song = dir.join("Song.MP3");
+        std::fs::write(&song, audiotags::testing::mp3(40, &[(b"TIT2", "Picked")])).unwrap();
+        let list = dir.join("list.M3U8");
+        std::fs::write(&list, "Song.MP3\n").unwrap();
+
+        let mut state = PlayerState::new();
+        state
+            .playlist
+            .push(Track::from_path(PathBuf::from("/music/already.mp3")));
+        let said = open_picked(&mut state, &song);
+        assert_eq!(state.playlist.len(), 2, "{said}");
+        assert_eq!(state.playlist[1].title, "Picked");
+
+        let said = open_picked(&mut state, &list);
+        assert_eq!(
+            state.playlist.len(),
+            1,
+            "a playlist replaces the list: {said}"
+        );
+        assert_eq!(state.playlist[0].title, "Picked");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

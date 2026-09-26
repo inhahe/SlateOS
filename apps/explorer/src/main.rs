@@ -5689,17 +5689,62 @@ pub(crate) fn guarded_scratch(label: &str) -> scratchdir::ScratchDir {
 }
 
 fn main() -> std::process::ExitCode {
-    // The folder to open, then the home directory, then the root. A path given
-    // on the command line is what makes "open containing folder" possible from
-    // anywhere else in the desktop.
-    let start_path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/"));
+    // A path given on the command line is what makes "open containing folder"
+    // possible from anywhere else in the desktop.
+    //
+    // Parsed by `Args` and handed to `launch_with`. It was read as
+    // `args_os().nth(1)` and then `launch` was called -- which parses the same
+    // command line, found the path left over, and refused it: "exit 2,
+    // unexpected argument", before the window opened. Every "open containing
+    // folder" and every association that sends a file here opened nothing.
+    let args = match oswindow::app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("explorer: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut explorer = explorer_for(&args.rest, home);
+    oswindow::app::launch_with("explorer", args.display.as_deref(), &mut explorer)
+}
 
-    let mut explorer = ExplorerState::new(&start_path);
-    oswindow::app::launch("explorer", &mut explorer)
+/// The window a command line asks for.
+///
+/// A folder named opens on that folder. A file named opens on the folder it
+/// is in, with the file selected: "show in folder", and what the associations
+/// that send an archive or a disk image here mean. Nothing named opens on
+/// `home`, then the root. A window shows one folder, so a second path named is
+/// said not to have been opened rather than dropped without a word.
+fn explorer_for(paths: &[String], home: Option<PathBuf>) -> ExplorerState {
+    let Some((first, rest)) = paths.split_first() else {
+        return ExplorerState::new(&home.unwrap_or_else(|| PathBuf::from("/")));
+    };
+    let named = PathBuf::from(first);
+    // Made absolute, so the path bar and the history hold where the window
+    // is rather than where it was started from. It fails only when the
+    // working directory cannot be read, and then the path as given is the
+    // best there is: the listing names it if it cannot be read either.
+    let named = std::path::absolute(&named).unwrap_or(named);
+    let mut state = match (named.is_file(), named.parent(), named.file_name()) {
+        (true, Some(folder), Some(name)) => {
+            let mut state = ExplorerState::new(folder);
+            if let Some(index) = state
+                .entries
+                .iter()
+                .position(|e| e.path.file_name() == Some(name))
+            {
+                state.move_selection_to(index);
+            }
+            state
+        }
+        // A folder, or nothing there at all: the listing says which.
+        _ => ExplorerState::new(&named),
+    };
+    if !rest.is_empty() {
+        state.status_message = format!("{} more not opened: a window shows one folder", rest.len());
+    }
+    state
 }
 
 // ============================================================================
@@ -6035,6 +6080,48 @@ mod tests {
             ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));
         state.queue_thumbnails();
         state
+    }
+
+    /// A path on the command line: a folder opens on itself, a file on its
+    /// folder with it selected, and nothing on home. It opened no window at
+    /// all -- `launch` refused the path as an unexpected argument.
+    #[test]
+    fn a_path_on_the_command_line_opens_its_folder() {
+        let scratch = temp_dir("command_line");
+        let dir = scratch.dir().to_path_buf();
+        fs::create_dir_all(dir.join("inner")).expect("mkdir");
+        write(&dir.join("a.txt"), "a");
+        write(&dir.join("b.txt"), "b");
+        let text = |p: &Path| p.to_str().expect("a text path").to_owned();
+        let _turn = settingsfile::testing::config_turn();
+
+        let folder = explorer_for(&[text(&dir.join("inner"))], None);
+        assert_eq!(folder.current_path, dir.join("inner"));
+        assert!(folder.selected_indices.is_empty());
+
+        let file = explorer_for(&[text(&dir.join("b.txt"))], None);
+        assert_eq!(file.current_path, dir, "a file opens on its folder");
+        let selected: Vec<&str> = file
+            .selected_indices
+            .iter()
+            .map(|&i| file.entries[i].name.as_str())
+            .collect();
+        assert_eq!(selected, ["b.txt"], "with the file selected");
+
+        let two = explorer_for(&[text(&dir), text(&dir.join("a.txt"))], None);
+        assert_eq!(two.current_path, dir);
+        assert!(
+            two.status_message.contains("1 more not opened"),
+            "{}",
+            two.status_message
+        );
+
+        let home = explorer_for(&[], Some(dir.join("inner")));
+        assert_eq!(
+            home.current_path,
+            dir.join("inner"),
+            "nothing named opens on home"
+        );
     }
 
     /// A directory holding `n` files, so a listing can be longer than a window.

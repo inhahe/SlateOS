@@ -3584,20 +3584,50 @@ impl Probe for AppState {
 }
 
 fn main() -> ExitCode {
-    let mut state = AppState::default();
     // A path on the command line is the file manager's "open with" and the
     // shell's `archivemanager foo.zip`. Without one the window comes up
     // empty rather than showing a demo: a fabricated archive on screen looks
     // exactly like a real one, and the first thing a user would do is press
     // Extract on files that do not exist.
-    match std::env::args_os().nth(1) {
-        // A failure has already put its reason in the status line, and the
-        // window still opens: refusing to start because one argument would not
-        // read leaves the user with no way to pick another file.
-        Some(arg) => drop(state.open_path(Path::new(&arg))),
-        None => state.status_message = state.status_text(),
+    //
+    // Parsed by `Args` and handed to `launch_with`. It was read as
+    // `args_os().nth(1)` and then `app::launch` was called -- which parses the
+    // same command line, found the path left over, and refused it: "exit 2,
+    // unexpected argument", before the window opened. The file manager's "open
+    // with" opened nothing at all, and a path of `--display` was taken as a
+    // path.
+    let args = match app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("archivemanager: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut state = AppState::default();
+    open_arguments(&mut state, &args.rest);
+    app::launch_with("archivemanager", args.display.as_deref(), &mut state)
+}
+
+/// Open the archive named on the command line.
+///
+/// A failure has already put its reason in the status line, and the window
+/// still opens: refusing to start because one argument would not read leaves
+/// the user with no way to pick another file. A window holds one archive, so
+/// a second one named is said not to have been opened rather than dropped
+/// without a word.
+fn open_arguments(state: &mut AppState, paths: &[String]) {
+    let Some((first, rest)) = paths.split_first() else {
+        state.status_message = state.status_text();
+        return;
+    };
+    state.open_path(Path::new(first));
+    if !rest.is_empty() {
+        state.status_message = format!(
+            "{} -- {} more not opened: a window holds one archive",
+            state.status_message,
+            rest.len()
+        );
     }
-    app::launch("archivemanager", &mut state)
 }
 
 // ============================================================================
@@ -5703,6 +5733,41 @@ mod tests {
             "status was {:?}",
             state.status_message
         );
+    }
+
+    /// The file manager opens an archive here by naming it on the command
+    /// line. One window holds one archive: a second named is said not to have
+    /// been opened, and nothing named leaves the window empty and saying so.
+    #[test]
+    fn the_archive_named_on_the_command_line_is_opened() {
+        let dir = write_scratch("args");
+        let path = dir.join("named.zip");
+        std::fs::write(&path, ziparchive::create(&[])).expect("write a fixture");
+        let named = path.to_str().expect("a text path").to_owned();
+
+        let mut state = AppState::default();
+        open_arguments(&mut state, std::slice::from_ref(&named));
+        assert!(state.archive.is_some(), "{}", state.status_message);
+        assert!(
+            !state.status_message.contains("not opened"),
+            "{}",
+            state.status_message
+        );
+
+        let mut two = AppState::default();
+        open_arguments(&mut two, &[named.clone(), named]);
+        assert!(two.archive.is_some());
+        assert!(
+            two.status_message.contains("1 more not opened"),
+            "{}",
+            two.status_message
+        );
+
+        let mut none = AppState::default();
+        open_arguments(&mut none, &[]);
+        assert!(none.archive.is_none());
+        assert_eq!(none.status_message, none.status_text());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

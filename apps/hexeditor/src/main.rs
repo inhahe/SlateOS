@@ -2846,17 +2846,14 @@ impl HexEditor {
     /// is a real offset in a file that has different bytes there.
     pub fn open_path(&mut self, path: &std::path::Path) -> String {
         let shown = path.display().to_string();
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
+        // Read only as far as the cap. `std::fs::read` took the whole file and
+        // cut it afterwards, so the four-gigabyte file the cap exists for was
+        // read into memory in full before a byte of it was thrown away.
+        let read = match safeio::read_capped(path, MAX_OPEN_BYTES) {
+            Ok(read) => read,
             Err(err) => return format!("Could not read {shown}: {err}"),
         };
-        let whole = bytes.len();
-        let truncated = whole > MAX_OPEN_BYTES;
-        let data = if truncated {
-            bytes.get(..MAX_OPEN_BYTES).unwrap_or(&bytes).to_vec()
-        } else {
-            bytes
-        };
+        let (whole, truncated, data) = (read.whole, read.truncated, read.bytes);
         let len = data.len();
         let doc = HexDocument::from_file(path, data, truncated.then_some(whole));
 
@@ -3979,9 +3976,38 @@ fn main() -> ExitCode {
     // A hex editor is for looking at a particular file's actual bytes. There
     // is no version of that a synthetic buffer satisfies, which is why this one
     // starts on an empty document and says how to open something instead.
+    //
+    // The arguments are parsed here rather than by `app::launch`, which
+    // refuses every argument but `--display`: the file manager opens a file
+    // in this program by naming it, and the refusal ended the program -- "exit
+    // 2, unexpected argument" on a stderr nobody sees -- before its window
+    // opened.
+    let args = match app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("hexeditor: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let mut editor = HexEditor::new(1200.0, 800.0);
-    editor.last_open = Some(String::from("Press Ctrl+O to open a file"));
-    app::launch("hexeditor", &mut editor)
+    editor.last_open = Some(open_arguments(&mut editor, &args.rest));
+    app::launch_with("hexeditor", args.display.as_deref(), &mut editor)
+}
+
+/// Open each file named on the command line, a tab each, and say what
+/// happened to every one; with none, how to open something.
+///
+/// Every message is kept: a file that could not be read is named even when
+/// one after it opened, so the window does not report only the last success.
+fn open_arguments(editor: &mut HexEditor, paths: &[String]) -> String {
+    if paths.is_empty() {
+        return String::from("Press Ctrl+O to open a file");
+    }
+    paths
+        .iter()
+        .map(|path| editor.open_path(std::path::Path::new(path)))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The most of a file one open will read.
@@ -4631,6 +4657,33 @@ mod tests {
     /// Every offset past the cut is a real offset in a file that has different
     /// bytes there, so a silent truncation is a view that lies about a
     /// specific address -- worse than refusing the file outright.
+    /// The file manager opens a file here by naming it on the command line:
+    /// each one named opens in a tab of its own, and a file that cannot be read
+    /// is said to be so beside the ones that opened.
+    #[test]
+    fn the_files_named_on_the_command_line_are_opened() {
+        let one = Scratch::with("arg-one", b"one");
+        let two = Scratch::with("arg-two", b"second");
+        let missing = one.0.with_extension("not-there");
+        let mut editor = HexEditor::new(1200.0, 800.0);
+        let paths: Vec<String> = [&one.0, &missing, &two.0]
+            .iter()
+            .map(|p| p.to_str().expect("a text path").to_owned())
+            .collect();
+        let said = open_arguments(&mut editor, &paths);
+        assert_eq!(editor.documents.len(), 2, "one tab per file that opened");
+        assert_eq!(editor.documents[0].data, b"one");
+        assert_eq!(editor.documents[1].data, b"second");
+        assert!(said.contains("Could not read"), "{said}");
+        assert!(said.contains("(6 bytes)"), "{said}");
+
+        let mut empty = HexEditor::new(1200.0, 800.0);
+        assert_eq!(
+            open_arguments(&mut empty, &[]),
+            "Press Ctrl+O to open a file"
+        );
+    }
+
     #[test]
     fn a_file_past_the_cap_says_it_was_cut() {
         let big = vec![0x41_u8; MAX_OPEN_BYTES + 32];

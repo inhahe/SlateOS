@@ -4481,10 +4481,45 @@ impl Probe for PdfViewerApp {
 // ============================================================================
 
 fn main() -> ExitCode {
-    app::launch(
-        "pdfviewer",
-        &mut PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT),
-    )
+    // Parsed here rather than by `app::launch`, which refuses every argument
+    // but `--display`: the file manager opens a PDF by naming it, and the
+    // refusal ended the program -- "exit 2, unexpected argument" on a stderr
+    // nobody sees -- before its window opened.
+    let args = match app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("pdfviewer: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut viewer = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+    if let Some(error) = open_arguments(&mut viewer, &args.rest) {
+        eprintln!("pdfviewer: {error}");
+    }
+    app::launch_with("pdfviewer", args.display.as_deref(), &mut viewer)
+}
+
+/// Open each PDF named on the command line, a tab each, and return what
+/// could not be opened -- every one of them, which is also what the window
+/// shows.
+///
+/// A tab is made only for a file once the one before it opened: a file that
+/// fails leaves its tab empty, and the next file takes it rather than leaving
+/// a blank tab behind.
+fn open_arguments(viewer: &mut PdfViewerApp, paths: &[String]) -> Option<String> {
+    let mut errors = Vec::new();
+    for path in paths {
+        if viewer.active_tab().is_some_and(|t| t.document.is_some()) {
+            viewer.new_tab();
+        }
+        if !viewer.open_path(std::path::Path::new(path))
+            && let Some(error) = viewer.open_error.take()
+        {
+            errors.push(error);
+        }
+    }
+    viewer.open_error = (!errors.is_empty()).then(|| errors.join("; "));
+    viewer.open_error.clone()
 }
 
 // ============================================================================
@@ -5040,6 +5075,44 @@ mod tests {
         let second = doc.pages.get(1).expect("a second page");
         assert!((second.width - 595.0).abs() < 0.01, "A4, from the file");
         assert_eq!(doc.path, path, "the document remembers where it came from");
+    }
+
+    /// The file manager opens a PDF here by naming it on the command line:
+    /// each one named opens in a tab of its own, and every one that cannot is
+    /// said to be so, beside the ones that opened.
+    #[test]
+    fn the_files_named_on_the_command_line_are_opened() {
+        let dir = pdf_scratch("args");
+        let one = dir.join("one.pdf");
+        let two = dir.join("two.pdf");
+        std::fs::write(&one, two_page_pdf()).expect("write fixture");
+        std::fs::write(&two, two_page_pdf()).expect("write fixture");
+        let missing = dir.join("absent.pdf");
+        let paths: Vec<String> = [&one, &missing, &two]
+            .iter()
+            .map(|p| p.to_str().expect("a text path").to_owned())
+            .collect();
+
+        let mut app = PdfViewerApp::new(1000.0, 700.0);
+        let error = open_arguments(&mut app, &paths);
+        assert_eq!(
+            app.tabs.len(),
+            2,
+            "one tab per file that opened, and no empty one"
+        );
+        let opened: Vec<_> = app
+            .tabs
+            .iter()
+            .filter_map(|t| t.document.as_ref().map(|d| d.path.clone()))
+            .collect();
+        assert_eq!(opened, vec![one.clone(), two.clone()]);
+        let error = error.expect("the missing file is reported");
+        assert!(error.contains("absent.pdf"), "{error}");
+        assert_eq!(app.open_error.as_deref(), Some(error.as_str()), "and shown");
+
+        let mut none = PdfViewerApp::new(1000.0, 700.0);
+        assert_eq!(open_arguments(&mut none, &[]), None);
+        assert_eq!(none.tabs.len(), 1);
     }
 
     /// A PDF on disk becomes text in the window, end to end.

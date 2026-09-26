@@ -43,6 +43,7 @@
 //! (`known-issues.md` → `B-D-AIO-OUTCOMES-EVICTED-AND-NEVER-NOTIFIED`.)
 
 use crate::errno;
+use crate::sigevent::{SigeventView, notify};
 use core::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -369,130 +370,6 @@ unsafe fn submit(cb: *mut Aiocb, op: Op) -> bool {
     errno::set_errno(saved);
     completed();
     true
-}
-
-// ---------------------------------------------------------------------------
-// Notification
-// ---------------------------------------------------------------------------
-
-/// The fields of a `struct sigevent` (musl's x86_64 layout, 64 bytes) that
-/// notification reads.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SigeventView {
-    /// `union sigval`: an `int` or a pointer, passed to the `SIGEV_THREAD`
-    /// function in one register.
-    sigev_value: usize,
-    sigev_signo: i32,
-    sigev_notify: i32,
-    /// `SIGEV_THREAD`'s function (musl's `__sev_fields.__sev_thread`).
-    sigev_notify_function: Option<extern "C" fn(usize)>,
-    /// And its thread's attributes; NULL for a detached default thread.
-    sigev_notify_attributes: *const crate::pthread::PthreadAttrT,
-    __pad: [u8; 32],
-}
-
-const _: () = assert!(size_of::<SigeventView>() == 64);
-
-impl SigeventView {
-    /// `SIGEV_NONE`, for a `lio_listio` given no `sig`.
-    const NONE: Self = Self {
-        sigev_value: 0,
-        sigev_signo: 0,
-        sigev_notify: crate::time::SIGEV_NONE,
-        sigev_notify_function: None,
-        sigev_notify_attributes: core::ptr::null(),
-        __pad: [0; 32],
-    };
-
-    /// Read a `struct sigevent` at `p`.
-    fn read(p: *const u8) -> Self {
-        // SAFETY: callers pass the 64 bytes of an `aiocb`'s `aio_sigevent`
-        // or a caller's `struct sigevent`; every bit pattern is a valid
-        // `SigeventView` (the function pointer is an `Option`, and a non-null
-        // fn pointer is only invalid to *call*).
-        unsafe { core::ptr::read_unaligned(p.cast::<Self>()) }
-    }
-}
-
-/// What a notification thread calls.  glibc copies it to the heap because
-/// the `sigevent` may be gone before the thread runs.
-struct NotifyCall {
-    function: extern "C" fn(usize),
-    value: usize,
-}
-
-extern "C" fn notify_thread(arg: *mut u8) -> *mut u8 {
-    // SAFETY: `arg` is the `NotifyCall` `notify` allocated for this thread
-    // alone.
-    let call = unsafe { core::ptr::read(arg.cast::<NotifyCall>()) };
-    // SAFETY: allocated by `malloc` in `notify`, and read above.
-    unsafe { crate::malloc::free(arg) };
-    (call.function)(call.value);
-    core::ptr::null_mut()
-}
-
-/// Notify as `sev` asks (glibc's `__aio_notify_only`); `Err` with `errno`
-/// set if it could not be done.  `SIGEV_NONE`, `SIGEV_THREAD_ID` and
-/// anything unknown notify nothing, as in glibc.
-fn notify(sev: &SigeventView) -> Result<(), ()> {
-    match sev.sigev_notify {
-        crate::time::SIGEV_SIGNAL => {
-            // glibc sends it with `rt_sigqueueinfo`, for which signal 0 only
-            // probes.
-            if sev.sigev_signo == 0 || crate::signal::raise(sev.sigev_signo) == 0 {
-                Ok(())
-            } else {
-                Err(())
-            }
-        }
-        crate::time::SIGEV_THREAD => {
-            let Some(function) = sev.sigev_notify_function else {
-                // glibc would start a thread that calls NULL, and fault.
-                errno::set_errno(errno::EFAULT);
-                return Err(());
-            };
-            let call = crate::malloc::malloc(size_of::<NotifyCall>());
-            if call.is_null() {
-                errno::set_errno(errno::ENOMEM);
-                return Err(());
-            }
-            // SAFETY: `malloc` returned a block big and aligned enough.
-            unsafe {
-                core::ptr::write(
-                    call.cast::<NotifyCall>(),
-                    NotifyCall {
-                        function,
-                        value: sev.sigev_value,
-                    },
-                );
-            }
-            let mut detached: crate::pthread::PthreadAttrT = [0; 56];
-            let attr = if sev.sigev_notify_attributes.is_null() {
-                // Both succeed on a valid attribute object and a valid state.
-                let _ = crate::pthread::pthread_attr_init(&raw mut detached);
-                let _ = crate::pthread::pthread_attr_setdetachstate(
-                    &raw mut detached,
-                    crate::pthread::PTHREAD_CREATE_DETACHED,
-                );
-                (&raw const detached).cast()
-            } else {
-                sev.sigev_notify_attributes
-            };
-            let mut tid: crate::pthread::PthreadT = 0;
-            let rc = crate::pthread::pthread_create(&raw mut tid, attr, notify_thread, call);
-            if rc != 0 {
-                // glibc tests this with `< 0`, which a positive error number
-                // never is, and so never notices; the request is told.
-                // SAFETY: the thread never started, so the block is ours.
-                unsafe { crate::malloc::free(call) };
-                errno::set_errno(rc);
-                return Err(());
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
 }
 
 // ---------------------------------------------------------------------------

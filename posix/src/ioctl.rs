@@ -683,12 +683,12 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, entry.handle, arg),
         TIOCSWINSZ => handle_tiocswinsz(entry.kind, entry.handle, arg),
         FIONBIO => handle_fionbio(fd, arg),
-        FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
+        FIONREAD => handle_fionread(fd, entry.kind, entry.handle, arg),
         TCGETS => handle_tcgets(entry.kind, entry.handle, arg),
         TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind, entry.handle, request, arg),
         TCFLSH => handle_tcflsh(entry.kind, entry.handle, arg),
-        TIOCGPGRP => handle_tiocgpgrp(fd, entry.kind, entry.handle, arg),
-        TIOCSPGRP => handle_tiocspgrp(fd, entry.kind, entry.handle, arg),
+        TIOCGPGRP => handle_tiocgpgrp(entry.kind, entry.handle, arg),
+        TIOCSPGRP => handle_tiocspgrp(entry.kind, entry.handle, arg),
         TIOCSCTTY => handle_tiocsctty(entry.kind, entry.handle),
         TIOCNOTTY => handle_tiocnotty(entry.kind, entry.handle),
         _ => {
@@ -823,9 +823,19 @@ fn handle_fionbio(fd: i32, arg: *mut u8) -> i32 {
 
 /// FIONREAD — get number of bytes available to read.
 ///
-/// Returns 0 for Console fds (we don't buffer input), ENOTTY for
-/// non-terminal fds (files don't support FIONREAD via ioctl; use
-/// stat + seek instead).
+/// Linux 6.6's order: the descriptor (the dispatcher), then whether this file
+/// answers FIONREAD at all — `do_vfs_ioctl` does for a regular file
+/// (fs/ioctl.c:829), and otherwise the file's own ioctl does or it is `ENOTTY`
+/// — and only then the write through `arg`, where a NULL faults.  Until
+/// 2026-09-26 the NULL test came first, so an epoll descriptor with a NULL
+/// `arg` said `EFAULT` rather than `ENOTTY`; a regular file was `ENOTTY`
+/// ("files don't support FIONREAD"), where Linux answers its size less the
+/// offset; an inotify descriptor was `ENOTTY`, where `inotify_ioctl` counts
+/// its queued events' bytes; and a listening TCP socket said 0, where
+/// `tcp_ioctl` says `EINVAL`.
+///
+/// The console answers 0: its input is buffered in the kernel, which exposes
+/// no count.
 ///
 /// The pty arms answer `0` or `1` rather than a true count, because the
 /// kernel exposes no readable-byte count for a pty — only the readable bit
@@ -833,35 +843,65 @@ fn handle_fionbio(fd: i32, arg: *mut u8) -> i32 {
 /// deliberate approximation and not a silent one; it is tracked as
 /// `TD-B-PTY-FIONREAD-IS-A-BOOLEAN` and requested of lane A in
 /// `requests/b-a-pty-gaps-master-inheritance-and-readable-bytes.md`.
-fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
-    use crate::syscall::{SYS_TCP_INFO, syscall3};
-
-    if arg.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    match kind {
-        HandleKind::Console => {
-            // Console: no buffering visible from userspace.
-            // SAFETY: arg must be at least sizeof(i32).
+fn handle_fionread(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    match fionread_count(fd, kind, handle) {
+        Ok(available) => {
+            if arg.is_null() {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
+            // SAFETY: a non-NULL `arg` points at an `int`, per ioctl(FIONREAD).
             unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), 0);
+                core::ptr::write_unaligned(arg.cast::<i32>(), available);
             }
             0
         }
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// `do_vfs_ioctl`'s FIONREAD for a regular file (fs/ioctl.c:833): its size
+/// less the file offset, converted to an `int` as `put_user` converts it — so
+/// negative when the offset is past the end.  Anything else a `File`
+/// descriptor can name, a directory above all, is `ENOTTY`: its own ioctl
+/// has no FIONREAD.
+fn fionread_for_file(mode: u32, size: i64, offset: i64) -> Result<i32, i32> {
+    if mode & crate::fcntl::S_IFMT != crate::fcntl::S_IFREG {
+        return Err(errno::ENOTTY);
+    }
+    // The truncation is Linux's: `put_user` into an `int`.
+    Ok(size.wrapping_sub(offset) as i32)
+}
+
+/// What FIONREAD reports for `fd`, or the errno it fails with — everything
+/// but the write through `arg`, which [`handle_fionread`] does after.
+fn fionread_count(fd: i32, kind: HandleKind, handle: u64) -> Result<i32, i32> {
+    use crate::syscall::{SYS_TCP_INFO, syscall3};
+
+    match kind {
+        HandleKind::Console => Ok(0),
         HandleKind::Pipe => {
             // Query actual buffered byte count from the kernel.
             use crate::syscall::{SYS_PIPE_READABLE_BYTES, syscall1};
-            let bytes = syscall1(SYS_PIPE_READABLE_BYTES, handle) as i32;
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), bytes);
-            }
-            0
+            Ok(syscall1(SYS_PIPE_READABLE_BYTES, handle) as i32)
         }
         HandleKind::File => {
-            errno::set_errno(errno::ENOTTY);
-            -1
+            // SAFETY: `Stat` is a plain C struct; all zeroes is a value.
+            let mut st: crate::stat::Stat = unsafe { core::mem::zeroed() };
+            if crate::file::fstat(fd, &raw mut st) < 0 {
+                return Err(errno::get_errno());
+            }
+            if st.st_mode & crate::fcntl::S_IFMT != crate::fcntl::S_IFREG {
+                return Err(errno::ENOTTY);
+            }
+            let offset = crate::file::lseek(fd, 0, crate::fcntl::SEEK_CUR);
+            if offset < 0 {
+                return Err(errno::get_errno());
+            }
+            fionread_for_file(st.st_mode, st.st_size, offset)
         }
         HandleKind::UnixStream => {
             // Query actual buffered byte count from the kernel.
@@ -871,19 +911,11 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
                 use crate::syscall::{SYS_SOCKETPAIR_READABLE_BYTES, syscall1};
                 syscall1(SYS_SOCKETPAIR_READABLE_BYTES, handle) as i32
             };
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), bytes);
-            }
-            0
+            Ok(bytes)
         }
         HandleKind::TcpStream => {
             if handle == 0 {
-                // SAFETY: arg must be at least sizeof(i32).
-                unsafe {
-                    core::ptr::write_unaligned(arg.cast::<i32>(), 0);
-                }
-                return 0;
+                return Ok(0);
             }
             // Query TCP_INFO to get rx_buffered (bytes 24..28).
             let mut info_buf = [0u8; 48];
@@ -894,20 +926,12 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             } else {
                 0
             };
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), available as i32);
-            }
-            0
+            Ok(available as i32)
         }
         HandleKind::TcpListener => {
-            // For listeners: number of pending connections (1 or 0).
-            // Simplistically reported as 0 for now.
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), 0);
-            }
-            0
+            // `tcp_ioctl`: `if (sk->sk_state == TCP_LISTEN) return -EINVAL;`
+            // (net/ipv4/tcp.c).  It answered 0 until 2026-09-26.
+            Err(errno::EINVAL)
         }
         HandleKind::UdpSocket => {
             // FIONREAD on UDP returns byte size of the first deliverable
@@ -918,11 +942,7 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             } else {
                 syscall1(SYS_UDP_RX_FRONT_BYTES, handle) as i32
             };
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), bytes);
-            }
-            0
+            Ok(bytes)
         }
         HandleKind::PtyMaster | HandleKind::PtySlave => {
             // A real count, from the kernel's ring, since `SYS_PTY_READABLE_BYTES`
@@ -949,19 +969,19 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             // say "unknown", and reporting a negative as a count would be read as
             // an enormous positive by a caller that stores it unsigned — so fall
             // back to the exact-and-safe answer rather than propagating garbage.
-            let available = i32::try_from(bytes).unwrap_or(0).max(0);
-            // SAFETY: arg must be at least sizeof(i32).
-            unsafe {
-                core::ptr::write_unaligned(arg.cast::<i32>(), available);
-            }
-            0
+            Ok(i32::try_from(bytes).unwrap_or(0).max(0))
         }
-        HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
-            // Linux's eventfd / epoll / timerfd / inotify have no .ioctl
-            // handler, so ioctl() returns ENOTTY on them.  Match that
-            // behavior.
-            errno::set_errno(errno::ENOTTY);
-            -1
+        HandleKind::Inotify => {
+            // `inotify_ioctl` answers FIONREAD with the bytes its queued events
+            // would read as (fs/notify/inotify/inotify_user.c:329).  The
+            // comment here said inotify had no ioctl until 2026-09-26.
+            crate::epoll::inotify_pending_bytes(handle)
+        }
+        HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd => {
+            // No FIONREAD in eventfd's, epoll's or timerfd's file operations
+            // (timerfd's ioctl knows only TFD_IOC_SET_TICKS), so the ioctl is
+            // ENOTTY.
+            Err(errno::ENOTTY)
         }
     }
 }
@@ -1167,12 +1187,19 @@ fn is_pgrp_terminal(kind: HandleKind) -> bool {
 /// controlling terminal, or when nothing has claimed the named pty yet), so a
 /// -1 is propagated rather than written into the caller's buffer as if it were
 /// a process group.
-fn handle_tiocgpgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+///
+/// Linux's `tiocgpgrp` (drivers/tty/tty_jobctrl.c) refuses a console or
+/// slave that is not the caller's controlling terminal before its
+/// `put_user`, so there a NULL `arg` is `EFAULT` only once there is a group
+/// to write; it was tested first until 2026-09-26.  A master skips that
+/// check and its lookup cannot fail, so on a master a NULL `arg` is always
+/// `EFAULT`, and is tested first.
+fn handle_tiocgpgrp(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
     if !is_pgrp_terminal(kind) && kind != HandleKind::PtyMaster {
         errno::set_errno(errno::ENOTTY);
         return -1;
     }
-    if arg.is_null() {
+    if kind == HandleKind::PtyMaster && arg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
@@ -1185,14 +1212,18 @@ fn handle_tiocgpgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32
             }
         }
     } else {
-        let v = crate::process::tcgetpgrp(fd);
+        let v = crate::process::ctty_get_fg();
         if v < 0 {
-            // errno is already set by tcgetpgrp.
+            // errno is already set.
             return -1;
         }
         v
     };
-    // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
+    if arg.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: a non-NULL `arg` points at a `pid_t`, per the ioctl contract.
     unsafe {
         core::ptr::write_unaligned(arg.cast::<i32>(), pgrp);
     }
@@ -1210,7 +1241,16 @@ fn handle_tiocgpgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32
 /// pgid as `arg0`, while 871 takes the terminal as `arg0` and the pgid as
 /// `arg1`.  That is not gratuitous: 537/538 are invoked as `syscall0`/`syscall1`
 /// and so have no free register to widen into.
-fn handle_tiocspgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+///
+/// Linux's `tiocspgrp` order after the terminal check: the `get_user`
+/// (`EFAULT`), a negative group (`EINVAL`), then the controlling-terminal and
+/// session checks and the group's existence, which are the kernel's.  The
+/// negative test is here because nothing below it makes it: until 2026-09-26
+/// `tcsetpgrp` made it, and refused 0 too, which Linux does not.  (Linux runs
+/// `tty_check_change` before the `get_user`, so a background caller passing a
+/// NULL `arg` gets `SIGTTOU` there and `EFAULT` here: our kernel makes that
+/// check inside the call, which a NULL `arg` never reaches.)
+fn handle_tiocspgrp(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
     if !is_pgrp_terminal(kind) && kind != HandleKind::PtyMaster {
         errno::set_errno(errno::ENOTTY);
         return -1;
@@ -1221,6 +1261,10 @@ fn handle_tiocspgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32
     }
     // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
     let pgrp = unsafe { core::ptr::read_unaligned(arg.cast::<i32>()) };
+    if pgrp < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if kind == HandleKind::PtyMaster {
         return match pty_master_set_pgrp(handle, pgrp) {
             Ok(()) => 0,
@@ -1230,7 +1274,7 @@ fn handle_tiocspgrp(fd: i32, kind: HandleKind, handle: u64, arg: *mut u8) -> i32
             }
         };
     }
-    crate::process::tcsetpgrp(fd, pgrp)
+    crate::process::ctty_set_fg(pgrp)
 }
 
 /// `SYS_PTY_GET_PGRP` behind an `errno`-shaped result.
@@ -2771,13 +2815,54 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
+    /// `do_vfs_ioctl` answers FIONREAD for a regular file with its size less
+    /// the offset, as an `int`; anything else is ENOTTY.  (The host has no
+    /// `fstat` for a `File` descriptor, so the arithmetic is tested here and
+    /// the descriptor's `fstat` failure below.)
+    #[test]
+    fn test_fionread_for_a_regular_file_is_what_is_left() {
+        let reg = crate::fcntl::S_IFREG | 0o644;
+        assert_eq!(fionread_for_file(reg, 100, 30), Ok(70));
+        assert_eq!(fionread_for_file(reg, 100, 100), Ok(0));
+        assert_eq!(fionread_for_file(reg, 100, 130), Ok(-30), "past the end");
+        assert_eq!(
+            fionread_for_file(reg, 1 << 33, 0),
+            Ok(0),
+            "`int` truncation, as Linux"
+        );
+        let dir = crate::fcntl::S_IFDIR | 0o755;
+        assert_eq!(fionread_for_file(dir, 4096, 0), Err(crate::errno::ENOTTY));
+    }
+
     #[test]
     fn test_ioctl_fionread_file() {
+        // A File descriptor is no longer refused outright; on the host its
+        // `fstat` fails, and that failure is what comes back -- not ENOTTY.
         let fd = fdtable::alloc_fd(HandleKind::File, 302).unwrap();
         let mut avail: i32 = 0;
         let ret = ioctl(fd, FIONREAD, (&raw mut avail).cast::<u8>());
-        assert_eq!(ret, -1, "FIONREAD on File → ENOTTY");
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        assert_eq!(ret, -1);
+        assert_ne!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    /// A file that has no FIONREAD is ENOTTY even with a NULL `arg`: the
+    /// file is asked before the pointer is used.  It was EFAULT until
+    /// 2026-09-26.
+    #[test]
+    fn test_ioctl_fionread_unsupported_kind_beats_null_arg() {
+        for kind in [HandleKind::Epoll, HandleKind::Eventfd, HandleKind::Timerfd] {
+            let fd = fdtable::alloc_fd(kind, 0).unwrap();
+            crate::errno::set_errno(0);
+            assert_eq!(ioctl(fd, FIONREAD, core::ptr::null_mut()), -1, "{kind:?}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY, "{kind:?}");
+            let _ = fdtable::close_fd(fd);
+        }
+        // A listening socket is EINVAL, NULL or not.
+        let fd = fdtable::alloc_fd(HandleKind::TcpListener, 0).unwrap();
+        crate::errno::set_errno(0);
+        assert_eq!(ioctl(fd, FIONREAD, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         let _ = fdtable::close_fd(fd);
     }
 
@@ -3779,15 +3864,17 @@ mod tests {
         assert_eq!(nul_pos, Some(12), "Null terminator at position 12");
     }
 
-    // -- Fionread on TcpListener gives 0 --
+    // -- FIONREAD on a listening socket is EINVAL (tcp_ioctl) --
 
     #[test]
     fn test_ioctl_fionread_tcp_listener() {
+        // It answered 0 until 2026-09-26.
         let fd = fdtable::alloc_fd(HandleKind::TcpListener, 0).unwrap();
         let mut avail: i32 = -1;
         let ret = ioctl(fd, FIONREAD, (&raw mut avail).cast::<u8>());
-        assert_eq!(ret, 0);
-        assert_eq!(avail, 0, "TcpListener FIONREAD should return 0");
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(avail, -1, "nothing written");
         let _ = fdtable::close_fd(fd);
     }
 

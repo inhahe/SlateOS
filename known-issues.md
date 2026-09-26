@@ -23807,6 +23807,38 @@ pointer checks it precedes.
 **So sampling cannot retire this entry.** With twelve of twenty wrong, the
 tail is presumptively wrong, not presumptively right, and gets a full sweep.
 
+**Twelfth pass, 2026-09-26 — `ioctl.rs` (8 sites), lane D.** The first file
+of the full sweep. `TIOCGWINSZ`, `TIOCSWINSZ`, `FIONBIO`, `TCGETS` and
+`TIOCSPGRP`'s pointer were in Linux's place already; three were not, and each
+opened onto more:
+
+- **`FIONREAD`** tested its pointer before asking whether the file answers
+  FIONREAD at all, so an epoll descriptor with a NULL `arg` said `EFAULT`
+  where Linux says `ENOTTY`. Behind it: a regular file was `ENOTTY` ("files
+  don't support FIONREAD"), where `do_vfs_ioctl` answers size less offset; an
+  inotify descriptor was `ENOTTY` under a comment saying inotify has no ioctl
+  — `inotify_ioctl` counts the queued events' bytes; and a listening TCP
+  socket said 0, where `tcp_ioctl` says `EINVAL`.
+- **`TIOCGPGRP`** tested its pointer before the controlling-terminal check
+  `tiocgpgrp` makes first on a console or slave (on a master there is no such
+  check and a NULL is `EFAULT`, as it was).
+- **`TIOCSPGRP`** left the negative-group test to `tcsetpgrp`, and
+  **`tcgetpgrp`/`tcsetpgrp`** accepted any open descriptor — a regular file's
+  included — under a comment saying descriptor kinds were not tracked, which
+  `ioctl` two files away was using. They are glibc's now: `ioctl(fd,
+  TIOCGPGRP/TIOCSPGRP, …)`. `tcsetpgrp` also refused a group of 0 itself; that
+  is the kernel's call, and Linux's answer is `ESRCH`, not `EINVAL`
+  (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
+- In the inotify read path the FIONREAD count needed: names were cut at 63
+  bytes — another file's name, not a shorter one — and rounded to 8 bytes
+  where Linux rounds to 16; and a dead instance read as an empty queue rather
+  than `EBADF`.
+
+`TCSETS`'s pointer is Linux's too, with one ordering left: `set_termios` runs
+`tty_check_change` (which stops a background caller with `SIGTTOU`) before
+its copy, and our kernel makes that check inside the call, which a NULL
+pointer never reaches.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -23818,11 +23850,11 @@ NPTL has no NULL checks at all, so there is no upstream errno to look up and
 goes for `file.rs`, `spawn.rs`, `socket.rs`, `unistd.rs`, `process.rs` and
 `epoll.rs`, walked by passes five to ten. What is left is a long tail, and
 the eleventh pass showed it cannot be retired by sampling: it needs the
-file-at-a-time sweep. On 2026-09-26 the sampling script counts 128 sites in 39
-files — about a dozen of them classified by that pass — led by `ioctl.rs`,
-`semaphore.rs` and `time.rs` at eight each, `aio.rs` and `sched.rs` at six,
-`mqueue.rs` and `resolv.rs` at five, and twelve files at four; sweep them in
-that order.
+file-at-a-time sweep. On 2026-09-26 the sampling script counted 128 sites in 39
+files — about a dozen of them classified by that pass. The twelfth pass swept
+`ioctl.rs`; next are `semaphore.rs` and `time.rs` at eight each, `aio.rs` and
+`sched.rs` at six, `mqueue.rs` and `resolv.rs` at five, and twelve files at
+four, in that order.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL

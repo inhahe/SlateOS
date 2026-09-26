@@ -1793,7 +1793,9 @@ pub extern "C" fn signalfd4(fd: i32, mask: *const u64, flags: i32) -> i32 {
 //   * 32 events per instance queue (further events are dropped with
 //     `IN_Q_OVERFLOW` semantics: an overflow flag is set on the
 //     instance, surfaced as a single overflow event on the next read).
-//   * Names truncated to 63 bytes + NUL.
+//   * Names up to `NAME_MAX` (255) bytes (until 2026-09-26, 63).  The
+//     kernel's watch record carries 256 bytes of *path*, so a name that
+//     record cut arrives cut (requested of lane A).
 
 /// inotify event flags.
 pub const IN_ACCESS: u32 = 0x0000_0001;
@@ -1879,11 +1881,13 @@ pub const MAX_INOTIFY_WATCHES: usize = 8;
 /// Maximum number of queued events per instance.
 pub const MAX_INOTIFY_EVENTS: usize = 32;
 
-/// Maximum length of a name field stored in a snapshot or queued event.
-/// Longer names are truncated to fit (the bytes past the limit are
-/// dropped); detection still works since we hash the truncated prefix
-/// for diffing.
-pub const INOTIFY_NAME_MAX: usize = 64;
+/// Room for a name in a queued event: `NAME_MAX` (255) bytes and its NUL.
+///
+/// It was 64 until 2026-09-26, and a longer name was cut to 63 bytes --
+/// which is not a shorter name but another file's.  Names now arrive whole
+/// up to the kernel's watch record, which carries 256 bytes of *path*; a
+/// name that record cut is cut before it reaches this code.
+pub const INOTIFY_NAME_MAX: usize = 256;
 
 /// Maximum length of a watched path.
 pub const INOTIFY_PATH_MAX: usize = 256;
@@ -2197,13 +2201,13 @@ fn kwatch_read(_id: u64, _buf: &mut [u8], _max_events: usize) -> i64 {
 // Event-queue helpers
 // ---------------------------------------------------------------------------
 
-fn queue_push(inst: &mut InotifyInstance, ev: InotifyPending) {
+fn queue_push(inst: &mut InotifyInstance, ev: &InotifyPending) {
     if inst.count as usize >= MAX_INOTIFY_EVENTS {
         inst.overflow_pending = true;
         return;
     }
     let tail = inst.tail as usize;
-    inst.events[tail] = ev;
+    inst.events[tail] = *ev;
     inst.tail = ((tail + 1) % MAX_INOTIFY_EVENTS) as u16;
     inst.count += 1;
 }
@@ -2330,14 +2334,14 @@ fn retire_after_first_event(t: &mut Translation, wd: i32) {
         return;
     }
     *t = TRANSLATION_EMPTY;
-    push_tr(t, first);
-    push_tr(t, make_event(wd, IN_IGNORED, &[]));
+    push_tr(t, &first);
+    push_tr(t, &make_event(wd, IN_IGNORED, &[]));
     t.disarm = true;
 }
 
-fn push_tr(t: &mut Translation, ev: InotifyPending) {
+fn push_tr(t: &mut Translation, ev: &InotifyPending) {
     if let Some(slot) = t.events.get_mut(t.count) {
-        *slot = ev;
+        *slot = *ev;
         t.count = t.count.saturating_add(1);
     }
 }
@@ -2395,20 +2399,20 @@ fn translate_kernel_event(
             if inotify_mask & IN_CREATE != 0
                 && let Rel::Child(name) = relative_name(watched, affected)
             {
-                push_tr(&mut t, make_event(wd, IN_CREATE | isdir, name));
+                push_tr(&mut t, &make_event(wd, IN_CREATE | isdir, name));
             }
         }
         KEV_DELETED => match relative_name(watched, affected) {
             Rel::SelfPath => {
                 if inotify_mask & IN_DELETE_SELF != 0 {
-                    push_tr(&mut t, make_event(wd, IN_DELETE_SELF | isdir, &[]));
+                    push_tr(&mut t, &make_event(wd, IN_DELETE_SELF | isdir, &[]));
                 }
-                push_tr(&mut t, make_event(wd, IN_IGNORED, &[]));
+                push_tr(&mut t, &make_event(wd, IN_IGNORED, &[]));
                 t.disarm = true;
             }
             Rel::Child(name) => {
                 if inotify_mask & IN_DELETE != 0 {
-                    push_tr(&mut t, make_event(wd, IN_DELETE | isdir, name));
+                    push_tr(&mut t, &make_event(wd, IN_DELETE | isdir, name));
                 }
             }
             Rel::NotMatched => {}
@@ -2417,7 +2421,7 @@ fn translate_kernel_event(
             if inotify_mask & IN_MODIFY != 0
                 && let Some(name) = rel_self_or_child(relative_name(watched, affected))
             {
-                push_tr(&mut t, make_event(wd, IN_MODIFY | isdir, name));
+                push_tr(&mut t, &make_event(wd, IN_MODIFY | isdir, name));
             }
         }
         KEV_RENAMED => {
@@ -2426,7 +2430,7 @@ fn translate_kernel_event(
             // `new_path`.  Self-rename of the watched path → IN_MOVE_SELF.
             if matches!(relative_name(watched, affected), Rel::SelfPath) {
                 if inotify_mask & IN_MOVE_SELF != 0 {
-                    push_tr(&mut t, make_event(wd, IN_MOVE_SELF | isdir, &[]));
+                    push_tr(&mut t, &make_event(wd, IN_MOVE_SELF | isdir, &[]));
                 }
             } else {
                 if inotify_mask & IN_MOVED_FROM != 0
@@ -2434,7 +2438,7 @@ fn translate_kernel_event(
                 {
                     push_tr(
                         &mut t,
-                        pending_with_cookie(wd, IN_MOVED_FROM | isdir, cookie, name),
+                        &pending_with_cookie(wd, IN_MOVED_FROM | isdir, cookie, name),
                     );
                 }
                 if inotify_mask & IN_MOVED_TO != 0
@@ -2442,7 +2446,7 @@ fn translate_kernel_event(
                 {
                     push_tr(
                         &mut t,
-                        pending_with_cookie(wd, IN_MOVED_TO | isdir, cookie, name),
+                        &pending_with_cookie(wd, IN_MOVED_TO | isdir, cookie, name),
                     );
                 }
             }
@@ -2451,18 +2455,18 @@ fn translate_kernel_event(
             if inotify_mask & IN_ATTRIB != 0
                 && let Some(name) = rel_self_or_child(relative_name(watched, affected))
             {
-                push_tr(&mut t, make_event(wd, IN_ATTRIB | isdir, name));
+                push_tr(&mut t, &make_event(wd, IN_ATTRIB | isdir, name));
             }
         }
         KEV_ACCESSED => {
             if inotify_mask & IN_ACCESS != 0
                 && let Some(name) = rel_self_or_child(relative_name(watched, affected))
             {
-                push_tr(&mut t, make_event(wd, IN_ACCESS | isdir, name));
+                push_tr(&mut t, &make_event(wd, IN_ACCESS | isdir, name));
             }
         }
         KEV_OVERFLOW => {
-            push_tr(&mut t, pending_with_cookie(-1, IN_Q_OVERFLOW, 0, &[]));
+            push_tr(&mut t, &pending_with_cookie(-1, IN_Q_OVERFLOW, 0, &[]));
         }
         _ => {}
     }
@@ -2551,7 +2555,7 @@ fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, oneshot: bool, w
             let _ = with_inotify_mut(idx, |inst| {
                 for k in 0..tr.count {
                     if let Some(ev) = tr.events.get(k) {
-                        queue_push(inst, *ev);
+                        queue_push(inst, ev);
                     }
                 }
                 if tr.disarm {
@@ -2638,9 +2642,11 @@ pub fn inotify_is_nonblock(idx: u64) -> bool {
 /// written, or 0 if no events are available (caller decides whether to
 /// block).
 ///
-/// Each record is 16 bytes of header followed by a `len`-byte name
-/// field (NUL-padded to an 8-byte boundary).  We require `buf` to be
-/// large enough for at least one full record.
+/// Each record is 16 bytes of header followed by a `len`-byte name field,
+/// NUL-padded to a multiple of 16 bytes -- `sizeof (struct inotify_event)`,
+/// as `round_event_name_len` rounds it (fs/notify/inotify/inotify_user.c:161);
+/// it was rounded to 8 until 2026-09-26.  We require `buf` to be large
+/// enough for at least one full record.
 ///
 /// # Errors
 ///
@@ -2653,7 +2659,9 @@ pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
 
     let mut written = 0usize;
     let mut err: Option<i32> = None;
-    let _ = with_inotify_mut(idx, |inst| {
+    // A dead instance is EBADF, as the doc says; it read as an empty queue
+    // until 2026-09-26.
+    let live = with_inotify_mut(idx, |inst| {
         // Surface overflow first if pending.
         if inst.overflow_pending && written + 16 <= buf.len() {
             // wd=-1, mask=IN_Q_OVERFLOW, cookie=0, len=0.
@@ -2687,15 +2695,8 @@ pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
             // decide if the next record fits.
             let head = inst.head as usize;
             let ev = inst.events[head];
-            // Pad name field to 8 bytes minimum (or larger multiple)
-            // so it remains aligned across reads.
             let raw_name = ev.name_len as usize;
-            let name_field = if raw_name == 0 {
-                0
-            } else {
-                let nul_terminated = raw_name + 1;
-                (nul_terminated + 7) & !7
-            };
+            let name_field = inotify_name_field(raw_name);
             let record_size = 16 + name_field;
             if written + record_size > buf.len() {
                 if written == 0 {
@@ -2736,10 +2737,52 @@ pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
         }
     });
 
+    if live.is_none() {
+        return Err(errno::EBADF);
+    }
     if let Some(e) = err {
         return Err(e);
     }
     Ok(written)
+}
+
+/// The name field of an event record: 0 for no name, else the name and its
+/// NUL rounded up to a multiple of `sizeof (struct inotify_event)`, 16 --
+/// `round_event_name_len` (fs/notify/inotify/inotify_user.c:154).
+fn inotify_name_field(name_len: usize) -> usize {
+    if name_len == 0 {
+        0
+    } else {
+        name_len.saturating_add(1).next_multiple_of(16)
+    }
+}
+
+/// FIONREAD for an inotify descriptor: the bytes `read` would return now,
+/// as `inotify_ioctl` counts them -- each queued event's 16-byte header and
+/// its rounded name, the overflow event included.  Pumps first, as `read`
+/// does, so the count and a following `read` agree.
+///
+/// # Errors
+///
+/// `EBADF` if `idx` names no live instance.
+pub fn inotify_pending_bytes(idx: u64) -> Result<i32, i32> {
+    pump_instance(idx);
+    let total = with_inotify_mut(idx, |inst| {
+        let mut total: usize = if inst.overflow_pending { 16 } else { 0 };
+        let mut i: usize = 0;
+        while i < usize::from(inst.count) {
+            let slot = (usize::from(inst.head).wrapping_add(i)) % MAX_INOTIFY_EVENTS;
+            if let Some(ev) = inst.events.get(slot) {
+                total = total
+                    .saturating_add(16)
+                    .saturating_add(inotify_name_field(usize::from(ev.name_len)));
+            }
+            i = i.wrapping_add(1);
+        }
+        total
+    })
+    .ok_or(errno::EBADF)?;
+    Ok(i32::try_from(total).unwrap_or(i32::MAX))
 }
 
 // ---------------------------------------------------------------------------
@@ -3052,7 +3095,7 @@ pub extern "C" fn inotify_rm_watch(fd: i32, wd: i32) -> i32 {
         if !found {
             return;
         }
-        queue_push(inst, make_event(wd, IN_IGNORED, &[]));
+        queue_push(inst, &make_event(wd, IN_IGNORED, &[]));
         for w in &mut inst.watches {
             if w.in_use && w.wd == wd {
                 *w = INOTIFY_WATCH_INIT;
@@ -4039,8 +4082,8 @@ mod tests {
     fn test_retire_after_first_event() {
         let wd = 5;
         let mut t = TRANSLATION_EMPTY;
-        push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_FROM, 9, b"a"));
-        push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_TO, 9, b"b"));
+        push_tr(&mut t, &pending_with_cookie(wd, IN_MOVED_FROM, 9, b"a"));
+        push_tr(&mut t, &pending_with_cookie(wd, IN_MOVED_TO, 9, b"b"));
         retire_after_first_event(&mut t, wd);
         assert_eq!(t.count, 2);
         let masks = [t.events[0].mask, t.events[1].mask];
@@ -4052,8 +4095,8 @@ mod tests {
         assert!(t.disarm);
 
         let mut self_delete = TRANSLATION_EMPTY;
-        push_tr(&mut self_delete, make_event(wd, IN_DELETE_SELF, &[]));
-        push_tr(&mut self_delete, make_event(wd, IN_IGNORED, &[]));
+        push_tr(&mut self_delete, &make_event(wd, IN_DELETE_SELF, &[]));
+        push_tr(&mut self_delete, &make_event(wd, IN_IGNORED, &[]));
         self_delete.disarm = true;
         retire_after_first_event(&mut self_delete, wd);
         let masks = [self_delete.events[0].mask, self_delete.events[1].mask];
@@ -4066,7 +4109,7 @@ mod tests {
         let mut overflow = TRANSLATION_EMPTY;
         push_tr(
             &mut overflow,
-            pending_with_cookie(-1, IN_Q_OVERFLOW, 0, &[]),
+            &pending_with_cookie(-1, IN_Q_OVERFLOW, 0, &[]),
         );
         retire_after_first_event(&mut overflow, wd);
         assert_eq!((overflow.count, overflow.disarm), (1, false));

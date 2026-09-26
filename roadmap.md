@@ -1798,6 +1798,13 @@ D's to act on once answered).
     * `tsearch`/`tfind`/`tdelete`/`twalk` are glibc's red-black tree (they
       were an unbalanced one, which sorted input made a list), and `twalk_r`
       exists.
+    * the twelfth NULL-pointer pass (`ioctl.rs`, the first of the full
+      sweep): `FIONREAD` answers for regular files and inotify, refuses a
+      listening socket and a file without it before touching its pointer;
+      `TIOCGPGRP`/`TIOCSPGRP` take Linux's order; `tcgetpgrp`/`tcsetpgrp` are
+      glibc's ioctls, so a descriptor that is not a terminal is `ENOTTY`;
+      inotify names are no longer cut at 63 bytes.  The kernel's halves are
+      requested of lane A.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 

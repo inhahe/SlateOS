@@ -1475,29 +1475,28 @@ pub(crate) fn host_ctty_release() -> i32 {
 
 /// Get the foreground process group ID of a terminal.
 ///
+/// glibc's is `ioctl (fd, TIOCGPGRP, &pgrp)` (termios/tcgetpgrp.c), and so is
+/// this: `EBADF` for a descriptor that is not open, `ENOTTY` for one that is
+/// not a terminal, and otherwise [`ctty_get_fg`] (or, for a pty master, the
+/// group of the terminal it drives).  Until 2026-09-26 any open descriptor
+/// was accepted, under a comment saying descriptors' kinds were not tracked
+/// -- which they are, and which `ioctl` already used.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tcgetpgrp(fd: crate::types::Fd) -> PidT {
+    let mut pgrp: PidT = 0;
+    if crate::ioctl::ioctl(fd, crate::ioctl::TIOCGPGRP, (&raw mut pgrp).cast::<u8>()) < 0 {
+        return -1;
+    }
+    pgrp
+}
+
+/// The foreground process group of our session's controlling terminal, or
+/// -1 with `errno` set (`ENOTTY` when there is none).
+///
 /// The value lives in the *kernel*, keyed by our session, so a shell and
 /// the job it foregrounded read the same one — see the section comment
 /// above and `kernel/src/proc/pcb.rs`'s controlling-terminal section.
-///
-/// Validates `fd` first: Linux's `tcgetpgrp` returns -1/EBADF for a closed
-/// fd before consulting the controlling terminal.  We do not track which
-/// fds are terminals, so an open non-tty fd is accepted and the answer
-/// comes from the session; the kernel reports `ENOTTY` if it has no
-/// terminal at all.
-///
-/// Errors:
-///   * `EBADF` — `fd` is negative or not open.
-///   * `ENOTTY` — our session has no controlling terminal.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tcgetpgrp(fd: crate::types::Fd) -> PidT {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if crate::fdtable::get_fd(fd).is_none() {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
+pub(crate) fn ctty_get_fg() -> PidT {
     #[cfg(target_os = "none")]
     {
         let ret = crate::syscall::syscall0(crate::syscall::SYS_TTY_GET_PGRP);
@@ -1523,38 +1522,35 @@ pub extern "C" fn tcgetpgrp(fd: crate::types::Fd) -> PidT {
 
 /// Set the foreground process group ID of a terminal.
 ///
+/// glibc's is `ioctl (fd, TIOCSPGRP, &pgrp_id)` (termios/tcsetpgrp.c), and so
+/// is this: `EBADF` for a descriptor that is not open, `ENOTTY` for one that
+/// is not a terminal, `EINVAL` for a negative group, and otherwise
+/// [`ctty_set_fg`] (or, for a pty master, its terminal's group).  Until
+/// 2026-09-26 it accepted any open descriptor -- a regular file's included --
+/// and refused a group of 0 itself; the kernel refuses that now, and Linux
+/// answers it `ESRCH` once the terminal checks pass (requested of lane A).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
+    crate::ioctl::ioctl(
+        fd,
+        crate::ioctl::TIOCSPGRP,
+        (&raw const pgrp).cast::<u8>().cast_mut(),
+    )
+}
+
+/// Hand our session's controlling terminal to process group `pgrp`: 0, or
+/// -1 with `errno` set.
+///
 /// This is the call a shell makes to hand the terminal to a job, so it has
 /// to reach real kernel state: the job must be able to see that it is now
 /// in the foreground.  The kernel enforces that `pgrp` names a live process
 /// group *in our own session* — otherwise any process could steal another
-/// session's terminal by naming one of its groups.
+/// session's terminal by naming one of its groups — refuses a `pgrp` of 0 or
+/// less with `EINVAL`, and stops a background caller with `SIGTTOU`.
 ///
-/// Validates `fd` before checking `pgrp` — Linux's prologue order is to
-/// check the fd first.
-///
-/// Not yet implemented: POSIX sends `SIGTTOU` to a **background** process
-/// that calls this.  That needs a terminal that can deliver input, which
-/// does not exist yet; see `todo.txt`.
-///
-/// Errors:
-///   * `EBADF` — `fd` is negative or not open.
-///   * `EINVAL` — `pgrp` is zero or negative.
-///   * `ENOTTY` — our session has no controlling terminal.
-///   * `EPERM` — `pgrp` is not a live group in our session.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if crate::fdtable::get_fd(fd).is_none() {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if pgrp <= 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
+/// Errors: `EINVAL` (`pgrp <= 0`), `ENOTTY` (no controlling terminal),
+/// `EPERM` (`pgrp` is not a live group in our session).
+pub(crate) fn ctty_set_fg(pgrp: PidT) -> i32 {
     #[cfg(target_os = "none")]
     {
         #[allow(clippy::cast_sign_loss)]
@@ -1567,6 +1563,11 @@ pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
     }
     #[cfg(not(target_os = "none"))]
     {
+        // The kernel's own first check (`sys_tty_set_pgrp`), modelled.
+        if pgrp <= 0 {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
         if host_pg::ctty_set_fg(pgrp) {
             0
         } else {
@@ -4406,6 +4407,24 @@ mod tests {
         // POSIX: the new session has no controlling terminal.
         assert_eq!(tcgetpgrp(0), -1);
         assert_eq!(errno::get_errno(), errno::ENOTTY);
+    }
+
+    /// glibc's `tcgetpgrp`/`tcsetpgrp` are ioctls, so a descriptor that is
+    /// not a terminal is ENOTTY.  Until 2026-09-26 any open descriptor was
+    /// accepted, and the session's terminal was answered for.
+    #[test]
+    fn test_tcpgrp_on_a_file_descriptor_is_enotty() {
+        reset_pg();
+        ensure_pg_test_fds();
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0xF11E).unwrap();
+        errno::set_errno(0);
+        assert_eq!(tcgetpgrp(fd), -1);
+        assert_eq!(errno::get_errno(), errno::ENOTTY);
+        errno::set_errno(0);
+        assert_eq!(tcsetpgrp(fd, 77), -1);
+        assert_eq!(errno::get_errno(), errno::ENOTTY);
+        assert_eq!(tcgetpgrp(0), 42, "the terminal's group is untouched");
+        let _ = crate::fdtable::close_fd(fd);
     }
 
     #[test]

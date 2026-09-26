@@ -164993,100 +164993,6 @@ name, they read identically at the call site, and only one of them answers
 in `scripts/key-survey.py`, written to fix this exact defect in the survey --
 by the same hand that then wrote it into thirty-eight tests.
 
-### [F] A partial frame was not the frame a full redraw draws: four faults, found by one comparison -- 2026-09-24
-
-**Status:** ✅ FIXED 2026-09-24 (lane F) — `gui/compositor/src/{lib,render,repaint,buffer}.rs`; design-decisions §1300.
-
-**In short:** the compositor redraws only what changed on the screen, and that
-shortcut was wrong four ways at once. Something you had just changed could
-flicker back to how it was, a window could paint itself over the window on top
-of it, the frosted-glass blur on menus and the taskbar never ran at all, and a
-moved window left a faint two-pixel trail of its shadow. None of it was caught
-because no test ever compared a shortcut frame against a full redraw of the same
-scene. One does now, and it found all four — plus a fifth fault in the blur that
-the fix itself introduced and the full redraw exposed.
-
-**How it was found.** Building the mouse pointer (C-Q18), whose every move would
-be a small partial frame, meant first asking whether partial frames were right.
-A probe answered in one step: window A drawn red in frame 2 was white again in
-frame 3 because frame 3 changed only window B.
-
-| fault | where | what a user saw |
-|---|---|---|
-| the buffer drawn into was two frames stale | `Framebuffer` swapped a front/back pair on every present, so a partial frame drew into the frame before last | an update made one frame earlier reverted whenever anything else on screen changed |
-| a window reaching the damage was redrawn whole | `render_damaged_windows` re-rendered overlapping windows unclipped | a lower window painted over a higher one; translucent edges darkened |
-| the backdrop blur never ran | `fc54f3ac2` wired it into the no-occlusion-cull branch, which production never takes; its test called the pass directly | menus, notifications and the taskbar were never blurred |
-| damage stopped short of the shadow | `damage_window` used `outer_rect`; the shadow is cast 3 px down-right | a moved window left the last 2 rows/columns of its shadow behind |
-| *(introduced by the first fix, caught by the test)* a blurred window with opaque content culled the backdrop under itself | `StackPlan::occluders_above` excluded covers *above* a blurred window from culling its backdrop, but not its own | its blur read its own previous frame, so every **full** frame drifted with nothing in the scene changing |
-
-**The fix** (design-decisions §1300): a one-buffer software framebuffer; a
-`RenderTarget::buffer_age` contract with a damage history, so a multi-buffered
-target (a GPU swapchain, or the scanout pair `TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE`
-wants to compose into) is correct by construction; a repaint that walks windows
-outermost over a disjoint region and clips every draw; damage spread to the
-whole frame of any blurred window it reaches; damage equal to the drawn extent.
-Two further corrections rode along: direct scanout now requires an opaque buffer
-(it was handing translucent ones to the display with their alpha dropped), and a
-buffer's opacity is measured from its pixels rather than assumed from its format.
-
-**What holds it:** `partial_frames_composite_exactly_what_a_full_frame_would`
-and its ring-of-two and ring-of-three siblings (two compositors, one random
-scene script, every pixel of every frame compared), plus
-`partial_frames_match_full_frames_over_many_scenes` (ignored; 48,000 frames in
-release, green) and one small test per fault.
-
-**The lesson worth keeping.** The shortcut and the long way round were two
-implementations of one function, and nothing compared them. The comparison is a
-dozen lines once both exist — and this time it also caught the oracle being
-wrong, which is what an oracle that is merely *trusted* never does.
-
-### [F] Pointer input reached the wrong window four ways, and no left-button release reached any window at all -- 2026-09-24
-
-**Status:** ✅ FIXED 2026-09-24 (lane F) — `gui/compositor/src/lib.rs`: `pointer_target`, `track_pointer_window`, `press_in`, and the release path of `handle_mouse_button`.
-
-**In short:** clicking a checkbox with the mouse did nothing and a clicked
-button stayed drawn pressed, because the compositor never passed on the
-release of the left button — to any window, ever. Found while fixing the
-narrower bug this entry was opened for (hover highlights that stayed lit), in
-the same forty lines of input routing, alongside two more.
-
-| fault | what a user saw |
-|---|---|
-| **A left-button release never reached a window.** `handle_mouse_button` returned on every left release, whether or not it had just ended a window drag. The toolkit's checkbox toggles on the release, its button un-presses on it, and 73 sites across `gui/toolkit` and `apps/` read it. | checkboxes could not be ticked with the mouse; buttons stayed drawn pressed; drags inside applications (sliders, selections, the colour picker) never ended |
-| **No `Enter`/`Leave`.** The protocol carries both and a dozen sites consume them; the compositor emitted neither. | a hover highlight stayed lit after the pointer moved to another window |
-| **A title bar did not hide the window beneath it from the pointer.** `window_at` looked for the topmost *client area* containing the point, so a point on one window's title bar fell through to the client area of whatever was beneath it. | moving, scrolling or right-clicking on a title bar acted on the window underneath |
-| **No implicit grab, and releases went to the focused window.** Motion went to whatever window was under the pointer, and a non-left release to the focused window. | a slider or text selection dragged past the window's edge stopped following; a right-click on an unfocused window had its release sent to a different window |
-
-**The fix.** One hit test, `pointer_target` — client area, frame, or desktop,
-topmost first, skipping click-through windows — behind motion, scroll, button
-and cursor-shape routing alike. `track_pointer_window` sends `Leave` and `Enter`
-as the client area under the pointer changes, including when the pointer leaves
-the output. A press in a client area grabs the pointer for that window until the
-button is released (`press_in`); motion, scroll and the release go to it
-wherever the pointer is, and a release whose press no window saw goes nowhere.
-A closed window drops out of both.
-
-**What holds it.** One test per fault, each checked to fail with the old code
-restored: `a_left_click_reaches_the_window_as_a_press_and_a_release`,
-`the_pointer_moving_between_windows_leaves_one_and_enters_the_other`,
-`a_title_bar_hides_the_window_beneath_it_from_the_pointer`,
-`a_drag_keeps_the_pointer_in_the_window_it_started_in`,
-`a_right_click_releases_to_the_window_it_pressed_in`, plus
-`a_release_with_no_press_behind_it_goes_nowhere`,
-`the_pointer_leaving_the_output_leaves_the_window_it_was_in`,
-`a_click_through_window_takes_neither_the_pointer_nor_its_shape` and
-`a_closed_window_no_longer_holds_the_pointer`.
-
-**Why none of it was caught.** Every routing test asserted on the press. A
-click is two events, and the half nobody checked was the half that did not
-arrive — the same shape as a test that asserts the part of a feature that
-works.
-
-**Left as it is, on purpose:** a drag that leaves the *development host's*
-window ends the grab, because the host sends `WM_MOUSELEAVE` and the release
-happens where the compositor cannot see it. On a real display the pointer
-cannot leave the output.
-
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 
 **Status:** OPEN — worked around in lane F; the fix is lane A's (`requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`).
@@ -165119,54 +165025,6 @@ helpers with it.
 workaround is in place; `a_listener_the_platform_cannot_vouch_for_is_asked_every_frame`
 holds the workaround's two halves. The kernel side is visible directly: `poll`
 a listening socket with a connection pending and `revents` comes back 0.
-
-### [F] A JPEG thumbnail is not the picture libjpeg makes at that scale, and sits half a source pixel off -- 2026-09-25 -- **FIXED 2026-09-25**
-
-**Status:** ✅ FIXED 2026-09-25 (lane F) — design-decisions §1307. The reduced
-transforms now average as libjpeg-turbo's do, and each component is
-reconstructed at the block size libjpeg gives it; every fixture at 1/2, 1/4
-and 1/8 is within 2 levels of TurboJPEG's own scaled decode
-(`tests/jpeg_sampling.rs`), where it was up to 157. The entry below is kept as
-the record of what was wrong.
-
-**In short:** a JPEG thumbnail is made by decoding the photograph directly at a
-half, a quarter or an eighth of its size, which is far cheaper than decoding it
-whole and shrinking it. This decoder does that reduction its own way: at half
-and quarter size its picture is shifted by half an original pixel, and it is not
-the picture libjpeg (under every browser and image library) makes at the same
-size, so there is nothing to check it against. Nobody would see the shift in a
-thumbnail; having no reference to test the scaled path against is the real
-cost.
-
-**Where.** `gui/imagecodec/src/jpeg.rs`: `idct_scaled` and `scaled_position`,
-and every component sharing one block size in `decode_scan` and in
-`jpeg/progressive.rs`'s `Coefficients`.
-
-**What differs.**
-1. `idct_scaled` transforms only a block's top-left `n` x `n` coefficients and
-   evaluates the 8-point basis at whole positions (`scaled_position`: 1, 3, 5
-   and 7 at half scale). The centres of the pixel pairs those samples stand for
-   are at 0.5, 2.5, 4.5 and 6.5 — half a source pixel away, the offset
-   `scaled_position`'s doc comment says it avoids.
-2. libjpeg-turbo's reduced transforms (`jidctred.c`: `jpeg_idct_4x4`, `2x2`,
-   `1x1`) produce, by their own header comment, the mean of each 2x2 (4x4, 8x8)
-   group of the full transform's output: a box filter done inside the
-   transform, which needs every coefficient that contributes to those means
-   (all but row and column 4 at half scale; 0, 1, 3, 5 and 7 at quarter).
-3. For colour halved both ways (4:2:0) libjpeg-turbo reconstructs chroma with a
-   transform twice the size instead of upsampling it afterwards (`jdmaster.c`:
-   "scale up the chroma components via IDCT scaling rather than upsampling").
-
-**The proper fix:** what libjpeg-turbo does — the averaging reduced transforms,
-and the doubled chroma transform wherever both ratios allow it — so the scaled
-path can be held to TurboJPEG's own scaled decode (`simplejpeg`, already what
-writes two of the fixtures). The cost to weigh: a progressive thumbnail must
-then keep 7x7 coefficients a block at half scale and 5x5 at quarter instead of
-4x4 and 2x2 (design-decisions §1305, point 1); eighth scale keeps the DC alone
-either way.
-
-**How to see it.** Decode a JPEG with `decode_scaled` at a bound that picks half
-scale, and compare it with `simplejpeg.decode_jpeg(data, min_factor=2)`.
 
 ### [F] Gate 5 (GNU option tables) is non-deterministic when WSL is sick: a fast WSL failure passes the push unjudged, a hang fails it -- 2026-09-25 -- **FIXED 2026-09-25 by lane A, 54e1c8743**
 
@@ -165263,40 +165121,6 @@ have the disc's colour at partial alpha.
 **How to see it.** Thumbnail a GIF or PNG with an opaque coloured shape on a
 transparent background over a light background: the shape has a dark rim.
 
-### [F] Lossless WebP decodes at half libwebp's speed -- 2026-09-25 -- **FIXED 2026-09-25**
-
-**Status:** FIXED — it now takes fewer cycles than libwebp: 0.39 billion for
-the 2000x1500 picture against libwebp's 0.46 (it was 0.63), measured in the
-decoding thread's CPU cycles. The pixel loop looks its prefix-code group up
-once a block and walks columns without dividing (libwebp's own scheme, item
-1 below), non-overlapping copies are one move, and the predictor and colour
-transforms work a row at a time in runs of one block, their mode or element
-looked up once a run (in the spirit of item 3). Every fixture as before,
-and 3,750 bit-flipped and 2,183 truncated lossless and alpha WebPs decoded
-exactly as libwebp decodes them. Item 2 was not needed. The original report
-follows.
-
-**In short:** opening a large lossless WebP takes about twice as long here as
-in a browser: 0.31 s for a 2000x1500 picture against libwebp's 0.15 s. The
-pictures are right to the bit; only the speed is behind. Lossless WebP is rare
-for photographs (those are almost always lossy), so this is felt mainly on big
-lossless screenshots and artwork.
-
-**Where.** `gui/imagecodec/src/webp/lossless.rs`, `decode_image`'s pixel loop.
-
-**The proper fix,** each measurable on its own against
-`examples/time_decode.rs`:
-1. Look the prefix-code group up once per block of `2^prefix_bits` pixels
-   rather than per pixel, as libwebp does.
-2. When a group's red, blue and alpha codes are all single-symbol or short,
-   decode a literal's four channels from one table lookup (libwebp's "packed"
-   tables).
-3. Undo the transforms a row at a time into one buffer instead of one pass per
-   transform over the whole picture, so the image stays in cache.
-
-**How to see it.** `cargo run --release -p imagecodec --example time_decode --
-<lossless.webp>`, against Pillow's `Image.open(...).load()` on the same file.
-
 ### [F] Lossy WebP decodes at about half libwebp's speed -- 2026-09-25
 
 **Status:** OPEN — lane F's; tech debt, not a bug. Mostly paid: the steps
@@ -165342,35 +165166,6 @@ arrays the compiler can vectorise.
 against a snapshot copy, interleaved, the minimum of N runs in thread
 cycles), and libwebp's cycles from Pillow's `load()` measured the same way
 with `QueryThreadCycleTime`.
-
-### [F] A lossless alpha plane cut off mid-symbol can differ from libwebp in its last pixel -- 2026-09-25 -- **FIXED 2026-09-25**
-
-**Status:** FIXED — `Bits` in `webp/lossless.rs` is now a port of libwebp's `VP8LBitReader`, called where `vp8l_dec.c` calls it, and the byte-per-pixel alpha loop is libwebp's `DecodeAlphaData`; `tests/data/webp_lossy_alpha_corrupt_tail.webp` is the file that showed it. The original report follows.
-
-**In short:** on a damaged file only. If a WebP's alpha plane is stored
-compressed, is one libwebp decodes a byte per pixel, and runs out of data in
-the middle of its very last pixel, libwebp still shows the picture -- and so
-does this -- but libwebp fills that one pixel from bits it has already used,
-and this fills it from zeros. One pixel's transparency in one corner of a
-damaged file. Found by comparing 5,200 corrupted files with libwebp
-(design-decisions.md §1312); it was the only difference left.
-
-**Where.** `gui/imagecodec/src/webp/lossless.rs`, `Bits`: past the end of
-the data it yields zeros; libwebp's `VP8LBitReader` wraps its 64-bit window
-(`bit_pos & 63`) once a read starts at its 64th bit, and after `eos` is set it
-resets `bit_pos` to 0 and reads the window from its start.
-
-**The proper fix.** Make `Bits` a port of libwebp's `VP8LBitReader` -- its
-64-bit window, `ShiftBytes` and `DoFillBitWindow`, `PrefetchBits` masking the
-position, `SetBitPos` without checks, `ReadBits` returning 0 once `eos` is
-set -- and call it where libwebp's `vp8l_dec.c` does (`FillBitWindow` before
-each symbol, the second-level lookup re-prefetching), so the stale bits are
-the ones libwebp reads.
-
-**How to see it.** Flip bits in `tests/data/webp_lossy_alpha.webp` with a
-seeded generator (the comparison script is described in §1312) and decode
-each with Pillow and with `imagecodec::decode`: one file in 5,200 differs, in
-its last pixel's alpha.
 
 ### [F] An icon with a broken colour profile shows here, and not in Chrome -- 2026-09-25
 
@@ -165418,45 +165213,6 @@ stream or a stream damaged past the strip's end.
 **The proper fix.** An additive `deflate` function with libdeflate's
 semantics (the request above spells them out); `inflate` becomes a call to it.
 Not a second inflater in `imagecodec`: design-decisions §555.
-
-### [F] Lossless JPEG is refused though libjpeg-turbo decodes it -- 2026-09-25
-
-**Status:** FIXED 2026-09-25. `gui/imagecodec/src/jpeg/lossless.rs` ports the
-three files below; 56 fixtures and 20,000 mutants agree with libjpeg-turbo
-(design-decisions §1318, "Lossless JPEG").
-
-**In short:** a JPEG coded losslessly (`SOF3`) -- used by medical imaging and
-some scientific instruments, almost never for photographs -- is refused
-(`ImageError::Unsupported`), where libjpeg-turbo 3, which the rest of the
-JPEG decoder is a port of, decodes it at up to 8 bits a sample. Nothing
-else about JPEG is affected.
-
-**Where.** `gui/imagecodec/src/jpeg/decompress.rs` (`start`, which refuses a
-lossless frame).
-
-**The proper fix.** Port libjpeg-turbo's lossless decompressor -- `jdlossls.c`
-(prediction and undifferencing), `jddiffct.c` (the difference buffer
-controller) and `jdlhuff.c` (its Huffman decoder) -- as the rest was
-ported (design-decisions §1318), and fuzz it against the same oracle.
-
-### [F] Some TIFFs are refused that libtiff shows -- 2026-09-25
-
-**Status:** FIXED 2026-09-25 -- PixarLog (`gui/imagecodec/src/tiff/pixarlog.rs`)
-was the last; every compression libtiff's reader decodes now decodes here
-(design-decisions §1317). The original report follows.
-
-**In short:** TIFFs compressed with PixarLog are refused
-(`ImageError::Unsupported`) though libtiff reads them. It is a rare, single
-vendor's format. (`YCbCr` and CIELab samples, fax, JPEG, old-style JPEG,
-NeXT, ThunderScan and SGI LogLuv were on this list; they decode now.)
-
-**Where.** `gui/imagecodec/src/tiff/read.rs` (`run_codec`) and `rgba.rs`
-(`pick_contig`, `pick_separate`, `begin`).
-
-**The proper fix.** Port the rest of libtiff's reader, as the first stages were
-(design-decisions §1317): `tif_pixarlog.c`, whose tables are made with
-glibc's `exp` and `log` and must come out as glibc's do -- generated from
-glibc, as CIELab's were. Fixtures from the same libtiff oracle.
 
 ### [F] A damaged PixarLog TIFF strip can be refused where libtiff shows it -- 2026-09-25
 

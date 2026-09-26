@@ -166022,30 +166022,57 @@ is getopt, not a hand conversion". A `POSIXLY_CORRECT` rule added to the
 existing loops would be the fourth thing each of them re-implements by hand,
 which is why the change above did not add one.
 
-## TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D (lane B, 2026-09-25) — **open**
+## TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D (lane B, 2026-09-25) — **open** for `-d`; `-t` fixed 2026-09-25
 
-**In short:** `touch -t 202001011200 f` and `touch -d '2020-01-01 12:00' f`
--- the two ways to give a file a chosen time rather than now -- both answer
-`option -t is not implemented by this touch` and exit 1. Build scripts, test
-fixtures and `make` workarounds use both.
+**In short:** `touch -d '2020-01-01 12:00' f` -- one of the two ways to give a
+file a chosen time rather than now -- answers `option -d is not implemented by
+this touch` and exits 1. Build scripts and test fixtures use it. The other way,
+`touch -t 202001011200 f`, works since 2026-09-25.
 
 **Where:** `userspace/coreutils/src/bin/touch.rs`, `parse_args`: `Opt::Short(flag
-@ (b'd' | b't'), _) => return Err(unimplemented_short(flag))`. The obsolete
-`touch MMDDhhmm[YY] FILE` operand, which GNU reads only while
-`_POSIX2_VERSION` is below 200112, is left out on purpose in the module docs,
-on the reasoning that a date-shaped operand would sometimes be a date and
-sometimes a file -- which is exactly GNU's behaviour, gated by that variable.
+@ b'd', _) => return Err(unimplemented_short(flag))`.
 
-**The fix** is two gnulib ports, each a module other utilities need too:
+**How `-t` was closed.** gnulib's `lib/posixtm.c` is `coreutils::posixtm`:
+`[[CC]YY]MMDDhhmm[.ss]` under upstream's syntax bits, read as a local time
+through `localtime::Zone::epoch` and refused when that normalises it to
+something else (September 31st, 25:00, a spring-forward gap), with a sixtieth
+second taken as the next one. `touch -t` is `CENTURY | SECONDS`. The obsolete
+`touch MMDDhhmm[YY] FILE…` operand came with it -- `TRAILING_YEAR | PRE_2000`,
+read only while `_POSIX2_VERSION` is below 200112, warned about unless
+`POSIXLY_CORRECT` is set -- replacing the module docs' reasoning for leaving it
+out, which was that a date-shaped operand would be a date only sometimes: that
+is upstream's behaviour, and the edition decides it. `-t` with `-r` is `cannot
+specify times from more than one source`. Pinned by `scripts/touch-diff.sh`
+section 11 (139 passed, 0 differed): lengths, two-digit years either side of
+69, the leap second, invalid stamps, the order of errors, both halves, and the
+obsolete operand under three editions.
 
-- `lib/posixtm.c` (208 lines) as `coreutils::posixtm`: `[[CC]YY]MMDDhhmm[.ss]`
-  under its syntax bits. `touch -t` is `PDS_LEADING_YEAR | PDS_CENTURY |
-  PDS_SECONDS`; the obsolete operand is `PDS_TRAILING_YEAR | PDS_PRE_2000`,
-  with upstream's `warning: 'touch %s' is obsolete; use 'touch -t …'` unless
-  `POSIXLY_CORRECT` is set; `date MMDDhhmm[[CC]YY][.ss]` is the third caller.
-  `coreutils::posixver` already answers the edition question.
-- `lib/parse-datetime.y` (2438 lines) as `coreutils::parse_datetime`, for
-  `touch -d`. `date -d` and `find -newerXt` each carry a measured subset of the
-  same language today (`date.rs`'s module docs list what it covers); one
-  transcription of the grammar would replace both, with `date-diff.sh` and
-  `find-diff.sh` checking that nothing they pass today is lost.
+**The fix for `-d`** is `lib/parse-datetime.y` (2438 lines) as
+`coreutils::parse_datetime`. `date -d` and `find -newerXt` each carry a
+measured subset of the same language today (`date.rs`'s module docs list what
+it covers); one transcription of the grammar would replace both, with
+`date-diff.sh` and `find-diff.sh` checking that nothing they pass today is
+lost. `touch -r FILE -d REL` then needs the reference time's nanoseconds kept
+through the relative items, as upstream's `date_relative` keeps them, and `-d
+now` needs upstream's special case that turns it back into `UTIME_NOW`.
+
+## B-TOUCH-WROTE-NOW-AS-A-CHOSEN-TIME (lane B, 2026-09-25) — FIXED 2026-09-25
+
+**In short:** `touch f` on a file its user may write but does not own --
+`/dev/null`, a group-writable file in a shared directory -- failed with
+`setting times of 'f': Operation not permitted`. GNU succeeds. Ours read the
+clock and wrote that instant, and the kernel lets only a file's owner write a
+chosen time; asking for *now*, which GNU does by passing no times at all, needs
+only write permission (`utimensat(2)`).
+
+**Measured** in WSL against GNU 9.4 as an ordinary user: `touch /dev/null`
+exits 0 there and 1 here; `touch -a /dev/null` and `touch -m /dev/null` fail on
+both, because *now* on one half and `UTIME_OMIT` on the other needs the owner
+again.
+
+**How it was closed.** `coreutils::fsattr` gained `When::Now`, the kernel's
+`UTIME_NOW`, and `Times::now()`; `touch` asks for it whenever no `-r` or `-t`
+was given. The descriptor path (`touch -`) calls `futimens` directly, because
+`std`'s `File::set_times` has no way to say *now*; the Windows arm reads the
+clock, which loses only a permission rule that host does not have. Pinned by
+`touch-diff.sh`'s `/dev/null` rows and `fsattr`'s `now_is_the_other_sentinel`.

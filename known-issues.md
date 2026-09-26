@@ -24374,7 +24374,8 @@ the icons its frame names before sending it (`ShellSession::send_frame`).
 
 **Not in reach here:** the icons *programs* put in the tray are characters they
 send (`guiremote::tray::TrayIcon::glyph`); naming a theme icon there is a wire
-change, lane F's.
+change, lane F's -- requested in
+`requests/c-f-let-a-tray-icon-name-a-theme-icon.md`.
 
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 

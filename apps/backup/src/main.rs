@@ -97,6 +97,9 @@ fn sha256_file(path: &Path) -> io::Result<String> {
 /// this tree's shipped defaults, fixtures or YAML use a bracket, and the
 /// operator confirmed the same of their own rules -- so nothing that exists
 /// changes meaning.
+/// Text against text; the tests' way in. The program matches paths' own
+/// bytes (`is_excluded`), with `glob_match_recursive` itself.
+#[cfg(test)]
 fn glob_matches(pattern: &str, path: &str) -> bool {
     glob_match_recursive(pattern.as_bytes(), path.as_bytes())
 }
@@ -416,26 +419,17 @@ fn glob_match_simple(pattern: &[u8], text: &[u8]) -> bool {
 
 /// Check if a path should be excluded based on exclude patterns.
 fn is_excluded(path: &Path, patterns: &[String]) -> bool {
-    // Exclusion patterns are UTF-8 text the user typed, so matching against a
-    // lossy rendering is the only thing that can be meant. This is a selection
-    // heuristic, not an identity check: the ASCII structure a glob keys on
-    // (separators, extensions) survives the conversion exactly, and the
-    // undecodable bytes a pattern could never have named become U+FFFD, which
-    // no pattern contains.
-    let path = path.to_string_lossy();
-    let path = path.as_ref();
-    for pattern in patterns {
-        if glob_matches(pattern, path) {
-            return true;
-        }
-        // Also check just the filename component
-        if let Some(name) = path.rsplit('/').next()
-            && glob_matches(pattern, name)
-        {
-            return true;
-        }
-    }
-    false
+    // Matched against the path's own bytes, which is what the matcher works
+    // on: a byte that is not text is one no pattern names, and nothing is
+    // decoded -- the lossy rendering this matched before turned such bytes
+    // into U+FFFD, which a pattern holding that character would then match.
+    let path = path.as_os_str().as_encoded_bytes();
+    // The file's own name as well as the whole path.
+    let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+    patterns.iter().any(|pattern| {
+        glob_match_recursive(pattern.as_bytes(), path)
+            || glob_match_recursive(pattern.as_bytes(), name)
+    })
 }
 
 // ============================================================================
@@ -2023,10 +2017,11 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
     let files_to_restore: Vec<&FileEntry> = if let Some(ref pattern) = opts.file_pattern {
         full_files
             .iter()
-            // The pattern is UTF-8 text the user typed, so matching a lossy
-            // rendering of the stored path is a selection heuristic, not an
-            // identity check. The path itself is still restored byte-exactly.
-            .filter(|f| glob_matches(pattern, &f.path.to_string_lossy()))
+            // Against the stored path's own bytes, as the matcher works;
+            // the path itself is restored byte-exactly either way.
+            .filter(|f| {
+                glob_match_recursive(pattern.as_bytes(), f.path.as_os_str().as_encoded_bytes())
+            })
             .collect()
     } else {
         full_files.iter().collect()
@@ -2806,9 +2801,16 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
     for entry in &manifest.files {
         // `Path::extension` (unlike splitting on '.') correctly reports no
         // extension for "README" and for a dotfile like ".gitignore".
+        // An extension that is not text is grouped by its bytes (shown as
+        // escapes): two such extensions are two groups, not one.
         let ext = entry.path.extension().map_or_else(
             || "(no ext)".to_string(),
-            |e| e.to_string_lossy().into_owned(),
+            |e| {
+                e.to_str().map_or_else(
+                    || quoting::escape_unprintable(e.as_encoded_bytes()),
+                    str::to_owned,
+                )
+            },
         );
         let (count, size) = by_ext.entry(ext).or_insert((0, 0));
         *count = count.saturating_add(1);
@@ -3329,6 +3331,42 @@ mod tests {
     /// Each is driven end-to-end through the real command rather than through
     /// an extracted helper, so the test exercises the same call the binary
     /// makes and cannot drift away from it.
+    /// Exclusions match the path's own bytes: a pattern still excludes a
+    /// file whose name is not text, and a pattern holding the replacement
+    /// character no longer matches one -- as it did against the lossy form.
+    #[cfg(unix)]
+    #[test]
+    fn an_exclusion_matches_the_paths_own_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = Path::new(std::ffi::OsStr::from_bytes(b"dir/caf\xe9.tmp"));
+        assert!(is_excluded(odd, &[String::from("*.tmp")]));
+        assert!(
+            is_excluded(odd, &[String::from("caf?.tmp")]),
+            "a byte that is not text is one character to `?`"
+        );
+        assert!(
+            !is_excluded(odd, &[String::from("caf\u{FFFD}.tmp")]),
+            "matched the lossy form"
+        );
+    }
+
+    /// The name alone, and the whole path, are both tried.
+    #[test]
+    fn an_exclusion_matches_the_whole_path_or_the_name() {
+        assert!(is_excluded(
+            Path::new("dir/a.tmp"),
+            &[String::from("*.tmp")]
+        ));
+        assert!(is_excluded(
+            Path::new("x/y/a.tmp"),
+            &[String::from("a.tmp")]
+        ));
+        assert!(!is_excluded(
+            Path::new("x/y/a.txt"),
+            &[String::from("*.tmp")]
+        ));
+    }
+
     #[test]
     fn command_level_writes_go_through_safeio() {
         let _guard = audit_lock();

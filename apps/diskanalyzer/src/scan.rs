@@ -287,10 +287,20 @@ pub fn walk(root: &Path, limits: Limits, shared: &Shared) -> Outcome {
 
 /// The display name for a path, which is the last component, or the whole path
 /// when there is no last component (`/`, or a bare drive letter).
+///
+/// A name that is not text is shown by its bytes, as escapes: a lossy decode
+/// showed two such folders as the same row.
 fn display_name(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || path.to_string_lossy().into_owned(),
-        |n| n.to_string_lossy().into_owned(),
+    path.file_name()
+        .map_or_else(|| path.display().to_string(), shown)
+}
+
+/// `name` as the window shows it: itself when it is text, its bytes as escapes
+/// when it is not.
+fn shown(name: &std::ffi::OsStr) -> String {
+    name.to_str().map_or_else(
+        || quoting::escape_unprintable(name.as_encoded_bytes()),
+        str::to_owned,
     )
 }
 
@@ -376,7 +386,7 @@ impl Walker<'_> {
                 continue;
             };
             let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
+            let name = shown(&entry.file_name());
 
             // `symlink_metadata`, not `metadata`: see the module docs. A link in
             // `/tmp` pointing at `/` would otherwise have this walk measure the
@@ -567,6 +577,32 @@ mod tests {
             .iter()
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("no child named {name} among {:?}", node.children.len()))
+    }
+
+    /// A name that is not text is shown by its bytes: two such folders are
+    /// two rows.
+    #[test]
+    fn a_name_that_is_not_text_is_shown_by_its_bytes() {
+        assert_eq!(display_name(Path::new("/d/photos")), "photos");
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_wide(&[0x0066, 0xD800]),
+                std::ffi::OsString::from_wide(&[0x0066, 0xD801]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_vec(vec![b'f', 0xFE]),
+                std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
+            )
+        };
+        let (sa, sb) = (display_name(Path::new(&a)), display_name(Path::new(&b)));
+        assert!(!sa.contains('\u{FFFD}'), "{sa:?}");
+        assert_ne!(sa, sb, "two folders became one row");
     }
 
     #[test]

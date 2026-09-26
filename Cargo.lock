@@ -146,6 +146,7 @@ name = "backup-app"
 version = "0.1.0"
 dependencies = [
  "pathcodec",
+ "quoting",
  "safeio",
  "scratchdir",
  "sha2",
@@ -663,6 +664,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "quoting",
  "scratchdir",
 ]
 
@@ -1261,6 +1263,7 @@ name = "indexer-app"
 version = "0.1.0"
 dependencies = [
  "globmatch",
+ "quoting",
  "scratchdir",
  "textfmt",
 ]

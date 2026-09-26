@@ -16,10 +16,7 @@
 #
 # roots: gui apps
 
-apps/backup/src/main.rs:VALUE:2
-apps/diskanalyzer/src/scan.rs:VALUE:3
 apps/diskimager/src/main.rs:VALUE:6
-apps/indexer/src/main.rs:VALUE:2
 apps/installer/src/grub.rs:VALUE:1
 apps/screenrecorder/src/main.rs:VALUE:2
 apps/settings/src/main.rs:VALUE:1

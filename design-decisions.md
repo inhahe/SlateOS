@@ -77342,10 +77342,12 @@ moved the guess as GNU's did. `Zone::mktime` keeps the same static;
 `mktime_internal` takes the guess as a parameter for callers (and tests) that
 must not share it.
 
-`Zone::epoch` stays, for callers that want an instant that always exists.
-`posixtm` (and so `touch -t`) and `cal` still call it and are the next to move
-to `mktime`, which will make their answers in a daylight-saving gap glibc's
-too.
+`Zone::epoch` stayed, for callers that wanted an instant that always
+exists, while `posixtm` (and so `touch -t`) and `cal` still called it.
+**Update 2026-09-26:** both moved to `mktime` -- called when and as upstream
+calls it, with `tm_isdst` -1 -- and with no callers left `Zone::epoch` was
+removed, a second inverse with its own answers for the skipped and repeated
+hours being an invitation to pick the one GNU's never give.
 
 ### Where C's integers show through
 

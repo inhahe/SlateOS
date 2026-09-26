@@ -55,12 +55,16 @@
 //!
 //! # And `mktime`, the way glibc does it
 //!
-//! [`Zone::epoch`] inverts [`Zone::local`] for callers that want an instant
-//! that always exists. A caller porting C that calls `mktime` wants something
-//! else — glibc's answers for the skipped and repeated hours, its handling of
-//! an explicit `tm_isdst`, and its failures — and gets them from
-//! [`Zone::mktime`] and [`Zone::localtime_r`] over a C-shaped [`StructTm`]. See
-//! the `mktime` module for why each of those is observable.
+//! The inverse of [`Zone::local`] is [`Zone::mktime`], with [`Zone::localtime_r`]
+//! beside it, over a C-shaped [`StructTm`]: glibc's answers for the skipped
+//! and repeated hours, its handling of an explicit `tm_isdst`, and its
+//! failures. See the `mktime` module for why each of those is observable.
+//!
+//! There used to be a second inverse, `Zone::epoch`, with its own rule for the
+//! skipped and repeated hours. It was removed on 2026-09-26 when its last
+//! callers (`touch -t`, `cal`) moved to `mktime`: every program here ports one
+//! that calls glibc's, and a second inverse was only ever an invitation to
+//! pick the one whose answers GNU's never give.
 
 use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
@@ -384,81 +388,6 @@ impl Zone {
     pub fn local(&self, t: i64, nanos: u32) -> Tm {
         Tm::from_utc(t, nanos, self.lookup(t))
     }
-
-    /// The inverse of [`Zone::local`]: a civil local time to a UTC instant.
-    ///
-    /// This is `mktime`. It returns the instant *and* the normalised [`Tm`],
-    /// because a caller that hands in `2024-02-31` or `month: 13` needs to know
-    /// what that resolved to — which is the same reason C's `mktime` writes
-    /// back through its argument.
-    ///
-    /// # Why it iterates
-    ///
-    /// The offset depends on the instant and the instant depends on the offset.
-    /// So it starts from the UTC guess and applies the offset in force there,
-    /// repeating until it settles. Three rounds converge for every real zone,
-    /// because an offset change is never larger than a day and never happens
-    /// twice within one.
-    ///
-    /// A local time that a spring-forward skipped **does not exist**, and this
-    /// resolves it to a nearby instant rather than failing — which is what
-    /// glibc does with `tm_isdst = -1`. An ambiguous time in a fall-back hour
-    /// picks one of the two, likewise as glibc does.
-    ///
-    /// # Why it lives here
-    ///
-    /// `userspace/coreutils/src/bin/cal.rs` carried this, under a comment
-    /// saying "there is no inverse of `Zone::local` in the `localtime` crate,
-    /// so this is it". Three other files carry private copies of the
-    /// [`days_from_civil`] half alone. That is the same shape as the
-    /// duplication this crate was created to end — see the module docs, where
-    /// `unix_secs_to_datetime` is recorded as the fourth copy of the *forward*
-    /// arithmetic. This is the first copy of the reverse.
-    #[must_use]
-    pub fn epoch(&self, civil: &Civil) -> (i64, Tm) {
-        // Normalise the month first, so `days_from_civil` sees 1..=12 and any
-        // day-of-month overflow (31 February) is left for it to carry.
-        let year = civil
-            .year
-            .saturating_add((civil.month.saturating_sub(1)).div_euclid(12));
-        let month = (civil.month.saturating_sub(1))
-            .rem_euclid(12)
-            .saturating_add(1);
-
-        let days = days_from_civil(year, month, civil.day);
-        let local_secs = days
-            .saturating_mul(86_400)
-            .saturating_add(civil.hour.saturating_mul(3_600))
-            .saturating_add(civil.minute.saturating_mul(60))
-            .saturating_add(civil.second);
-
-        let mut t = local_secs;
-        for _ in 0..3 {
-            let off = i64::from(self.lookup(t).gmtoff);
-            let next = local_secs.saturating_sub(off);
-            if next == t {
-                break;
-            }
-            t = next;
-        }
-        (t, self.local(t, 0))
-    }
-}
-
-/// A civil (wall-clock) local time, with fields allowed **out of range**.
-///
-/// Out-of-range is the point: it is what lets a caller say "the 32nd of March"
-/// or "month 13" and have [`Zone::epoch`] carry it, which is how `date -d` and
-/// `cal` resolve `tomorrow` without special-casing month ends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct Civil {
-    pub year: i64,
-    /// 1..=12 nominally; outside that range it carries into the year.
-    pub month: i64,
-    pub day: i64,
-    pub hour: i64,
-    pub minute: i64,
-    pub second: i64,
 }
 
 /// Days since 1970-01-01 for a proleptic-Gregorian civil date.
@@ -468,7 +397,7 @@ pub struct Civil {
 /// table.
 ///
 /// Note that `m` and `d` are *not* range-checked: this is the arithmetic half,
-/// and [`Zone::epoch`] is where normalisation happens.
+/// and [`Zone::mktime`] is where normalisation happens.
 #[must_use]
 pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y.saturating_sub(1) } else { y };
@@ -867,53 +796,43 @@ mod tests {
         }
     }
 
+    /// `mktime` of what `localtime_r` gave back is the instant it was given.
     #[test]
-    fn zone_epoch_is_the_inverse_of_zone_local() {
+    fn mktime_is_the_inverse_of_localtime_r() {
         let utc = Zone::utc();
         for t in [0i64, 1, -1, 1_000_000_000, -1_000_000_000, 1_614_834_367] {
-            let tm = utc.local(t, 0);
-            let civil = Civil {
-                year: tm.year,
-                month: i64::from(tm.month),
-                day: i64::from(tm.day),
-                hour: i64::from(tm.hour),
-                minute: i64::from(tm.minute),
-                second: i64::from(tm.second),
-            };
-            assert_eq!(utc.epoch(&civil).0, t, "round trip failed for {t}");
+            let mut tm = utc.localtime_r(t).unwrap();
+            let mut offset = 0;
+            assert_eq!(
+                utc.mktime_internal(&mut tm, &mut offset),
+                Some(t),
+                "round trip failed for {t}"
+            );
         }
     }
 
+    /// The 32nd of March is the 1st of April, month 12 (C's 0-based 13th) is
+    /// next January, and February 30th of a leap year is March 1st -- what
+    /// `date -d tomorrow` and `cal` rely on, so load-bearing rather than a
+    /// curiosity.
     #[test]
-    fn zone_epoch_normalises_out_of_range_fields() {
+    fn mktime_normalises_out_of_range_fields() {
         let utc = Zone::utc();
-        // The 32nd of March is the 1st of April, and month 13 is next January.
-        // This is the behaviour `date -d tomorrow` and `cal` rely on, so it is
-        // load-bearing rather than a curiosity.
-        let (_, tm) = utc.epoch(&Civil {
-            year: 2021,
-            month: 3,
-            day: 32,
-            ..Civil::default()
-        });
-        assert_eq!((tm.year, tm.month, tm.day), (2021, 4, 1));
-
-        let (_, tm) = utc.epoch(&Civil {
-            year: 2021,
-            month: 13,
-            day: 1,
-            ..Civil::default()
-        });
-        assert_eq!((tm.year, tm.month, tm.day), (2022, 1, 1));
-
-        // February 30th in a leap year is March 1st.
-        let (_, tm) = utc.epoch(&Civil {
-            year: 2024,
-            month: 2,
-            day: 30,
-            ..Civil::default()
-        });
-        assert_eq!((tm.year, tm.month, tm.day), (2024, 3, 1));
+        let normalised = |year: i32, mon: i32, mday: i32| {
+            let mut tm = StructTm {
+                tm_year: year - 1900,
+                tm_mon: mon,
+                tm_mday: mday,
+                tm_isdst: -1,
+                ..StructTm::default()
+            };
+            let mut offset = 0;
+            utc.mktime_internal(&mut tm, &mut offset).unwrap();
+            (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+        };
+        assert_eq!(normalised(2021, 2, 32), (2021, 4, 1));
+        assert_eq!(normalised(2021, 12, 1), (2022, 1, 1));
+        assert_eq!(normalised(2024, 1, 30), (2024, 3, 1));
     }
 
     #[test]

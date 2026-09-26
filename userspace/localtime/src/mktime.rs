@@ -26,8 +26,8 @@
 //!   its offset — `2021-06-15 12:00` with `tm_isdst = 0` in New York is 13:00
 //!   EDT. `parse_datetime` relies on this for input such as `EST` in July.
 //!
-//! [`Zone::epoch`] predates this and answers the first two questions its own
-//! way; it is kept for the callers that want an instant that always exists.
+//! This crate's own inverse, `Zone::epoch`, answered the first two questions
+//! its own way; it was removed on 2026-09-26, when its last callers moved here.
 //!
 //! # `localtime_r` fails too
 //!

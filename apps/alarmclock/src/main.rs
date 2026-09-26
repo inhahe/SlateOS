@@ -80,6 +80,17 @@ const WINDOW_HEIGHT: f32 = 640.0;
 /// Tab bar height.
 const TAB_BAR_HEIGHT: f32 = 48.0;
 
+/// The strip under the tab bar that says an alarm makes no sound.
+///
+/// Its own strip, which the content starts below. The two lines used to be
+/// drawn at the very top of the window, before the tab bar -- which filled the
+/// same forty-eight pixels and painted over them, so the one thing this
+/// program most needs to say was never seen.
+const NOTICE_H: f32 = 34.0;
+
+/// One line of the notice, top to top.
+const NOTICE_LINE_H: f32 = 15.0;
+
 /// Standard padding.
 const PADDING: f32 = 16.0;
 
@@ -2300,7 +2311,7 @@ impl AlarmClockApp {
     /// The rectangle the active tab draws into.
     #[must_use]
     pub fn content_rect(width: f32, height: f32) -> Rect {
-        let top = TAB_BAR_HEIGHT + 8.0;
+        let top = TAB_BAR_HEIGHT + NOTICE_H + 8.0;
         Rect::new(
             PADDING,
             top,
@@ -2379,13 +2390,15 @@ impl AlarmClockApp {
             self.palette.base,
             0.0,
         );
-        // After the background, or it would be painted over. Unconditional:
-        // there is no state in which this program can make a sound.
+        self.draw_tab_bar(&mut f, width);
+        // Under the tab bar and over nothing: the content starts below it.
+        // Unconditional -- there is no state in which this program can make a
+        // sound.
         for (i, line) in NO_SOUND_LINES.iter().enumerate() {
             #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-            let ty = 1.0 + i as f32 * 11.0;
+            let ty = TAB_BAR_HEIGHT + 3.0 + i as f32 * NOTICE_LINE_H;
             let avail = (width - 16.0).max(0.0);
-            if avail <= 0.0 || ty + 11.0 > height {
+            if avail <= 0.0 || ty + NOTICE_LINE_H > height {
                 break;
             }
             f.push(RenderCommand::Text {
@@ -2397,7 +2410,7 @@ impl AlarmClockApp {
                 } else {
                     self.palette.subtext0
                 },
-                font_size: if i == 0 { 10.0 } else { 9.0 },
+                font_size: if i == 0 { 12.0 } else { 11.0 },
                 font_weight: if i == 0 {
                     FontWeightHint::Bold
                 } else {
@@ -2407,8 +2420,6 @@ impl AlarmClockApp {
                 overflow: TextOverflow::Ellipsis,
             });
         }
-
-        self.draw_tab_bar(&mut f, width);
 
         let content = Self::content_rect(width, height);
         match self.active_tab {
@@ -3598,6 +3609,27 @@ mod tests {
                 .any(|l| l.contains("nothing will wake you")),
             "nothing states the consequence, only the mechanism",
         );
+
+        // And where it can be seen. The lines were in the frame and on no
+        // screen: drawn before the tab bar, which filled the same pixels. A
+        // list of the frame's texts said they were there.
+        let frame = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let commands = frame.commands();
+        for line in NO_SOUND_LINES {
+            let (at, x, y) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == line => Some((i, *x, *y)),
+                    _ => None,
+                })
+                .expect("drawn");
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+        }
     }
 
     use guitk::probe;

@@ -165963,6 +165963,35 @@ against the same commits: nothing with `xargs -r git diff-tree`, the five
 given in the request with a regression case for `test-pre-push-gates.py`.
 Until then, run a script's `test-<stem>.py` by hand before pushing it.
 
+### [E] Warnings drawn where the next thing drawn covers them -- 2026-09-25
+**Status:** FIXED for notes, kanban and the alarm clock (lane E, 2026-09-25); OPEN for twelve more -- lane E's, in progress.
+
+**In short:** a sweep in mid-September gave many apps one or two lines of
+text at the very top of the window saying something the user must know: the
+alarm clock makes no sound, so "if this window is not in front of you, nothing
+will wake you"; the calendar and the reminders list keep nothing; the
+spreadsheet opens on an example. Each was drawn "after the background, or it
+would be painted over" -- and then the app drew its toolbar or tab bar over the
+same pixels. The lines were in every frame and on no screen. Their tests read
+the frame's list of texts, where the lines were, and passed.
+
+**Fixed** in `apps/notes` (drawn before the window's own background),
+`apps/kanban` (under the toolbar, and on every board) and `apps/alarmclock`
+(under the tab bar -- the worst of them, since an alarm clock that cannot wake
+anyone must say so where it is read). Each now draws its lines where nothing
+covers them, and its test also asks that nothing drawn after a line fills the
+point it is drawn at.
+
+**Open -- the same comment marks each:** `calendar`, `clipmanager`,
+`credmanager`, `filediff`, `podcast`, `mindmap`, `musicplayer`, `spreadsheet`,
+`startupmanager`, `remotedesktop`, `videoplayer`, `reminders`. Not all may be
+covered -- where the lines land depends on what each app draws next -- so each
+wants the test first. Some lines are also no longer true: the spreadsheet's
+says Ctrl+S writes a CSV and that work is gone at close, both false since it
+kept workbooks (design-decisions §1204); and the calendar's and the reminders
+list's say they keep nothing, which is so -- they are two more apps that keep
+nothing, beside the four the entry below names.
+
 ### [E] The explorer's file-type columns showed the same invented values for every file -- 2026-09-25
 **Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25); OPEN for audio files, a picture's colour depth, and tar, gzip, 7z and rar archives -- lane E's.
 

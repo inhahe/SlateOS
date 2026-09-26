@@ -872,7 +872,7 @@ fn parse_path_number(s: &str) -> Result<f32, SvgError> {
 // ─── SVG Node Tree ───────────────────────────────────────────────────────────
 
 /// Style properties for an SVG node.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SvgStyle {
     pub fill: Option<SvgPaint>,
     pub stroke: Option<SvgPaint>,
@@ -998,7 +998,8 @@ impl SvgDocument {
         (0.0, 0.0, 300.0, 150.0)
     }
 
-    /// Render the SVG to an ARGB pixel buffer at the given dimensions.
+    /// Render the SVG to a pixel buffer at the given dimensions: 4 bytes per
+    /// pixel, `[r, g, b, a]`, straight alpha, row by row.
     /// Uses 4x supersampling for anti-aliased edges.
     pub fn render(&self, width: u32, height: u32) -> Vec<u8> {
         let mut renderer = SvgRenderer::new(width, height);
@@ -1406,12 +1407,32 @@ fn build_svg(elem: &XmlElement) -> Result<SvgNode, SvgError> {
     let height = elem.attr_f32("height");
     let view_box = elem.attr("viewBox").and_then(|s| parse_viewbox(s).ok());
 
-    let children: Result<Vec<_>, _> = elem.children.iter().map(build_node).collect();
+    let children: Vec<SvgNode> = elem
+        .children
+        .iter()
+        .map(build_node)
+        .collect::<Result<_, _>>()?;
+    // Presentation attributes on the root element -- `fill="none"
+    // stroke="currentColor"` is how most icon sets are written -- are inherited
+    // by everything in the document, as SVG says. They were ignored, so every
+    // such icon drew its outlines as solid black shapes: the default fill,
+    // unstroked. A group carrying them gives them the inheritance a `<g>`
+    // already has, without a second kind of node to walk.
+    let style = parse_style_attrs(elem)?;
+    let children = if style == SvgStyle::default() {
+        children
+    } else {
+        vec![SvgNode::Group {
+            transform: Transform::IDENTITY,
+            style,
+            children,
+        }]
+    };
     Ok(SvgNode::Svg {
         width,
         height,
         view_box,
-        children: children?,
+        children,
     })
 }
 
@@ -2074,7 +2095,8 @@ fn path_to_polygons(commands: &[PathCommand], transform: Transform) -> Vec<Vec<(
 struct SvgRenderer {
     width: u32,
     height: u32,
-    /// ARGB buffer (4 bytes per pixel: [B, G, R, A] in little-endian, or as u32 ARGB)
+    /// 4 bytes per pixel, `[r, g, b, a]`, straight alpha, row by row -- what
+    /// `blend_pixel` writes.
     buffer: Vec<u8>,
     /// 2x supersampling grid for anti-aliasing
     ss_factor: u32,
@@ -3387,5 +3409,32 @@ mod tests {
         let cmds = doc.render_commands(0.0, 0.0, 200.0, 200.0);
         let has_line = cmds.iter().any(|c| matches!(c, RenderCommand::Line { .. }));
         assert!(has_line);
+    }
+    /// Presentation attributes on the root `<svg>` are inherited, as they are
+    /// on a `<g>`: an outline icon written `fill="none" stroke="..."` on the
+    /// root draws its outline, not a solid black shape.
+    #[test]
+    fn root_presentation_attributes_are_inherited() {
+        let doc = SvgDocument::parse(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" fill="none" stroke="#00ff00" stroke-width="2"><rect x="2" y="2" width="6" height="6"/></svg>"##,
+        )
+        .unwrap();
+        let px = doc.render(10, 10);
+        let at = |x: usize, y: usize| &px[(y * 10 + x) * 4..(y * 10 + x) * 4 + 4];
+        // The middle of the rectangle is not filled...
+        assert_eq!(at(5, 5)[3], 0, "the rect was filled: {:?}", at(5, 5));
+        // ...and its edge is stroked green.
+        let edge = at(2, 5);
+        assert!(edge[1] > 200 && edge[0] < 50 && edge[3] > 0, "{edge:?}");
+    }
+
+    /// The buffer is `[r, g, b, a]`: a red square comes out red first.
+    #[test]
+    fn the_rendered_bytes_are_red_green_blue_alpha() {
+        let doc = SvgDocument::parse(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><rect x="0" y="0" width="4" height="4" fill="#ff0000"/></svg>"##,
+        )
+        .unwrap();
+        assert_eq!(&doc.render(4, 4)[..4], &[255, 0, 0, 255]);
     }
 }

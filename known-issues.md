@@ -157787,7 +157787,40 @@ direction: a consumer did exist, and was reached, and still made the displayed
 claim false, because it was fed an argument that erased the difference.
 
 
-## TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST -- 2026-09-17
+## TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST -- 2026-09-17; the live half FIXED 2026-09-25, the page half OPEN
+
+**Status, 2026-09-25.** This entry was wrong about one thing that mattered:
+the three rows *were* live. The start menu has listed the database's
+`Category::Setting` entries beside its applications since 2026-08-21
+(`DesktopShell::start_menu_entries`), so "Display Settings", "Network
+Settings" and "Sound Settings" were start-menu rows -- and search results --
+that started nothing at every press, not inert launcher data. Found again
+while fixing the power menu's `/sbin/shutdown`
+(`TD-C-THE-POWER-MENU-LAUNCHED-PROGRAMS-SLATEOS-HAS-NEVER-HAD`), by checking
+every path the database names against the binaries the workspace builds.
+
+*Fixed:* the three entries are gone and their search words are Settings'
+own, so "wifi" or "volume" finds Settings, which opens. That respects the
+reasoning below -- no row claims a page it cannot open, since there is one
+row and it claims only Settings. And
+`launcher::tests::every_program_the_menus_start_is_one_this_workspace_builds`
+now holds every program the start and power menus start to a binary this
+workspace builds, by a path with no space in it: the check that would have
+caught this, the power menu's paths, and the screenshot shortcut's flags.
+
+*Still open:* rows that land on their page, in the order below. A second
+reason for step 1's design: the flag cannot be `--display`, which is the
+compositor address every SlateOS program takes (`oswindow::app::Args`). Step
+1 is filed as `requests/c-e-settings-opens-on-the-page-it-is-asked-for.md`,
+which is the caller design-decisions 856 asks for. Step 2 has grown since
+this was written: four entries would share the program `/usr/bin/settings`,
+so everything that identifies an entry by `executable_path` -- pins and
+`startmenu.yaml`, the search's de-duplication, drag payloads, desktop
+shortcuts -- must identify it by the whole command line instead (about
+twenty sites in `gui/desktop/src/lib.rs` and `launcher.rs`).
+
+The entry as first written:
+
 
 **In short:** the search launcher's built-in app list has three entries
 — "Display settings", "Network settings", "Sound settings" — whose

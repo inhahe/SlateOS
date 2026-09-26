@@ -19502,6 +19502,18 @@ mod start_search_tests {
     #[test]
     fn the_keyboards_row_stays_on_screen() {
         let mut shell = shell();
+        // Programs of its own, so that the list is longer than the menu however
+        // many the built-in database happens to hold.
+        for n in 0..12 {
+            shell.apps.push(super::launcher::AppEntry {
+                name: format!("Program {n:02}"),
+                description: String::new(),
+                executable_path: format!("/opt/fixture/program-{n:02}"),
+                keywords: Vec::new(),
+                category: super::launcher::Category::Application,
+                launch_count: 0,
+            });
+        }
         let rows = shell.start_menu_visible_rows();
         assert!(
             shell.start_menu_entries().len() > rows,

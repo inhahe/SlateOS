@@ -927,11 +927,41 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
             category: Category::Application,
             launch_count: 0,
         },
+        // The words of three entries that are no longer here. "Display
+        // Settings", "Network Settings" and "Sound Settings" named
+        // `/usr/bin/settings --display` and its neighbours as their program --
+        // one path with a space and a flag in it, which no file is called -- so
+        // each row of the start menu started nothing. Pointed at
+        // `/usr/bin/settings` alone they would be three rows each claiming a
+        // page and all opening the same front one, and Settings cannot yet be
+        // asked for a page: it refuses an argument it does not know, and
+        // `--display` is every program's compositor address. So a search for
+        // "wifi" finds Settings itself, which is honest about where it lands:
+        // `known-issues.md`
+        // `TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST`.
         AppEntry {
             name: "Settings".to_string(),
             description: "System preferences and configuration".to_string(),
             executable_path: SETTINGS.to_string(),
-            keywords: vec!["config".into(), "preferences".into(), "options".into()],
+            keywords: vec![
+                "config".into(),
+                "preferences".into(),
+                "options".into(),
+                "display".into(),
+                "monitor".into(),
+                "resolution".into(),
+                "dpi".into(),
+                "network".into(),
+                "wifi".into(),
+                "ethernet".into(),
+                "vpn".into(),
+                "internet".into(),
+                "sound".into(),
+                "audio".into(),
+                "volume".into(),
+                "speaker".into(),
+                "microphone".into(),
+            ],
             category: Category::Setting,
             launch_count: 0,
         },
@@ -994,45 +1024,6 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
                 "grab".into(),
             ],
             category: Category::Application,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Display Settings".to_string(),
-            description: "Resolution, scaling, and monitors".to_string(),
-            executable_path: "/usr/bin/settings --display".to_string(),
-            keywords: vec![
-                "monitor".into(),
-                "resolution".into(),
-                "screen".into(),
-                "dpi".into(),
-            ],
-            category: Category::Setting,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Network Settings".to_string(),
-            description: "Wi-Fi, Ethernet, and VPN configuration".to_string(),
-            executable_path: "/usr/bin/settings --network".to_string(),
-            keywords: vec![
-                "wifi".into(),
-                "ethernet".into(),
-                "vpn".into(),
-                "internet".into(),
-            ],
-            category: Category::Setting,
-            launch_count: 0,
-        },
-        AppEntry {
-            name: "Sound Settings".to_string(),
-            description: "Audio input/output and volume".to_string(),
-            executable_path: "/usr/bin/settings --sound".to_string(),
-            keywords: vec![
-                "audio".into(),
-                "volume".into(),
-                "speaker".into(),
-                "microphone".into(),
-            ],
-            category: Category::Setting,
             launch_count: 0,
         },
     ]
@@ -1684,6 +1675,122 @@ mod tests {
         match st.handle_key(&press(Key::Enter)) {
             LauncherAction::Launch(path) => assert_eq!(path, "/opt/zzz"),
             other => panic!("expected Launch(/opt/zzz), got {other:?}"),
+        }
+    }
+
+    // -------- The programs the menus start --------
+
+    /// Every binary this workspace builds, by name: a crate's package name
+    /// when it has a `src/main.rs`, each `[[bin]]` it declares, and each
+    /// `src/bin/*.rs`. Read from the manifests under the workspace's member
+    /// globs (`apps/*`, `gui/*`, `init/*`, `net/*`, `userspace/*` in the root
+    /// `Cargo.toml`) -- line by line, since a name is all this needs.
+    fn workspace_binaries() -> std::collections::BTreeSet<String> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut bins = std::collections::BTreeSet::new();
+        for zone in ["apps", "gui", "init", "net", "userspace"] {
+            let dir = std::fs::read_dir(root.join(zone)).expect("a member directory");
+            for krate in dir.flatten() {
+                let krate = krate.path();
+                let Ok(manifest) = std::fs::read_to_string(krate.join("Cargo.toml")) else {
+                    continue;
+                };
+                let mut section = String::new();
+                for line in manifest.lines().map(str::trim) {
+                    if line.starts_with('[') {
+                        section = line.to_string();
+                        continue;
+                    }
+                    let Some(value) = line.strip_prefix("name") else {
+                        continue;
+                    };
+                    let Some(value) = value.trim_start().strip_prefix('=') else {
+                        continue;
+                    };
+                    let name = value.trim().trim_matches('"').to_string();
+                    let is_main = section == "[package]" && krate.join("src/main.rs").exists();
+                    if is_main || section == "[[bin]]" {
+                        bins.insert(name);
+                    }
+                }
+                if let Ok(extra) = std::fs::read_dir(krate.join("src/bin")) {
+                    for bin in extra.flatten() {
+                        let path = bin.path();
+                        if path.extension().is_some_and(|e| e == "rs")
+                            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                        {
+                            bins.insert(stem.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        bins
+    }
+
+    /// **Every program the start menu and the power menu can start is one this
+    /// workspace builds**, named by a path with no space in it.
+    ///
+    /// Nothing else connects these strings to programs that exist, and three
+    /// times one named nothing: the screenshot shortcut's flags were part of
+    /// its path until 2026-09-17, the power menu started `/sbin/shutdown` and
+    /// `/usr/bin/logout` until 2026-09-25, and three settings entries started
+    /// `/usr/bin/settings --display` and its neighbours -- a file name with a
+    /// space and a flag in it. Each drew, each launched, and each started
+    /// nothing, with every other test green. The shortcuts are held to this
+    /// list by `hotkeys`' own test, so they are covered here too.
+    ///
+    /// The directory is not checked: no image installs the desktop's programs
+    /// anywhere yet, so there is no layout to hold `/usr/bin` against.
+    #[test]
+    fn every_program_the_menus_start_is_one_this_workspace_builds() {
+        let bins = workspace_binaries();
+        // A floor, so an empty scan -- a moved manifest, a wrong root -- fails
+        // as itself rather than as every program being missing, or none.
+        assert!(bins.len() > 50, "the scan found {} binaries", bins.len());
+
+        let mut programs: Vec<(String, String)> = builtin_app_database()
+            .into_iter()
+            .map(|entry| (entry.name, entry.executable_path))
+            .collect();
+        for choice in crate::power::PowerChoice::ALL {
+            if let Some(launch) = choice.command() {
+                let program = launch.program.to_str().expect("a literal path").to_string();
+                programs.push((choice.label().to_string(), program));
+            }
+        }
+        for (what, program) in programs {
+            assert!(
+                program.starts_with('/'),
+                "{what} starts {program:?}, which is not a path"
+            );
+            assert!(
+                !program.contains(char::is_whitespace),
+                "{what} starts {program:?}: a program path with a space in it is a command line \
+                 in disguise, looked up whole as one file name"
+            );
+            let name = program.rsplit('/').next().unwrap_or(&program);
+            assert!(
+                bins.contains(name),
+                "{what} starts {program:?}, and nothing in this workspace builds a program \
+                 called {name:?}"
+            );
+        }
+    }
+
+    /// A search for what the three folded entries covered still finds a way
+    /// in: Settings, which owns every one of those pages.
+    #[test]
+    fn a_search_for_a_settings_page_finds_settings() {
+        let settings = builtin_app_database()
+            .into_iter()
+            .find(|entry| entry.executable_path == SETTINGS)
+            .expect("Settings is in the database");
+        for word in ["display", "resolution", "wifi", "vpn", "sound", "volume"] {
+            assert!(
+                search_score(word, &settings).is_some(),
+                "{word:?} does not find Settings"
+            );
         }
     }
 

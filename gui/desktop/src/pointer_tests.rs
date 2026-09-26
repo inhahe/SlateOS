@@ -38,6 +38,34 @@ fn shell() -> DesktopShell {
     DesktopShell::new(1000, 800)
 }
 
+/// A shell whose start menu lists more programs than it can show, so that
+/// scrolling has somewhere to go.
+///
+/// Made by adding programs rather than by counting on how many the built-in
+/// database holds. The scrolling tests used to take "more than the menu can
+/// show" from the database's size, and on 2026-09-25 the database lost three
+/// entries that had never started anything -- and two of those tests lost
+/// their scroll with them, while two more went on passing because a list that
+/// cannot scroll does not move either way.
+fn shell_with_a_long_menu() -> DesktopShell {
+    let mut shell = shell();
+    for n in 0..12 {
+        shell.apps.push(launcher::AppEntry {
+            name: format!("Program {n:02}"),
+            description: String::new(),
+            executable_path: format!("/opt/fixture/program-{n:02}"),
+            keywords: Vec::new(),
+            category: Category::Application,
+            launch_count: 0,
+        });
+    }
+    assert!(
+        shell.start_menu_max_scroll() >= 6,
+        "the fixture must list more programs than the menu can show"
+    );
+    shell
+}
+
 /// A window list on the desktop the user is looking at.
 ///
 /// Almost every test in this file is about a click landing somewhere, and none
@@ -225,12 +253,8 @@ fn every_visible_row_launches_the_program_named_on_it() {
 /// renderer and a hit test that each tracked the offset would part company.
 #[test]
 fn a_scrolled_row_launches_the_program_named_on_it() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
-    assert!(
-        shell.start_menu_max_scroll() >= 3,
-        "the fixture needs more programs than the menu can show"
-    );
 
     let (x, y) = centre(shell.start_menu_row_rect(0));
     // One detent, which is three rows. This used to read
@@ -250,7 +274,7 @@ fn a_scrolled_row_launches_the_program_named_on_it() {
 
 #[test]
 fn the_list_cannot_scroll_past_either_end() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
 
     shell.scroll_start_menu(1_000);
@@ -302,7 +326,7 @@ fn a_trackpads_fractions_add_up_instead_of_being_discarded() {
 /// with a pixel-shaped number.
 #[test]
 fn a_wheel_notch_over_the_menu_scrolls_it() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
     let rect = shell.start_menu_row_rect(0);
     let (x, y) = centre(rect);
@@ -319,7 +343,7 @@ fn a_wheel_notch_over_the_menu_scrolls_it() {
 /// A fraction left over from one visit to the menu must not move the next one.
 #[test]
 fn reopening_the_menu_forgets_the_leftover_fraction() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
     let rect = shell.start_menu_row_rect(0);
     let (x, y) = centre(rect);
@@ -337,7 +361,7 @@ fn reopening_the_menu_forgets_the_leftover_fraction() {
 
 #[test]
 fn reopening_the_menu_rewinds_the_list() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
     shell.scroll_start_menu(2);
     assert_eq!(shell.start_menu_scroll, 2);
@@ -590,7 +614,7 @@ fn closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it() {
 
 #[test]
 fn a_wheel_over_the_power_menu_does_not_scroll_the_list_behind_it() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
     shell.toggle_power_menu();
 

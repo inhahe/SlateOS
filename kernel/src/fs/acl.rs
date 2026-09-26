@@ -30,9 +30,18 @@
 //!
 //! ## Storage
 //!
-//! ACLs are stored in the VFS xattr system under the key
-//! `system.posix_acl_access`.  This is compatible with Linux ext4's
-//! ACL storage.  In-memory, a BTreeMap caches ACLs for fast lookup.
+//! **In memory only.** ACLs live in this module's table and nowhere else: they
+//! do not survive a reboot, and nothing reads or writes the
+//! `system.posix_acl_access` xattr that Linux keeps them in. (This section
+//! used to say they were stored there, with the table as a cache; no code ever
+//! did that.) The xattr is where they belong -- it would make an ACL persist,
+//! and end with its inode -- and `known-issues.md`
+//! `A-PER-FILE-STATE-OUTLIVED-ITS-FILE` records that as the long-term home.
+//!
+//! The table is keyed on the file's identity, so it has to be told when a
+//! file goes: an ext4 inode number is reused by the next file created, and an
+//! ACL left behind would govern that stranger. The VFS does tell it -- see
+//! [`super::perfile`] and [`PER_FILE_STATE`].
 //!
 //! ## Reference
 //!
@@ -202,12 +211,157 @@ struct AclInner {
     /// no entry, so the file whose ACL was displaced becomes unprotected,
     /// while the file that displaced it inherits restrictions nobody asked
     /// for.
-    acls: BTreeMap<PathBuf, Acl>,
+    /// Keyed by [`AclKey`], valued by the path as DATA plus the ACL.
+    ///
+    /// The path is kept so `list_paths` can still report names without the
+    /// key type reaching its signature.
+    acls: BTreeMap<AclKey, (PathBuf, Acl)>,
     /// Statistics counters.
     checks_performed: u64,
     denials: u64,
 }
 
+/// The key an ACL is stored under: the file's identity when it has one,
+/// otherwise its path.
+///
+/// POSIX keeps an ACL in the inode's extended attributes, which is why a
+/// hard link shares its file's ACL there. Keying on the path string made
+/// this table disagree with that: a second name for a protected file found
+/// no entry, and `check_access` treats no entry as *allow* ("defer to
+/// traditional permissions"), so the protection simply did not apply under
+/// the other name.
+///
+/// That was not exploitable when it was found -- there is no ACL syscall, so
+/// only a `kshell` command can put an entry in this table at all -- and the
+/// reason to fix it anyway is that it is pre-positioned: adding
+/// `SYS_ACL_SET` later would arm it, and the new syscall would look correct
+/// in isolation. See `known-issues.md` 2026-09-21.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum AclKey {
+    Id(crate::fs::vfs::FileId),
+    Path(PathBuf),
+}
+
+/// Derive the key for a path. Every key is built by [`key_from`], which this
+/// and the file-lifecycle hooks share, so a key can never be derived one way
+/// at `insert` and another at `remove`.
+///
+/// MUST be called before taking the `ACLS` lock: `file_identity` calls into
+/// the VFS, and a module global held across that call inverts
+/// filesystem-lock -> module-state. Nine such sites were introduced and
+/// caught by `scripts/check-vfs-under-lock.py` on 2026-09-21; this ordering
+/// is what that gate enforces.
+///
+/// The path fallback is exact rather than approximate: every filesystem here
+/// that can give one file two names assigns nonzero inodes (ext4 and memfs
+/// leave `ino: 0` at 0 of 15 and 0 of 16 construction sites), so a file that
+/// resolves to no identity is one that cannot be hard-linked anyway.
+fn acl_key(path: &Path) -> AclKey {
+    key_from(crate::fs::Vfs::file_identity(path).unwrap_or(None), path)
+}
+
+/// The key for a file whose identity is already known -- the one place an
+/// `AclKey` is built, which [`acl_key`] and the file-lifecycle hooks share.
+///
+/// The hooks need it because they run after the name is gone: the VFS reads
+/// the identity while the name still resolves and hands it over, and looking
+/// the name up again would find nothing (or, for a replaced name, the wrong
+/// file).
+fn key_from(id: Option<crate::fs::vfs::FileId>, path: &Path) -> AclKey {
+    match id {
+        Some(id) => AclKey::Id(id),
+        None => AclKey::Path(path.to_path_buf()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File lifecycle (see `super::perfile`)
+// ---------------------------------------------------------------------------
+
+/// This table's part in the file lifecycle: an ACL ends with its file, and
+/// moves with it when it is renamed. See [`super::perfile`] for why a
+/// `FileId`-keyed entry that outlived its file would be a stranger's ACL.
+pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
+    name: "acl",
+    forget: forget_file,
+    rename: rename_names,
+    unmounted: forget_filesystem,
+    plant: plant_for_test,
+    finds: finds_for_test,
+    reports: reports_for_test,
+};
+
+/// The file is gone: drop its ACL.
+fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
+    // Every removal on the system passes through here, and almost no file has
+    // an ACL; the count is the same filter `check_access`'s callers use.
+    if ACL_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let key = key_from(id, path);
+    let mut inner = ACLS.lock();
+    if inner.acls.remove(&key).is_some() {
+        ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
+    }
+}
+
+/// Names moved: rewrite every stored name `rename` maps to a new one.
+///
+/// An identity key stays as it is -- the file is the same file -- and only the
+/// name kept to report it changes. A path key IS the name (the two are equal
+/// by construction in [`set_acl`]), so it moves with it.
+fn rename_names(rename: &super::perfile::NameMap<'_>) {
+    if ACL_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let mut inner = ACLS.lock();
+    // Collected first: a map key cannot be changed in place.
+    let moved: Vec<(AclKey, PathBuf)> = inner
+        .acls
+        .iter()
+        .filter_map(|(key, (name, _))| rename(name).map(|new| (key.clone(), new)))
+        .collect();
+    for (key, new_name) in moved {
+        let Some((_, acl)) = inner.acls.remove(&key) else {
+            continue;
+        };
+        let new_key = match key {
+            AclKey::Id(id) => AclKey::Id(id),
+            AclKey::Path(_) => AclKey::Path(new_name.clone()),
+        };
+        inner.acls.insert(new_key, (new_name, acl));
+    }
+    ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
+}
+
+/// Self-test support: an ACL granting read and write to everyone -- the
+/// lifecycle rungs need no more, and it refuses nothing they do.
+fn plant_for_test(path: &Path) -> KernelResult<()> {
+    set_acl(path, from_mode(0o666))
+}
+
+/// Self-test support: whether a lookup through `path` finds an ACL.
+fn finds_for_test(path: &Path) -> bool {
+    get_acl(path).is_some()
+}
+
+/// Self-test support: whether an ACL is reported under `name`.
+fn reports_for_test(name: &Path) -> bool {
+    ACLS.lock().acls.values().any(|(p, _)| p.as_path() == name)
+}
+
+/// A filesystem was unmounted: its mount id is never reused, so no identity
+/// on it can match again, and its entries are only garbage.
+fn forget_filesystem(fs_id: u64) {
+    if ACL_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let mut inner = ACLS.lock();
+    inner
+        .acls
+        .retain(|key, _| !matches!(key, AclKey::Id(id) if id.fs_id == fs_id));
+    ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
+}
 static ACLS: Mutex<AclInner> = Mutex::new(AclInner {
     acls: BTreeMap::new(),
     checks_performed: 0,
@@ -222,8 +376,9 @@ static ACLS: Mutex<AclInner> = Mutex::new(AclInner {
 /// would put a lock on that path for the overwhelmingly common case of a
 /// system with no ACLs set. A relaxed load costs nothing.
 ///
-/// Kept in step with the map by [`set_acl`], [`remove_acl`] and [`clear`] —
-/// the only three functions that change its size. Relaxed is sufficient: a
+/// Kept in step with the map by every function that changes its size:
+/// [`set_acl`], [`remove_acl`], [`clear`], and the file-lifecycle hooks
+/// (`forget_file`, `rename_names`, `forget_filesystem`). Relaxed is sufficient: a
 /// reader that misses a just-inserted ACL by a few cycles behaves exactly
 /// like a reader that ran a moment earlier, and `check_access` re-reads the
 /// map under the lock anyway, so the count is a filter and never the answer.
@@ -272,8 +427,10 @@ pub fn set_acl(path: impl AsRef<Path>, acl: Acl) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
 
+    // Above the lock. See `acl_key`.
+    let key = acl_key(path);
     let mut inner = ACLS.lock();
-    inner.acls.insert(path.to_path_buf(), acl);
+    inner.acls.insert(key, (path.to_path_buf(), acl));
     // Published under the lock so a concurrent `remove_acl` cannot interleave
     // its decrement between this insert and this store.
     ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
@@ -284,15 +441,17 @@ pub fn set_acl(path: impl AsRef<Path>, acl: Acl) -> KernelResult<()> {
 ///
 /// Returns None if no ACL is set (file uses only traditional permissions).
 pub fn get_acl(path: impl AsRef<Path>) -> Option<Acl> {
-    ACLS.lock().acls.get(path.as_ref()).cloned()
+    let key = acl_key(path.as_ref());
+    ACLS.lock().acls.get(&key).map(|(_, acl)| acl.clone())
 }
 
 /// Remove the ACL from a file path.
 ///
 /// After removal, the file uses only traditional permissions.
 pub fn remove_acl(path: impl AsRef<Path>) -> bool {
+    let key = acl_key(path.as_ref());
     let mut inner = ACLS.lock();
-    let removed = inner.acls.remove(path.as_ref()).is_some();
+    let removed = inner.acls.remove(&key).is_some();
     ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
     removed
 }
@@ -319,11 +478,13 @@ pub fn check_access(
     request: AccessRequest,
 ) -> KernelResult<()> {
     let path = path.as_ref();
+    // Above the lock: this is the site the lock-order gate exists for.
+    let key = acl_key(path);
     let mut inner = ACLS.lock();
     inner.checks_performed = inner.checks_performed.saturating_add(1);
 
-    let acl = match inner.acls.get(path) {
-        Some(acl) => acl,
+    let acl = match inner.acls.get(&key) {
+        Some((_, acl)) => acl,
         None => return Ok(()), // No ACL, defer to traditional permissions.
     };
 
@@ -397,13 +558,13 @@ pub fn check_access(
 /// List all paths that have ACLs set.
 #[allow(dead_code)]
 pub fn list_paths() -> Vec<PathBuf> {
-    ACLS.lock().acls.keys().cloned().collect()
+    ACLS.lock().acls.values().map(|(p, _)| p.clone()).collect()
 }
 
 /// Get statistics about the ACL subsystem.
 pub fn stats() -> AclStats {
     let inner = ACLS.lock();
-    let total_entries: usize = inner.acls.values().map(|a| a.entries.len()).sum();
+    let total_entries: usize = inner.acls.values().map(|(_, a)| a.entries.len()).sum();
     AclStats {
         files_with_acls: inner.acls.len(),
         total_entries,
@@ -560,6 +721,9 @@ pub fn format_acl(acl: &Acl, mask: Option<AclPerm>) -> Vec<String> {
 /// Self-test for the ACL subsystem.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[acl] Running self-test...");
+    // Sections that skip record why, so the closing line cannot claim 12
+    // tests passed when one of them did not run.
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // --- Test 1: Minimal ACL from mode ---
     {
@@ -931,6 +1095,88 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[acl]   non-UTF-8 paths OK");
     }
 
-    serial_println!("[acl] Self-test passed (11 tests).");
+    // --- Test 12: an ACL follows the FILE, not the name ---
+    //
+    // The pre-existing rungs above use synthetic paths that do not exist, so
+    // `file_identity` returns NotFound, keying falls back to the path, and
+    // every one of them passes identically whether this table is keyed by
+    // identity or by name. They are therefore no evidence for the conversion.
+    // This rung creates a real file and gives it a second name.
+    {
+        const A: &[u8] = b"/tmp/acl-id-a";
+        const B: &[u8] = b"/tmp/acl-id-b";
+        let _ = crate::fs::Vfs::remove(Path::new(A));
+        let _ = crate::fs::Vfs::remove(Path::new(B));
+        crate::fs::Vfs::write_file(Path::new(A), b"x")?;
+
+        // Classified, not guessed. `.is_err()` would announce "no hard links
+        // here" for a link refused with PermissionDenied or ENOSPC -- a cause
+        // never established -- and return success.
+        let link_unsupported =
+            match crate::fs::selftest::classify(crate::fs::Vfs::link(Path::new(A), Path::new(B))) {
+                crate::fs::selftest::Setup::Ready => false,
+                crate::fs::selftest::Setup::Unsupported(_) => true,
+                crate::fs::selftest::Setup::Failed(e) => {
+                    serial_println!("[acl]   FAIL: link() refused with {:?}, which is not", e);
+                    serial_println!(
+                        "[acl]         'this system cannot' -- it was asked and said no"
+                    );
+                    let _ = crate::fs::Vfs::remove(Path::new(A));
+                    return Err(e);
+                }
+            };
+        if link_unsupported {
+            serial_println!("[acl]   identity rung SKIPPED -- link() unsupported on this mount");
+            skips.record("identity rung", "link() unsupported on /tmp");
+            let _ = crate::fs::Vfs::remove(Path::new(A));
+        } else {
+            let ida = crate::fs::Vfs::file_identity(Path::new(A))?;
+            let idb = crate::fs::Vfs::file_identity(Path::new(B))?;
+            if ida.is_none() || ida != idb {
+                serial_println!("[acl]   identity rung SKIPPED -- {:?} vs {:?}", ida, idb);
+                skips.record("identity rung", "two names did not share an identity");
+                let _ = crate::fs::Vfs::remove(Path::new(A));
+                let _ = crate::fs::Vfs::remove(Path::new(B));
+            } else {
+                // 0o700: owner rwx, group and other nothing. Requester 1000
+                // is neither the owner (0) nor in its group, so it lands on
+                // the Other entry and must be refused.
+                set_acl(Path::new(A), from_mode(0o700))?;
+                let denied_via_a =
+                    check_access(Path::new(A), 1000, 1000, 0, 0, AccessRequest::READ).is_err();
+                let denied_via_b =
+                    check_access(Path::new(B), 1000, 1000, 0, 0, AccessRequest::READ).is_err();
+                let _ = remove_acl(Path::new(A));
+                let _ = crate::fs::Vfs::remove(Path::new(A));
+                let _ = crate::fs::Vfs::remove(Path::new(B));
+
+                // The CONTROL, checked first and separately. Without it a
+                // build where `check_access` refuses nothing at all would
+                // satisfy the real assertion below by accident, and the rung
+                // would report OK having demonstrated nothing (dd-954).
+                if !denied_via_a {
+                    serial_println!(
+                        "[acl]   ERROR: control failed -- a 0o700 ACL did not deny uid 1000"
+                    );
+                    serial_println!("[acl]          under the file's OWN name, so the");
+                    serial_println!("[acl]          identity assertion below proves nothing");
+                    return Err(KernelError::InternalError);
+                }
+                if !denied_via_b {
+                    serial_println!(
+                        "[acl]   FAIL: the ACL denied under /tmp/acl-id-a but ALLOWED under"
+                    );
+                    serial_println!("[acl]         /tmp/acl-id-b, a second name for the same");
+                    serial_println!("[acl]         inode -- a hard link walks past the ACL");
+                    return Err(KernelError::InternalError);
+                }
+                serial_println!(
+                    "[acl]   identity rung OK -- an ACL follows the file, not the name"
+                );
+            }
+        }
+    }
+    skips.report("acl");
+    serial_println!("[acl] Self-test passed (12 tests){}", skips.suffix());
     Ok(())
 }

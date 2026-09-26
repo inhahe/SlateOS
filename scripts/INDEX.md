@@ -99,6 +99,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-refusals-refuse.py` | Refuse a shell block that announces a refusal and then returns success. |
 | `scripts/check-release-staleness.py` | Gate: refuse to push when the release-profile boot test is stale. |
 | `scripts/check-requests-not-deleted.py` | Gate: a `requests/` file may be stamped, but not deleted. |
+| `scripts/check-ring3-entry-regs.py` | Every transition to ring 3 must leave the syscall-argument registers DEFINED. |
 | `scripts/check-roadmap-done.py` | Gate: a roadmap entry marked `[x]` must not name a crate that does not exist. |
 | `scripts/check-scratch-config.py` | Every test that can write a settings file runs inside a scratch directory. |
 | `scripts/check-self-tests-wired.py` | Fail if a kernel `self_test` exists that nothing ever calls. |
@@ -206,6 +207,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/head-diff.sh` | Differential test: our head against GNU head. |
 | `scripts/host-errmsg.py` | Find utilities that print the *host's* error text instead of POSIX's. |
 | `scripts/hostid-diff.sh` | hostid-diff.sh — compare our `hostid` against GNU's, inside WSL. |
+| `scripts/hostload.py` | How much CPU this host will give a process right now -- measured, not assumed. |
 | `scripts/hostname-diff.sh` | Differential test: our `hostname` against net-tools `hostname`. |
 | `scripts/id-diff.sh` | id-diff.sh — compare our `id` and `groups` against GNU's, inside WSL. |
 | `scripts/install-hooks.sh` | Install this repo's git hooks into the shared .git dir, as trampolines. |
@@ -226,10 +228,12 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lossy-decode.py` | Find lossy byte->text conversions that reach a VALUE, not a message. |
 | `scripts/ls-diff.sh` | Compare our `ls` -- and `dir` and `vdir`, its other two builds -- against GNU's, inside WSL. |
 | `scripts/ls-quote-probe.py` | Measure all ten of GNU's quoting styles at once, byte for byte. |
+| `scripts/lsmem-diff.sh` | Differential test: our `lsmem` against util-linux 2.39.3's. |
 | `scripts/make-spike/run.sh` | Cross-compile upstream GNU make and link it against SlateOS's own libc.a. |
 | `scripts/merge-readiness.py` | Say whether incoming `origin/main` commits land in the part of the tree your |
 | `scripts/mknod-diff.sh` | mknod-diff.sh — compare our `mknod` against GNU's, inside WSL. |
 | `scripts/more-diff.sh` | Differential test: our more against util-linux's more. |
+| `scripts/msysbash.py` | The bash this repository's shell scripts actually run under -- found, not assumed. |
 | `scripts/multicall-aliases.py` | Find command names that a program answers to but that nothing can invoke. |
 | `scripts/mutate-gate.py` | Break one piece of a Python gate at a time and demand its `--selftest` notice. |
 | `scripts/mutation_harness.py` | The mutation-sweep harness shared by every app's `mutate.py`. |
@@ -323,6 +327,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/scan-unwired.py` | Find work that no path from an entry point reaches, but a test does. |
 | `scripts/scan-unwrap.py` | Find `.unwrap()` / `.expect(...)` in *production* kernel code. |
 | `scripts/sed-diff.sh` | Differential test: our sed against GNU sed. |
+| `scripts/selftest-boot-gate-identity.py` | Self-test for boot-test.sh's `check_identity_rungs` gate. |
 | `scripts/selftestflag.py` | One spelling rule for `--self-test`, because the alternative reported success. |
 | `scripts/seq-cases.py` | Generate the case file for ``scripts/seq-diff.sh``. |
 | `scripts/seq-diff.sh` | Differential test: our `seq` against GNU's. |
@@ -375,14 +380,17 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
 | `scripts/test-gittree.py` | Tests for `scripts/gittree.py` — reading many blobs out of one git process. |
 | `scripts/test-grade-positional.py` | Regression tests for `scripts/grade-positional.py`. |
+| `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
 | `scripts/test-ki-dupes.py` | Regression tests for `scripts/ki_dupes.py` and its entry/subsection split. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
+| `scripts/test-msysbash.py` | Tests for `msysbash.py`, the one place that decides which bash runs our scripts. |
 | `scripts/test-open-requests.py` | Regression tests for `scripts/open-requests.py`. |
 | `scripts/test-pre-push-doclinks-gate.py` | Tests for pre-push gate 11 -- the dead-intra-doc-link gate. |
 | `scripts/test-pre-push-fmt-gate.py` | Behavioural tests for pre-push gate 7 (rustfmt drift), and specifically for |
 | `scripts/test-pre-push-gates.py` | Structural tests for `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-identity-gate.py` | Behavioural tests for pre-push gate 10 (fixture-identity refusal). |
 | `scripts/test-pre-push-run-checker.py` | Tests for `run_checker`, the shared checker-invocation helper. |
+| `scripts/test-pre-push-touches.py` | Tests for the pre-push hook's `touches` helper (scripts/hooks/pre-push). |
 | `scripts/test-pre-push-unixhalf-gate.py` | Behavioural tests for pre-push gate 12 (coreutils' unix half). |
 | `scripts/test-proctree.py` | test-proctree.py — tests for `proctree.resolve_command` and friends. |
 | `scripts/test-prune-build-cache.py` | Run `prune-build-cache.py`'s self-test under the boot test's tooling gate. |
@@ -423,4 +431,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_413 scripts._
+_421 scripts._

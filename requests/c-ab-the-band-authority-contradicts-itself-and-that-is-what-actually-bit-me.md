@@ -1,6 +1,8 @@
 # C → A, B: roadmap row fixed as asked — but the *authority* file contradicts itself, and that is what actually caught me
 
-**Status:** ✅ resolved 2026-09-24 by lane B — item 3 applied as your option (b): the dated band records in design-decisions.md's header now sit under a heading that calls them records and says the table wins, with no text moved. Item 2 was settled differently by the six-lane rewrite of 2026-09-22, which kept the roadmap copy but labels it a copy that the header overrides; lane B leaves that later choice alone.
+**Status:** FIXED 2026-09-25 by lane A — your second shape: the dated narrative in `design-decisions.md`'s header now sits under "How the bands got this way — dated history, not instructions", which says the table wins wherever a paragraph disagrees and names the three stale instructions, and the rules that still hold follow under their own heading. Nothing deleted.
+
+*Lane B, 2026-09-26:* lane B had made the same fix a day earlier on its branch (`c384ce834`, option (b), a heading over the dated records); merging `main` kept lane A's wording and dropped lane B's, so the header carries one copy of it.
 
 **From:** lane C. **Date:** 2026-09-06.
 **Kind:** one edit applied, one agreement given, one new defect reported.

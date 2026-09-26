@@ -78,6 +78,22 @@ const ELFOSABI_GNU: u8 = 3;
 // ELFOSABI_LINUX is an alias for ELFOSABI_GNU (same value, 3).  glibc
 // historically used the name "GNU"; many references say "LINUX".
 
+/// SlateOS's own `EI_OSABI` value: 255, the top of the range the gABI leaves
+/// to the architecture/OS (64–255). One of the two forms of the explicit
+/// native marker (design-decisions.md §33); `userspace/readelf` already names
+/// it `ELFOSABI_SLATEOS`.
+const ELFOSABI_SLATEOS: u8 = 255;
+
+/// Owner name of the SlateOS ABI note, NUL-terminated as ELF note names are.
+/// The other form of the native marker: a note in a `PT_NOTE` segment.
+const SLATEOS_NOTE_NAME: &[u8] = b"SlateOS\0";
+
+/// `n_type` of the note that declares "this binary speaks the SlateOS native
+/// system-call ABI". Its 4-byte descriptor is the ABI revision, currently 1;
+/// the kernel accepts any revision for now, and the field exists so a future
+/// incompatible ABI can be told apart without a new note type.
+const NT_SLATEOS_ABI: u32 = 1;
+
 // e_type values.
 const ET_EXEC: u16 = 2; // Executable file.
 const ET_DYN: u16 = 3; // Shared object / PIE.
@@ -92,7 +108,6 @@ const PT_LOAD: u32 = 1;
 #[allow(dead_code)]
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
-#[allow(dead_code)]
 const PT_NOTE: u32 = 4;
 #[allow(dead_code)]
 const PT_PHDR: u32 = 6;
@@ -455,8 +470,28 @@ impl<'a> ElfFile<'a> {
     /// having no Linux ABI support at all, and the binary can be
     /// flagged manually via [`crate::proc::pcb::set_abi_mode`] or a
     /// future explicit-runtime syscall.
+    ///
+    /// ## The SlateOS native marker outranks every signal above
+    ///
+    /// A binary carrying [`Self::has_slateos_marker`] is native, whatever else
+    /// it carries. That precedence is not a tie-break, it is a correction:
+    /// signal 1 is *not* unambiguous for our own toolchain. The slateos target
+    /// is an LLVM `x86_64-unknown-linux-musl` target, and an object is tagged
+    /// `ELFOSABI_GNU` as soon as it uses a GNU extension — so a native SlateOS
+    /// program can reach the kernel as OSABI 3. `coreutils`' binaries do, and
+    /// were being run with the *Linux* syscall table: their first native
+    /// syscall (`SYS_SET_FS_BASE`, 528) was refused as an unknown Linux
+    /// number. Found 2026-09-24, when `ctest-coreutils-runs` exec'd
+    /// `/mnt/bin/true` for the first time. The marker is how design-decisions
+    /// §33 (operator's decision) says native binaries identify themselves; its
+    /// producers are the toolchain's (`requests/a-bd-coreutils-cannot-start-
+    /// two-link-faults.md`).
     #[must_use]
     pub fn detect_linux_abi(&self) -> bool {
+        if self.has_slateos_marker() {
+            return false;
+        }
+
         // Signal 1: EI_OSABI explicit Linux/GNU tag.
         if self.header.e_ident_osabi == ELFOSABI_GNU {
             return true;
@@ -485,6 +520,38 @@ impl<'a> ElfFile<'a> {
         }
 
         false
+    }
+
+    /// Whether this binary declares itself SlateOS-native — the explicit
+    /// marker of design-decisions.md §33.
+    ///
+    /// Either form is sufficient:
+    ///
+    /// * `e_ident[EI_OSABI] == ELFOSABI_SLATEOS` (255); or
+    /// * a note in a `PT_NOTE` segment whose owner is `"SlateOS"` and whose
+    ///   type is `NT_SLATEOS_ABI` (1), descriptor = ABI revision (4 bytes).
+    ///
+    /// Two forms because they suit different producers: a linker script can
+    /// keep a note that the C runtime emits, so every binary linked against
+    /// our libc carries it with no extra step; a byte in the header can be
+    /// stamped after the fact by whatever stages a binary, for toolchains that
+    /// cannot be taught to keep a note.
+    #[must_use]
+    pub fn has_slateos_marker(&self) -> bool {
+        if self.header.e_ident_osabi == ELFOSABI_SLATEOS {
+            return true;
+        }
+        (0..self.program_header_count()).any(|i| {
+            let Some(phdr) = self.program_header(i) else {
+                return false;
+            };
+            if phdr.p_type != PT_NOTE {
+                return false;
+            }
+            self.raw_segment_bytes(&phdr).is_some_and(|notes| {
+                notes_contain(notes, phdr.p_align, SLATEOS_NOTE_NAME, NT_SLATEOS_ABI)
+            })
+        })
     }
 
     /// Return the dynamic loader path from the `PT_INTERP` segment.
@@ -992,6 +1059,71 @@ fn copy_segment_data_to_frame(
 fn read_u16(data: &[u8], off: usize) -> u16 {
     let bytes: [u8; 2] = [data[off], data[off + 1]];
     u16::from_le_bytes(bytes)
+}
+
+/// Whether the note segment image `notes` holds a note owned by `name` (the
+/// exact bytes, NUL included) with type `n_type`.
+///
+/// Each note is `Elf64_Nhdr { n_namesz, n_descsz, n_type }` (three `u32`s),
+/// then the name, then the descriptor, each padded to the note alignment.
+/// That alignment is 4 for ordinary notes and 8 for `.note.gnu.property`, and
+/// a segment's `p_align` says which — anything other than 8 is taken as 4,
+/// which is what every toolchain emits for a 4-aligned note segment.
+///
+/// Every size in a note is attacker-controlled (it is file content), so every
+/// offset is computed with checked arithmetic and every read goes through
+/// `get`: a malformed note ends the walk with `false`, it never panics and
+/// never reads outside the segment.
+fn notes_contain(notes: &[u8], p_align: u64, name: &[u8], n_type: u32) -> bool {
+    let align: usize = if p_align == 8 { 8 } else { 4 };
+    let pad = |x: usize| -> Option<usize> {
+        x.checked_add(align.wrapping_sub(1))
+            .map(|v| v & !align.wrapping_sub(1))
+    };
+    let word = |at: usize| -> Option<u32> {
+        let b: [u8; 4] = notes.get(at..at.checked_add(4)?)?.try_into().ok()?;
+        Some(u32::from_le_bytes(b))
+    };
+    let mut off = 0usize;
+    // One loop turn per note; `next > off` below guarantees progress, so
+    // this terminates within `notes.len() / 12` turns.
+    while off < notes.len() {
+        let Some(namesz) = word(off) else {
+            return false;
+        };
+        let Some(descsz) = word(off.saturating_add(4)) else {
+            return false;
+        };
+        let Some(ty) = word(off.saturating_add(8)) else {
+            return false;
+        };
+        let Some(name_start) = off.checked_add(12) else {
+            return false;
+        };
+        let Some(name_end) = name_start.checked_add(namesz as usize) else {
+            return false;
+        };
+        let Some(desc_start) = pad(name_end) else {
+            return false;
+        };
+        let Some(desc_end) = desc_start.checked_add(descsz as usize) else {
+            return false;
+        };
+        if desc_end > notes.len() {
+            return false;
+        }
+        if ty == n_type && notes.get(name_start..name_end) == Some(name) {
+            return true;
+        }
+        let Some(next) = pad(desc_end) else {
+            return false;
+        };
+        if next <= off {
+            return false;
+        }
+        off = next;
+    }
+    false
 }
 
 /// Return `true` if `bytes` (a NUL-terminated `PT_INTERP` path image)
@@ -6633,6 +6765,13 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
     // syscall  →  0F 05
     buf[c + 20] = 0x0F;
     buf[c + 21] = 0x05;
+    // int3. The doc above has always promised this and the code never
+    // emitted it, so a FAILED exec fell through into the buffer's zero
+    // fill -- `00 00` is `add [rax], al` -- and faulted somewhere with no
+    // relation to the defect. The 2026-09-21 boot showed exactly that: a
+    // #GP at base+0x16, one byte past this syscall. A breakpoint stops
+    // where it broke.
+    buf[c + 22] = 0xCC;
 
     // int3 at c+22 (already filled by safety net above)
 
@@ -6684,9 +6823,9 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
 /// | `0x13` | `struct_size = 108` | `-3` | not a multiple of 8 |
 /// | `0x14` | `struct_size = 4104` | `-3` | above `SPAWN_EX2_MAX_SIZE` |
 /// | `0x15` | `struct_size = 104` | `-101` | a short struct is legal, and the missing tail is zero-filled — an unzeroed `cap_mode` would have been rejected |
-/// | `0x16` | `struct_size = 128` | `-101` | the exact current size is accepted |
-/// | `0x17` | `struct_size = 136`, tail `= 0` | `-101` | a *newer* caller with an all-zero tail is accepted |
-/// | `0x18` | `struct_size = 136`, tail `= 1` | `-3` | a non-zero unknown field is refused, never ignored |
+/// | `0x16` | `struct_size = 144` | `-101` | the exact current size is accepted |
+/// | `0x17` | `struct_size = 152`, tail `= 0` | `-101` | a *newer* caller with an all-zero tail is accepted |
+/// | `0x18` | `struct_size = 152`, tail `= 1` | `-3` | a non-zero unknown field is refused, never ignored |
 /// | `0x19` | `cap_mode = 2` | `-3` | an unknown mode is not clamped to a known one |
 /// | `0x1A` | `cap_mode = 1`, `cap_ptr = 0`, `cap_count = 3` | `-3` | a null array with a count is a caller bug, not "no capabilities" |
 /// | `0x1B` | `cap_mode = 1`, `cap_ptr = 0`, `cap_count = 0` | `-101` | …but the two spellings of "nothing" agree |
@@ -6695,6 +6834,15 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
 /// | `0x1E` | entry `_reserved[0] = 1` | `-3` | the reserved field is validated, not skipped |
 /// | `0x1F` | a well-formed entry | `-101` | …and a clean entry passes the decode |
 /// | `0x20` | `cap_mode = 0` with a junk `cap_ptr`/`cap_count` | `-101` | inherit-all ignores the array entirely |
+/// | `0x21` | `cwd_ptr` unmapped, `cwd_len = 0` | `-101` | a zero length inherits the parent's directory and the pointer is never read |
+/// | `0x22` | `cwd_ptr = 0`, `cwd_len = 1` | `-3` | a null path with a length is a caller bug, not "inherit" |
+/// | `0x23` | `cwd_ptr` unmapped, `cwd_len = 4096` | `-3` | over `CWD_MAX_LEN` is refused *before* the pointer is read (a read first would say -101) |
+/// | `0x24` | `cwd` = `"a"` | `-3` | a relative directory is refused, not resolved or ignored |
+/// | `0x25` | `cwd` = `"/"` | `-101` | …and a canonical one passes the gate |
+///
+/// The size probes (`0x16`-`0x18`) moved when `cwd_ptr`/`cwd_len` made the
+/// struct 144 bytes (§960, 2026-09-25): aimed at the old 128, "the unknown
+/// tail" was `cwd_ptr`, a known field that is accepted, and `0x18` failed.
 ///
 /// # Deliberately out of scope
 ///
@@ -6734,12 +6882,20 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     const F_CAP_MODE: u32 = 104;
     const F_CAP_PTR: u32 = 112;
     const F_CAP_COUNT: u32 = 120;
+    /// `cwd_ptr` and `cwd_len`, the two fields the working-directory change
+    /// (design-decisions.md §960) added -- which made the struct 144 bytes.
+    const F_CWD_PTR: u32 = 128;
+    const F_CWD_LEN: u32 = 136;
     /// The first byte past the struct — the "unknown tail" a newer caller
-    /// would have written a new field into.
-    const F_TAIL: u32 = 128;
+    /// would have written a new field into.  It was 128 until `cwd_ptr` took
+    /// that slot; a probe left aimed there then wrote a *known* field, which
+    /// is accepted, and 0x18 failed on every boot until this moved.
+    const F_TAIL: u32 = 144;
     /// A scratch `CapEntryInfo`: `resource_type` and `_reserved[3]` share this
     /// qword, then `rights`, then `resource_id` (both left zero).
     const F_ENTRY: u32 = 160;
+    /// A scratch path for the `cwd` probes: one byte, then zeroes.
+    const F_PATH: u32 = 200;
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
@@ -6824,17 +6980,17 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     // zero there is rejected.
     set(&mut code, F_SIZE, 104);
     probe(&mut code, EFAULT, 0x15);
-    set(&mut code, F_SIZE, 128);
+    set(&mut code, F_SIZE, 144);
     probe(&mut code, EFAULT, 0x16);
 
     // --- the unknown tail ---------------------------------------------------
-    set(&mut code, F_SIZE, 136);
+    set(&mut code, F_SIZE, 152);
     set(&mut code, F_TAIL, 0);
     probe(&mut code, EFAULT, 0x17);
     set(&mut code, F_TAIL, 1);
     probe(&mut code, EINVAL, 0x18);
     set(&mut code, F_TAIL, 0);
-    set(&mut code, F_SIZE, 128);
+    set(&mut code, F_SIZE, 144);
 
     // --- cap_mode dispatch --------------------------------------------------
     set(&mut code, F_CAP_MODE, 2);
@@ -6868,6 +7024,28 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     set(&mut code, F_CAP_PTR, UNMAPPED);
     set(&mut code, F_CAP_COUNT, 7);
     probe(&mut code, EFAULT, 0x20);
+
+    // --- the working directory ----------------------------------------------
+    // Checked at the gate, before the ELF read, so an accepted `cwd` still ends
+    // in -101 and a refused one in -3.  Inherit-all stays on from above, so the
+    // capability array plays no part.
+    set(&mut code, F_CWD_PTR, UNMAPPED);
+    set(&mut code, F_CWD_LEN, 0);
+    probe(&mut code, EFAULT, 0x21);
+    set(&mut code, F_CWD_PTR, 0);
+    set(&mut code, F_CWD_LEN, 1);
+    probe(&mut code, EINVAL, 0x22);
+    set(&mut code, F_CWD_PTR, UNMAPPED);
+    set(&mut code, F_CWD_LEN, 4096); // CWD_MAX_LEN + 1
+    probe(&mut code, EINVAL, 0x23);
+    lea_rax(&mut code, F_PATH);
+    store(&mut code, F_CWD_PTR);
+    set(&mut code, F_CWD_LEN, 1);
+    set(&mut code, F_PATH, u64::from(b'a'));
+    probe(&mut code, EINVAL, 0x24);
+    set(&mut code, F_PATH, u64::from(b'/'));
+    probe(&mut code, EFAULT, 0x25);
+    set(&mut code, F_CWD_LEN, 0);
 
     // --- every probe agreed -------------------------------------------------
     code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
@@ -7290,6 +7468,7 @@ pub fn self_test() -> KernelResult<()> {
     test_detect_linux_abi_interp_musl()?;
     test_detect_linux_abi_interp_unrelated()?;
     test_detect_linux_abi_gnu_property()?;
+    test_detect_slateos_native_marker()?;
     test_is_linux_interp_helper()?;
     test_interp_path_dynamic()?;
     test_interp_path_static()?;
@@ -7971,6 +8150,159 @@ fn test_detect_linux_abi_gnu_property() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[elf]   Detect Linux ABI: PT_GNU_PROPERTY: OK");
+    Ok(())
+}
+
+/// Encode one ELF note: header, name, descriptor, each padded to `align`.
+fn encode_note(out: &mut alloc::vec::Vec<u8>, name: &[u8], n_type: u32, desc: &[u8], align: usize) {
+    let pad = |v: &mut alloc::vec::Vec<u8>| {
+        while !v.len().is_multiple_of(align) {
+            v.push(0);
+        }
+    };
+    out.extend_from_slice(&u32::try_from(name.len()).unwrap_or(u32::MAX).to_le_bytes());
+    out.extend_from_slice(&u32::try_from(desc.len()).unwrap_or(u32::MAX).to_le_bytes());
+    out.extend_from_slice(&n_type.to_le_bytes());
+    out.extend_from_slice(name);
+    pad(out);
+    out.extend_from_slice(desc);
+    pad(out);
+}
+
+/// Build a tiny ELF whose only program header is a `PT_NOTE` over `notes`,
+/// with the given `EI_OSABI` and note alignment. For the native-marker tests.
+fn build_note_elf(osabi: u8, notes: &[u8], p_align: u64) -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let note_offset: u64 = 64 + ELF64_PHDR_SIZE as u64;
+    let note_size = notes.len() as u64;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+    let mut buf = vec![0u8; (note_offset + note_size) as usize];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = osabi;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr);
+    write_u64(&mut buf, 32, phdr_offset);
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_NOTE);
+    write_u32(&mut buf, ph + 4, PF_R);
+    write_u64(&mut buf, ph + 8, note_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, note_size);
+    write_u64(&mut buf, ph + 40, note_size);
+    write_u64(&mut buf, ph + 48, p_align);
+
+    if let Some(dst) = buf.get_mut(note_offset as usize..) {
+        dst.copy_from_slice(notes);
+    }
+    buf
+}
+
+/// Test 16b: the SlateOS native marker, in both forms, outranks the Linux
+/// signals — and nothing else is mistaken for it.
+///
+/// The case that matters is the second: `ELFOSABI_GNU` *and* the SlateOS note
+/// is exactly what a std-based SlateOS Rust program looks like once marked,
+/// because LLVM tags it GNU (see `detect_linux_abi`). Without the precedence
+/// it runs on the Linux syscall table and dies at its first native syscall.
+fn test_detect_slateos_native_marker() -> KernelResult<()> {
+    let fail = |what: &str| -> KernelResult<()> {
+        serial_println!("[elf]   FAIL: native marker: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let revision = 1u32.to_le_bytes();
+
+    // Form 1: EI_OSABI = 255.
+    let mut data = build_test_elf();
+    data[EI_OSABI] = ELFOSABI_SLATEOS;
+    let elf = ElfFile::parse(&data)?;
+    if !elf.has_slateos_marker() || elf.detect_linux_abi() {
+        return fail("EI_OSABI=255 should mark the binary native");
+    }
+
+    // Form 2, over the GNU tag our Rust userland actually carries.
+    let mut notes = alloc::vec::Vec::new();
+    encode_note(&mut notes, SLATEOS_NOTE_NAME, NT_SLATEOS_ABI, &revision, 4);
+    let data = build_note_elf(ELFOSABI_GNU, &notes, 4);
+    let elf = ElfFile::parse(&data)?;
+    if !elf.has_slateos_marker() {
+        return fail("a SlateOS note was not found");
+    }
+    if elf.detect_linux_abi() {
+        return fail("OSABI GNU + the SlateOS note must be NATIVE -- the marker outranks the tag");
+    }
+
+    // The marker is found after an unrelated note, at both note alignments,
+    // which proves the walker steps over a note rather than only reading one.
+    for align in [4usize, 8] {
+        let mut notes = alloc::vec::Vec::new();
+        encode_note(&mut notes, b"GNU\0", 1, &[0u8; 16], align); // NT_GNU_ABI_TAG
+        encode_note(
+            &mut notes,
+            SLATEOS_NOTE_NAME,
+            NT_SLATEOS_ABI,
+            &revision,
+            align,
+        );
+        let data = build_note_elf(ELFOSABI_GNU, &notes, align as u64);
+        if !ElfFile::parse(&data)?.has_slateos_marker() {
+            return fail("the SlateOS note after a GNU note was missed");
+        }
+    }
+
+    // Not the marker: the same owner with another type, another owner with
+    // the same type, and the owner without its NUL. Each leaves OSABI GNU in
+    // charge, so the binary stays Linux.
+    let lookalikes: [(&[u8], u32); 3] = [
+        (SLATEOS_NOTE_NAME, 2),
+        (b"GNU\0", NT_SLATEOS_ABI),
+        (b"SlateOS", NT_SLATEOS_ABI),
+    ];
+    for (name, ty) in lookalikes {
+        let mut notes = alloc::vec::Vec::new();
+        encode_note(&mut notes, name, ty, &revision, 4);
+        let elf_data = build_note_elf(ELFOSABI_GNU, &notes, 4);
+        let elf = ElfFile::parse(&elf_data)?;
+        if elf.has_slateos_marker() || !elf.detect_linux_abi() {
+            return fail("a lookalike note was taken for the marker");
+        }
+    }
+
+    // Malformed: a name size that runs off the end. No marker, no panic.
+    let mut bad = alloc::vec::Vec::new();
+    bad.extend_from_slice(&u32::MAX.to_le_bytes());
+    bad.extend_from_slice(&4u32.to_le_bytes());
+    bad.extend_from_slice(&NT_SLATEOS_ABI.to_le_bytes());
+    bad.extend_from_slice(SLATEOS_NOTE_NAME);
+    let data = build_note_elf(ELFOSABI_SYSV, &bad, 4);
+    if ElfFile::parse(&data)?.has_slateos_marker() {
+        return fail("a malformed note was accepted");
+    }
+
+    serial_println!(
+        "[elf]   Native marker (OSABI 255, SlateOS note over OSABI GNU, note walk at \
+         4/8 alignment, lookalikes, malformed): OK"
+    );
     Ok(())
 }
 

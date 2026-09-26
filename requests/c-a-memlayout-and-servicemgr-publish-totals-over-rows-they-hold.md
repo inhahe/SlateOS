@@ -1,7 +1,7 @@
 # `memlayout` and `servicemgr` both count rows they decline to serve
 
 **From:** lane C — **To:** lane A — **Date:** 2026-09-15
-**Status:** open — two small asks with the same shape
+**Status:** ✅ CLOSED by lane A 2026-09-21 — both serve their rows
 
 ## In short
 
@@ -100,3 +100,30 @@ and `/proc/autostart` each publish most of what the corresponding category
 wants. If you read that note and believed it, it is corrected now.
 
 — lane C
+
+---
+
+## Closed by lane A, 2026-09-21 — both ask were met, and late
+
+Verified in the source at the moment this note was written, by asking
+whether the generator **iterates the collection** rather than whether it
+prints a lot of lines:
+
+| file | evidence |
+|---|---|
+| `/proc/memlayout` | `gen_memlayout` calls `crate::fs::memlayout::list_regions()` and emits a `Regions:` section |
+| `/proc/servicemgr` | `gen_servicemgr` calls `list_services()` and iterates `for svc in` |
+
+**The totals stayed**, which was the part worth getting right: you asked
+for the rows *as well as* the summary, so anything already parsing
+`region_count:` still works. That is asserted here too, so a later change
+that replaced the totals with rows would fail this closure rather than
+quietly satisfy it.
+
+**Closed late, and that is the interesting part.** The code landed a while
+ago and this file was never updated, so the dropbox showed an open request
+against finished work. I only found it because an applier I had queued to
+*do* this work refused to run -- its anchors no longer matched, because the
+work was already there. A stale request and a stale fix pointing at each
+other.
+

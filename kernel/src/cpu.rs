@@ -1221,6 +1221,23 @@ fn cpuid_extended_leaf8_ebx() -> u32 {
     __cpuid(0x8000_0008).ebx
 }
 
+/// The CPU's physical address width in bits (CPUID 0x80000008, EAX[7:0]).
+///
+/// `mm::page_table::init` sizes the direct map's top-level page-table
+/// entries from this: MMIO is mapped into the direct map on demand, so it
+/// must reach every address the CPU can generate. A CPU too old to report
+/// the width is taken to have 36 bits, which is what the leaf's absence
+/// implies (Intel SDM Vol. 3A §4.1.4).
+#[must_use]
+pub fn physical_address_bits() -> u8 {
+    const WITHOUT_LEAF: u8 = 36;
+    if cpuid_max_extended_leaf() < 0x8000_0008 {
+        return WITHOUT_LEAF;
+    }
+    // The mask makes the conversion infallible; the fallback is unreachable.
+    u8::try_from(__cpuid(0x8000_0008).eax & 0xFF).unwrap_or(WITHOUT_LEAF)
+}
+
 /// CPUID leaf 0x0A: Architectural Performance Monitoring info.
 ///
 /// Returns EAX which encodes version, counter count, and bit width.

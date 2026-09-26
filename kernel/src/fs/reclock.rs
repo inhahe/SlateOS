@@ -36,9 +36,9 @@
 //!
 //! Locks are advisory: they do not prevent I/O. Cooperating programs check.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
+use super::path::{Path, PathBuf};
 use crate::sync::Mutex;
 
 /// The kind of a record lock. `F_UNLCK` is an operation, not a stored state,
@@ -99,8 +99,26 @@ impl RecordLock {
 
 /// Every record lock held on one path.
 struct PathEntry {
-    path: String,
+    /// Retained for `/proc` display and as the fallback key where the
+    /// filesystem has no stable inode. No longer the primary key.
+    path: PathBuf,
+    /// Filesystem identity, when there is one. The real key: a record lock
+    /// taken under one name must be seen under every other name for the
+    /// same file, or two writers both believe they hold the range.
+    id: Option<crate::fs::vfs::FileId>,
     locks: Vec<RecordLock>,
+}
+
+/// Does this entry describe the same file as `(path, id)`?
+///
+/// Identity wins when both sides have one; otherwise the path. One function
+/// rather than four inline comparisons -- there are four entry points here,
+/// and four hand-written comparisons is how one of them ends up different.
+fn path_entry_matches(e: &PathEntry, path: &Path, id: Option<crate::fs::vfs::FileId>) -> bool {
+    match (e.id, id) {
+        (Some(a), Some(b)) => a == b,
+        _ => e.path.as_path() == path,
+    }
 }
 
 /// The record-lock table, keyed by resolved path.
@@ -162,27 +180,30 @@ fn subtract(held: &RecordLock, start: u64, end: u64) -> Vec<RecordLock> {
 /// belongs in the caller, which can retry; this layer never sleeps because it
 /// holds the table lock.
 pub fn set(
-    path: &str,
+    path: impl AsRef<Path>,
     owner: u64,
     start: u64,
     len: u64,
     lock_type: RecordLockType,
 ) -> crate::error::KernelResult<()> {
+    let path = path.as_ref();
     let want = RecordLock {
         owner,
         start,
         len,
         lock_type,
     };
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let mut table = TABLE.lock();
-    let idx = match table.iter().position(|e| e.path == path) {
+    let idx = match table.iter().position(|e| path_entry_matches(e, path, id)) {
         Some(i) => i,
         None => {
             if table.len() >= MAX_LOCKED_PATHS {
                 return Err(crate::error::KernelError::OutOfMemory);
             }
             table.push(PathEntry {
-                path: String::from(path),
+                path: path.to_path_buf(),
+                id,
                 locks: Vec::new(),
             });
             table.len().saturating_sub(1)
@@ -218,14 +239,21 @@ pub fn set(
 }
 
 /// Release `[start, len)` for one owner, splitting any lock the cut divides.
-pub fn unlock(path: &str, owner: u64, start: u64, len: u64) -> crate::error::KernelResult<()> {
+pub fn unlock(
+    path: impl AsRef<Path>,
+    owner: u64,
+    start: u64,
+    len: u64,
+) -> crate::error::KernelResult<()> {
+    let path = path.as_ref();
     let end = if len == 0 {
         u64::MAX
     } else {
         start.saturating_add(len)
     };
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let mut table = TABLE.lock();
-    let Some(idx) = table.iter().position(|e| e.path == path) else {
+    let Some(idx) = table.iter().position(|e| path_entry_matches(e, path, id)) else {
         // Unlocking a path with no locks is not an error: POSIX lets a process
         // clear a range it does not hold.
         return Ok(());
@@ -257,20 +285,22 @@ pub fn unlock(path: &str, owner: u64, start: u64, len: u64) -> crate::error::Ker
 /// boolean answer would be the same shape as a stub that always says "free".
 #[must_use]
 pub fn query(
-    path: &str,
+    path: impl AsRef<Path>,
     owner: u64,
     start: u64,
     len: u64,
     lock_type: RecordLockType,
 ) -> Option<RecordLock> {
+    let path = path.as_ref();
     let want = RecordLock {
         owner,
         start,
         len,
         lock_type,
     };
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let table = TABLE.lock();
-    let entry = table.iter().find(|e| e.path == path)?;
+    let entry = table.iter().find(|e| path_entry_matches(e, path, id))?;
     entry
         .locks
         .iter()
@@ -283,6 +313,52 @@ pub fn query(
 /// Called when a process exits. POSIX also drops a process's record locks when
 /// it closes ANY descriptor for the file, which is a famous wart and belongs in
 /// the close path rather than here.
+/// Tag bit distinguishing an OFD lock owner from a POSIX one.
+///
+/// This module owns the `owner: u64` space, so it owns the encoding. The bit
+/// started life as a constant in `syscall/linux.rs`, which would have meant
+/// `fs::handle` -- the module that has to RELEASE these locks -- agreeing about
+/// it by hand. An owner space with two authors is one that will eventually
+/// disagree, and the disagreement is silent: `conflicts_with` compares owners
+/// for equality, so a mismatched tag makes a lock invisible to its own holder.
+const OFD_OWNER_TAG: u64 = 1 << 63;
+
+/// The owner value for a lock held by an **open file description** (`F_OFD_*`).
+#[must_use]
+pub fn ofd_owner(handle: u64) -> u64 {
+    handle | OFD_OWNER_TAG
+}
+
+/// The owner value for a lock held by a **process** (plain `F_SETLK`).
+///
+/// Masked rather than passed through: a pid with bit 63 set would otherwise
+/// impersonate an open file description.
+#[must_use]
+pub fn posix_owner(pid: u64) -> u64 {
+    pid & !OFD_OWNER_TAG
+}
+
+/// Does this owner identify an open file description rather than a process?
+///
+/// Used to report `l_pid = -1` from `F_GETLK`, which is what POSIX requires
+/// when the holder is an OFD lock: an open file description has no pid.
+#[must_use]
+pub fn owner_is_ofd(owner: u64) -> bool {
+    owner & OFD_OWNER_TAG != 0
+}
+
+/// Release every record lock held by one open file description.
+///
+/// Called from [`crate::fs::handle::close`] on the **final** close of a
+/// description, which is exactly when an OFD lock ends -- that is the whole
+/// definition of an OFD lock, as against a POSIX one which ends when the
+/// process does. Without this a holder that dies wedges the range until
+/// reboot, which is the property that makes byte-range locking safe to rely
+/// on rather than merely present.
+pub fn release_ofd(handle: u64) {
+    release_all(ofd_owner(handle));
+}
+
 pub fn release_all(owner: u64) {
     let mut table = TABLE.lock();
     for entry in table.iter_mut() {
@@ -293,11 +369,16 @@ pub fn release_all(owner: u64) {
 
 /// Locks currently held on a path, for tests and `/proc`.
 #[must_use]
-pub fn list(path: &str) -> Vec<RecordLock> {
+pub fn list(path: impl AsRef<Path>) -> Vec<RecordLock> {
+    let path = path.as_ref();
+    // Its own resolution. This is the fourth entry point into the table and
+    // the second time a missing one was caught by the compiler rather than by
+    // my own assertions -- the checks verify text, not scope.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let table = TABLE.lock();
     table
         .iter()
-        .find(|e| e.path == path)
+        .find(|e| path_entry_matches(e, path, id))
         .map_or_else(Vec::new, |e| e.locks.clone())
 }
 
@@ -307,7 +388,85 @@ pub fn list(path: &str) -> Vec<RecordLock> {
 /// and `release_all` clears both owners at the end. A self-test that left locks
 /// behind would make `/proc` report holders that are not there -- the same
 /// failure this module exists to stop.
+/// A record lock taken under one name must be visible under another.
+///
+/// **The only rung here that exercises identity keying.** The others use
+/// synthetic paths that do not exist, so `file_identity` returns `NotFound`,
+/// the key falls back to the name, and they pass exactly as they did before
+/// the 2026-09-21 conversion -- no evidence for it at all.
+/// Otherwise two writers each believe they hold the same byte range.
+fn test_record_lock_follows_the_file() -> crate::error::KernelResult<()> {
+    use crate::fs::Vfs;
+    const A: &[u8] = b"/tmp/reclock-id-a";
+    const B: &[u8] = b"/tmp/reclock-id-b";
+
+    let _ = Vfs::remove(Path::new(A));
+    let _ = Vfs::remove(Path::new(B));
+    Vfs::write_file(Path::new(A), b"x")?;
+    match crate::fs::selftest::classify(Vfs::link(Path::new(A), Path::new(B))) {
+        crate::fs::selftest::Setup::Ready => {}
+        // Only NotSupported/ReadOnlyFilesystem/NoSuchDevice reach here.
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            crate::serial_println!(
+                "reclock: identity rung SKIPPED -- link() unsupported here: {:?}",
+                e
+            );
+            let _ = Vfs::remove(Path::new(A));
+            return Ok(());
+        }
+        // The system was ASKED and REFUSED. Reporting that as 'no hard
+        // links here' would announce a cause never established.
+        crate::fs::selftest::Setup::Failed(e) => {
+            crate::serial_println!("reclock: FAIL: link() refused with {:?}, which is not", e);
+            crate::serial_println!("reclock:       'this system cannot'");
+            let _ = Vfs::remove(Path::new(A));
+            return Err(e);
+        }
+    }
+    let (ida, idb) = (
+        Vfs::file_identity(Path::new(A))?,
+        Vfs::file_identity(Path::new(B))?,
+    );
+    if ida.is_none() || ida != idb {
+        crate::serial_println!("reclock: identity rung SKIPPED -- {:?} vs {:?}", ida, idb);
+        let _ = Vfs::remove(Path::new(B));
+        let _ = Vfs::remove(Path::new(A));
+        return Ok(());
+    }
+
+    set(Path::new(A), 1, 0, 16, RecordLockType::Write)?;
+    let seen = list(Path::new(B));
+    // NEGATIVE CONTROL: an unrelated real file must report no locks. Without
+    // it, a matcher that matched anything would satisfy the assertion below
+    // while proving nothing about identity (dd-954).
+    const C: &[u8] = b"/tmp/reclock-id-c";
+    let _ = Vfs::remove(Path::new(C));
+    let unrelated = match Vfs::write_file(Path::new(C), b"x") {
+        Ok(()) => {
+            let l = list(Path::new(C));
+            let _ = Vfs::remove(Path::new(C));
+            l
+        }
+        Err(_) => Vec::new(),
+    };
+    let _ = unlock(Path::new(A), 1, 0, 16);
+    let _ = Vfs::remove(Path::new(B));
+    let _ = Vfs::remove(Path::new(A));
+    if !unrelated.is_empty() {
+        crate::serial_println!(
+            "reclock: ERROR: control failed -- an UNRELATED file reports A's lock"
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+    if seen.is_empty() {
+        crate::serial_println!("reclock: FAIL -- a lock set on one name is invisible on another");
+        return Err(crate::error::KernelError::InternalError);
+    }
+    crate::serial_println!("reclock: identity rung OK -- a record lock follows the file");
+    Ok(())
+}
 pub fn self_test() -> crate::error::KernelResult<()> {
+    test_record_lock_follows_the_file()?;
     use crate::error::KernelError;
 
     const A: u64 = 9001;

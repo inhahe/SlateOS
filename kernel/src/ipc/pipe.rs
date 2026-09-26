@@ -327,7 +327,7 @@ static PIPES: Mutex<BTreeMap<PipeId, Pipe>> = Mutex::new(BTreeMap::new());
 /// Create a new pipe, returning `(read_handle, write_handle)`.
 ///
 /// The read handle can only be used with [`read`] / [`try_read`].
-/// The write handle can only be used with [`write`] / [`try_write`].
+/// The write handle can only be used with [`fn@write`] / [`try_write`].
 pub fn create() -> (PipeHandle, PipeHandle) {
     let id = alloc_pipe_id();
     let pipe = Pipe::new(DEFAULT_BUFFER_CAPACITY);

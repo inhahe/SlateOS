@@ -547,7 +547,7 @@ pub unsafe fn set_level_triggered(irq: u8) {
 ///
 /// - `irq`: The IOAPIC input pin number (0..MAX_IRQ).
 /// - `lapic_id`: The target Local APIC ID.  Use
-///   [`crate::smp::cpu_apic_id(cpu_index)`] to convert a CPU index.
+///   [`crate::smp::cpu_apic_id`] to convert a CPU index.
 ///
 /// # Safety
 ///

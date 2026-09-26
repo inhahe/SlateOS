@@ -36,7 +36,7 @@
 //! kernel via `SYS_PROCESS_GET_ARGS` and have no auxiliary vector by
 //! design (see `posix/src/crt.rs` and design-decision #4 in
 //! `design-decisions.md`).  The native launch path
-//! ([`crate::proc::spawn::setup_user_stack`]) is never modified to build
+//! (`crate::proc::spawn::setup_user_stack`) is never modified to build
 //! any of this; it only maps a bare zeroed stack.  This module is invoked
 //! **exclusively** on the `AbiMode::Linux` branch of the spawn/exec path,
 //! writing the System V layout *into* the already-mapped stack frames.

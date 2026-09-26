@@ -313,6 +313,41 @@ struct FileAttrs {
 }
 
 /// Global attribute store.
+/// The key an indexed-attribute record is filed under: the file's identity when
+/// it has one, otherwise its path.
+///
+/// Queryable attributes describe the FILE, so two names for one file must see
+/// one set of attributes; path keying gave a hard link its own empty record.
+/// `design-decisions.md` §957 gives the test: should this data survive the file
+/// at that path being REPLACED? For indexed attributes, no -- so identity is the
+/// right key. Contrast `fs::integrity`, whose baselines must stay path-keyed
+/// precisely because a replacement is the event they exist to detect.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum QueryKey {
+    Id(crate::fs::vfs::FileId),
+    Path(PathBuf),
+}
+
+/// Derive the key for a path. Every key is built by [`key_from`].
+///
+/// MUST be called before taking the `STORE` lock. `file_identity` calls into the
+/// VFS, and a module global held across that call inverts
+/// filesystem-lock -> module-state -- nine such sites were introduced and caught
+/// by `scripts/check-vfs-under-lock.py` on 2026-09-21.
+fn query_key(path: &Path) -> QueryKey {
+    key_from(crate::fs::Vfs::file_identity(path).unwrap_or(None), path)
+}
+
+/// The key for a file whose identity is already known: the one place a
+/// `QueryKey` is built, shared by [`query_key`] and the file-lifecycle hooks,
+/// which run after the name is gone and are handed the identity the VFS read
+/// while it still resolved.
+fn key_from(id: Option<crate::fs::vfs::FileId>, path: &Path) -> QueryKey {
+    match id {
+        Some(id) => QueryKey::Id(id),
+        None => QueryKey::Path(path.to_path_buf()),
+    }
+}
 struct AttrStore {
     /// Path → index in `files`.
     ///
@@ -320,7 +355,7 @@ struct AttrStore {
     /// filename may hold any byte but `/` and NUL, so a `String` key is
     /// narrower than the thing it keys and two distinct files could share
     /// one attribute set.
-    path_index: BTreeMap<PathBuf, usize>,
+    path_index: BTreeMap<QueryKey, usize>,
     /// All files with attributes.
     files: Vec<FileAttrs>,
     /// Free slots (indices of removed entries).
@@ -349,6 +384,82 @@ impl AttrStore {
             schemas: BTreeMap::new(),
             indexes: BTreeMap::new(),
             indexed_names: BTreeSet::new(),
+        }
+    }
+
+    /// Take `name` out of the index of `attr` under `value_key`, dropping the
+    /// value's set once it is empty.
+    ///
+    /// `name` must be the RECORD's name (`FileAttrs::path`), never the name a
+    /// caller happened to use: under identity keying a file with two names has
+    /// one record, and an index updated under whichever name each call used
+    /// would keep an entry for a value the file no longer has. `create_index`
+    /// has always used the record's name; every other index update now does.
+    fn unindex(&mut self, attr: &str, value_key: &str, name: &Path) {
+        if let Some(val_map) = self.indexes.get_mut(attr)
+            && let Some(names) = val_map.get_mut(value_key)
+        {
+            names.remove(name);
+            if names.is_empty() {
+                val_map.remove(value_key);
+            }
+        }
+    }
+
+    /// The indexed attributes of the record in slot `idx`, as
+    /// `(attribute, value key)` pairs.
+    fn indexed_pairs(&self, idx: usize) -> Vec<(String, String)> {
+        self.files.get(idx).map_or_else(Vec::new, |file| {
+            file.attrs
+                .iter()
+                .filter(|(name, _)| self.indexed_names.contains(name.as_str()))
+                .map(|(name, val)| (name.clone(), value_to_key(val)))
+                .collect()
+        })
+    }
+
+    /// Remove the record filed under `key`, with its index entries, and return
+    /// how many attributes it held; `None` if there was no such record.
+    fn drop_record(&mut self, key: &QueryKey) -> Option<usize> {
+        let idx = self.path_index.remove(key)?;
+        let pairs = self.indexed_pairs(idx);
+        let file = self.files.get_mut(idx)?;
+        let name = file.path.clone();
+        let count = core::mem::take(&mut file.attrs).len();
+        for (attr, value_key) in &pairs {
+            self.unindex(attr, value_key, &name);
+        }
+        self.free_slots.push(idx);
+        Some(count)
+    }
+
+    /// Give the record filed under `key` (in slot `idx`) the name `new_name`,
+    /// moving its index entries with it, and its key too when the key is a
+    /// path.
+    fn rename_record(&mut self, key: QueryKey, idx: usize, new_name: PathBuf) {
+        let pairs = self.indexed_pairs(idx);
+        let Some(file) = self.files.get_mut(idx) else {
+            return;
+        };
+        let old_name = core::mem::replace(&mut file.path, new_name.clone());
+        for (attr, value_key) in &pairs {
+            self.unindex(attr, value_key, &old_name);
+            self.indexes
+                .entry(attr.clone())
+                .or_default()
+                .entry(value_key.clone())
+                .or_default()
+                .insert(new_name.clone());
+        }
+        if let QueryKey::Path(_) = key {
+            self.path_index.remove(&key);
+            let new_key = QueryKey::Path(new_name);
+            // A path-keyed record already under the new name describes
+            // whatever the rename just replaced; the moved file's record takes
+            // its place, as the file took the name. `None` -- nothing was
+            // there -- is the usual answer and needs no handling.
+            let _ = self.drop_record(&new_key);
+            self.path_index.insert(new_key, idx);
         }
     }
 }
@@ -443,9 +554,11 @@ pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelR
     validate_value(&value)?;
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
     let mut store = STORE.lock();
 
-    let idx = if let Some(&i) = store.path_index.get(path) {
+    let idx = if let Some(&i) = store.path_index.get(&key) {
         i
     } else {
         // New file entry.
@@ -466,7 +579,7 @@ pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelR
             });
             i
         };
-        store.path_index.insert(path.to_path_buf(), idx);
+        store.path_index.insert(key, idx);
         idx
     };
 
@@ -478,29 +591,25 @@ pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelR
         }
     }
 
-    // Update index if this attribute is indexed.
+    // Update index if this attribute is indexed -- under the record's name,
+    // not `path`: see `AttrStore::unindex`.
     let attr_name_owned = String::from(name);
     let is_indexed = store.indexed_names.contains(&attr_name_owned);
     if is_indexed {
+        let Some(record_name) = store.files.get(idx).map(|f| f.path.clone()) else {
+            // `idx` came from `path_index` or was just pushed, so this is a
+            // corrupted store rather than a missing file.
+            return Err(KernelError::InternalError);
+        };
         // Remove old index entry if value is changing.
         let old_key = store.files[idx].attrs.get(name).map(value_to_key);
         if let Some(ok) = old_key {
-            if let Some(val_map) = store.indexes.get_mut(name) {
-                if let Some(paths) = val_map.get_mut(&ok) {
-                    paths.remove(path);
-                    if paths.is_empty() {
-                        val_map.remove(&ok);
-                    }
-                }
-            }
+            store.unindex(name, &ok, &record_name);
         }
         // Insert new index entry.
         let new_key = value_to_key(&value);
         let val_map = store.indexes.entry(attr_name_owned.clone()).or_default();
-        val_map
-            .entry(new_key)
-            .or_default()
-            .insert(path.to_path_buf());
+        val_map.entry(new_key).or_default().insert(record_name);
     }
 
     store.files[idx].attrs.insert(attr_name_owned, value);
@@ -511,8 +620,10 @@ pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelR
 pub fn get_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<AttrValue> {
     let path = path.as_ref();
     GET_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
     let store = STORE.lock();
-    let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
+    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
     let file = &store.files[*idx];
     file.attrs.get(name).cloned().ok_or(KernelError::NotFound)
 }
@@ -520,8 +631,10 @@ pub fn get_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<AttrValue> {
 /// Remove an attribute from a file.
 pub fn remove_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<()> {
     let path = path.as_ref();
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
     let mut store = STORE.lock();
-    let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
+    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
     let idx = *idx;
 
     let removed = store.files[idx].attrs.remove(name);
@@ -529,24 +642,22 @@ pub fn remove_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<()> {
         return Err(KernelError::NotFound);
     }
 
-    // Clean up index.
-    if let Some(old_val) = &removed {
-        if store.indexed_names.contains(name) {
-            let old_key = value_to_key(old_val);
-            if let Some(val_map) = store.indexes.get_mut(name) {
-                if let Some(paths) = val_map.get_mut(&old_key) {
-                    paths.remove(path);
-                    if paths.is_empty() {
-                        val_map.remove(&old_key);
-                    }
-                }
-            }
-        }
+    // Clean up index, under the record's name (see `AttrStore::unindex`).
+    if let Some(old_val) = &removed
+        && store.indexed_names.contains(name)
+    {
+        // `idx` came from `path_index`; a miss is a corrupted store.
+        let record_name = store
+            .files
+            .get(idx)
+            .map(|f| f.path.clone())
+            .ok_or(KernelError::InternalError)?;
+        store.unindex(name, &value_to_key(old_val), &record_name);
     }
 
     // If file has no more attributes, remove it entirely.
     if store.files[idx].attrs.is_empty() {
-        store.path_index.remove(path);
+        store.path_index.remove(&key);
         store.free_slots.push(idx);
     }
 
@@ -556,8 +667,10 @@ pub fn remove_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<()> {
 /// List all attributes on a file.
 pub fn list_attrs(path: impl AsRef<Path>) -> KernelResult<Vec<(String, AttrValue)>> {
     let path = path.as_ref();
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
     let store = STORE.lock();
-    let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
+    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
     let file = &store.files[*idx];
     Ok(file
         .attrs
@@ -569,35 +682,9 @@ pub fn list_attrs(path: impl AsRef<Path>) -> KernelResult<Vec<(String, AttrValue
 /// Remove all attributes from a file.
 pub fn clear_attrs(path: impl AsRef<Path>) -> KernelResult<usize> {
     let path = path.as_ref();
-    let mut store = STORE.lock();
-    let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
-    let idx = *idx;
-    let count = store.files[idx].attrs.len();
-
-    // Collect index cleanup info before mutating.
-    let to_clean: Vec<(String, String)> = store.files[idx]
-        .attrs
-        .iter()
-        .filter(|(name, _)| store.indexed_names.contains(name.as_str()))
-        .map(|(name, val)| (name.clone(), value_to_key(val)))
-        .collect();
-
-    // Clean up indexes.
-    for (name, key) in &to_clean {
-        if let Some(val_map) = store.indexes.get_mut(name.as_str()) {
-            if let Some(paths) = val_map.get_mut(key) {
-                paths.remove(path);
-                if paths.is_empty() {
-                    val_map.remove(key);
-                }
-            }
-        }
-    }
-
-    store.files[idx].attrs.clear();
-    store.path_index.remove(path);
-    store.free_slots.push(idx);
-    Ok(count)
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
+    STORE.lock().drop_record(&key).ok_or(KernelError::NotFound)
 }
 
 // ---------------------------------------------------------------------------
@@ -816,31 +903,130 @@ pub fn unique_values(attr_name: &str) -> Vec<AttrValue> {
 // Rename support
 // ---------------------------------------------------------------------------
 
-/// Update all attributes when a file is renamed/moved.
+/// Move the attributes recorded under `old_path` (and, for a directory, under
+/// every name below it) to `new_path`.
+///
+/// The VFS does this itself on every rename, through [`PER_FILE_STATE`] (see
+/// [`super::perfile`]), so production code has no reason to call it; it stays
+/// public as the direct form of that one event, which this module's self-test
+/// exercises. An identity-keyed record keeps its key -- the file is the same
+/// file -- and only the name it is reported under moves; a path-keyed record
+/// moves its key too.
+///
+/// This used to derive both keys by looking the names up, which cannot be
+/// right at any moment: before a rename `new_path` names nothing (or the file
+/// about to be replaced), and after it `old_path` names nothing.
+///
+/// # Errors
+///
+/// [`KernelError::NotFound`] if no record is stored under `old_path` or below
+/// it.
 pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
     let (old_path, new_path) = (old_path.as_ref(), new_path.as_ref());
-    let mut store = STORE.lock();
-    let idx = store
-        .path_index
-        .remove(old_path)
-        .ok_or(KernelError::NotFound)?;
-    store.path_index.insert(new_path.to_path_buf(), idx);
-    store.files[idx].path = new_path.to_path_buf();
-
-    // Update all index entries.
-    for (attr_name, val) in store.files[idx].attrs.clone() {
-        if store.indexed_names.contains(&attr_name) {
-            let key = value_to_key(&val);
-            if let Some(val_map) = store.indexes.get_mut(&attr_name) {
-                if let Some(paths) = val_map.get_mut(&key) {
-                    paths.remove(old_path);
-                    paths.insert(new_path.to_path_buf());
-                }
-            }
-        }
+    let moved = rename_names_counted(&|p: &Path| super::pathutil::rebase(p, old_path, new_path));
+    if moved == 0 {
+        return Err(KernelError::NotFound);
     }
-
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// File lifecycle (see `super::perfile`)
+// ---------------------------------------------------------------------------
+
+/// This table's part in the file lifecycle: attributes end with their file,
+/// and move with it when it is renamed. See [`super::perfile`] for why a
+/// `FileId`-keyed record that outlived its file would describe a stranger --
+/// and, here, return it from a query for the old file's values.
+pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
+    name: "queryable",
+    forget: forget_file,
+    rename: rename_names,
+    unmounted: forget_filesystem,
+    plant: plant_for_test,
+    finds: finds_for_test,
+    reports: reports_for_test,
+};
+
+/// The file is gone: drop its record and its index entries.
+fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
+    let key = key_from(id, path);
+    // `None`: the file had no attributes, which is nearly every file.
+    let _ = STORE.lock().drop_record(&key);
+}
+
+/// Names moved: see [`rename_names_counted`].
+fn rename_names(rename: &super::perfile::NameMap<'_>) {
+    rename_names_counted(rename);
+}
+
+/// Rewrite every record name `rename` maps to a new one, with its index
+/// entries; returns how many records moved.
+fn rename_names_counted(rename: &super::perfile::NameMap<'_>) -> usize {
+    let mut store = STORE.lock();
+    // Collected first: the index cannot be walked while records change.
+    let moved: Vec<(QueryKey, usize, PathBuf)> = store
+        .path_index
+        .iter()
+        .filter_map(|(key, &idx)| {
+            let file = store.files.get(idx)?;
+            rename(&file.path).map(|new| (key.clone(), idx, new))
+        })
+        .collect();
+    let count = moved.len();
+    for (key, idx, new_name) in moved {
+        store.rename_record(key, idx, new_name);
+    }
+    count
+}
+
+/// The attribute the lifecycle rungs plant: a name of its own, so no real
+/// query ever matches it.
+const LIFECYCLE_RUNG_ATTR: &str = "Perfile:Rung";
+
+/// Self-test support: plant [`LIFECYCLE_RUNG_ATTR`].
+fn plant_for_test(path: &Path) -> KernelResult<()> {
+    set_attr(path, LIFECYCLE_RUNG_ATTR, AttrValue::Int(1))
+}
+
+/// Self-test support: whether a lookup through `path` finds
+/// [`LIFECYCLE_RUNG_ATTR`]. Reads the store directly rather than through
+/// `get_attr`, which would count the lookup in `stats()`.
+fn finds_for_test(path: &Path) -> bool {
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
+    let store = STORE.lock();
+    store
+        .path_index
+        .get(&key)
+        .and_then(|&idx| store.files.get(idx))
+        .is_some_and(|file| file.attrs.contains_key(LIFECYCLE_RUNG_ATTR))
+}
+
+/// Self-test support: whether a record is reported under `name`.
+fn reports_for_test(name: &Path) -> bool {
+    let store = STORE.lock();
+    store.path_index.values().any(|&idx| {
+        store
+            .files
+            .get(idx)
+            .is_some_and(|file| file.path.as_path() == name)
+    })
+}
+
+/// A filesystem was unmounted: its mount id is never reused, so no identity
+/// on it can match again, and its records are only garbage.
+fn forget_filesystem(fs_id: u64) {
+    let mut store = STORE.lock();
+    let dead: Vec<QueryKey> = store
+        .path_index
+        .keys()
+        .filter(|key| matches!(key, QueryKey::Id(id) if id.fs_id == fs_id))
+        .cloned()
+        .collect();
+    for key in &dead {
+        let _ = store.drop_record(key); // Listed just above, so always Some.
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1147,12 @@ pub fn self_test() -> KernelResult<()> {
 
 fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
+
+    // A section that skips records why, so the closing line cannot claim nine
+    // self-tests passed when eight ran. `check-selftest-skips` refuses a build
+    // over an unconditional success after a skip, and it is right to: the last
+    // line is the one a reader believes.
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Save and reset state.
     clear_all();
@@ -1138,6 +1330,79 @@ fn self_test_inner() -> KernelResult<()> {
     clear_all();
     reset_stats();
 
-    serial_println!("[queryable] all 8 self-tests passed");
+    // --- 9: attributes follow the FILE, not the name ---
+    //
+    // The eight rungs above use paths that do not exist, so `file_identity`
+    // returns NotFound, `query_key` falls back to the path, and every one of
+    // them passes identically whether this table is keyed by identity or by
+    // name. They are no evidence for the conversion. This one creates a real
+    // file and gives it a second name.
+    {
+        const A: &[u8] = b"/tmp/queryable-id-a";
+        const B: &[u8] = b"/tmp/queryable-id-b";
+        const C: &[u8] = b"/tmp/queryable-id-c";
+        for p in [A, B, C] {
+            let _ = crate::fs::Vfs::remove(Path::new(p));
+        }
+        crate::fs::Vfs::write_file(Path::new(A), b"x")?;
+
+        // Classified, not guessed: `.is_err()` would announce "no hard links
+        // here" for a link refused with PermissionDenied, a cause never
+        // established, and return success.
+        match crate::fs::selftest::classify(crate::fs::Vfs::link(Path::new(A), Path::new(B))) {
+            crate::fs::selftest::Setup::Ready => {
+                // A third real file, deliberately NOT a link, for the control.
+                crate::fs::Vfs::write_file(Path::new(C), b"x")?;
+                set_attr(Path::new(A), "rung", AttrValue::Int(42))?;
+                let via_b = get_attr(Path::new(B), "rung");
+                let via_c = get_attr(Path::new(C), "rung");
+                let _ = remove_attr(Path::new(A), "rung");
+                for p in [A, B, C] {
+                    let _ = crate::fs::Vfs::remove(Path::new(p));
+                }
+
+                // NEGATIVE CONTROL first: a key that collapsed every path to one
+                // entry would answer for C too, and the assertion below would
+                // pass without identity keying existing (dd-954).
+                if via_c.is_ok() {
+                    serial_println!(
+                        "[queryable]   ERROR: control failed -- an UNRELATED file reports A's attr"
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                if via_b.is_err() {
+                    serial_println!(
+                        "[queryable]   FAIL: attr set on /tmp/queryable-id-a is invisible under"
+                    );
+                    serial_println!(
+                        "[queryable]         /tmp/queryable-id-b, a second name for one inode"
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                serial_println!(
+                    "[queryable]   identity rung OK -- attributes follow the file, not the name"
+                );
+            }
+            crate::fs::selftest::Setup::Unsupported(e) => {
+                serial_println!(
+                    "[queryable]   identity rung SKIPPED -- link() unsupported here: {:?}",
+                    e
+                );
+                skips.record("identity rung", "link() unsupported on /tmp");
+                let _ = crate::fs::Vfs::remove(Path::new(A));
+            }
+            crate::fs::selftest::Setup::Failed(e) => {
+                serial_println!(
+                    "[queryable]   FAIL: link() refused with {:?}, which is not 'this",
+                    e
+                );
+                serial_println!("[queryable]         system cannot' -- it was asked and said no");
+                let _ = crate::fs::Vfs::remove(Path::new(A));
+                return Err(e);
+            }
+        }
+    }
+    skips.report("queryable");
+    serial_println!("[queryable] all 9 self-tests passed{}", skips.suffix());
     Ok(())
 }

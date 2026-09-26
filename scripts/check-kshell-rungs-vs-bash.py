@@ -363,7 +363,7 @@ def check_awk():
             + body.encode()
             + b"\nAWK_EOF\necho x | awk -f \"$tmp\"\nrm -f \"$tmp\"\n"
         )
-        r = bashprobe.run(script)
+        r = bashprobe.run_or_decline(script)
         got = r.stdout.decode("utf-8", "replace")
         ok = r.returncode == 0 and got == want
         if not ok:

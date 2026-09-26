@@ -19,7 +19,7 @@
 //! so as long as the BSP is alive and taking timer interrupts the watchdog
 //! never expires. If the BSP wedges, the kicks stop, the hardware counts down,
 //! and QEMU injects an NMI into the guest — which the BSP takes *despite*
-//! `IF=0`, letting [`crate::idt::handle_nmi`] dump the faulting RIP and the
+//! `IF=0`, letting `crate::idt::handle_nmi` dump the faulting RIP and the
 //! task table so we can finally see *where* the wedge is.
 //!
 //! ## Blast radius
@@ -166,7 +166,7 @@ static LAST_KICK_NS: AtomicU64 = AtomicU64::new(0);
 const WEDGE_STALE_NS: u64 = 2_000_000_000;
 
 /// Record that a hard-lockup watchdog NMI was observed (called from
-/// [`crate::idt::handle_nmi`] on the armed, no-hardware-error path).
+/// `crate::idt::handle_nmi` on the armed, no-hardware-error path).
 #[inline]
 pub fn note_fired() {
     FIRED.fetch_add(1, Ordering::Relaxed);
@@ -232,7 +232,7 @@ fn present() -> bool {
 
 /// Returns `true` if the watchdog is currently armed.
 ///
-/// Used by [`crate::idt::handle_nmi`] to decide whether a software/external
+/// Used by `crate::idt::handle_nmi` to decide whether a software/external
 /// NMI should be attributed to this watchdog (and trigger a diagnostic dump).
 #[inline]
 pub fn is_armed() -> bool {
@@ -546,7 +546,7 @@ pub fn rearm() {
 /// It arms the watchdog, then spins with interrupts disabled and **without**
 /// kicking for longer than the ~9.8 s timeout — reproducing the exact BSP-dead
 /// `IF=0` condition of the hang we hunt — so QEMU injects an NMI that
-/// [`crate::idt::handle_nmi`] must catch. Because the injected NMI is
+/// `crate::idt::handle_nmi` must catch. Because the injected NMI is
 /// non-maskable it is delivered despite `IF=0`, and the TSC (hence
 /// [`crate::cpu::delay_us`]) keeps advancing, so the spin is bounded. Prints a
 /// PASS/FAIL verdict by comparing [`fired_count`] across the spin.

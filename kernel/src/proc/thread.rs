@@ -488,10 +488,7 @@ pub fn thread_exit_with_value(exit_value: i64, detached: bool) -> ! {
     on_thread_exit(task_id);
 
     // Terminate the scheduler task (never returns).
-    sched::task_exit();
-
-    // Unreachable, but needed for the -> ! return type.
-    crate::cpu::halt_loop();
+    sched::task_exit()
 }
 
 /// Wait for a specific thread to exit and retrieve its exit value.

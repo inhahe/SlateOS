@@ -1015,6 +1015,40 @@ global_asm!(
     "    call __libc_start_main",
     // __libc_start_main should not return, but if it does, halt.
     "    ud2",
+    // ---------------------------------------------------------------
+    // The SlateOS ABI note: "this binary is SlateOS-native".
+    //
+    // design-decisions.md §33: native binaries carry an explicit marker,
+    // and the kernel trusts it over every Linux signal. Without one, the
+    // kernel guesses from `EI_OSABI` -- and LLVM stamps that GNU (3) on any
+    // object using a GNU extension, which `std` does -- so a native program
+    // could be run on the Linux system-call table and die on its first
+    // native call (`requests/a-bd-coreutils-cannot-start-two-link-faults.md`,
+    // fault 2). It is also what lets the kernel one day default unmarked
+    // binaries to Linux, which it cannot do while any native binary is
+    // unmarked.
+    //
+    // Here, beside `_start`, and not as a Rust static elsewhere in the crate:
+    // `_start` is the entry point, so the object holding it is in every link
+    // that uses this libc's startup, and a note in the same object goes
+    // wherever it goes. A note in any other object would be linked only if
+    // something happened to reference that object. lld never garbage-collects
+    // an SHT_NOTE section, and its default layout gives it a PT_NOTE; a
+    // linker script with its own PHDRS must keep `.note.slateos` and give it
+    // one (see `services/*/linker.ld`).
+    //
+    // Layout (ELF note, 4-byte aligned): n_namesz 8, n_descsz 4, n_type 1
+    // (NT_SLATEOS_ABI), the name "SlateOS" with its NUL (8 bytes, already
+    // aligned), then the descriptor: ABI revision 1, little-endian.
+    // ---------------------------------------------------------------
+    ".pushsection .note.slateos, \"a\", @note",
+    ".balign 4",
+    ".long 8",
+    ".long 4",
+    ".long 1",
+    ".asciz \"SlateOS\"",
+    ".long 1",
+    ".popsection",
 );
 
 // ---------------------------------------------------------------------------

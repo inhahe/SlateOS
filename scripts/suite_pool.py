@@ -235,7 +235,7 @@ def self_test() -> int:
     # as `git` writes its objects, included.
     def read_only(tmp: str) -> None:
         name = os.path.join(tmp, "object")
-        with open(name, "w", encoding="utf-8") as handle:
+        with open(name, "w", encoding="utf-8", newline="") as handle:
             handle.write("x")
         os.chmod(name, stat.S_IREAD)
 

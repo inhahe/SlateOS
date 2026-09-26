@@ -59,11 +59,9 @@ fn box_at<R: Read + Seek>(r: &mut R, at: u64, limit: u64, len: u64) -> io::Resul
         },
         n => (8, u64::from(n)),
     };
-    if size < header {
-        return Ok(None);
-    }
     let body = at.saturating_add(header);
     let end = at.saturating_add(size).min(limit);
+    // A size smaller than its own header, or a header past its parent's end.
     if body > end {
         return Ok(None);
     }
@@ -391,11 +389,10 @@ pub(crate) fn fourcc(code: &[u8; 4]) -> Codec {
 
 /// ISO 639-2 packed in fifteen bits, five to a letter, each less 0x60. A
 /// value under 0x400 is a Macintosh language number, which QuickTime files
-/// use and which this does not map: nothing is said rather than a guess.
+/// use and which this does not map: nothing is said rather than a guess --
+/// and its first letter's bits are zero, which is no letter, so the letter
+/// check below is what says so.
 pub(crate) fn packed_language(code: u16) -> Option<String> {
-    if code < 0x400 {
-        return None;
-    }
     let letter = |shift: u32| {
         let bits = code.checked_shr(shift).unwrap_or(0) & 0x1F;
         u8::try_from(bits)

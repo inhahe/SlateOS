@@ -3,9 +3,10 @@
 //!
 //! The facts are in the Segment's `Info` and `Tracks`, which a muxer puts
 //! before the first `Cluster` of pictures and sound. The walk steps over what
-//! it does not read by length; a `Cluster` whose length was not known when it
-//! was written (a live recording) cannot be stepped over, and past one the
-//! `SeekHead` says where `Info` and `Tracks` are.
+//! it does not read by length. An element whose length was not known when it
+//! was written -- a live recording's `Cluster` -- runs to its parent's end,
+//! so the walk ends there, and the `SeekHead` says where `Info` and `Tracks`
+//! are past it.
 
 use std::io::{self, Read, Seek};
 
@@ -39,7 +40,6 @@ const AUDIO: u64 = 0xE1;
 const SAMPLING_FREQUENCY: u64 = 0xB5;
 const OUTPUT_SAMPLING_FREQUENCY: u64 = 0x78B5;
 const CHANNELS: u64 = 0x9F;
-const CLUSTER: u64 = 0x1F43_B675;
 
 /// The most of `Info` that is read: a few numbers and a title.
 const MAX_INFO: usize = 64 * 1024;
@@ -47,14 +47,12 @@ const MAX_INFO: usize = 64 * 1024;
 /// setup data that can be a few kilobytes more.
 const MAX_TRACKS: usize = 1024 * 1024;
 
-/// An element: its id, where its body starts and where it ends, and whether
-/// its length was known when it was written.
+/// An element: its id, and where its body starts and where it ends.
 #[derive(Clone, Copy, Debug)]
 struct El {
     id: u64,
     body: u64,
     end: u64,
-    sized: bool,
 }
 
 /// An EBML variable-length integer at `at` in `b`, and its length in bytes:
@@ -103,21 +101,15 @@ fn element_at<R: Read + Seek>(r: &mut R, at: u64, limit: u64, len: u64) -> io::R
     };
     let header = u64::try_from(id_len.saturating_add(size_len)).unwrap_or(u64::MAX);
     let body = at.saturating_add(header);
-    let sized = !unknown_length(size, size_len);
-    let end = if sized {
-        body.saturating_add(size).min(limit)
-    } else {
+    let end = if unknown_length(size, size_len) {
         limit
+    } else {
+        body.saturating_add(size).min(limit)
     };
     if body > end {
         return Ok(None);
     }
-    Ok(Some(El {
-        id,
-        body,
-        end,
-        sized,
-    }))
+    Ok(Some(El { id, body, end }))
 }
 
 /// The elements in `b`, in order, each its id and body, as far as they are
@@ -211,9 +203,6 @@ pub(crate) fn probe<R: Read + Seek>(r: &mut R, len: u64) -> io::Result<Probe> {
             INFO => info = Some(el),
             TRACKS => tracks = Some(el),
             SEEK_HEAD => seeks.extend(read_seek_head(r, el, len)?),
-            // Nothing after a cluster of unknown length can be found by
-            // stepping: its end is not written down.
-            CLUSTER if !el.sized => break,
             _ => {}
         }
         at = el.end;

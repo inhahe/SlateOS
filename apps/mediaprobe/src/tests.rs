@@ -355,6 +355,7 @@ fn a_track_says_its_name_language_and_flags() {
             element(0x22_B59C, b"ger"),
             element(0x22_B59D, b"de-CH"),
             uint_element(0x88, 0),
+            uint_element(0x55AA, 0),
         ]),
         entry(&[
             uint_element(0x83, 17),
@@ -364,9 +365,9 @@ fn a_track_says_its_name_language_and_flags() {
         ]),
     ];
     let mut file = ebml_header("matroska");
-    file.extend(mkv_segment(1.0, Some("The Title"), &tracks));
+    file.extend(mkv_segment(1.0, Some("The\nTitle"), &tracks));
     let p = read(&file);
-    assert_eq!(p.title.as_deref(), Some("The Title"));
+    assert_eq!(p.title.as_deref(), Some("The Title"), "a title is one line");
     let a = &p.tracks[0];
     assert_eq!(a.codec, Codec::Ac3);
     assert_eq!(a.name.as_deref(), Some("Commentary"));
@@ -376,6 +377,7 @@ fn a_track_says_its_name_language_and_flags() {
         "BCP 47 over ISO 639-2"
     );
     assert!(!a.default);
+    assert!(!a.forced, "a forced flag of 0 is not forced");
     let s = &p.tracks[1];
     assert_eq!((s.kind, s.codec.clone()), (Kind::Subtitle, Codec::Text));
     assert_eq!(s.language, None, "undetermined");
@@ -548,8 +550,8 @@ fn an_avi_is_read_for_its_length_its_picture_and_its_sound() {
 #[test]
 fn an_opendml_avi_counts_its_frames_past_the_first_gigabyte() {
     let video = [
-        strh(b"vids", b"XVID", 1001, 30_000, 1000),
-        bitmap(720, -480, b"XVID"),
+        strh(b"vids", b"xvid", 1001, 30_000, 1000),
+        bitmap(720, -480, b"xvid"),
     ]
     .concat();
     let odml = avi_list(b"odml", &chunk(b"dmlh", &3000_u32.to_le_bytes()));
@@ -577,16 +579,23 @@ fn an_opendml_avi_counts_its_frames_past_the_first_gigabyte() {
 
 #[test]
 fn a_stream_says_its_name_and_whether_it_is_off() {
-    let mut off = strh(b"auds", &[0; 4], 1, 48_000, 48_000);
+    // Two seconds of sound, where the main header says one second of
+    // frames: with no picture, the main header's is the length.
+    let mut off = strh(b"auds", &[0; 4], 1, 48_000, 96_000);
     off[16] = 1; // flags, after the id and length: disabled
+    // The name is nine bytes: the format after its pad byte is still found.
     let audio = [
         off,
-        wave_format(0x0001, 2, 48_000),
         chunk(b"strn", b"Director\0"),
+        wave_format(0x0001, 2, 48_000),
     ]
     .concat();
     let header = [avih(40_000, 25, 0, 0), avi_list(b"strl", &audio)].concat();
-    let p = read(&avi_file(&header));
+    let mut file = avi_file(&header);
+    // A JUNK chunk of odd length before the header list, and its pad byte.
+    let junk = chunk(b"JUNK", b"odd");
+    file.splice(12..12, junk);
+    let p = read(&file);
     let a = &p.tracks[0];
     assert_eq!(a.name.as_deref(), Some("Director"));
     assert!(!a.default);
@@ -627,6 +636,54 @@ fn an_extensible_wave_format_names_its_sub_format_and_a_blank_compression_its_ha
 // ============================================================================
 // Anything
 // ============================================================================
+
+#[test]
+fn a_box_sized_to_the_end_of_the_file_is_read() {
+    let mut file = mp4_box(b"ftyp", b"isom\0\0\x02\0isom");
+    let mut moov = 0_u32.to_be_bytes().to_vec();
+    moov.extend_from_slice(b"moov");
+    moov.extend(mvhd(100, 250));
+    file.extend(moov);
+    assert_eq!(read(&file).duration_secs, Some(2.5));
+}
+
+#[test]
+fn an_unknown_movie_length_is_taken_from_the_tracks() {
+    let p = read(&mp4_of(&[
+        mvhd(1000, u32::MAX),
+        video_trak(320, 240, 90_000, 270_000, 75),
+    ]));
+    assert_eq!(
+        p.duration_secs,
+        Some(3.0),
+        "every bit set is \"unknown\", not 49 days"
+    );
+}
+
+#[test]
+fn an_esds_with_optional_fields_is_read_past_them() {
+    // Flags 0xE0: a stream it depends on (two bytes), a URL (a length and
+    // that many bytes) and an OCR stream (two bytes), before the decoder
+    // configuration.
+    let esds = [
+        0x03, 0x20, 0x00, 0x01, 0xE0, 0x00, 0x02, 0x03, b'u', b'r', b'l', 0x00, 0x03, 0x04, 0x11,
+        0x6B, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut entry = vec![0, 0, 0, 0, 0, 0, 0, 1];
+    entry.extend_from_slice(&[0; 8]);
+    entry.extend_from_slice(&2_u16.to_be_bytes());
+    entry.extend_from_slice(&16_u16.to_be_bytes());
+    entry.extend_from_slice(&[0; 4]);
+    entry.extend_from_slice(&(44_100_u32 << 16).to_be_bytes());
+    entry.extend(full_box(b"esds", 0, 0, &esds));
+    let mut stsd = 1_u32.to_be_bytes().to_vec();
+    stsd.extend(mp4_box(b"mp4a", &entry));
+    let stbl = mp4_box(b"stbl", &full_box(b"stsd", 0, 0, &stsd));
+    let hdlr = full_box(b"hdlr", 0, 0, b"\0\0\0\0soun\0\0\0\0\0\0\0\0\0\0\0\0\0");
+    let mdia = mp4_box(b"mdia", &[hdlr, mp4_box(b"minf", &stbl)].concat());
+    let p = read(&mp4_of(&[mvhd(1, 1), mp4_box(b"trak", &mdia)]));
+    assert_eq!(p.tracks[0].codec, Codec::Mp3);
+}
 
 #[test]
 fn what_is_not_a_video_says_nothing() {

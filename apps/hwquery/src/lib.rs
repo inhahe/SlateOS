@@ -140,6 +140,12 @@ pub struct PciDeviceInfo {
     pub class: String,
     pub description: String,
     pub vendor_name: String,
+    /// The base class and subclass codes, as the kernel publishes them --
+    /// what `class` and `description` put in words. Kept as numbers for the
+    /// programs that sort devices by kind, which should not have to parse
+    /// the words back.
+    pub class_code: Option<u8>,
+    pub subclass_code: Option<u8>,
 }
 
 /// Service entry.

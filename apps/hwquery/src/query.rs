@@ -562,6 +562,8 @@ pub fn pci_function(name: &str, text: &str) -> Option<PciDeviceInfo> {
             _ => String::new(),
         },
         vendor_name: pci_vendor_name(vendor_id).to_owned(),
+        class_code: class,
+        subclass_code: subclass,
     })
 }
 
@@ -1330,6 +1332,8 @@ impl HardwareProvider for StubProvider {
                 class: "Host Bridge".to_string(),
                 description: "Intel 13th Gen Core Host Bridge".to_string(),
                 vendor_name: "Intel Corporation".to_string(),
+                class_code: None,
+                subclass_code: None,
             },
             PciDeviceInfo {
                 bus: 0,
@@ -1340,6 +1344,8 @@ impl HardwareProvider for StubProvider {
                 class: "VGA Controller".to_string(),
                 description: "AMD Radeon RX 7900 XTX".to_string(),
                 vendor_name: "Advanced Micro Devices".to_string(),
+                class_code: None,
+                subclass_code: None,
             },
         ])
     }

@@ -1921,6 +1921,21 @@ word; text inside them that says "lane C" is history.
   `guitk::modal::AlertDialog` the one way, and every program above asks
   through it (2026-09-25) -- the six hand-drawn copies are gone.
 
+- `[-]` `[E]` **System Information and the Device Manager read the machine**
+  — 2026-09-26. System Information read `/sys/hardware/pci` and
+  `/sys/hardware/memmap`, which never existed, so its PCI list and memory map
+  were always empty; both now come from where the kernel publishes them
+  (`/sys/devices/pci`, `/sys/devices/memmap`). Its reader became a crate of
+  its own, `apps/hwquery`, and the Device Manager -- which invented the
+  machine until 2026-09-15 and showed nothing since -- lists through it every
+  PCI function by class, the disks, the network interfaces, the display
+  outputs and the processor, scanning on opening and on F5; Export writes a
+  file. **Waiting on lane A** for what a device manager exists to show --
+  which driver runs each PCI function, its interrupt line and its memory
+  (`requests/e-a-publish-each-pci-functions-irq-bars-and-driver.md`); until
+  then those read "Not reported". `known-issues.md` → `[E] The Device Manager
+  cannot say which driver runs a PCI device, nor its interrupt or memory`.
+
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
 C's standing note before the split). **Baseline, 2026-09-24:** every `apps/*`

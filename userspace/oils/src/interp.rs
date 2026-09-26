@@ -40015,7 +40015,7 @@ impl Shell {
     /// what a child `date` would see, so the shell's own rendering must agree
     /// with it. It also keeps the lookup independent of the host the tests run
     /// on. An empty value falls back to the default, as glibc's
-    /// `*tzdir == ' '` test does; any other value is used as the bytes it
+    /// `*tzdir == '\0'` test does; any other value is used as the bytes it
     /// is, since a path need not be UTF-8.
     fn zoneinfo_dir(&mut self) -> PathBuf {
         if !self.exported.contains("TZDIR") {

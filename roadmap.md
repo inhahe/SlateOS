@@ -1957,6 +1957,22 @@ word; text inside them that says "lane C" is history.
   have `std::net`; switching to DHCP (today it points at `dhcpcd`); Wi-Fi and
   VPNs stay refused until something publishes them.
 
+- `[-]` `[E]` **The Remote Desktop connects over VNC** — 2026-09-26.
+  `apps/remotedesktop/src/rfb.rs` speaks RFB 3.8 (RFC 6143) on a socket of
+  its own -- version, no-password or VNC's DES challenge (`des.rs`), the
+  desktop's size and name, Raw and CopyRect, DesktopSize, the bell and the
+  server's clipboard -- with every length bounded before anything is
+  allocated for it. Connect asks a VNC profile for its password (kept
+  nowhere) and refuses RDP and SSH by name; the session is Connected when
+  the server has shaken hands and its outcome is filed then; the screen is
+  uploaded to the compositor and drawn scaled to the view; keys (as X
+  keysyms) and the pointer go back while it is shown, the escape hotkey
+  giving the keyboard back. Unencrypted, and the window says so. **Next:**
+  a compressed encoding (ZRLE or Tight) for slow links; partial uploads
+  instead of the whole screen per change; sending the local clipboard;
+  VeNCrypt/TLS once `open-questions.md` E-Q2 settles how certificates are
+  checked; RDP.
+
 - `[x]` `[E]` **The dictionary knows more than thirty words** — 2026-09-26.
   A word the built-in list lacks is looked up in WordNet at dict.org over
   DICT (RFC 2229), when the reader asks and never as they type

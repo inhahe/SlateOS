@@ -17,8 +17,14 @@
 //! - Fullscreen mode with configurable escape hotkey
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha dark theme.
-//! Network I/O is performed through Slate OS syscalls; simulated with
-//! representative data for initial development.
+//!
+//! **VNC connects** (2026-09-26): `rfb` speaks RFB 3.8 over a socket of its
+//! own, with VNC's password challenge (`des`); the remote screen is uploaded
+//! to the compositor as an image and drawn scaled to the view, and keys and
+//! the pointer go back while the Sessions view shows it (the escape hotkey
+//! gives the keyboard back). A password is asked for when Connect is
+//! pressed and kept nowhere. The connection is not encrypted, and the window
+//! says so. RDP and SSH are refused in words: neither is implemented.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -35,10 +41,12 @@ use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
-#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::collections::VecDeque;
+
+mod des;
+mod rfb;
 
 // ============================================================================
 // Catppuccin Mocha Theme Colors
@@ -66,21 +74,21 @@ fn transfer_step(size: u64) -> u64 {
     (size / 20).max(1)
 }
 
-/// Said when Connect is pressed.
-const CANNOT_CONNECT: &str =
-    "Cannot connect: this program has no network access, so nothing was contacted";
+/// The first image id a remote screen is uploaded under; a session's is this
+/// plus its id, so two sessions never share one.
+const SCREEN_IMAGE_BASE: u64 = 0x5652_4642_0000_0000;
 
-/// What the window says instead of a session list.
+/// What the window says under its tabs: what connects, what it costs, and
+/// what still has nothing behind it.
 ///
-/// Three lines. The third is about the history, which is the part that
-/// outlives the session: `connect_profile` wrote an entry with
-/// `success: true` at the moment Connect was pressed, before any outcome was
-/// known, so the log recorded successful connections to machines nobody had
-/// reached.
-const CANNOT_CONNECT_LINES: [&str; 3] = [
-    "This program cannot connect to a remote machine.",
-    "It has no network access, so no host has been contacted and no session exists.",
-    "The connection history is empty for the same reason -- no attempt was ever made.",
+/// Until 2026-09-26 these lines said nothing could connect, and that the
+/// history was empty because no attempt was ever made -- true then, since
+/// `connect_profile` had written `success: true` entries the moment Connect
+/// was pressed. A VNC attempt is now filed when its outcome is known.
+const NOTICE_LINES: [&str; 3] = [
+    "VNC connects; RDP and SSH are not implemented here, and say so when asked.",
+    "A VNC connection is not encrypted: the screen and every key typed cross the network readable.",
+    "File transfer and the performance figures have nothing behind them yet.",
 ];
 
 const WINDOW_WIDTH: f32 = 1100.0;
@@ -541,7 +549,6 @@ pub struct ConnectionProfile {
 /// was stamped 1 January 1970 and they all sorted equal.
 /// `#[cfg(test)]` with the history entries it timestamped: nothing in
 /// production records a connection now, because none can be made.
-#[cfg(test)]
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -665,6 +672,33 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F1 / ?", "This list"),
 ];
 
+/// A VNC session that is really connected, or on its way: the protocol's
+/// half, and the remote screen as it stands.
+struct LiveScreen {
+    session_id: u32,
+    rfb: rfb::Session,
+    width: u32,
+    height: u32,
+    /// `0xAARRGGBB`, row by row.
+    pixels: Vec<u32>,
+    /// Changed since it was last uploaded.
+    dirty: bool,
+    /// The server has shaken hands.
+    ready: bool,
+    /// The buttons held, as RFB's mask.
+    buttons: u8,
+    /// Keys held, with the keysym each was sent as: a release carries no
+    /// text to derive one from.
+    held: Vec<(Key, u32)>,
+}
+
+/// Asking for a VNC password before connecting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasswordPrompt {
+    pub profile_index: usize,
+    pub text: String,
+}
+
 pub struct RemoteDesktopApp {
     // --- Profiles ---
     pub profiles: Vec<ConnectionProfile>,
@@ -742,6 +776,14 @@ pub struct RemoteDesktopApp {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// The VNC sessions that are real, beside `sessions`' rows.
+    live: Vec<LiveScreen>,
+    /// Wakes the window when a session has news.
+    waker: Option<std::task::Waker>,
+    /// Remote screens to upload, or drop, before the next frame.
+    pending_images: Vec<oswindow::app::ImageChange>,
+    /// The password being typed for a VNC connection, while one is.
+    pub password_prompt: Option<PasswordPrompt>,
 }
 
 impl Default for RemoteDesktopApp {
@@ -825,6 +867,10 @@ impl RemoteDesktopApp {
             confirm_delete: None,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
+            live: Vec::new(),
+            waker: None,
+            pending_images: Vec::new(),
+            password_prompt: None,
         }
     }
 
@@ -1213,11 +1259,374 @@ impl RemoteDesktopApp {
     /// written at the start of an attempt is not a record of what happened; it
     /// is a record of what was intended, filed where someone will later read
     /// it as what happened.
+    ///
+    /// Since 2026-09-26 a VNC profile connects: this asks for its password
+    /// (the session starts when it is given, [`Self::connect_vnc`]), and the
+    /// history entry is written when the outcome is known. RDP and SSH are
+    /// refused, naming which.
     pub fn connect_profile(&mut self, profile_index: usize) -> Option<u32> {
-        if self.profiles.get(profile_index).is_some() {
-            self.status_message = Some(String::from(CANNOT_CONNECT));
+        let profile = self.profiles.get(profile_index)?;
+        if profile.protocol != Protocol::Vnc {
+            self.status_message = Some(format!(
+                "Cannot connect to {}: {} is not implemented here -- only VNC connects",
+                profile.display_name,
+                profile.protocol.label()
+            ));
+            return None;
         }
+        self.status_message = Some(format!(
+            "Password for {} -- leave it empty for a server that asks for none",
+            profile.display_name
+        ));
+        self.password_prompt = Some(PasswordPrompt {
+            profile_index,
+            text: String::new(),
+        });
         None
+    }
+
+    /// Connect to a VNC profile with `password`, which is used for the
+    /// handshake and kept nowhere. The session is Connecting until the
+    /// server has shaken hands.
+    pub fn connect_vnc(&mut self, profile_index: usize, password: &str) -> Option<u32> {
+        let profile = self.profiles.get(profile_index)?;
+        let name = profile.display_name.clone();
+        let rfb = match rfb::Session::open(
+            &profile.hostname,
+            profile.port,
+            password,
+            self.waker.clone(),
+        ) {
+            Ok(rfb) => rfb,
+            Err(e) => {
+                self.status_message = Some(format!("Cannot connect to {name}: {e}"));
+                return None;
+            }
+        };
+        let id = self.next_session_id;
+        self.next_session_id = id.saturating_add(1);
+        self.sessions.push(RemoteSession {
+            id,
+            profile_id: profile.id,
+            display_name: name.clone(),
+            state: SessionState::Connecting,
+            connected_at: None,
+            duration_secs: 0,
+        });
+        self.live.push(LiveScreen {
+            session_id: id,
+            rfb,
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+            dirty: false,
+            ready: false,
+            buttons: 0,
+            held: Vec::new(),
+        });
+        self.selected_session = Some(self.sessions.len().saturating_sub(1));
+        self.current_view = MainView::ActiveSessions;
+        self.status_message = Some(format!(
+            "Connecting to {name} -- the connection is not encrypted"
+        ));
+        Some(id)
+    }
+
+    /// Take what each live session has sent -- its screen, its size, the
+    /// bell, its clipboard, its end -- and queue the screens that changed.
+    pub fn pump(&mut self) {
+        enum Note {
+            Ready(String),
+            Closed(String),
+            Bell,
+            Clipboard(usize),
+        }
+        let mut notes: Vec<(u32, Note)> = Vec::new();
+        for live in &mut self.live {
+            for update in live.rfb.drain() {
+                match update {
+                    rfb::Update::Ready {
+                        width,
+                        height,
+                        name,
+                    } => {
+                        resize(live, width, height);
+                        live.ready = true;
+                        notes.push((live.session_id, Note::Ready(name)));
+                    }
+                    rfb::Update::Pixels { x, y, w, h, pixels } => blit(live, x, y, w, h, &pixels),
+                    rfb::Update::Copy {
+                        src_x,
+                        src_y,
+                        x,
+                        y,
+                        w,
+                        h,
+                    } => {
+                        copy_rect(live, (src_x, src_y), (x, y), (w, h));
+                    }
+                    rfb::Update::Resized { width, height } => resize(live, width, height),
+                    rfb::Update::Bell => notes.push((live.session_id, Note::Bell)),
+                    rfb::Update::CutText(text) => {
+                        notes.push((live.session_id, Note::Clipboard(text.chars().count())));
+                    }
+                    rfb::Update::Closed(why) => notes.push((live.session_id, Note::Closed(why))),
+                }
+            }
+        }
+        for (id, note) in notes {
+            let Some(at) = self.sessions.iter().position(|s| s.id == id) else {
+                continue;
+            };
+            let name = self
+                .sessions
+                .get(at)
+                .map(|s| s.display_name.clone())
+                .unwrap_or_default();
+            match note {
+                Note::Ready(desktop) => {
+                    if let Some(session) = self.sessions.get_mut(at) {
+                        session.state = SessionState::Connected;
+                        session.connected_at = Some(now_secs());
+                    }
+                    self.record_attempt(id, true);
+                    self.status_message = Some(format!("Connected to {name} ({desktop})"));
+                }
+                Note::Closed(why) => {
+                    let was_ready = self.live.iter().any(|l| l.session_id == id && l.ready);
+                    if !was_ready {
+                        self.record_attempt(id, false);
+                    }
+                    if let Some(session) = self.sessions.get_mut(at) {
+                        session.state = SessionState::Disconnected;
+                    }
+                    self.live.retain(|l| l.session_id != id);
+                    self.pending_images
+                        .push(oswindow::app::ImageChange::Drop(screen_image(id)));
+                    self.status_message = Some(format!("Disconnected from {name}: {why}"));
+                }
+                Note::Bell => self.status_message = Some(format!("{name} rang the bell")),
+                Note::Clipboard(chars) => {
+                    self.status_message =
+                        Some(format!("{name} copied {chars} characters to its clipboard"));
+                }
+            }
+        }
+        for live in &mut self.live {
+            if live.ready && live.dirty {
+                live.dirty = false;
+                self.pending_images
+                    .push(oswindow::app::ImageChange::Upload {
+                        id: screen_image(live.session_id),
+                        width: live.width,
+                        height: live.height,
+                        stride: live.width.saturating_mul(4),
+                        format: oswindow::PixelFormat::Argb8888,
+                        bytes: guitk::canvas::WireBytes::from_le_argb(&live.pixels),
+                    });
+            }
+        }
+    }
+
+    /// File the outcome of a connection attempt, once it is known.
+    fn record_attempt(&mut self, session_id: u32, success: bool) {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            return;
+        };
+        let Some(profile) = self.profiles.iter().find(|p| p.id == session.profile_id) else {
+            return;
+        };
+        let entry = HistoryEntry {
+            profile_name: profile.display_name.clone(),
+            hostname: profile.hostname.clone(),
+            protocol: profile.protocol,
+            timestamp: now_secs(),
+            duration_secs: 0,
+            success,
+        };
+        self.add_history_entry(entry);
+    }
+
+    /// The live screen the Sessions view shows: the selected session's,
+    /// once the server has shaken hands.
+    fn shown_screen(&self) -> Option<&LiveScreen> {
+        let session = self.sessions.get(self.selected_session?)?;
+        self.live
+            .iter()
+            .find(|l| l.session_id == session.id && l.ready)
+    }
+
+    /// Where the shown screen is drawn: the content area right of the
+    /// sidebar, the screen scaled to fit with its shape kept.
+    fn screen_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        if self.current_view != MainView::ActiveSessions {
+            return None;
+        }
+        let screen = self.shown_screen()?;
+        let top = Self::content_top() + SECTION_PADDING;
+        let left = SIDEBAR_WIDTH + SECTION_PADDING;
+        let room_w = (self.window_width - left - SECTION_PADDING).max(1.0);
+        let room_h = (self.window_height - top - STATUS_BAR_HEIGHT - SECTION_PADDING).max(1.0);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a screen is at most 16384 pixels a side"
+        )]
+        let (w, h) = (screen.width.max(1) as f32, screen.height.max(1) as f32);
+        let scale = (room_w / w).min(room_h / h);
+        Some((left, top, w * scale, h * scale))
+    }
+
+    /// Draw the shown screen.
+    fn render_remote_screen(&self, cmds: &mut Vec<RenderCommand>) {
+        let (Some(screen), Some((x, y, width, height))) = (self.shown_screen(), self.screen_rect())
+        else {
+            return;
+        };
+        cmds.push(RenderCommand::Image {
+            x,
+            y,
+            width,
+            height,
+            image_id: screen_image(screen.session_id),
+        });
+    }
+
+    /// Draw the password prompt, while one is open.
+    fn render_password_prompt(&self, cmds: &mut Vec<RenderCommand>) {
+        let Some(prompt) = &self.password_prompt else {
+            return;
+        };
+        let name = self
+            .profiles
+            .get(prompt.profile_index)
+            .map_or("", |p| p.display_name.as_str());
+        let (w, h) = (420.0, 110.0);
+        let x = ((self.window_width - w) / 2.0).max(0.0);
+        let y = ((self.window_height - h) / 2.0).max(0.0);
+        cmds.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::all(8.0),
+        });
+        let lines = [
+            format!("VNC password for {name}"),
+            "\u{2022}".repeat(prompt.text.chars().count()),
+            String::from("Enter connects, Escape cancels. The password is kept nowhere."),
+        ];
+        for (i, line) in lines.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: x + 16.0,
+                #[expect(clippy::cast_precision_loss, reason = "three lines")]
+                y: y + 16.0 + i as f32 * 28.0,
+                text: line.clone(),
+                font_size: if i == 0 { 14.0 } else { 12.0 },
+                color: if i == 0 {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(w - 32.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+
+    /// A key while the password prompt is open: it takes every key.
+    fn handle_prompt_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Consumed;
+        }
+        let Some(prompt) = self.password_prompt.as_mut() else {
+            return EventResult::Ignored;
+        };
+        match key.key {
+            Key::Escape => {
+                self.password_prompt = None;
+                self.status_message = Some(String::from("Not connected"));
+            }
+            Key::Backspace => {
+                prompt.text.pop();
+            }
+            Key::Enter => {
+                let prompt = self.password_prompt.take();
+                if let Some(prompt) = prompt {
+                    let _id = self.connect_vnc(prompt.profile_index, &prompt.text);
+                }
+            }
+            _ => prompt.text.push_str(&key.text),
+        }
+        EventResult::Consumed
+    }
+
+    /// A key while a remote screen is shown: it goes to the remote machine,
+    /// except the escape hotkey, which gives the keyboard back.
+    fn forward_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        if key.key == self.escape_hotkey || self.screen_rect().is_none() {
+            return None;
+        }
+        let id = self.shown_screen()?.session_id;
+        let live = self.live.iter_mut().find(|l| l.session_id == id)?;
+        let keysym = if key.pressed {
+            let sym = keysym_of_key(key.key)
+                .or_else(|| key.text.chars().next().map(rfb::keysym_of_char))?;
+            live.held.push((key.key, sym));
+            sym
+        } else {
+            let at = live.held.iter().position(|(k, _)| *k == key.key)?;
+            live.held.remove(at).1
+        };
+        if let Err(why) = live.rfb.key(key.pressed, keysym) {
+            self.status_message = Some(format!("The key was not sent: {why}"));
+        }
+        Some(EventResult::Consumed)
+    }
+
+    /// The pointer over a remote screen: moved, pressed and released there.
+    fn forward_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> Option<EventResult> {
+        let (x, y, w, h) = self.screen_rect()?;
+        if mouse.x < x || mouse.y < y || mouse.x >= x + w || mouse.y >= y + h {
+            return None;
+        }
+        let id = self.shown_screen()?.session_id;
+        let live = self.live.iter_mut().find(|l| l.session_id == id)?;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a screen is at most 16384 pixels a side"
+        )]
+        let (sw, sh) = (live.width as f32, live.height as f32);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "inside the screen, so 0..width and 0..height"
+        )]
+        let (rx, ry) = (
+            ((mouse.x - x) / w * sw) as u16,
+            ((mouse.y - y) / h * sh) as u16,
+        );
+        let bit = |b: &MouseButton| match b {
+            MouseButton::Left => 1_u8,
+            MouseButton::Middle => 2,
+            MouseButton::Right => 4,
+            _ => 0,
+        };
+        match &mouse.kind {
+            MouseEventKind::Press(b) => live.buttons |= bit(b),
+            MouseEventKind::Release(b) => live.buttons &= !bit(b),
+            MouseEventKind::Move => {}
+            _ => return None,
+        }
+        if let Err(why) = live.rfb.pointer(live.buttons, rx, ry) {
+            self.status_message = Some(format!("The pointer was not sent: {why}"));
+        }
+        Some(EventResult::Consumed)
     }
 
     /// Open a session the way Connect used to.
@@ -1259,6 +1668,10 @@ impl RemoteDesktopApp {
     pub fn disconnect_session(&mut self, index: usize) -> bool {
         if let Some(session) = self.sessions.get_mut(index) {
             session.state = SessionState::Disconnected;
+            // A live one is closed; its end arrives as news and is said then.
+            if let Some(live) = self.live.iter().find(|l| l.session_id == session.id) {
+                live.rfb.close();
+            }
             true
         } else {
             false
@@ -1457,8 +1870,13 @@ impl RemoteDesktopApp {
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
-            Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Key(key) => self.handle_key(key),
+            Event::Key(key) if self.password_prompt.is_some() => self.handle_prompt_key(key),
+            Event::Key(key) => self
+                .forward_key(key)
+                .unwrap_or_else(|| self.handle_key(key)),
+            Event::Mouse(mouse) => self
+                .forward_mouse(mouse)
+                .unwrap_or_else(|| self.handle_mouse(mouse)),
             Event::Resize { width, height } => {
                 self.window_width = *width as f32;
                 self.window_height = *height as f32;
@@ -1887,7 +2305,7 @@ impl RemoteDesktopApp {
         // lines were drawn at the top of the window, before the title bar,
         // which filled the same pixels.
         let strip_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT;
-        for (i, line) in CANNOT_CONNECT_LINES.iter().enumerate() {
+        for (i, line) in NOTICE_LINES.iter().enumerate() {
             cmds.push(RenderCommand::Text {
                 x: 10.0,
                 #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
@@ -1929,7 +2347,9 @@ impl RemoteDesktopApp {
 
         cmds.push(RenderCommand::PopClip);
 
+        self.render_remote_screen(&mut cmds);
         self.render_status_bar(&mut cmds);
+        self.render_password_prompt(&mut cmds);
 
         if self.show_perf_overlay {
             self.render_perf_overlay(&mut cmds);
@@ -3589,6 +4009,112 @@ fn format_duration(secs: u64) -> String {
     guitk::duration::units(secs)
 }
 
+/// The image id a session's screen is uploaded under.
+fn screen_image(session_id: u32) -> u64 {
+    SCREEN_IMAGE_BASE.saturating_add(u64::from(session_id))
+}
+
+/// Give a live screen a new size, black, to be drawn over.
+fn resize(live: &mut LiveScreen, width: u16, height: u16) {
+    live.width = u32::from(width);
+    live.height = u32::from(height);
+    live.pixels = vec![0xFF00_0000; usize::from(width).saturating_mul(usize::from(height))];
+    live.dirty = true;
+}
+
+/// Put a rectangle's pixels (`0x00RRGGBB`) on a live screen, opaque. A
+/// rectangle reaching past the screen is clipped to it (`rfb` refuses one
+/// outside the desktop; this keeps a resize race from writing past the end).
+fn blit(live: &mut LiveScreen, x: u16, y: u16, w: u16, h: u16, pixels: &[u32]) {
+    let width = usize::try_from(live.width).unwrap_or(0);
+    let (x, w) = (usize::from(x), usize::from(w));
+    for (row, line) in pixels.chunks(w.max(1)).take(usize::from(h)).enumerate() {
+        let at = usize::from(y)
+            .saturating_add(row)
+            .saturating_mul(width)
+            .saturating_add(x);
+        let fit = w.min(width.saturating_sub(x));
+        if let (Some(dst), Some(src)) = (
+            live.pixels.get_mut(at..at.saturating_add(fit)),
+            line.get(..fit),
+        ) {
+            for (d, s) in dst.iter_mut().zip(src) {
+                *d = s | 0xFF00_0000;
+            }
+        }
+    }
+    live.dirty = true;
+}
+
+/// Copy a rectangle of a live screen to another place on it -- RFB's
+/// CopyRect -- through a copy of the source, so an overlap reads the old
+/// pixels.
+fn copy_rect(live: &mut LiveScreen, src: (u16, u16), dst: (u16, u16), size: (u16, u16)) {
+    let width = usize::try_from(live.width).unwrap_or(0);
+    let (w, h) = (usize::from(size.0), usize::from(size.1));
+    let area = w.saturating_mul(h);
+    let mut block = Vec::with_capacity(area);
+    for row in 0..h {
+        let at = usize::from(src.1)
+            .saturating_add(row)
+            .saturating_mul(width)
+            .saturating_add(usize::from(src.0));
+        block.extend_from_slice(live.pixels.get(at..at.saturating_add(w)).unwrap_or(&[]));
+    }
+    if block.len() != area {
+        return;
+    }
+    for (row, line) in block.chunks(w.max(1)).enumerate() {
+        let at = usize::from(dst.1)
+            .saturating_add(row)
+            .saturating_mul(width)
+            .saturating_add(usize::from(dst.0));
+        if let Some(d) = live.pixels.get_mut(at..at.saturating_add(w)) {
+            d.copy_from_slice(line);
+        }
+    }
+    live.dirty = true;
+}
+
+/// The X keysym for a key that types no character.
+fn keysym_of_key(key: Key) -> Option<u32> {
+    Some(match key {
+        Key::F1 => 0xFFBE,
+        Key::F2 => 0xFFBF,
+        Key::F3 => 0xFFC0,
+        Key::F4 => 0xFFC1,
+        Key::F5 => 0xFFC2,
+        Key::F6 => 0xFFC3,
+        Key::F7 => 0xFFC4,
+        Key::F8 => 0xFFC5,
+        Key::F9 => 0xFFC6,
+        Key::F10 => 0xFFC7,
+        Key::F11 => 0xFFC8,
+        Key::F12 => 0xFFC9,
+        Key::Backspace => 0xFF08,
+        Key::Tab => 0xFF09,
+        Key::Enter => 0xFF0D,
+        Key::Escape => 0xFF1B,
+        Key::Home => 0xFF50,
+        Key::Left => 0xFF51,
+        Key::Up => 0xFF52,
+        Key::Right => 0xFF53,
+        Key::Down => 0xFF54,
+        Key::PageUp => 0xFF55,
+        Key::PageDown => 0xFF56,
+        Key::End => 0xFF57,
+        Key::Insert => 0xFF63,
+        Key::Delete => 0xFFFF,
+        Key::LeftShift => 0xFFE1,
+        Key::RightShift => 0xFFE2,
+        Key::LeftCtrl => 0xFFE3,
+        Key::RightCtrl => 0xFFE4,
+        Key::LeftAlt => 0xFFE9,
+        Key::RightAlt => 0xFFEA,
+        _ => return None,
+    })
+}
+
 // ============================================================================
 // Entry point
 // ============================================================================
@@ -3596,6 +4122,24 @@ fn format_duration(secs: u64) -> String {
 impl App for RemoteDesktopApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.waker = Some(waker);
+    }
+
+    /// A session has news.
+    fn on_wake(&mut self) -> Response {
+        self.pump();
+        Response::Redraw
+    }
+
+    fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
+        std::mem::take(&mut self.pending_images)
     }
 
     fn title(&self) -> String {
@@ -3731,9 +4275,9 @@ mod tests {
         );
     }
 
-    /// And the window says why, including about the empty history.
+    /// The window says what connects, and that it is not encrypted.
     #[test]
-    fn the_window_says_it_cannot_connect() {
+    fn the_window_says_what_connects_and_what_it_costs() {
         let app = RemoteDesktopApp::new();
         let texts: Vec<String> = app
             .render_commands()
@@ -3743,17 +4287,21 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in CANNOT_CONNECT_LINES {
+        for line in NOTICE_LINES {
             assert!(
                 texts.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
         assert!(
-            CANNOT_CONNECT_LINES
+            NOTICE_LINES.iter().any(|l| l.contains("not encrypted")),
+            "nothing says a VNC session crosses the network readable",
+        );
+        assert!(
+            NOTICE_LINES
                 .iter()
-                .any(|l| l.contains("no attempt was ever made")),
-            "nothing explains the empty history",
+                .any(|l| l.contains("RDP and SSH are not implemented")),
+            "nothing says which protocols do not connect",
         );
     }
 
@@ -5653,7 +6201,7 @@ mod tests {
     fn the_warning_lines_are_not_painted_over() {
         let app = RemoteDesktopApp::new();
         let commands: Vec<RenderCommand> = app.render_commands();
-        for line in CANNOT_CONNECT_LINES {
+        for line in NOTICE_LINES {
             let (at, x, y, reach) = commands
                 .iter()
                 .enumerate()
@@ -5677,12 +6225,278 @@ mod tests {
             // a warning is as unreadable as a fill over it.
             let crowded = commands.iter().any(|c| {
                 matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
-                    if !CANNOT_CONNECT_LINES.contains(&text.as_str())
+                    if !NOTICE_LINES.contains(&text.as_str())
                         && (ty - y).abs() < 10.0
                         && *tx < reach
                         && tx + tw.unwrap_or(f32::INFINITY) > x)
             });
             assert!(!crowded, "{line:?} shares its row with other text");
         }
+    }
+
+    // --- VNC ---
+
+    use crate::rfb::fake::{Step, handshake_none, server};
+
+    /// An app with one VNC profile, for `127.0.0.1:port`.
+    fn vnc_app(port: u16) -> RemoteDesktopApp {
+        let mut app = RemoteDesktopApp::new();
+        let mut profile = ConnectionProfile::new_default(0);
+        profile.display_name = String::from("desk");
+        profile.hostname = String::from("127.0.0.1");
+        profile.port = port;
+        profile.protocol = Protocol::Vnc;
+        app.add_profile(profile);
+        app
+    }
+
+    /// Pump until `done` holds, or five seconds pass.
+    fn pump_until(app: &mut RemoteDesktopApp, done: impl Fn(&RemoteDesktopApp) -> bool) {
+        let give_up = std::time::Instant::now() + Duration::from_secs(5);
+        while !done(app) {
+            assert!(std::time::Instant::now() < give_up, "it never happened");
+            app.pump();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// **A VNC session shows the remote screen**: it connects, becomes
+    /// Connected when the server has shaken hands, files a successful
+    /// attempt then (not when Connect was pressed), and uploads the screen
+    /// -- opaque, with the rectangle the server sent in its place.
+    #[test]
+    fn a_vnc_session_shows_the_remote_screen() {
+        let mut script = handshake_none();
+        let mut update = vec![0, 0, 0, 1, 0, 1, 0, 1, 0, 2, 0, 1];
+        update.extend_from_slice(&0_i32.to_be_bytes());
+        update.extend_from_slice(&[0x33, 0x22, 0x11, 0x00, 0x66, 0x55, 0x44, 0x00]);
+        script.push(Step::Say(update));
+        script.push(Step::Hear(10));
+        let (port, _heard) = server(script);
+        let mut app = vnc_app(port);
+
+        let id = app.connect_vnc(0, "").expect("a session");
+        assert_eq!(app.sessions[0].state, SessionState::Connecting);
+        assert!(
+            app.history.is_empty(),
+            "an outcome filed before it was known"
+        );
+        pump_until(&mut app, |a| a.sessions[0].state == SessionState::Connected);
+        assert_eq!(app.history.back().map(|h| h.success), Some(true));
+
+        pump_until(&mut app, |a| {
+            a.live.iter().any(|l| l.pixels.get(5) == Some(&0xFF11_2233))
+        });
+        let live = app
+            .live
+            .iter()
+            .find(|l| l.session_id == id)
+            .expect("the live half");
+        assert_eq!((live.width, live.height), (4, 2));
+        assert_eq!(
+            live.pixels[4 + 1],
+            0xFF11_2233,
+            "the pixel is not where the server put it"
+        );
+        assert_eq!(live.pixels[4 + 2], 0xFF44_5566);
+        assert_eq!(live.pixels[0], 0xFF00_0000, "the rest is not opaque black");
+
+        let images = app.take_images();
+        assert!(
+            images.iter().any(|c| matches!(
+                c,
+                oswindow::app::ImageChange::Upload { id: img, width: 4, height: 2, stride: 16, .. }
+                    if *img == screen_image(id)
+            )),
+            "the screen was not uploaded"
+        );
+        app.current_view = MainView::ActiveSessions;
+        let drawn = app.render_commands();
+        assert!(
+            drawn.iter().any(|c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == screen_image(id))),
+            "the screen is not drawn"
+        );
+    }
+
+    /// Keys and the pointer reach the remote machine while its screen is
+    /// shown; the escape hotkey does not -- it gives the keyboard back.
+    #[test]
+    fn keys_and_the_pointer_reach_the_remote_machine() {
+        let mut script = handshake_none();
+        script.push(Step::Hear(8));
+        script.push(Step::Hear(8));
+        script.push(Step::Hear(6));
+        script.push(Step::Hear(8));
+        // Listening still, so a hotkey that did go out would be heard rather
+        // than swallowed after the script ends.
+        script.push(Step::Hear(8));
+        let (port, heard) = server(script);
+        let mut app = vnc_app(port);
+        app.connect_vnc(0, "").expect("a session");
+        pump_until(&mut app, |a| a.sessions[0].state == SessionState::Connected);
+        for _ in 0..6 {
+            let _ = heard.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+
+        let press = KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::from("a"),
+        };
+        assert_eq!(app.handle_event(&Event::Key(press)), EventResult::Consumed);
+        assert_eq!(
+            heard.recv_timeout(Duration::from_secs(5)).unwrap(),
+            [4, 1, 0, 0, 0, 0, 0, 0x61]
+        );
+        let release = KeyEvent {
+            key: Key::A,
+            pressed: false,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        };
+        app.handle_event(&Event::Key(release));
+        assert_eq!(
+            heard.recv_timeout(Duration::from_secs(5)).unwrap(),
+            [4, 0, 0, 0, 0, 0, 0, 0x61],
+            "the release did not carry the keysym the press was sent as"
+        );
+
+        let (x, y, w, h) = app.screen_rect().expect("the screen is shown");
+        app.handle_event(&Event::Mouse(guitk::event::MouseEvent {
+            x: x + w - 0.5,
+            y: y + h - 0.5,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(
+            heard.recv_timeout(Duration::from_secs(5)).unwrap(),
+            [5, 1, 0, 3, 0, 1]
+        );
+
+        let f5 = KeyEvent {
+            key: Key::F5,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        };
+        assert_ne!(app.escape_hotkey, Key::F5, "control: F5 is not the hotkey");
+        app.handle_event(&Event::Key(f5));
+        assert_eq!(
+            heard.recv_timeout(Duration::from_secs(5)).unwrap(),
+            [4, 1, 0, 0, 0, 0, 0xFF, 0xC2],
+            "a function key did not reach the remote machine"
+        );
+        let escape = KeyEvent {
+            key: app.escape_hotkey,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        };
+        app.handle_event(&Event::Key(escape));
+        assert!(
+            heard.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the escape hotkey went to the remote machine"
+        );
+    }
+
+    /// A refused password ends the session in the server's words, and the
+    /// attempt is filed as failed.
+    #[test]
+    fn a_refused_password_is_a_failed_attempt() {
+        let mut reason = 11_u32.to_be_bytes().to_vec();
+        reason.extend_from_slice(b"bad secret!");
+        let mut failed = 1_u32.to_be_bytes().to_vec();
+        failed.extend_from_slice(&reason);
+        let script = vec![
+            Step::Say(b"RFB 003.008\n".to_vec()),
+            Step::Hear(12),
+            Step::Say(vec![1, 2]),
+            Step::Hear(1),
+            Step::Say(vec![0; 16]),
+            Step::Hear(16),
+            Step::Say(failed),
+        ];
+        let (port, _heard) = server(script);
+        let mut app = vnc_app(port);
+        app.connect_vnc(0, "wrong").expect("a session");
+        pump_until(&mut app, |a| {
+            a.sessions[0].state == SessionState::Disconnected
+        });
+        assert_eq!(app.history.back().map(|h| h.success), Some(false));
+        let said = app.status_message.clone().unwrap_or_default();
+        assert!(said.contains("bad secret!"), "{said}");
+        assert!(app.live.is_empty(), "the ended session's half was kept");
+    }
+
+    /// Connect asks a VNC profile for its password first -- nothing is
+    /// contacted until it is given -- and refuses RDP and SSH by name.
+    #[test]
+    fn connect_asks_for_the_password_and_refuses_what_is_not_vnc() {
+        let mut app = vnc_app(9);
+        assert_eq!(app.connect_profile(0), None);
+        assert_eq!(
+            app.password_prompt,
+            Some(PasswordPrompt {
+                profile_index: 0,
+                text: String::new()
+            })
+        );
+        assert!(app.sessions.is_empty(), "a session before the password");
+        let key = |k: Key, text: &str| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: String::from(text),
+            })
+        };
+        app.handle_event(&key(Key::S, "s"));
+        app.handle_event(&key(Key::Backspace, ""));
+        app.handle_event(&key(Key::X, "x"));
+        assert_eq!(
+            app.password_prompt.as_ref().map(|p| p.text.as_str()),
+            Some("x")
+        );
+        app.handle_event(&key(Key::Escape, ""));
+        assert_eq!(app.password_prompt, None);
+        assert!(app.sessions.is_empty(), "Escape connected");
+
+        assert_eq!(app.connect_profile(0), None);
+        app.handle_event(&key(Key::Enter, ""));
+        assert_eq!(app.password_prompt, None, "Enter left the prompt open");
+        assert_eq!(
+            app.sessions.first().map(|s| s.state),
+            Some(SessionState::Connecting),
+            "Enter did not start the connection"
+        );
+
+        app.profiles[0].protocol = Protocol::Rdp;
+        assert_eq!(app.connect_profile(0), None);
+        assert_eq!(app.password_prompt, None);
+        let said = app.status_message.clone().unwrap_or_default();
+        assert!(said.contains("RDP is not implemented"), "{said}");
+    }
+
+    /// CopyRect reads the old pixels even where source and destination
+    /// overlap.
+    #[test]
+    fn an_overlapping_copy_reads_the_old_pixels() {
+        let (port, _heard) = server(handshake_none());
+        let mut app = vnc_app(port);
+        app.connect_vnc(0, "").expect("a session");
+        pump_until(&mut app, |a| a.sessions[0].state == SessionState::Connected);
+        let live = app.live.first_mut().expect("the live half");
+        live.pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        copy_rect(live, (0, 0), (1, 0), (3, 1));
+        assert_eq!(
+            live.pixels[..4],
+            [1, 1, 2, 3],
+            "the copy read what it had written"
+        );
+        blit(live, 3, 1, 4, 1, &[0x0000_00AA, 0x0000_00BB]);
+        assert_eq!(
+            live.pixels[7], 0xFF00_00AA,
+            "a clipped blit wrote nothing, or past the row"
+        );
     }
 }

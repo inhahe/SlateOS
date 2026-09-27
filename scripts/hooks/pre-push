@@ -171,6 +171,28 @@
 #      in the ownership table naming nothing tracked, or a script owned by
 #      two lanes (design-decisions §973, the operator's answer to A-Q11). A
 #      new file gets its owner in the commit that creates it.
+#  52. Run check-manifest-producers.py at the push (design-decisions 974): manifest producers.
+#  53. Run check-cp-diff-sees-nul.py at the push (design-decisions 974): cp-diff sees NUL.
+#  54. Run check-gates-can-refuse.py at the push (design-decisions 974): gates can refuse.
+#  55. Run check-gates-are-wired.py at the push (design-decisions 974): gates are wired.
+#  56. Run check-mutation-needles.py at the push (design-decisions 974): mutation needles.
+#  57. Run check-user-access-sites.py at the push (design-decisions 974): user-access sites.
+#  58. Run check-linux-only-capabilities.py at the push (design-decisions 974): Linux-only capabilities.
+#  59. Run check-usage-names-reach-the-command.py at the push (design-decisions 974): usage names reach the command.
+#  60. Run check-refusals-refuse.py at the push (design-decisions 974): refusals refuse.
+#  61. Run check-usage-status.py at the push (design-decisions 974): usage messages report failure.
+#  62. Run check-query-status.py at the push (design-decisions 974): queries report success.
+#  63. Run check-selftest-rung-numbers.py at the push (design-decisions 974): self-test rung numbers.
+#  64. Run check-shell-message-names.py at the push (design-decisions 974): shell message names.
+#  65. Run check-shell-noun-article.py at the push (design-decisions 974): shell noun articles.
+#  66. Run selftest-boot-gate-identity.py at the push (design-decisions 974): identity-rung gate.
+#  67. Run check-ring3-entry-regs.py at the push (design-decisions 974): ring-3 entry registers.
+#  68. Run gen-script-index.py at the push (design-decisions 974): script index.
+#  69. Run check-foreign-worktree-paths.py at the push (design-decisions 974): foreign worktree paths.
+#  70. Run check-frame-needles.py at the push (design-decisions 974): frame needles.
+#  71. Run check-generated-tables.py at the push (design-decisions 974): generated tables.
+#  72. Run check-diskcleanup-test-roots.py at the push (design-decisions 974): diskcleanup test roots.
+#  73. Run check-selftest-reinit.py at the push (design-decisions 974): self-test tables re-opened.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -5690,14 +5712,6 @@ EOF
 fi
 
 
-# ---------------------------------------------------------------------------
-# The gate tally, printed here because here is after every gate.  See the note
-# where it used to live, above gate 19's history.
-# ---------------------------------------------------------------------------
-n_ran=0
-n_skipped=0
-for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
-for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
 
 # ---------------------------------------------------------------------------
 # Gate 48 -- accent-family text drawn without `ink()`.
@@ -5931,6 +5945,725 @@ EOF
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Gates 52-73: boot-test gates that take seconds, run at the push too.
+#
+# WHY. The operator's answer to A-Q13 (design-decisions 974). A fault a lane
+# pushed used to surface only in another lane's boot test, twenty minutes to
+# hours later, and the agent who paid for it was never the one who caused it.
+# The checks that would have caught most of those existed, deterministic and
+# fast, and ran only in the boot, for no reason anyone recorded. These are
+# the ones that take seconds (a median of 15 s or less across six loaded
+# boots, 2026-09-27); the slower ones stay in the boot, where the gate cache is
+# meant to make them cheaper instead.
+#
+# WHAT THEY JUDGE. None of these checkers takes --head: each reads the working
+# tree. So each runs only where the working tree IS the push -- one ref, that
+# ref's commit checked out, and nothing modified or untracked under the paths
+# the gate reads. That is gate 12's precondition, applied per gate so that an
+# untracked file elsewhere declines nothing. Where it does not hold the gate
+# declines by name and says it was NOT checked; the boot still runs it.
+#
+# Each is scoped by `touches` to the paths it reads, so a push pays only for
+# the gates it could have broken, and each has its own bypass.
+# ---------------------------------------------------------------------------
+
+# The six gates below that read kernel/src name it the way boot-test.sh does,
+# so check-gate-invocation-parity sees one invocation, not two.
+PROJECT_ROOT=${PROJECT_ROOT:-${repo_root:-.}}
+
+# tree_is_push <what> <path>...: 0 when the working tree is the commit being
+# pushed on <path>...; otherwise say why <what> declines, and return 1.
+tree_is_push() {
+    _tp_what=$1
+    shift
+    _tp_n=0
+    for _tp_sha in $pushed_shas; do _tp_n=$((_tp_n + 1)); done
+    _tp_head=$(git rev-parse HEAD 2>/dev/null) || _tp_head=""
+    _tp_why=""
+    if [ "$_tp_n" != "1" ]; then
+        _tp_why="this push sends $_tp_n refs, and one working tree is at most one of them"
+    elif [ "${pushed_shas# }" != "$_tp_head" ]; then
+        _tp_why="the commit being pushed is not the one checked out"
+    elif [ -n "$(git status --porcelain --untracked-files=normal -- "$@" 2>/dev/null | head -n 1)" ]; then
+        _tp_why="the working tree has uncommitted or untracked changes under the paths it reads"
+    fi
+    if [ -n "$_tp_why" ]; then
+        echo "pre-push: $_tp_what declines -- $_tp_why, so it would judge a tree that is not the push." >&2
+        echo "  It was NOT checked; the boot test still runs it." >&2
+        return 1
+    fi
+    return 0
+}
+
+# moved_gate_refuses <n> <what> <bypass> <rule>: the shared refusal for 52-73.
+moved_gate_refuses() {
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push - gate $1 ($2) found the problem named above.
+
+$4
+
+The boot test runs this check too, where it would have refused the same tree
+after the build and a long run of other gates. Here it costs seconds
+(design-decisions 974).
+
+To push anyway:
+    $3=1 git push $remote_name ...
+
+EOF
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Gate 52 -- manifest producers.
+# Every entry in scripts/rootfs-bin-manifest.txt must name a program something
+# in the tree builds. An entry nothing produces puts a missing program on the
+# disk image, and the image build finds out only after the boot's gates.
+#
+# Bypass: ALLOW_MANIFEST_PRODUCERS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+mfprod="${repo_root:-.}/scripts/check-manifest-producers.py"
+skip_mfprod=$skip
+if [ "${ALLOW_MANIFEST_PRODUCERS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_MANIFEST_PRODUCERS=1 set - skipping gate 52 (manifest producers)." >&2
+    skip_mfprod=1
+fi
+[ -f "$mfprod" ] || skip_mfprod=1
+touches scripts/rootfs-bin-manifest.txt userspace/ scripts/check-manifest-producers.py || skip_mfprod=1
+if [ "$skip_mfprod" != "1" ]; then
+    tree_is_push "gate 52 (manifest producers)" scripts/rootfs-bin-manifest.txt userspace/ scripts/check-manifest-producers.py || skip_mfprod=1
+fi
+note_gate check-manifest-producers "$skip_mfprod"
+if [ "$skip_mfprod" != "1" ]; then
+    if ! run_checker check-manifest-producers-selftest "$py" "$mfprod" --self-test; then
+        moved_gate_refuses 52 "manifest producers" ALLOW_MANIFEST_PRODUCERS \
+            "check-manifest-producers.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-manifest-producers "$py" "$mfprod"; then
+        moved_gate_refuses 52 "manifest producers" ALLOW_MANIFEST_PRODUCERS "Every entry in scripts/rootfs-bin-manifest.txt must name a program something
+in the tree builds. An entry nothing produces puts a missing program on the
+disk image, and the image build finds out only after the boot's gates."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 53 -- cp-diff sees NUL.
+# cp-diff.sh's contents() must still see a difference made only of NUL bytes.
+# If it cannot, the cp differential test passes files that differ.
+#
+# Bypass: ALLOW_CP_DIFF_NUL=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+cpnul="${repo_root:-.}/scripts/check-cp-diff-sees-nul.py"
+skip_cpnul=$skip
+if [ "${ALLOW_CP_DIFF_NUL:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_CP_DIFF_NUL=1 set - skipping gate 53 (cp-diff sees NUL)." >&2
+    skip_cpnul=1
+fi
+[ -f "$cpnul" ] || skip_cpnul=1
+touches scripts/cp-diff.sh scripts/check-cp-diff-sees-nul.py || skip_cpnul=1
+if [ "$skip_cpnul" != "1" ]; then
+    tree_is_push "gate 53 (cp-diff sees NUL)" scripts/cp-diff.sh scripts/check-cp-diff-sees-nul.py || skip_cpnul=1
+fi
+note_gate check-cp-diff-sees-nul "$skip_cpnul"
+if [ "$skip_cpnul" != "1" ]; then
+    if ! run_checker check-cp-diff-sees-nul-selftest "$py" "$cpnul" --self-test; then
+        moved_gate_refuses 53 "cp-diff sees NUL" ALLOW_CP_DIFF_NUL \
+            "check-cp-diff-sees-nul.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-cp-diff-sees-nul "$py" "$cpnul"; then
+        moved_gate_refuses 53 "cp-diff sees NUL" ALLOW_CP_DIFF_NUL "cp-diff.sh's contents() must still see a difference made only of NUL bytes.
+If it cannot, the cp differential test passes files that differ."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 54 -- gates can refuse.
+# Every gate must be able to exit non-zero when run the way it is run. A gate
+# that cannot fail enforces nothing, however thoroughly it detects.
+#
+# Bypass: ALLOW_GATES_CAN_REFUSE=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+canref="${repo_root:-.}/scripts/check-gates-can-refuse.py"
+skip_canref=$skip
+if [ "${ALLOW_GATES_CAN_REFUSE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_GATES_CAN_REFUSE=1 set - skipping gate 54 (gates can refuse)." >&2
+    skip_canref=1
+fi
+[ -f "$canref" ] || skip_canref=1
+touches scripts/ || skip_canref=1
+if [ "$skip_canref" != "1" ]; then
+    tree_is_push "gate 54 (gates can refuse)" scripts/ || skip_canref=1
+fi
+note_gate check-gates-can-refuse "$skip_canref"
+if [ "$skip_canref" != "1" ]; then
+    if ! run_checker check-gates-can-refuse-selftest "$py" "$canref" --selftest; then
+        moved_gate_refuses 54 "gates can refuse" ALLOW_GATES_CAN_REFUSE \
+            "check-gates-can-refuse.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-gates-can-refuse "$py" "$canref"; then
+        moved_gate_refuses 54 "gates can refuse" ALLOW_GATES_CAN_REFUSE "Every gate must be able to exit non-zero when run the way it is run. A gate
+that cannot fail enforces nothing, however thoroughly it detects."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 55 -- gates are wired.
+# Every gate must be run by the boot test or this hook, or pinned with a reason,
+# and every self-test that exists must be run. A gate nothing runs enforces
+# nothing.
+#
+# Bypass: ALLOW_GATES_ARE_WIRED=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+wired="${repo_root:-.}/scripts/check-gates-are-wired.py"
+skip_wired=$skip
+if [ "${ALLOW_GATES_ARE_WIRED:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_GATES_ARE_WIRED=1 set - skipping gate 55 (gates are wired)." >&2
+    skip_wired=1
+fi
+[ -f "$wired" ] || skip_wired=1
+touches scripts/ || skip_wired=1
+if [ "$skip_wired" != "1" ]; then
+    tree_is_push "gate 55 (gates are wired)" scripts/ || skip_wired=1
+fi
+note_gate check-gates-are-wired "$skip_wired"
+if [ "$skip_wired" != "1" ]; then
+    if ! run_checker check-gates-are-wired-selftest "$py" "$wired" --selftest; then
+        moved_gate_refuses 55 "gates are wired" ALLOW_GATES_ARE_WIRED \
+            "check-gates-are-wired.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-gates-are-wired "$py" "$wired"; then
+        moved_gate_refuses 55 "gates are wired" ALLOW_GATES_ARE_WIRED "Every gate must be run by the boot test or this hook, or pinned with a reason,
+and every self-test that exists must be run. A gate nothing runs enforces
+nothing."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 56 -- mutation needles.
+# Every needle in a gate's mutation table must still quote text in that gate.
+# A needle that matches nothing mutates nothing, and the row passes while
+# testing nothing.
+#
+# Bypass: ALLOW_MUTATION_NEEDLES=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+needles="${repo_root:-.}/scripts/check-mutation-needles.py"
+skip_needles=$skip
+if [ "${ALLOW_MUTATION_NEEDLES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_MUTATION_NEEDLES=1 set - skipping gate 56 (mutation needles)." >&2
+    skip_needles=1
+fi
+[ -f "$needles" ] || skip_needles=1
+touches scripts/ || skip_needles=1
+if [ "$skip_needles" != "1" ]; then
+    tree_is_push "gate 56 (mutation needles)" scripts/ || skip_needles=1
+fi
+note_gate check-mutation-needles "$skip_needles"
+if [ "$skip_needles" != "1" ]; then
+    if ! run_checker check-mutation-needles-selftest "$py" "$needles" --self-test; then
+        moved_gate_refuses 56 "mutation needles" ALLOW_MUTATION_NEEDLES \
+            "check-mutation-needles.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-mutation-needles "$py" "$needles"; then
+        moved_gate_refuses 56 "mutation needles" ALLOW_MUTATION_NEEDLES "Every needle in a gate's mutation table must still quote text in that gate.
+A needle that matches nothing mutates nothing, and the row passes while
+testing nothing."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 57 -- user-access sites.
+# Kernel writes to user memory must stay inside the audited copy helpers. A
+# new site elsewhere is a write the fault handling was never reviewed for.
+#
+# Bypass: ALLOW_USER_ACCESS_SITES=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+uaccess="${repo_root:-.}/scripts/check-user-access-sites.py"
+skip_uaccess=$skip
+if [ "${ALLOW_USER_ACCESS_SITES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_USER_ACCESS_SITES=1 set - skipping gate 57 (user-access sites)." >&2
+    skip_uaccess=1
+fi
+[ -f "$uaccess" ] || skip_uaccess=1
+touches kernel/ scripts/check-user-access-sites.py || skip_uaccess=1
+if [ "$skip_uaccess" != "1" ]; then
+    tree_is_push "gate 57 (user-access sites)" kernel/ scripts/check-user-access-sites.py || skip_uaccess=1
+fi
+note_gate check-user-access-sites "$skip_uaccess"
+if [ "$skip_uaccess" != "1" ]; then
+    if ! run_checker check-user-access-sites "$py" "$uaccess"; then
+        moved_gate_refuses 57 "user-access sites" ALLOW_USER_ACCESS_SITES "Kernel writes to user memory must stay inside the audited copy helpers. A
+new site elsewhere is a write the fault handling was never reviewed for."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 58 -- Linux-only capabilities.
+# No kernel capability may be reachable only through the Linux-ABI table. A
+# native program must be able to reach everything a Linux one can.
+#
+# Bypass: ALLOW_LINUX_ONLY_CAPS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+linuxonly="${repo_root:-.}/scripts/check-linux-only-capabilities.py"
+skip_linuxonly=$skip
+if [ "${ALLOW_LINUX_ONLY_CAPS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_LINUX_ONLY_CAPS=1 set - skipping gate 58 (Linux-only capabilities)." >&2
+    skip_linuxonly=1
+fi
+[ -f "$linuxonly" ] || skip_linuxonly=1
+touches kernel/ scripts/check-linux-only-capabilities.py || skip_linuxonly=1
+if [ "$skip_linuxonly" != "1" ]; then
+    tree_is_push "gate 58 (Linux-only capabilities)" kernel/ scripts/check-linux-only-capabilities.py || skip_linuxonly=1
+fi
+note_gate check-linux-only-capabilities "$skip_linuxonly"
+if [ "$skip_linuxonly" != "1" ]; then
+    if ! run_checker check-linux-only-capabilities-selftest "$py" "$linuxonly" --self-test; then
+        moved_gate_refuses 58 "Linux-only capabilities" ALLOW_LINUX_ONLY_CAPS \
+            "check-linux-only-capabilities.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-linux-only-capabilities "$py" "$linuxonly"; then
+        moved_gate_refuses 58 "Linux-only capabilities" ALLOW_LINUX_ONLY_CAPS "No kernel capability may be reachable only through the Linux-ABI table. A
+native program must be able to reach everything a Linux one can."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 59 -- usage names reach the command.
+# A kshell usage line must name a command the shell can actually reach.
+#
+# Bypass: ALLOW_USAGE_NAMES=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+usagenames="${repo_root:-.}/scripts/check-usage-names-reach-the-command.py"
+skip_usagenames=$skip
+if [ "${ALLOW_USAGE_NAMES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_USAGE_NAMES=1 set - skipping gate 59 (usage names reach the command)." >&2
+    skip_usagenames=1
+fi
+[ -f "$usagenames" ] || skip_usagenames=1
+touches kernel/ scripts/check-usage-names-reach-the-command.py || skip_usagenames=1
+if [ "$skip_usagenames" != "1" ]; then
+    tree_is_push "gate 59 (usage names reach the command)" kernel/ scripts/check-usage-names-reach-the-command.py || skip_usagenames=1
+fi
+note_gate check-usage-names "$skip_usagenames"
+if [ "$skip_usagenames" != "1" ]; then
+    if ! run_checker check-usage-names-selftest "$py" "$usagenames" --self-test; then
+        moved_gate_refuses 59 "usage names reach the command" ALLOW_USAGE_NAMES \
+            "check-usage-names-reach-the-command.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-usage-names "$py" "$usagenames"; then
+        moved_gate_refuses 59 "usage names reach the command" ALLOW_USAGE_NAMES "A kshell usage line must name a command the shell can actually reach."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 60 -- refusals refuse.
+# A shell block that announces a refusal must reach a non-zero exit. A gate
+# that prints REFUSING and then returns success refuses nothing.
+#
+# Bypass: ALLOW_REFUSALS_REFUSE=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+refrefuse="${repo_root:-.}/scripts/check-refusals-refuse.py"
+skip_refrefuse=$skip
+if [ "${ALLOW_REFUSALS_REFUSE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_REFUSALS_REFUSE=1 set - skipping gate 60 (refusals refuse)." >&2
+    skip_refrefuse=1
+fi
+[ -f "$refrefuse" ] || skip_refrefuse=1
+touches scripts/ || skip_refrefuse=1
+if [ "$skip_refrefuse" != "1" ]; then
+    tree_is_push "gate 60 (refusals refuse)" scripts/ || skip_refrefuse=1
+fi
+note_gate check-refusals-refuse "$skip_refrefuse"
+if [ "$skip_refrefuse" != "1" ]; then
+    if ! run_checker check-refusals-refuse-selftest "$py" "$refrefuse" --self-test; then
+        moved_gate_refuses 60 "refusals refuse" ALLOW_REFUSALS_REFUSE \
+            "check-refusals-refuse.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-refusals-refuse "$py" "$refrefuse"; then
+        moved_gate_refuses 60 "refusals refuse" ALLOW_REFUSALS_REFUSE "A shell block that announces a refusal must reach a non-zero exit. A gate
+that prints REFUSING and then returns success refuses nothing."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 61 -- usage messages report failure.
+# A kshell usage message must report failure. A command that prints its usage
+# and says it succeeded tells a script it did what it was asked.
+#
+# Bypass: ALLOW_USAGE_STATUS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+usagestat="${repo_root:-.}/scripts/check-usage-status.py"
+skip_usagestat=$skip
+if [ "${ALLOW_USAGE_STATUS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_USAGE_STATUS=1 set - skipping gate 61 (usage messages report failure)." >&2
+    skip_usagestat=1
+fi
+[ -f "$usagestat" ] || skip_usagestat=1
+touches kernel/ scripts/check-usage-status.py || skip_usagestat=1
+if [ "$skip_usagestat" != "1" ]; then
+    tree_is_push "gate 61 (usage messages report failure)" kernel/ scripts/check-usage-status.py || skip_usagestat=1
+fi
+note_gate check-usage-status "$skip_usagestat"
+if [ "$skip_usagestat" != "1" ]; then
+    if ! run_checker check-usage-status "$py" "$usagestat"; then
+        moved_gate_refuses 61 "usage messages report failure" ALLOW_USAGE_STATUS "A kshell usage message must report failure. A command that prints its usage
+and says it succeeded tells a script it did what it was asked."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 62 -- queries report success.
+# A kshell command that answers the question it was asked must report success.
+#
+# Bypass: ALLOW_QUERY_STATUS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+querystat="${repo_root:-.}/scripts/check-query-status.py"
+skip_querystat=$skip
+if [ "${ALLOW_QUERY_STATUS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_QUERY_STATUS=1 set - skipping gate 62 (queries report success)." >&2
+    skip_querystat=1
+fi
+[ -f "$querystat" ] || skip_querystat=1
+touches kernel/ scripts/check-query-status.py || skip_querystat=1
+if [ "$skip_querystat" != "1" ]; then
+    tree_is_push "gate 62 (queries report success)" kernel/ scripts/check-query-status.py || skip_querystat=1
+fi
+note_gate check-query-status "$skip_querystat"
+if [ "$skip_querystat" != "1" ]; then
+    if ! run_checker check-query-status "$py" "$querystat"; then
+        moved_gate_refuses 62 "queries report success" ALLOW_QUERY_STATUS "A kshell command that answers the question it was asked must report success."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 63 -- self-test rung numbers.
+# Kernel self-test rungs are numbered uniquely and in order, with no gaps. The
+# boot test's evidence names rungs by number.
+#
+# Bypass: ALLOW_SELFTEST_RUNG_NUMBERS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+rungnums="${repo_root:-.}/scripts/check-selftest-rung-numbers.py"
+skip_rungnums=$skip
+if [ "${ALLOW_SELFTEST_RUNG_NUMBERS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SELFTEST_RUNG_NUMBERS=1 set - skipping gate 63 (self-test rung numbers)." >&2
+    skip_rungnums=1
+fi
+[ -f "$rungnums" ] || skip_rungnums=1
+touches kernel/ scripts/check-selftest-rung-numbers.py || skip_rungnums=1
+if [ "$skip_rungnums" != "1" ]; then
+    tree_is_push "gate 63 (self-test rung numbers)" kernel/ scripts/check-selftest-rung-numbers.py || skip_rungnums=1
+fi
+note_gate check-selftest-rung-numbers "$skip_rungnums"
+if [ "$skip_rungnums" != "1" ]; then
+    if ! run_checker check-selftest-rung-numbers-selftest "$py" "$rungnums" --self-test; then
+        moved_gate_refuses 63 "self-test rung numbers" ALLOW_SELFTEST_RUNG_NUMBERS \
+            "check-selftest-rung-numbers.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-selftest-rung-numbers "$py" "$rungnums"; then
+        moved_gate_refuses 63 "self-test rung numbers" ALLOW_SELFTEST_RUNG_NUMBERS "Kernel self-test rungs are numbered uniquely and in order, with no gaps. The
+boot test's evidence names rungs by number."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 64 -- shell message names.
+# A kshell diagnostic must name the command it actually came from.
+#
+# Bypass: ALLOW_SHELL_MESSAGE_NAMES=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+msgnames="${repo_root:-.}/scripts/check-shell-message-names.py"
+skip_msgnames=$skip
+if [ "${ALLOW_SHELL_MESSAGE_NAMES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SHELL_MESSAGE_NAMES=1 set - skipping gate 64 (shell message names)." >&2
+    skip_msgnames=1
+fi
+[ -f "$msgnames" ] || skip_msgnames=1
+touches kernel/ scripts/check-shell-message-names.py || skip_msgnames=1
+if [ "$skip_msgnames" != "1" ]; then
+    tree_is_push "gate 64 (shell message names)" kernel/ scripts/check-shell-message-names.py || skip_msgnames=1
+fi
+note_gate check-shell-message-names "$skip_msgnames"
+if [ "$skip_msgnames" != "1" ]; then
+    if ! run_checker check-shell-message-names-selftest "$py" "$msgnames" --self-test; then
+        moved_gate_refuses 64 "shell message names" ALLOW_SHELL_MESSAGE_NAMES \
+            "check-shell-message-names.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-shell-message-names "$py" "$msgnames"; then
+        moved_gate_refuses 64 "shell message names" ALLOW_SHELL_MESSAGE_NAMES "A kshell diagnostic must name the command it actually came from."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 65 -- shell noun articles.
+# An operand noun whose article English picks by sound must state the spelling
+# that decides it.
+#
+# Bypass: ALLOW_SHELL_NOUN_ARTICLE=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+nounart="${repo_root:-.}/scripts/check-shell-noun-article.py"
+skip_nounart=$skip
+if [ "${ALLOW_SHELL_NOUN_ARTICLE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SHELL_NOUN_ARTICLE=1 set - skipping gate 65 (shell noun articles)." >&2
+    skip_nounart=1
+fi
+[ -f "$nounart" ] || skip_nounart=1
+touches kernel/ scripts/check-shell-noun-article.py || skip_nounart=1
+if [ "$skip_nounart" != "1" ]; then
+    tree_is_push "gate 65 (shell noun articles)" kernel/ scripts/check-shell-noun-article.py || skip_nounart=1
+fi
+note_gate check-shell-noun-article "$skip_nounart"
+if [ "$skip_nounart" != "1" ]; then
+    if ! run_checker check-shell-noun-article-selftest "$py" "$nounart" --self-test; then
+        moved_gate_refuses 65 "shell noun articles" ALLOW_SHELL_NOUN_ARTICLE \
+            "check-shell-noun-article.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-shell-noun-article "$py" "$nounart"; then
+        moved_gate_refuses 65 "shell noun articles" ALLOW_SHELL_NOUN_ARTICLE "An operand noun whose article English picks by sound must state the spelling
+that decides it."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 66 -- identity-rung gate.
+# boot-test.sh's identity-rung gate must still fire on the case it exists for.
+#
+# Bypass: ALLOW_IDENTITY_RUNG_GATE=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+idrung="${repo_root:-.}/scripts/selftest-boot-gate-identity.py"
+skip_idrung=$skip
+if [ "${ALLOW_IDENTITY_RUNG_GATE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_IDENTITY_RUNG_GATE=1 set - skipping gate 66 (identity-rung gate)." >&2
+    skip_idrung=1
+fi
+[ -f "$idrung" ] || skip_idrung=1
+touches scripts/boot-test.sh scripts/selftest-boot-gate-identity.py || skip_idrung=1
+if [ "$skip_idrung" != "1" ]; then
+    tree_is_push "gate 66 (identity-rung gate)" scripts/boot-test.sh scripts/selftest-boot-gate-identity.py || skip_idrung=1
+fi
+note_gate identity-rung-gate-selftest "$skip_idrung"
+if [ "$skip_idrung" != "1" ]; then
+    if ! run_checker identity-rung-gate-selftest "$py" "$idrung"; then
+        moved_gate_refuses 66 "identity-rung gate" ALLOW_IDENTITY_RUNG_GATE "boot-test.sh's identity-rung gate must still fire on the case it exists for."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 67 -- ring-3 entry registers.
+# Every transition to ring 3 must define the argument registers it hands the
+# program. An undefined one leaks kernel state into user space.
+#
+# Bypass: ALLOW_RING3_ENTRY_REGS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+r3regs="${repo_root:-.}/scripts/check-ring3-entry-regs.py"
+skip_r3regs=$skip
+if [ "${ALLOW_RING3_ENTRY_REGS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_RING3_ENTRY_REGS=1 set - skipping gate 67 (ring-3 entry registers)." >&2
+    skip_r3regs=1
+fi
+[ -f "$r3regs" ] || skip_r3regs=1
+touches kernel/ scripts/check-ring3-entry-regs.py || skip_r3regs=1
+if [ "$skip_r3regs" != "1" ]; then
+    tree_is_push "gate 67 (ring-3 entry registers)" kernel/ scripts/check-ring3-entry-regs.py || skip_r3regs=1
+fi
+note_gate ring3-entry-regs "$skip_r3regs"
+if [ "$skip_r3regs" != "1" ]; then
+    if ! run_checker ring3-entry-regs-selftest "$py" "$r3regs" --self-test; then
+        moved_gate_refuses 67 "ring-3 entry registers" ALLOW_RING3_ENTRY_REGS \
+            "check-ring3-entry-regs.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker ring3-entry-regs "$py" "$r3regs" "$PROJECT_ROOT/kernel/src"; then
+        moved_gate_refuses 67 "ring-3 entry registers" ALLOW_RING3_ENTRY_REGS "Every transition to ring 3 must define the argument registers it hands the
+program. An undefined one leaks kernel state into user space."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 68 -- script index.
+# scripts/INDEX.md must match the scripts. Regenerate it:
+#     python scripts/gen-script-index.py
+# A new script directly in scripts/ also needs its line in your lane's block of
+# SCRIPT_OWNERS in scripts/which-lane.py (gate 51).
+#
+# Bypass: ALLOW_SCRIPT_INDEX=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+scindex="${repo_root:-.}/scripts/gen-script-index.py"
+skip_scindex=$skip
+if [ "${ALLOW_SCRIPT_INDEX:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SCRIPT_INDEX=1 set - skipping gate 68 (script index)." >&2
+    skip_scindex=1
+fi
+[ -f "$scindex" ] || skip_scindex=1
+touches scripts/ || skip_scindex=1
+if [ "$skip_scindex" != "1" ]; then
+    tree_is_push "gate 68 (script index)" scripts/ || skip_scindex=1
+fi
+note_gate script-index "$skip_scindex"
+if [ "$skip_scindex" != "1" ]; then
+    if ! run_checker script-index-selftest "$py" "$scindex" --self-test; then
+        moved_gate_refuses 68 "script index" ALLOW_SCRIPT_INDEX \
+            "gen-script-index.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker script-index "$py" "$scindex" --check; then
+        moved_gate_refuses 68 "script index" ALLOW_SCRIPT_INDEX "scripts/INDEX.md must match the scripts. Regenerate it:
+    python scripts/gen-script-index.py
+A new script directly in scripts/ also needs its line in your lane's block of
+SCRIPT_OWNERS in scripts/which-lane.py (gate 51)."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 69 -- foreign worktree paths.
+# No executable script may hardcode an absolute path to a lane worktree. It
+# runs against another lane's tree from whichever worktree it is invoked in.
+#
+# Bypass: ALLOW_FOREIGN_WORKTREE_PATHS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+foreignwt="${repo_root:-.}/scripts/check-foreign-worktree-paths.py"
+skip_foreignwt=$skip
+if [ "${ALLOW_FOREIGN_WORKTREE_PATHS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_FOREIGN_WORKTREE_PATHS=1 set - skipping gate 69 (foreign worktree paths)." >&2
+    skip_foreignwt=1
+fi
+[ -f "$foreignwt" ] || skip_foreignwt=1
+touches scripts/ || skip_foreignwt=1
+if [ "$skip_foreignwt" != "1" ]; then
+    tree_is_push "gate 69 (foreign worktree paths)" scripts/ || skip_foreignwt=1
+fi
+note_gate foreign-worktree "$skip_foreignwt"
+if [ "$skip_foreignwt" != "1" ]; then
+    if ! run_checker foreign-worktree-selftest "$py" "$foreignwt" --self-test; then
+        moved_gate_refuses 69 "foreign worktree paths" ALLOW_FOREIGN_WORKTREE_PATHS \
+            "check-foreign-worktree-paths.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker foreign-worktree "$py" "$foreignwt"; then
+        moved_gate_refuses 69 "foreign worktree paths" ALLOW_FOREIGN_WORKTREE_PATHS "No executable script may hardcode an absolute path to a lane worktree. It
+runs against another lane's tree from whichever worktree it is invoked in."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 70 -- frame needles.
+# A whole-frame text assertion in an app's tests must be scoped to the band it
+# names (lesson 91), or it passes on text drawn anywhere in the window.
+#
+# Bypass: ALLOW_FRAME_NEEDLES=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+frneedles="${repo_root:-.}/scripts/check-frame-needles.py"
+skip_frneedles=$skip
+if [ "${ALLOW_FRAME_NEEDLES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_FRAME_NEEDLES=1 set - skipping gate 70 (frame needles)." >&2
+    skip_frneedles=1
+fi
+[ -f "$frneedles" ] || skip_frneedles=1
+touches apps/ scripts/check-frame-needles.py || skip_frneedles=1
+if [ "$skip_frneedles" != "1" ]; then
+    tree_is_push "gate 70 (frame needles)" apps/ scripts/check-frame-needles.py || skip_frneedles=1
+fi
+note_gate check-frame-needles "$skip_frneedles"
+if [ "$skip_frneedles" != "1" ]; then
+    if ! run_checker check-frame-needles "$py" "$frneedles"; then
+        moved_gate_refuses 70 "frame needles" ALLOW_FRAME_NEEDLES "A whole-frame text assertion in an app's tests must be scoped to the band it
+names (lesson 91), or it passes on text drawn anywhere in the window."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 71 -- generated tables.
+# The generated tables checked in under gui/font must match their generators.
+# Regenerate them rather than editing a table by hand.
+#
+# Bypass: ALLOW_GENERATED_TABLES=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+gentables="${repo_root:-.}/scripts/check-generated-tables.py"
+skip_gentables=$skip
+if [ "${ALLOW_GENERATED_TABLES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_GENERATED_TABLES=1 set - skipping gate 71 (generated tables)." >&2
+    skip_gentables=1
+fi
+[ -f "$gentables" ] || skip_gentables=1
+touches gui/font/ scripts/check-generated-tables.py || skip_gentables=1
+if [ "$skip_gentables" != "1" ]; then
+    tree_is_push "gate 71 (generated tables)" gui/font/ scripts/check-generated-tables.py || skip_gentables=1
+fi
+note_gate check-generated-tables "$skip_gentables"
+if [ "$skip_gentables" != "1" ]; then
+    if ! run_checker check-generated-tables "$py" "$gentables"; then
+        moved_gate_refuses 71 "generated tables" ALLOW_GENERATED_TABLES "The generated tables checked in under gui/font must match their generators.
+Regenerate them rather than editing a table by hand."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 72 -- diskcleanup test roots.
+# apps/diskcleanup's own tests must not point at the host's real directories.
+# A cleanup tool's test that walks the real disk can delete real files.
+#
+# Bypass: ALLOW_DISKCLEANUP_TEST_ROOTS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+dcroots="${repo_root:-.}/scripts/check-diskcleanup-test-roots.py"
+skip_dcroots=$skip
+if [ "${ALLOW_DISKCLEANUP_TEST_ROOTS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_DISKCLEANUP_TEST_ROOTS=1 set - skipping gate 72 (diskcleanup test roots)." >&2
+    skip_dcroots=1
+fi
+[ -f "$dcroots" ] || skip_dcroots=1
+touches apps/diskcleanup/ scripts/check-diskcleanup-test-roots.py || skip_dcroots=1
+if [ "$skip_dcroots" != "1" ]; then
+    tree_is_push "gate 72 (diskcleanup test roots)" apps/diskcleanup/ scripts/check-diskcleanup-test-roots.py || skip_dcroots=1
+fi
+note_gate check-diskcleanup-test-roots "$skip_dcroots"
+if [ "$skip_dcroots" != "1" ]; then
+    if ! run_checker check-diskcleanup-test-roots-selftest "$py" "$dcroots" --self-test; then
+        moved_gate_refuses 72 "diskcleanup test roots" ALLOW_DISKCLEANUP_TEST_ROOTS \
+            "check-diskcleanup-test-roots.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-diskcleanup-test-roots "$py" "$dcroots"; then
+        moved_gate_refuses 72 "diskcleanup test roots" ALLOW_DISKCLEANUP_TEST_ROOTS "apps/diskcleanup's own tests must not point at the host's real directories.
+A cleanup tool's test that walks the real disk can delete real files."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 73 -- self-test tables re-opened.
+# A kernel self-test that clears a /proc table must re-open it before it
+# returns, or every later reader sees the table empty.
+#
+# Bypass: ALLOW_SELFTEST_REINIT=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+reinit="${repo_root:-.}/scripts/check-selftest-reinit.py"
+skip_reinit=$skip
+if [ "${ALLOW_SELFTEST_REINIT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SELFTEST_REINIT=1 set - skipping gate 73 (self-test tables re-opened)." >&2
+    skip_reinit=1
+fi
+[ -f "$reinit" ] || skip_reinit=1
+touches kernel/ scripts/check-selftest-reinit.py || skip_reinit=1
+if [ "$skip_reinit" != "1" ]; then
+    tree_is_push "gate 73 (self-test tables re-opened)" kernel/ scripts/check-selftest-reinit.py || skip_reinit=1
+fi
+note_gate check-selftest-reinit "$skip_reinit"
+if [ "$skip_reinit" != "1" ]; then
+    if ! run_checker check-selftest-reinit-selftest "$py" -u "$reinit" --self-test; then
+        moved_gate_refuses 73 "self-test tables re-opened" ALLOW_SELFTEST_REINIT \
+            "check-selftest-reinit.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker check-selftest-reinit "$py" -u "$reinit"; then
+        moved_gate_refuses 73 "self-test tables re-opened" ALLOW_SELFTEST_REINIT "A kernel self-test that clears a /proc table must re-open it before it
+returns, or every later reader sees the table empty."
+    fi
+fi
+
+
+# ---------------------------------------------------------------------------
+# The gate tally, computed here because here is after every gate.  See the note
+# where it used to live, above gate 19's history.  (Until 2026-09-27 it was
+# computed before gates 48-50, which had been added below it: the count missed
+# them while the ran/skipped lists named them.)
+# ---------------------------------------------------------------------------
+n_ran=0
+n_skipped=0
+for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
+for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
 echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
 [ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2
 [ "$n_skipped" -gt 0 ] && echo "  skipped: ${gates_skipped# }" >&2

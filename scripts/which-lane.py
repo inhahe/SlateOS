@@ -520,6 +520,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "test-pre-push-run-checker.py",
         "test-pre-push-suites-scope.py",
         "test-pre-push-touches.py",
+        "test-pre-push-tree-is-push.py",
         "test-proctree.py",
         "test-prune-build-cache.py",
         "test-prune-build-trees.py",

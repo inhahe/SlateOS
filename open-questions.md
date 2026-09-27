@@ -3740,12 +3740,10 @@ DQ1 and DQ2 and are never reissued.)*
 - F-Q2 Remote desktop's video fallback: which video format? — resolved
   2026-09-27 (1332): **VP9**, with hardware encoders and decoders where they
   can be found, and a software fallback threaded across every core.
-- F-Q1, AVIF half: open AVIF pictures? — resolved 2026-09-27 (1333):
-  **yes**, through a port of rav1d. The HEIC half is still open as F-Q1.
-- C-Q18 (lane C's entry, lane F's code) What happens to the pointer over
-  fullscreen video and games? — resolved 2026-09-27 (1334): **always shown**:
-  on the presenter's copy today, and by the display's cursor plane when a
-  screen is shown without copying. Lane C retires the entry.
+
+(F-Q1's AVIF half, answered "yes", is §1333; its HEIC half is still open
+above. C-Q18, answered for lane F's code, is §1334; lane C files its index
+line when it retires the entry.)
 
 ## Resolved — pre-split (unprefixed `Q<n>`, single-agent era)
 

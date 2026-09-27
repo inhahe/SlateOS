@@ -110,7 +110,11 @@ MUTATOR_RE = re.compile(
 # The direction matters: the bug made the tool report FEWER problems than exist.
 # The first measurement of 2026-08-26, 520, was taken with it and is an
 # undercount too.
-CEILING = 503
+# 503 -> 501 on 2026-09-27: measured on lane A's tree (main at cde7df06d plus
+# lane A's batch), where the checker reported two mutators wired since the
+# ceiling was last pinned.  Lowered, as the message asks, so the next one
+# to become unreachable is caught rather than absorbed by the slack.
+CEILING = 501
 
 
 def main() -> int:

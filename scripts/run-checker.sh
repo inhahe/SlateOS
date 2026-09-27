@@ -245,20 +245,43 @@
 # processes per gate, and the danger lives where git exports GIT_DIR: the push
 # hook sets it; boot-test.sh, which no hook runs, does not.
 #
-# The index is fingerprinted by content (`ls-files -s`), not by the file's
-# mtime: `git status` and `git diff` rewrite the index to refresh stat data
-# without changing a byte of what it records, and a guard that fired on that
-# would be switched off within a day.
+# What is watched is what a gate escaping through this worktree's GIT_DIR
+# writes, and nothing another lane writes:
+#
+#   * this worktree's HEAD -- the branch it is on and the commit it names. A
+#     fixture's `git commit` or `git checkout -b` lands here.
+#   * this worktree's index, by content (`ls-files -s`), not by the file's
+#     mtime: `git status` and `git diff` rewrite the index to refresh stat
+#     data without changing a byte of what it records, and a guard that fired
+#     on that would be switched off within a day.
+#   * the config every worktree shares (`--git-common-dir`), where a fixture's
+#     `git init` sets core.bare -- less `branch.*`, the tracking entries other
+#     lanes write with `push -u`.
+#
+# NOT the rest of the refs. Six worktrees share one refs namespace, and the
+# other five move their own branches while a push's gates run: the first
+# version fingerprinted every ref (`show-ref --head`), and on its first push
+# (2026-09-26) it stopped a clean one because lane E's branch moved during the
+# ten minutes test-boot-test.py took. The price of the narrower net is that a
+# fixture creating a stray branch or tag elsewhere in the namespace is not
+# caught -- junk refs, where the damage this exists for is a rewritten branch.
 
 # run_checker [--may-skip] <label> <command> [args...]
 run_checker() {
     # Defined in here so that anything cutting run_checker out of this file
     # (test-pre-push-run-checker.py does, by brace matching) gets it too.
     _rc_repo_state() {
-        git show-ref --head 2>/dev/null
+        # This worktree's HEAD: the branch it is on, and the commit.
+        git symbolic-ref -q HEAD 2>/dev/null
+        git rev-parse -q --verify HEAD 2>/dev/null
+        # This worktree's index, by content.
         git ls-files -s 2>/dev/null | cksum
+        # The config every worktree shares, less the branch.* tracking
+        # entries other lanes write as a matter of course (`push -u`).
         _rc_cfg=$(git rev-parse --git-common-dir 2>/dev/null)/config
-        if [ -f "$_rc_cfg" ]; then cksum < "$_rc_cfg"; fi
+        if [ -f "$_rc_cfg" ]; then
+            git config --file "$_rc_cfg" --list 2>/dev/null | grep -v '^branch\.' | sort | cksum
+        fi
         return 0
     }
     # Cleared on every call, flagged or not — see the header on stale state.
@@ -343,7 +366,7 @@ run_checker() {
             cat "$_rc_log" >&2
             echo "" >&2
             echo "$_rc_prog: STOPPING -- gate '$_rc_label' CHANGED THE REPOSITORY it was judging." >&2
-            echo "$_rc_prog: refs, index content or config differ from before it ran." >&2
+            echo "$_rc_prog: this worktree's HEAD, its index content or the shared config differ from before it ran." >&2
             echo "--- before ---" >&2
             printf '%s\n' "$_rc_before" | head -n 40 >&2
             echo "--- after ---" >&2

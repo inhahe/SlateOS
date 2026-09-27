@@ -168876,13 +168876,19 @@ fixtures is on any branch, local or remote.
 the shared config*, and a repair that checks only the first two leaves the
 third to be found by whoever uses the main checkout next.
 `scripts/run-checker.sh`'s repository guard (af5906d71, `CHECKER_REPO_GUARD`,
-set by `pre-push`) fingerprints all three around every gate -- the config
-through `git rev-parse --git-common-dir`, the shared file. A gate that changes
-any of them stops the push by name. `scripts/test-pre-push-run-checker.py`
-covers it both ways:
-- stopped: a gate that commits, one that stages a file, one that sets
-  `core.bare` in a plain repository, and one that sets it from a linked
-  worktree -- this incident's shape;
+set by `pre-push`) fingerprints this worktree's HEAD, its index and the
+shared config around every gate -- the config through `git rev-parse
+--git-common-dir`, the file every worktree shares. A gate that changes any of
+them stops the push by name. Not the rest of the refs: its first version
+fingerprinted every ref, and on its first push stopped a clean one because
+lane E moved its own branch during a ten-minute gate -- six worktrees share
+one refs namespace. `scripts/test-pre-push-run-checker.py` covers it both
+ways:
+- stopped: a gate that commits, one that stages a file, one that switches
+  this worktree's branch, one that sets `core.bare` in a plain repository,
+  and one that sets it from a linked worktree -- this incident's shape;
+- passed: another lane committing on its own branch meanwhile, and a
+  `branch.*` tracking entry written meanwhile;
 - a mutant fingerprinting `--git-dir`'s config fails that last case, because
   a linked worktree's own git directory has no `config`.
 

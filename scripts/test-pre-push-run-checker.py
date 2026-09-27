@@ -1255,9 +1255,11 @@ def main() -> int:
         # ------------------------------------------------------------------
         # A gate must not change the repository it judges. The two accidents
         # (2026-08-29, 2026-09-26) were checker self-tests whose scratch
-        # repository was the real one; the guard fingerprints refs, index
-        # content and config around each gate and stops the run if a gate
-        # changed any of them. Driven in a scratch repository standing in for
+        # repository was the real one; the guard fingerprints this worktree's
+        # HEAD, its index content and the shared config (less branch.*) around
+        # each gate and stops the run if a gate changed any of them -- and
+        # nothing another lane changes meanwhile, which is the other half of
+        # what is pinned here. Driven in a scratch repository standing in for
         # the one being pushed.
         print("group: the repository guard")
         sys.path.insert(0, str(ROOT / "scripts"))
@@ -1281,6 +1283,17 @@ def main() -> int:
                     f"subprocess.run({argv!r}.split(), check=True, capture_output=True)\n"
                     "print('did it')\n")
 
+        # Another lane: a second worktree of the same repository, on its own
+        # branch. What it does during a gate is not the gate's doing.
+        other = tmp_root / "judged-other-lane"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "other-lane", str(other)],
+                       cwd=str(judged), env=genv, check=True, capture_output=True)
+        other_lane_commits = (
+            "import subprocess\n"
+            f"subprocess.run(['git', '-C', {str(other)!r}, 'commit', '-q', "
+            "'--allow-empty', '-m', 'other lane'], check=True, capture_output=True)\n"
+            "print('did it')\n")
+
         cases = [
             ("a clean gate passes the guard", "print('ok')\n", False),
             ("a gate that runs `git status` (index stat refresh) passes",
@@ -1291,6 +1304,15 @@ def main() -> int:
              "open('new.txt', 'w').write('n')\n" + git_step("git add new.txt"), True),
             ("a gate that sets core.bare is stopped",
              git_step("git config core.bare true"), True),
+            ("a gate that switches this worktree to another branch is stopped",
+             git_step("git checkout -q -b escaped"), True),
+            # The false positive of the first version, 2026-09-26: lane E's
+            # branch moved while test-boot-test.py ran, and a clean push was
+            # stopped. Six worktrees share one refs namespace.
+            ("another lane committing on its own branch meanwhile is not a change",
+             other_lane_commits, False),
+            ("nor is a tracking entry another lane writes (branch.*)",
+             git_step("git config branch.other-lane.remote origin"), False),
         ]
         for index, (label, body, should_stop) in enumerate(cases):
             script = fake_checker(tmp_root, f"guard-case-{index}", body)
@@ -1307,8 +1329,8 @@ def main() -> int:
             # Undo what the case did. Each case fingerprints its own before and
             # after, so this only keeps the fixture tidy; a commit a case added
             # can stay.
-            for undo in (["config", "core.bare", "false"], ["reset", "-q", "--hard", "HEAD"],
-                         ["clean", "-qfd"]):
+            for undo in (["config", "core.bare", "false"], ["checkout", "-q", "main"],
+                         ["reset", "-q", "--hard", "HEAD"], ["clean", "-qfd"]):
                 subprocess.run(["git", *undo], cwd=str(judged), env=genv, capture_output=True)
 
         committing = fake_checker(tmp_root, "guard-off", git_step("git commit -q --allow-empty -m off"))

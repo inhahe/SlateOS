@@ -56,8 +56,9 @@ is written). ``scripts/test-check-release-staleness.py`` holds it.
 
 The net under every call site is in ``scripts/run-checker.sh`` ("A gate must
 not change the repository it judges"): with ``CHECKER_REPO_GUARD`` set, as the
-push hook sets it, a gate that changes a ref, the index's content or the
-config stops the run by name, whatever it reported.
+push hook sets it, a gate that moves this worktree's HEAD, changes its
+index's content or rewrites the shared config stops the run by name,
+whatever it reported.
 
 What to use
 -----------

@@ -3323,16 +3323,19 @@ impl SettingsState {
             // uninstall, so it is not waiting on a consumer but on a source.
             //
             // `WiFi`, `Ethernet` and `VPN`, same date, one answer for all
-            // three: `apps/netmanager` is the network manager, it is 5,700
-            // lines, and it has already been through this. `apply_ip_config`
-            // returns "nothing here can reach the interface"; `connect_wifi`
-            // returns "nothing here can reach a radio", with a comment
-            // recording that it used to report a join against a network
-            // `sample_wifi_networks` had invented; `toggle_vpn` deliberately
-            // leaves the switch where it is. `net80211`'s only `scan` parses a
-            // frame it is handed -- there is no device scan to call. A page
-            // here would be a *second* network configurator over the same
-            // absent write path, and the first one at least refuses out loud.
+            // three: `apps/netmanager` is the network manager, and a page
+            // here would be a *second* configurator of the same interface --
+            // two places to change one address, each unaware of the other's
+            // edits. Since 2026-09-26 the first one is real for Ethernet: it
+            // lists `/proc/net`'s interface and applies an address, netmask,
+            // gateway and DNS server, and up/down, through the kernel's
+            // `SYS_NET_IF_CONFIG`. Wi-Fi and VPN are still refused there in
+            // words (`connect_wifi`: "nothing here can scan for or join a
+            // wireless network"; `toggle_vpn` leaves the switch where it is):
+            // `net80211`'s only `scan` parses a frame it is handed -- there is
+            // no device scan to call -- and nothing reads a VPN's
+            // configuration. Neither a second copy of the working half nor a
+            // second copy of the refusals belongs here.
             //
             // `Power`: blocked on lane A, not on judgement.
             // `gui/desktop/src/power_settings.rs` has `set_brightness_ac` and

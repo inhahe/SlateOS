@@ -1833,7 +1833,13 @@ impl App for SnakeApp {
     /// speed: the snake's speed changes with the score and the difficulty, and
     /// a window that had to be re-armed every time it changed would be a second
     /// place the speed is written down.
+    /// Only while something moves. A paused, finished or filled-board game has nothing to
+    /// advance, and a clock asked for anyway woke the machine every frame for
+    /// as long as the window stayed open.
     fn tick_interval(&self) -> Option<Duration> {
+        if self.state != GameState::Playing {
+            return None;
+        }
         Some(TICK)
     }
 
@@ -3758,6 +3764,13 @@ mod tests {
 
     #[test]
     fn the_window_asks_for_a_tick_often_enough_to_run_the_fastest_game() {
+        let mut still = game();
+        still.state = GameState::Paused;
+        assert_eq!(
+            still.tick_interval(),
+            None,
+            "a paused game asked for a clock"
+        );
         let app = game();
         let tick = app
             .tick_interval()

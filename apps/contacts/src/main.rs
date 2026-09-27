@@ -61,7 +61,7 @@ use textfmt::tsv;
 // ============================================================================
 
 // Every one of these carried an `#[allow(dead_code)]`, and five of them --
-// self.palette.crust, MAUVE, TEAL, PINK, ROSEWATER -- were never named anywhere but on
+// CRUST, MAUVE, TEAL, PINK, ROSEWATER -- were never named anywhere but on
 // their own definition line. The `allow` is what let that be true for as long
 // as it was: it silences the one warning that would have said so. They are
 // deleted rather than kept "for later", because a palette entry no drawing

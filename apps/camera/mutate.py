@@ -321,6 +321,31 @@ MUTATIONS = [
         "        None",
         ["the_clock_reaches_the_program_through_the_entry_point_the_platform_calls"],
     ),
+    # 2026-09-27: a real build lists no camera, and takes nothing without one.
+    (
+        "a real build invents its cameras again",
+        "            cameras: Vec::new(),",
+        "            cameras: default_cameras(),",
+        ["a_real_build_lists_no_camera_and_says_why", "without_a_camera_nothing_is_taken"],
+    ),
+    (
+        "a photo is taken with no camera",
+        "    pub fn take_photo(&mut self) {\n        if !self.has_live_camera() {",
+        "    pub fn take_photo(&mut self) {\n        if false {",
+        ["without_a_camera_nothing_is_taken"],
+    ),
+    (
+        "a recording starts with no camera",
+        "    pub fn start_recording(&mut self) {\n        if !self.has_live_camera() {",
+        "    pub fn start_recording(&mut self) {\n        if false {",
+        ["without_a_camera_nothing_is_taken"],
+    ),
+    (
+        "no camera is drawn as a camera in error",
+        "        if self.active_camera().is_none() {",
+        "        if false {",
+        ["a_real_build_lists_no_camera_and_says_why"],
+    ),
 ]
 
 if __name__ == "__main__":

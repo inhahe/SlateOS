@@ -58744,16 +58744,33 @@ test of the fixture, not of the bound.
 
 ### Deferred, each with the condition that un-defers it
 
-- **The terminal polls for its shell's output** -- 16 ms while the shell is
-  talking, 50 ms once it has been quiet for 2 s -- because `oswindow`'s loop
-  can wake an application only for compositor events and a clock. A terminal
-  at a prompt therefore wakes twenty times a second for nothing, and the first
-  keystroke after a pause waits up to 50 ms for its echo. The proper fix is a
-  waker in the loop: `requests/e-f-wake-an-application-for-its-own-descriptor.md`.
-  **Trigger:** that request lands. Then the reader thread in
-  `apps/terminal/src/child.rs` wakes the loop per chunk, and `ACTIVE_POLL_MS`,
-  `IDLE_POLL_MS`, `ACTIVE_WINDOW_MS` and their test go. Tracked as
-  `known-issues.md` -> `[E] The terminal polls for its shell's output`.
+- **`apps/textline` can go.** Lane C extended `guitk::textinput::TextInput`
+  with textline's two extras -- `set_capacity(Some(n))` (characters, not
+  bytes; a full field answers Handled) and a paste that leaves control
+  characters out -- on lane-c as 137f64c5f; `LineEdit::handled` is
+  `edit_key(..) != KeyEdit::Unhandled`. **Trigger:** it is on `origin/main`
+  (`git show origin/main:gui/toolkit/src/textinput.rs | grep set_capacity`).
+  Then each app using `textline` moves to `TextInput` and the crate goes;
+  lane C reports the nine apps calling paste/edit_key pass unchanged.
+
+- **The settings-leak guard.** Lane C made `settingsfile`'s `store` panic
+  under its `testing` feature when the file would land outside
+  `std::env::temp_dir()` (lane-c 7ed763741; design-decisions §1409 says why
+  it judges by where, not by a flag). **Trigger:** it is on `origin/main`.
+  Then `known-issues.md` -> `[E] A test that forgets its scratch settings
+  writes the developer's own` is FIXED and
+  `requests/e-c-settingsfile-refuses-a-store-outside-a-scratch-config-in-tests.md`
+  is closed; lane C found every lane E test already clean.
+
+- **Three private copies of colour-as-hex-text** -- `parse_colour` and its
+  writer in `apps/spreadsheet`, `apps/contacts` and `apps/kanban`. Lane C
+  landed `guitk::color::Color::hex_text` (`#rrggbb`, or `#rrggbbaa` when not
+  opaque; lowercase) and `Color::from_hex_text` (`#` plus 6 or 8 hex digits,
+  either case, nothing else -- not a leading `+`) on lane-c as 00cb8a0da
+  (`requests/e-c-a-colour-as-hex-text.md`). **Trigger:** it is on
+  `origin/main` (`git show origin/main:gui/toolkit/src/color.rs | grep
+  hex_text`). Then each copy goes; files written afterwards carry lowercase
+  hex, which the old readers already accept, so old and new files both load.
 
 - **The terminal has never run on SlateOS.** Its real child -- `forkpty` plus
   `execve` through `libcall::pty` -- is tested only on a Linux host against

@@ -137,6 +137,19 @@ MAIN = [
         "            socket.send_to(&packet, DEFAULT_WOL)",
         [WOL],
     ),
+    # 2026-09-27: the target is this machine's network, never an invented one.
+    (
+        "a mask with a hole names a range",
+        "    if mask.checked_shl(prefix).unwrap_or(0) != 0 || prefix == 0 {",
+        "    if prefix == 0 {",
+        ["a_subnet_is_the_address_under_its_mask"],
+    ),
+    (
+        "the window opens on no network even when it can read one",
+        "        if let Some(net) = machine_subnet(provider) {",
+        "        if let Some(net) = None::<String> {",
+        ["the_target_is_this_machines_network"],
+    ),
 ]
 
 WHOIS = [

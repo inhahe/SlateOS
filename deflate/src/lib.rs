@@ -719,6 +719,164 @@ impl ZlibInflateStream<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Piecewise inflate -- one stream, delivered in flushed pieces
+// ---------------------------------------------------------------------------
+
+/// One DEFLATE or zlib stream that arrives in pieces, each ending where a
+/// block does -- what zlib's `Z_SYNC_FLUSH` produces, and how VNC's ZRLE and
+/// Tight encodings carry a single stream across every rectangle of a
+/// session.
+///
+/// Each piece is inflated as it arrives, its back-references reaching into
+/// what earlier pieces produced (the last 32 KiB, as far as DEFLATE can
+/// reach). [`InflateStream`] and [`inflate_limited`] cannot do this: they
+/// read one complete buffer, so a caller with a stream in pieces would have
+/// had to keep every piece and inflate them all again for each new one.
+///
+/// Added 2026-09-26 by lane E, for `apps/remotedesktop`'s ZRLE. The block
+/// decoders are this crate's own, unchanged: a piece is decoded into an
+/// output buffer that already holds the history, and only what follows the
+/// history is handed back.
+///
+/// A piece must end where a block does. One that ends inside a block -- a
+/// sender that did not flush -- is [`Error::UnexpectedEnd`], and the stream
+/// cannot go on: the bits already read are gone, so every later piece is
+/// refused with the same error.
+pub struct PiecewiseInflater {
+    /// The last [`WINDOW_SIZE`] bytes produced, for back-references.
+    history: Vec<u8>,
+    /// A zlib stream whose two-byte header has not been read yet.
+    header_pending: bool,
+    /// A zlib stream's running checksum, compared with its trailer.
+    adler: Option<Adler32State>,
+    /// The final block has been read: nothing more may be inflated.
+    finished: bool,
+    /// A piece failed part-way, and the stream's state went with it.
+    broken: bool,
+}
+
+impl core::fmt::Debug for PiecewiseInflater {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PiecewiseInflater")
+            .field("history", &self.history.len())
+            .field("zlib", &self.adler.is_some())
+            .field("header_pending", &self.header_pending)
+            .field("finished", &self.finished)
+            .field("broken", &self.broken)
+            .finish()
+    }
+}
+
+impl PiecewiseInflater {
+    /// A raw DEFLATE stream (RFC 1951).
+    #[must_use]
+    pub fn raw() -> Self {
+        Self {
+            history: Vec::new(),
+            header_pending: false,
+            adler: None,
+            finished: false,
+            broken: false,
+        }
+    }
+
+    /// A zlib stream (RFC 1950): the first piece begins with the two-byte
+    /// header, and the Adler-32 trailer after the final block is checked
+    /// against everything the stream produced.
+    #[must_use]
+    pub fn zlib() -> Self {
+        Self {
+            header_pending: true,
+            adler: Some(Adler32State::new()),
+            ..Self::raw()
+        }
+    }
+
+    /// Whether the stream's final block has been read.
+    #[must_use]
+    pub fn finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Inflate the next piece, handing back what it decodes to -- at most
+    /// `limit` bytes of it.
+    ///
+    /// # Errors
+    ///
+    /// Anything [`inflate_limited`] reports for a malformed stream;
+    /// [`Error::BadWrapperHeader`] or [`Error::PresetDictionary`] for a zlib
+    /// header this cannot read; [`Error::ChecksumMismatch`] for a trailer
+    /// that disagrees; and [`Error::UnexpectedEnd`] for a piece that stops
+    /// inside a block, for any piece after a failure, and for one after the
+    /// final block.
+    pub fn inflate_piece(&mut self, piece: &[u8], limit: usize) -> Result<Vec<u8>> {
+        if self.broken || self.finished {
+            return Err(Error::UnexpectedEnd);
+        }
+        let result = self.decode(piece, limit);
+        if result.is_err() {
+            self.broken = true;
+        }
+        result
+    }
+
+    fn decode(&mut self, piece: &[u8], limit: usize) -> Result<Vec<u8>> {
+        let mut reader = BitReader::new(piece);
+        if self.header_pending {
+            let cmf = reader.read_byte()?;
+            let flg = reader.read_byte()?;
+            let check = u16::from(cmf)
+                .wrapping_mul(256)
+                .wrapping_add(u16::from(flg));
+            if cmf & 0x0F != 8 || cmf >> 4 > 7 || check % 31 != 0 {
+                return Err(Error::BadWrapperHeader);
+            }
+            if flg & 0x20 != 0 {
+                return Err(Error::PresetDictionary);
+            }
+            self.header_pending = false;
+        }
+        let base = self.history.len();
+        let cap = base.saturating_add(limit);
+        let mut output = core::mem::take(&mut self.history);
+        while reader.remaining() > 0 {
+            let bfinal = reader.read_bits(1)?;
+            let btype = reader.read_bits(2)?;
+            match btype {
+                0 => inflate_stored(&mut reader, &mut output, cap)?,
+                1 => inflate_fixed(&mut reader, &mut output, cap)?,
+                2 => inflate_dynamic(&mut reader, &mut output, cap)?,
+                _ => return Err(Error::ReservedBlockType),
+            }
+            if bfinal != 0 {
+                self.finished = true;
+                break;
+            }
+        }
+        let produced = output.split_off(base.min(output.len()));
+        output.extend_from_slice(&produced);
+        let keep_from = output.len().saturating_sub(WINDOW_SIZE);
+        self.history = output.split_off(keep_from);
+        if let Some(adler) = self.adler.as_mut() {
+            adler.update(&produced);
+            if self.finished {
+                reader.align();
+                let mut trailer = [0_u8; 4];
+                for slot in &mut trailer {
+                    *slot = reader.read_byte()?;
+                }
+                let expected = u32::from_be_bytes(trailer);
+                let actual = adler.finish();
+                if expected != actual {
+                    return Err(Error::ChecksumMismatch { expected, actual });
+                }
+            }
+        }
+        Ok(produced)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DEFLATE deflate (compression)
 // ---------------------------------------------------------------------------
 

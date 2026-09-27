@@ -745,8 +745,9 @@ impl ColorHistory {
 // Eyedropper state
 // ============================================================================
 
-/// Eyedropper mode state. In a real OS this would capture the screen and let
-/// the user click to pick a color. Here we simulate it with a stored coordinate.
+/// Eyedropper mode state: armed, and where it last sampled. It samples this
+/// window's own drawing ([`ColorPickerApp::color_under`]), because there is no
+/// screen-capture service to ask; the words it shows say so.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EyedropperState {
     /// Whether the eyedropper mode is active.
@@ -917,7 +918,7 @@ impl ColorPickerApp {
         self.eyedropper.active = !self.eyedropper.active;
     }
 
-    /// Simulate picking a color at screen coordinates.
+    /// Take `color` as sampled at `(x, y)` in this window, and disarm.
     pub fn eyedrop_pick(&mut self, x: f32, y: f32, color: PickedColor) {
         self.eyedropper.pick_x = x;
         self.eyedropper.pick_y = y;
@@ -1106,7 +1107,7 @@ impl ColorPickerApp {
                     // Honest about what it can do: there is no screen capture
                     // to sample from yet, so the mode arms and waits rather
                     // than claiming it is reading pixels.
-                    String::from("Eyedropper armed — click anywhere to sample")
+                    String::from("Eyedropper armed — click a colour in this window to sample it")
                 } else {
                     String::from("Eyedropper off")
                 };

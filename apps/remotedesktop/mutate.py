@@ -35,12 +35,18 @@ REFUSED = "a_refused_password_is_a_failed_attempt"
 ASKS = "connect_asks_for_the_password_and_refuses_what_is_not_vnc"
 OVERLAP = "an_overlapping_copy_reads_the_old_pixels"
 DURATION = "a_sessions_duration_runs_from_its_handshake"
+RECONNECT = "test_reconnect_session"
+CLOCK = "a_connecting_session_works_through_to_connected"
+IDLE_CLOCK = "an_idle_window_asks_for_no_clock"
+RECONNECT_ASKS = "reconnect_asks_for_the_password_again"
 HANDSHAKE = "a_session_shakes_hands_and_shows_the_screen"
 PASSWORD = "a_password_is_proven_by_the_challenge"
 OUTSIDE = "a_rectangle_outside_the_desktop_is_refused"
 OTHERS = "every_other_message_arrives"
 RFB_KEYS = "keys_and_the_pointer_are_sent_as_rfb_says"
 HEXTILE_TEST = "hextile_tiles_are_drawn"
+ZRLE_TEST = "zrle_rectangles_are_drawn_through_one_stream"
+ZRLE_REFUSED = "a_zrle_run_past_its_tile_is_refused"
 
 MAIN = [
     (
@@ -116,6 +122,27 @@ MAIN = [
         [ASKS],
     ),
     (
+        "a session is put back on the clock",
+        "    pub fn has_work_in_flight(&self) -> bool {\n        self.transfers",
+        "    pub fn has_work_in_flight(&self) -> bool {\n        !self.sessions.is_empty() || self.transfers",
+        [CLOCK, IDLE_CLOCK],
+    ),
+    (
+        "reconnect claims an attempt again",
+        "        let _asks = self.connect_profile(profile_index);",
+        "        let _ = profile_index;\n"
+        "        if let Some(s) = self.sessions.get_mut(index) {\n"
+        "            s.state = SessionState::Reconnecting;\n"
+        "        }",
+        [RECONNECT, RECONNECT_ASKS],
+    ),
+    (
+        "a live session is reconnected",
+        "        if session.state != SessionState::Disconnected {",
+        "        if false {",
+        [RECONNECT],
+    ),
+    (
         "a connected session's duration does not run",
         "            (true, Some(since)) => now.saturating_sub(since),",
         "            (true, Some(_)) => 0,",
@@ -125,10 +152,42 @@ MAIN = [
 
 RFB = [
     (
-        "Hextile is not asked for first",
-        "        for e in [HEXTILE, COPY_RECT, RAW, DESKTOP_SIZE] {",
-        "        for e in [COPY_RECT, RAW, DESKTOP_SIZE, HEXTILE] {",
+        "ZRLE is not asked for first",
+        "        for e in [ZRLE, HEXTILE, COPY_RECT, RAW, DESKTOP_SIZE] {",
+        "        for e in [HEXTILE, ZRLE, COPY_RECT, RAW, DESKTOP_SIZE] {",
         [HANDSHAKE],
+    ),
+    (
+        "each ZRLE rectangle starts a new zlib stream",
+        "                    let raw = self\n                        .zrle\n",
+        "                    let raw = deflate::PiecewiseInflater::zlib()\n",
+        [ZRLE_TEST],
+    ),
+    (
+        "a two-colour palette's indices are read two bits wide",
+        "                        2 => (1, 0b1),",
+        "                        2 => (1, 0b11),",
+        [ZRLE_TEST],
+    ),
+    (
+        "a run is one short",
+        "        let mut run = 1_usize;",
+        "        let mut run = 0_usize;",
+        [ZRLE_TEST],
+    ),
+    (
+        "a run past its tile is written",
+        "                        let run = at.run()?;\n"
+        "                        if run > area.saturating_sub(tile.len()) {",
+        "                        let run = at.run()?;\n"
+        "                        if false {",
+        [ZRLE_REFUSED],
+    ),
+    (
+        "palette runs ignore the run flag",
+        "                        let run = if index & 128 != 0 { at.run()? } else { 1 };",
+        "                        let run = 1;",
+        [ZRLE_TEST],
     ),
     (
         "a tile's background is read and dropped",

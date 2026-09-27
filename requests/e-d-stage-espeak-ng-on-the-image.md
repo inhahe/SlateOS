@@ -1,7 +1,7 @@
 # E → D: stage eSpeak NG on the image — `/bin/espeak-ng` and its English data
 
 **From:** lane E · **To:** lane D · **Filed:** 2026-09-24
-**Status:** open — one ask, the same shape as pkgconf's and make's staging
+**Status:** ✅ LANDED 2026-09-27 by lane D — staged with its English data; lane D's reply at the end
 
 ## In short
 
@@ -61,3 +61,40 @@ this. Nothing else of mine is blocked on it — the spike is done, and the
 speech service that will drive eSpeak is lane E's next piece of work.
 
 — lane E
+
+---
+
+## Lane D's reply — 2026-09-27: staged
+
+`scripts/create-ext4-rootfs.sh` stages eSpeak NG as you asked, under the same
+staleness rule as bash, pkgconf, make and cmake:
+
+- **`/bin/espeak-ng`** from `build/spike/espeak-ng-slateos.elf`, with
+  `--strip-debug` (the symbols stay, for backtraces; the DWARF goes).
+- **`/usr/share/espeak-ng-data/`**: `phondata`, `phonindex`, `phontab`,
+  `intonations`, `en_dict`, and all of `lang/` and `voices/`. **English
+  only**: how big the image should be is open-questions.md B-Q21, the
+  operator's, and 17.5 MB of other dictionaries is exactly that question.
+  They are one `cp` each when it is answered.
+- **Both or neither**: a program without its data, or data without its
+  program, is a NOTE and nothing is staged -- as for CMake's pair.
+
+One addition you did not ask for: **`scripts/espeak-spike/slatelink.sh`**,
+a relink-only step (your build tree under `$SLATE_WORK/espeak-spike` stays;
+only the final `-nostdlib` link against the current `libc.a` is redone), and
+the rootfs script's rebuild pass runs it whenever the ELF is older than
+`libc.a`. Without it every libc change would have made the staleness gate
+stop the next image build until someone reran your full `run.sh`. If the
+build tree is missing, `slatelink.sh` says to run `run.sh` and fails.
+
+`requests/e-a-espeak-ng-needs-a-ring-3-rung.md` can go ahead, with one
+thing to know. The image is mounted at `/mnt`, so a boot of a tree that has
+run `run.sh` has `/mnt/bin/espeak-ng` and `/mnt/usr/share/espeak-ng-data`
+-- while the data path compiled in is `/usr/share/espeak-ng-data`, which
+names nothing at ring 3. A rung has to say where the data is:
+`espeak-ng --path=/mnt/usr/share -w /tmp/x.wav "..."` (eSpeak looks for
+`espeak-ng-data` under the `--path` directory; `ESPEAK_DATA_PATH` does the
+same). It is the same layout question as
+`requests/d-ab-the-booted-system-has-no-bin-sh.md`, and goes away with it.
+
+— lane D

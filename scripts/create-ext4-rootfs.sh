@@ -1104,6 +1104,10 @@ else
         scripts/pkgconf-spike/run.sh
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/make-slateos.elf" \
         scripts/make-spike/run.sh
+    # eSpeak NG's relink is seconds: the objects and the phoneme data stay,
+    # only the last link against the new libc.a is redone.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/espeak-ng-slateos.elf" \
+        scripts/espeak-spike/slatelink.sh
     # CMake is deliberately NOT in this list, and the reason is its cost rather
     # than any difference in principle. The other four relink objects that are
     # already built; cmake's spike re-runs a full cross configure and build of
@@ -1314,6 +1318,62 @@ elif [ -e "$CMAKE_SLATE" ]; then
 else
     echo "[rootfs] NOTE: $CMAKE_SLATE not found — /bin/cmake will be absent"
     echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh)"
+fi
+
+# --- eSpeak NG 1.52, likewise linked against OUR OWN libc --------------------
+# The speech synthesizer (design.txt: speech output is one of the two things
+# exempt from "no AI"), built by scripts/espeak-spike/run.sh (lane E's; see its
+# README) and relinked against libc.a -- with zero missing and zero duplicate
+# symbols on its first attempt.  Asked for in
+# requests/e-d-stage-espeak-ng-on-the-image.md.
+#
+# TWO artifacts from one build, staged together or not at all, as CMake's
+# pair above: /bin/espeak-ng, and /usr/share/espeak-ng-data/, the data path
+# compiled into it.  The data is compiled by the same build, and a data file
+# from another eSpeak version need not load.
+#
+# ENGLISH ONLY, for now: the phoneme tables (phondata, phonindex, phontab,
+# intonations), en_dict, and lang/ and voices/ -- every language's and voice's
+# definition, 66 KB, so `espeak-ng --voices` stays honest about what the program
+# knows.  0.9 MB in all.  The other ~109 languages' dictionaries are 17.5 MB,
+# and how large this image should be is the operator's open question
+# (open-questions.md, B-Q21); they come when that is answered, or as packages.
+#
+# `--strip-debug`, as CPython's slatelink does: the symbol table stays for
+# backtraces, the DWARF (most of the 2.8 MB) does not.
+#
+# Staleness: identical rule to bash, pkgconf, make and cmake -- absent is
+# honest (NOTE), older than libc.a is a lie (fatal).  The relink above is
+# normally what keeps it fresh.
+ESPEAK_SLATE="$ROOT_DIR/build/spike/espeak-ng-slateos.elf"
+ESPEAK_DATA="$ROOT_DIR/build/spike/espeak-ng-data"
+ESPEAK_STALE=0
+if [ -e "$ESPEAK_SLATE" ] && [ -f "$ESPEAK_DATA/phondata" ] && [ -f "$ESPEAK_DATA/en_dict" ]; then
+    strip --strip-debug -o "$STAGE/bin/espeak-ng" "$ESPEAK_SLATE"
+    chmod 0755 "$STAGE/bin/espeak-ng"
+    ESPEAK_DST="$STAGE/usr/share/espeak-ng-data"
+    mkdir -p "$ESPEAK_DST"
+    for espeak_f in phondata phonindex phontab intonations en_dict; do
+        cp "$ESPEAK_DATA/$espeak_f" "$ESPEAK_DST/$espeak_f"
+    done
+    cp -r "$ESPEAK_DATA/lang" "$ESPEAK_DATA/voices" "$ESPEAK_DST/"
+    echo "[rootfs] staged eSpeak NG (linked against our libc.a): /bin/espeak-ng" \
+         "($(stat -c %s "$STAGE/bin/espeak-ng") bytes) + English data" \
+         "($(du -sb "$ESPEAK_DST" | cut -f1) bytes)"
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$ESPEAK_SLATE" ]; then
+        echo "[rootfs] WARNING: espeak-ng-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/espeak-spike/slatelink.sh"
+        ESPEAK_STALE=1
+    fi
+elif [ -e "$ESPEAK_SLATE" ]; then
+    echo "[rootfs] NOTE: $ESPEAK_SLATE exists but its data ($ESPEAK_DATA) does not --"
+    echo "[rootfs]       staging NEITHER: the program cannot speak without it."
+    echo "[rootfs]       (rebuild both with: wsl -d Ubuntu --exec bash scripts/espeak-spike/run.sh)"
+else
+    echo "[rootfs] NOTE: $ESPEAK_SLATE not found — /bin/espeak-ng will be absent"
+    echo "[rootfs]       (build it with: wsl -d Ubuntu --exec bash scripts/espeak-spike/run.sh)"
 fi
 
 # --- CPython 3.12.3, likewise linked against OUR OWN libc ---------------------
@@ -1960,6 +2020,22 @@ if [ "$PY_STALE" -gt 0 ]; then
         echo "[rootfs]        package, or a deflated member we cannot inflate) rather than a"
         echo "[rootfs]        libc link — so if the WARNING above named the stdlib, that"
         echo "[rootfs]        second command is the one you need."
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$ESPEAK_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: espeak-ng-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/espeak-ng-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/espeak-ng on the image would be built against a libc"
+        echo "[rootfs]        that is no longer in the build. Relink it:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/espeak-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

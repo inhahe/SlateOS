@@ -24373,9 +24373,10 @@ pub fn self_test_filestream_abi() -> KernelResult<()> {
     }
 
     serial_println!(
-        "[spawn]   streamed file I/O (ring 3: 8 probes — 2.5 MiB written in one call \
+        "[spawn]   streamed file I/O (ring 3: 14 probes — 2.5 MiB written in one call \
          and read back with a 2 GiB length arrive whole and in order across the \
-         bounce buffer's chunks; a 1.5 GiB write from 3 MiB writes the 3 MiB): OK"
+         bounce buffer's chunks; a 1.5 GiB write from 3 MiB writes the 3 MiB; \
+         pread/pwrite leave the position where it was): OK"
     );
     Ok(())
 }

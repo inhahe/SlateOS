@@ -7740,6 +7740,12 @@ pub fn build_callmax_abi_test_elf() -> alloc::vec::Vec<u8> {
 /// | `0x66` | the `B` region back | every byte `B` |
 /// | `0x67` | the `C` region back | every byte `C` |
 /// | `0x68` | `fs_write`, 1.5 GiB | `3145728`: the mapped 3 MiB, then the fault |
+/// | `0x69` | `fs_pwrite` (1081), 4 KiB at offset 0 | `4096` |
+/// | `0x6A` | `fs_seek` (614), 0 from the current position | `5767168`: pwrite left it at the end |
+/// | `0x6B` | `fs_pread` (1080), 4 KiB at offset 1 MiB | `4096` |
+/// | `0x6C` | what 0x6B read | every byte `B` |
+/// | `0x6D` | `fs_seek`, 0 from the current position | `5767168`: pread did not move it |
+/// | `0x6E` | `fs_pread` at offset 5.5 MiB | `0`: end of file |
 #[must_use]
 #[allow(
     clippy::indexing_slicing,
@@ -7794,6 +7800,13 @@ pub fn build_filestream_abi_test_elf() -> alloc::vec::Vec<u8> {
         code.push(0xB8); // mov eax, nr
         code.extend_from_slice(&nr.to_le_bytes());
         code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    }
+
+    /// As [`call`] with the handle in `rdi` and a fourth argument in `r10`.
+    fn call4(code: &mut alloc::vec::Vec<u8>, nr: u32, b: u64, c: u64, d: u64) {
+        code.extend_from_slice(&[0x49, 0xBA]); // movabs r10, imm64
+        code.extend_from_slice(&d.to_le_bytes());
+        call(code, nr, None, b, c);
     }
 
     /// `exit(fail)` unless `rax == expect`.
@@ -7858,6 +7871,21 @@ pub fn build_filestream_abi_test_elf() -> alloc::vec::Vec<u8> {
     // Bigger than the vmalloc region: the mapped 3 MiB go, then the fault.
     call(&mut code, 613, None, DATA_VADDR, HUGE);
     expect_rax(&mut code, DATA_LEN, 0x68);
+
+    // Positional transfers: the position (at the end, 5.5 MiB) stays put.
+    const FILE_END: u64 = WRITTEN + DATA_LEN;
+    const SPARE: u64 = DATA_VADDR + WRITTEN; // past the A/B/C regions
+    call4(&mut code, 1081, DATA_VADDR, 4096, 0); // pwrite at 0
+    expect_rax(&mut code, 4096, 0x69);
+    call(&mut code, 614, None, 0, 1); // seek(0, SEEK_CUR)
+    expect_rax(&mut code, FILE_END, 0x6A);
+    call4(&mut code, 1080, SPARE, 4096, MIB); // pread the second MiB
+    expect_rax(&mut code, 4096, 0x6B);
+    verify(&mut code, SPARE, 4096, b'B', 0x6C);
+    call(&mut code, 614, None, 0, 1);
+    expect_rax(&mut code, FILE_END, 0x6D);
+    call4(&mut code, 1080, SPARE, 4096, FILE_END); // pread at end of file
+    expect_rax(&mut code, 0, 0x6E);
 
     // --- every probe agreed -------------------------------------------------
     code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi

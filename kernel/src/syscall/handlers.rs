@@ -10905,6 +10905,83 @@ pub fn sys_fs_write(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_FS_PREAD` — read from a file handle at an explicit offset; the
+/// handle's position is neither read nor moved. See the number's doc.
+pub fn sys_fs_pread(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    let len = args.arg2 as usize;
+    // As `SYS_FS_READ`: a zero-length read is 0, pointer unexamined.
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    if args.arg1 == 0 || i64::try_from(args.arg3).is_err() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    match fs_pread(handle, args.arg3, args.arg1, len) {
+        Ok(n) =>
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(n as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_PWRITE` — write to a file handle at an explicit offset; the
+/// handle's position is neither read nor moved. See the number's doc.
+pub fn sys_fs_pwrite(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    let len = args.arg2 as usize;
+    if (args.arg1 == 0 && len > 0) || i64::try_from(args.arg3).is_err() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // As `SYS_FS_WRITE`: a zero-length write still asks the handle, so a
+    // read-only or wrong one says so.
+    let written = if len == 0 {
+        crate::fs::handle::write_at(handle, args.arg3, &[])
+    } else {
+        fs_pwrite(handle, args.arg3, args.arg1, len)
+    };
+    match written {
+        Ok(n) =>
+        {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(n as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// Read `len` bytes of file `handle` from `offset` into user memory at
+/// `dst`, streamed ([`stream_user_read`]), the handle's position untouched.
+/// Shared by `SYS_FS_PREAD` and Linux `pread64`/`preadv*`.
+pub(crate) fn fs_pread(handle: u64, offset: u64, dst: u64, len: usize) -> KernelResult<usize> {
+    let mut at = offset;
+    stream_user_read(dst, len, |chunk| {
+        let n = crate::fs::handle::read_at(handle, at, chunk)?;
+        at = at.saturating_add(n as u64);
+        Ok(n)
+    })
+}
+
+/// Write `len` bytes from user memory at `src` to file `handle` at
+/// `offset`, streamed ([`stream_user_write`]), the handle's position
+/// untouched. Shared by `SYS_FS_PWRITE` and Linux `pwrite64`/`pwritev*`.
+pub(crate) fn fs_pwrite(handle: u64, offset: u64, src: u64, len: usize) -> KernelResult<usize> {
+    let mut at = offset;
+    stream_user_write(src, len, |chunk| {
+        let n = crate::fs::handle::write_at(handle, at, chunk)?;
+        at = at.saturating_add(n as u64);
+        Ok(n)
+    })
+}
+
 /// `SYS_FS_SEEK` — seek to a new position in a file.
 pub fn sys_fs_seek(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;

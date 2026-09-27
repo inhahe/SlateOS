@@ -3183,6 +3183,40 @@ pub const SYS_FS_SEEK_DATA: u64 = 650;
 /// Returns: offset of next hole, or EOF if no holes.
 pub const SYS_FS_SEEK_HOLE: u64 = 651;
 
+/// Read from a file handle at an explicit offset, leaving the handle's
+/// position where it was (POSIX `pread`).
+///
+/// `arg0`: file handle.
+/// `arg1`: pointer to the receive buffer.
+/// `arg2`: buffer capacity.
+/// `arg3`: offset to read from; above `i64::MAX` is `InvalidArgument`.
+///
+/// The position is neither read nor moved, so threads sharing a handle can
+/// read it concurrently at their own offsets -- what libc's `pread` family
+/// promises, and could only emulate with seek-read-seek, racing every other
+/// user of the position, until this existed. Streams through a bounded
+/// kernel buffer, as `SYS_FS_READ` does.
+///
+/// Returns: bytes read (0 at or past end of file), or a negative error code.
+/// Chosen number 1080.
+pub const SYS_FS_PREAD: u64 = 1080;
+
+/// Write to a file handle at an explicit offset, leaving the handle's
+/// position where it was (POSIX `pwrite`).
+///
+/// `arg0`: file handle.
+/// `arg1`: pointer to the data.
+/// `arg2`: data length.
+/// `arg3`: offset to write at; above `i64::MAX` is `InvalidArgument`.
+///
+/// On a handle opened with `APPEND` the **offset still wins**, as POSIX has
+/// it and as this kernel's Linux `pwrite64` does (Linux itself appends, and
+/// lists that under BUGS) -- design-decisions.md, "positional writes on an
+/// append handle".
+///
+/// Returns: bytes written, or a negative error code. Chosen number 1081.
+pub const SYS_FS_PWRITE: u64 = 1081;
+
 /// Mount a filesystem at a target path.
 ///
 /// `arg0`: pointer to source/device string (may be empty for pseudo-filesystems).

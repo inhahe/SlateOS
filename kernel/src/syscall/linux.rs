@@ -43007,19 +43007,10 @@ fn pread_file_to_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result<
     if len == 0 {
         return Ok(0);
     }
-    crate::mm::user::validate_user_write(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
-        Ok(v) => v,
-        Err(e) => return Err(linux_errno_for(e)),
-    };
-    let n = crate::fs::handle::read_at(handle, offset, &mut kbuf).map_err(linux_errno_for)?;
-    if n > 0 {
-        // SAFETY: validate_user_write succeeded for `len ≥ n` bytes
-        // starting at `buf`; kbuf is a kernel-owned slice; copy_to_user
-        // uses STAC/CLAC.
-        let r = unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n) };
-        r.map_err(linux_errno_for)?;
-    }
+    // Streamed through a bounded bounce buffer (`handlers::fs_pread`, which
+    // native `SYS_FS_PREAD` shares): the kernel holds at most one chunk of
+    // the request, not all of it.
+    let n = handlers::fs_pread(handle, offset, buf, len).map_err(linux_errno_for)?;
     #[allow(clippy::cast_possible_wrap)]
     Ok(n as i64)
 }
@@ -43048,15 +43039,9 @@ fn pwrite_file_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Resu
         // write" and report success with 0 bytes.
         return Ok(0);
     }
-    crate::mm::user::validate_user_read(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
-        Ok(v) => v,
-        Err(e) => return Err(linux_errno_for(e)),
-    };
-    // SAFETY: validate_user_read succeeded; copy_from_user uses STAC/CLAC.
-    let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len) };
-    r.map_err(linux_errno_for)?;
-    let n = crate::fs::handle::write_at(handle, offset, &kbuf).map_err(linux_errno_for)?;
+    // Streamed through a bounded bounce buffer (`handlers::fs_pwrite`, which
+    // native `SYS_FS_PWRITE` shares).
+    let n = handlers::fs_pwrite(handle, offset, buf, len).map_err(linux_errno_for)?;
     #[allow(clippy::cast_possible_wrap)]
     Ok(n as i64)
 }
@@ -43070,28 +43055,24 @@ fn pread_memfd_to_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result
     if len == 0 {
         return Ok(0);
     }
-    crate::mm::user::validate_user_write(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
-        Ok(v) => v,
-        Err(e) => return Err(linux_errno_for(e)),
-    };
-    let n = crate::ipc::memfd::read_at(
-        crate::ipc::memfd::MemFdHandle::from_raw(handle),
-        offset,
-        &mut kbuf,
-    )
+    // Streamed through a bounded bounce buffer (`handlers::stream_user_read`).
+    // The copy's own faults and allocation failures keep their errnos; the
+    // memfd's are mapped as before.
+    let h = crate::ipc::memfd::MemFdHandle::from_raw(handle);
+    let mut at = offset;
+    let n = handlers::stream_user_read(buf, len, |chunk| {
+        let n = crate::ipc::memfd::read_at(h, at, chunk)?;
+        at = at.saturating_add(n as u64);
+        Ok(n)
+    })
     .map_err(|e| match e {
         crate::error::KernelError::InvalidHandle => errno::EBADF,
         crate::error::KernelError::InvalidArgument => errno::EINVAL,
+        crate::error::KernelError::InvalidAddress | crate::error::KernelError::OutOfMemory => {
+            linux_errno_for(e)
+        }
         _ => errno::EIO,
     })?;
-    if n > 0 {
-        // SAFETY: validate_user_write succeeded for `len ≥ n` bytes
-        // starting at `buf`; kbuf is a kernel-owned slice; copy_to_user
-        // uses STAC/CLAC.
-        let r = unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n) };
-        r.map_err(linux_errno_for)?;
-    }
     #[allow(clippy::cast_possible_wrap)]
     Ok(n as i64)
 }
@@ -43114,23 +43095,23 @@ fn pwrite_memfd_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Res
     if len == 0 {
         return Ok(0);
     }
-    crate::mm::user::validate_user_read(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
-        Ok(v) => v,
-        Err(e) => return Err(linux_errno_for(e)),
-    };
-    // SAFETY: validate_user_read succeeded; copy_from_user uses STAC/CLAC.
-    let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len) };
-    r.map_err(linux_errno_for)?;
-    let n = crate::ipc::memfd::write_at(
-        crate::ipc::memfd::MemFdHandle::from_raw(handle),
-        offset,
-        &kbuf,
-    )
+    // Streamed through a bounded bounce buffer (`handlers::stream_user_write`).
+    // A seal that stops a later chunk leaves the earlier ones written and
+    // returns their count, as Linux's shmem does page by page.
+    let h = crate::ipc::memfd::MemFdHandle::from_raw(handle);
+    let mut at = offset;
+    let n = handlers::stream_user_write(buf, len, |chunk| {
+        let n = crate::ipc::memfd::write_at(h, at, chunk)?;
+        at = at.saturating_add(n as u64);
+        Ok(n)
+    })
     .map_err(|e| match e {
         crate::error::KernelError::InvalidHandle => errno::EBADF,
         crate::error::KernelError::PermissionDenied => errno::EPERM,
         crate::error::KernelError::InvalidArgument => errno::EINVAL,
+        crate::error::KernelError::InvalidAddress | crate::error::KernelError::OutOfMemory => {
+            linux_errno_for(e)
+        }
         _ => errno::EIO,
     })?;
     #[allow(clippy::cast_possible_wrap)]

@@ -58841,24 +58841,17 @@ is already waiting, not whether the setter exists.
   check.  The kernel's record has the MAC (`sys_net_if_info` bytes 16..22);
   the counters are in `/proc/net/dev` (`kernel/src/fs/netdev.rs`).  Needs
   `sockaddr_ll` and `rtnl_link_stats` checked against musl (§1011, §1119).
-- **posix/src: 44 facades whose tests are the only tests of something
-  live** (the sequel to TD-D-1700-CONSTANT-MODULES-NOTHING-USED).  Nothing
-  the library exports reaches these modules -- they re-export socket.rs's,
-  unistd.rs's, process.rs's names for Rust callers that cannot exist (only
-  crypt and ed25519 may be imported, §768) -- but their tests call the real
-  functions, and for some they are the only such tests: sys_random.rs's
-  getrandom flag checks (the Phase 80 set: unknown bits, GRND_RANDOM with
-  GRND_INSECURE, which check comes first), sys_reboot.rs's 26 (Phase 77),
-  sys_personality.rs's 22, mntent.rs's (unistd.rs tests getmntent twice),
-  linux_quota.rs's quotactl tests, netdb.rs's herror.  The rest duplicate
-  tests the defining module has (arpa_inet.rs, the epoll, eventfd,
-  signalfd, timerfd and inotify
-  family, sys_uio.rs, sys_vfs.rs, sys_xattr.rs, ...).  Method: for each,
-  move what is not already tested into the defining module's tests, in
-  that module's terms, then delete the facade (§1118) -- one family a
-  commit.  (ifaddrs.rs and net_if_packet.rs went on 2026-09-27, when
-  getifaddrs was fixed and tested in socket.rs.)
-  The scan that finds them: comments stripped, roots every module that
-  exports a C symbol, what lib.rs names, what another crate imports and
-  what a script runs (abi_layout.rs, via check-libc-abi.py).  103 others,
-  whose tests reached nothing live, were deleted on 2026-09-27.
+- **The mntent family is a stub on a premise that is no longer true**
+  (`posix/src/unistd.rs`: `setmntent`, `getmntent`, `getmntent_r`,
+  `addmntent`, `endmntent`, `hasmntopt`).  `setmntent` returns NULL "until
+  /etc/mtab or /proc/mounts exists" -- and `kernel/src/fs/procfs.rs` serves
+  `/proc/mounts`, `/proc/self/mounts` and `/proc/<pid>/mounts` in Linux's
+  format, with its octal escapes.  So `df`, `mount -l`, `findmnt` and every
+  gnulib `read_file_system_list` see no filesystems.  Port glibc's
+  `misc/mntent_r.c`: `setmntent` is `fopen` (with `e`), `getmntent_r` skips
+  blank and `#` lines, splits on blanks and tabs, decodes `\040`, `\011`,
+  `\012` and `\134`, and defaults the missing numbers to 0; `addmntent`
+  escapes the same four; `endmntent` closes and returns 1; `hasmntopt` finds
+  an option as a whole comma-separated word or `word=`.  And `/etc/mtab`
+  (glibc's `MOUNTED`) should be the symlink to `/proc/self/mounts` it is on
+  every Linux: the rootfs recipe's.

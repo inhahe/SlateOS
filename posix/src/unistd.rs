@@ -4000,10 +4000,10 @@ static PERSONALITY_STATE: core::sync::atomic::AtomicU32 = core::sync::atomic::At
 
 /// Cross-test serialisation lock for the process-global
 /// `PERSONALITY_STATE`.  Every test that reads *or* writes the
-/// personality — in this file and in `sys_personality` — must hold this
-/// for its whole duration.
+/// personality must hold this for its whole duration.
 ///
-/// `sys_personality`'s tests previously relied on a `reset_personality()`
+/// The personality tests that lived in `sys_personality` (in this file since
+/// 2026-09-27) once relied on a `reset_personality()`
 /// call plus an RAII `PersonalityGuard` that snapshot the value and
 /// restored it on drop.  That is not isolation: cargo runs the test
 /// binary's tests on parallel threads in one process, so a snapshot /
@@ -4036,9 +4036,9 @@ pub fn lock_personality_for_test() -> std::sync::MutexGuard<'static, ()> {
 
 /// Read the current personality without altering it.
 ///
-/// Internal helper used by `posix::sys_personality` tests and by the
-/// process subsystem when it needs to consult the personality bits
-/// (e.g. to honour `ADDR_NO_RANDOMIZE` for an `execve`).
+/// Internal helper for this module's tests and for anything that needs to
+/// consult the personality bits (e.g. to honour `ADDR_NO_RANDOMIZE` for an
+/// `execve`).
 #[must_use]
 pub fn current_personality() -> u32 {
     PERSONALITY_STATE.load(core::sync::atomic::Ordering::Relaxed)
@@ -9340,9 +9340,93 @@ mod tests {
 
     #[test]
     fn test_grnd_constants() {
-        assert_eq!(GRND_NONBLOCK, 1);
-        assert_eq!(GRND_RANDOM, 2);
-        assert_ne!(GRND_NONBLOCK, GRND_RANDOM);
+        // musl's (and the kernel's) numbers; the mask is exactly their union.
+        assert_eq!((GRND_NONBLOCK, GRND_RANDOM, GRND_INSECURE), (1, 2, 4));
+        assert_eq!(GRND_VALID_FLAGS, GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE);
+    }
+
+    // getrandom's flag checks, in the kernel's order (drivers/char/random.c,
+    // `SYSCALL_DEFINE3(getrandom, ...)`): an unknown flag bit, then
+    // GRND_RANDOM with GRND_INSECURE, are EINVAL before the buffer is looked
+    // at; then a NULL buffer with a length is EFAULT, before the length's
+    // range.  These lived in sys_random.rs, a facade nothing reached, until
+    // 2026-09-27.
+
+    #[test]
+    fn test_getrandom_rejects_an_unknown_flag_bit() {
+        let mut buf = [0u8; 16];
+        for flags in [0x8000_0000, GRND_NONBLOCK | 0x0008, !0u32] {
+            errno::set_errno(0);
+            assert_eq!(getrandom(buf.as_mut_ptr(), buf.len(), flags), -1, "{flags:#x}");
+            assert_eq!(errno::get_errno(), errno::EINVAL, "{flags:#x}");
+        }
+    }
+
+    #[test]
+    fn test_getrandom_rejects_random_with_insecure() {
+        let mut buf = [0u8; 16];
+        for flags in [GRND_RANDOM | GRND_INSECURE, GRND_RANDOM | GRND_INSECURE | GRND_NONBLOCK] {
+            errno::set_errno(0);
+            assert_eq!(getrandom(buf.as_mut_ptr(), buf.len(), flags), -1, "{flags:#x}");
+            assert_eq!(errno::get_errno(), errno::EINVAL, "{flags:#x}");
+        }
+    }
+
+    #[test]
+    fn test_getrandom_checks_flags_before_the_buffer() {
+        // A bad flag outranks a NULL buffer, and so does the conflict.
+        for flags in [0xDEAD_BEEF, GRND_RANDOM | GRND_INSECURE] {
+            errno::set_errno(0);
+            assert_eq!(getrandom(core::ptr::null_mut(), 16, flags), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL, "{flags:#x}");
+        }
+        // Even a zero-length call, which reads no buffer, refuses a bad flag.
+        errno::set_errno(0);
+        assert_eq!(getrandom(core::ptr::null_mut(), 0, 0x1_0000), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrandom_checks_the_buffer_before_the_length() {
+        errno::set_errno(0);
+        assert_eq!(getrandom(core::ptr::null_mut(), usize::MAX, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_getrandom_accepts_each_valid_combination() {
+        let mut buf = [0u8; 16];
+        for flags in [
+            0,
+            GRND_NONBLOCK,
+            GRND_RANDOM,
+            GRND_INSECURE,
+            GRND_NONBLOCK | GRND_RANDOM,
+            GRND_NONBLOCK | GRND_INSECURE,
+        ] {
+            errno::set_errno(0);
+            let n = getrandom(buf.as_mut_ptr(), buf.len(), flags);
+            assert_eq!(n, buf.len() as isize, "{flags:#x}");
+        }
+    }
+
+    #[test]
+    fn test_getrandom_zero_length_with_a_valid_flag_is_zero() {
+        let mut buf = [0u8; 1];
+        assert_eq!(getrandom(buf.as_mut_ptr(), 0, GRND_NONBLOCK), 0);
+        assert_eq!(getrandom(core::ptr::null_mut(), 0, GRND_NONBLOCK), 0);
+        assert_eq!(getrandom(core::ptr::null_mut(), 0, 0), 0);
+    }
+
+    #[test]
+    fn test_getrandom_success_leaves_errno_alone_and_fills_the_length() {
+        let mut buf = [0u8; 64];
+        errno::set_errno(0xBEEF);
+        assert_eq!(getrandom(buf.as_mut_ptr(), 16, GRND_NONBLOCK), 16);
+        assert_eq!(errno::get_errno(), 0xBEEF);
+        for len in [1usize, 7, 16, 33, 64] {
+            assert_eq!(getrandom(buf.as_mut_ptr(), len, 0), len as isize);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -9947,6 +10031,78 @@ mod tests {
         // Setting PER_LINUX over PER_LINUX returns the previous value, 0.
         let ret = personality(0);
         assert_eq!(ret, 0, "Setting PER_LINUX should succeed");
+    }
+
+    // personality(2), as Linux's `SYSCALL_DEFINE1(personality, unsigned int,
+    // ...)` has it: it keeps whatever it is given, unchecked, and answers the
+    // value it replaced; 0xffffffff asks without setting; and the argument is
+    // an `unsigned int`, so a 64-bit value's high half is dropped before
+    // either.  These came from sys_personality.rs ("Phase 78"), a facade
+    // nothing reached, on 2026-09-27.  The numbers are musl's
+    // `<sys/personality.h>`.
+    const PER_LINUX: u32 = 0;
+    const PER_BSD: u32 = 0x0006;
+    const PER_LINUX32: u32 = 0x0008;
+    const ADDR_NO_RANDOMIZE: u32 = 0x004_0000;
+    const MMAP_PAGE_ZERO: u32 = 0x010_0000;
+    const READ_IMPLIES_EXEC: u32 = 0x040_0000;
+
+    /// Take the cross-test lock, then start from PER_LINUX.
+    fn fresh_personality() -> std::sync::MutexGuard<'static, ()> {
+        let g = lock_personality_for_test();
+        personality(u64::from(PER_LINUX));
+        g
+    }
+
+    #[test]
+    fn test_personality_returns_the_value_it_replaces() {
+        let _g = fresh_personality();
+        assert_eq!(personality(u64::from(PER_LINUX32)), PER_LINUX as i32);
+        assert_eq!(personality(u64::from(PER_BSD)), PER_LINUX32 as i32);
+        assert_eq!(personality(0), PER_BSD as i32);
+        assert_eq!(current_personality(), PER_LINUX);
+    }
+
+    #[test]
+    fn test_personality_query_asks_without_setting() {
+        let _g = fresh_personality();
+        assert_eq!(PERSONALITY_QUERY, 0xFFFF_FFFF);
+        let set = PER_LINUX | ADDR_NO_RANDOMIZE;
+        personality(u64::from(set));
+        for _ in 0..2 {
+            assert_eq!(personality(u64::from(PERSONALITY_QUERY)) as u32, set);
+        }
+        assert_eq!(current_personality(), set);
+        assert_eq!(set & 0xFF, PER_LINUX, "the domain is the low byte");
+    }
+
+    #[test]
+    fn test_personality_drops_the_high_half() {
+        let _g = fresh_personality();
+        personality(u64::from(PER_LINUX32));
+        // All ones -- `(unsigned long)-1` -- is the query once truncated.
+        assert_eq!(personality(!0u64), PER_LINUX32 as i32);
+        assert_eq!(current_personality(), PER_LINUX32);
+        // And a set keeps only the low 32 bits.
+        personality(0xDEAD_BEEF_0000_0008);
+        assert_eq!(current_personality(), 0x0000_0008);
+    }
+
+    #[test]
+    fn test_personality_keeps_any_bits() {
+        let _g = fresh_personality();
+        // Nothing is validated: what goes in comes out -- 0xfffffffe is a set,
+        // not the query, and the top bit is just a bit.
+        for value in [
+            0x1234_5678,
+            0xFFFF_FFFE,
+            0x8000_0000,
+            PER_LINUX | ADDR_NO_RANDOMIZE | MMAP_PAGE_ZERO | READ_IMPLIES_EXEC,
+        ] {
+            personality(u64::from(value));
+            assert_eq!(current_personality(), value, "{value:#x}");
+            assert_eq!(personality(u64::from(PERSONALITY_QUERY)) as u32, value, "{value:#x}");
+        }
     }
 
     // ------------------------------------------------------------------

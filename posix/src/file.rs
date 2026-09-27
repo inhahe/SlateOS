@@ -4774,9 +4774,10 @@ mod umask_record {
 /// body*, not each call, is the unit that has to be atomic. Held from the first
 /// statement for that reason.
 ///
-/// Crate-visible because not every such test is in this file: `sys_stat.rs`
-/// has one, which ran unserialised until 2026-09-25. Poison is recovered so
-/// that one genuine failure reports once instead of poisoning its siblings.
+/// Crate-visible so that a test elsewhere that sets the mask can take it too:
+/// `sys_stat.rs` had one, which ran unserialised until 2026-09-25 (the module,
+/// a facade nothing reached, went on 2026-09-27). Poison is recovered so that
+/// one genuine failure reports once instead of poisoning its siblings.
 #[cfg(test)]
 static UMASK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

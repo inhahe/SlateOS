@@ -9061,6 +9061,14 @@ mod tests {
         );
     }
 
+    /// A NULL (or empty) prefix prints the message alone, as glibc's `herror`
+    /// does; it is not an error.
+    #[test]
+    fn herror_takes_a_null_prefix() {
+        herror(core::ptr::null());
+        herror(b"\0".as_ptr());
+    }
+
     #[test]
     fn herror_accepts_every_resolver_code() {
         // Exercises the `get_h_errno` read path for each code; `herror`

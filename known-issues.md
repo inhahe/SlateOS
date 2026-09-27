@@ -171031,6 +171031,16 @@ credited `crate::linux_rlimit` -- a header transcription -- with the Linux-ABI
 `prlimit64`; that is the kernel's (`kernel/src/syscall/linux.rs`), and they
 say so now.
 
+**Closed (2026-09-27).** The review of what else nothing reached is done: of
+the 149 modules a scan of that day found unreached, 103 were header
+transcriptions, facades and duplicates whose tests reached nothing live, and
+went in one commit; the 46 whose tests called live functions went once those
+tests had moved to the modules they test -- `getrandom`'s flag checks and
+`personality`'s to `unistd.rs`, `reboot`'s to `process.rs` (where one of them
+turned out to certify the wrong order), `getifaddrs`'s to `socket.rs` (where
+the function turned out to hand every caller the same static list). No module
+remains that nothing reaches but `abi_layout.rs`, which a script runs.
+
 ## D-POSIX-CONSTANTS-WERE-NOT-MUSLS — 83 constants a C caller passes or reads back had values of their own, or glibc's (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
 
 **In short:** a C program here is compiled against musl's headers, so the

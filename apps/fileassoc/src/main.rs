@@ -9,6 +9,7 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
@@ -1817,9 +1818,9 @@ impl FileAssocUI {
                     Ok(()) => format!(
                         "Exported {} association(s) to {}",
                         self.registry.association_count(),
-                        path.display()
+                        path.shown()
                     ),
-                    Err(e) => format!("Could not write {}: {e}", path.display()),
+                    Err(e) => format!("Could not write {}: {e}", path.shown()),
                 };
             }
             Transfer::Import => match std::fs::read_to_string(path) {
@@ -1836,12 +1837,12 @@ impl FileAssocUI {
                         None => format!(
                             "Imported {} association(s) from {}",
                             self.registry.association_count(),
-                            path.display()
+                            path.shown()
                         ),
                     };
                     self.persist();
                 }
-                Err(e) => self.status = format!("Could not read {}: {e}", path.display()),
+                Err(e) => self.status = format!("Could not read {}: {e}", path.shown()),
             },
         }
     }

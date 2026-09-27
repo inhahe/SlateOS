@@ -14,7 +14,13 @@
 //! through Slate OS syscalls; stubbed with representative data for initial
 //! development.
 
-pub mod hwquery;
+// The machine's hardware, read where the kernel publishes it -- shared with
+// the Device Manager, so the two cannot disagree about the machine.
+use hwquery::{
+    Address, CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
+    MemoryMapEntry, NetworkAdapterInfo, PciDeviceInfo, ProcessEntry, ServiceInfo, SoundInfo,
+    StartupEntry, UsbDeviceInfo,
+};
 
 #[allow(unused_imports)]
 use appearance::Palette;
@@ -31,6 +37,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -356,248 +363,6 @@ impl Property {
     }
 }
 
-/// CPU information.
-#[derive(Clone, Debug)]
-pub struct CpuInfo {
-    /// The marketing name, if anything publishes one. Nothing does.
-    ///
-    /// The kernel serves CPUID leaf 1 -- family, model, stepping -- and not
-    /// leaves 0x8000_0002..4, which are where a brand string lives. An empty
-    /// `String` would draw as a processor with no name rather than as a
-    /// question nobody answered, and the invented value it replaced was
-    /// "Intel Core i7-13700K".
-    pub brand: Option<String>,
-    /// The vendor string, on the same terms as [`CpuInfo::brand`]: CPUID leaf
-    /// 0, also not served.
-    pub vendor: Option<String>,
-    pub family: u32,
-    pub model: u32,
-    pub stepping: u32,
-    pub physical_cores: u32,
-    pub logical_processors: u32,
-    /// Base clock, if a frequency source exists. None does.
-    ///
-    /// Lane A's `sysfs.rs` says why there is no `cpufreq/`, and the reasoning
-    /// covers this field: *"a file reading 0 cannot be told from a real 0 MHz.
-    /// Absent is the honest answer until a CPUID leaf-16h reader exists."*
-    pub base_clock_mhz: Option<u32>,
-    /// Turbo clock, on the same terms as [`CpuInfo::base_clock_mhz`].
-    pub max_turbo_mhz: Option<u32>,
-    pub l1_data_kb: u32,
-    pub l1_inst_kb: u32,
-    pub l2_kb: u32,
-    pub l3_kb: u32,
-    pub features: Vec<(String, bool)>,
-}
-
-/// Memory slot information.
-#[derive(Clone, Debug)]
-pub struct MemorySlot {
-    pub slot_name: String,
-    pub size_mb: u32,
-    pub mem_type: String,
-    pub speed_mhz: u32,
-    pub manufacturer: String,
-}
-
-/// Overall memory information.
-#[derive(Clone, Debug)]
-pub struct MemoryInfo {
-    pub total_mb: u64,
-    pub available_mb: u64,
-    pub mem_type: String,
-    pub speed_mhz: u32,
-    pub slots_used: u32,
-    pub slots_total: u32,
-    pub slots: Vec<MemorySlot>,
-}
-
-/// Partition information.
-///
-/// Sizes are raw byte counts, not pre-scaled gigabytes. They used to be
-/// `f32` fields named `*_gb` holding values divided by 1024³ and displayed
-/// with a `GB` label — a 2 TB disk read `1863.0 GB`, which is neither its
-/// capacity in GB (2000) nor a unit anyone sells. Keeping bytes and scaling
-/// at the point of display means the divisor and the unit name are chosen
-/// together, by `guitk::bytes`. See design-decisions.md §489.
-#[derive(Clone, Debug)]
-pub struct PartitionInfo {
-    pub label: String,
-    pub filesystem: String,
-    pub capacity_bytes: u64,
-    pub used_bytes: u64,
-    pub free_bytes: u64,
-    pub mount_point: String,
-}
-
-/// Disk information.
-#[derive(Clone, Debug)]
-pub struct DiskInfo {
-    pub model: String,
-    /// Raw byte count; see [`PartitionInfo`] for why this is not pre-scaled.
-    pub capacity_bytes: u64,
-    pub interface: String,
-    pub serial: String,
-    pub smart_status: String,
-    pub partitions: Vec<PartitionInfo>,
-}
-
-/// Network adapter information.
-#[derive(Clone, Debug)]
-pub struct NetworkAdapterInfo {
-    pub name: String,
-    pub adapter_type: String,
-    pub mac_address: String,
-    pub ipv4: String,
-    pub ipv6: String,
-    pub subnet: String,
-    pub gateway: String,
-    pub dns: String,
-    pub speed_mbps: u32,
-    pub duplex: String,
-    pub bytes_sent: u64,
-    pub bytes_received: u64,
-}
-
-/// Display/GPU information.
-#[derive(Clone, Debug)]
-pub struct DisplayInfo {
-    pub gpu_name: String,
-    pub vendor: String,
-    pub vram_mb: u32,
-    pub resolution: String,
-    pub refresh_rate_hz: u32,
-    pub outputs: Vec<(String, bool)>,
-    pub driver_version: String,
-}
-
-/// PCI device entry.
-#[derive(Clone, Debug)]
-pub struct PciDeviceInfo {
-    pub bus: u8,
-    pub device: u8,
-    pub function: u8,
-    pub vendor_id: u16,
-    pub device_id: u16,
-    pub class: String,
-    pub description: String,
-    pub vendor_name: String,
-}
-
-/// Service entry.
-#[derive(Clone, Debug)]
-pub struct ServiceInfo {
-    pub name: String,
-    pub status: String,
-    pub start_type: String,
-}
-
-/// Process entry (for the sysinfo view).
-#[derive(Clone, Debug)]
-pub struct ProcessEntry {
-    pub pid: u32,
-    pub name: String,
-    pub memory_kb: u64,
-    pub cpu_percent: f32,
-}
-
-/// Driver entry.
-#[derive(Clone, Debug)]
-pub struct DriverInfo {
-    pub name: String,
-    pub path: String,
-    pub status: String,
-}
-
-/// IRQ assignment.
-#[derive(Clone, Debug)]
-pub struct IrqInfo {
-    pub irq_number: u32,
-    pub device: String,
-    /// Left empty when read from `/proc/interrupts`: the kernel publishes a
-    /// label and a flag, and nothing that is a *type*. It used to default to
-    /// `"Edge"`, which is a trigger mode nobody reported.
-    pub irq_type: String,
-    /// Whether the IOAPIC showed the line asserted at the moment of the read.
-    ///
-    /// **A sample, not a total, and never to be drawn as activity.** Reading
-    /// `/proc/interrupts` twice can show `false` both times while thousands of
-    /// interrupts were serviced in between, so a count synthesised from this
-    /// would agree with itself forever *and* agree with the real one. That is
-    /// worse than a wrong constant, which at least fails on a second look:
-    /// **the observation that would falsify it is the observation that
-    /// confirms it.** Lane B declined to synthesise the count in `procinfo`
-    /// for this reason; the same answer applies one layer up. A rate needs the
-    /// counters to exist first.
-    pub asserted: bool,
-}
-
-/// I/O port range.
-#[derive(Clone, Debug)]
-pub struct IoPortInfo {
-    pub start: u16,
-    pub end: u16,
-    pub device: String,
-}
-
-/// Memory map region.
-#[derive(Clone, Debug)]
-pub struct MemoryMapEntry {
-    pub start: u64,
-    pub end: u64,
-    pub region_type: String,
-    pub description: String,
-}
-
-/// DMA channel assignment.
-#[derive(Clone, Debug)]
-pub struct DmaInfo {
-    pub channel: u8,
-    pub device: String,
-    pub mode: String,
-}
-
-/// USB device entry.
-#[derive(Clone, Debug)]
-pub struct UsbDeviceInfo {
-    pub port: String,
-    pub vendor_id: u16,
-    pub product_id: u16,
-    pub description: String,
-    pub speed: String,
-}
-
-/// Sound device.
-#[derive(Clone, Debug)]
-pub struct SoundInfo {
-    pub name: String,
-    pub device_type: String,
-    pub driver: String,
-    pub status: String,
-}
-
-/// Startup program entry.
-#[derive(Clone, Debug)]
-pub struct StartupEntry {
-    pub name: String,
-    /// The command line the item runs. `/proc/autostart`'s COMMAND column.
-    pub path: String,
-    /// **When** it runs -- boot, login, session -- not where it came from.
-    ///
-    /// This field was `source`, and `source` in a startup manager means the
-    /// place the entry was registered: a folder, a registry key, a unit file.
-    /// `/proc/autostart` publishes no such thing. It publishes a PHASE, and
-    /// putting a phase in a column meaning origin is the same defect as
-    /// putting a bus *type* in a column meaning bus *number* -- which is why
-    /// `/proc/devicemgr` was left unwired. Renamed rather than repurposed.
-    pub phase: String,
-    /// Whether the item is set to run at all.
-    ///
-    /// A disabled entry listed like an enabled one is a claim that it runs.
-    /// The file says which, so the window can too.
-    pub enabled: bool,
-}
-
 // ============================================================================
 // Application state
 // ============================================================================
@@ -755,21 +520,22 @@ impl SysInfoState {
     /// exists to prevent. Each category moved by hand instead, so "with no
     /// change to this file" was the least accurate part.
     ///
-    /// Where each category reads from now:
+    /// Where each category reads from now (2026-09-26; `hwquery` is the
+    /// authority -- this table is a reader's map of it):
     ///
     /// | category | source |
     /// |---|---|
     /// | CPU, memory | `/sys/devices/system/{cpu,memory}` (§850) |
     /// | storage | `/sys/devices/block/<name>/` |
-    /// | network, processes | `/proc/net/dev`, `/proc/<pid>/stat` |
-    /// | IRQs, display | `/proc/{interrupts,monitors}` — **published, not yet read here** |
-    /// | PCI, USB, sound, I/O ports, DMA, memory map, drivers, services, startup | nothing publishes these |
+    /// | PCI, memory map | `/sys/devices/{pci,memmap}` |
+    /// | network | `/proc/net`, SlateOS's file (a Linux host: `/proc/net/dev`) |
+    /// | processes, uptime | `/proc/<pid>/stat`, `/proc/uptime` |
+    /// | IRQs, I/O ports, display | `/proc/{interrupts,ioport,monitors}` |
+    /// | drivers, startup | `/proc/{kmod,autostart}` |
+    /// | USB, sound, DMA, services | nothing publishes these |
     ///
     /// The last row is the honest "cannot read", and is expected to stay that
-    /// way. The row above it is the outstanding work, and it needs parsers in
-    /// `procinfo` rather than here -- see
-    /// `known-issues.md` →
-    /// `TD-C-APPS-SYSINFO-WAITS-ON-A-FILESYSTEM-TREE-THAT-DOES-NOT-EXIST`.
+    /// way until the kernel publishes them.
     pub fn new() -> Self {
         use hwquery::HardwareProvider;
         let provider = hwquery::SyscallProvider::new();
@@ -874,7 +640,21 @@ impl SysInfoState {
     /// cannot be mistaken for a reading.
     const NOT_REPORTED: &'static str = "Not reported by this system";
 
-    /// Render an optional value, or say it was not reported.
+    /// An address the system does report, and says there is none of: a card
+    /// DHCP has not configured. A fact about the machine -- the answer to
+    /// "why can nothing be reached?" -- so it must not read as
+    /// [`Self::NOT_REPORTED`].
+    const NOT_ASSIGNED: &'static str = "None assigned";
+
+    /// An adapter's address, or which of the two kinds of absence it is.
+    fn address_text(address: &Address) -> String {
+        match address {
+            Address::NotReported => Self::NOT_REPORTED.to_string(),
+            Address::Unassigned => Self::NOT_ASSIGNED.to_string(),
+            Address::Is(text) => text.clone(),
+        }
+    }
+
     /// An uptime as days, hours, minutes and seconds.
     ///
     /// Days are included because a machine that has been up for four days read
@@ -1150,26 +930,64 @@ impl SysInfoState {
                 props.push(Property::blank());
             }
             props.push(Property::new(&format!("--- Adapter {} ---", idx), ""));
+            // What nothing published reads "Not reported" -- never a blank
+            // that looks like a missing value, or a 0 that looks like one.
+            let or_not = |v: &str| {
+                if v.is_empty() {
+                    Self::NOT_REPORTED.to_string()
+                } else {
+                    v.to_string()
+                }
+            };
             props.push(Property::new("Name", &adapter.name));
-            props.push(Property::new("Type", &adapter.adapter_type));
-            props.push(Property::new("MAC Address", &adapter.mac_address));
-            props.push(Property::new("IPv4 Address", &adapter.ipv4));
-            props.push(Property::new("IPv6 Address", &adapter.ipv6));
-            props.push(Property::new("Subnet Mask", &adapter.subnet));
-            props.push(Property::new("Default Gateway", &adapter.gateway));
-            props.push(Property::new("DNS Servers", &adapter.dns));
+            props.push(Property::new(
+                "Link",
+                match adapter.up {
+                    Some(true) => "Up",
+                    Some(false) => "Down",
+                    None => Self::NOT_REPORTED,
+                },
+            ));
+            props.push(Property::new("Type", &or_not(&adapter.adapter_type)));
+            props.push(Property::new("MAC Address", &or_not(&adapter.mac_address)));
+            props.push(Property::new(
+                "IPv4 Address",
+                &Self::address_text(&adapter.ipv4),
+            ));
+            props.push(Property::new(
+                "IPv6 Address",
+                &Self::address_text(&adapter.ipv6),
+            ));
+            props.push(Property::new(
+                "Subnet Mask",
+                &Self::address_text(&adapter.subnet),
+            ));
+            props.push(Property::new(
+                "Default Gateway",
+                &Self::address_text(&adapter.gateway),
+            ));
+            props.push(Property::new(
+                "DNS Servers",
+                &Self::address_text(&adapter.dns),
+            ));
             props.push(Property::new(
                 "Speed",
-                &format!("{} Mbps", adapter.speed_mbps),
+                &adapter
+                    .speed_mbps
+                    .map_or_else(|| Self::NOT_REPORTED.to_string(), |s| format!("{s} Mbps")),
             ));
-            props.push(Property::new("Duplex", &adapter.duplex));
+            props.push(Property::new("Duplex", &or_not(&adapter.duplex)));
             props.push(Property::new(
                 "Bytes Sent",
-                &format_bytes(adapter.bytes_sent),
+                &adapter
+                    .bytes_sent
+                    .map_or_else(|| Self::NOT_REPORTED.to_string(), format_bytes),
             ));
             props.push(Property::new(
                 "Bytes Received",
-                &format_bytes(adapter.bytes_received),
+                &adapter
+                    .bytes_received
+                    .map_or_else(|| Self::NOT_REPORTED.to_string(), format_bytes),
             ));
         }
         props
@@ -1645,8 +1463,8 @@ impl SysInfoState {
     pub fn write_report(&mut self, path: &std::path::Path) -> String {
         let text = self.export_text();
         match safeio::write_str_atomically(path, &text) {
-            Ok(()) => format!("Wrote {} bytes to {}", text.len(), path.display()),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Ok(()) => format!("Wrote {} bytes to {}", text.len(), path.shown()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
@@ -2611,6 +2429,7 @@ mod tests {
     )]
 
     use super::*;
+    use hwquery::MemorySlot;
 
     // ------------------------------------------------------------------
     // The compositor wiring
@@ -2996,6 +2815,143 @@ mod tests {
         })
     }
 
+    /// **A PCI function is read as the kernel writes it**: its address from
+    /// its file's name, `BB:DD.F`, and its ids and class from the `key: value`
+    /// lines inside (`kernel/src/fs/sysfs.rs`, `gen_pci_device`) -- and a name
+    /// that is not an address, or a file without both ids, is not a device.
+    #[test]
+    fn a_pci_function_is_read_as_the_kernel_writes_it() {
+        let file = |vendor: &str, class: &str, sub: &str| {
+            format!("address: x\nvendor: {vendor}\ndevice: 2922\nclass: {class}\nsubclass: {sub}\n")
+        };
+        let sata = hwquery::pci_function("00:1f.2", &file("8086", "01", "06")).expect("a device");
+        assert_eq!(
+            (
+                sata.bus,
+                sata.device,
+                sata.function,
+                sata.vendor_id,
+                sata.device_id
+            ),
+            (0, 0x1F, 2, 0x8086, 0x2922)
+        );
+        assert_eq!(sata.class, "Mass storage controller");
+        assert_eq!(sata.description, "SATA controller");
+        assert_eq!(sata.vendor_name, "Intel");
+        let odd = hwquery::pci_function("0a:00.0", &file("abcd", "ff", "00")).expect("a device");
+        assert_eq!(odd.bus, 0x0A);
+        assert_eq!(odd.class, "Unassigned class");
+        assert_eq!(odd.vendor_name, "", "an unknown vendor is not named");
+        assert!(hwquery::pci_function("notes", &file("8086", "01", "06")).is_none());
+        assert!(hwquery::pci_function("00:00.0", "vendor: 8086\n").is_none());
+    }
+
+    /// **The PCI functions the kernel publishes are listed**, one file per
+    /// function under `/sys/devices/pci`, in address order. This read
+    /// `/sys/hardware/pci`, which never existed, so the list was always empty.
+    /// Unix only: a file name holding `:` is an alternate data stream on
+    /// Windows, so the fixture cannot exist there.
+    #[cfg(unix)]
+    #[test]
+    fn the_pci_functions_the_kernel_publishes_are_read() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-pci-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("sys/devices/pci");
+        std::fs::create_dir_all(&base).expect("fixture");
+        let function = |name: &str, vendor: &str, device: &str, class: &str, sub: &str| {
+            std::fs::write(
+                base.join(name),
+                format!(
+                    "address: {name}\nvendor: {vendor}\ndevice: {device}\nclass: {class}\nsubclass: {sub}\n"
+                ),
+            )
+            .unwrap();
+        };
+        function("00:1f.2", "8086", "2922", "01", "06");
+        function("00:00.0", "8086", "1237", "06", "00");
+        function("00:02.0", "1234", "1111", "03", "00");
+        function("00:03.0", "abcd", "0001", "ff", "00");
+        std::fs::write(base.join("not-an-address"), b"vendor: 8086\n").unwrap();
+
+        let provider = hwquery::SyscallProvider::at(root.to_str().expect("a text path"));
+        let pci = {
+            use hwquery::HardwareProvider;
+            provider.query_pci().expect("the fixture tree is readable")
+        };
+        let seen: Vec<String> = pci
+            .iter()
+            .map(|d| {
+                format!(
+                    "{:02x}:{:02x}.{} {:04x}:{:04x} {} / {} / {}",
+                    d.bus,
+                    d.device,
+                    d.function,
+                    d.vendor_id,
+                    d.device_id,
+                    d.class,
+                    d.description,
+                    d.vendor_name
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                "00:00.0 8086:1237 Bridge / Host bridge / Intel",
+                "00:02.0 1234:1111 Display controller / VGA compatible controller / QEMU",
+                "00:03.0 abcd:0001 Unassigned class / Unassigned class / ",
+                "00:1f.2 8086:2922 Mass storage controller / SATA controller / Intel",
+            ],
+            "in address order, the file that is not an address skipped"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The firmware memory map is read** from `/sys/devices/memmap`, a
+    /// numbered directory per region, in address order whatever the numbers
+    /// sort as -- and `end` as the last byte, where the kernel writes one past
+    /// it. This read `/sys/hardware/memmap`, which never existed.
+    #[test]
+    fn the_memory_map_the_kernel_publishes_is_read() {
+        let root =
+            std::env::temp_dir().join(format!("sysinfo-memmap-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&root);
+        let base = root.join("sys/devices/memmap");
+        let region = |n: &str, start: u64, end: u64, kind: &str| {
+            let dir = base.join(n);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("start"), format!("0x{start:016x}\n")).unwrap();
+            std::fs::write(dir.join("end"), format!("0x{end:016x}\n")).unwrap();
+            std::fs::write(dir.join("type"), format!("{kind}\n")).unwrap();
+        };
+        region("10", 0x1_0000_0000, 0x2_0000_0000, "Usable RAM");
+        region("0", 0, 0x9_FC00, "Usable RAM");
+        region("2", 0xF0000, 0x10_0000, "Reserved");
+        std::fs::create_dir_all(base.join("notes")).unwrap();
+
+        let provider = hwquery::SyscallProvider::at(root.to_str().expect("a text path"));
+        let map = {
+            use hwquery::HardwareProvider;
+            provider
+                .query_memory_map()
+                .expect("the fixture tree is readable")
+        };
+        let seen: Vec<(u64, u64, &str)> = map
+            .iter()
+            .map(|r| (r.start, r.end, r.region_type.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (0, 0x9_FBFF, "Usable RAM"),
+                (0xF0000, 0xF_FFFF, "Reserved"),
+                (0x1_0000_0000, 0x1_FFFF_FFFF, "Usable RAM"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The disks the kernel publishes are read, and nothing else is invented.
     ///
     /// `query_storage` read `/sys/hardware/block`, **a path this kernel has
@@ -3110,19 +3066,15 @@ mod tests {
         );
     }
 
-    /// The interfaces come from `/proc/net/dev`, with nothing filled in around them.
+    /// On a Linux host the interfaces come from `/proc/net/dev`, with nothing
+    /// filled in around them. (SlateOS's own `/proc/net` is `hwquery`'s to
+    /// test, and the address rows below.)
     ///
-    /// `query_network` read `/sys/hardware/net`, which the kernel has never
-    /// served. `/proc/net/dev` is published and carries the names and the
-    /// traffic counters.
-    ///
-    /// The empty fields are the point of the test as much as the full ones. A
-    /// MAC address, an IPv4 lease, a gateway, a DNS server, a link speed and a
-    /// duplex mode are published by nothing in this tree, and lane A declined
-    /// to add a `/sys/devices/net/` in the same words: the kernel's
-    /// `InterfaceInfo` "has no name field, so both would be invented". **A row
-    /// carrying a plausible 192.168.1.x is worse than one carrying a blank**,
-    /// because the blank is legible as absent.
+    /// The empty fields are the point of the test as much as the full ones.
+    /// `/proc/net/dev` carries names and traffic counters and nothing else: no
+    /// MAC address, no IPv4 lease, no gateway, no DNS server, no link speed or
+    /// duplex mode. **A row carrying a plausible 192.168.1.x is worse than one
+    /// carrying a blank**, because the blank is legible as absent.
     #[test]
     fn the_network_interfaces_are_read_and_nothing_is_filled_in_around_them() {
         let root =
@@ -3146,19 +3098,51 @@ mod tests {
         assert_eq!(adapters.len(), 2, "one row per interface");
         let eth0 = adapters.first().expect("eth0");
         assert_eq!(eth0.name, "eth0");
-        assert_eq!(eth0.bytes_received, 900_000, "rx is the receive column");
-        assert_eq!(eth0.bytes_sent, 400_000, "tx is the transmit column");
+        assert_eq!(
+            eth0.bytes_received,
+            Some(900_000),
+            "rx is the receive column"
+        );
+        assert_eq!(eth0.bytes_sent, Some(400_000), "tx is the transmit column");
 
         for a in &adapters {
             assert!(a.mac_address.is_empty(), "invented a MAC address");
-            assert!(a.ipv4.is_empty(), "invented an address lease");
-            assert!(a.gateway.is_empty(), "invented a gateway");
-            assert!(a.dns.is_empty(), "invented a resolver");
-            assert_eq!(a.speed_mbps, 0, "invented a link speed");
+            assert_eq!(a.ipv4, Address::NotReported, "invented an address lease");
+            assert_eq!(a.gateway, Address::NotReported, "invented a gateway");
+            assert_eq!(a.dns, Address::NotReported, "invented a resolver");
+            assert_eq!(a.speed_mbps, None, "invented a link speed");
+            assert_eq!(a.up, None, "invented a link state");
             assert!(a.duplex.is_empty(), "invented a duplex mode");
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An address the kernel says there is none of reads "None assigned" --
+    /// the answer to "why can nothing be reached?" -- and one nothing reports
+    /// reads as not reported. Two absences, told apart.
+    #[test]
+    fn an_unassigned_address_is_not_an_unreported_one() {
+        let mut app = SysInfoState::new();
+        app.network_adapters = vec![NetworkAdapterInfo {
+            up: Some(false),
+            ipv4: Address::Unassigned,
+            gateway: Address::Is(String::from("10.0.2.2")),
+            ..NetworkAdapterInfo::named("eth0")
+        }];
+        let props = app.props_network();
+        let value = |name: &str| {
+            props
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.value.clone())
+                .unwrap_or_else(|| panic!("no {name} row"))
+        };
+        assert_eq!(value("IPv4 Address"), SysInfoState::NOT_ASSIGNED);
+        assert_eq!(value("IPv6 Address"), SysInfoState::NOT_REPORTED);
+        assert_eq!(value("Default Gateway"), "10.0.2.2");
+        assert_eq!(value("Link"), "Down");
+        assert_ne!(SysInfoState::NOT_ASSIGNED, SysInfoState::NOT_REPORTED);
     }
 
     /// With no `/proc/net/dev`, it says so rather than reporting no interfaces.

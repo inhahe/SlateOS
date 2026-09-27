@@ -118,3 +118,74 @@ paint	K	ditto
 paint	Q	ditto
 paint	W	ditto
 
+terminal	W	ditto
+terminal	LeftBracket	ditto: Ctrl+[ is ESC, sent to the program inside by ctrl_key_code
+terminal	RightBracket	ditto: Ctrl+] is GS, sent to the program inside by ctrl_key_code
+textline	A	a library of a field's editing keys (Ctrl+A/C/X/V): it draws nothing, and the application whose field it is names them
+textline	C	ditto
+textline	V	ditto
+textline	X	ditto
+textarea	A	a library of a text area's editing keys (Ctrl+A/C/X/V): it draws nothing, and the application whose area it is names them
+textarea	C	ditto
+textarea	V	ditto
+textarea	X	ditto
+markdowneditor	Num9	key_char spells a digit key for a keystroke that carries no text; Ctrl+9 answers nothing -- the heading keys the card names stop at 6
+finance	B	key_char spells the letter a textless keystroke (a Ctrl chord) types, so shortcuts can be written as characters; only the shortcuts the card names act
+finance	E	ditto
+finance	F	ditto
+finance	G	ditto
+finance	H	ditto
+finance	I	ditto
+finance	J	ditto
+finance	K	ditto
+finance	L	ditto
+finance	M	ditto
+finance	O	ditto
+finance	P	ditto
+finance	Q	ditto
+finance	R	ditto
+finance	S	ditto
+finance	T	ditto
+finance	U	ditto
+finance	V	ditto
+finance	W	ditto
+finance	X	ditto
+finance	Z	ditto
+finance	Num6	ditto
+finance	Num7	ditto
+finance	Num8	ditto
+finance	Num9	ditto
+flashcards	B	key_char spells the letter a textless keystroke types, so key_name can name it; only the keys the card names act
+flashcards	C	ditto
+flashcards	D	ditto
+flashcards	F	ditto
+flashcards	G	ditto
+flashcards	H	ditto
+flashcards	J	ditto
+flashcards	K	ditto
+flashcards	L	ditto
+flashcards	M	ditto
+flashcards	P	ditto
+flashcards	U	ditto
+flashcards	V	ditto
+flashcards	W	ditto
+flashcards	Z	ditto
+flashcards	Num6	ditto
+flashcards	Num7	ditto
+
+# --- remotedesktop: keys sent to the remote machine, not answered here ----
+# `keysym_of_key` (apps/remotedesktop/src/main.rs) turns a key into the X
+# keysym RFB sends while a remote screen is shown. What F5 does there belongs
+# to the remote machine, not to this window, exactly as the terminal's keys
+# belong to the program inside it. The one key kept back -- the escape hotkey,
+# F11 -- is named on screen, and is not listed here.
+remotedesktop	F2	sent to the remote machine as its X keysym, by keysym_of_key; not answered here
+remotedesktop	F3	ditto
+remotedesktop	F4	ditto
+remotedesktop	F5	ditto
+remotedesktop	F6	ditto
+remotedesktop	F7	ditto
+remotedesktop	F8	ditto
+remotedesktop	F9	ditto
+remotedesktop	F10	ditto
+remotedesktop	F12	ditto

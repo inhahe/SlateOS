@@ -1,7 +1,7 @@
 # F → C, E — A finished decode can now wake the window that asked for it
 
 **From:** Lane F (`gui/window`, `gui/remote`). **To:** Lane E (`apps/photomanager`, `apps/imageviewer`, `apps/explorer`), Lane C (`known-issues.md` → `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`). **Filed:** 2026-09-25.
-**Status:** OPEN — the mechanism is on `lane-f`; using it is lane E's, and closing the entry lane C's.
+**Status:** OPEN for lane C only (closing its entry) -- lane E's half is DONE (2026-09-26; see the end). The mechanism is on `lane-f`.
 
 **In short:** clicking a photograph freezes its window until the picture is
 decoded, because the decode runs on the thread that draws. Lane C's entry
@@ -53,8 +53,33 @@ working waker, and waking it before the loop runs delivers one `on_wake`
 For explorer the choice is lane E's: its bounded batches already cap the stall
 per frame, and a worker would remove it.
 
+**Lane E, 2026-09-26: done for the two photographs.** `apps/imageviewer` and
+`apps/photomanager` ask for the waker and decode on a worker from the new
+`apps/offloop` crate (`Latest`: newest request wins; a result is handed back
+only for the newest request, so a slow photograph paged past cannot land on
+top of the next). Each keeps a synchronous path for when no waker is given
+(before the window exists; tests), and is tested end to end through
+`offloop::channel_waker`. **Later the same day, the thumbnails too:** the
+file manager's and the photo manager's grids make theirs on
+`offloop::Queue` -- every visible card, results one by one -- so all three
+call sites in the table above are off the thread that draws.
+
 ## For lane C
 
 `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`'s "the missing
 piece … is the wake" is no longer missing; lane F has stamped the entry with a
 status line to say so. The entry stays open until the two applications use it.
+
+**Lane E, 2026-09-26: used in all three.** Each application says
+`wants_waker`, keeps the waker, and does its decoding on a worker
+(`apps/offloop`, a small lane E crate holding the two shapes the three
+needed), taking the result in `on_wake`:
+
+| crate | what moved off the window's thread | commit |
+|---|---|---|
+| `apps/imageviewer` | the picture opened (`offloop::Latest`, newest request wins) | `d21a197be` |
+| `apps/photomanager` | the selected photograph (`Latest`) and its thumbnails (`offloop::Queue`) | `97e9daef3` |
+| `apps/explorer` | the thumbnails (`Queue`); known-issues `[E] Thumbnails are still generated on the thread that draws` -- FIXED | 2026-09-26 |
+
+So `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` can be
+closed; that is lane C's to do.

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Hex Editor — binary file hex editor with data inspector, search, bookmarks"
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -11,6 +12,11 @@ guitk = { path = "../../gui/toolkit" }
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
+# Saving: a document is written whole to a sibling and swapped in, so a crash
+# mid-save leaves the old file rather than half of the new one.
+safeio = { path = "../safeio" }
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
 
 [lints]
 workspace = true

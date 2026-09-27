@@ -1,0 +1,18 @@
+[package]
+name = "pngwrite"
+version = "0.1.0"
+edition = "2024"
+description = "Writing a picture as a PNG: truecolour, filtered per row, deflated"
+
+[dependencies]
+# The compression and the checksums: the tree's own, the same `deflate` that
+# `imagecodec` inflates PNGs with.
+deflate = { path = "../../deflate" }
+crc32 = { path = "../../crc32" }
+
+[dev-dependencies]
+# Every test reads what it wrote back through the decoder the system uses.
+imagecodec = { path = "../../gui/imagecodec" }
+
+[lints]
+workspace = true

@@ -100,6 +100,7 @@ mod library;
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 // The toolkit's rectangle rather than a private copy: this crate had
 // the same four floats under `width`/`height`, with the same half-open
 // `contains`. See `known-issues.md`
@@ -429,607 +430,20 @@ impl ColorLabel {
 // EXIF metadata
 // ============================================================================
 
-/// Parsed EXIF metadata for a photo.
-#[derive(Clone, Debug, Default)]
-pub struct ExifData {
-    pub camera_make: Option<String>,
-    pub camera_model: Option<String>,
-    pub lens: Option<String>,
-    pub focal_length_mm: Option<f32>,
-    pub aperture: Option<f32>,
-    pub shutter_speed: Option<String>,
-    pub iso: Option<u32>,
-    pub flash_fired: Option<bool>,
-    pub date_taken: Option<String>,
-    pub gps_latitude: Option<f64>,
-    pub gps_longitude: Option<f64>,
-    pub gps_altitude: Option<f32>,
-    pub orientation: Option<u16>,
-    pub software: Option<String>,
-    pub copyright: Option<String>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub color_space: Option<String>,
-    pub white_balance: Option<String>,
-    pub metering_mode: Option<String>,
-    pub exposure_program: Option<String>,
-    pub exposure_bias: Option<f32>,
-}
+/// A photograph's EXIF, read by the shared `exif` crate.
+///
+/// The parser was this file's own until 2026-09-26: the image viewer's info
+/// panel and the file manager's columns want the same facts, and a parser of
+/// untrusted input kept in three copies is three attack surfaces with one set
+/// of fixes. The crate also finds the EXIF by the file's structure -- a JPEG's
+/// APP1 segment, a PNG's `eXIf` chunk -- where this searched the whole file for
+/// the bytes `Exif\0\0`, and reads the exposure program from its own tag: it
+/// was taken from ExposureMode, whose values mean something else.
+pub use exif::ExifData;
 
-impl ExifData {
-    /// Create empty EXIF data.
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Sample EXIF data, for tests.
-    ///
-    /// `#[cfg(test)]` since 2026-09-15. It was reachable from production and
-    /// `seeded_library` used it, so every photo in the window that opened was
-    /// described as a Canon EOS R5 shot in San Francisco. A fixture that
-    /// production can reach is a fixture that eventually ships.
-    #[cfg(test)]
-    pub fn sample() -> Self {
-        Self {
-            camera_make: Some("Canon".to_owned()),
-            camera_model: Some("EOS R5".to_owned()),
-            lens: Some("RF 24-70mm f/2.8L IS USM".to_owned()),
-            focal_length_mm: Some(50.0),
-            aperture: Some(2.8),
-            shutter_speed: Some("1/250".to_owned()),
-            iso: Some(400),
-            flash_fired: Some(false),
-            date_taken: Some("2025-06-15 14:30:22".to_owned()),
-            gps_latitude: Some(37.7749),
-            gps_longitude: Some(-122.4194),
-            gps_altitude: Some(16.0),
-            orientation: Some(1),
-            software: Some("Adobe Lightroom 7.0".to_owned()),
-            copyright: None,
-            width: Some(8192),
-            height: Some(5464),
-            color_space: Some("sRGB".to_owned()),
-            white_balance: Some("Auto".to_owned()),
-            metering_mode: Some("Multi-segment".to_owned()),
-            exposure_program: Some("Aperture Priority".to_owned()),
-            exposure_bias: Some(0.0),
-        }
-    }
-
-    /// Format resolution as "WxH" string.
-    pub fn resolution_str(&self) -> String {
-        match (self.width, self.height) {
-            (Some(w), Some(h)) => format!("{w} x {h}"),
-            _ => "Unknown".to_owned(),
-        }
-    }
-
-    /// Format GPS coordinates as a readable string.
-    pub fn gps_str(&self) -> Option<String> {
-        match (self.gps_latitude, self.gps_longitude) {
-            (Some(lat), Some(lon)) => {
-                let lat_dir = if lat >= 0.0 { "N" } else { "S" };
-                let lon_dir = if lon >= 0.0 { "E" } else { "W" };
-                Some(format!(
-                    "{:.4}{} {:.4}{}",
-                    lat.abs(),
-                    lat_dir,
-                    lon.abs(),
-                    lon_dir
-                ))
-            }
-            _ => None,
-        }
-    }
-
-    /// Format megapixels.
-    pub fn megapixels(&self) -> Option<f32> {
-        match (self.width, self.height) {
-            (Some(w), Some(h)) => {
-                let px = f64::from(w) * f64::from(h);
-                Some((px / 1_000_000.0) as f32)
-            }
-            _ => None,
-        }
-    }
-
-    /// Get exposure summary (aperture, shutter, ISO).
-    pub fn exposure_summary(&self) -> String {
-        let mut parts = Vec::new();
-        if let Some(ap) = self.aperture {
-            parts.push(format!("f/{ap:.1}"));
-        }
-        if let Some(ref ss) = self.shutter_speed {
-            parts.push(format!("{ss}s"));
-        }
-        if let Some(iso) = self.iso {
-            parts.push(format!("ISO {iso}"));
-        }
-        if parts.is_empty() {
-            "No exposure data".to_owned()
-        } else {
-            parts.join("  ")
-        }
-    }
-}
-
-/// Parse EXIF data from raw bytes (simplified parser for common tags).
+/// The EXIF in a picture file's bytes: see [`exif::read`].
 pub fn parse_exif_from_bytes(data: &[u8]) -> ExifData {
-    let mut exif = ExifData::empty();
-
-    // Check for JPEG SOI marker + EXIF APP1 header
-    if data.len() < 12 {
-        return exif;
-    }
-
-    // Look for "Exif\0\0" marker
-    let exif_header = b"Exif\0\0";
-    let mut offset = None;
-    for i in 0..data.len().saturating_sub(6) {
-        if data.get(i..i.saturating_add(6)) == Some(exif_header) {
-            offset = Some(i.saturating_add(6));
-            break;
-        }
-    }
-
-    let tiff_start = match offset {
-        Some(o) => o,
-        None => return exif,
-    };
-
-    // Determine byte order (II = little-endian, MM = big-endian)
-    let little_endian = match data.get(tiff_start..tiff_start.saturating_add(2)) {
-        Some(b"II") => true,
-        Some(b"MM") => false,
-        _ => return exif,
-    };
-
-    // Verify TIFF magic number
-    let magic = read_u16(data, tiff_start.saturating_add(2), little_endian);
-    if magic != Some(42) {
-        return exif;
-    }
-
-    // Get IFD0 offset
-    let ifd0_offset = match read_u32(data, tiff_start.saturating_add(4), little_endian) {
-        Some(o) => tiff_start.saturating_add(o as usize),
-        None => return exif,
-    };
-
-    // Parse IFD entries
-    parse_ifd_entries(data, ifd0_offset, tiff_start, little_endian, &mut exif);
-
-    exif
-}
-
-fn read_u16(data: &[u8], offset: usize, little_endian: bool) -> Option<u16> {
-    let b0 = u16::from(*data.get(offset)?);
-    let b1 = u16::from(*data.get(offset.saturating_add(1))?);
-    if little_endian {
-        Some(b0 | (b1 << 8))
-    } else {
-        Some((b0 << 8) | b1)
-    }
-}
-
-fn read_u32(data: &[u8], offset: usize, little_endian: bool) -> Option<u32> {
-    let lo = u32::from(read_u16(data, offset, little_endian)?);
-    let hi = u32::from(read_u16(data, offset.saturating_add(2), little_endian)?);
-    if little_endian {
-        Some(lo | (hi << 16))
-    } else {
-        Some((lo << 16) | hi)
-    }
-}
-
-fn read_ascii_string(data: &[u8], offset: usize, count: usize) -> Option<String> {
-    let end = offset.saturating_add(count);
-    let slice = data.get(offset..end)?;
-    // Trim trailing nulls
-    let trimmed = slice
-        .iter()
-        .copied()
-        .take_while(|&b| b != 0)
-        .collect::<Vec<u8>>();
-    String::from_utf8(trimmed).ok()
-}
-
-/// Parse IFD entries for EXIF tags.
-fn parse_ifd_entries(
-    data: &[u8],
-    ifd_offset: usize,
-    tiff_start: usize,
-    le: bool,
-    exif: &mut ExifData,
-) {
-    let entry_count = match read_u16(data, ifd_offset, le) {
-        Some(c) => c as usize,
-        None => return,
-    };
-
-    let entries_start = ifd_offset.saturating_add(2);
-
-    for i in 0..entry_count.min(200) {
-        let entry_offset = entries_start.saturating_add(i.saturating_mul(12));
-        let tag = match read_u16(data, entry_offset, le) {
-            Some(t) => t,
-            None => continue,
-        };
-        let data_type = match read_u16(data, entry_offset.saturating_add(2), le) {
-            Some(t) => t,
-            None => continue,
-        };
-        let count = match read_u32(data, entry_offset.saturating_add(4), le) {
-            Some(c) => c as usize,
-            None => continue,
-        };
-        let value_offset_raw = entry_offset.saturating_add(8);
-
-        match tag {
-            // ImageWidth
-            0x0100 => {
-                if let Some(v) =
-                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
-                {
-                    exif.width = Some(v);
-                }
-            }
-            // ImageHeight
-            0x0101 => {
-                if let Some(v) =
-                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
-                {
-                    exif.height = Some(v);
-                }
-            }
-            // Make
-            0x010F => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.camera_make = Some(s);
-                }
-            }
-            // Model
-            0x0110 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.camera_model = Some(s);
-                }
-            }
-            // Orientation
-            0x0112 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.orientation = Some(v);
-                }
-            }
-            // Software
-            0x0131 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.software = Some(s);
-                }
-            }
-            // Copyright
-            0x8298 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.copyright = Some(s);
-                }
-            }
-            // ExifIFD pointer — recurse into the Exif sub-IFD
-            0x8769 => {
-                if let Some(sub_offset) = read_u32(data, value_offset_raw, le) {
-                    parse_ifd_entries(
-                        data,
-                        tiff_start.saturating_add(sub_offset as usize),
-                        tiff_start,
-                        le,
-                        exif,
-                    );
-                }
-            }
-            // GPS IFD pointer
-            0x8825 => {
-                if let Some(sub_offset) = read_u32(data, value_offset_raw, le) {
-                    parse_gps_ifd(
-                        data,
-                        tiff_start.saturating_add(sub_offset as usize),
-                        tiff_start,
-                        le,
-                        exif,
-                    );
-                }
-            }
-            // ExposureTime
-            0x829A => {
-                if let Some((num, den)) =
-                    read_rational(data, value_offset_raw, tiff_start, le, count)
-                    && den != 0
-                {
-                    if num < den {
-                        exif.shutter_speed = Some(format!("{num}/{den}"));
-                    } else {
-                        let secs = f64::from(num) / f64::from(den);
-                        exif.shutter_speed = Some(format!("{secs:.1}"));
-                    }
-                }
-            }
-            // FNumber
-            0x829D => {
-                if let Some((num, den)) =
-                    read_rational(data, value_offset_raw, tiff_start, le, count)
-                    && den != 0
-                {
-                    exif.aperture = Some(num as f32 / den as f32);
-                }
-            }
-            // ISO
-            0x8827 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.iso = Some(u32::from(v));
-                }
-            }
-            // DateTimeOriginal
-            0x9003 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.date_taken = Some(s);
-                }
-            }
-            // Flash
-            0x9209 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.flash_fired = Some((v & 1) != 0);
-                }
-            }
-            // FocalLength
-            0x920A => {
-                if let Some((num, den)) =
-                    read_rational(data, value_offset_raw, tiff_start, le, count)
-                    && den != 0
-                {
-                    exif.focal_length_mm = Some(num as f32 / den as f32);
-                }
-            }
-            // ColorSpace
-            0xA001 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.color_space = Some(match v {
-                        1 => "sRGB".to_owned(),
-                        0xFFFF => "Uncalibrated".to_owned(),
-                        _ => format!("Unknown({v})"),
-                    });
-                }
-            }
-            // PixelXDimension
-            0xA002 => {
-                if let Some(v) =
-                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
-                {
-                    exif.width = Some(v);
-                }
-            }
-            // PixelYDimension
-            0xA003 => {
-                if let Some(v) =
-                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
-                {
-                    exif.height = Some(v);
-                }
-            }
-            // WhiteBalance
-            0xA403 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.white_balance = Some(match v {
-                        0 => "Auto".to_owned(),
-                        1 => "Manual".to_owned(),
-                        _ => format!("Unknown({v})"),
-                    });
-                }
-            }
-            // ExposureMode
-            0xA402 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.exposure_program = Some(match v {
-                        0 => "Auto".to_owned(),
-                        1 => "Manual".to_owned(),
-                        2 => "Auto Bracket".to_owned(),
-                        _ => format!("Mode {v}"),
-                    });
-                }
-            }
-            // MeteringMode
-            0x9207 => {
-                if let Some(v) = read_u16(data, value_offset_raw, le) {
-                    exif.metering_mode = Some(match v {
-                        0 => "Unknown".to_owned(),
-                        1 => "Average".to_owned(),
-                        2 => "Center-weighted".to_owned(),
-                        3 => "Spot".to_owned(),
-                        4 => "Multi-spot".to_owned(),
-                        5 => "Multi-segment".to_owned(),
-                        6 => "Partial".to_owned(),
-                        _ => format!("Other({v})"),
-                    });
-                }
-            }
-            // ExposureBiasValue
-            0x9204 => {
-                if let Some((num, den)) =
-                    read_rational_signed(data, value_offset_raw, tiff_start, le, count)
-                    && den != 0
-                {
-                    exif.exposure_bias = Some(num as f32 / den as f32);
-                }
-            }
-            // LensModel
-            0xA434 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    exif.lens = Some(s);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Parse GPS IFD entries.
-fn parse_gps_ifd(data: &[u8], ifd_offset: usize, tiff_start: usize, le: bool, exif: &mut ExifData) {
-    let entry_count = match read_u16(data, ifd_offset, le) {
-        Some(c) => c as usize,
-        None => return,
-    };
-
-    let entries_start = ifd_offset.saturating_add(2);
-    let mut lat_ref: Option<char> = None;
-    let mut lon_ref: Option<char> = None;
-    let mut lat_vals: Option<(f64, f64, f64)> = None;
-    let mut lon_vals: Option<(f64, f64, f64)> = None;
-
-    for i in 0..entry_count.min(50) {
-        let entry_offset = entries_start.saturating_add(i.saturating_mul(12));
-        let tag = match read_u16(data, entry_offset, le) {
-            Some(t) => t,
-            None => continue,
-        };
-        let _data_type = read_u16(data, entry_offset.saturating_add(2), le);
-        let count = match read_u32(data, entry_offset.saturating_add(4), le) {
-            Some(c) => c as usize,
-            None => continue,
-        };
-        let value_offset_raw = entry_offset.saturating_add(8);
-
-        match tag {
-            // GPSLatitudeRef
-            1 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    lat_ref = s.chars().next();
-                }
-            }
-            // GPSLatitude
-            2 => {
-                lat_vals = read_gps_dms(data, value_offset_raw, tiff_start, le);
-            }
-            // GPSLongitudeRef
-            3 => {
-                if let Some(s) = read_value_string(data, value_offset_raw, tiff_start, le, count) {
-                    lon_ref = s.chars().next();
-                }
-            }
-            // GPSLongitude
-            4 => {
-                lon_vals = read_gps_dms(data, value_offset_raw, tiff_start, le);
-            }
-            // GPSAltitude
-            6 => {
-                if let Some(offset_val) = read_u32(data, value_offset_raw, le) {
-                    let abs_offset = tiff_start.saturating_add(offset_val as usize);
-                    if let (Some(num), Some(den)) = (
-                        read_u32(data, abs_offset, le),
-                        read_u32(data, abs_offset.saturating_add(4), le),
-                    ) && den != 0
-                    {
-                        exif.gps_altitude = Some(num as f32 / den as f32);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Convert DMS to decimal degrees
-    if let Some((d, m, s)) = lat_vals {
-        let mut dec = d + m / 60.0 + s / 3600.0;
-        if lat_ref == Some('S') {
-            dec = -dec;
-        }
-        exif.gps_latitude = Some(dec);
-    }
-    if let Some((d, m, s)) = lon_vals {
-        let mut dec = d + m / 60.0 + s / 3600.0;
-        if lon_ref == Some('W') {
-            dec = -dec;
-        }
-        exif.gps_longitude = Some(dec);
-    }
-}
-
-fn read_gps_dms(
-    data: &[u8],
-    value_offset: usize,
-    tiff_start: usize,
-    le: bool,
-) -> Option<(f64, f64, f64)> {
-    let offset_val = read_u32(data, value_offset, le)? as usize;
-    let abs = tiff_start.saturating_add(offset_val);
-
-    let d_num = f64::from(read_u32(data, abs, le)?);
-    let d_den = f64::from(read_u32(data, abs.saturating_add(4), le)?);
-    let m_num = f64::from(read_u32(data, abs.saturating_add(8), le)?);
-    let m_den = f64::from(read_u32(data, abs.saturating_add(12), le)?);
-    let s_num = f64::from(read_u32(data, abs.saturating_add(16), le)?);
-    let s_den = f64::from(read_u32(data, abs.saturating_add(20), le)?);
-
-    if d_den == 0.0 || m_den == 0.0 || s_den == 0.0 {
-        return None;
-    }
-
-    Some((d_num / d_den, m_num / m_den, s_num / s_den))
-}
-
-fn read_value_string(
-    data: &[u8],
-    value_offset: usize,
-    tiff_start: usize,
-    le: bool,
-    count: usize,
-) -> Option<String> {
-    if count <= 4 {
-        // Value stored inline in the 4-byte value field
-        read_ascii_string(data, value_offset, count)
-    } else {
-        // Value stored at an offset
-        let offset_val = read_u32(data, value_offset, le)? as usize;
-        read_ascii_string(data, tiff_start.saturating_add(offset_val), count)
-    }
-}
-
-fn read_value_u32(
-    data: &[u8],
-    value_offset: usize,
-    _tiff_start: usize,
-    le: bool,
-    data_type: u16,
-    _count: usize,
-) -> Option<u32> {
-    match data_type {
-        3 => read_u16(data, value_offset, le).map(u32::from), // SHORT
-        4 => read_u32(data, value_offset, le),                // LONG
-        _ => None,
-    }
-}
-
-fn read_rational(
-    data: &[u8],
-    value_offset: usize,
-    tiff_start: usize,
-    le: bool,
-    _count: usize,
-) -> Option<(u32, u32)> {
-    let offset_val = read_u32(data, value_offset, le)? as usize;
-    let abs = tiff_start.saturating_add(offset_val);
-    let num = read_u32(data, abs, le)?;
-    let den = read_u32(data, abs.saturating_add(4), le)?;
-    Some((num, den))
-}
-
-fn read_rational_signed(
-    data: &[u8],
-    value_offset: usize,
-    tiff_start: usize,
-    le: bool,
-    _count: usize,
-) -> Option<(i32, i32)> {
-    let offset_val = read_u32(data, value_offset, le)? as usize;
-    let abs = tiff_start.saturating_add(offset_val);
-    let num = read_u32(data, abs, le)? as i32;
-    let den = read_u32(data, abs.saturating_add(4), le)? as i32;
-    Some((num, den))
+    exif::read(data)
 }
 
 // ============================================================================
@@ -1744,6 +1158,50 @@ struct ShownPicture {
     height: u32,
 }
 
+/// The worker that decodes the selected photograph off the window's thread:
+/// asked with the photograph and its file, answering with the photograph and
+/// its pixels or why there are none.
+type PictureLoader =
+    offloop::Latest<(PhotoId, std::path::PathBuf), (PhotoId, Result<imagecodec::Image, String>)>;
+
+/// The worker that makes the grid's thumbnails off the window's thread: asked
+/// with every card the grid shows, answering with each one's thumbnail as it
+/// is made.
+type ThumbWorker =
+    offloop::Queue<thumbs::ThumbnailRequest, Option<(thumbs::ThumbnailRequest, thumbs::Thumbnail)>>;
+
+/// Make one thumbnail with `generator` -- from its disk cache if it has one, else
+/// from the file.
+fn make_thumbnail(
+    generator: &mut thumbs::ThumbnailGenerator,
+    request: thumbs::ThumbnailRequest,
+) -> Option<(thumbs::ThumbnailRequest, thumbs::Thumbnail)> {
+    generator.push(request);
+    generator.process_batch(1);
+    generator.take_completed().pop()
+}
+
+/// Read and decode the photograph at `path`, or say why not.
+///
+/// Nothing here needs the application, so it runs on the loader's thread or,
+/// with no loader, on the window's -- and says the same either way.
+fn decode_photo(path: &std::path::Path) -> Result<imagecodec::Image, String> {
+    let read = safeio::read_capped(path, PhotoApp::MAX_PICTURE_BYTES)
+        .map_err(|e| format!("could not be read: {e}"))?;
+    if read.truncated {
+        // Refused rather than decoded. A picture's tail is not optional -- a
+        // JPEG's scan runs to the last byte of the file -- so a cut file
+        // decodes to something that is not the photograph, and would then be
+        // shown without a word about it.
+        return Err(format!(
+            "is larger than {} MiB",
+            PhotoApp::MAX_PICTURE_BYTES / (1024 * 1024)
+        ));
+    }
+    imagecodec::decode(&read.bytes, imagecodec::Limits::default())
+        .map_err(|e| format!("could not be decoded: {e}"))
+}
+
 /// A file's modification time, in seconds since the epoch, or zero.
 ///
 /// Zero for a file that cannot be stat'ed, and that is a usable key rather
@@ -1859,6 +1317,23 @@ pub struct PhotoApp {
     pending_images: Vec<app::ImageChange>,
     /// The photograph whose pixels are uploaded, once it has been decoded.
     shown_picture: Option<ShownPicture>,
+    /// The worker that decodes the selected photograph, once the window has
+    /// handed over a way to be woken (`App::attach_waker`).
+    ///
+    /// The decode ran inside `render`, so selecting a large photograph froze
+    /// the window -- every other photograph, every key -- for as long as it
+    /// took (`known-issues.md` ->
+    /// `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`). With
+    /// no loader -- before the window exists, and in tests that give it no
+    /// waker -- the photograph is decoded where it is asked for, as it was.
+    picture_loader: Option<PictureLoader>,
+    /// The worker that makes the grid's thumbnails, once the window has
+    /// handed over a way to be woken; `thumb_gen` is its generator until then.
+    ///
+    /// They were made a few per frame inside `render`, and a camera's JPEG
+    /// costs about a third of a second even at thumbnail size, so every frame
+    /// that made two or three was a frame the window could not answer in.
+    thumb_worker: Option<ThumbWorker>,
     /// The photograph the two fields above were computed for, whether that
     /// ended in a picture or in a reason.
     ///
@@ -1947,6 +1422,8 @@ impl PhotoApp {
             shown_picture: None,
             picture_for: None,
             picture_error: None,
+            picture_loader: None,
+            thumb_worker: None,
             thumb_cache: thumbs::ThumbnailCache::default_capacity(),
             thumb_gen: thumbs::ThumbnailGenerator::new(),
             thumb_ready: HashMap::new(),
@@ -2214,9 +1691,33 @@ impl PhotoApp {
     /// modification time and size, so a hit is a hit on *this* version of the
     /// file and a miss after an edit is automatic.
     fn queue_thumbnails(&mut self) {
+        let wanted = self.thumbnail_requests();
+        // The worker's set replaces what is left of the last one -- the cards
+        // scrolled away -- and an empty set cancels it.
+        let wanted = match self.thumb_worker.as_mut() {
+            Some(worker) => match worker.replace(wanted) {
+                Ok(()) => return,
+                // The worker is gone (only a panic does that, and only a
+                // test's build survives one): make them here, a few a frame.
+                Err(wanted) => {
+                    self.thumb_worker = None;
+                    wanted
+                }
+            },
+            None => wanted,
+        };
         self.thumb_gen.cancel_all();
+        for request in wanted {
+            self.thumb_gen.push(request);
+        }
+    }
+
+    /// A thumbnail request for every card the grid will draw that has none
+    /// in the cache -- and, for those that have, a note that they are ready.
+    fn thumbnail_requests(&mut self) -> Vec<thumbs::ThumbnailRequest> {
+        let mut requests = Vec::new();
         if self.view_mode != ViewMode::Grid {
-            return;
+            return requests;
         }
         let config = self.thumb_config();
         let wanted: Vec<PhotoId> = self.visible_photos();
@@ -2234,13 +1735,14 @@ impl PhotoApp {
                     .insert(pid, (mtime, thumbs::image_id(&path, mtime, size)));
                 continue;
             }
-            self.thumb_gen.push(thumbs::ThumbnailRequest {
+            requests.push(thumbs::ThumbnailRequest {
                 path,
                 mtime,
                 size,
                 config: config.clone(),
             });
         }
+        requests
     }
 
     /// How a thumbnail should look: the user's colours, at the grid's size.
@@ -2265,18 +1767,42 @@ impl PhotoApp {
     fn pump_thumbnails(&mut self) {
         self.thumb_gen.process_batch(Self::THUMB_BATCH);
         for (req, thumb) in self.thumb_gen.take_completed() {
-            let id = thumbs::image_id(&req.path, req.mtime, req.size);
-            let owner = self
-                .photos
-                .iter()
-                .find(|p| p.file_path == req.path)
-                .map(|p| p.id);
-            self.thumb_uploads.push((id, thumb.clone()));
-            self.thumb_cache
-                .insert(&req.path, req.mtime, req.size, thumb);
-            if let Some(pid) = owner {
-                self.thumb_ready.insert(pid, (req.mtime, id));
-            }
+            self.file_thumbnail(req, thumb);
+        }
+        self.collect_thumbnails();
+    }
+
+    /// File every thumbnail the worker has made since the last call; whether
+    /// there were any, so a wake that brought some can ask for a frame.
+    fn collect_thumbnails(&mut self) -> bool {
+        let made: Vec<_> = self
+            .thumb_worker
+            .as_mut()
+            .map(offloop::Queue::take)
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect();
+        let any = !made.is_empty();
+        for (req, thumb) in made {
+            self.file_thumbnail(req, thumb);
+        }
+        any
+    }
+
+    /// File one made thumbnail.
+    fn file_thumbnail(&mut self, req: thumbs::ThumbnailRequest, thumb: thumbs::Thumbnail) {
+        let id = thumbs::image_id(&req.path, req.mtime, req.size);
+        let owner = self
+            .photos
+            .iter()
+            .find(|p| p.file_path == req.path)
+            .map(|p| p.id);
+        self.thumb_uploads.push((id, thumb.clone()));
+        self.thumb_cache
+            .insert(&req.path, req.mtime, req.size, thumb);
+        if let Some(pid) = owner {
+            self.thumb_ready.insert(pid, (req.mtime, id));
         }
     }
 
@@ -2333,32 +1859,47 @@ impl PhotoApp {
             return;
         };
 
-        let read = match safeio::read_capped(&path, Self::MAX_PICTURE_BYTES) {
-            Ok(read) => read,
-            Err(e) => {
-                self.picture_error = Some(format!("could not be read: {e}"));
-                return;
-            }
+        // Off the window's thread when there is a loader: the card shows the
+        // photograph's name and size until `on_wake` brings its pixels.
+        let asked = match self.picture_loader.as_mut() {
+            Some(loader) => loader.ask((pid, path)),
+            None => Err((pid, path)),
         };
-        if read.truncated {
-            // Refused rather than decoded. A picture's tail is not optional --
-            // a JPEG's scan runs to the last byte of the file -- so a cut file
-            // decodes to something that is not the photograph, and would then
-            // be shown without a word about it.
-            self.picture_error = Some(format!(
-                "is larger than {} MiB",
-                Self::MAX_PICTURE_BYTES / (1024 * 1024)
-            ));
-            return;
+        if let Err((pid, path)) = asked {
+            // No loader, or one whose thread has gone -- which only a panic
+            // does, and only a test's build survives one. The photograph is
+            // still wanted, and this thread can decode it.
+            self.picture_loader = None;
+            self.show_picture(pid, decode_photo(&path));
         }
-        let image = match imagecodec::decode(&read.bytes, imagecodec::Limits::default()) {
+    }
+
+    /// Put up the photograph the loader has finished, if it has; whether it
+    /// did.
+    fn take_decoded_picture(&mut self) -> bool {
+        let Some((pid, decoded)) = self.picture_loader.as_mut().and_then(offloop::Latest::take)
+        else {
+            return false;
+        };
+        // The loader answers only the newest request, which is the selection
+        // unless that has since moved to nothing.
+        if self.picture_for != Some(pid) {
+            return false;
+        }
+        self.show_picture(pid, decoded);
+        true
+    }
+
+    /// Put the decoded photograph `pid` up -- or, when it would not decode,
+    /// the reason where it would have been.
+    fn show_picture(&mut self, pid: PhotoId, decoded: Result<imagecodec::Image, String>) {
+        let image = match decoded {
             Ok(image) => image,
-            Err(e) => {
-                self.picture_error = Some(format!("could not be decoded: {e}"));
+            Err(why) => {
+                self.picture_error = Some(why);
                 return;
             }
         };
-
         self.shown_picture = Some(ShownPicture {
             photo: pid,
             width: image.width,
@@ -3158,19 +2699,25 @@ impl PhotoApp {
     /// window over a library that was never read from anywhere, and "nothing
     /// visibly happened" is exactly how that survived.
     fn import_from_disk(&mut self, path: &std::path::Path) -> String {
-        let name = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
+        let name = shown_file_name(path).unwrap_or_else(|| path.shown().to_string());
+        // Under the same cap as opening a picture: it read the whole file
+        // first, however large, before anything could refuse it.
+        let bytes = match safeio::read_capped(path, Self::MAX_PICTURE_BYTES) {
+            Ok(read) if read.truncated => {
+                return format!(
+                    "{name} is over {} MB, more than this imports",
+                    Self::MAX_PICTURE_BYTES / (1024 * 1024)
+                );
+            }
+            Ok(read) => read.bytes,
             Err(err) => return format!("Could not read {name}: {err}"),
         };
+        // An extension that is not text is no format this reads.
         let ext = path
             .extension()
-            .map(|e| e.to_string_lossy().into_owned())
+            .and_then(std::ffi::OsStr::to_str)
             .unwrap_or_default();
-        let Some(format) = ImageFormat::from_extension(&ext) else {
+        let Some(format) = ImageFormat::from_extension(ext) else {
             return format!("{name} is not an image format this reads");
         };
         // The EXIF parser was written, tested and never given a real file.
@@ -5113,6 +4660,45 @@ impl App for PhotoApp {
         }
     }
 
+    /// The selected photograph is decoded off the loop's thread, and the loop
+    /// woken when it is ready.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        // A worker that cannot be started leaves its work on this thread, as
+        // it always was: slower to answer, never wrong.
+        self.picture_loader = offloop::Latest::start(
+            "photomanager-picture",
+            waker.clone(),
+            |(pid, path): (PhotoId, std::path::PathBuf)| (pid, decode_photo(&path)),
+        )
+        .ok();
+        // The generator goes to the worker, with whatever disk cache it was
+        // given; an empty one is left here, which is what a worker that fails
+        // to start falls back on -- slower, never wrong.
+        let mut generator = std::mem::take(&mut self.thumb_gen);
+        self.thumb_worker = offloop::Queue::start("photomanager-thumbs", waker, move |request| {
+            make_thumbnail(&mut generator, request)
+        })
+        .ok();
+        // What the grid was filled for is forgotten, so the next frame asks
+        // for its cards again -- of the worker, or of the generator left here.
+        self.thumb_queued_for = None;
+    }
+
+    /// The selected photograph is decoded: put it up. `on_wake` runs before
+    /// the frame, so its upload is drained into that frame by `take_images`.
+    fn on_wake(&mut self) -> Response {
+        let thumbnails = self.collect_thumbnails();
+        if self.take_decoded_picture() || thumbnails {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     fn take_images(&mut self) -> Vec<app::ImageChange> {
         // Drops first, and the order is load-bearing: the link checks its
         // image budget against `held - freed + incoming`, so a batch that
@@ -5174,6 +4760,13 @@ impl App for PhotoApp {
     }
 }
 
+/// `path`'s file name as the window shows it (`pathtext`): a byte that is
+/// not text, or a control character, as an escape -- never a lossy decode,
+/// which shows two such names alike.
+fn shown_file_name(path: &std::path::Path) -> Option<String> {
+    Some(path.file_name()?.shown().to_string())
+}
+
 fn main() -> ExitCode {
     // Starts empty. It used to call `seeded_library`, which built two albums
     // ("Vacation 2025", "Family") and three photos at paths like
@@ -5212,6 +4805,38 @@ mod tests {
 
     // --- ImageFormat tests ---
 
+    /// A file name that is text is shown as it is; one that is not, by its
+    /// bytes -- two such names never look the same.
+    #[test]
+    fn a_file_name_that_is_not_text_is_shown_by_its_bytes() {
+        use std::path::Path;
+        assert_eq!(
+            shown_file_name(Path::new("dir/notes.txt")).as_deref(),
+            Some("notes.txt")
+        );
+        assert_eq!(shown_file_name(Path::new("/")), None);
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_wide(&[0x0066, 0xD800]),
+                std::ffi::OsString::from_wide(&[0x0066, 0xD801]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_vec(vec![b'f', 0xFE]),
+                std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
+            )
+        };
+        let shown_a = shown_file_name(Path::new(&a)).unwrap();
+        let shown_b = shown_file_name(Path::new(&b)).unwrap();
+        assert!(!shown_a.contains('\u{FFFD}'), "{shown_a:?}");
+        assert_ne!(shown_a, shown_b, "two names became one");
+    }
+
     #[test]
     fn test_format_from_extension() {
         assert_eq!(ImageFormat::from_extension("jpg"), Some(ImageFormat::Jpeg));
@@ -5247,9 +4872,43 @@ mod tests {
 
     // --- ExifData tests ---
 
+    /// Sample EXIF data, for tests.
+    ///
+    /// A test helper, and only that. It was `ExifData::sample`, reachable from
+    /// production, and `seeded_library` used it -- so every photo in the
+    /// window that opened was described as a Canon EOS R5 shot in San
+    /// Francisco. A fixture that production can reach is a fixture that
+    /// eventually ships.
+    fn sample_exif() -> ExifData {
+        ExifData {
+            camera_make: Some("Canon".to_owned()),
+            camera_model: Some("EOS R5".to_owned()),
+            lens: Some("RF 24-70mm f/2.8L IS USM".to_owned()),
+            focal_length_mm: Some(50.0),
+            aperture: Some(2.8),
+            shutter_speed: Some("1/250".to_owned()),
+            iso: Some(400),
+            flash_fired: Some(false),
+            date_taken: Some("2025-06-15 14:30:22".to_owned()),
+            gps_latitude: Some(37.7749),
+            gps_longitude: Some(-122.4194),
+            gps_altitude: Some(16.0),
+            orientation: Some(1),
+            software: Some("Adobe Lightroom 7.0".to_owned()),
+            copyright: None,
+            width: Some(8192),
+            height: Some(5464),
+            color_space: Some("sRGB".to_owned()),
+            white_balance: Some("Auto".to_owned()),
+            metering_mode: Some("Multi-segment".to_owned()),
+            exposure_program: Some("Aperture Priority".to_owned()),
+            exposure_bias: Some(0.0),
+        }
+    }
+
     #[test]
     fn test_exif_sample() {
-        let exif = ExifData::sample();
+        let exif = sample_exif();
         assert_eq!(exif.camera_make.as_deref(), Some("Canon"));
         assert_eq!(exif.resolution_str(), "8192 x 5464");
         assert!(exif.megapixels().unwrap() > 44.0);
@@ -5884,7 +5543,7 @@ mod tests {
             "photo.jpg",
             ImageFormat::Jpeg,
             5_000_000,
-            ExifData::sample(),
+            sample_exif(),
         );
         let photo = app.find_photo(id).unwrap();
         assert_eq!(photo.exif.camera_make.as_deref(), Some("Canon"));
@@ -7484,7 +7143,7 @@ mod tests {
             "IMG_0001.jpg",
             ImageFormat::Jpeg,
             5_242_880,
-            ExifData::sample(),
+            sample_exif(),
         );
         let p2 = app.import_photo(
             "/photos/IMG_0002.png",
@@ -7526,7 +7185,7 @@ mod tests {
     #[test]
     fn every_parsed_exif_field_reaches_the_panel() {
         let app = PhotoApp::new();
-        let mut exif = ExifData::sample();
+        let mut exif = sample_exif();
         exif.copyright = Some("(c) nobody".to_owned());
         exif.exposure_program = Some("Aperture priority".to_owned());
         exif.exposure_bias = Some(-0.7);
@@ -7925,6 +7584,62 @@ mod tests {
         );
     }
 
+    /// Run the window's side of the thumbnail worker until `n` cards have
+    /// their picture: wait for a wake, then do what the loop does with it.
+    fn until_thumbnails(
+        app: &mut PhotoApp,
+        heard: &std::sync::mpsc::Receiver<()>,
+        n: usize,
+    ) -> usize {
+        let mut redraws: usize = 0;
+        while app.thumb_ready.len() < n {
+            heard
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the thumbnail worker never woke the window");
+            if app.on_wake() == Response::Redraw {
+                redraws = redraws.saturating_add(1);
+            }
+        }
+        redraws
+    }
+
+    /// **The grid's thumbnails are made off the window's thread**, every card
+    /// the grid shows, and each is put up as it arrives. They were made a few
+    /// per frame inside `render`.
+    #[test]
+    fn the_grids_thumbnails_are_made_off_the_window() {
+        let n = PhotoApp::THUMB_BATCH + 3;
+        let mut app = app_with_n_pictures("thumbs-off", n);
+        let heard = with_a_loader(&mut app);
+        assert!(
+            app.thumb_worker.is_some(),
+            "no thumbnail worker was started"
+        );
+        let _ = app.render(900.0, 700.0);
+        assert_eq!(
+            app.thumb_gen.pending_count(),
+            0,
+            "the frame was left to make them"
+        );
+        assert!(
+            until_thumbnails(&mut app, &heard, n) > 0,
+            "thumbnails arrived and no frame was asked for"
+        );
+        let uploads = app
+            .take_images()
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Upload { .. }))
+            .count();
+        assert_eq!(uploads, n, "a thumbnail made was never sent");
+        let drawn = app
+            .render(900.0, 700.0)
+            .commands
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Image { .. }))
+            .count();
+        assert_eq!(drawn, n, "a card still draws its placeholder");
+    }
+
     /// More photographs than fit in one frame's budget still all arrive.
     ///
     /// The budget is what keeps a scroll smooth; the thing to prove is that it
@@ -8111,6 +7826,135 @@ mod tests {
             app.picture_error, first,
             "the file was opened a second time, so every frame re-reads it"
         );
+    }
+
+    /// The photo manager given a loader, as the window gives it one, and the
+    /// channel its wakes are said on.
+    fn with_a_loader(app: &mut PhotoApp) -> std::sync::mpsc::Receiver<()> {
+        assert!(app.wants_waker());
+        let (waker, heard) = offloop::channel_waker();
+        app.attach_waker(waker);
+        assert!(app.picture_loader.is_some(), "no loader was started");
+        heard
+    }
+
+    /// Run the window's side of the loader until the newest photograph is in:
+    /// wait for a wake, then do what the loop does with it.
+    fn until_decoded(app: &mut PhotoApp, heard: &std::sync::mpsc::Receiver<()>) -> usize {
+        let mut redraws: usize = 0;
+        while app
+            .picture_loader
+            .as_ref()
+            .is_some_and(offloop::Latest::busy)
+        {
+            heard
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the loader never woke the window");
+            if app.on_wake() == Response::Redraw {
+                redraws = redraws.saturating_add(1);
+            }
+        }
+        redraws
+    }
+
+    /// **The selected photograph is decoded off the window's thread** and
+    /// drawn when it wakes the window: the frame that asked for it is not held
+    /// up by it, and shows the card until it arrives.
+    #[test]
+    fn the_selected_photograph_is_decoded_off_the_window() {
+        let mut app = app_with_pictures("off-loop");
+        let heard = with_a_loader(&mut app);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+        let tree = app.render(900.0, 700.0);
+        assert!(
+            app.take_images().is_empty(),
+            "decoded on the frame that asked"
+        );
+        let drawn = |tree: &RenderTree| {
+            tree.commands.iter().any(
+                |c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == PHOTO_IMAGE_ID),
+            )
+        };
+        assert!(!drawn(&tree), "drawn before it was decoded");
+        assert_eq!(until_decoded(&mut app, &heard), 1);
+        let queued = app.take_images();
+        assert!(
+            matches!(
+                queued.as_slice(),
+                [oswindow::app::ImageChange::Upload {
+                    id: PHOTO_IMAGE_ID,
+                    width: 6,
+                    height: 4,
+                    ..
+                }]
+            ),
+            "{} change(s)",
+            queued.len()
+        );
+        assert!(drawn(&app.render(900.0, 700.0)));
+    }
+
+    /// **A photograph moved past is never put up**: two selections before the
+    /// first decode is in, and only the second arrives.
+    #[test]
+    fn a_photograph_moved_past_is_never_put_up() {
+        let mut app = app_with_pictures("moved-past");
+        let heard = with_a_loader(&mut app);
+        let (first, second) = (app.photos[0].id, app.photos[1].id);
+        app.selected_photo = Some(first);
+        let _ = app.render(900.0, 700.0);
+        app.selected_photo = Some(second);
+        let _ = app.render(900.0, 700.0);
+        until_decoded(&mut app, &heard);
+        assert_eq!(app.shown_picture.map(|s| s.photo), Some(second));
+        let uploads = app
+            .take_images()
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Upload { .. }))
+            .count();
+        assert_eq!(uploads, 1, "the photograph moved past was uploaded too");
+    }
+
+    /// A photograph whose selection went while it decoded is not put up.
+    #[test]
+    fn a_photograph_deselected_while_decoding_is_not_put_up() {
+        let mut app = app_with_pictures("deselected");
+        let heard = with_a_loader(&mut app);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+        let _ = app.render(900.0, 700.0);
+        app.selected_photo = None;
+        let _ = app.render(900.0, 700.0);
+        heard
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the loader never woke the window");
+        assert_eq!(app.on_wake(), Response::Idle, "nothing to draw");
+        assert!(app.shown_picture.is_none());
+        assert!(app.take_images().is_empty(), "uploaded for no selection");
+    }
+
+    /// A photograph that will not decode says why, off the window as on it.
+    #[test]
+    fn a_photograph_that_fails_off_the_window_says_why() {
+        let mut app = PhotoApp::new();
+        app.view_mode = ViewMode::Single;
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("fails-off-the-window.png");
+        std::fs::write(&path, b"not a picture").expect("write");
+        app.import_from_disk(&path);
+        let heard = with_a_loader(&mut app);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+        let _ = app.render(900.0, 700.0);
+        assert!(app.picture_error.is_none(), "an answer before the decode");
+        until_decoded(&mut app, &heard);
+        assert!(
+            app.picture_error
+                .as_deref()
+                .is_some_and(|r| r.contains("could not be decoded")),
+            "{:?}",
+            app.picture_error
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A second selection replaces the upload rather than queueing behind it.

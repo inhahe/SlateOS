@@ -2,6 +2,18 @@
 //!
 //! Implements IRC protocol message parsing, channel management,
 //! user tracking, message history, and a multi-panel chat UI.
+//!
+//! **It connects** (`net`, 2026-09-26): `/connect irc.libera.chat` opens a
+//! plain TCP connection on a thread of its own, registers (`NICK`, `USER`),
+//! and from then on every line the server sends goes through the same
+//! handlers the tests drive, and every line typed goes out. A `PING` is
+//! answered at once; a nickname already taken is tried again with a `_`; a
+//! `/join` switches to the channel when the server confirms it. The
+//! connection is plain text -- nothing here can check a secure server's
+//! identity yet -- and the window says so while connected.
+//!
+//! Until then it had no socket at all, and said so in the window; before
+//! that, it had shown a conversation nobody had.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -19,6 +31,8 @@ use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
 use std::time::Duration;
+
+mod net;
 
 // ============================================================================
 // Layout
@@ -98,6 +112,15 @@ impl IrcMessage {
         if line.is_empty() {
             return None;
         }
+        // IRCv3 message tags (`@a=b;c :prefix CMD ...`) come first when a
+        // server sends them. This client asks for none, but a server may
+        // send some anyway, and a line read with them in place of the prefix
+        // would be read as a command named `@a=b;c`.
+        let line = if line.starts_with('@') {
+            line.split_once(' ')?.1.trim_start()
+        } else {
+            line
+        };
 
         let mut rest = line;
         let prefix = if rest.starts_with(':') {
@@ -320,29 +343,15 @@ pub mod numerics {
 // CTCP (Client-To-Client Protocol)
 // ============================================================================
 
-/// What the window says instead of a conversation.
+/// What the window says while there is no connection, one line each.
 ///
-/// **This program opened on a fabricated one.** `seeded_client` set the
-/// connection state to `Connected`, named the server `irc.libera.chat`, joined
-/// `#slateos` and `#rust`, gave them topics, populated them with four users --
-/// alice, bob, charlie and a bot -- and filled the scrollback with a
-/// timestamped exchange between them. None of it happened. This client has no
-/// socket: `Cargo.toml` lists three GUI crates and nothing that opens one.
-///
-/// That is a worse thing to invent than a filename. A list of files is a claim
-/// that files exist; a conversation is a claim that *people said things*, with
-/// names and times attached, and the reader has no way to tell it from a log
-/// of a real session -- because the only difference is on the other side of a
-/// socket that is not there.
-///
-/// The three lines say what is true, in order of what the reader needs: there
-/// is no connection, there never was one, and the composer still works so
-/// typing is not pointless.
-const CANNOT_CONNECT_LINES: [&str; 3] = [
-    "Not connected: this program has no network access.",
-    "No server has been contacted, and nothing here was received from one.",
-    "Commands still parse -- typing one shows the line that would have been \
-sent.",
+/// The third line is the one that matters once a connection *can* be made:
+/// the connection is plain text, and a user deciding whether to type a
+/// password into it should know that before they do.
+const NOT_CONNECTED_LINES: [&str; 3] = [
+    "Not connected.",
+    "Type /connect irc.libera.chat -- or another network -- to join one.",
+    "Plain text: nothing here can check a secure server yet, so what you send can be read on the way.",
 ];
 
 /// Every command this client understands, and what it does.
@@ -354,6 +363,11 @@ sent.",
 /// "Unknown or incomplete command", which is a statement about the line and
 /// not an offer of the ones that would work.
 const COMMANDS: &[(&str, &str)] = &[
+    (
+        "/connect server [port]",
+        "Connect to a network, in plain text",
+    ),
+    ("/disconnect", "Leave the network"),
     ("/join #channel", "Join a channel, and switch to it"),
     ("/part [#channel]", "Leave this channel, or a named one"),
     ("/msg nick text", "Send someone a private message"),
@@ -877,13 +891,18 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             address: "irc.libera.chat".to_string(),
-            port: 6697,
-            tls: true,
+            // The plain-text port: nothing here can check a secure server
+            // yet, so 6697 (TLS) is out of reach, and saying `tls: true`
+            // would describe a connection this client cannot make.
+            port: 6667,
+            tls: false,
             nick: "SlateOSUser".to_string(),
             username: "slateos".to_string(),
             realname: "Slate OS IRC Client".to_string(),
             password: None,
-            auto_join: vec!["#slateos".to_string()],
+            // A channel is the user's to choose. This joined `#slateos`,
+            // which nobody had checked exists.
+            auto_join: Vec::new(),
             nickserv_pass: None,
         }
     }
@@ -971,6 +990,16 @@ pub struct IrcClientApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The connection, open or on its way.
+    link: Option<net::Connection>,
+    /// Wakes the window when the connection has news.
+    waker: Option<std::task::Waker>,
+    /// A channel the user asked to join, to switch to when the server says
+    /// they are in it.
+    pending_switch: Option<String>,
+    /// Lines to send, queued by handlers that answer the server (a CTCP
+    /// `VERSION`), and sent by [`Self::pump`].
+    outbox: Vec<String>,
 }
 
 impl IrcClientApp {
@@ -985,14 +1014,15 @@ impl IrcClientApp {
                 SavedNetwork {
                     name: "Libera Chat".to_string(),
                     config: ServerConfig::default(),
-                    auto_connect: true,
+                    // Nothing connects until the user says so.
+                    auto_connect: false,
                 },
                 SavedNetwork {
                     name: "OFTC".to_string(),
                     config: ServerConfig {
                         address: "irc.oftc.net".to_string(),
-                        port: 6697,
-                        tls: true,
+                        port: 6667,
+                        tls: false,
                         nick: "SlateOSUser".to_string(),
                         username: "slateos".to_string(),
                         realname: "Slate OS IRC Client".to_string(),
@@ -1023,6 +1053,175 @@ impl IrcClientApp {
             highlight_words: Vec::new(),
             notification_sound: true,
             flash_on_mention: true,
+            link: None,
+            waker: None,
+            pending_switch: None,
+            outbox: Vec::new(),
+        }
+    }
+
+    // ========================================================================
+    // The connection
+    // ========================================================================
+
+    /// Whether a connection is open or on its way.
+    #[must_use]
+    pub fn is_linked(&self) -> bool {
+        self.link.is_some()
+    }
+
+    /// Connect to `host`:`port`, closing any connection first.
+    pub fn connect(&mut self, host: &str, port: u16) {
+        let stamp = self.timestamp();
+        self.disconnect();
+        match net::Connection::open(host, port, self.waker.clone()) {
+            Ok(link) => {
+                self.link = Some(link);
+                self.connection = ConnectionState::Connecting;
+                self.server_config.address = host.to_string();
+                self.server_config.port = port;
+                self.server_messages.push(ChatMessage::system(
+                    &stamp,
+                    &format!(
+                        "Connecting to {host}:{port}, in plain text -- what you send can be read on the way"
+                    ),
+                ));
+            }
+            Err(e) => self
+                .server_messages
+                .push(ChatMessage::system(&stamp, &format!("Cannot connect: {e}"))),
+        }
+    }
+
+    /// Say goodbye and close the connection, if there is one.
+    pub fn disconnect(&mut self) {
+        self.disconnect_saying("");
+    }
+
+    /// [`disconnect`](Self::disconnect), with a reason the server shows the
+    /// channels (`/quit gone to lunch`).
+    pub fn disconnect_saying(&mut self, reason: &str) {
+        if let Some(link) = self.link.take() {
+            // The connection is going either way; a QUIT that cannot be sent
+            // changes nothing about that.
+            let _ = link.send(cmd_quit(reason).trim_end_matches(['\r', '\n']));
+            link.close();
+            self.connection = ConnectionState::Disconnected;
+            let stamp = self.timestamp();
+            self.server_messages
+                .push(ChatMessage::system(&stamp, "Disconnected."));
+        }
+    }
+
+    /// Send one line to the server, saying in the window why when it cannot
+    /// go. Whether it went.
+    fn send_line(&mut self, line: &str) -> bool {
+        let line = line.trim_end_matches(['\r', '\n']);
+        let outcome = match &self.link {
+            Some(link) => link.send(line),
+            None => Err(String::from("not connected -- /connect a server first")),
+        };
+        match outcome {
+            Ok(()) => true,
+            Err(why) => {
+                let stamp = self.timestamp();
+                self.server_messages
+                    .push(ChatMessage::system(&stamp, &format!("Not sent: {why}")));
+                false
+            }
+        }
+    }
+
+    /// Take in what the connection has reported, and send what the handlers
+    /// queued. Whether anything changed.
+    pub fn pump(&mut self) -> bool {
+        let news = match &self.link {
+            Some(link) => link.drain(),
+            None => return false,
+        };
+        let changed = !news.is_empty() || !self.outbox.is_empty();
+        for item in news {
+            match item {
+                net::Incoming::Connected => self.register(),
+                net::Incoming::Line(line) => self.receive(&line),
+                net::Incoming::Closed(why) => {
+                    self.link = None;
+                    self.connection = ConnectionState::Disconnected;
+                    self.pending_switch = None;
+                    let stamp = self.timestamp();
+                    self.server_messages
+                        .push(ChatMessage::system(&stamp, &format!("Disconnected: {why}")));
+                }
+            }
+        }
+        for line in std::mem::take(&mut self.outbox) {
+            self.send_line(&line);
+        }
+        changed
+    }
+
+    /// Say who we are, as the connection opens.
+    fn register(&mut self) {
+        self.connection = ConnectionState::Registering;
+        if let Some(pass) = self.server_config.password.clone() {
+            self.send_line(&format!("PASS {pass}"));
+        }
+        let nick = self.my_nick.clone();
+        self.send_line(&cmd_nick(&nick));
+        let (user, real) = (
+            self.server_config.username.clone(),
+            self.server_config.realname.clone(),
+        );
+        self.send_line(&cmd_user(&user, &real));
+    }
+
+    /// One line from the server.
+    fn receive(&mut self, line: &str) {
+        let Some(msg) = IrcMessage::parse(line) else {
+            return;
+        };
+        match msg.command.as_str() {
+            // A nickname taken while registering: try another, as every
+            // client does, rather than sit unregistered.
+            numerics::ERR_NICKNAMEINUSE if self.connection == ConnectionState::Registering => {
+                self.my_nick.push('_');
+                let nick = self.my_nick.clone();
+                self.outbox.push(cmd_nick(&nick));
+            }
+            numerics::RPL_WELCOME => {
+                // The server's name for us is authoritative from here.
+                if let Some(me) = msg.params.first() {
+                    self.my_nick.clone_from(me);
+                }
+                if let Some(server) = msg.nick() {
+                    self.server_name = server.to_string();
+                }
+                // The channels the user configured to join are ones they
+                // asked for: the first is where they land, once the server
+                // says they are in it.
+                let auto_join = self.server_config.auto_join.clone();
+                if self.pending_switch.is_none() {
+                    self.pending_switch = auto_join.first().cloned();
+                }
+                for channel in auto_join {
+                    self.outbox.push(cmd_join(&channel));
+                }
+            }
+            _ => {}
+        }
+        self.handle_message(&msg);
+        // A join the user asked for is where they want to be.
+        if msg.command == "JOIN"
+            && msg
+                .nick()
+                .is_some_and(|n| n.eq_ignore_ascii_case(&self.my_nick))
+            && let Some(wanted) = self.pending_switch.clone()
+        {
+            let joined = msg.trailing().or_else(|| msg.target()).unwrap_or("");
+            if joined.eq_ignore_ascii_case(&wanted) {
+                self.pending_switch = None;
+                self.switch_panel(ActivePanel::Channel(joined.to_string()));
+            }
         }
     }
 
@@ -1030,13 +1229,24 @@ impl IrcClientApp {
     // Channel management
     // ========================================================================
 
+    /// Open `name` as joined and show it.
     pub fn join_channel(&mut self, name: &str) {
-        if self.find_channel(name).is_none() {
+        self.open_channel(name);
+        self.active_panel = ActivePanel::Channel(name.to_string());
+    }
+
+    /// Open `name` as joined, without showing it: what a JOIN the server
+    /// reports does, since only a join the user asked for is somewhere they
+    /// want to be taken (`pending_switch`). A channel parted earlier is
+    /// joined again, not left marked as parted.
+    fn open_channel(&mut self, name: &str) {
+        if let Some(ch) = self.find_channel_mut(name) {
+            ch.joined = true;
+        } else {
             let mut ch = Channel::new(name.to_string());
             ch.joined = true;
             self.channels.push(ch);
         }
-        self.active_panel = ActivePanel::Channel(name.to_string());
     }
 
     pub fn part_channel(&mut self, name: &str) {
@@ -1119,6 +1329,38 @@ impl IrcClientApp {
         let target = msg.target().unwrap_or("").to_string();
         let text = msg.trailing().unwrap_or("").to_string();
 
+        // A CTCP request other than ACTION is a question to this program,
+        // not a line of conversation: answered, or noted, never drawn with
+        // its control bytes as if someone had said it.
+        match CtcpMessage::parse(&text) {
+            Some(CtcpMessage::Version) => {
+                self.outbox.push(cmd_notice(
+                    &sender,
+                    &CtcpMessage::format_version_reply("SlateOS IRC client"),
+                ));
+                self.server_messages.push(ChatMessage::system(
+                    "",
+                    &format!("{sender} asked which client this is (CTCP VERSION)"),
+                ));
+                return;
+            }
+            Some(CtcpMessage::Ping(token)) => {
+                self.outbox
+                    .push(cmd_notice(&sender, &format!("\x01PING {token}\x01")));
+                return;
+            }
+            Some(CtcpMessage::Action(_)) | None => {}
+            Some(other) => {
+                self.server_messages.push(ChatMessage::system(
+                    "",
+                    &format!(
+                        "{sender} sent a CTCP request this client does not answer ({other:?})"
+                    ),
+                ));
+                return;
+            }
+        }
+
         // Check for CTCP ACTION
         let (display_text, is_action) = if let Some(action) = CtcpMessage::action_text(&text) {
             (action.to_string(), true)
@@ -1173,7 +1415,10 @@ impl IrcClientApp {
             .to_string();
 
         if nick.eq_ignore_ascii_case(&self.my_nick) {
-            self.join_channel(&channel);
+            // Opened, not shown: a join the server made on its own (or one
+            // the user asked for, which `pending_switch` then shows) must
+            // not pull the user out of the conversation they are in.
+            self.open_channel(&channel);
         } else if let Some(ch) = self.find_channel_mut(&channel) {
             ch.add_user(ChannelUser {
                 nick: nick.clone(),
@@ -1241,7 +1486,12 @@ impl IrcClientApp {
             self.my_nick = new_nick.clone();
         }
 
+        // Only the channels the nick is in: a rename reported in every
+        // channel would tell each of them about someone not there.
         for ch in &mut self.channels {
+            if ch.find_user(&old_nick).is_none() {
+                continue;
+            }
             ch.rename_user(&old_nick, &new_nick);
             ch.add_message(ChatMessage {
                 timestamp: String::new(),
@@ -1810,10 +2060,22 @@ impl IrcClientApp {
         true
     }
 
-    /// Put a line of one's own into the conversation on screen.
+    /// Send a line of one's own, and put it into the conversation on screen
+    /// -- a server does not send one's own messages back.
     fn say(&mut self, text: &str) {
         let nick = self.my_nick.clone();
         let stamp = self.timestamp();
+        let target = match &self.active_panel {
+            ActivePanel::Channel(name) | ActivePanel::Private(name) => Some(name.clone()),
+            ActivePanel::Server => None,
+        };
+        if let Some(target) = &target
+            && !self.send_line(&cmd_privmsg(target, text))
+        {
+            // Said why in the server panel; a line that did not go is not
+            // shown as if it had.
+            return;
+        }
         let message = ChatMessage::normal(&stamp, &nick, text);
         match self.active_panel.clone() {
             ActivePanel::Channel(name) => {
@@ -1838,18 +2100,19 @@ impl IrcClientApp {
 
     /// Carry out a slash command.
     ///
-    /// This client has no socket: `parse_command` builds the line a server
-    /// would be sent, and the commands whose effect is local are applied here
-    /// as well, so that typing `/join #x` opens the channel rather than only
-    /// composing a string. The rest are logged as what would have gone out,
-    /// which is the truthful thing to show for a client that cannot send.
+    /// `parse_command` builds the line; it is sent, and what the server does
+    /// with it comes back as its own messages -- a `/join` is a channel once
+    /// the server's `JOIN` says so, a `/nick` a new name once its `NICK`
+    /// does. Only what a server never echoes is applied here: one's own
+    /// messages. Without a connection nothing is applied, and the window
+    /// says nothing was sent.
     fn run_command(&mut self, line: &str) {
         let stamp = self.timestamp();
         // Commands that are about this program rather than about the server
         // are answered first: they have no wire form for `parse_command` to
         // turn them into, so it would call them unknown.
         let rest = line.get(1..).unwrap_or("");
-        let (name, _args) = rest.split_once(' ').unwrap_or((rest, ""));
+        let (name, local_args) = rest.split_once(' ').unwrap_or((rest, ""));
         match name.to_ascii_lowercase().as_str() {
             "timestamps" => {
                 self.show_timestamps = !self.show_timestamps;
@@ -1869,6 +2132,34 @@ impl IrcClientApp {
                 }
                 return;
             }
+            "connect" | "server" => {
+                let mut words = local_args.split_whitespace();
+                let host = words
+                    .next()
+                    .map_or_else(|| self.server_config.address.clone(), str::to_string);
+                let port = match words.next().map(str::parse::<u16>) {
+                    None => self.server_config.port,
+                    Some(Ok(port)) if port != 0 => port,
+                    Some(_) => {
+                        self.server_messages.push(ChatMessage::system(
+                            &stamp,
+                            "A port is a number from 1 to 65535",
+                        ));
+                        return;
+                    }
+                };
+                self.connect(&host, port);
+                return;
+            }
+            "disconnect" | "quit" | "exit" => {
+                if self.link.is_none() {
+                    self.server_messages
+                        .push(ChatMessage::system(&stamp, "Not connected."));
+                } else {
+                    self.disconnect_saying(local_args.trim());
+                }
+                return;
+            }
             _ => {}
         }
         let Some(wire) = self.parse_command(line) else {
@@ -1879,43 +2170,36 @@ impl IrcClientApp {
             return;
         };
 
+        if !self.send_line(&wire) {
+            // Not sent -- and said why -- so nothing it would have done is
+            // shown as done.
+            return;
+        }
         let rest = line.get(1..).unwrap_or("");
         let (cmd, args) = rest.split_once(' ').unwrap_or((rest, ""));
         match cmd.to_ascii_lowercase().as_str() {
+            // The server's JOIN opens the channel; this remembers to switch
+            // to it when it does.
             "join" | "j" => {
-                let name = args.trim();
+                let name = args.split_whitespace().next().unwrap_or("");
                 if !name.is_empty() {
-                    self.join_channel(name);
-                    self.switch_panel(ActivePanel::Channel(name.to_string()));
+                    self.pending_switch = Some(name.to_string());
                 }
             }
-            "part" | "leave" => {
-                let name = if args.trim().is_empty() {
-                    match &self.active_panel {
-                        ActivePanel::Channel(n) => n.clone(),
-                        _ => String::new(),
-                    }
-                } else {
-                    args.trim().to_string()
-                };
-                if !name.is_empty() {
-                    self.part_channel(&name);
-                    self.switch_panel(ActivePanel::Server);
-                }
-            }
-            "nick" => {
-                let new_nick = args.trim();
-                if !new_nick.is_empty() {
-                    self.my_nick = new_nick.to_string();
-                }
-            }
+            // One's own messages are never echoed, so they are shown here.
             "me" => {
                 let nick = self.my_nick.clone();
                 let message = ChatMessage::action(&stamp, &nick, args);
-                if let ActivePanel::Channel(name) = self.active_panel.clone()
-                    && let Some(ch) = self.find_channel_mut(&name)
-                {
-                    ch.add_message(message);
+                match self.active_panel.clone() {
+                    ActivePanel::Channel(name) => {
+                        if let Some(ch) = self.find_channel_mut(&name) {
+                            ch.add_message(message);
+                        }
+                    }
+                    ActivePanel::Private(nick) => {
+                        self.get_or_create_pm(&nick).messages.push(message);
+                    }
+                    ActivePanel::Server => {}
                 }
             }
             "query" | "msg" | "privmsg" => {
@@ -1931,9 +2215,6 @@ impl IrcClientApp {
             }
             _ => {}
         }
-
-        self.server_messages
-            .push(ChatMessage::system(&stamp, &format!("-> {wire}")));
     }
 
     /// The time a message is stamped with.
@@ -1948,15 +2229,13 @@ impl IrcClientApp {
             .map_or_else(|| "--:--".to_string(), |m| m.timestamp.clone())
     }
 
-    /// Say, in the window, that this client cannot connect.
-    ///
-    /// Unconditional for the reason `apps/netmanager`'s equivalent is: there
-    /// is no state in which this program *can* connect, so a condition here
-    /// would be one that is always true and would rot the moment it stopped
-    /// being.
-    fn push_cannot_connect_banner(&self, cmds: &mut Vec<RenderCommand>) {
-        let mut y = self.height - 4.0 - 14.0 * CANNOT_CONNECT_LINES.len() as f32;
-        for (i, line) in CANNOT_CONNECT_LINES.iter().enumerate() {
+    /// Say, in the window, that there is no connection, and how to make one.
+    fn push_not_connected_banner(&self, cmds: &mut Vec<RenderCommand>) {
+        if self.link.is_some() {
+            return;
+        }
+        let mut y = self.height - 4.0 - 14.0 * NOT_CONNECTED_LINES.len() as f32;
+        for (i, line) in NOT_CONNECTED_LINES.iter().enumerate() {
             let (size, color) = if i == 0 {
                 (12.0, self.palette.ink(self.palette.yellow))
             } else {
@@ -1982,12 +2261,8 @@ impl IrcClientApp {
 
     pub fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(512);
-        // Drawn on every frame, not only when the channel list is empty. A
-        // user who types `/join #x` gets a channel -- the local half of the
-        // command is applied -- and a banner that vanished at that point would
-        // disappear exactly when the window started looking most like a real
-        // session.
-        self.push_cannot_connect_banner(&mut cmds);
+        // Drawn whenever there is no connection, whatever the panels hold.
+        self.push_not_connected_banner(&mut cmds);
 
         // Background
         cmds.push(RenderCommand::FillRect {
@@ -2070,11 +2345,19 @@ impl IrcClientApp {
         cmds.push(RenderCommand::Text {
             x: 24.0,
             y: 8.0,
-            text: format!(
-                "{} - {}",
-                self.server_config.display_address(),
-                self.connection.label()
-            ),
+            text: if self.link.is_some() {
+                format!(
+                    "{} - {} (plain text)",
+                    self.server_config.display_address(),
+                    self.connection.label()
+                )
+            } else {
+                format!(
+                    "{} - {}",
+                    self.server_config.display_address(),
+                    self.connection.label()
+                )
+            },
             font_size: 12.0,
             color: self.palette.text,
             font_weight: FontWeightHint::Regular,
@@ -2770,20 +3053,45 @@ impl App for IrcClientApp {
         }
     }
 
-    /// No clock.
-    ///
-    /// Messages arrive from a server, not from a timer, and this client has no
-    /// socket to receive them on yet. Asking the harness for a tick would wake
-    /// the machine on a schedule to find the same conversation still there --
-    /// `known-issues.md` lesson 47. See `todo.txt` for what changes when there
-    /// is a transport.
+    /// A clock only while connected, beside the waker: the connection's
+    /// thread wakes the window as lines arrive, and this is the fallback that
+    /// keeps them coming if a wake is ever lost. Disconnected, nothing can
+    /// arrive, and asking for a tick would wake the machine for nothing.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        self.link.is_some().then_some(Duration::from_millis(500))
+    }
+
+    /// The connection's thread wakes the window with each batch of lines.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.waker = Some(waker);
+    }
+
+    fn on_wake(&mut self) -> Response {
+        if self.pump() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
         match event {
-            Event::CloseRequested => Response::Exit,
+            Event::CloseRequested => {
+                // Say goodbye rather than vanish: a server shows the reason.
+                self.disconnect();
+                Response::Exit
+            }
+            Event::Tick { .. } => {
+                if self.pump() {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -2828,8 +3136,8 @@ impl App for IrcClientApp {
 /// into `main` left every test green. `scripts/sabotage.py` caught it by
 /// doing exactly that.
 fn initial_app() -> IrcClientApp {
-    // Disconnected and empty. It used to be `seeded_client`, which invented a
-    // whole session -- see `CANNOT_CONNECT_LINES`.
+    // Disconnected and empty: nothing is contacted until the user connects.
+    // It used to be `seeded_client`, which invented a whole session.
     IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT)
 }
 
@@ -3266,8 +3574,11 @@ mod tests {
     #[test]
     fn test_server_config_display() {
         let config = ServerConfig::default();
-        assert!(config.display_address().contains("ircs://"));
-        assert!(config.display_address().contains("6697"));
+        // Plain text, the one kind of connection this client can make.
+        assert!(config.display_address().contains("irc://"));
+        assert!(config.display_address().contains("6667"));
+        assert!(!config.tls);
+        assert!(config.auto_join.is_empty(), "joins a channel nobody chose");
     }
 
     // Connection state
@@ -3378,21 +3689,33 @@ mod tests {
     fn every_listed_command_is_understood() {
         for (usage, what) in COMMANDS {
             let name = usage.split_whitespace().next().unwrap_or(usage);
+            let line = example_for(usage);
             let mut app = joined();
+            // A command for the server has a line to send; the rest are this
+            // program's own, and answer in the window.
+            let local = matches!(
+                name,
+                "/connect" | "/disconnect" | "/quit" | "/timestamps" | "/help"
+            );
+            if !local {
+                assert!(
+                    app.parse_command(&line).is_some(),
+                    "the list offers {name} for {what:?}, and it has no line to send"
+                );
+            }
             let before = app.server_messages.len();
-            app.input_text = example_for(usage);
+            app.input_text = line;
             app.submit_input();
             let after = &app.server_messages[before..];
             assert!(
                 !after
                     .iter()
-                    .any(|m| m.text.contains("Unknown or incomplete command")),
-                "the list offers {name} for {what:?}, and the dispatcher calls it unknown"
+                    .any(|m| m.text.contains("Unknown or incomplete command")
+                        || m.text.starts_with("Not sent")),
+                "the list offers {name} for {what:?}, and it was not understood or not sent: {:?}",
+                after.iter().map(|m| &m.text).collect::<Vec<_>>()
             );
-            assert!(
-                !after.is_empty() || name == "/part",
-                "{name} produced no reply at all"
-            );
+            assert!(!local || !after.is_empty(), "{name} answered nothing");
         }
     }
 
@@ -3545,6 +3868,9 @@ mod tests {
             "/nick" => String::from("/nick newname"),
             "/topic" => String::from("/topic a new topic"),
             "/quit" => String::from("/quit bye"),
+            // Loopback, and a port nothing listens on: no test reaches the
+            // network, and the refusal comes back as a reply.
+            "/connect" => String::from("/connect 127.0.0.1 9"),
             other => other.to_owned(),
         }
     }
@@ -3585,6 +3911,9 @@ mod tests {
     fn joined() -> IrcClientApp {
         let mut app = IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.connection = ConnectionState::Connected;
+        // A socket that takes what is sent and never answers: lines go out,
+        // and what the server would do with them is up to each test.
+        app.link = Some(net::Connection::to_nowhere());
         app.my_nick = "me".to_string();
         app.join_channel("#one");
         app.join_channel("#two");
@@ -3888,13 +4217,44 @@ mod tests {
 
     // --- slash commands ---
 
+    /// `/join` opens the channel when the server says the user is in it,
+    /// and switches to it then -- not before, when it may yet be refused.
     #[test]
     fn slash_join_opens_the_channel() {
         let mut app = joined();
         type_line(&mut app, "/join #three");
         assert!(app.handle_event(&key(Key::Enter)));
+        assert!(
+            app.find_channel("#three").is_none(),
+            "the channel opened before the server said so"
+        );
+        app.receive(":me!u@h JOIN #three");
         assert!(app.find_channel("#three").is_some());
         assert_eq!(app.active_panel, ActivePanel::Channel("#three".to_string()));
+    }
+
+    /// A JOIN the user did not ask for -- a server-forced one -- opens the
+    /// channel without pulling them out of the one they are in; and a
+    /// channel parted earlier is joined again, not left marked parted.
+    #[test]
+    fn a_join_nobody_asked_for_does_not_move_the_user() {
+        let mut app = joined();
+        assert_eq!(app.active_panel, ActivePanel::Channel("#one".to_string()));
+        app.receive(":me!u@h JOIN #forced");
+        assert!(app.find_channel("#forced").is_some_and(|ch| ch.joined));
+        assert_eq!(
+            app.active_panel,
+            ActivePanel::Channel("#one".to_string()),
+            "a join the user did not ask for took them away"
+        );
+
+        app.receive(":me!u@h PART #forced");
+        app.receive(":me!u@h JOIN #forced");
+        assert_eq!(
+            app.find_channel("#forced").map(|ch| ch.joined),
+            Some(true),
+            "a channel joined again still says it was left"
+        );
     }
 
     #[test]
@@ -3902,6 +4262,7 @@ mod tests {
         let mut app = joined();
         type_line(&mut app, "/part");
         assert!(app.handle_event(&key(Key::Enter)));
+        app.receive(":me!u@h PART #one");
         assert_eq!(
             app.find_channel("#one").map(|ch| ch.joined),
             Some(false),
@@ -3915,6 +4276,8 @@ mod tests {
         let mut app = joined();
         type_line(&mut app, "/nick newname");
         app.handle_event(&key(Key::Enter));
+        assert_eq!(app.my_nick, "me", "renamed before the server agreed");
+        app.receive(":me!u@h NICK :newname");
         assert_eq!(app.my_nick, "newname");
     }
 
@@ -3946,21 +4309,225 @@ mod tests {
         );
     }
 
+    /// **Without a connection nothing is pretended**: a command is not
+    /// sent and says so, and nothing it would have done is shown done.
     #[test]
-    fn a_command_logs_the_line_it_would_have_sent() {
-        let mut app = joined();
-        type_line(&mut app, "/nick other");
+    fn without_a_connection_a_command_says_nothing_was_sent() {
+        let mut app = IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        type_line(&mut app, "/join #rust");
         app.handle_event(&key(Key::Enter));
+        assert!(
+            app.channels.is_empty(),
+            "a channel was opened with no server"
+        );
         let logged = app
             .server_messages
             .last()
             .map(|m| m.text.clone())
             .unwrap_or_default();
+        assert!(logged.starts_with("Not sent: not connected"), "{logged:?}");
+        let texts = drawn_text(&app);
+        for line in NOT_CONNECTED_LINES {
+            assert!(texts.contains(line), "the window never said {line:?}");
+        }
+
+        // A line said in a channel with no connection is not shown as said.
+        app.join_channel("#local");
+        app.switch_panel(ActivePanel::Channel(String::from("#local")));
+        type_line(&mut app, "hello?");
+        app.handle_event(&key(Key::Enter));
         assert!(
-            logged.starts_with("-> NICK"),
-            "a client with no socket should show what it would have sent \
-             rather than drop it: {logged:?}"
+            app.find_channel("#local")
+                .is_some_and(|ch| ch.messages.iter().all(|m| m.text != "hello?")),
+            "a line that was never sent was shown in the channel"
         );
+        // Nor is an action: `/me` shows its own line only once it is sent.
+        type_line(&mut app, "/me waves");
+        app.handle_event(&key(Key::Enter));
+        assert!(
+            app.find_channel("#local")
+                .is_some_and(|ch| ch.messages.iter().all(|m| m.text != "waves")),
+            "an action that was never sent was shown in the channel"
+        );
+    }
+
+    /// Pump the app until `done` holds, or five seconds pass.
+    fn pump_until(app: &mut IrcClientApp, done: impl Fn(&IrcClientApp) -> bool) {
+        let give_up = std::time::Instant::now() + Duration::from_secs(5);
+        while !done(app) {
+            assert!(std::time::Instant::now() < give_up, "it never happened");
+            app.pump();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// **A connection registers and carries a conversation**, end to end
+    /// against a server on loopback: NICK and USER on connecting, the
+    /// welcome making it Connected, a `/join` confirmed and switched to, a
+    /// line heard and a line said.
+    #[test]
+    fn a_connection_registers_and_carries_a_conversation() {
+        let server = net::fake::server();
+        let mut app = IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        type_line(&mut app, &format!("/connect 127.0.0.1 {}", server.port));
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(app.connection, ConnectionState::Connecting);
+        pump_until(&mut app, |a| a.connection == ConnectionState::Registering);
+        assert_eq!(server.next(), "NICK SlateOSUser");
+        assert_eq!(server.next(), "USER slateos 0 * :Slate OS IRC Client");
+
+        server
+            .say
+            .send(String::from(
+                ":irc.test 001 SlateOSUser :Welcome to the test",
+            ))
+            .unwrap();
+        pump_until(&mut app, |a| a.connection == ConnectionState::Connected);
+        assert_eq!(app.server_name, "irc.test");
+        assert!(
+            drawn_text(&app).contains("(plain text)"),
+            "a plain-text connection is not said to be one"
+        );
+        assert!(
+            !drawn_text(&app).contains(NOT_CONNECTED_LINES[0]),
+            "the not-connected banner stayed over a connection"
+        );
+
+        type_line(&mut app, "/join #rust");
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(server.next(), "JOIN #rust");
+        server
+            .say
+            .send(String::from(":SlateOSUser!u@h JOIN #rust"))
+            .unwrap();
+        pump_until(&mut app, |a| a.find_channel("#rust").is_some());
+        assert_eq!(
+            app.active_panel,
+            ActivePanel::Channel(String::from("#rust"))
+        );
+
+        server
+            .say
+            .send(String::from(":alice!a@h PRIVMSG #rust :hello there"))
+            .unwrap();
+        pump_until(&mut app, |a| {
+            a.find_channel("#rust")
+                .is_some_and(|ch| ch.messages.iter().any(|m| m.text == "hello there"))
+        });
+
+        type_line(&mut app, "hi alice");
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(server.next(), "PRIVMSG #rust :hi alice");
+        assert!(
+            app.find_channel("#rust")
+                .is_some_and(|ch| ch.messages.last().is_some_and(|m| m.text == "hi alice")),
+            "one's own line is not shown -- a server does not send it back"
+        );
+
+        type_line(&mut app, "/disconnect");
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(server.next(), "QUIT");
+        assert_eq!(app.connection, ConnectionState::Disconnected);
+    }
+
+    /// A nickname taken while registering is tried again with a `_`.
+    #[test]
+    fn a_nickname_in_use_is_tried_again() {
+        let server = net::fake::server();
+        let mut app = IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.connect("127.0.0.1", server.port);
+        pump_until(&mut app, |a| a.connection == ConnectionState::Registering);
+        assert_eq!(server.next(), "NICK SlateOSUser");
+        assert!(server.next().starts_with("USER "));
+        server
+            .say
+            .send(String::from(
+                ":irc.test 433 * SlateOSUser :Nickname is already in use",
+            ))
+            .unwrap();
+        pump_until(&mut app, |a| a.my_nick == "SlateOSUser_");
+        app.pump();
+        assert_eq!(server.next(), "NICK SlateOSUser_");
+    }
+
+    /// A CTCP VERSION is answered, and not drawn as a line someone said.
+    #[test]
+    fn a_ctcp_version_is_answered_not_shown() {
+        let server = net::fake::server();
+        let mut app = IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.connect("127.0.0.1", server.port);
+        pump_until(&mut app, |a| a.connection == ConnectionState::Registering);
+        let _ = (server.next(), server.next()); // NICK, USER
+        server
+            .say
+            .send(String::from(
+                ":bob!b@h PRIVMSG SlateOSUser :\x01VERSION\x01",
+            ))
+            .unwrap();
+        pump_until(&mut app, |a| {
+            a.server_messages
+                .iter()
+                .any(|m| m.text.contains("CTCP VERSION"))
+        });
+        app.pump();
+        assert_eq!(
+            server.next(),
+            "NOTICE bob :\x01VERSION SlateOS IRC client\x01"
+        );
+        assert!(
+            app.private_chats.iter().all(|pm| pm.messages.is_empty()),
+            "the request was drawn as a message"
+        );
+    }
+
+    /// The server hanging up is said, and leaves the window disconnected.
+    #[test]
+    fn the_server_hanging_up_is_said() {
+        let server = net::fake::server();
+        let mut app = IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.connect("127.0.0.1", server.port);
+        pump_until(&mut app, |a| a.connection == ConnectionState::Registering);
+        server.hang_up();
+        pump_until(&mut app, |a| a.connection == ConnectionState::Disconnected);
+        assert!(!app.is_linked());
+        assert!(
+            app.server_messages
+                .iter()
+                .any(|m| m.text.starts_with("Disconnected: ")),
+            "the end of the connection was not said"
+        );
+        assert!(
+            app.tick_interval().is_none(),
+            "a clock with nothing to hear"
+        );
+    }
+
+    /// A rename is reported only in the channels the user is in.
+    #[test]
+    fn a_rename_is_reported_only_where_the_user_is() {
+        let mut app = joined();
+        let two_before = app.find_channel("#two").map_or(0, |ch| ch.messages.len());
+        app.receive(":bob!b@h NICK :robert");
+        assert!(
+            app.find_channel("#one")
+                .is_some_and(|ch| ch.find_user("robert").is_some()),
+            "the rename did not reach the channel bob is in"
+        );
+        assert_eq!(
+            app.find_channel("#two").map_or(0, |ch| ch.messages.len()),
+            two_before,
+            "a channel bob is not in was told he changed his name"
+        );
+    }
+
+    /// Message tags ahead of a line are skipped, not read as its command.
+    #[test]
+    fn message_tags_are_skipped() {
+        let msg = IrcMessage::parse("@time=2026-09-26T12:00:00Z;x=y :alice!a@h PRIVMSG #a :hi")
+            .expect("a message");
+        assert_eq!(msg.command, "PRIVMSG");
+        assert_eq!(msg.nick(), Some("alice"));
+        assert_eq!(msg.trailing(), Some("hi"));
     }
 
     #[test]
@@ -4137,13 +4704,15 @@ mod tests {
         assert_eq!(app.title(), "(4) irc.example - IRC");
     }
 
+    /// A clock only while there is a connection to hear from.
     #[test]
-    fn a_chat_client_with_no_socket_asks_for_no_clock() {
+    fn a_chat_client_asks_for_a_clock_only_while_connected() {
         assert_eq!(
-            joined().tick_interval(),
+            IrcClientApp::new(WINDOW_WIDTH, WINDOW_HEIGHT).tick_interval(),
             None,
-            "messages arrive from a server, not from a timer"
+            "nothing can arrive with no connection"
         );
+        assert!(joined().tick_interval().is_some());
     }
 
     #[test]
@@ -4235,7 +4804,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in CANNOT_CONNECT_LINES {
+        for line in NOT_CONNECTED_LINES {
             assert!(
                 texts.iter().any(|t| t == line),
                 "the window never said {line:?}"

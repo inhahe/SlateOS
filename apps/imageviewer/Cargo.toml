@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Image Viewer — photo and image viewing with zoom and slideshow"
 [dependencies]
+# Names are shown through `pathtext`: a byte that is not text, or a control
+# character, as an escape -- never as a lossy decode.
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -27,6 +30,19 @@ safeio = { path = "../safeio" }
 # TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING.
 imagecodec = { path = "../../gui/imagecodec" }
 
+# The camera's facts for the info panel -- make, lens, exposure, the date it
+# was taken -- which the panel drew when present and nothing ever filled.
+exif = { path = "../exif" }
+
+# Pictures are read and decoded off the window's thread, newest request
+# first, and handed back through the waker the window gives it -- so paging
+# through photographs never freezes the window on a large one.
+offloop = { path = "../offloop" }
+
+# Delete moves a picture to the recycle bin -- the file manager's own, so it
+# is listed and restored there.
+recyclebin = { path = "../recyclebin" }
+
 # The window and its event loop. `oswindow::app` is the strap every application
 # shares -- connect, open one window, run until it closes -- and it is also the
 # only route by which decoded pixels reach the compositor, since a `RenderTree`
@@ -37,6 +53,8 @@ oswindow = { path = "../../gui/window" }
 # named from the process id and a counter, so two tests in one process can
 # never draw the same name the way a clock-tagged name could.
 [dev-dependencies]
+# `exif::testing`: a camera's EXIF, for the info panel's tests.
+exif = { path = "../exif", features = ["testing"] }
 # `appearance::palette_check`.
 appearance = { path = "../../gui/appearance", features = ["testing"] }
 scratchdir = { path = "../../userspace/scratchdir" }

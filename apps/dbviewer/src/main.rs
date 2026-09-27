@@ -42,6 +42,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -5316,10 +5317,10 @@ impl DbViewerApp {
                     .and_then(|t| t.selected_table.clone())
                     .unwrap_or_default(),
                 format.label(),
-                path.display(),
+                path.shown(),
                 text.len()
             ),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
@@ -5333,7 +5334,7 @@ impl DbViewerApp {
     pub fn read_csv_file(&mut self, path: &std::path::Path) -> String {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(err) => return format!("Could not read {}: {err}", path.display()),
+            Err(err) => return format!("Could not read {}: {err}", path.shown()),
         };
         let whole = text.len();
         let truncated = whole > MAX_CSV_BYTES;
@@ -5378,7 +5379,7 @@ impl DbViewerApp {
                     .map_or(0, Table::row_count);
                 format!("{cut_note}Imported {name}: {rows} row(s){rename_note}")
             }
-            Err(err) => format!("{cut_note}Could not import {}: {err}", path.display()),
+            Err(err) => format!("{cut_note}Could not import {}: {err}", path.shown()),
         }
     }
 

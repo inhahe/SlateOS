@@ -1,5 +1,10 @@
 # Workspace-wide clippy configuration.
 #
+# NOT for the crates under `apps/`: clippy reads the nearest clippy.toml and
+# does not merge it with this one, and `apps/clippy.toml` exists (it adds a
+# ratchet against lossy path display). A setting added here must be added
+# there too, or `apps/` will not see it.
+#
 # `doc-valid-idents` extends (via the `..` entry, which splices in clippy's
 # own default list) the set of identifiers that `clippy::doc_markdown` will
 # not demand backticks around. Without it, every doc comment that names this

@@ -32356,6 +32356,997 @@ the middle quad a pixel narrow.
 
 ---
 
+## 1200. The terminal's shell runs on a kernel pseudo-terminal, started by one `libcall` call; the terminal's in-process model of a terminal is deleted
+
+**Date:** 2026-09-24
+**Lane:** E
+**Decided by:** Claude (autonomous)
+
+**In short:** A terminal window has to run a shell, and the shell has to
+believe it is talking to a terminal — that belief is what makes it print a
+prompt, lets Ctrl+C stop a command, and tells a full-screen program such as an
+editor how big the window is. Our terminal application had been *simulating* a
+terminal inside its own process and running the shell on plain pipes beside
+the simulation, so the shell never believed it: no prompt, no Ctrl+C, no size.
+This replaces the simulation with the real thing the kernel already provides,
+and records the choices that came with it — how the shell is started, how the
+terminal's own tests work without a shell, and what the window does when the
+shell ends.
+
+### What forced it
+
+`apps/terminal/src/pty.rs` (2,054 lines) modelled a pseudo-terminal —
+master, slave, a cooked-mode line discipline (the part that buffers a line and
+echoes it), a window size — as Rust objects inside the terminal. On
+2026-09-18 a shell was attached to the model's slave by two threads copying to
+and from the shell's *pipes*. Measured consequences, each one a property of
+pipes rather than a bug in the threads:
+
+| | |
+|---|---|
+| `isatty(0)` in the shell | false, so it ran non-interactively: no prompt, no job control |
+| `^C` | became a `PtySignal::Interrupt` value that no process received |
+| window size | stored in a struct the shell could not ask for, so it never learned it |
+| full-screen programs | refuse to start without a terminal |
+| standard error | a pipe whose reading end was dropped when `start_shell` returned, so the shell's first error message raised `SIGPIPE` and killed it |
+| the exited shell | never reaped, and its exit status never read |
+
+The kernel has had real pseudo-terminals since 2026-08-23 (syscalls 544–556,
+`kernel/src/tty/pty.rs`), and `posix::pty::forkpty` composes them the way musl
+does. Design-decisions §768 says a program reaches stateful libc through the
+C ABI — `libcall` — so the missing piece was a `libcall` door and the terminal
+using it.
+
+### The choices, and what else was on the table
+
+**1. The kernel's pseudo-terminal, and no model beside it.**
+
+- *Chosen — the model is deleted.* *What changes:* the shell is interactive;
+  `^C`, `SIGWINCH` and full-screen programs are the kernel's business.
+- *Keep the model as a fallback for hosts without pseudo-terminals.* *What
+  changes:* on the Windows development host the window would echo typing
+  locally. Rejected: it is a second line discipline in the one process that
+  must not have one, 2,000 lines to keep in step with the kernel's, and its
+  echo is exactly what made a terminal with no shell look like a terminal
+  with a quiet one — the defect `known-issues.md`
+  `TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` was filed about.
+- *Pipes* (the 2026-09-18 design). Rejected by the table above.
+
+**2. One call that forks and execs, with everything built before the fork.**
+
+`libcall::pty::spawn(path, argv, envp, size)`: the argument and environment
+vectors are laid out on the parent's stack, then `forkpty`, then the child does
+nothing but restore `SIGPIPE`, empty its signal mask and `execve`.
+
+- *A `fork` + `exec` pair, or a hook run in the child* (`std`'s `pre_exec`
+  shape). *What changes:* a caller could run arbitrary code between the two.
+  Rejected: in a multi-threaded process the child of a fork owns copies of
+  locks other threads held — the allocator's included — so the only safe code
+  there is async-signal-safe system calls, and an API that accepts a closure
+  cannot enforce that. The request that asked for this call said the same
+  (`requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`).
+- *Cost of the choice:* `libcall` is `no_std` with no allocator, so the
+  vectors are fixed arrays — at most 256 arguments and 1,024 environment
+  entries, `E2BIG` beyond. Far above anything a terminal passes; stated so the
+  bound is not a surprise to the next caller.
+- Two additions beyond the ask, each fixing a real fault: a failed `execve`
+  is reported as its `errno` through a close-on-exec pipe, not guessed from
+  exit status 127 (so the window can say "`/bin/zsh`: no such file"); and the
+  master is made close-on-exec, so a second shell cannot inherit the first's
+  master and keep it from ever being hung up.
+
+**3. A seam, `child::Link`, and a scripted child for the emulator's tests.**
+
+- *Chosen.* The emulator's tests assert what it *sends* for a key and what it
+  *draws* for a byte against a script; the real link has its own tests that
+  drive a real shell over a real pseudo-terminal.
+- *Test the emulator against a real shell.* Rejected: every emulator test
+  would depend on a platform, a shell and a clock, and on the Windows host
+  where the suite runs there is no pseudo-terminal at all.
+- *Cost:* the real link is `cfg(unix)`, so the host test run and the mutation
+  sweep cannot compile it. Its tests run on a Linux host (`cargo test -p
+  terminal --target x86_64-unknown-linux-gnu`, under WSL here) — a second
+  command someone has to know to run, recorded in `apps/terminal/mutate.py`
+  and `known-issues.md`.
+
+**4. A clean exit closes the window; any other ending leaves it open.** A
+user-visible policy decided without asking, so it is also in `todo.txt` →
+Lane E → Judgment Calls, where the operator can overrule it. The
+alternatives — always close (xterm and most Linux desktops; loses the crash
+message) and never close (every `exit` needs a second close) — are one branch
+away.
+
+**5. The terminal polls for output until the window library can wake it.**
+`oswindow` wakes an application only for compositor events and a clock, so
+output is read on a tick: 16 ms while the shell is talking, 50 ms once it has
+been quiet for two seconds. That is an interim with a named end —
+`requests/e-f-wake-an-application-for-its-own-descriptor.md` — not a design.
+
+### What is verified, and what is not
+
+Verified on a Linux host against glibc's `forkpty`: the child is on a terminal,
+sees its size and a later resize, gets exactly the environment passed, is
+interrupted by `^C` written to the master, does not inherit an ignored
+`SIGPIPE`; a missing program is an error with no child left; exits and signal
+deaths are told apart; the master is close-on-exec; a command typed through the
+terminal's own link runs and answers, hang-up ends the shell, and the last
+output arrives before the exit. **Not verified: any of it on SlateOS**, because
+no graphical application runs there yet. `todo.txt` → Lane E lists what to
+check the first time one does.
+
+**Where it lives:** `libcall/src/pty.rs`; `apps/terminal/src/child.rs`;
+`TerminalState::{attach, drain_child, flush_to_child, tick_interval}` in
+`apps/terminal/src/main.rs`.
+
+**How to reverse:** the model is `apps/terminal/src/pty.rs` in the commit
+before this one. Nothing else in the tree used it.
+
+---
+
+## 1201. The habit tracker's "today" is the clock's, and it rolls over at midnight while the window is open
+
+**Date:** 2026-09-25
+**Lane:** E
+**Decided by:** Claude (autonomous) -- reversing an earlier Claude call, so
+still Claude's to revisit, and the operator's to overrule
+
+**In short:** A habit tracker records which days you did something. Ours did
+not know what day it was: "today" was always 18 May 2026, moved only by the `+`
+and `-` keys, so a check-in made today was filed under a day in May, and every
+streak was counted from there. It now reads the date from the clock, and if
+the window is left open across midnight the next day becomes "today" on its
+own. Nothing a user checked in moves when that happens -- check-ins are kept
+by date -- only which column is labelled "Today".
+
+### What was there, and why
+
+The date was a test fixture that shipped: a `Date` literal in `new`, and two
+keys to step it, which the status bar advertised as `+/-:Date`. A comment
+beside `tick_interval` defended not rolling over: "a habit tracker that rolled
+over at midnight while the window was open would move the user's check-ins
+under them".
+
+### The tradeoff
+
+| | Clock, rolling over (chosen) | Clock, read once at start | Keystroke-advanced (was) |
+|---|---|---|---|
+| A check-in lands on | the day it is made | the day the window opened | whatever day the keys reached |
+| Window open past midnight | columns shift by a day; nothing moves | yesterday stays "Today" until restarted | n/a |
+| Cost | one wake a day, at midnight | none | none |
+
+The fear in the old comment is real in one narrow form: a press aimed at the
+"Today" cell in the second before midnight can land after the columns shift,
+on the new day. That is one press, visible at once (the new day's cell turns
+green), and undone by pressing again. Reading the clock once at start instead
+would file every check-in after midnight under yesterday until the window was
+restarted -- silently, and for as long as the window stays open, which for a
+tracker that lives on a desktop is days.
+
+### Details
+
+- The zone comes from `tzrules`, as in `apps/reminders`, so a real local zone
+  is picked up when per-process zone plumbing lands
+  (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`); until then it is UTC.
+- The window asks to be woken at the next midnight (at most an hour away, so a
+  changed clock or a sleep is caught up within the hour), re-reads the date,
+  and redraws only if the day changed.
+- The `+` and `-` keys are gone. Filling in a missed day is what the dashboard's
+  seven day columns are for.
+
+**Where it lives:** `apps/habits/src/main.rs`: `today_from_clock`,
+`HabitTrackerApp::tick_interval`, the `Event::Tick` arm of `handle_event`.
+
+**How to reverse:** give `new` a fixed `today` again and drop the tick; the
+tests set `today` directly and do not depend on the clock.
+
+---
+
+## 1202. The finance ledger is a tab-separated text file, kept on every change, and one that cannot be read whole is left alone
+
+**Date:** 2026-09-25
+**Lane:** E
+**Decided by:** Claude (autonomous) -- the known-issues entry that asked for a
+store proposed YAML; this is a different call, and Claude's to revisit
+
+**In short:** The finance app now keeps what is entered. It writes one plain
+text file -- `finance/ledger.txt` in the user's settings folder -- with one line
+per account, budget and transaction, the fields separated by tabs. It is
+rewritten, whole and atomically (a new file swapped in, so a crash leaves the
+old one), after every change: there is no Save. If the file is there but cannot
+be read completely, the app reads none of it, writes nothing over it, and says
+so on screen for as long as it is open.
+
+### Text lines rather than YAML
+
+`TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA` proposed "a YAML store under the
+user's config directory". The design's rule is *YAML for configuration files*,
+and a ledger is not configuration: it is a record that grows by a line a day,
+for years.
+
+| | Tab-separated lines (chosen) | YAML (`yamldoc`) |
+|---|---|---|
+| Size of a year | a line per transaction, ~100 bytes | a map per transaction, several times that |
+| Reading it elsewhere | `cut`, `grep`, a spreadsheet's import | a YAML library |
+| Consistency with settings | different from every settings file | the same as them |
+| Round trip of text | four escapes (`\\`, `\t`, `\n`, `\r`), exact | exact |
+| Comments and formatting kept | no -- the app owns the file | yes, the point of `yamldoc` |
+
+`yamldoc` earns its keep on a file a person edits and the program must not
+disturb; nobody hand-formats a ledger, and preserving formatting across
+thousands of records is cost with no reader. Money is whole cents and dates
+are `YYYY-MM-DD`, so nothing is rounded on the way through. The first line
+names the format (`format 1`), and a ledger naming another is refused rather
+than guessed at.
+
+### All or nothing on reading
+
+A ledger with one line not understood is refused whole. The alternative --
+skip the bad line, read the rest -- looks kinder and is the dangerous one: the
+next change saves the ledger, and the save writes back only what was read, so
+the line not understood is deleted. Refusing leaves the file byte for byte as
+it was, and the window says which line and why ("line 3: a date is not one"),
+so it can be mended by hand or moved aside. A transaction naming an account
+the ledger does not have is refused the same way.
+
+### Kept on every change
+
+The app keeps state the way `apps/habits` and `apps/flashcards` do: every
+change is written as it is made, so closing the window, or a crash, loses
+nothing, and there is no unsaved state to ask about. A save that fails is
+reported in the status bar until one succeeds.
+
+**Where it lives:** `apps/finance/src/main.rs`: `ledger_path`, `ledger_text`,
+`parse_ledger`, `FinanceApp::{from_settings, load_ledger, save_ledger}`.
+
+**How to reverse:** the format is behind `ledger_text`/`parse_ledger`; a YAML
+store replaces those two and keeps `load_ledger`'s all-or-nothing rule, which
+does not depend on the format.
+
+---
+
+## 1203. The multiplexer's panes are the terminal app's terminals, and its sessions live in its window
+
+**Date:** 2026-09-25
+**Lane:** E
+**Decided by:** Claude (autonomous)
+
+**In short:** Each tmux pane is now a whole terminal -- the same code the
+terminal app runs, made into a library both programs use -- with the user's
+shell in it. A shell that exits normally closes its pane, as in tmux; one that
+fails leaves the pane open to say how. Closing a pane or a window asks first,
+because it ends the programs in it. Sessions last as long as the tmux window:
+detaching hides one, but closing the window ends them all, and the window says
+so. That last point is the big difference from real tmux, which keeps sessions
+running after its window is gone.
+
+### One emulator, not two
+
+tmux had its own terminal emulator: a grid, a parser of a dozen escape
+sequences and no more. With a shell in the pane it would have drawn every
+full-screen program wrong -- no scroll regions, no alternate screen, no
+cursor-key modes, no answers to a program's questions. `apps/terminal` has all
+of those, and its link to a shell. So `apps/terminal` became a library as well
+as a program (`src/lib.rs` the terminal, `src/main.rs` its window), and a pane
+holds a `TerminalState`, drawn by the terminal's own `frame` under a
+translation and hit-tested with the terminal's own targets. The alternatives:
+
+| | Share the terminal (chosen) | Improve tmux's own emulator | A new crate both use |
+|---|---|---|---|
+| Emulators to keep correct | one | two, drifting | one |
+| Work now | move `main` out, make five methods public | reimplement most of the terminal | move five thousand lines |
+| Where a fix lands | both programs at once | wherever it was found | both |
+
+The third is the second done later; nothing about the terminal is
+terminal-app-specific enough to need it yet. Sharing paid at once: resizing
+panes on every split found four bugs in the terminal (a shrink pushed the
+prompt into history, the hidden screen lost its prompt, one saved-cursor slot
+for two screens, `reset` killed the shell), and its grid moved to the
+fixed-pitch face tmux had already fixed for itself. (§477's single layout walk
+still holds: `relayout` sizes every pane from `Window::bounds`; the conversion
+to cells is now the terminal's `resize_to_window`.)
+
+### How a pane ends
+
+tmux's default is that a pane closes when its program exits, whatever the exit
+status; its `remain-on-exit failed` keeps a pane whose program failed. This
+takes the second: the terminal app already closes its window on a clean exit
+and keeps it, with the reason, on a failed one, and a pane is the same thing in
+a smaller rectangle. A shell killed by a signal, or one that exits with the
+status of a command that failed, leaves its pane showing why, and `prefix x`
+closes it. The last pane closing ends its window, the last window its session,
+and the last session the multiplexer -- the window closes, as tmux exits when
+its last session does. Before, closing the last pane *detached* instead, which
+left a window showing nothing that could run anything.
+
+`prefix x` and `prefix &` ask first, with the answer typed (y) or clicked, as
+tmux's default bindings do (`confirm-before`). Typed commands (`:kill-pane`,
+`:kill-window`, `:kill-session`) do not ask; tmux's do not either.
+
+### No server
+
+Real tmux is a server that outlives its clients. This is one process with one
+window: the sessions are its data and the shells its children, so they end
+with it. A server needs a protocol, a lifetime and a way for a second window to
+find the first -- a subsystem, not a fix -- and the value is leaving a long job
+running with no window open, which nothing here needs yet. Until then the
+detached screen says plainly that closing the window ends every session, and
+`known-issues.md` → `[E] tmux is not a server` records what the real thing
+would take.
+
+**Where it lives:** `apps/terminal/src/lib.rs` (`TerminalState::start_with`,
+`paste`, `set_focused`, `hang_up`); `apps/tmux/src/main.rs` (`Pane`,
+`Multiplexer::{start_shell, tick, remove_pane, relayout, draw_pane}`).
+
+**How to reverse:** the exit rule is one match arm in `Multiplexer::tick`
+(`Response::Exit` closes the pane); the confirmation is `Confirm` and
+`ask_close_*`; a server would replace `Multiplexer`'s ownership of the panes
+and keep everything else.
+
+---
+
+## 1204. A spreadsheet is a tab-separated workbook file, `.spreadsheet`, read whole or not at all; a CSV opens as a new workbook
+
+**Date:** 2026-09-25
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** The spreadsheet can now keep a whole workbook -- every sheet,
+every cell as it was typed (so a formula comes back a formula), every format,
+column width, row height and frozen pane -- in a file of its own, and open it
+again. Before, Ctrl+S wrote the sheet in front as CSV: its values only. The
+file is plain text, one line per cell, fields separated by tabs. A file with a
+line this version does not understand is refused whole, saying which line.
+CSV is still read and written: Ctrl+O on a CSV opens it as a new workbook of
+one sheet, and Ctrl+E exports the sheet in front as CSV.
+
+### Tab-separated lines rather than YAML
+
+The slide deck, the diagram and the whiteboard are YAML (`yamldoc`), and the
+design's rule is YAML for anything a person might edit. The spreadsheet does
+not follow them, for two reasons:
+
+| | Tab-separated lines (chosen) | YAML (`yamldoc`) |
+|---|---|---|
+| A full sheet (26 x 999 cells) | one pass to write, one to read | `yamldoc` finds each key by scanning the document; tens of thousands of cells make that quadratic -- minutes, not milliseconds |
+| Reading it elsewhere | `cut`, `grep`, any spreadsheet's text import | a YAML library |
+| Consistency | the finance ledger's format (§1202): the same four escapes, the same all-or-nothing reading | the other document editors' |
+
+The first is the deciding one: a format that takes minutes to open a full sheet
+is not a format.
+
+### What a line holds
+
+`slateos-spreadsheet<TAB>1` first; then `sheet<TAB>name`, and under it
+`frozen<TAB>rows<TAB>cols`, `width<TAB>C<TAB>px`, `height<TAB>7<TAB>px` (only
+what differs from the default), and `cell<TAB>A1<TAB>what was typed` followed by
+its format as flags -- `bold`, `italic`, `align=right`, `number=currency:2`,
+`text=#RRGGBB`, `fill=#RRGGBB`, `border=tl` -- nothing for a default; last,
+`active<TAB>n`. A tab, a line break or a backslash in a name or a cell is written
+`\t`, `\n`, `\r` or `\\`.
+
+### Read whole or not at all
+
+A line not understood, a cell written twice, a broken escape, a later format
+number: each refuses the file, and the message names the line. The diagram and
+the whiteboard instead leave out a shape they do not understand and read the
+rest (as the slide deck does). The difference is the ledger's argument: a
+workbook read in part and saved again would silently lose what was not read,
+and in a workbook that is somebody's numbers.
+
+### A CSV is not the workbook's file
+
+Opening a CSV makes a new workbook from it and leaves the workbook with no file,
+so Ctrl+S asks where to save -- it never writes a workbook over the CSV. The
+alternative, writing the CSV back, loses every formula, format and other sheet
+the user adds, which is the failure this change exists to end. The workbook is
+named `.spreadsheet`, the pattern the other editors use (`.slides`,
+`.diagram`, `.whiteboard`). Save As is F12 -- Excel's key -- because
+Ctrl+Shift+S already shows and hides the status bar here.
+
+**Where it lives:** `apps/spreadsheet/src/main.rs`: `workbook_text`,
+`parse_workbook`, `format_flags`, `apply_flag`; `SpreadsheetApp::{write_workbook,
+open_path, save, picked, unless_unsaved, request_close}`. The escapes are
+`textfmt::tsv`'s since the same day, shared with the ledger and the notes
+library (§1205).
+
+**How to reverse:** the format is `workbook_text`/`parse_workbook`; a YAML file
+replaces those two, and keeps `open_path`'s rules about CSV and about reading
+whole.
+
+---
+
+## 1205. The notes library is one tab-separated file in the settings folder, kept on every change and read whole or not at all
+
+**Date:** 2026-09-25
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** The notes app now keeps everything written in it -- every
+notebook and note, with its tags, checklist, table and history of earlier
+versions -- in one plain-text file in the user's settings folder
+(`notes/library.txt`), rewritten after every change; there is no Save. Until
+now nothing was kept at all: every note was gone when the window closed. If
+the file is there but cannot be read completely, the app reads none of it,
+writes nothing over it, and says so for as long as the window is open. When a
+note was made or changed now comes from the clock and is shown as a date and
+time; it was a counter ("Modified: 1004").
+
+### One file rather than a file per note
+
+| | One library file (chosen) | A folder of Markdown files, one per note |
+|---|---|---|
+| What another program sees | a record file: `grep` finds words, but a note's line breaks are written `\n` | each note readable as itself in any editor |
+| Notebooks, tags, pins, checklists, tables, history | fields and lines of the one file | folders for notebooks, a header in each note for the rest, the history kept beside it |
+| A crash in the middle of a save | the old file or the new one, whole (`safeio`) | each note's file is safe alone, but deleting a notebook with its notes, or moving notes, is many files and can stop half-way |
+| Refusing what it cannot read | one decision about one file | per file -- and a folder other programs edit is not what this one wrote |
+
+The folder is friendlier to someone who lives in other editors, and is the one
+to move to if that is how the notes turn out to be used; Ctrl+E's Markdown
+export is the bridge meanwhile. The single file wins on the property the store
+exists for: whatever happens, the notes the user had are the notes they get
+back.
+
+### The ledger's format and the ledger's rules
+
+Tab-separated lines with the four escapes, now `textfmt::tsv`, which the ledger
+(§1202) and the workbook (§1204) share; the first line names the format
+(`slateos-notes 1`); and all-or-nothing reading, for the ledger's reason: a
+library read in part and then saved would lose, without a word, whatever was
+not read. A note in a notebook the file does not have, two things with one
+number, or a notebook inside itself is refused the same way, naming the line.
+Not YAML: a note keeps up to fifty past versions, so this is the largest record
+any of these apps keeps, and `yamldoc` finds each key by scanning (§1204's
+table).
+
+### Kept once per event
+
+Every change marks the library, and the event that made it writes it before
+the next event is handled -- so one keystroke that makes a notebook and a note
+in it writes the file once. A save that fails is shown in red in the status
+bar, and the next change -- or Ctrl+S, which otherwise just says where the
+notes are kept -- tries again. Closing the window while a save is failing asks
+first (`apps/unsaved`); a window whose library was refused does not ask, since
+it has said from the start that nothing written in it is kept. What is being
+written in a note when the window closes is committed and kept first, where
+before it was dropped.
+
+### Stamps from the clock
+
+A stamp is milliseconds since 1970 from the clock, but never earlier than the
+last stamp given or read: a later change must sort later, within one
+millisecond or after the clock is set back. Shown as `2026-09-25 14:03`, in the
+desktop's zone -- UTC until the system has one, as the habit tracker and the
+finance app read theirs.
+
+**Where it lives:** `apps/notes/src/main.rs`: `library_path`, `library_text`,
+`parse_library`, `when`, `clock_ms`; `NotesApp::{from_settings, load_library,
+take_library, after_change, keep, keeping_line, stamp, request_close}`.
+
+**How to reverse:** the format is `library_text`/`parse_library`; a folder of
+files replaces those two and `keep`, and keeps `load_library`'s all-or-nothing
+rule and `stamp`.
+
+---
+
+## 1206. The address book is kept like the notes library, and the store counts its own changes
+
+**Date:** 2026-09-25
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** The contacts app now keeps its address book -- every contact
+with all its numbers, addresses, accounts and groups, the groups, and who was
+looked at last -- in one file in the settings folder
+(`contacts/address-book.txt`), written after every change, the way the notes
+library is kept (§1205). Until now nothing was kept, and a vCard export was
+the only way to keep anyone. vCard stays what it was: the way in from and out
+to other programs (Ctrl+O, and Ctrl+E where it was Ctrl+S).
+
+### Not vCard as the store
+
+vCard is the address book's interchange format and the obvious candidate. It
+cannot hold what this app keeps: a contact's groups (vCard's `CATEGORIES` are
+names, and two groups can share one), a group's colour and description, the
+star, when a contact was added and last reached, which of several numbers is
+primary in a way every reader agrees on, and the recently viewed. Each of
+those would be an extension (`X-SLATEOS-...`), and a store made of extensions
+is a private format wearing a public one's name -- other programs would read
+it and drop half of it without a word. The file is the notes library's kind:
+tab-separated lines, `textfmt::tsv`'s escapes, the format named on the first
+line, read whole or not at all.
+
+### The store counts its changes
+
+The notes app marks the library changed in each method that changes it; a
+method that forgets is a change that is never written. The contacts store's
+fields are private, so every change goes through one of its methods, and each
+of those counts one in `ContactStore::revision` -- the two that hand out
+`&mut` count whether or not the caller then changes anything. The window
+writes the book after any event that moved the revision. A method added later
+that forgets to count is still possible, but it is one place, next to the
+field, not every call site in the app.
+
+**Where it lives:** `apps/contacts/src/main.rs`: `book_path`, `book_text`,
+`parse_book`, `ContactStore::{revision, changed}`, `ContactsApp::{from_settings,
+load_book, take_store, keep, unkept, keeping_line, stamp, request_close}`.
+
+**How to reverse:** the format is `book_text`/`parse_book`; the counting is
+independent of it.
+
+---
+
+## 1207. The kanban boards are kept like the notes library, and a change is found by comparing the boards' text
+
+**Date:** 2026-09-25
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** The kanban app now keeps every board in one file in the
+settings folder (`kanban/boards.txt`), written after every key or click that
+changed one; until now every card was gone when the window closed. It is the
+same kind of file as the notes library (§1205). What is different is how the
+window knows a board changed: after each key or click it writes the boards out
+as text and compares that with what it last wrote.
+
+### Finding a change
+
+| | Compare the text (chosen) | Count changes where they happen (§1206) | Mark each change (§1205) |
+|---|---|---|---|
+| A change missed | impossible: whatever changed, the text differs | only by a method added later that forgets to count | by any place that forgets to mark |
+| Cost per key or click | the boards written to a string | nothing | nothing |
+| Fits this app | the boards are a few hundred cards at most; every change goes through `active_board_mut` *or* `boards.push`, and the view code reaches into boards in forty places | a store type the app does not have | the forty places |
+
+Notes and contacts can hold far more (a note keeps fifty past versions), so they
+count; a board is small, so it compares. Cards are written sorted by id so the
+same boards are always the same text -- a board's cards live in a hash map,
+whose order is not stable.
+
+### Cards once, columns by id
+
+A card is written once and a column lists the ids of its cards. A column
+nesting its cards would have had no place for a card in no column (which the
+model allows), and the archive is a list of ids already. The reader refuses a
+card named twice, a list naming a card the board does not have, and a card in
+two places; the JSON import, the one path that could make such a board, now
+drops them on the way in -- the first place a card is named is where it is.
+
+**Where it lives:** `apps/kanban/src/main.rs`: `boards_path`, `boards_text`,
+`parse_boards`, `KanbanApp::{from_settings, load_boards, keep, unkept,
+keeping_line, request_close}`, `JsonImporter::import_board`.
+
+**How to reverse:** the format is `boards_text`/`parse_boards`; `keep` is where
+the comparison is.
+
+## 1208. A mind map is a document: a file of its own per map, `.mindmap`, and the window asks before losing one
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** The mind map app could not keep a map. Ctrl+S wrote an outline --
+indented lines of text, which keep the words and the branches and lose every
+colour, shape, position and fold -- and the window closed over unsaved maps
+without a word. Each map (each tab) is now saved whole to a file of its own,
+and closing a map, or the window, over changes not saved asks first, as the
+diagram and the whiteboard do. The outline stays, as an export (Ctrl+E) and as
+something Ctrl+O can open.
+
+### A file per map, or one for the window
+
+| | A file per map (chosen) | One file holding every tab |
+|---|---|---|
+| What Ctrl+S saves | the map showing | every map |
+| Giving someone one map | its file | cut out of a workspace |
+| Coming back to a session | open each map | open one file |
+| The other editors here | the JSON viewer's tabs are a file each | none works this way |
+
+A window of tabs where each tab is a file is what the JSON viewer already is
+and what a document editor is expected to be; a workspace file would be a
+second idea on top of it, and can still be added on top.
+
+### Opened by what it holds
+
+Ctrl+O takes a map file or an outline, and decides which by what the file
+holds: a file whose top level names `slateos-mindmap` is a map, anything else
+an outline. The name is a claim by whoever gave it; the content is the fact
+(the rule `apps/diagram`'s `write_diagram` states for opening a file). An
+outline opens as a new map with no file, so saving it asks where and never
+writes a map over the outline. A map file too large to read whole is refused;
+an outline too large is opened to its last whole line and said to be
+incomplete.
+
+### Smaller calls
+
+- **Save As names the map after the file.** The name on the tab is the name
+  the map is found by, and there was no other way to name a map.
+- **Closing the last map leaves a fresh one.** A window with no map has
+  nothing to draw or add to; refusing Ctrl+W on the last tab, as the JSON
+  viewer does, would leave no way to throw that map away.
+- **Each map keeps its own undo history.** It was the window's, replayed onto
+  whichever map was showing, and could delete a node of another map
+  (known-issues, the mind map's undo).
+- **A map is marked changed where a change is recorded for undo** -- and by
+  undo, redo, and a layout that moves a node -- not wherever a map is borrowed
+  to change: renaming a node to what it already says is not a change.
+
+**Where it lives:** `apps/mindmap/src/main.rs`: `mindmap_document`,
+`mindmap_from_document`, `MindMapApp::{open_file, import_outline, write_map,
+save_map_as, save, picked, request_close_map, close_map, request_quit,
+answer_close, continue_quitting, push_undo, lay_out_again}`.
+
+**How to reverse:** the format is `mindmap_document`/`mindmap_from_document`;
+the file-per-map choice is the map id `write_map` takes.
+
+## 1209. The calendar's events are kept like the address book, and added and changed in a form
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** Nothing could be put into the calendar but an imported `.ics`
+file, nothing in it could be changed or deleted, and whatever was there was
+gone when the window closed. Now N (or the New event button) opens a form --
+title, date, all day or a start and an end, category, repeat, place and notes
+-- Enter or a second press on an event opens it again, and Delete asks and
+deletes. Every change is written at once to `calendar/events.txt` in the
+settings folder, the same kind of file the notes library and the address book
+use, and read back whole next time or not at all.
+
+### The file: tab-separated, or the calendar's own `.ics`
+
+| | Tab-separated lines (chosen) | `.ics` (iCalendar) |
+|---|---|---|
+| Holds everything the calendar does | yes: colour, reminder, all-day, every repeat | only with private `X-` lines for colour and all-day |
+| Read whole or refused, naming the line | the notes library's reader, again | the import is lenient on purpose -- a stranger's file |
+| Like the other kept files here | notes, contacts, kanban | none |
+| Opened by another calendar as it is | no -- Ctrl+S exports an `.ics` | yes |
+
+An `.ics` reader for files from elsewhere has to shrug at what it does not
+know; a reader for the calendar's own file has to refuse what it does not
+know, or the next save loses it. One reader cannot be both, so the calendar's
+own file is its own format and `.ics` stays the door in and out.
+
+### Smaller calls
+
+- **A change is found by the store counting its own** (`EventStore::revision`,
+  as the address book's `ContactStore` does, §1206), not by comparing the whole
+  calendar's text after each event (kanban, §1207): an imported calendar can
+  hold thousands of events, and the calendar redraws on the pointer and on a
+  clock.
+- **The form does not offer a reminder.** The event has one, and it is kept
+  and written, but nothing in this program raises an alert; a reminder field
+  would promise one.
+- **A weekly repeat made in the form is "on the day it starts"** (no weekdays
+  named), so changing the date moves it; a repeat the list does not have -- an
+  imported weekly-on-three-days, or every N days -- is offered beside the list
+  so that editing the title does not change it.
+- **Delete asks**, naming the event and, for a repeating one, that every
+  repeat goes with it: there is no undo.
+- **The New event button gives way** to the view tabs in a narrow window (the
+  tabs are the only way to change view); N works either way.
+
+**Where it lives:** `apps/calendar/src/main.rs`: `calendar_text`,
+`parse_calendar`, `EventStore::{revision, from_events}`, `EventForm`,
+`CalendarApp::{from_settings, load_events, keep, request_close, answer,
+open_new_event, open_edit_event, save_form, delete_event, notice_lines}`,
+`handle_form_key`, `handle_form_click`, `handle_confirm_key`.
+
+**How to reverse:** the format is `calendar_text`/`parse_calendar`; the
+change counting is `EventStore::changed`.
+
+## 1210. The reminders list is kept like the calendar, and a repeating reminder done comes round again
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** A reminders app that could not add a reminder: the list filled
+only from a JSON file, nothing in it could be changed or deleted, a reminder's
+steps could not be reached, and everything was gone when the window closed.
+Now N adds a reminder, E changes the one selected, Delete asks and deletes, and
+the steps are written, ticked and removed in the same form -- all from the
+keyboard, which is how the program has always been driven. Every change is
+written at once to `reminders/tasks.txt` in the settings folder, the calendar's
+kind of file (§1209). And a repeating reminder, done, comes back for its next
+time instead of being finished for good.
+
+### A repeating reminder, done
+
+| | Comes round again (chosen) | Marked done, like any other (before) |
+|---|---|---|
+| "Take the pills", daily, done today | due again tomorrow at the same time | gone from Today, Upcoming and All, forever |
+| What its repeat is for | when it is next due | nothing: a label |
+| Missed three times, then done | due next at the first time still to come | -- |
+
+The next time is stepped from the due date, not from when it was done, so a
+reminder due at 09:00 stays at 09:00; past times are skipped, so doing a
+weekly chore late does not leave it due three weeks ago.
+
+### Smaller calls
+
+- **Keyboard only.** The program binds every key it uses and takes no pointer
+  by construction (known-issues, the no-pointer entry: "keyboard-driven, no
+  pointer layer needed"); the form keeps to that: Tab between fields, Left and
+  Right to choose, Enter to save.
+- **Steps are edited in the form**: a Steps row where Up and Down choose, Space
+  ticks and Delete removes, and an "Add a step" field where Enter adds -- plus
+  Shift+1-9 to tick one from the list without opening the form.
+- **A new reminder is due at the next whole hour, today** -- clearing the date
+  makes it undated -- and a reminder saved where the current view would hide
+  it switches the view to All, so it does not vanish the moment it is made.
+- **A change is counted by the store** (`TaskStore::revision`), as the
+  calendar's is.
+
+**Where it lives:** `apps/reminders/src/main.rs`: `tasks_text`, `parse_tasks`,
+`next_due_after`, `TaskStore::{revision, from_tasks, complete_task}`,
+`TaskForm`, `RemindersApp::{from_settings, load_tasks, keep, request_close,
+answer, open_new_task, open_edit_task, save_form, delete_task, toggle_step,
+notice_lines, handle_form_key, handle_confirm_key}`.
+
+**How to reverse:** the format is `tasks_text`/`parse_tasks`; the repeat is
+`complete_task`'s first branch.
+
+## 1211. A snippet is written in the column it is shown in, and the library is kept like the notes library
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** The snippets app could hold a library of code and could not
+change a line of it: a new snippet was named from the search box and had no
+content, and nothing could give it any. Now F2 (or the Edit button, or making
+a new one) turns the right-hand column -- where the snippet is shown -- into
+an editor for it: title, language, folder, tags, description, and the code.
+Ctrl+S saves; leaving over changes asks first. The library is written to
+`snippets/library.txt` in the settings folder after every change.
+
+### Where the editor is
+
+| | In the snippet's own column (chosen) | A dialog over the window |
+|---|---|---|
+| Room for the code | the whole column, as the code is shown | what a dialog can spare |
+| Seeing the list while editing | yes, though it does not answer | no |
+| Like the other editors here | the notes app edits a note where it is shown | the calendar and reminders use a form -- short fields, not a page of code |
+
+### Smaller calls
+
+- **Tab indents in the code**, as it does in any code editor; Shift+Tab leaves
+  the code for the field above. Everywhere else Tab walks the fields.
+- **New still makes the snippet at once**, named from the search box as
+  before, and opens the editor on it: a New that opened an empty editor and
+  made nothing until a save would lose the search-box naming the list's order
+  depends on.
+- **The editor is modal within the window**: while it is up, a press on the
+  list or the sidebar does nothing, so a stray press cannot pick another
+  snippet out from under an unsaved one.
+- **A first run opens on the examples**, as before, and writes nothing until
+  something changes (kanban's starting board, §1207).
+- **Delete asks**: there is no undo, and a snippet can be a page of code.
+- **Tags are one line, split at commas**, trimmed, empty ones and repeats
+  dropped; the file keeps each on a line of its own, so a tag cannot break
+  its line whatever it holds.
+
+**Where it lives:** `apps/snippets/src/main.rs`: `library_text`,
+`parse_library`, `Editing`, `SnippetField`, `App::{from_settings,
+load_library, keep, request_close, answer, edit, save_edit, leave_editor,
+handle_edit_key, press_in_editor, draw_edit_form, draw_edit_code,
+draw_confirm_delete}`; `apps/textarea` (`TextArea::with_family`).
+
+**How to reverse:** the format is `library_text`/`parse_library`; the editor
+is drawn by `draw_editor`'s first branch.
+
+## 1212. The feed reader keeps its subscriptions as OPML and its marks by link, and reads a feed file again at start
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** The feed reader kept nothing: every start was empty. Now the
+list of feeds and the folders they are filed in are written after every
+change, as an OPML file in the settings folder -- the format the reader
+already imports and exports, so the file is also one a person can take to
+another reader. Which articles are read or starred is written beside it,
+keyed by each article's link. The articles themselves are not copied: they
+come from feed files the user keeps, and a feed read from a file is simply
+read from that file again at the next start, its marks coming back with it.
+
+### What is kept, and how
+
+| | Kept as | Why this shape |
+|---|---|---|
+| Feeds and folders | OPML (`subscriptions.opml`) | the program's own import and export format; portable |
+| Read and starred marks | lines of `flags feed key` (`marks.txt`) | OPML has nowhere for them; a key per article, not an index, survives a feed file that changed |
+| Articles | not copied | they are in the user's own files, which are read again |
+
+### Smaller calls
+
+- **An article's key is its link, or `title:` and its title** for a feed that
+  gives no link. The link is what a feed promises to keep stable; a title can
+  be edited, but a feed without links offers nothing better.
+- **Only marked articles are written**, and only for subscribed feeds: a
+  removed feed takes its marks with it, so the file does not grow with feeds
+  that are gone.
+- **Only a feed whose address is a file on this machine is read at start** --
+  one added by a web address cannot be fetched, as the window says.
+- **Reading at start is not a change**: nothing is written until the user
+  changes something, re-reading notwithstanding.
+- **An OPML list imported twice adds only what is new**, and an empty folder
+  is a folder -- both found by keeping: the reader's own export writes an
+  empty folder, and its own import dropped it.
+
+**Where it lives:** `apps/rssreader/src/main.rs`: `subscriptions_path`,
+`marks_path`, `Marks`, `mark_key`, `marks_text`, `parse_marks`,
+`RssReaderApp::{from_settings, load_kept, keep, unkept, request_close, answer,
+remember_marks, subscriptions_changed, route_event}`.
+
+**How to reverse:** the formats are `generate_opml`/`import_opml` and
+`marks_text`/`parse_marks`; `from_settings` is what `main` opens.
+
+---
+
+## 1213. An application shows a name through `pathtext`, and `apps/clippy.toml` refuses `display()`
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** A file's name on this system can hold bytes that are not text.
+Rust's usual way to show a path, `display()`, draws every such byte as the
+same symbol (U+FFFD), so two different files can look identical on screen and
+a message about one reads as a message about the other. Lane E's programs now
+show every path and name through one method, `pathtext`'s `.shown()`, which
+writes such a byte as its code instead (`caf\351.txt`) -- the rendering they
+already used for names in the forty-seven places fixed earlier the same day.
+A configuration file that only lane E's crates read makes `display()` a build
+error there, so a new one cannot come back unnoticed.
+
+### The choices
+
+| Question | Chosen | Alternative | Why |
+|---|---|---|---|
+| Rendering | `quoting::escape_unprintable`: a byte that is not text, or a control character, as three octal digits; everything else, backslash included, as itself | `quoting::escape` (the `ls`/`tar` style, which also doubles `\`) | one rendering across lane E: the earlier lossy-decode fixes use it. `escape` is unambiguous where this is not (a name that really contains the four characters `\351` looks like one holding byte 0xE9), but doubles every backslash in a name a person typed: a rare confusion against a daily oddity. Revisit if the two are ever confused in practice. |
+| Where it lives | a lane E crate, `apps/pathtext` | a function in `quoting` | `quoting` is lane B's, and a method that stands in for `display()` is an application convenience, not a quoting style |
+| Shape | a trait method, `.shown()`, returning a `Display` | a free function returning a `String` | it replaces `.display()` where it stands, so no call site's receiver had to be re-read; it borrows, and renders only when formatted |
+| Ratchet | `disallowed-methods` in `apps/clippy.toml` | a text-scanning gate in the pre-push hook | the compiler resolves which `display` is meant, so the fourteen application types with a `display()` of their own are not flagged, which no text scan can tell apart; and the workspace already denies `clippy::all`, so the boot test's clippy gate enforces it with no change to a shared file |
+
+### The sweep
+
+The call sites were found by clippy itself -- the new configuration, the lint
+capped to a warning, every crate under `apps/` on both the host target and
+`x86_64-unknown-linux-gnu` so `cfg(unix)` code was seen -- and each reported
+span was rewritten in place; nothing was found by pattern.
+
+**Then every site was read, because `display()` was not always a display.**
+A shown name and a used name need opposite things: shown, a control
+character must be escaped so it cannot break or disguise a line; used, the
+name must stay exactly itself or it names another file. About a dozen of the
+368 were used:
+
+| Where | What the name was | Now |
+|---|---|---|
+| `musicplayer` M3U export | a line of the playlist file | the path exactly, or the track left out and named -- a line break or a name that is not text has no M3U form (it wrote U+FFFD, pointing the entry at no file) |
+| `email` flag key | a persisted key | `pathcodec::encode_path` (§426): shown forms can coincide |
+| `rssreader` feed address | read again as a path at start | the exact text; a name that is not text is kept by its shown form and the window says it will not be read again |
+| `diskanalyzer` path box | edited, then scanned | unedited, it means the folder it was filled from, exactly |
+| `installer/build.rs` | a linker argument | exact, or the build stops |
+| save-name suggestions, an attachment's name from the user's own file, the two editors' document names | used as file names | `text_or_shown`: exact whenever the name is text |
+| an attachment's name from a *stranger's* message | a suggested file name | escaped on purpose: a bidirectional override cannot hide the true extension |
+| test arguments and a test's device node | opened | exact text |
+
+`pathtext` gained `text_or_shown` for the used-but-not-a-key case, and ten
+per-application helpers that each rendered names their own way (one wrote
+`\xNN`) now call it or `shown`.
+
+### The cost
+
+`apps/clippy.toml` replaces the workspace's `clippy.toml` for every crate under
+`apps/`: clippy reads the nearest one and merges nothing. So it repeats the
+workspace's settings. `pathtext`'s test
+`the_apps_clippy_config_repeats_the_workspaces` fails if one is missing, and the
+workspace file says so at its top.
+
+**Where it lives:** `apps/pathtext/src/lib.rs`, `apps/clippy.toml`, and every
+`.shown()` under `apps/`.
+
+**How to reverse:** delete the two `disallowed-methods` entries; `.shown()` and
+`.display()` are interchangeable at every call site.
+
+---
+
+## 1214. The dictionary looks a word it lacks up at dict.org -- when asked, never as the reader types
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** The dictionary program knew thirty words. It now also looks up
+any other word in WordNet (a free English dictionary) on a public server,
+dict.org, using the DICT protocol (RFC 2229 -- a plain-text way of asking a
+dictionary server for a word). The word the reader asked about is sent to
+that server, which this project does not run, so a lookup happens only when
+the reader asks for one -- Enter on the offer, a click on a word -- and the
+offer says where the word goes. Nothing is sent while typing.
+
+### The choices
+
+| Question | Chosen | Alternative | Why |
+|---|---|---|---|
+| Where definitions come from | WordNet, from dict.org over DICT | ship WordNet's data (about 30 MB) with the system | the data is not in the tree and packaging it is a larger decision than this program's; DICT is plain TCP, which an application can already open (`netscan` does), and WordNet's entries read cleanly into the shape the entry screen already draws. Revisit once packages can carry data files: a local copy needs no network and sends nothing. |
+| When a lookup happens | on request: Enter on the "Look up ... online" row, a suggestion, a remembered word, or a click on a cross-reference the list lacks | as the reader types, like the built-in search | a lookup per keystroke sends every prefix of every word typed, including ones the reader thought better of, to someone else's server |
+| Saying so | the offer reads "In WordNet, at dict.org -- the word is sent there"; an entry from it reads "From WordNet ..., at dict.org" | say nothing | a reader should know which words leave the machine, and which entries came from elsewhere |
+| A miss | the words one edit away (`MATCH wn lev`), offered as rows | "not found" alone | a misspelling is the commonest reason for a miss |
+| Which server | dict.org, one constant | a setting | nothing yet reads a setting for it; the constant is `online::DICT_ORG`, and `Dictionary::server` already carries it, so a setting is one line when wanted |
+
+**Where it lives:** `apps/dictionary/src/online.rs` (the conversation and the
+WordNet reader, tested against dict.org's own replies, recorded), and the
+lookup rows, chips and answer handling in `apps/dictionary/src/main.rs`.
+
+**How to reverse:** set `lookup` to a function that refuses; every row and
+chip that offers a lookup then says why it could not.
+
+---
+
+## 1215. The speed test measures against public test servers, over plain HTTP, when Start is pressed
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** The speed test used to invent its results, then showed none.
+It now measures the connection: it times TCP connections to a public test
+server for the round trip, then downloads (and, where the server allows,
+uploads) for a set time and counts the bytes. The servers are ones their
+operators publish for exactly this -- Tele2, Hetzner, Linode, Vultr and
+thinkbroadband -- and nothing is contacted until Start is pressed, and then
+only the server selected.
+
+### The choices
+
+| Question | Chosen | Alternative | Why |
+|---|---|---|---|
+| Servers | eight public test-file servers, named with who runs them and where | speedtest.net's protocol and server list | Ookla's protocol is proprietary and its terms restrict third-party clients; these servers publish their files for public testing |
+| Transport | plain HTTP | HTTPS | nothing here can check a server's identity (see E-Q2); a speed test sends nothing of the user's, only bytes to count |
+| Latency | TCP connect time, 20 probes | ICMP ping | an application can open TCP connections and nothing lower; a handshake is one round trip with no server work in it. A probe that fails is counted as a failed probe -- the result's "packet loss" became "failed probes", since TCP hides lost packets |
+| The figure | the average rate after the first fifth of each phase | the average of the whole phase | a connection starts slow and doubles; counting the climb reports a slower line than there is |
+| No upload address | "not measured" | zero | zero says the line cannot send |
+
+**Where it lives:** `apps/speedtest/src/net.rs` (the run), `real_servers()`
+and `SpeedTestUI::apply` in `apps/speedtest/src/main.rs`.
+
+**How to reverse:** `default_servers()` returning an empty list makes Start
+report "No server is selected" and contact nothing.
+
+---
+
+## 1216. The Network Manager's Diagnose looks up and connects to example.com -- when asked, never on its own
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** Diagnose used to invent a passing report, then refused to run.
+It now checks the machine: whether a network card is up, whether it has an
+address and a gateway (read from the kernel), and then -- off the window's
+thread -- whether a name can be looked up and a connection made. Those last
+two need somewhere to look up and connect to; it is `example.com`, port 80,
+and nothing is contacted until Diagnose is pressed.
+
+**Why `example.com`:** it is reserved by IANA for exactly this kind of
+illustrative use (RFC 2606), has answered HTTP on port 80 for decades, and
+belongs to no company whose logs would learn that a SlateOS machine exists.
+A large provider's host (a search engine's, an OS vendor's connectivity
+check) would be as reachable and would tell that provider on every click.
+
+**Alternatives:** the DNS server the kernel names (a lookup there proves
+little about the wider network, and a resolver need not answer TCP port 80);
+the gateway (gateways rarely listen on anything); a host the operator
+chooses (a setting nobody has yet, and the question can be reopened when
+one exists -- `open-questions.md` E-Q2 is where the related "which remote
+services" question already sits).
+
+**What it costs:** one DNS query and one TCP handshake to IANA per click.
+No request is sent over the connection; it is closed once made.
+
 ## §253 — `requeue` means "re-enqueue if still Running", so every parking call site passes `true`
 
 **Date:** 2026-08-21

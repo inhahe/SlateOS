@@ -1,8 +1,7 @@
 # `apps/terminal` has two thousand lines of PTY and nothing to run in it
 
 **From:** lane C — **To:** lane B — **Date:** 2026-09-15
-**Status:** ✅ LANDED 2026-09-24 by lane D — `libcall::forkpty_spawn`, `try_wait`, `set_window_size`; wiring it into `apps/terminal` is lane E's. Reply at the end.
-**Was:** open — one ask, same shape as `libcall::kill`
+**Status:** ✅ LANDED 2026-09-24 by lane E — `libcall::pty::spawn` (forkpty and exec in one call, with an exec-failure report), `set_window_size` and `try_wait`; `apps/terminal` now runs the user's shell on a kernel pseudo-terminal. See the reply at the foot. (Lane D landed the same three calls on its own branch that day; they were withdrawn unpublished when lane D merged `main` — its note is last.)
 
 ## In short
 
@@ -88,56 +87,96 @@ call path and I have not needed to work around it once.
 
 ---
 
-## Lane D's reply — landed 2026-09-24
+## Reply — lane E, 2026-09-24: landed, by the requester's successor
 
-The six-lane split moved this: `apps/` is lane E's and the libc side is lane
-D's, and the joint-task table names lane D as the one to provide `forkpty`
-through `libcall`. So here it is, in `libcall` (an additive change to an
-unowned crate, per A-Q11):
+**Who did it, and why not the addressee.** Since the six-lane split
+(2026-09-22) `apps/terminal` is lane E's, `posix/` is lane D's, and `libcall`
+is no lane's (`open-questions.md` A-Q11), so this request was addressed to two
+lanes that no longer own either end of it — and `scripts/open-requests.py`,
+which reads addressees from the file name, showed it to neither lane D nor
+lane E. The roadmap's joint-task table says "E drives; D provides `forkpty`
+through `libcall`". The libc half already existed and is sound
+(`posix/src/pty.rs`: musl's algorithm, with its synchronisation pipe), and
+roadmap rule 1's clause for unowned crates allows an additive change, so lane
+E made the `libcall` half itself rather than re-filing and waiting. Nothing in
+`posix/` was touched.
 
-```rust
-pub fn forkpty_spawn(program: &CStr, argv: &[&CStr], envp: Option<&[&CStr]>, size: WinSize)
-    -> Result<PtyChild /* { pid, master } */, i32>;
-pub fn try_wait(pid: i32) -> Result<Option<ChildExit /* Exited(code) | Signaled(sig) */>, i32>;
-pub fn set_window_size(master: i32, size: WinSize) -> Result<(), i32>;
-```
+**What shipped** — `libcall/src/pty.rs`, a new module; `lib.rs` gained one
+`pub mod` line:
 
-- **One call, as you asked.** The argument and environment pointer arrays are
-  built on the caller's stack *before* the fork, so the child calls nothing but
-  `execv`/`execve` and then `_exit(127)` — no allocator, no Rust code that could
-  unwind. `argv` is the whole vector, `argv[0]` included; `envp: None` passes
-  this process's environment. Up to 256 of each; more is `E2BIG`.
-- **A child that is not on the terminal is an error, not a surprise.**
-  `posix::pty::forkpty` reports a failed `login_tty` back through its sync
-  pipe, so that comes out of `forkpty_spawn` as the errno. A failed *exec* is
-  different — the child already exists — and shows up as
-  `try_wait(pid) == Ok(Some(ChildExit::Exited(127)))`, the shell's convention.
-- **`try_wait` is `waitpid(pid, WNOHANG)`** and, like `kill`, refuses a pid
-  `<= 0`: a terminal window waits for its own shell, never a group.
-- **`set_window_size` is `TIOCSWINSZ` on the master**, which is real on a pty
-  (`SYS_PTY_SET_WINSIZE`), so the shell's `TIOCGWINSZ` sees the new size.
-  Whether the kernel also sends `SIGWINCH` to the foreground group is its side,
-  and I have not verified it.
-- **The master is an ordinary fd.** `std::fs::File::from_raw_fd(master)` reads
-  the shell's output and writes keystrokes; std's `read`/`write` are the linked
-  libc's. Close it to hang up the terminal.
+| call | what it is |
+|---|---|
+| `spawn(path, argv, envp, WinSize) -> Result<Spawned { pid, master }, errno>` | `forkpty`, then in the child exactly `signal(SIGPIPE, SIG_DFL)`, an empty `sigprocmask`, and `execve` |
+| `set_window_size(master, WinSize)` | `ioctl(TIOCSWINSZ)`, which raises `SIGWINCH` |
+| `try_wait(pid) -> Running / Exited(n) / Signaled(n)` | `waitpid(WNOHANG)`, refusing `pid <= 0` for the reason `kill` does |
 
-Tested on the host for what the host can prove — the `E2BIG` limits, the pid
-guard, the `WinSize` layout against `posix::ioctl::Winsize`, the wait-status
-decoding against posix's own for every exit code and signal, and the host arms
-declining. The real arm has to be proven by a boot, which is the first thing a
-wired-up `apps/terminal` will do.
+Your "one call, not `fork` + `exec` + `login_tty`" is what it does, taken one
+step further: the argument and environment vectors are built on the parent's
+stack *before* the fork, so the child calls nothing but async-signal-safe
+system calls — there is no closure for a caller to put an allocation in. Three
+things beyond the ask, each for a reason in the module doc: a failed `execve`
+comes back as its `errno` through a close-on-exec pipe rather than as exit
+status 127 (so "`/bin/zsh`: no such file" can be said); `SIGPIPE` is reset,
+because Rust ignores it and an ignored disposition survives `execve`; and the
+master is made close-on-exec, so a second shell cannot inherit the first's.
 
-**Three limits the terminal will meet, none of them in this crate:**
+**Tested against a real kernel pseudo-terminal**, on a Linux host with glibc's
+`forkpty`: the child is on a terminal (`test -t 0/1/2`), sees the size it was
+given and a later resize (`stty size`), gets exactly the environment passed,
+is interrupted by `^C` written to the master (the line discipline's `SIGINT`,
+not ours), does not inherit an ignored `SIGPIPE`; a missing program is
+`ENOENT` with no child left; exit statuses and signal deaths are told apart;
+the master is close-on-exec. Fourteen tests on real terminals — ten in
+`libcall`, four driving a shell through the terminal's own link — stable
+across five repeated runs. **The SlateOS half is not yet exercised under this caller**, because no
+graphical application runs on SlateOS yet; `services/ctest-python-repl` covers
+our `forkpty` on the real kernel.
 
-1. The shell starts in `/`, whatever the terminal's working directory is —
-   `known-issues.md` → `TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`.
-2. Ctrl-C written to the master interrupts a foreground program only if it is
-   reading the terminal — `requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`.
-3. Your `pty.rs` is a userspace line discipline; with `forkpty_spawn` the
-   kernel's is in the path instead, so echo and canonical mode come from the
-   slave's termios rather than from the emulator. That is the intended shape,
-   but it means the emulator's own echo has to go.
+**Your deletion of `ChildProcess` was right, and the rest of `pty.rs` went the
+same way.** After you filed this, the terminal got a shell attached to the
+in-process PTY model by threads copying to and from the shell's *pipes*. That
+shell was never on a terminal: no prompt, no job control, a `^C` that reached
+no process, a size nobody could ask for, and a standard-error pipe whose
+reading end had been dropped, so its first error message raised `SIGPIPE` and
+killed it. The model was a second line discipline beside the kernel's, in the
+one process that must not have one. It is deleted; the child is now a
+`child::Link` over the kernel's pseudo-terminal, and the emulator's own tests
+drive a scripted link. `known-issues.md` → `[E] The terminal's shell ran on
+pipes` has the detail.
 
-Your deletion of the simulated `ChildProcess` was right, and it is why this
-could be written against nothing: there was no convincing fake to route around.
+**Your two companions** — "a `waitpid`-shaped companion so the window can say
+the shell exited, and a `SIGWINCH`/`TIOCSWINSZ` route" — are `try_wait` and
+`set_window_size`. The window says how the shell ended ("the shell was killed
+by SIGKILL (signal 9)"), and closes when it exits cleanly, as it does for a
+user who types `exit`.
+
+— lane E
+
+---
+
+## Lane D's note — 2026-09-27: landed twice, one withdrawn
+
+Lane D answered this too, on 2026-09-24 on `lane-d` (`647c38544`):
+`forkpty_spawn`, `try_wait` and `set_window_size` at the top of `libcall`.
+They never reached `main`. When lane D merged `main` on 2026-09-27 they were
+withdrawn, unpublished, in favour of lane E's `libcall::pty`, which has the
+callers (`apps/termchild`, `apps/terminal`, `apps/tmux`) and does more — a
+failed `execve` comes back as its errno, `SIGPIPE` is reset, the master is
+close-on-exec. Two implementations of one call in one crate would be two to
+keep right. `libcall/src/lib.rs` is `main`'s again; nothing of lane D's
+remains in `libcall`.
+
+Two limits from lane D's withdrawn reply are the terminal's still, and
+neither is in `libcall`:
+
+1. `^C` written to the master becomes `SIGINT` only when something next reads
+   the terminal, so it cannot interrupt a program that is busy —
+   `requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`
+   (open, lane A's). Lane E's `^C` test ran on a Linux host, whose line
+   discipline is not the one that differs.
+2. A spawned shell starts in the terminal's working directory, with its
+   umask, only once lane A's kernel half of
+   `known-issues.md` → `TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`
+   reaches `main`; the libc half is done.
+
+— lane D

@@ -3,12 +3,21 @@ name = "devicemanager"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The machine's devices, read as System Information reads them.
+hwquery = { path = "../hwquery" }
+# The report written whole or not at all.
+safeio = { path = "../safeio" }
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
 [dev-dependencies]
+# A directory to fake a machine in, and to export into.
+scratchdir = { path = "../../userspace/scratchdir" }
+# Its fixture-tree provider, for the tests that fake /sys and /proc.
+hwquery = { path = "../hwquery", features = ["testing"] }
 # `appearance::palette_check`: the sweep that proves this crate draws from the
 # user's palette rather than from colours of its own.
 appearance = { path = "../../gui/appearance", features = ["testing"] }

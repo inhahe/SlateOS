@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -11,6 +12,14 @@ guitk = { path = "../../gui/toolkit" }
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
+
+# The regular-expression rule: the POSIX engine the shell, grep, sed and awk
+# share, so a pattern that works at the prompt works here.
+ere = { path = "../../userspace/ere" }
+
+# A name that is not text is shown by its bytes (escapes), so two such names
+# never look the same; the tree's one renderer for an untrusted name.
+quoting = { path = "../../userspace/quoting" }
 
 [lints]
 workspace = true

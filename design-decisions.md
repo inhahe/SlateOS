@@ -82968,8 +82968,11 @@ a boot shows that a module is live.
     code in the kernel.
   - Then the syscall door that lane B's parked request asks for
     (`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`).
-  - `userspace/sbctl` claims to create keys and sign images while doing
-    neither. That is lane B's to stop, and lane B is told.
+  - `userspace/sbctl` no longer claims success, as A-Q21's text had it. Its
+    commands have refused since 2026-09-15, per lane B's correction of
+    2026-09-27. Under the operator's B-Q17 answer, lane B is deleting the
+    four that need RSA/X.509. `enroll-keys` and `reset` stay as refusals
+    until this door lands.
 - **`diskencrypt`.** `unlock_volume` ignores the passphrase. Fix first: real key
   derivation with a ported, vetted password hash (§539). Then connect it to
   the mount path.

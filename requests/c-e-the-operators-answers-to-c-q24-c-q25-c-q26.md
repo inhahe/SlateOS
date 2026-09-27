@@ -53,6 +53,16 @@ desktop's own settings use). The four that asked:
 Saving stays each program writing its own file; the live-update service lane C
 is adding sits beside that, never in front of it.
 
+## 4. A sentence that promises a shortcut no longer on by default (C-Q24, §1416)
+
+*Added 2026-09-27, after the defaults changed.* `apps/settings/src/main.rs`
+(~line 4658) tells a user who turns automatic locking off: "It can still be
+locked at any time from the start menu or with the lock shortcut." Lock (Super+L)
+is no longer bound by default, so on a fresh install there is no lock shortcut.
+"from the start menu" is still true (the power menu's Lock). Suggested: drop
+"or with the lock shortcut", or say "or with a shortcut, if you set one". A
+search of `apps/` found no other text naming a shortcut that is now unbound.
+
 ## If this is never done
 
 Nothing gets worse: the editing keys work where they work now, the password

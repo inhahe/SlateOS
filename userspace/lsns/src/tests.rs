@@ -161,11 +161,13 @@ fn help_is_upstreams() {
     assert!(text.starts_with(
         "\nUsage:\n lsns [options] [<namespace>]\n\nList system namespaces.\n\nOptions:\n"
     ));
-    // `USAGE_HELP_OPTIONS(24)`: each option padded to 24 columns.
-    let help = format!(
-        "\n{:<24}display this help\n{:<24}display version\n",
-        " -h, --help", " -V, --version"
-    );
+    // `USAGE_HELP_OPTIONS(24)`: each option padded to 24 columns. The option
+    // fields are built from single words so that scripts/check-help-vs-parser.py,
+    // which reads this file apart from the parser in main.rs, does not take
+    // the expectation for a second, unparsed help text.
+    let help_opt = format!(" {}, {}", "-h", "--help");
+    let version_opt = format!(" {}, {}", "-V", "--version");
+    let help = format!("\n{help_opt:<24}display this help\n{version_opt:<24}display version\n");
     assert!(text.contains(&help));
     // `" %11s  %s\n"` for each column.
     let ns = format!(

@@ -4,6 +4,10 @@ members = [
     "kernel",
     "apps/*",
     "gui/*",
+    # Lane F's video codecs, each its own crate under `gui/video/`, which
+    # `gui/*` cannot reach and which is itself excluded below. The first is
+    # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`).
+    "gui/video/rav1d",
     "init/*",
     "net/*",
     "userspace/*",
@@ -271,6 +275,10 @@ exclude = [
     "netring",
     # Empty directory (incomplete crate); skip until populated.
     "userspace/cylance-cli",
+    # A directory of crates, not a crate: `gui/*` would otherwise take it for
+    # one and fail on its missing manifest. Its crates are listed as members
+    # above.
+    "gui/video",
     # nushell is a self-contained upstream workspace with its own member
     # list and lockfile. Keep it out of our workspace — build via
     # `cd nushell && cargo build`.

@@ -20,6 +20,7 @@ use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
 use crate::osbytes::split_on_slash;
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
+use crate::row_strip::RowStrip;
 use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::Surface;
@@ -81,6 +82,8 @@ const EDIT_TEXT_X: f32 = FIELD_PADDING_LEFT + CRUMB_PADDING_H;
 const DROPDOWN_ITEM_HEIGHT: f32 = 24.0;
 const DROPDOWN_MAX_VISIBLE: usize = 8;
 const DROPDOWN_PADDING: f32 = 4.0;
+/// How far below the bar its completion list hangs.
+const DROPDOWN_GAP: f32 = 2.0;
 /// Stands for the segments that did not fit and were dropped from the left.
 const ELLIPSIS: &str = "...";
 
@@ -159,7 +162,17 @@ pub struct PathBar {
     selection_anchor: Option<usize>,
 
     // --- Autocomplete state ---
-    /// Available completions from the host.
+    /// Every name the host offered for the folder being typed in, before the
+    /// name typed so far narrows them.
+    all_completions: Vec<CompletionItem>,
+    /// The folder `all_completions` lists: the prefix they were asked for.
+    ///
+    /// Kept so that typing on into a *different* folder drops the last
+    /// folder's names at once, rather than offering them there until the host
+    /// answers.
+    completions_folder: String,
+    /// The completions on show: `all_completions` narrowed to the name typed
+    /// so far.
     completions: Vec<CompletionItem>,
     /// Index of highlighted completion (None = no highlight).
     completion_index: Option<usize>,
@@ -178,6 +191,12 @@ pub struct PathBar {
     // --- Layout cache (computed during render) ---
     /// Where each drawn crumb is, and which segment it stands for.
     crumb_hits: Vec<CrumbHit>,
+    /// The size the bar was last rendered at.
+    ///
+    /// For a click on the completion list, which hangs below the bar and is
+    /// laid out from the bar's size -- the one click a host hands the bar
+    /// that lands outside the bar's own rectangle.
+    last_size: (f32, f32),
 }
 
 /// Where one crumb was drawn, and which segment of the trail it stands for.
@@ -208,6 +227,8 @@ impl PathBar {
             edit_exact: None,
             cursor: TextCursor::default(),
             selection_anchor: None,
+            all_completions: Vec::new(),
+            completions_folder: String::new(),
             completions: Vec::new(),
             completion_index: None,
             dropdown_visible: false,
@@ -215,6 +236,7 @@ impl PathBar {
             path_invalid: false,
             pending_events: Vec::new(),
             crumb_hits: Vec::new(),
+            last_size: (0.0, 0.0),
         }
     }
 
@@ -230,9 +252,45 @@ impl PathBar {
         &self.path
     }
 
-    /// Provide autocomplete results from the host.
+    /// Provide autocomplete results from the host: the names in the folder
+    /// the bar last asked about ([`PathBarEvent::RequestAutoComplete`]).
+    ///
+    /// The whole folder, not a selection from it. The bar narrows the list
+    /// itself to the names that start with what has been typed after the last
+    /// `/` -- in any case, as `design.txt` asks of tab-completion, so "down"
+    /// offers "Downloads" -- and keeps hidden names back unless what has been
+    /// typed starts with a dot. So a host need not know what was typed after
+    /// it was asked, and its answer stays right while the typing goes on.
     pub fn set_completions(&mut self, items: Vec<CompletionItem>) {
-        self.completions = items;
+        // They are the names of the folder being typed in now: that is the
+        // folder the latest request named, since every keystroke that changes
+        // the folder asks again.
+        self.completions_folder =
+            autocomplete_prefix(&self.edit_text, self.cursor.byte).to_string();
+        self.all_completions = items;
+        self.narrow_completions();
+    }
+
+    /// Show the completions the name typed so far allows, the first of them
+    /// highlighted.
+    ///
+    /// Until this existed the list was whatever the host sent, whatever had
+    /// been typed: "/home/us" offered every name in /home, and Tab put the
+    /// first of them -- "admin", say -- in place of the "us" the user typed.
+    fn narrow_completions(&mut self) {
+        let typed = self.edit_text.get(..self.cursor.byte).unwrap_or_default();
+        let partial = typed.rsplit_once('/').map_or(typed, |(_, name)| name);
+        let wanted = partial.to_lowercase();
+        let hidden_too = partial.starts_with('.');
+        self.completions = self
+            .all_completions
+            .iter()
+            .filter(|item| {
+                (hidden_too || !item.name.starts_with('.'))
+                    && item.name.to_lowercase().starts_with(&wanted)
+            })
+            .cloned()
+            .collect();
         self.completion_index = if self.completions.is_empty() {
             None
         } else {
@@ -259,6 +317,23 @@ impl PathBar {
     /// Whether the widget is currently in edit mode.
     pub fn is_editing(&self) -> bool {
         self.mode == Mode::Edit
+    }
+
+    /// What has been typed, while the bar is being typed in.
+    #[must_use]
+    pub fn typed_text(&self) -> Option<&str> {
+        (self.mode == Mode::Edit).then_some(self.edit_text.as_str())
+    }
+
+    /// The completions on show: what the host offered, narrowed to the name
+    /// typed so far.
+    #[must_use]
+    pub fn completions(&self) -> &[CompletionItem] {
+        if self.dropdown_visible {
+            &self.completions
+        } else {
+            &[]
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -294,9 +369,73 @@ impl PathBar {
     }
 
     /// Render the path bar into a list of render commands.
+    ///
+    /// Also remembers where the crumbs and the completion list landed, which
+    /// is what a click is answered from -- so render at the size the bar is
+    /// shown at before handing it one.
     pub fn render(&mut self, palette: &Palette, width: u32, height: u32) -> Vec<RenderCommand> {
-        let w = width as f32;
-        let h = height as f32;
+        let (w, h) = (width as f32, height as f32);
+        let (cmds, hits) = self.paint(palette, w, h);
+        self.crumb_hits = hits;
+        self.last_size = (w, h);
+        cmds
+    }
+
+    /// The same drawing as [`render`](Self::render), from a shared borrow.
+    ///
+    /// For a host that draws from `&self` -- the file dialog, whose `frame`
+    /// does. Nothing is remembered, so such a host calls
+    /// [`lay_out`](Self::lay_out) at the size it drew at before handing the
+    /// bar a click.
+    #[must_use]
+    pub fn draw(&self, palette: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
+        self.paint(palette, width, height).0
+    }
+
+    /// Remember where the crumbs and the completion list land at `width` x
+    /// `height`, without drawing: [`render`](Self::render) less its commands.
+    ///
+    /// For a host that draws with [`draw`](Self::draw), before it hands the
+    /// bar a click. Where things land does not depend on colour, so any
+    /// palette lays the bar out the same.
+    pub fn lay_out(&mut self, width: f32, height: f32) {
+        let (_, hits) = self.paint(&Palette::for_mode(false), width, height);
+        self.crumb_hits = hits;
+        self.last_size = (width, height);
+    }
+
+    /// Where the completion list hangs while one is showing, in the bar's own
+    /// space: just under the bar, as wide as it.
+    ///
+    /// Outside the bar's rectangle, so a host that routes clicks by rectangle
+    /// has to ask -- and has to draw the bar after anything the list overlaps,
+    /// or the list is drawn under it.
+    #[must_use]
+    pub fn completions_rect(&self, width: f32, height: f32) -> Option<(f32, f32, f32, f32)> {
+        if self.mode != Mode::Edit || !self.dropdown_visible || self.completions.is_empty() {
+            return None;
+        }
+        let rows = self.completion_rows(height + DROPDOWN_GAP);
+        let bottom = rows.bottom() + DROPDOWN_PADDING;
+        let top = height + DROPDOWN_GAP;
+        Some((0.0, top, width, bottom - top))
+    }
+
+    /// The completion list's rows, for a list whose top edge is at `top`:
+    /// one per completion shown, below the list's padding.
+    ///
+    /// One layout for the drawing and for the click, so a click lands on the
+    /// row that was drawn under it.
+    fn completion_rows(&self, top: f32) -> RowStrip {
+        let shown = self.completions.len().min(DROPDOWN_MAX_VISIBLE);
+        RowStrip::new(
+            top + DROPDOWN_PADDING,
+            core::iter::repeat_n(DROPDOWN_ITEM_HEIGHT, shown),
+        )
+    }
+
+    /// Draw the bar at `w` x `h`, and say where its crumbs landed.
+    fn paint(&self, palette: &Palette, w: f32, h: f32) -> (Vec<RenderCommand>, Vec<CrumbHit>) {
         let mut cmds = Vec::new();
 
         // The field: the well every text input sinks into (`crust`), with a
@@ -330,12 +469,15 @@ impl PathBar {
             corner_radii: CornerRadii::all(FIELD_RADIUS),
         });
 
-        match self.mode {
+        let hits = match self.mode {
             Mode::Breadcrumb => self.render_breadcrumb(palette, &mut cmds, w, h),
-            Mode::Edit => self.render_edit(palette, &mut cmds, w, h),
-        }
+            Mode::Edit => {
+                self.render_edit(palette, &mut cmds, w, h);
+                Vec::new()
+            }
+        };
 
-        cmds
+        (cmds, hits)
     }
 
     // -----------------------------------------------------------------------
@@ -351,6 +493,8 @@ impl PathBar {
         self.edit_exact = Some(self.path.clone());
         self.cursor = self.edit_text.len().into();
         self.selection_anchor = None;
+        self.all_completions.clear();
+        self.completions_folder.clear();
         self.completions.clear();
         self.completion_index = None;
         self.dropdown_visible = false;
@@ -370,6 +514,8 @@ impl PathBar {
         self.edit_exact = None;
         self.cursor = TextCursor::default();
         self.selection_anchor = None;
+        self.all_completions.clear();
+        self.completions_folder.clear();
         self.completions.clear();
         self.completion_index = None;
         self.dropdown_visible = false;
@@ -389,6 +535,9 @@ impl PathBar {
             self.edit_text.clear();
             self.edit_text.extend(event.typed());
             self.cursor = self.edit_text.len().into();
+            // A path begun by typing is a path being typed: completions are
+            // asked for, as they are for every later keystroke.
+            self.on_text_changed();
             return EventResult::Consumed;
         }
         EventResult::Ignored
@@ -600,10 +749,18 @@ impl PathBar {
         // Whatever the host refused, it was not this text.
         self.path_invalid = false;
         // Determine the prefix for autocomplete: everything up to and including the last '/'.
-        let prefix = autocomplete_prefix(&self.edit_text, self.cursor.byte);
-        self.pending_events.push(PathBarEvent::RequestAutoComplete {
-            prefix: prefix.to_string(),
-        });
+        let prefix = autocomplete_prefix(&self.edit_text, self.cursor.byte).to_string();
+        if prefix != self.completions_folder {
+            // Another folder: what was offered for the last one completes
+            // nothing here, and is not shown while the host is asked.
+            self.all_completions.clear();
+            self.completions_folder.clone_from(&prefix);
+        }
+        // Narrowed now, from what the host last offered, so the list follows
+        // the typing even before -- or without -- an answer.
+        self.narrow_completions();
+        self.pending_events
+            .push(PathBarEvent::RequestAutoComplete { prefix });
     }
 
     // -----------------------------------------------------------------------
@@ -768,8 +925,25 @@ impl PathBar {
                 EventResult::Consumed
             }
             Mode::Edit => {
-                // Click in dropdown?
-                // For now, position cursor based on x.
+                // A click on the completion list takes the completion under
+                // it, as Tab takes the highlighted one. The list is laid out
+                // from the size the bar was last rendered at, which is where
+                // it was drawn.
+                let (w, h) = self.last_size;
+                if let Some((lx, ly, lw, lh)) = self.completions_rect(w, h)
+                    && x >= lx
+                    && x <= lx + lw
+                    && y >= ly
+                    && y <= ly + lh
+                {
+                    // The list's padding, above and below the rows, is part of
+                    // the list and takes the click, but chooses nothing.
+                    if let Some(row) = self.completion_rows(ly).index_at(y) {
+                        self.completion_index = Some(self.dropdown_scroll.saturating_add(row));
+                        self.accept_completion();
+                    }
+                    return EventResult::Consumed;
+                }
                 let text_x = EDIT_TEXT_X;
                 // Hit-tested against the drawn glyphs rather than a nominal
                 // cell, so a click lands on the character under the pointer
@@ -795,13 +969,13 @@ impl PathBar {
     // -----------------------------------------------------------------------
 
     fn render_breadcrumb(
-        &mut self,
+        &self,
         palette: &Palette,
         cmds: &mut Vec<RenderCommand>,
         width: f32,
         height: f32,
-    ) {
-        self.crumb_hits.clear();
+    ) -> Vec<CrumbHit> {
+        let mut hits = Vec::new();
         let y_center = height / 2.0;
         // The folder the bar is showing: the one crumb set bold.
         let current = self.segments.len().saturating_sub(1);
@@ -888,10 +1062,11 @@ impl PathBar {
                 crumb_weight(i == current),
                 room,
             );
-            self.crumb_hits.push(CrumbHit { segment: i, rect });
+            hits.push(CrumbHit { segment: i, rect });
             x += rect.2;
             preceded = true;
         }
+        hits
     }
 
     // -----------------------------------------------------------------------
@@ -983,8 +1158,8 @@ impl PathBar {
         cmds.extend(caret.commands);
 
         // Autocomplete dropdown.
-        if self.dropdown_visible && !self.completions.is_empty() {
-            self.render_dropdown(palette, cmds, width, height);
+        if let Some(list) = self.completions_rect(width, height) {
+            self.render_dropdown(palette, cmds, list);
         }
     }
 
@@ -992,13 +1167,9 @@ impl PathBar {
         &self,
         palette: &Palette,
         cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        bar_height: f32,
+        (_, dropdown_y, dropdown_w, dropdown_h): (f32, f32, f32, f32),
     ) {
-        let visible_count = self.completions.len().min(DROPDOWN_MAX_VISIBLE);
-        let dropdown_h = visible_count as f32 * DROPDOWN_ITEM_HEIGHT + DROPDOWN_PADDING * 2.0;
-        let dropdown_y = bar_height + 2.0;
-        let dropdown_w = width;
+        let rows = self.completion_rows(dropdown_y);
 
         // Shadow.
         cmds.push(RenderCommand::BoxShadow {
@@ -1041,8 +1212,10 @@ impl PathBar {
             .completion_index
             .and_then(|idx| idx.checked_sub(self.dropdown_scroll));
 
-        for (vi, item) in window.iter().take(visible_count).enumerate() {
-            let item_y = dropdown_y + DROPDOWN_PADDING + vi as f32 * DROPDOWN_ITEM_HEIGHT;
+        for (vi, item) in window.iter().enumerate() {
+            let Some(item_y) = rows.top(vi) else {
+                break;
+            };
 
             // Highlight selected item.
             if selected_row == Some(vi) {
@@ -1935,6 +2108,217 @@ mod tests {
             bar.drain_events()
                 .contains(&PathBarEvent::Navigate(PathBuf::from("/home/user")))
         );
+    }
+
+    /// A bar in edit mode with three completions on show.
+    fn bar_with_completions() -> PathBar {
+        let mut bar = PathBar::new("/home");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.edit_text = "/home/".to_string();
+        bar.cursor = bar.edit_text.len().into();
+        bar.set_completions(
+            ["docs", "music", "notes.txt"]
+                .iter()
+                .map(|name| CompletionItem {
+                    name: (*name).to_string(),
+                    is_directory: !name.contains('.'),
+                })
+                .collect(),
+        );
+        bar.drain_events();
+        bar
+    }
+
+    /// Type `text` into the bar a character at a time, as a keyboard would.
+    fn type_text(bar: &mut PathBar, text: &str) {
+        for ch in text.chars() {
+            bar.handle_key_event(&key_press_with_text(Key::A, ch));
+        }
+    }
+
+    /// The names on show in the completion list.
+    fn shown(bar: &PathBar) -> Vec<&str> {
+        bar.completions
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect()
+    }
+
+    /// **The list offers only names that start with what was typed, in any
+    /// case.** It used to show the host's whole folder whatever was typed, so
+    /// "/home/us" offered every name in /home and Tab put the first of them in
+    /// place of the "us".
+    #[test]
+    fn the_list_offers_only_names_starting_with_what_was_typed_in_any_case() {
+        let mut bar = PathBar::new("/home");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.edit_text = "/home/".to_string();
+        bar.cursor = bar.edit_text.len().into();
+        type_text(&mut bar, "do");
+        bar.set_completions(
+            ["admin", "Documents", "Downloads", "music"]
+                .iter()
+                .map(|name| CompletionItem {
+                    name: (*name).to_string(),
+                    is_directory: true,
+                })
+                .collect(),
+        );
+        assert_eq!(shown(&bar), vec!["Documents", "Downloads"]);
+
+        // Typing on narrows what was offered, without asking again first.
+        type_text(&mut bar, "W");
+        assert_eq!(shown(&bar), vec!["Downloads"]);
+        bar.handle_key_event(&key_press(Key::Tab));
+        assert_eq!(
+            bar.edit_text, "/home/Downloads/",
+            "the case typed is not the name's"
+        );
+    }
+
+    /// **Hidden names wait for a dot**, as a shell's completion does.
+    #[test]
+    fn hidden_names_are_offered_once_a_dot_is_typed() {
+        let mut bar = PathBar::new("/home");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.edit_text = "/home/".to_string();
+        bar.cursor = bar.edit_text.len().into();
+        bar.set_completions(
+            [".config", "docs"]
+                .iter()
+                .map(|name| CompletionItem {
+                    name: (*name).to_string(),
+                    is_directory: true,
+                })
+                .collect(),
+        );
+        assert_eq!(shown(&bar), vec!["docs"]);
+        type_text(&mut bar, ".");
+        assert_eq!(shown(&bar), vec![".config"]);
+    }
+
+    /// **Typing on into another folder drops the last folder's names** until
+    /// the host has been asked about the new one -- they complete nothing
+    /// there.
+    #[test]
+    fn typing_into_another_folder_drops_the_last_folders_names() {
+        let mut bar = PathBar::new("/home");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.edit_text = "/home/".to_string();
+        bar.cursor = bar.edit_text.len().into();
+        type_text(&mut bar, "d");
+        bar.set_completions(vec![CompletionItem {
+            name: "docs".to_string(),
+            is_directory: true,
+        }]);
+        assert_eq!(shown(&bar), vec!["docs"]);
+        bar.drain_events();
+
+        type_text(&mut bar, "ocs/");
+        assert_eq!(
+            shown(&bar),
+            Vec::<&str>::new(),
+            "/home's names offered inside /home/docs"
+        );
+        assert!(!bar.dropdown_visible);
+        assert!(
+            bar.drain_events()
+                .contains(&PathBarEvent::RequestAutoComplete {
+                    prefix: "/home/docs/".to_string()
+                })
+        );
+    }
+
+    /// A path begun by typing, from the trail, asks for completions like
+    /// every later keystroke does.
+    #[test]
+    fn a_path_begun_by_typing_asks_for_completions() {
+        let mut bar = PathBar::new("/home/user");
+        bar.drain_events();
+        type_text(&mut bar, "/");
+        assert!(bar.is_editing());
+        assert!(
+            bar.drain_events()
+                .contains(&PathBarEvent::RequestAutoComplete {
+                    prefix: "/".to_string()
+                })
+        );
+    }
+
+    /// **`draw` is `render` without the memory**: a host drawing from a shared
+    /// borrow gets the very commands the bar would have rendered, in both
+    /// modes.
+    #[test]
+    fn draw_draws_what_render_renders() {
+        let palette = Palette::for_mode(true);
+        let mut bar = PathBar::new("/home/user/Documents");
+        assert_eq!(
+            bar.draw(&palette, 400.0, 28.0),
+            bar.render(&palette, 400, 28)
+        );
+        let mut editing = bar_with_completions();
+        assert_eq!(
+            editing.draw(&palette, 400.0, 28.0),
+            editing.render(&palette, 400, 28)
+        );
+    }
+
+    /// **The completion list is where it is drawn**: the rectangle a host
+    /// routes clicks by is the list's own shadow and panel, just under the
+    /// bar; and there is none when nothing is being completed.
+    #[test]
+    fn the_completion_list_is_where_it_is_drawn() {
+        let palette = Palette::for_mode(false);
+        let mut bar = bar_with_completions();
+        let cmds = bar.render(&palette, 400, 28);
+        let list = bar
+            .completions_rect(400.0, 28.0)
+            .expect("three completions are showing");
+        let shadow = cmds.iter().find_map(|cmd| match cmd {
+            RenderCommand::BoxShadow {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => Some((*x, *y, *width, *height)),
+            _ => None,
+        });
+        assert_eq!(shadow, Some(list));
+        assert!(
+            list.1 > 28.0,
+            "the list does not hang below the bar: {list:?}"
+        );
+
+        assert_eq!(PathBar::new("/home").completions_rect(400.0, 28.0), None);
+    }
+
+    /// **A click on a completion takes it**, as Tab takes the highlighted one
+    /// -- the row under the pointer, not the highlighted row -- and a click in
+    /// the list's padding takes the click and chooses nothing.
+    #[test]
+    fn a_click_on_the_completion_list_takes_that_completion() {
+        let palette = Palette::for_mode(false);
+        let press = |x: f32, y: f32| MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+
+        let mut bar = bar_with_completions();
+        bar.render(&palette, 400, 28);
+        let (_, top, _, _) = bar.completions_rect(400.0, 28.0).expect("a list");
+        // Into the padding above the first row: taken, nothing chosen.
+        assert_eq!(
+            bar.handle_mouse_event(&press(50.0, top + 1.0)),
+            EventResult::Consumed
+        );
+        assert_eq!(bar.edit_text, "/home/");
+        // The middle of the second row: "music", highlighted or not.
+        let second = bar.completion_rows(top).top(1).expect("a second row");
+        bar.handle_mouse_event(&press(50.0, second + DROPDOWN_ITEM_HEIGHT / 2.0));
+        assert_eq!(bar.edit_text, "/home/music/");
+        assert!(bar.is_editing(), "a folder completed; the typing goes on");
     }
 
     #[test]

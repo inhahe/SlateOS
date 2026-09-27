@@ -43,5 +43,12 @@ required-features = ["testing"]
 # be, and lane F's like this crate, so one decoder serves both.
 imagecodec = { path = "../imagecodec" }
 
+[dev-dependencies]
+# This crate itself with `testing`: the integration tests (`tests/`) link the
+# library as any other crate would, without `cfg(test)`, and
+# `tests/host_fonts.rs` checks the wrapping it ships against
+# `osfont::testing::wrap_by_words`, the slow rule it replaced.
+osfont = { path = ".", features = ["testing"] }
+
 [lints]
 workspace = true

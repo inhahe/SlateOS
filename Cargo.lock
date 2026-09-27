@@ -2202,6 +2202,7 @@ name = "osfont"
 version = "0.1.0"
 dependencies = [
  "imagecodec",
+ "osfont",
 ]
 
 [[package]]

@@ -10,7 +10,7 @@
 //! configurable TTL, automatically refreshing stale data on access.
 
 use crate::{
-    CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
+    Address, CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
     MemoryMapEntry, NetworkAdapterInfo, PciDeviceInfo, ProcessEntry, ServiceInfo, SoundInfo,
     StartupEntry, UsbDeviceInfo,
 };
@@ -121,8 +121,9 @@ const SYSDEV_MEMORY: &str = "/sys/devices/system/memory";
 /// file the older constants below still name.
 const SYSDEV_BLOCK: &str = "/sys/devices/block";
 // `/sys/hardware/net` is gone with the query that read it. Interfaces come
-// from `/proc/net/dev`, and lane A has declined to serve a `/sys/devices/net/`
-// because the kernel's `InterfaceInfo` carries no name to key it on.
+// from SlateOS's `/proc/net` (Linux's `/proc/net/dev` on a host), and lane A
+// has declined to serve a `/sys/devices/net/` because the kernel's
+// `InterfaceInfo` carries no name to key it on.
 /// PCI devices directory.
 /// Where the kernel publishes each PCI function: one file per `BB:DD.F`
 /// address, holding `vendor`, `device`, `class` and `subclass` in hex, one
@@ -536,6 +537,54 @@ impl SyscallProvider {
     }
 }
 
+/// Bytes the kernel wrote, as text to draw: every printable character as
+/// itself and every other byte as an octal escape, through the tree's one
+/// renderer for untrusted text.
+///
+/// A name the kernel hands over may hold any byte. `String::from_utf8_lossy`,
+/// which this replaced, turns each byte that is not part of a character into
+/// U+FFFD, so two interfaces (or processes, or modules) that differ only in
+/// such bytes were drawn identically; and it passes a control character
+/// through, so a name could put a line break into a table cell.
+fn shown(bytes: &[u8]) -> String {
+    quoting::escape_unprintable(bytes)
+}
+
+/// What SlateOS's `/proc/net` says of one address: `0.0.0.0`, the
+/// unspecified address, is how the kernel writes "none yet"; a missing line
+/// is not reported.
+fn address_of(value: Option<&[u8]>) -> Address {
+    match value {
+        None => Address::NotReported,
+        Some(b"0.0.0.0") => Address::Unassigned,
+        Some(text) => Address::Is(shown(text)),
+    }
+}
+
+/// Whether `/proc/net`'s interface is a network card at all. The kernel
+/// writes an `eth0` whether or not it found one; with none, the MAC is its
+/// placeholder, all zeros, which no card is ever assigned. A MAC it does not
+/// write at all is not evidence either way, so that interface is listed.
+fn is_a_card(iface: &procinfo::NetInterface) -> bool {
+    iface
+        .mac
+        .as_deref()
+        .is_none_or(|mac| !mac.iter().all(|&b| b == b'0' || b == b':'))
+}
+
+/// The adapter SlateOS's `/proc/net` describes, with what it publishes.
+fn adapter_from_proc_net(iface: &procinfo::NetInterface) -> NetworkAdapterInfo {
+    NetworkAdapterInfo {
+        up: iface.up,
+        mac_address: iface.mac.as_deref().map(shown).unwrap_or_default(),
+        ipv4: address_of(iface.ipv4.as_deref()),
+        subnet: address_of(iface.netmask.as_deref()),
+        gateway: address_of(iface.gateway.as_deref()),
+        dns: address_of(iface.dns.as_deref()),
+        ..NetworkAdapterInfo::named(shown(&iface.name))
+    }
+}
+
 /// One PCI function, from its file under [`SYSDEV_PCI`]: `name` is the
 /// file's name (`BB:DD.F`, which is the address) and `text` what it holds.
 /// `None` for a name that is not an address or a file without both ids.
@@ -764,43 +813,55 @@ impl HardwareProvider for SyscallProvider {
         Ok(disks)
     }
 
-    /// Read the network interfaces from `/proc/net/dev`.
+    /// Read the network interfaces: Linux's `/proc/net/dev`, and SlateOS's
+    /// `/proc/net`.
     ///
-    /// This read `/sys/hardware/net`, which the kernel has never served, so
-    /// the category reported "cannot read". `/proc/net/dev` is published and
-    /// gives the interface names and their traffic counters.
+    /// **SlateOS serves no `/proc/net/dev`.** Its `/proc/net` is a file
+    /// describing the interface the kernel's network stack runs -- link
+    /// state, MAC, IPv4 address, netmask, gateway and DNS server -- and its
+    /// per-interface counters are `/proc/netdev`, which no driver fills yet.
+    /// This read only `/proc/net/dev`, so on SlateOS it always said "not
+    /// available" while the machine's address sat one file away.
     ///
-    /// **Everything else stays empty, and that is deliberate.** A MAC address,
-    /// an IPv4 lease, a gateway, a DNS server, a link speed and a duplex mode
-    /// are not published by anything in this tree. Lane A declined to add a
-    /// `/sys/devices/net/` for the same reason, in their own words: the
-    /// kernel's `InterfaceInfo` "has no name field, so both would be
-    /// invented". An adapter row with a plausible `192.168.1.x` in it is worse
-    /// than one with a blank, because the blank is legible as absent.
+    /// The kernel writes an `eth0` into `/proc/net` whether or not it found a
+    /// network card; the placeholder it writes with none (a MAC of all zeros)
+    /// is not listed, so a machine without one has an empty list rather than
+    /// a phantom `eth0`, down, at `0.0.0.0`.
+    ///
+    /// The two files cannot both exist -- `/proc/net` is either SlateOS's
+    /// file or Linux's directory -- so whichever was read is the whole
+    /// answer. **Nothing else is filled in**: a link speed, a duplex mode and
+    /// an IPv6 address are published by nothing here, and a plausible value
+    /// beside real ones is worse than a blank, because the blank is legible
+    /// as absent.
     fn query_network(&self) -> Result<Vec<NetworkAdapterInfo>, HwQueryError> {
-        let devices = self.procfs().net_devices().ok().flatten().ok_or_else(|| {
-            HwQueryError::NotAvailable {
-                path: self.rooted("/proc/net/dev"),
-            }
-        })?;
-
-        Ok(devices
+        let procfs = self.procfs();
+        // The other system's file is absent, and that absence can arrive as
+        // an error rather than as `Ok(None)`: reading Linux's `/proc/net` as a
+        // file fails "is a directory", and reading `/proc/net/dev` under
+        // SlateOS's fails "not a directory". So a failure of one read is the
+        // normal case and not reported; both failing is, below.
+        if let Some(interfaces) = procfs.net_interfaces().ok().flatten() {
+            return Ok(interfaces
+                .iter()
+                .filter(|iface| is_a_card(iface))
+                .map(adapter_from_proc_net)
+                .collect());
+        }
+        let counters =
+            procfs
+                .net_devices()
+                .ok()
+                .flatten()
+                .ok_or_else(|| HwQueryError::NotAvailable {
+                    path: self.rooted("/proc/net"),
+                })?;
+        Ok(counters
             .iter()
             .map(|d| NetworkAdapterInfo {
-                // The name is the one field `/proc/net/dev` keys on, and it is
-                // bytes there; it becomes text only to be drawn.
-                name: String::from_utf8_lossy(&d.name).into_owned(),
-                adapter_type: String::new(),
-                mac_address: String::new(),
-                ipv4: String::new(),
-                ipv6: String::new(),
-                subnet: String::new(),
-                gateway: String::new(),
-                dns: String::new(),
-                speed_mbps: 0,
-                duplex: String::new(),
-                bytes_sent: d.tx_bytes.unwrap_or(0),
-                bytes_received: d.rx_bytes.unwrap_or(0),
+                bytes_sent: d.tx_bytes,
+                bytes_received: d.rx_bytes,
+                ..NetworkAdapterInfo::named(shown(&d.name))
             })
             .collect())
     }
@@ -840,7 +901,7 @@ impl HardwareProvider for SyscallProvider {
             outputs: mons
                 .outputs
                 .iter()
-                .map(|mon| (String::from_utf8_lossy(&mon.name).into_owned(), mon.enabled))
+                .map(|mon| (shown(&mon.name), mon.enabled))
                 .collect(),
             driver_version: String::new(),
         })
@@ -931,7 +992,7 @@ impl HardwareProvider for SyscallProvider {
                 irq_number: irq.number,
                 // Bytes in the file, because nothing guarantees the label is
                 // UTF-8; text only here, where it becomes glyphs.
-                device: String::from_utf8_lossy(&irq.description).into_owned(),
+                device: shown(&irq.description),
                 irq_type: String::new(),
                 asserted: irq.pending,
             })
@@ -964,7 +1025,7 @@ impl HardwareProvider for SyscallProvider {
                 start: u16::try_from(r.start).unwrap_or(u16::MAX),
                 end: u16::try_from(r.end).unwrap_or(u16::MAX),
                 // Bytes in the file; text only here, where it becomes glyphs.
-                device: String::from_utf8_lossy(&r.name).into_owned(),
+                device: shown(&r.name),
             })
             .collect())
     }
@@ -1079,7 +1140,7 @@ impl HardwareProvider for SyscallProvider {
             };
             procs.push(ProcessEntry {
                 pid: u32::try_from(stat.pid).unwrap_or(u32::MAX),
-                name: String::from_utf8_lossy(&stat.comm).into_owned(),
+                name: shown(&stat.comm),
                 memory_kb: stat.rss_kib(),
                 cpu_percent: 0.0,
             });
@@ -1111,9 +1172,9 @@ impl HardwareProvider for SyscallProvider {
             .modules
             .iter()
             .map(|m| DriverInfo {
-                name: String::from_utf8_lossy(&m.name).into_owned(),
+                name: shown(&m.name),
                 path: String::new(),
-                status: String::from_utf8_lossy(&m.state).into_owned(),
+                status: shown(&m.state),
             })
             .collect())
     }
@@ -1146,9 +1207,9 @@ impl HardwareProvider for SyscallProvider {
             .items
             .iter()
             .map(|it| StartupEntry {
-                name: String::from_utf8_lossy(&it.name).into_owned(),
-                path: String::from_utf8_lossy(&it.command).into_owned(),
-                phase: String::from_utf8_lossy(&it.phase).into_owned(),
+                name: shown(&it.name),
+                path: shown(&it.command),
+                phase: shown(&it.phase),
                 enabled: it.enabled,
             })
             .collect())
@@ -1294,15 +1355,16 @@ impl HardwareProvider for StubProvider {
             name: "Intel I225-V Ethernet".to_string(),
             adapter_type: "Ethernet".to_string(),
             mac_address: "A4:BB:6D:12:34:56".to_string(),
-            ipv4: "192.168.1.100".to_string(),
-            ipv6: "fe80::a6bb:6dff:fe12:3456".to_string(),
-            subnet: "255.255.255.0".to_string(),
-            gateway: "192.168.1.1".to_string(),
-            dns: "1.1.1.1, 8.8.8.8".to_string(),
-            speed_mbps: 2500,
+            ipv4: Address::Is("192.168.1.100".to_string()),
+            ipv6: Address::Is("fe80::a6bb:6dff:fe12:3456".to_string()),
+            subnet: Address::Is("255.255.255.0".to_string()),
+            gateway: Address::Is("192.168.1.1".to_string()),
+            dns: Address::Is("1.1.1.1, 8.8.8.8".to_string()),
+            up: Some(true),
+            speed_mbps: Some(2500),
             duplex: "Full".to_string(),
-            bytes_sent: 1_542_876_160,
-            bytes_received: 8_234_567_680,
+            bytes_sent: Some(1_542_876_160),
+            bytes_received: Some(8_234_567_680),
         }])
     }
 
@@ -2205,7 +2267,7 @@ mod tests {
         let stub = StubProvider::new();
         let nets = stub.query_network().expect("stub network");
         assert!(!nets.is_empty());
-        assert!(nets[0].speed_mbps > 0);
+        assert!(nets[0].speed_mbps.is_some_and(|mbps| mbps > 0));
     }
 
     #[test]
@@ -2550,5 +2612,106 @@ mod tests {
         let vars = provider.query_env_vars().expect("env vars");
         // Should have at least PATH or USERPROFILE on Windows
         assert!(!vars.is_empty());
+    }
+
+    /// A machine whose `/proc/net` is `text`, as SlateOS's kernel writes it
+    /// (`kernel/src/fs/procfs.rs`, `gen_net`).
+    fn slate_net(text: &str) -> (scratchdir::ScratchDir, SyscallProvider) {
+        let dir = scratchdir::ScratchDir::new("hwquery_proc_net");
+        std::fs::create_dir_all(dir.dir().join("proc")).expect("fixture");
+        std::fs::write(dir.dir().join("proc/net"), text).expect("fixture");
+        let provider = SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+        (dir, provider)
+    }
+
+    /// **SlateOS's interface is read**: the link, the MAC and every address
+    /// the kernel publishes -- where this read Linux's `/proc/net/dev`, which
+    /// SlateOS does not serve, and said the network was not available.
+    #[test]
+    fn slateos_proc_net_is_read() {
+        let (_dir, provider) = slate_net(
+            "Interface: eth0  (UP)\n  MAC:     52:54:00:12:34:56\n  IPv4:    10.0.2.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.2.2\n  DNS:     10.0.2.3\n",
+        );
+        let adapters = provider.query_network().expect("the fixture is readable");
+        assert_eq!(adapters.len(), 1);
+        let eth0 = &adapters[0];
+        assert_eq!(eth0.name, "eth0");
+        assert_eq!(eth0.up, Some(true));
+        assert_eq!(eth0.mac_address, "52:54:00:12:34:56");
+        assert_eq!(eth0.ipv4, Address::Is(String::from("10.0.2.15")));
+        assert_eq!(eth0.subnet, Address::Is(String::from("255.255.255.0")));
+        assert_eq!(eth0.gateway, Address::Is(String::from("10.0.2.2")));
+        assert_eq!(eth0.dns, Address::Is(String::from("10.0.2.3")));
+        // What it does not publish stays unreported, not zero.
+        assert_eq!(eth0.ipv6, Address::NotReported);
+        assert_eq!(
+            (eth0.bytes_sent, eth0.bytes_received, eth0.speed_mbps),
+            (None, None, None)
+        );
+    }
+
+    /// A card DHCP has not configured has its addresses as the kernel says:
+    /// none -- not "not reported", which would hide why nothing connects.
+    #[test]
+    fn an_unconfigured_card_has_no_addresses_rather_than_unreported_ones() {
+        let (_dir, provider) = slate_net(
+            "Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        );
+        let adapters = provider.query_network().expect("the fixture is readable");
+        let eth0 = &adapters[0];
+        assert_eq!(eth0.up, Some(false));
+        for (field, value) in [
+            ("ipv4", &eth0.ipv4),
+            ("subnet", &eth0.subnet),
+            ("gateway", &eth0.gateway),
+            ("dns", &eth0.dns),
+        ] {
+            assert_eq!(value, &Address::Unassigned, "{field}");
+        }
+    }
+
+    /// The kernel's placeholder -- the `eth0` it writes when it found no card,
+    /// with a MAC of all zeros -- is not listed: a machine with no network
+    /// card has no adapters, not a phantom one that is down.
+    #[test]
+    fn the_placeholder_for_no_card_is_not_an_adapter() {
+        let (_dir, provider) = slate_net(
+            "Interface: eth0  (DOWN)\n  MAC:     00:00:00:00:00:00\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        );
+        let adapters = provider.query_network().expect("the file was read");
+        assert!(adapters.is_empty(), "{adapters:?}");
+    }
+
+    /// A line the kernel did not write is not reported, never unassigned:
+    /// only `0.0.0.0` says "none".
+    #[test]
+    fn a_missing_line_is_not_reported() {
+        let (_dir, provider) = slate_net("Interface: eth0  (UP)\n  MAC:     52:54:00:12:34:56\n");
+        let adapters = provider.query_network().expect("the fixture is readable");
+        assert_eq!(adapters[0].ipv4, Address::NotReported);
+        assert_eq!(adapters[0].dns, Address::NotReported);
+    }
+
+    /// A name the kernel hands over is drawn byte for byte: a byte that is
+    /// not text is an escape, not the replacement character that would make
+    /// two such names look alike, and a control character cannot break a
+    /// line of the table it is drawn in.
+    #[test]
+    fn a_name_that_is_not_text_is_escaped_not_replaced() {
+        assert_eq!(shown(b"eth\xff"), "eth\\377");
+        assert_eq!(shown(b"a\nb"), "a\\012b");
+        assert_eq!(shown("caf\u{e9}".as_bytes()), "caf\u{e9}");
+    }
+
+    /// Neither file there is "not available", not an empty list that would
+    /// read as a machine without network hardware.
+    #[test]
+    fn neither_file_is_not_available() {
+        let dir = scratchdir::ScratchDir::new("hwquery_no_net");
+        let provider = SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+        assert!(matches!(
+            provider.query_network(),
+            Err(HwQueryError::NotAvailable { .. })
+        ));
     }
 }

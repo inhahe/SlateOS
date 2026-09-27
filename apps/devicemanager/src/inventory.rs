@@ -8,7 +8,7 @@
 //! |---|---|
 //! | every PCI function, sorted into a category by its class | `/sys/devices/pci` |
 //! | each disk the kernel has registered | `/sys/devices/block` |
-//! | each network interface but loopback | `/proc/net/dev` |
+//! | each network interface but loopback | `/proc/net` (Linux: `/proc/net/dev`) |
 //! | each display output | `/proc/monitors` |
 //! | the processor | `/sys/devices/system/cpu`, CPUID |
 //!
@@ -17,12 +17,14 @@
 //! driver is empty and its status "Unknown", with the reason in its details.
 //! A disk, an interface or an output the kernel has registered is one a
 //! driver is running, and is "Working" -- the one thing its being listed
-//! shows. No IRQ, memory range or DMA channel is published for any device,
-//! so the resource view has nothing, rather than something plausible.
+//! shows -- except an interface whose link the kernel says is down, which is
+//! a warning, as an unplugged cable is. No IRQ, memory range or DMA channel
+//! is published for any device, so the resource view has nothing, rather
+//! than something plausible.
 
 use crate::{DeviceCategory, DeviceInfo, DeviceStatus};
 use hwquery::{
-    CpuInfo, DiskInfo, DisplayInfo, HardwareProvider, NetworkAdapterInfo, PciDeviceInfo,
+    Address, CpuInfo, DiskInfo, DisplayInfo, HardwareProvider, NetworkAdapterInfo, PciDeviceInfo,
 };
 
 /// What one look at the machine found.
@@ -200,11 +202,34 @@ fn disk_row(d: &DiskInfo) -> DeviceInfo {
 
 /// A network interface's row.
 fn network_row(n: &NetworkAdapterInfo) -> DeviceInfo {
-    let mut row = blank(DeviceCategory::Network, DeviceStatus::Working);
+    // A link the kernel says is down is a warning, as a device manager shows
+    // an unplugged cable; one it says nothing about is simply listed.
+    let status = if n.up == Some(false) {
+        DeviceStatus::Warning
+    } else {
+        DeviceStatus::Working
+    };
+    let mut row = blank(DeviceCategory::Network, status);
     row.name = format!("Network interface {}", n.name);
     row.device_type = String::from("Network interface");
     row.location = n.name.clone();
-    row.status_detail = String::from("Listed by the kernel among the network interfaces");
+    let mut detail = String::from("Listed by the kernel among the network interfaces");
+    match n.up {
+        Some(true) => detail.push_str("; link up"),
+        Some(false) => detail.push_str("; link down"),
+        None => {}
+    }
+    match &n.ipv4 {
+        Address::Is(ip) => detail.push_str(&format!("; address {ip}")),
+        // The kernel's own word that there is none: the card has not been
+        // configured, which is what a reader chasing "no network" needs.
+        Address::Unassigned => detail.push_str("; no address assigned"),
+        Address::NotReported => {}
+    }
+    if !n.mac_address.is_empty() {
+        detail.push_str(&format!("; MAC {}", n.mac_address));
+    }
+    row.status_detail = detail;
     row
 }
 
@@ -471,20 +496,58 @@ mod tests {
         assert_eq!(found.unreadable, ["the processor (not published)"]);
     }
 
+    /// An interface's row says what the kernel says of it: a link that is
+    /// down is a warning, an address it has none of is said, and its address
+    /// and MAC when it has them -- nothing when nothing is reported.
+    #[test]
+    fn an_interface_row_says_its_link_and_address() {
+        let down = NetworkAdapterInfo {
+            up: Some(false),
+            ipv4: Address::Unassigned,
+            mac_address: String::from("52:54:00:12:34:56"),
+            ..adapter("eth0")
+        };
+        let row = network_row(&down);
+        assert_eq!(
+            row.status,
+            DeviceStatus::Warning,
+            "a link that is down was fine"
+        );
+        assert!(
+            row.status_detail.contains("; link down"),
+            "{}",
+            row.status_detail
+        );
+        assert!(
+            row.status_detail.contains("; no address assigned"),
+            "{}",
+            row.status_detail
+        );
+        assert!(row.status_detail.contains("; MAC 52:54:00:12:34:56"));
+
+        let up = NetworkAdapterInfo {
+            up: Some(true),
+            ipv4: Address::Is(String::from("10.0.2.15")),
+            ..adapter("eth0")
+        };
+        let row = network_row(&up);
+        assert_eq!(row.status, DeviceStatus::Working);
+        assert!(row.status_detail.contains("; link up"));
+        assert!(row.status_detail.contains("; address 10.0.2.15"));
+
+        let row = network_row(&adapter("eth1"));
+        assert_eq!(
+            row.status,
+            DeviceStatus::Working,
+            "no word on the link is not a fault"
+        );
+        assert_eq!(
+            row.status_detail, "Listed by the kernel among the network interfaces",
+            "something unreported was described"
+        );
+    }
+
     fn adapter(name: &str) -> NetworkAdapterInfo {
-        NetworkAdapterInfo {
-            name: String::from(name),
-            adapter_type: String::new(),
-            mac_address: String::new(),
-            ipv4: String::new(),
-            ipv6: String::new(),
-            subnet: String::new(),
-            gateway: String::new(),
-            dns: String::new(),
-            speed_mbps: 0,
-            duplex: String::new(),
-            bytes_sent: 0,
-            bytes_received: 0,
-        }
+        NetworkAdapterInfo::named(name)
     }
 }

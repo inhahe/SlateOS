@@ -1930,11 +1930,53 @@ word; text inside them that says "lane C" is history.
   machine until 2026-09-15 and showed nothing since -- lists through it every
   PCI function by class, the disks, the network interfaces, the display
   outputs and the processor, scanning on opening and on F5; Export writes a
-  file. **Waiting on lane A** for what a device manager exists to show --
+  file. The network interfaces are SlateOS's own `/proc/net` (a file; it
+  read Linux's `/proc/net/dev`, which SlateOS does not serve, so the network
+  was always "not available"): link state, MAC and addresses, an address the
+  kernel says there is none of reading "None assigned" rather than "Not
+  reported", and the `eth0` placeholder it writes with no card left out.
+  **Waiting on lane A** for what a device manager exists to show --
   which driver runs each PCI function, its interrupt line and its memory
   (`requests/e-a-publish-each-pci-functions-irq-bars-and-driver.md`); until
   then those read "Not reported". `known-issues.md` → `[E] The Device Manager
   cannot say which driver runs a PCI device, nor its interrupt or memory`.
+
+- `[-]` `[E]` **The Network Manager lists the machine's interfaces** —
+  2026-09-26. Read through `hwquery` from `/proc/net` on opening and on
+  Refresh: name, kind, link, MAC, address, netmask, gateway and DNS server,
+  with "None assigned" for the kernel's `0.0.0.0` and "Not reported" for the
+  speed, the counters and DHCP, which nothing publishes. The banner explains
+  an empty list only (not read / unreadable / no card found). Apply (a static
+  address, netmask, gateway and DNS server) and Enable/Disable reach the
+  kernel through `SYS_NET_IF_CONFIG` (856, administrator only -- the call
+  `ifconfig` makes), then read the list again, so what shows is the kernel's
+  word; a refusal names the reason in the kernel's own codes (`-400` is
+  permission denied -- five lane B tools decode it as Linux's `-1`,
+  `requests/e-b-five-network-tools-read-a-refusal-as-error-400.md`).
+  Diagnose checks the card, its address and gateway from what was read, and
+  then, off the window's thread, looks up and connects to `example.com`
+  (design-decisions §1216), only when asked. **Next:** switching to DHCP
+  (today it points at `dhcpcd`); Wi-Fi and VPNs stay refused until something
+  publishes them.
+
+- `[-]` `[E]` **The Remote Desktop connects over VNC** — 2026-09-26.
+  `apps/remotedesktop/src/rfb.rs` speaks RFB 3.8 (RFC 6143) on a socket of
+  its own -- version, no-password or VNC's DES challenge (`des.rs`), the
+  desktop's size and name, Raw and CopyRect, DesktopSize, the bell and the
+  server's clipboard -- with every length bounded before anything is
+  allocated for it. Connect asks a VNC profile for its password (kept
+  nowhere) and refuses RDP and SSH by name; the session is Connected when
+  the server has shaken hands and its outcome is filed then; the screen is
+  uploaded to the compositor and drawn scaled to the view; keys (as X
+  keysyms) and the pointer go back while it is shown, the escape hotkey
+  giving the keyboard back. Unencrypted, and the window says so. Hextile is
+  asked for first (tiles of background and coloured rectangles -- a fraction
+  of Raw's bytes for a desktop). **Next:** ZRLE or Tight, which need a zlib
+  stream resumed across rectangles -- a resumable inflater in `deflate/`
+  (no lane's; additive) rather than a second decompressor; partial uploads
+  instead of the whole screen per change; sending the local clipboard;
+  VeNCrypt/TLS once `open-questions.md` E-Q2 settles how certificates are
+  checked; RDP.
 
 - `[x]` `[E]` **The dictionary knows more than thirty words** — 2026-09-26.
   A word the built-in list lacks is looked up in WordNet at dict.org over

@@ -17,7 +17,7 @@
 // The machine's hardware, read where the kernel publishes it -- shared with
 // the Device Manager, so the two cannot disagree about the machine.
 use hwquery::{
-    CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
+    Address, CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
     MemoryMapEntry, NetworkAdapterInfo, PciDeviceInfo, ProcessEntry, ServiceInfo, SoundInfo,
     StartupEntry, UsbDeviceInfo,
 };
@@ -520,21 +520,22 @@ impl SysInfoState {
     /// exists to prevent. Each category moved by hand instead, so "with no
     /// change to this file" was the least accurate part.
     ///
-    /// Where each category reads from now:
+    /// Where each category reads from now (2026-09-26; `hwquery` is the
+    /// authority -- this table is a reader's map of it):
     ///
     /// | category | source |
     /// |---|---|
     /// | CPU, memory | `/sys/devices/system/{cpu,memory}` (§850) |
     /// | storage | `/sys/devices/block/<name>/` |
-    /// | network, processes | `/proc/net/dev`, `/proc/<pid>/stat` |
-    /// | IRQs, display | `/proc/{interrupts,monitors}` — **published, not yet read here** |
-    /// | PCI, USB, sound, I/O ports, DMA, memory map, drivers, services, startup | nothing publishes these |
+    /// | PCI, memory map | `/sys/devices/{pci,memmap}` |
+    /// | network | `/proc/net`, SlateOS's file (a Linux host: `/proc/net/dev`) |
+    /// | processes, uptime | `/proc/<pid>/stat`, `/proc/uptime` |
+    /// | IRQs, I/O ports, display | `/proc/{interrupts,ioport,monitors}` |
+    /// | drivers, startup | `/proc/{kmod,autostart}` |
+    /// | USB, sound, DMA, services | nothing publishes these |
     ///
     /// The last row is the honest "cannot read", and is expected to stay that
-    /// way. The row above it is the outstanding work, and it needs parsers in
-    /// `procinfo` rather than here -- see
-    /// `known-issues.md` →
-    /// `TD-C-APPS-SYSINFO-WAITS-ON-A-FILESYSTEM-TREE-THAT-DOES-NOT-EXIST`.
+    /// way until the kernel publishes them.
     pub fn new() -> Self {
         use hwquery::HardwareProvider;
         let provider = hwquery::SyscallProvider::new();
@@ -639,7 +640,21 @@ impl SysInfoState {
     /// cannot be mistaken for a reading.
     const NOT_REPORTED: &'static str = "Not reported by this system";
 
-    /// Render an optional value, or say it was not reported.
+    /// An address the system does report, and says there is none of: a card
+    /// DHCP has not configured. A fact about the machine -- the answer to
+    /// "why can nothing be reached?" -- so it must not read as
+    /// [`Self::NOT_REPORTED`].
+    const NOT_ASSIGNED: &'static str = "None assigned";
+
+    /// An adapter's address, or which of the two kinds of absence it is.
+    fn address_text(address: &Address) -> String {
+        match address {
+            Address::NotReported => Self::NOT_REPORTED.to_string(),
+            Address::Unassigned => Self::NOT_ASSIGNED.to_string(),
+            Address::Is(text) => text.clone(),
+        }
+    }
+
     /// An uptime as days, hours, minutes and seconds.
     ///
     /// Days are included because a machine that has been up for four days read
@@ -915,26 +930,64 @@ impl SysInfoState {
                 props.push(Property::blank());
             }
             props.push(Property::new(&format!("--- Adapter {} ---", idx), ""));
+            // What nothing published reads "Not reported" -- never a blank
+            // that looks like a missing value, or a 0 that looks like one.
+            let or_not = |v: &str| {
+                if v.is_empty() {
+                    Self::NOT_REPORTED.to_string()
+                } else {
+                    v.to_string()
+                }
+            };
             props.push(Property::new("Name", &adapter.name));
-            props.push(Property::new("Type", &adapter.adapter_type));
-            props.push(Property::new("MAC Address", &adapter.mac_address));
-            props.push(Property::new("IPv4 Address", &adapter.ipv4));
-            props.push(Property::new("IPv6 Address", &adapter.ipv6));
-            props.push(Property::new("Subnet Mask", &adapter.subnet));
-            props.push(Property::new("Default Gateway", &adapter.gateway));
-            props.push(Property::new("DNS Servers", &adapter.dns));
+            props.push(Property::new(
+                "Link",
+                match adapter.up {
+                    Some(true) => "Up",
+                    Some(false) => "Down",
+                    None => Self::NOT_REPORTED,
+                },
+            ));
+            props.push(Property::new("Type", &or_not(&adapter.adapter_type)));
+            props.push(Property::new("MAC Address", &or_not(&adapter.mac_address)));
+            props.push(Property::new(
+                "IPv4 Address",
+                &Self::address_text(&adapter.ipv4),
+            ));
+            props.push(Property::new(
+                "IPv6 Address",
+                &Self::address_text(&adapter.ipv6),
+            ));
+            props.push(Property::new(
+                "Subnet Mask",
+                &Self::address_text(&adapter.subnet),
+            ));
+            props.push(Property::new(
+                "Default Gateway",
+                &Self::address_text(&adapter.gateway),
+            ));
+            props.push(Property::new(
+                "DNS Servers",
+                &Self::address_text(&adapter.dns),
+            ));
             props.push(Property::new(
                 "Speed",
-                &format!("{} Mbps", adapter.speed_mbps),
+                &adapter
+                    .speed_mbps
+                    .map_or_else(|| Self::NOT_REPORTED.to_string(), |s| format!("{s} Mbps")),
             ));
-            props.push(Property::new("Duplex", &adapter.duplex));
+            props.push(Property::new("Duplex", &or_not(&adapter.duplex)));
             props.push(Property::new(
                 "Bytes Sent",
-                &format_bytes(adapter.bytes_sent),
+                &adapter
+                    .bytes_sent
+                    .map_or_else(|| Self::NOT_REPORTED.to_string(), format_bytes),
             ));
             props.push(Property::new(
                 "Bytes Received",
-                &format_bytes(adapter.bytes_received),
+                &adapter
+                    .bytes_received
+                    .map_or_else(|| Self::NOT_REPORTED.to_string(), format_bytes),
             ));
         }
         props
@@ -3013,19 +3066,15 @@ mod tests {
         );
     }
 
-    /// The interfaces come from `/proc/net/dev`, with nothing filled in around them.
+    /// On a Linux host the interfaces come from `/proc/net/dev`, with nothing
+    /// filled in around them. (SlateOS's own `/proc/net` is `hwquery`'s to
+    /// test, and the address rows below.)
     ///
-    /// `query_network` read `/sys/hardware/net`, which the kernel has never
-    /// served. `/proc/net/dev` is published and carries the names and the
-    /// traffic counters.
-    ///
-    /// The empty fields are the point of the test as much as the full ones. A
-    /// MAC address, an IPv4 lease, a gateway, a DNS server, a link speed and a
-    /// duplex mode are published by nothing in this tree, and lane A declined
-    /// to add a `/sys/devices/net/` in the same words: the kernel's
-    /// `InterfaceInfo` "has no name field, so both would be invented". **A row
-    /// carrying a plausible 192.168.1.x is worse than one carrying a blank**,
-    /// because the blank is legible as absent.
+    /// The empty fields are the point of the test as much as the full ones.
+    /// `/proc/net/dev` carries names and traffic counters and nothing else: no
+    /// MAC address, no IPv4 lease, no gateway, no DNS server, no link speed or
+    /// duplex mode. **A row carrying a plausible 192.168.1.x is worse than one
+    /// carrying a blank**, because the blank is legible as absent.
     #[test]
     fn the_network_interfaces_are_read_and_nothing_is_filled_in_around_them() {
         let root =
@@ -3049,19 +3098,51 @@ mod tests {
         assert_eq!(adapters.len(), 2, "one row per interface");
         let eth0 = adapters.first().expect("eth0");
         assert_eq!(eth0.name, "eth0");
-        assert_eq!(eth0.bytes_received, 900_000, "rx is the receive column");
-        assert_eq!(eth0.bytes_sent, 400_000, "tx is the transmit column");
+        assert_eq!(
+            eth0.bytes_received,
+            Some(900_000),
+            "rx is the receive column"
+        );
+        assert_eq!(eth0.bytes_sent, Some(400_000), "tx is the transmit column");
 
         for a in &adapters {
             assert!(a.mac_address.is_empty(), "invented a MAC address");
-            assert!(a.ipv4.is_empty(), "invented an address lease");
-            assert!(a.gateway.is_empty(), "invented a gateway");
-            assert!(a.dns.is_empty(), "invented a resolver");
-            assert_eq!(a.speed_mbps, 0, "invented a link speed");
+            assert_eq!(a.ipv4, Address::NotReported, "invented an address lease");
+            assert_eq!(a.gateway, Address::NotReported, "invented a gateway");
+            assert_eq!(a.dns, Address::NotReported, "invented a resolver");
+            assert_eq!(a.speed_mbps, None, "invented a link speed");
+            assert_eq!(a.up, None, "invented a link state");
             assert!(a.duplex.is_empty(), "invented a duplex mode");
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An address the kernel says there is none of reads "None assigned" --
+    /// the answer to "why can nothing be reached?" -- and one nothing reports
+    /// reads as not reported. Two absences, told apart.
+    #[test]
+    fn an_unassigned_address_is_not_an_unreported_one() {
+        let mut app = SysInfoState::new();
+        app.network_adapters = vec![NetworkAdapterInfo {
+            up: Some(false),
+            ipv4: Address::Unassigned,
+            gateway: Address::Is(String::from("10.0.2.2")),
+            ..NetworkAdapterInfo::named("eth0")
+        }];
+        let props = app.props_network();
+        let value = |name: &str| {
+            props
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.value.clone())
+                .unwrap_or_else(|| panic!("no {name} row"))
+        };
+        assert_eq!(value("IPv4 Address"), SysInfoState::NOT_ASSIGNED);
+        assert_eq!(value("IPv6 Address"), SysInfoState::NOT_REPORTED);
+        assert_eq!(value("Default Gateway"), "10.0.2.2");
+        assert_eq!(value("Link"), "Down");
+        assert_ne!(SysInfoState::NOT_ASSIGNED, SysInfoState::NOT_REPORTED);
     }
 
     /// With no `/proc/net/dev`, it says so rather than reporting no interfaces.

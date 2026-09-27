@@ -89,8 +89,12 @@ pub const SHM_EXEC: i32 = 0o100000;
 
 /// `shmget`: back the segment with huge pages.
 pub const SHM_HUGETLB: i32 = 0o4000;
-/// `shmget`: do not reserve swap for it.
-pub const SHM_NORESERVE: i32 = 0o10000000;
+/// `shmget`: do not reserve swap for it.  `0o10000`, as musl's `<sys/shm.h>`
+/// and the kernel's `ipc.h` have it -- the same bits as [`SHM_RDONLY`], which
+/// is `shmat`'s; this was `0o10000000` until 2026-09-27.  `shmget` ignores
+/// the flag (nothing is reserved here), as it ignores every bit it does not
+/// know.
+pub const SHM_NORESERVE: i32 = 0o10000;
 
 /// Lock pages in memory.
 pub const SHM_LOCK: i32 = 11;

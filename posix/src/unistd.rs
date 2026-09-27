@@ -165,10 +165,13 @@ pub const _SC_2_VERSION: i32 = 46;
 pub const _SC_2_C_BIND: i32 = 47;
 /// Maximum number of thread destructor iterations.
 pub const _SC_THREAD_DESTRUCTOR_ITERATIONS: i32 = 73;
-/// Maximum concurrent threads per process.
-pub const _SC_THREAD_THREADS_MAX: i32 = 74;
+// musl's (and glibc's) numbers: 74 is the keys' limit and 76 the threads'.
+// They were the other way round until 2026-09-27, so sysconf answered a
+// C caller's `_SC_THREAD_KEYS_MAX` with the thread limit and back.
 /// Maximum number of thread-specific data keys.
-pub const _SC_THREAD_KEYS_MAX: i32 = 76;
+pub const _SC_THREAD_KEYS_MAX: i32 = 74;
+/// Maximum concurrent threads per process.
+pub const _SC_THREAD_THREADS_MAX: i32 = 76;
 
 // ---------------------------------------------------------------------------
 // Current working directory tracking
@@ -5085,6 +5088,16 @@ mod tests {
     #[test]
     fn test_sysconf_open_max() {
         assert_eq!(sysconf(_SC_OPEN_MAX), crate::fdtable::MAX_FDS as i64);
+    }
+
+    /// Asked by the numbers a C caller's `<unistd.h>` (musl's) passes: 74 is
+    /// the keys' limit and 76 the threads'.  The two answers were swapped
+    /// until 2026-09-27.
+    #[test]
+    fn sysconf_answers_the_thread_limits_by_musls_numbers() {
+        assert_eq!((_SC_THREAD_KEYS_MAX, _SC_THREAD_THREADS_MAX), (74, 76));
+        assert_eq!(sysconf(74), i64::from(crate::limits::_POSIX_THREAD_KEYS_MAX));
+        assert_eq!(sysconf(76), 1024);
     }
 
     #[test]

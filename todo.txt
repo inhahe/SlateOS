@@ -58820,6 +58820,18 @@ is already waiting, not whether the setter exists.
   knows, so it can be glibc's iconv_prog over the libc's iconv -- asked in
   requests/d-b-the-iconv-program-can-run-on-the-libc.md.
 
+- **A gate for the numbers, as `check-libc-abi.py` is one for the layouts**
+  (design-decisions.md §1119; `D-POSIX-CONSTANTS-WERE-NOT-MUSLS`).  The
+  2026-09-27 audit was a one-off: every top-level `pub const` of the live
+  modules, evaluated from the source, against a probe built with `zig cc
+  --target=x86_64-linux-musl` -- 83 wrong values found, and a constant
+  added tomorrow is checked by nothing.  The gate's shape, after §1011: the
+  numbers from Rust (a test that prints each constant's value, so no Python
+  re-evaluates Rust's expressions), musl's headers as the oracle
+  (`_Static_assert(NAME == value)`), and the list derived -- every constant
+  of a module that exports C symbols whose name musl's headers define --
+  with §1119's table of eleven as its allowlist, each with its reason.
+  Scoped like check-libc-abi.py to pushes that touch `posix/src/`.
 - **posix/src: 46 facades whose tests are the only tests of something
   live** (the sequel to TD-D-1700-CONSTANT-MODULES-NOTHING-USED).  Nothing
   the library exports reaches these modules -- they re-export socket.rs's,

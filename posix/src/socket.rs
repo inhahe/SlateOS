@@ -4512,29 +4512,33 @@ pub const AI_NUMERICHOST: i32 = 0x0004;
 /// Numeric service string.
 pub const AI_NUMERICSERV: i32 = 0x0400;
 
-// getaddrinfo error codes.
-/// Address family not supported.
-pub const EAI_ADDRFAMILY: i32 = 1;
-/// Temporary failure in name resolution.
-pub const EAI_AGAIN: i32 = 2;
-/// Invalid flags.
-pub const EAI_BADFLAGS: i32 = 3;
-/// Non-recoverable failure in name resolution.
-pub const EAI_FAIL: i32 = 4;
-/// Address family not supported.
-pub const EAI_FAMILY: i32 = 5;
-/// Memory allocation failure.
-pub const EAI_MEMORY: i32 = 6;
-/// No address associated with hostname.
-pub const EAI_NODATA: i32 = 7;
+// getaddrinfo's and getnameinfo's error codes: negative, as musl's
+// `<netdb.h>` and glibc's both number them.  They were 1 to 11 until
+// 2026-09-27, so a caller -- whose header is musl's -- testing for
+// `EAI_NONAME` (-2) or retrying on `EAI_AGAIN` (-3) never saw either; only
+// `gai_strerror`, which read the same wrong numbers, agreed with them.
+/// ai_flags has a bad value.
+pub const EAI_BADFLAGS: i32 = -1;
 /// Name or service not known.
-pub const EAI_NONAME: i32 = 8;
-/// Service not supported for socket type.
-pub const EAI_SERVICE: i32 = 9;
-/// Socket type not supported.
-pub const EAI_SOCKTYPE: i32 = 10;
-/// System error.
-pub const EAI_SYSTEM: i32 = 11;
+pub const EAI_NONAME: i32 = -2;
+/// Temporary failure in name resolution.
+pub const EAI_AGAIN: i32 = -3;
+/// Non-recoverable failure in name resolution.
+pub const EAI_FAIL: i32 = -4;
+/// No address associated with hostname.
+pub const EAI_NODATA: i32 = -5;
+/// ai_family not supported.
+pub const EAI_FAMILY: i32 = -6;
+/// ai_socktype not supported.
+pub const EAI_SOCKTYPE: i32 = -7;
+/// The service is not supported for ai_socktype.
+pub const EAI_SERVICE: i32 = -8;
+/// Address family for hostname not supported.
+pub const EAI_ADDRFAMILY: i32 = -9;
+/// Memory allocation failure.
+pub const EAI_MEMORY: i32 = -10;
+/// System error: `errno` says which.
+pub const EAI_SYSTEM: i32 = -11;
 
 /// Byte offset of the `SockaddrIn` inside a result block from [`gai_alloc`].
 ///
@@ -4880,18 +4884,28 @@ pub unsafe extern "C" fn freeaddrinfo(res: *mut Addrinfo) {
 pub extern "C" fn gai_strerror(errcode: i32) -> *const u8 {
     match errcode {
         0 => c"Success".as_ptr().cast::<u8>(),
-        EAI_ADDRFAMILY | EAI_FAMILY => c"Address family not supported".as_ptr().cast::<u8>(),
+        EAI_BADFLAGS => c"Bad value for ai_flags".as_ptr().cast::<u8>(),
+        EAI_NONAME => c"Name or service not known".as_ptr().cast::<u8>(),
         EAI_AGAIN => c"Temporary failure in name resolution"
             .as_ptr()
             .cast::<u8>(),
-        EAI_BADFLAGS => c"Invalid flags".as_ptr().cast::<u8>(),
-        EAI_FAIL => c"Non-recoverable failure".as_ptr().cast::<u8>(),
-        EAI_MEMORY => c"Memory allocation failure".as_ptr().cast::<u8>(),
+        EAI_FAIL => c"Non-recoverable failure in name resolution"
+            .as_ptr()
+            .cast::<u8>(),
         EAI_NODATA => c"No address associated with hostname".as_ptr().cast::<u8>(),
-        EAI_NONAME => c"Name or service not known".as_ptr().cast::<u8>(),
-        EAI_SERVICE => c"Service not supported".as_ptr().cast::<u8>(),
-        EAI_SOCKTYPE => c"Socket type not supported".as_ptr().cast::<u8>(),
+        EAI_FAMILY => c"ai_family not supported".as_ptr().cast::<u8>(),
+        EAI_SOCKTYPE => c"ai_socktype not supported".as_ptr().cast::<u8>(),
+        EAI_SERVICE => c"Servname not supported for ai_socktype"
+            .as_ptr()
+            .cast::<u8>(),
+        EAI_ADDRFAMILY => c"Address family for hostname not supported"
+            .as_ptr()
+            .cast::<u8>(),
+        EAI_MEMORY => c"Memory allocation failure".as_ptr().cast::<u8>(),
         EAI_SYSTEM => c"System error".as_ptr().cast::<u8>(),
+        EAI_OVERFLOW => c"Result too large for supplied buffer"
+            .as_ptr()
+            .cast::<u8>(),
         _ => c"Unknown error".as_ptr().cast::<u8>(),
     }
 }
@@ -7957,7 +7971,7 @@ mod tests {
     #[test]
     fn test_gai_strerror_family() {
         let msg = unsafe { c_str_to_slice(gai_strerror(EAI_FAMILY)) };
-        assert_eq!(msg, b"Address family not supported");
+        assert_eq!(msg, b"ai_family not supported");
     }
 
     #[test]
@@ -7975,13 +7989,38 @@ mod tests {
     #[test]
     fn test_gai_strerror_service() {
         let msg = unsafe { c_str_to_slice(gai_strerror(EAI_SERVICE)) };
-        assert_eq!(msg, b"Service not supported");
+        assert_eq!(msg, b"Servname not supported for ai_socktype");
     }
 
     #[test]
     fn test_gai_strerror_system() {
         let msg = unsafe { c_str_to_slice(gai_strerror(EAI_SYSTEM)) };
         assert_eq!(msg, b"System error");
+    }
+
+    /// Every code's message, as glibc 2.39's `gai_strerror` prints it
+    /// (probed 2026-09-27); a positive number, which no code is, is unknown.
+    #[test]
+    fn gai_strerror_is_glibcs() {
+        let table: [(i32, &[u8]); 13] = [
+            (EAI_BADFLAGS, b"Bad value for ai_flags"),
+            (EAI_NONAME, b"Name or service not known"),
+            (EAI_AGAIN, b"Temporary failure in name resolution"),
+            (EAI_FAIL, b"Non-recoverable failure in name resolution"),
+            (EAI_NODATA, b"No address associated with hostname"),
+            (EAI_FAMILY, b"ai_family not supported"),
+            (EAI_SOCKTYPE, b"ai_socktype not supported"),
+            (EAI_SERVICE, b"Servname not supported for ai_socktype"),
+            (EAI_ADDRFAMILY, b"Address family for hostname not supported"),
+            (EAI_MEMORY, b"Memory allocation failure"),
+            (EAI_SYSTEM, b"System error"),
+            (EAI_OVERFLOW, b"Result too large for supplied buffer"),
+            (1, b"Unknown error"),
+        ];
+        for (code, text) in table {
+            let msg = unsafe { c_str_to_slice(gai_strerror(code)) };
+            assert_eq!(msg, text, "gai_strerror({code})");
+        }
     }
 
     #[test]
@@ -7994,17 +8033,18 @@ mod tests {
 
     #[test]
     fn test_eai_constants() {
-        assert_eq!(EAI_ADDRFAMILY, 1);
-        assert_eq!(EAI_AGAIN, 2);
-        assert_eq!(EAI_BADFLAGS, 3);
-        assert_eq!(EAI_FAIL, 4);
-        assert_eq!(EAI_FAMILY, 5);
-        assert_eq!(EAI_MEMORY, 6);
-        assert_eq!(EAI_NODATA, 7);
-        assert_eq!(EAI_NONAME, 8);
-        assert_eq!(EAI_SERVICE, 9);
-        assert_eq!(EAI_SOCKTYPE, 10);
-        assert_eq!(EAI_SYSTEM, 11);
+        // musl's `<netdb.h>` (and glibc's), probed 2026-09-27.
+        assert_eq!(EAI_BADFLAGS, -1);
+        assert_eq!(EAI_NONAME, -2);
+        assert_eq!(EAI_AGAIN, -3);
+        assert_eq!(EAI_FAIL, -4);
+        assert_eq!(EAI_NODATA, -5);
+        assert_eq!(EAI_FAMILY, -6);
+        assert_eq!(EAI_SOCKTYPE, -7);
+        assert_eq!(EAI_SERVICE, -8);
+        assert_eq!(EAI_ADDRFAMILY, -9);
+        assert_eq!(EAI_MEMORY, -10);
+        assert_eq!(EAI_SYSTEM, -11);
         assert_eq!(EAI_OVERFLOW, -12);
     }
 

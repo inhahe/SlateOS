@@ -61,20 +61,28 @@ use crate::stat::Stat;
 // Constants
 // ---------------------------------------------------------------------------
 
+// The type flags a callback is handed, numbered as musl's `<ftw.h>` numbers
+// them -- from 1.  glibc's header numbers them from 0, and this module had
+// glibc's numbers until 2026-09-27; but a port includes musl's header (the C
+// library every port here compiles against, design-decisions.md §1011), so a
+// callback testing `typeflag == FTW_F` was handed 0 and read FTW_F as
+// "not a regular file", FTW_D as FTW_F, and so on down the list.  The walk
+// itself is still glibc's; only the numbers are the header's.
+
 /// Regular file.
-pub const FTW_F: i32 = 0;
+pub const FTW_F: i32 = 1;
 /// Directory.
-pub const FTW_D: i32 = 1;
+pub const FTW_D: i32 = 2;
 /// Unreadable directory.
-pub const FTW_DNR: i32 = 2;
+pub const FTW_DNR: i32 = 3;
 /// `stat` failed (not a symlink).
-pub const FTW_NS: i32 = 3;
+pub const FTW_NS: i32 = 4;
 /// Symbolic link (nftw only, with FTW_PHYS).
-pub const FTW_SL: i32 = 4;
+pub const FTW_SL: i32 = 5;
 /// Directory, all children processed (nftw with FTW_DEPTH).
-pub const FTW_DP: i32 = 5;
+pub const FTW_DP: i32 = 6;
 /// Symbolic link pointing to nonexistent file (nftw only, without FTW_PHYS).
-pub const FTW_SLN: i32 = 6;
+pub const FTW_SLN: i32 = 7;
 
 /// `nftw` flag: do not follow symbolic links.
 pub const FTW_PHYS: i32 = 1;
@@ -930,13 +938,14 @@ mod tests {
 
     #[test]
     fn test_ftw_type_flags() {
-        assert_eq!(FTW_F, 0);
-        assert_eq!(FTW_D, 1);
-        assert_eq!(FTW_DNR, 2);
-        assert_eq!(FTW_NS, 3);
-        assert_eq!(FTW_SL, 4);
-        assert_eq!(FTW_DP, 5);
-        assert_eq!(FTW_SLN, 6);
+        // musl's `<ftw.h>`, which ports compile against (probed 2026-09-27).
+        assert_eq!(FTW_F, 1);
+        assert_eq!(FTW_D, 2);
+        assert_eq!(FTW_DNR, 3);
+        assert_eq!(FTW_NS, 4);
+        assert_eq!(FTW_SL, 5);
+        assert_eq!(FTW_DP, 6);
+        assert_eq!(FTW_SLN, 7);
     }
 
     #[test]

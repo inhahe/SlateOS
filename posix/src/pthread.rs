@@ -5070,9 +5070,10 @@ mod tests {
     }
 
     /// The floor is `PTHREAD_STACK_MIN`, which glibc's `check_stacksize_attr`
-    /// (sysdeps/nptl/pthreadP.h:704) compares against — 16 KiB on x86-64, not
-    /// a page.  This used to be a hardcoded 4096, which accepted three sizes
-    /// glibc rejects.
+    /// (sysdeps/nptl/pthreadP.h:704) compares against -- with the number from
+    /// the header a C program compiles against, musl's 2048.  (glibc's own is
+    /// 16 KiB, and was this floor until 2026-09-27, refusing a port's
+    /// `PTHREAD_STACK_MIN + margin` below it.)
     #[test]
     fn attr_setstacksize_minimum_is_pthread_stack_min() {
         let mut attr: PthreadAttrT = [0; 56];
@@ -5085,22 +5086,22 @@ mod tests {
             pthread_attr_setstacksize(&mut attr, PTHREAD_STACK_MIN as usize - 1),
             errno::EINVAL
         );
-        // A page is below the floor, so it is now rejected.
-        assert_eq!(pthread_attr_setstacksize(&mut attr, 4096), errno::EINVAL);
+        // A 4 KiB page clears musl's floor; the stack is still rounded up to
+        // one of this kernel's 16 KiB pages when the thread is made.
+        assert_eq!(pthread_attr_setstacksize(&mut attr, 4096), 0);
     }
 
     #[test]
     fn attr_setstacksize_rejects_too_small() {
         let mut attr: PthreadAttrT = [0; 56];
         pthread_attr_init(&mut attr);
-        assert_eq!(pthread_attr_setstacksize(&mut attr, 4095), errno::EINVAL);
+        assert_eq!(pthread_attr_setstacksize(&mut attr, 2047), errno::EINVAL);
         assert_eq!(pthread_attr_setstacksize(&mut attr, 0), errno::EINVAL);
         assert_eq!(pthread_attr_setstacksize(&mut attr, 1), errno::EINVAL);
     }
 
     /// `EFAULT` is reserved for the case where the *size* is acceptable and only
-    /// the pointer is bad — 8 KiB used to be the size here, but it is below
-    /// `PTHREAD_STACK_MIN` (16 KiB on x86-64) and so now loses to the size check.
+    /// the pointer is bad, so the size here is one no floor refuses.
     #[test]
     fn attr_setstacksize_null_returns_efault() {
         assert_eq!(
@@ -5116,7 +5117,7 @@ mod tests {
     #[test]
     fn attr_setstacksize_too_small_outranks_a_null_attr() {
         assert_eq!(
-            pthread_attr_setstacksize(core::ptr::null_mut(), 8192),
+            pthread_attr_setstacksize(core::ptr::null_mut(), 1024),
             errno::EINVAL
         );
     }
@@ -5366,8 +5367,7 @@ mod tests {
     }
 
     /// As with `pthread_attr_setstacksize`, `EFAULT` only applies once the size
-    /// clears `PTHREAD_STACK_MIN`; 8 KiB (the size this test used to pass) is
-    /// below the 16 KiB floor and now loses to the size check.
+    /// clears `PTHREAD_STACK_MIN`, so the size here is one no floor refuses.
     #[test]
     fn setstack_null_attr_returns_efault() {
         assert_eq!(
@@ -5383,7 +5383,7 @@ mod tests {
     #[test]
     fn setstack_too_small_outranks_a_null_attr() {
         assert_eq!(
-            pthread_attr_setstack(core::ptr::null_mut(), core::ptr::null_mut(), 8192),
+            pthread_attr_setstack(core::ptr::null_mut(), core::ptr::null_mut(), 1024),
             errno::EINVAL
         );
     }

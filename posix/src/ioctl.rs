@@ -1947,14 +1947,20 @@ pub extern "C" fn tcdrain(fd: i32) -> i32 {
     0
 }
 
-/// TCOON — restart suspended output.
-pub const TCOON: i32 = 0;
+// `tcflow`'s actions, as musl's `<bits/termios.h>` and the kernel's
+// `asm-generic/termbits.h` number them: suspend before restart. Until
+// 2026-09-27 each pair was the other way round -- TCOON 0, TCOOFF 1 --
+// and a test pinned that order; `tcflow` accepts all four and does nothing
+// with them, so no caller saw it, but an implementation of flow control
+// would have run every one backwards.
 /// TCOOFF — suspend output.
-pub const TCOOFF: i32 = 1;
-/// TCION — restart suspended input.
-pub const TCION: i32 = 2;
-/// TCIOFF — suspend input.
-pub const TCIOFF: i32 = 3;
+pub const TCOOFF: i32 = 0;
+/// TCOON — restart suspended output.
+pub const TCOON: i32 = 1;
+/// TCIOFF — send a STOP character, to suspend the terminal's input.
+pub const TCIOFF: i32 = 2;
+/// TCION — send a START character, to restart it.
+pub const TCION: i32 = 3;
 
 /// Suspend or restart terminal I/O.
 ///
@@ -1966,7 +1972,7 @@ pub extern "C" fn tcflow(fd: i32, action: i32) -> i32 {
         errno::set_errno(e);
         return -1;
     }
-    if !(TCOON..=TCIOFF).contains(&action) {
+    if !(TCOOFF..=TCION).contains(&action) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -2524,12 +2530,15 @@ mod tests {
 
     // -- tcflow / tcflush action constants --
 
+    /// musl's `<bits/termios.h>` (and the kernel's `asm-generic/termbits.h`):
+    /// suspend before restart, output before input.  Checked against musl's
+    /// header with a probe on 2026-09-27, when this test had the pairs swapped.
     #[test]
     fn test_tcflow_action_constants() {
-        assert_eq!(TCOON, 0);
-        assert_eq!(TCOOFF, 1);
-        assert_eq!(TCION, 2);
-        assert_eq!(TCIOFF, 3);
+        assert_eq!(TCOOFF, 0);
+        assert_eq!(TCOON, 1);
+        assert_eq!(TCIOFF, 2);
+        assert_eq!(TCION, 3);
     }
 
     #[test]

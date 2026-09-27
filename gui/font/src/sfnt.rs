@@ -2751,6 +2751,10 @@ impl Face {
     #[must_use]
     pub(crate) fn glyph_extents_at(&self, gid: u16, coords: &var::Coords) -> Option<[i32; 4]> {
         use crate::hbcalc::roundf_i32;
+        // HarfBuzz asks `COLR` first: a colour glyph's clip box is its box.
+        if let Some(extents) = crate::colr::clip_extents(self, gid, coords) {
+            return Some(extents);
+        }
         if let Outlines::Cff(cff) = &self.outlines {
             return self.cff_extents(cff, gid, coords);
         }

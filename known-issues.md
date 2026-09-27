@@ -170746,7 +170746,17 @@ bugs, worth reporting upstream; the point counting may be one too (FreeType
 counts from the start of the composite being built, which differs only for a
 nested one).
 
-### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26
+### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26 -- **clip boxes FIXED 2026-09-27; paint extents OPEN**
+
+**Status:** half fixed. `Face::glyph_extents_at` asks `COLR` first, as
+HarfBuzz does, and a glyph the `ClipList` covers reports its clip box, varied
+and rounded as `ClipBoxFormat2` does (`colr::clip_extents`). That is every
+colour glyph of `seguiemj.ttf`: all 12,977 sampled boxes now agree. **Still
+open:** a colour glyph with no clip box -- HarfBuzz then measures its *paint*
+(`hb_paint_extents`: the union of what each layer covers, under its
+transforms and clips; COLRv0 layers included), which this does not do, so
+such a glyph still reports its base glyph's outline box. No font on this host
+has one.
 
 **In short:** asked for the ink box of a colour emoji glyph, this crate
 answers with the box of the plain glyph underneath it, while HarfBuzz answers
@@ -170763,9 +170773,11 @@ at the instance, if it has one; otherwise the extents of its paint
 **Found by:** `tools/outline_oracle.py` over `seguiemj.ttf`, whose boxes
 disagree for 697 of 12,977 glyphs sampled while every path agrees.
 
-**The fix:** measure a `COLR` version-1 glyph as HarfBuzz does, in
-`glyph_extents_at` before the outline box -- `crate::colr` already reads the
-clip boxes and walks the paint graph -- and check it with the same oracle.
+**What is left:** the paint extents -- a walk of the paint graph as
+`hb_paint_extents` walks it (a clip glyph's box is the bounds of its drawn
+path, transformed; a paint unions the current clip into the group's bounds;
+`to_glyph_extents` rounds the corners) -- checked with a fixture font whose
+colour glyphs have no clip boxes, since no host font has one.
 
 ### [F] A variable font whose outlines are CFF (`CFF2`) would not open -- 2026-09-26 -- **FIXED 2026-09-26**
 

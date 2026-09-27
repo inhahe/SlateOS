@@ -127,6 +127,29 @@ pub fn has_colour(face: &Face, gid: u16) -> bool {
         .is_some_and(|t| t.base_v1(gid).is_some() || t.base_v0(gid).is_some())
 }
 
+/// The box HarfBuzz reports for glyph `gid` from `COLR`, when the table's
+/// `ClipList` gives the glyph a clip box: HarfBuzz asks `COLR` before the
+/// outline tables (`hb_ot_get_glyph_extents`), and a clip box is its whole
+/// answer (`COLR::get_extents`) -- varied at `coords`, each corner's delta
+/// rounded by HarfBuzz's `roundf` before it is added
+/// (`ClipBoxFormat2::get_clip_box`). Left edge, top edge, width rightwards,
+/// height downwards, in font units.
+///
+/// `None` for a glyph the clip list does not cover, or a face without
+/// `COLR`: HarfBuzz then measures the glyph's paint, which this does not
+/// yet do (known-issues.md), or its outline.
+#[must_use]
+pub(crate) fn clip_extents(face: &Face, gid: u16, coords: &Coords) -> Option<[i32; 4]> {
+    let tables = Tables::of(face, coords)?;
+    let [x_min, y_min, x_max, y_max] = tables.clip_corners(gid)?;
+    Some([
+        x_min,
+        y_max,
+        x_max.saturating_sub(x_min),
+        y_min.saturating_sub(y_max),
+    ])
+}
+
 /// Glyph `gid` of `face` painted in colour at `scale` pixels per font unit,
 /// at variation instance `coords`, with `foreground` (straight `0xAARRGGBB`)
 /// as the text colour and the palette `palette` chooses
@@ -470,6 +493,21 @@ impl<'a> Tables<'a> {
     /// gives it one.
     fn clip_box(&self, gid: u16) -> Option<Rect> {
         let d = self.colr;
+        let (clip, format) = self.clip_record(gid)?;
+        let base = self.var_base((format == 2).then(|| clip.checked_add(9)).flatten());
+        let v = |k: usize, i: u32| Some(fword(d, clip.checked_add(k)?)? + self.delta(base, i));
+        Some(Rect {
+            min_x: v(1, 0)?,
+            min_y: v(3, 1)?,
+            max_x: v(5, 2)?,
+            max_y: v(7, 3)?,
+        })
+    }
+
+    /// Where base glyph `gid`'s clip box is, and its format (1, or 2 with a
+    /// variation index), if the ClipList gives it one.
+    fn clip_record(&self, gid: u16) -> Option<(usize, u8)> {
+        let d = self.colr;
         let list = self.clip_list?;
         if u8_at(d, list)? != 1 {
             return None;
@@ -494,17 +532,21 @@ impl<'a> Tables<'a> {
         let clip = at_offset(list, u24_at(d, at.checked_add(4)?)?)?;
         // Formats 1 and 2 share the box; 2 adds a variation index.
         let format = u8_at(d, clip)?;
-        if !matches!(format, 1 | 2) {
-            return None;
-        }
+        matches!(format, 1 | 2).then_some((clip, format))
+    }
+
+    /// The clip box of base glyph `gid` as HarfBuzz reads it for a glyph's
+    /// extents: whole font units, each corner's delta rounded before it is
+    /// added. `[x_min, y_min, x_max, y_max]`.
+    fn clip_corners(&self, gid: u16) -> Option<[i32; 4]> {
+        let d = self.colr;
+        let (clip, format) = self.clip_record(gid)?;
         let base = self.var_base((format == 2).then(|| clip.checked_add(9)).flatten());
-        let v = |k: usize, i: u32| Some(fword(d, clip.checked_add(k)?)? + self.delta(base, i));
-        Some(Rect {
-            min_x: v(1, 0)?,
-            min_y: v(3, 1)?,
-            max_x: v(5, 2)?,
-            max_y: v(7, 3)?,
-        })
+        let corner = |k: usize, i: u32| -> Option<i32> {
+            let stored = i32::from(i16_at(d, clip.checked_add(k)?)?);
+            Some(stored.saturating_add(crate::hbcalc::roundf_i32(self.delta(base, i))))
+        };
+        Some([corner(1, 0)?, corner(3, 1)?, corner(5, 2)?, corner(7, 3)?])
     }
 
     /// The paint record at `at`; `None` if it is truncated, of a format this
@@ -2232,16 +2274,19 @@ pub(crate) mod tests {
     /// A version-1 `COLR`: `bases` (sorted by glyph), `layers`, and `clips`
     /// (first glyph, last glyph, box).
     fn colr_v1(bases: &[(u16, P)], layers: &[P], clips: &[(u16, u16, [i16; 4])]) -> Vec<u8> {
-        colr_v1_varied(bases, layers, clips, None, None)
+        colr_v1_varied(bases, layers, clips, None, None, &[])
     }
 
-    /// [`colr_v1`] with an `ItemVariationStore` and a `DeltaSetIndexMap`.
+    /// [`colr_v1`] with an `ItemVariationStore` and a `DeltaSetIndexMap`,
+    /// and clip boxes that vary: clip `i` is format 2, varied from index
+    /// `clip_vars[i]`, where that is given.
     fn colr_v1_varied(
         bases: &[(u16, P)],
         layers: &[P],
         clips: &[(u16, u16, [i16; 4])],
         store: Option<Vec<u8>>,
         map: Option<Vec<u8>>,
+        clip_vars: &[Option<u32>],
     ) -> Vec<u8> {
         let mut out = vec![0u8; 34];
         out[0..2].copy_from_slice(&1u16.to_be_bytes());
@@ -2272,8 +2317,12 @@ pub(crate) mod tests {
         }
         for (i, (_, _, b)) in clips.iter().enumerate() {
             let at = out.len();
-            out.push(1);
+            let varied = clip_vars.get(i).copied().flatten();
+            out.push(if varied.is_some() { 2 } else { 1 });
             words(&mut out, b);
+            if let Some(base) = varied {
+                out.extend_from_slice(&base.to_be_bytes());
+            }
             patch24(&mut out, clip_list + 5 + 7 * i + 4, at - clip_list);
         }
         put32(&mut out, 14, base_list);
@@ -2943,6 +2992,52 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_clip_box_is_the_glyphs_box() {
+        // HarfBuzz asks COLR before the outline: the clip box is the answer.
+        let face = face_with(colr_v1(
+            &[(1, P::Glyph(1, solid(RED)))],
+            &[],
+            &[(1, 1, [100, -20, 300, 400])],
+        ));
+        let default = Coords::default();
+        assert_eq!(
+            face.glyph_extents_at(1, &default),
+            Some([100, 400, 200, -420])
+        );
+        // A glyph the clip list does not cover keeps its outline's box.
+        let plain = Face::parse(build_test_font_with(vec![])).unwrap();
+        assert_eq!(
+            face.glyph_extents_at(2, &default),
+            plain.glyph_extents_at(2, &default)
+        );
+    }
+
+    #[test]
+    fn a_varied_clip_box_rounds_each_delta_before_adding_it() {
+        // At weight 550, half way to the store's peak at 700, the rows give
+        // 50.5, -16.5, 3.5 and 0; HarfBuzz rounds each half up (51, -16, 4)
+        // and adds it to its corner.
+        let store = crate::varstore::one_axis_store(&[101, -33, 7, 0]);
+        let face = variable_face_with(colr_v1_varied(
+            &[(1, P::Glyph(1, solid(RED)))],
+            &[],
+            &[(1, 1, [100, -20, 300, 400])],
+            Some(store),
+            None,
+            &[Some(0)],
+        ));
+        assert_eq!(
+            face.glyph_extents_at(1, &at_weight(&face, 550.0)),
+            Some([151, 400, 153, -436])
+        );
+        // At the default instance the box is as stored.
+        assert_eq!(
+            face.glyph_extents_at(1, &Coords::default()),
+            Some([100, 400, 200, -420])
+        );
+    }
+
+    #[test]
     fn a_variable_paint_moves_with_the_axes() {
         // Rows: 100 and 0 (the translate), -127 (the alpha), 50.
         let store = crate::varstore::one_axis_store(&[100, 0, -127, 50]);
@@ -2958,6 +3053,7 @@ pub(crate) mod tests {
             &[],
             Some(store.clone()),
             None,
+            &[],
         ));
         let draw_at = |wght: f32| {
             render(
@@ -2994,6 +3090,7 @@ pub(crate) mod tests {
             &[],
             Some(store),
             Some(map),
+            &[],
         ));
         assert_eq!(
             place(
@@ -3017,6 +3114,7 @@ pub(crate) mod tests {
             &[],
             Some(crate::varstore::one_axis_store(&[100])),
             None,
+            &[],
         ));
         assert_eq!(
             place(

@@ -763,6 +763,135 @@ fn wipefs_walks_every_signature() {
     );
 }
 
+// ---------------------------------------------------------------- ext
+
+/// `EXT3_FEATURE_COMPAT_HAS_JOURNAL`.
+const HAS_JOURNAL: u32 = 0x0004;
+
+/// A 64 KiB image with an ext superblock at 1 KiB.
+fn ext_image(fc: u32, fi: u32, frc: u32, label: &[u8], uuid: [u8; 16]) -> Image {
+    let mut img = Image::new(64 << 10);
+    let sb = 1024;
+    img.put(sb + 0x38, &[0x53, 0xef])
+        .le32(sb + 0x5c, fc)
+        .le32(sb + 0x60, fi)
+        .le32(sb + 0x64, frc)
+        .put(sb + 0x68, &uuid)
+        .put(sb + 0x78, label);
+    img
+}
+
+/// `blkid_do_safeprobe` with `flags`: every value, or the return code.
+fn sb_values(
+    dir: &ScratchDir,
+    name: &str,
+    img: &Image,
+    flags: u32,
+) -> Result<Vec<(String, String)>, i32> {
+    let mut pr = probe_of(dir, name, img);
+    pr.set_superblocks_flags(flags);
+    let rc = pr.do_safeprobe();
+    if rc != PROBE_OK {
+        return Err(rc);
+    }
+    Ok(pr
+        .values()
+        .iter()
+        .map(|v| {
+            (
+                v.name.to_owned(),
+                String::from_utf8(v.as_c_str().to_vec()).unwrap(),
+            )
+        })
+        .collect())
+}
+
+#[test]
+fn ext_types_and_values() {
+    let dir = ScratchDir::new("ulblkid-ext");
+    let uuid = [
+        0xf3, 0xac, 0x64, 0x74, 0xba, 0x9c, 0x46, 0x8c, 0xb6, 0xd0, 0xe2, 0x1c, 0xa6, 0xbc, 0x1d,
+        0xca,
+    ];
+    // Extents make it ext4; a 4 KiB block and an external journal.
+    let mut img = ext_image(HAS_JOURNAL, 0x0002 | 0x0040, 0x0001, b"root  ", uuid);
+    img.put(1024 + 0x18, &[2]).put(1024 + 0xd0, &[0xab]);
+    let flags = crate::SUBLKS_LABEL | crate::SUBLKS_UUID | crate::SUBLKS_TYPE;
+    let pairs = |v: &[(&str, &str)]| {
+        v.iter()
+            .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        sb_values(&dir, "ext4", &img, flags),
+        Ok(pairs(&[
+            ("LABEL", "root"),
+            ("UUID", "f3ac6474-ba9c-468c-b6d0-e21ca6bc1dca"),
+            ("EXT_JOURNAL", "ab000000-0000-0000-0000-000000000000"),
+            ("BLOCK_SIZE", "4096"),
+            ("TYPE", "ext4"),
+        ]))
+    );
+    // SEC_TYPE only when asked for, and only for what ext2 could mount:
+    // ext3 without ext4's extents.
+    let ext3 = ext_image(HAS_JOURNAL, 0x0002, 0x0001, b"", [0; 16]);
+    let names = |name: &str, img: &Image, flags: u32| {
+        sb_values(&dir, name, img, flags)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names("ext3a", &ext3, crate::SUBLKS_TYPE | crate::SUBLKS_SECTYPE),
+        vec!["SEC_TYPE", "BLOCK_SIZE", "TYPE"]
+    );
+    assert_eq!(
+        names("ext3b", &ext3, crate::SUBLKS_TYPE),
+        vec!["BLOCK_SIZE", "TYPE"]
+    );
+    assert_eq!(
+        names("ext4b", &img, crate::SUBLKS_SECTYPE),
+        vec!["EXT_JOURNAL", "BLOCK_SIZE"]
+    );
+    let ty = |name: &str, fc, fi, frc| {
+        sb_values(
+            &dir,
+            name,
+            &ext_image(fc, fi, frc, b"", [0; 16]),
+            crate::SUBLKS_TYPE,
+        )
+        .ok()
+        .and_then(|v| v.last().map(|(_, t)| t.clone()))
+    };
+    assert_eq!(
+        ty("t3", HAS_JOURNAL, 0x0002, 0x0001).as_deref(),
+        Some("ext3")
+    );
+    assert_eq!(ty("t2", 0, 0x0002, 0x0001).as_deref(), Some("ext2"));
+    // A journal device.
+    assert_eq!(ty("tj", 0, 0x0008, 0).as_deref(), Some("jbd"));
+    // A metadata checksum that does not match: nothing.
+    let mut bad = ext_image(0, 0, 0x0400, b"", [0; 16]);
+    bad.put(1024 + 0x3fc, &[1]);
+    assert_eq!(
+        sb_values(&dir, "bad", &bad, crate::SUBLKS_TYPE),
+        Err(PROBE_NONE)
+    );
+    // ... unless bad checksums are accepted, and then it says so.
+    let mut pr = probe_of(&dir, "bad2", &bad);
+    pr.set_superblocks_flags(crate::SUBLKS_TYPE | crate::SUBLKS_BADCSUM);
+    assert_eq!(pr.do_safeprobe(), PROBE_OK);
+    assert_eq!(value(&pr, "SBBADCSUM").as_deref(), Some("1"));
+    let mut good = ext_image(0, 0, 0x0400, b"", [0; 16]);
+    let csum = crc32c::crc32c_raw(!0, &good.0[1024..1024 + 0x3fc]);
+    good.le32(1024 + 0x3fc, csum);
+    assert_eq!(
+        sb_values(&dir, "good", &good, crate::SUBLKS_TYPE).map(|v| v.last().unwrap().1.clone()),
+        Ok("ext4".to_owned())
+    );
+}
+
 // ---------------------------------------------------------------- probe
 
 #[test]

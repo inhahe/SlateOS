@@ -332,6 +332,16 @@ static int exec_failed(pid_t child)
  * `fgets` into it -- in a forked child on a pty of its own, and report what
  * came back with `write`, not stdio. Then the same without `setvbuf`. The
  * verdict of this fixture is still the interpreter's; the probe only prints.
+ *
+ * THE ANSWER was neither, and the probe could not have given it: C's `stdin`
+ * was a NULL pointer (the library exported the integers 0, 1 and 2 for the
+ * three streams), and CPython's tokenizer takes `fp == NULL` for "the input
+ * is a string" -- so the interpreter never called `fgets` at all, and parsed
+ * its own uninitialised buffer. Every stdio call made with that NULL worked,
+ * which is why a probe that makes the calls passes; only a comparison with
+ * NULL fails. Fixed 2026-09-27 (known-issues.md,
+ * `D-POSIX-STDIN-WAS-A-NULL-POINTER`). The probe stays as a check that a
+ * line typed at a pty reaches `fgets`, buffered and not.
  * ------------------------------------------------------------------------- */
 
 static size_t append(char *out, size_t o, size_t cap, const char *s)

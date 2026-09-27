@@ -239,10 +239,8 @@ fn format_to_sink(sink: Sink, fmt: *const u8, args: &mut Args) -> i32 {
 /// Output goes through the stdio buffer (line-buffered on stdout) so
 /// printf output is properly coalesced with other stdout writes.
 pub(crate) fn _printf_impl(fmt: *const u8, args: &mut Args) -> i32 {
-    // Use STDOUT_SENTINEL (1) explicitly — dangling_mut::<u8>() happens to
-    // return the same value today but is not guaranteed to.
     format_to_sink(
-        Sink::Stream(crate::stdio::STDOUT_SENTINEL as *mut u8),
+        Sink::Stream(crate::stdio::stdout_stream()),
         fmt,
         args,
     )
@@ -799,8 +797,8 @@ pub unsafe extern "C" fn vfwprintf(
 /// As [`vfwprintf`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn vwprintf(fmt: *const crate::wchar::WcharT, ap: *mut VaList) -> i32 {
-    // SAFETY: caller contract; STDOUT_SENTINEL names standard output.
-    unsafe { vfwprintf(crate::stdio::STDOUT_SENTINEL as *mut u8, fmt, ap) }
+    // SAFETY: caller contract; `stdout_stream` is standard output.
+    unsafe { vfwprintf(crate::stdio::stdout_stream(), fmt, ap) }
 }
 
 /// `vswprintf(ws, n, fmt, ap)` — `swprintf` with a `va_list`.

@@ -216,18 +216,32 @@ fn free_file(file: *mut File) {
 }
 
 // ---------------------------------------------------------------------------
-// Stream sentinel conversion
+// The standard streams, as C holds them
 // ---------------------------------------------------------------------------
+//
+// A C program's `stdin`, `stdout` and `stderr` are pointers, and this library's
+// own code passes the same ones: the addresses of the three statics above.
+// Until 2026-09-27 they were the integers 0, 1 and 2, mapped back to the
+// statics by `stream_to_file` -- which made `stdin` a NULL pointer. C tests a
+// `FILE *` against NULL as a matter of course, and CPython's tokenizer takes
+// `fp == NULL` to mean "not a file, a string": its REPL never read the
+// terminal, and parsed its own uninitialised buffer instead
+// (known-issues.md, `D-POSIX-STDIN-WAS-A-NULL-POINTER`).
 
-/// Sentinel `FILE*` pointer values for standard streams.
-///
-/// C programs read the global `stdin`/`stdout`/`stderr` symbols which
-/// contain these small integers.  `stream_to_file` maps them to the
-/// real static FILE objects.  All other `FILE*` values are real pointers
-/// into `FILE_POOL` (returned by `fopen` / `fdopen`).
-pub(crate) const STDIN_SENTINEL: usize = 0;
-pub(crate) const STDOUT_SENTINEL: usize = 1;
-pub(crate) const STDERR_SENTINEL: usize = 2;
+/// `stdin` as a `FILE *`: the address of `STDIN_FILE`.
+pub(crate) fn stdin_stream() -> *mut u8 {
+    core::ptr::addr_of_mut!(STDIN_FILE).cast()
+}
+
+/// `stdout` as a `FILE *`: the address of `STDOUT_FILE`.
+pub(crate) fn stdout_stream() -> *mut u8 {
+    core::ptr::addr_of_mut!(STDOUT_FILE).cast()
+}
+
+/// `stderr` as a `FILE *`: the address of `STDERR_FILE`.
+pub(crate) fn stderr_stream() -> *mut u8 {
+    core::ptr::addr_of_mut!(STDERR_FILE).cast()
+}
 
 // ---------------------------------------------------------------------------
 // Cross-test serialisation for the standard streams
@@ -327,23 +341,23 @@ pub fn lock_std_streams_for_test() -> StdStreamTestGuard {
     StdStreamTestGuard { _inner: inner }
 }
 
-/// Convert a C `FILE*` to our internal `File` pointer.
+/// The `File` behind a C `FILE *`, which is simply its address: `stdin`,
+/// `stdout` and `stderr` point at the three statics, and every other stream at
+/// its slot in `FILE_POOL` (`fopen`, `fdopen`).
 ///
-/// Sentinel values 0/1/2 map to the static stdin/stdout/stderr FILEs.
-/// All other values are interpreted as real `File` pointers from `fopen`.
-fn stream_to_file(stream: *mut u8) -> *mut File {
-    match stream as usize {
-        STDIN_SENTINEL => core::ptr::addr_of_mut!(STDIN_FILE),
-        STDOUT_SENTINEL => core::ptr::addr_of_mut!(STDOUT_FILE),
-        STDERR_SENTINEL => core::ptr::addr_of_mut!(STDERR_FILE),
-        // SAFETY: Non-sentinel FILE* values are real `File` pointers returned
-        // by fopen, which allocates from FILE_POOL (a static [File; MAX_FILES]).
-        // Those slots are naturally aligned to `File`'s alignment (8 bytes).
-        // The u8 sentinel encoding is only applied to values 0/1/2; all other
-        // pointer values come from addr_of_mut! on File-aligned storage.
-        #[allow(clippy::cast_ptr_alignment)]
-        _ => stream.cast::<File>(),
+/// NULL is no stream: `None`, with `errno` set to `EBADF`, and each entry point
+/// fails as it fails on a stream error -- where glibc would fault reading
+/// through the pointer.  (`fflush(NULL)`, which C defines, is `fflush`'s own.)
+fn stream_to_file(stream: *mut u8) -> Option<*mut File> {
+    if stream.is_null() {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return None;
     }
+    // Every non-null `FILE *` this library hands out is the address of a
+    // `File` -- a static, or a slot of the static `FILE_POOL` -- so it is
+    // aligned for one.
+    #[allow(clippy::cast_ptr_alignment)]
+    Some(stream.cast::<File>())
 }
 
 // ---------------------------------------------------------------------------
@@ -751,7 +765,9 @@ fn file_read(f: *mut File, dst: *mut u8, len: usize) -> i64 {
 ///
 /// Returns the number of bytes written, or < 0 on error.
 pub(crate) fn write_stream(stream: *mut u8, data: *const u8, len: usize) -> i64 {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return -1;
+    };
     file_write(file, data, len)
 }
 
@@ -765,7 +781,7 @@ pub(crate) fn write_stream(stream: *mut u8, data: *const u8, len: usize) -> i64 
 /// or `EOF` (−1) on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putchar(c: i32) -> i32 {
-    fputc(c, STDOUT_SENTINEL as *mut u8)
+    fputc(c, stdout_stream())
 }
 
 /// Write a string to stdout followed by a newline.
@@ -780,7 +796,7 @@ pub unsafe extern "C" fn puts(s: *const u8) -> i32 {
     if s.is_null() {
         return EOF;
     }
-    let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
+    let file = core::ptr::addr_of_mut!(STDOUT_FILE);
     let len = unsafe { crate::string::strlen(s) };
     if file_write(file, s, len) < 0 {
         return EOF;
@@ -806,7 +822,9 @@ pub unsafe extern "C" fn fputs(s: *const u8, stream: *mut u8) -> i32 {
     if s.is_null() {
         return EOF;
     }
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return EOF;
+    };
     let len = unsafe { crate::string::strlen(s) };
     let ret = file_write(file, s, len);
     if ret < 0 { EOF } else { 0 }
@@ -816,7 +834,9 @@ pub unsafe extern "C" fn fputs(s: *const u8, stream: *mut u8) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fputc(c: i32, stream: *mut u8) -> i32 {
     let byte = c as u8;
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return EOF;
+    };
     let ret = file_write(file, &raw const byte, 1);
     if ret < 0 { EOF } else { i32::from(byte) }
 }
@@ -838,7 +858,9 @@ pub unsafe extern "C" fn fwrite(
     if ptr.is_null() || size == 0 || nmemb == 0 {
         return 0;
     }
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return 0;
+    };
     let total = size.saturating_mul(nmemb);
     let ret = file_write(file, ptr, total);
     if ret < 0 {
@@ -862,7 +884,9 @@ pub unsafe extern "C" fn fwrite(
 /// or `EOF` (−1) on error or end of file.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fgetc(stream: *mut u8) -> i32 {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return EOF;
+    };
 
     // Flush stdout before reading from stdin so interactive prompts
     // appear before the program blocks on input.
@@ -879,7 +903,7 @@ pub extern "C" fn fgetc(stream: *mut u8) -> i32 {
 /// Read a character from stdin.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getchar() -> i32 {
-    fgetc(STDIN_SENTINEL as *mut u8)
+    fgetc(stdin_stream())
 }
 
 /// Read a character from a stream (function form of `getc` macro).
@@ -900,7 +924,9 @@ pub unsafe extern "C" fn fread(ptr: *mut u8, size: usize, nmemb: usize, stream: 
     if ptr.is_null() || size == 0 || nmemb == 0 {
         return 0;
     }
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return 0;
+    };
     let total = size.saturating_mul(nmemb);
     let ret = file_read(file, ptr, total);
     if ret <= 0 {
@@ -936,7 +962,9 @@ pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
         return buf;
     }
 
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return core::ptr::null_mut();
+    };
 
     // Flush stdout if reading from stdin.
     // SAFETY: Single-threaded; STDOUT_FILE access is exclusive.
@@ -1094,11 +1122,11 @@ pub extern "C" fn fdopen(fd: i32, _mode: *const u8) -> *mut u8 {
         return core::ptr::null_mut();
     }
 
-    // Standard streams use their sentinel values.
+    // The standard descriptors have their streams already.
     match fd {
-        STDIN_FD => return STDIN_SENTINEL as *mut u8,
-        STDOUT_FD => return STDOUT_SENTINEL as *mut u8,
-        STDERR_FD => return STDERR_SENTINEL as *mut u8,
+        STDIN_FD => return stdin_stream(),
+        STDOUT_FD => return stdout_stream(),
+        STDERR_FD => return stderr_stream(),
         _ => {}
     }
 
@@ -1125,7 +1153,9 @@ pub unsafe extern "C" fn freopen(path: *const u8, mode: *const u8, stream: *mut 
         return core::ptr::null_mut();
     }
 
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return core::ptr::null_mut();
+    };
     // SAFETY: file is valid; exclusive access.
     let f = unsafe { &mut *file };
 
@@ -1200,7 +1230,9 @@ pub unsafe extern "C" fn freopen(path: *const u8, mode: *const u8, stream: *mut 
 /// Returns 0 on success, `EOF` on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fclose(stream: *mut u8) -> i32 {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return EOF;
+    };
     // SAFETY: file is valid; exclusive access.
     let f = unsafe { &mut *file };
 
@@ -1232,12 +1264,12 @@ pub extern "C" fn fclose(stream: *mut u8) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fflush(stream: *mut u8) -> i32 {
     // fflush(NULL) flushes all open output streams.
-    // Note: null maps to stdin via stream_to_file, so we check
-    // the raw pointer value before converting.
-    if (stream as usize) == 0 {
+    if stream.is_null() {
         return flush_all();
     }
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return EOF;
+    };
     file_flush(file)
 }
 
@@ -1267,12 +1299,14 @@ mod gnu_fpurge {
     ///   from the fd;
     /// - any `ungetc` pushback is dropped as well.
     ///
-    /// `NULL` maps to stdin via [`stream_to_file`], the same convention every
-    /// other entry point here uses.  Returns nothing and cannot fail — there is
-    /// no syscall to fail, which is the whole point of the function.
+    /// A NULL stream is no stream ([`stream_to_file`]): nothing to discard.
+    /// Returns nothing and cannot fail — there is no syscall to fail, which is
+    /// the whole point of the function.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __fpurge(stream: *mut u8) {
-        let file = stream_to_file(stream);
+        let Some(file) = stream_to_file(stream) else {
+            return;
+        };
         // SAFETY: stream_to_file returns a pointer to one of the static stream
         // Files or to a live heap File from fopen; either way it is valid and
         // uniquely borrowed for the duration of this call, exactly as in fseek.
@@ -1302,7 +1336,9 @@ pub const SEEK_END: i32 = 2;
 /// Returns 0 on success, −1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fseek(stream: *mut u8, offset: i64, whence: i32) -> i32 {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return -1;
+    };
     let f = unsafe { &mut *file };
 
     // Flush pending writes.
@@ -1345,7 +1381,9 @@ pub extern "C" fn fseek(stream: *mut u8, offset: i64, whence: i32) -> i32 {
 /// Returns the current offset, or −1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ftell(stream: *mut u8) -> i64 {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return -1;
+    };
     let f = unsafe { &mut *file };
 
     let raw_pos = crate::file::lseek(f.fd, 0, SEEK_CUR);
@@ -1377,7 +1415,9 @@ pub extern "C" fn ftell(stream: *mut u8) -> i64 {
 pub extern "C" fn rewind(stream: *mut u8) {
     let _ = fseek(stream, 0, SEEK_SET);
     // Also clear error indicator (POSIX requirement beyond fseek).
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return;
+    };
     unsafe {
         (*file).flags &= !FLAG_ERR;
     }
@@ -1499,7 +1539,9 @@ pub extern "C" fn fsetpos64(stream: *mut u8, pos: *const FposT) -> i32 {
 /// Get the file descriptor for a stream.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fileno(stream: *mut u8) -> i32 {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return -1;
+    };
     unsafe { (*file).fd }
 }
 
@@ -1508,7 +1550,9 @@ pub extern "C" fn fileno(stream: *mut u8) -> i32 {
 /// Returns non-zero if the EOF indicator is set, 0 otherwise.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn feof(stream: *mut u8) -> i32 {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return 0;
+    };
     i32::from(unsafe { (*file).flags } & FLAG_EOF != 0)
 }
 
@@ -1517,14 +1561,18 @@ pub extern "C" fn feof(stream: *mut u8) -> i32 {
 /// Returns non-zero if the error indicator is set, 0 otherwise.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ferror(stream: *mut u8) -> i32 {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return 1;
+    };
     i32::from(unsafe { (*file).flags } & FLAG_ERR != 0)
 }
 
 /// Clear error and EOF indicators for a stream.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clearerr(stream: *mut u8) {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return;
+    };
     unsafe {
         (*file).flags &= !(FLAG_EOF | FLAG_ERR);
     }
@@ -1543,7 +1591,9 @@ pub extern "C" fn ungetc(ch: i32, stream: *mut u8) -> i32 {
     if ch == EOF {
         return EOF;
     }
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return EOF;
+    };
     let f = unsafe { &mut *file };
     f.ungetc_byte = (ch & 0xFF) as i16;
     f.flags &= !FLAG_EOF; // Clear EOF on ungetc (POSIX requirement).
@@ -1563,7 +1613,9 @@ pub extern "C" fn ungetc(ch: i32, stream: *mut u8) -> i32 {
 /// Returns 0 on success, non-zero on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setvbuf(stream: *mut u8, _buf: *mut u8, mode: i32, _size: usize) -> i32 {
-    let file = stream_to_file(stream);
+    let Some(file) = stream_to_file(stream) else {
+        return -1;
+    };
     let f = unsafe { &mut *file };
 
     // Validate mode.
@@ -2124,7 +2176,7 @@ pub extern "C" fn getc_unlocked(stream: *mut u8) -> i32 {
 /// Reads from stdin without locking.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getchar_unlocked() -> i32 {
-    fgetc(STDIN_SENTINEL as *mut u8)
+    fgetc(stdin_stream())
 }
 
 /// Non-locking version of `putc`.
@@ -2140,7 +2192,7 @@ pub extern "C" fn putc_unlocked(c: i32, stream: *mut u8) -> i32 {
 /// Writes to stdout without locking.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putchar_unlocked(c: i32) -> i32 {
-    fputc(c, STDOUT_SENTINEL as *mut u8)
+    fputc(c, stdout_stream())
 }
 
 // ---------------------------------------------------------------------------
@@ -2272,7 +2324,9 @@ mod gnu_fpending {
     /// report buffered *input* as unflushed *output*.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __fpending(stream: *mut u8) -> usize {
-        let file = stream_to_file(stream);
+        let Some(file) = stream_to_file(stream) else {
+            return 0;
+        };
         // SAFETY: stream_to_file yields a valid, uniquely-borrowed File, as in
         // every other entry point here.
         let f = unsafe { &*file };
@@ -2297,7 +2351,9 @@ mod gnu_freadahead {
     /// that must be re-read before the buffer is consulted.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __freadahead(stream: *mut u8) -> usize {
-        let file = stream_to_file(stream);
+        let Some(file) = stream_to_file(stream) else {
+            return 0;
+        };
         // SAFETY: as above.
         let f = unsafe { &*file };
         let buffered = if f.buf_dir == BUF_DIR_READ {
@@ -2336,7 +2392,9 @@ mod gnu_freadptr {
         if sizep.is_null() {
             return core::ptr::null();
         }
-        let file = stream_to_file(stream);
+        let Some(file) = stream_to_file(stream) else {
+            return core::ptr::null();
+        };
         // SAFETY: as above.
         let f = unsafe { &*file };
         if f.buf_dir != BUF_DIR_READ || f.ungetc_byte >= 0 {
@@ -2366,7 +2424,9 @@ mod gnu_freadptrinc {
     /// from an inverted pair.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __freadptrinc(stream: *mut u8, increment: usize) {
-        let file = stream_to_file(stream);
+        let Some(file) = stream_to_file(stream) else {
+            return;
+        };
         // SAFETY: stream_to_file yields a valid, uniquely-borrowed File.
         let f = unsafe { &mut *file };
         if f.buf_dir != BUF_DIR_READ {
@@ -2390,7 +2450,9 @@ mod gnu_fseterr {
     /// later `ferror` reports it.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __fseterr(stream: *mut u8) {
-        let file = stream_to_file(stream);
+        let Some(file) = stream_to_file(stream) else {
+            return;
+        };
         // SAFETY: as above.
         let f = unsafe { &mut *file };
         f.flags |= FLAG_ERR;
@@ -2430,8 +2492,8 @@ mod gnu_getdelim {
             crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
-        // Note: we don't check stream.is_null() because our stdin sentinel
-        // IS null (STDIN_SENTINEL = 0).  stream_to_file() maps 0 → stdin.
+        // A NULL stream is caught by the first read: `fgetc` fails with
+        // `EBADF` ([`stream_to_file`]).
 
         let mut buf = unsafe { *lineptr };
         let mut cap = unsafe { *n };
@@ -2529,37 +2591,44 @@ pub use gnu_getline::getline;
 // FILE* global symbols
 // ---------------------------------------------------------------------------
 
-/// Global `FILE*` for standard output.
-///
-/// C programs access this as `extern FILE *stdout;`.  The value 1
-/// is a sentinel that `stream_to_file` maps to `STDOUT_FILE`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static stdout: usize = STDOUT_SENTINEL;
+/// A `FILE *` held in one of the variables the library exports: C declares
+/// them `extern FILE *const stdin;` and so on, and reads the pointer.
+#[repr(transparent)]
+pub struct StdStream(*mut File);
 
-/// Global `FILE*` for standard error.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static stderr: usize = STDERR_SENTINEL;
+// SAFETY: the pointer is fixed at link time to one of this module's statics
+// and never written; what threads share is an address, and the `File` behind
+// it is reached only through the stdio entry points, as every stream is.
+unsafe impl Sync for StdStream {}
 
-/// Global `FILE*` for standard input.
+/// `stdout`: `extern FILE *const stdout;`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static stdin: usize = STDIN_SENTINEL;
+pub static stdout: StdStream = StdStream(&raw mut STDOUT_FILE);
+
+/// `stderr`: `extern FILE *const stderr;`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static stderr: StdStream = StdStream(&raw mut STDERR_FILE);
+
+/// `stdin`: `extern FILE *const stdin;`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static stdin: StdStream = StdStream(&raw mut STDIN_FILE);
 
 // glibc internal FILE* aliases — some programs reference these instead
 // of the standard names.
 /// glibc alias for `stdin`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_upper_case_globals)]
-pub static _IO_stdin_: usize = STDIN_SENTINEL;
+pub static _IO_stdin_: StdStream = StdStream(&raw mut STDIN_FILE);
 
 /// glibc alias for `stdout`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_upper_case_globals)]
-pub static _IO_stdout_: usize = STDOUT_SENTINEL;
+pub static _IO_stdout_: StdStream = StdStream(&raw mut STDOUT_FILE);
 
 /// glibc alias for `stderr`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_upper_case_globals)]
-pub static _IO_stderr_: usize = STDERR_SENTINEL;
+pub static _IO_stderr_: StdStream = StdStream(&raw mut STDERR_FILE);
 
 // ---------------------------------------------------------------------------
 // LP64 aliases — fopen64
@@ -3152,16 +3221,65 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_sentinel_values() {
-        assert_eq!(STDIN_SENTINEL, 0);
-        assert_eq!(STDOUT_SENTINEL, 1);
-        assert_eq!(STDERR_SENTINEL, 2);
+    fn the_standard_streams_are_three_real_pointers() {
+        // Not NULL above all: C tests a FILE * against NULL, and CPython's
+        // tokenizer read `stdin == NULL` as "a string, not a file" -- its REPL
+        // parsed an uninitialised buffer and never read the terminal.
+        let (i, o, e) = (stdin_stream(), stdout_stream(), stderr_stream());
+        assert!(!i.is_null() && !o.is_null() && !e.is_null());
+        assert!(i != o && o != e && i != e);
+        assert_eq!(i, core::ptr::addr_of_mut!(STDIN_FILE).cast::<u8>());
+        assert_eq!(o, core::ptr::addr_of_mut!(STDOUT_FILE).cast::<u8>());
+        assert_eq!(e, core::ptr::addr_of_mut!(STDERR_FILE).cast::<u8>());
+    }
+
+    /// NULL is no stream: each entry point fails as on a stream error, with
+    /// `EBADF`, where it used to read NULL as stdin (and glibc would fault).
+    #[test]
+    fn a_null_stream_is_ebadf_everywhere() {
+        let _g = lock_std_streams_for_test();
+        let null = core::ptr::null_mut::<u8>();
+        let mut buf = [0u8; 8];
+        let check = |what: &str| {
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF, "{what}");
+            crate::errno::set_errno(0);
+        };
+        crate::errno::set_errno(0);
+        assert!(fgets(buf.as_mut_ptr(), 8, null).is_null());
+        check("fgets");
+        assert_eq!(fgetc(null), EOF);
+        check("fgetc");
+        assert_eq!(fputc(i32::from(b'x'), null), EOF);
+        check("fputc");
+        assert_eq!(unsafe { fputs(b"x\0".as_ptr(), null) }, EOF);
+        check("fputs");
+        assert_eq!(unsafe { fread(buf.as_mut_ptr(), 1, 1, null) }, 0);
+        check("fread");
+        assert_eq!(unsafe { fwrite(buf.as_ptr(), 1, 1, null) }, 0);
+        check("fwrite");
+        assert_eq!(fclose(null), EOF);
+        check("fclose");
+        assert_eq!(fseek(null, 0, 0), -1);
+        check("fseek");
+        assert_eq!(ftell(null), -1);
+        check("ftell");
+        assert_eq!(fileno(null), -1);
+        check("fileno");
+        assert_eq!(ungetc(i32::from(b'x'), null), EOF);
+        check("ungetc");
+        assert_ne!(setvbuf(null, core::ptr::null_mut(), 2, 0), 0);
+        check("setvbuf");
+        // An error, so that `while (!feof(f) && !ferror(f))` ends.
+        assert_eq!(feof(null), 0);
+        check("feof");
+        assert_ne!(ferror(null), 0);
+        check("ferror");
     }
 
     #[test]
     fn test_stream_to_file_sentinel_stdin() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let file = stream_to_file(stdin_stream()).unwrap();
         assert!(!file.is_null());
         let f = unsafe { &*file };
         assert_eq!(f.fd, STDIN_FD);
@@ -3170,7 +3288,7 @@ mod tests {
     #[test]
     fn test_stream_to_file_sentinel_stdout() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
+        let file = stream_to_file(stdout_stream()).unwrap();
         assert!(!file.is_null());
         let f = unsafe { &*file };
         assert_eq!(f.fd, STDOUT_FD);
@@ -3179,7 +3297,7 @@ mod tests {
     #[test]
     fn test_stream_to_file_sentinel_stderr() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         assert!(!file.is_null());
         let f = unsafe { &*file };
         assert_eq!(f.fd, STDERR_FD);
@@ -3387,32 +3505,32 @@ mod tests {
 
     #[test]
     fn test_stdout_symbol() {
-        assert_eq!(stdout, STDOUT_SENTINEL);
+        assert_eq!(stdout.0.cast::<u8>(), stdout_stream());
     }
 
     #[test]
     fn test_stderr_symbol() {
-        assert_eq!(stderr, STDERR_SENTINEL);
+        assert_eq!(stderr.0.cast::<u8>(), stderr_stream());
     }
 
     #[test]
     fn test_stdin_symbol() {
-        assert_eq!(stdin, STDIN_SENTINEL);
+        assert_eq!(stdin.0.cast::<u8>(), stdin_stream());
     }
 
     #[test]
     fn test_glibc_stdin_alias() {
-        assert_eq!(_IO_stdin_, STDIN_SENTINEL);
+        assert_eq!(_IO_stdin_.0.cast::<u8>(), stdin_stream());
     }
 
     #[test]
     fn test_glibc_stdout_alias() {
-        assert_eq!(_IO_stdout_, STDOUT_SENTINEL);
+        assert_eq!(_IO_stdout_.0.cast::<u8>(), stdout_stream());
     }
 
     #[test]
     fn test_glibc_stderr_alias() {
-        assert_eq!(_IO_stderr_, STDERR_SENTINEL);
+        assert_eq!(_IO_stderr_.0.cast::<u8>(), stderr_stream());
     }
 
     // -----------------------------------------------------------------------
@@ -3421,17 +3539,17 @@ mod tests {
 
     #[test]
     fn test_fileno_stdin() {
-        assert_eq!(fileno(STDIN_SENTINEL as *mut u8), STDIN_FD);
+        assert_eq!(fileno(stdin_stream()), STDIN_FD);
     }
 
     #[test]
     fn test_fileno_stdout() {
-        assert_eq!(fileno(STDOUT_SENTINEL as *mut u8), STDOUT_FD);
+        assert_eq!(fileno(stdout_stream()), STDOUT_FD);
     }
 
     #[test]
     fn test_fileno_stderr() {
-        assert_eq!(fileno(STDERR_SENTINEL as *mut u8), STDERR_FD);
+        assert_eq!(fileno(stderr_stream()), STDERR_FD);
     }
 
     // -----------------------------------------------------------------------
@@ -3443,32 +3561,32 @@ mod tests {
         let _g = lock_std_streams_for_test();
         // stdout starts with no EOF flag.
         // Reset flag state first to avoid interference from prior tests.
-        let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
+        let file = stream_to_file(stdout_stream()).unwrap();
         unsafe {
             (*file).flags &= !FLAG_EOF;
         }
-        assert_eq!(feof(STDOUT_SENTINEL as *mut u8), 0);
+        assert_eq!(feof(stdout_stream()), 0);
     }
 
     #[test]
     fn test_ferror_initially_zero() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
+        let file = stream_to_file(stdout_stream()).unwrap();
         unsafe {
             (*file).flags &= !FLAG_ERR;
         }
-        assert_eq!(ferror(STDOUT_SENTINEL as *mut u8), 0);
+        assert_eq!(ferror(stdout_stream()), 0);
     }
 
     #[test]
     fn test_feof_after_setting_flag() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_flags = unsafe { (*file).flags };
         unsafe {
             (*file).flags |= FLAG_EOF;
         }
-        assert_ne!(feof(STDERR_SENTINEL as *mut u8), 0);
+        assert_ne!(feof(stderr_stream()), 0);
         // Restore.
         unsafe {
             (*file).flags = old_flags;
@@ -3478,12 +3596,12 @@ mod tests {
     #[test]
     fn test_ferror_after_setting_flag() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_flags = unsafe { (*file).flags };
         unsafe {
             (*file).flags |= FLAG_ERR;
         }
-        assert_ne!(ferror(STDERR_SENTINEL as *mut u8), 0);
+        assert_ne!(ferror(stderr_stream()), 0);
         // Restore.
         unsafe {
             (*file).flags = old_flags;
@@ -3493,14 +3611,14 @@ mod tests {
     #[test]
     fn test_clearerr_clears_both_flags() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_flags = unsafe { (*file).flags };
         unsafe {
             (*file).flags |= FLAG_EOF | FLAG_ERR;
         }
-        clearerr(STDERR_SENTINEL as *mut u8);
-        assert_eq!(feof(STDERR_SENTINEL as *mut u8), 0);
-        assert_eq!(ferror(STDERR_SENTINEL as *mut u8), 0);
+        clearerr(stderr_stream());
+        assert_eq!(feof(stderr_stream()), 0);
+        assert_eq!(ferror(stderr_stream()), 0);
         // Restore.
         unsafe {
             (*file).flags = old_flags;
@@ -3514,11 +3632,11 @@ mod tests {
     #[test]
     fn test_ungetc_stores_byte() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let file = stream_to_file(stdin_stream()).unwrap();
         let old_byte = unsafe { (*file).ungetc_byte };
         let old_flags = unsafe { (*file).flags };
 
-        let ret = ungetc(b'X' as i32, STDIN_SENTINEL as *mut u8);
+        let ret = ungetc(b'X' as i32, stdin_stream());
         assert_eq!(ret, b'X' as i32);
         assert_eq!(unsafe { (*file).ungetc_byte }, b'X' as i16);
 
@@ -3531,14 +3649,14 @@ mod tests {
 
     #[test]
     fn test_ungetc_eof_returns_eof() {
-        let ret = ungetc(EOF, STDIN_SENTINEL as *mut u8);
+        let ret = ungetc(EOF, stdin_stream());
         assert_eq!(ret, EOF, "ungetc(EOF) must return EOF");
     }
 
     #[test]
     fn test_ungetc_clears_eof_flag() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let file = stream_to_file(stdin_stream()).unwrap();
         let old_flags = unsafe { (*file).flags };
         let old_byte = unsafe { (*file).ungetc_byte };
 
@@ -3547,8 +3665,8 @@ mod tests {
             (*file).flags |= FLAG_EOF;
         }
         // Push back a byte — should clear EOF.
-        ungetc(b'A' as i32, STDIN_SENTINEL as *mut u8);
-        assert_eq!(feof(STDIN_SENTINEL as *mut u8), 0, "ungetc must clear EOF");
+        ungetc(b'A' as i32, stdin_stream());
+        assert_eq!(feof(stdin_stream()), 0, "ungetc must clear EOF");
 
         // Restore.
         unsafe {
@@ -3560,11 +3678,11 @@ mod tests {
     #[test]
     fn test_ungetc_masks_to_byte() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let file = stream_to_file(stdin_stream()).unwrap();
         let old_byte = unsafe { (*file).ungetc_byte };
 
         // 0x1FF & 0xFF = 0xFF (should store only the low byte).
-        let ret = ungetc(0x1FF, STDIN_SENTINEL as *mut u8);
+        let ret = ungetc(0x1FF, stdin_stream());
         assert_eq!(ret, 0xFF);
         assert_eq!(unsafe { (*file).ungetc_byte }, 0xFF);
 
@@ -3586,21 +3704,21 @@ mod tests {
     }
 
     #[test]
-    fn test_fdopen_stdin_returns_sentinel() {
+    fn test_fdopen_stdin_returns_the_standard_stream() {
         let ret = fdopen(STDIN_FD, b"r\0".as_ptr());
-        assert_eq!(ret as usize, STDIN_SENTINEL);
+        assert_eq!(ret, stdin_stream());
     }
 
     #[test]
-    fn test_fdopen_stdout_returns_sentinel() {
+    fn test_fdopen_stdout_returns_the_standard_stream() {
         let ret = fdopen(STDOUT_FD, b"w\0".as_ptr());
-        assert_eq!(ret as usize, STDOUT_SENTINEL);
+        assert_eq!(ret, stdout_stream());
     }
 
     #[test]
-    fn test_fdopen_stderr_returns_sentinel() {
+    fn test_fdopen_stderr_returns_the_standard_stream() {
         let ret = fdopen(STDERR_FD, b"w\0".as_ptr());
-        assert_eq!(ret as usize, STDERR_SENTINEL);
+        assert_eq!(ret, stderr_stream());
     }
 
     // -----------------------------------------------------------------------
@@ -3627,14 +3745,14 @@ mod tests {
 
     #[test]
     fn test_fgetpos_null_pos() {
-        let ret = fgetpos(STDOUT_SENTINEL as *mut u8, core::ptr::null_mut());
+        let ret = fgetpos(stdout_stream(), core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_fsetpos_null_pos() {
-        let ret = fsetpos(STDOUT_SENTINEL as *mut u8, core::ptr::null());
+        let ret = fsetpos(stdout_stream(), core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -3645,7 +3763,7 @@ mod tests {
 
     #[test]
     fn test_setvbuf_invalid_mode() {
-        let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 99, 0);
+        let ret = setvbuf(stderr_stream(), core::ptr::null_mut(), 99, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -3655,11 +3773,11 @@ mod tests {
         let _g = lock_std_streams_for_test();
         // Each valid mode (0=_IOFBF, 1=_IOLBF, 2=_IONBF) should succeed.
         // Test on stderr (unbuffered) since we can restore its mode.
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_mode = unsafe { (*file).buf_mode };
 
         for mode in 0..3 {
-            let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), mode, 0);
+            let ret = setvbuf(stderr_stream(), core::ptr::null_mut(), mode, 0);
             assert_eq!(ret, 0, "setvbuf mode {mode} should succeed");
         }
 
@@ -3716,7 +3834,7 @@ mod tests {
                 core::ptr::null_mut(),
                 &raw mut n,
                 b'\n' as i32,
-                STDIN_SENTINEL as *mut u8,
+                stdin_stream(),
             )
         };
         assert_eq!(ret, -1);
@@ -3731,7 +3849,7 @@ mod tests {
                 &raw mut lineptr,
                 core::ptr::null_mut(),
                 b'\n' as i32,
-                STDIN_SENTINEL as *mut u8,
+                stdin_stream(),
             )
         };
         assert_eq!(ret, -1);
@@ -3754,7 +3872,7 @@ mod tests {
 
     #[test]
     fn test_fputs_null_string() {
-        let ret = unsafe { fputs(core::ptr::null(), STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputs(core::ptr::null(), stdout_stream()) };
         assert_eq!(ret, EOF);
     }
 
@@ -3764,21 +3882,21 @@ mod tests {
 
     #[test]
     fn test_fwrite_null_ptr() {
-        let ret = unsafe { fwrite(core::ptr::null(), 1, 10, STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fwrite(core::ptr::null(), 1, 10, stdout_stream()) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fwrite_zero_size() {
         let data = [1u8; 10];
-        let ret = unsafe { fwrite(data.as_ptr(), 0, 10, STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fwrite(data.as_ptr(), 0, 10, stdout_stream()) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fwrite_zero_nmemb() {
         let data = [1u8; 10];
-        let ret = unsafe { fwrite(data.as_ptr(), 1, 0, STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fwrite(data.as_ptr(), 1, 0, stdout_stream()) };
         assert_eq!(ret, 0);
     }
 
@@ -3788,21 +3906,21 @@ mod tests {
 
     #[test]
     fn test_fread_null_ptr() {
-        let ret = unsafe { fread(core::ptr::null_mut(), 1, 10, STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { fread(core::ptr::null_mut(), 1, 10, stdin_stream()) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fread_zero_size() {
         let mut buf = [0u8; 10];
-        let ret = unsafe { fread(buf.as_mut_ptr(), 0, 10, STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { fread(buf.as_mut_ptr(), 0, 10, stdin_stream()) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fread_zero_nmemb() {
         let mut buf = [0u8; 10];
-        let ret = unsafe { fread(buf.as_mut_ptr(), 1, 0, STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { fread(buf.as_mut_ptr(), 1, 0, stdin_stream()) };
         assert_eq!(ret, 0);
     }
 
@@ -3813,7 +3931,7 @@ mod tests {
     #[test]
     fn test_fgets_null_buf() {
         let _g = lock_std_streams_for_test();
-        let ret = fgets(core::ptr::null_mut(), 100, STDIN_SENTINEL as *mut u8);
+        let ret = fgets(core::ptr::null_mut(), 100, stdin_stream());
         assert!(ret.is_null());
     }
 
@@ -3821,7 +3939,7 @@ mod tests {
     fn test_fgets_zero_size() {
         let _g = lock_std_streams_for_test();
         let mut buf = [0u8; 10];
-        let ret = fgets(buf.as_mut_ptr(), 0, STDIN_SENTINEL as *mut u8);
+        let ret = fgets(buf.as_mut_ptr(), 0, stdin_stream());
         assert!(ret.is_null());
     }
 
@@ -3829,7 +3947,7 @@ mod tests {
     fn test_fgets_negative_size() {
         let _g = lock_std_streams_for_test();
         let mut buf = [0u8; 10];
-        let ret = fgets(buf.as_mut_ptr(), -1, STDIN_SENTINEL as *mut u8);
+        let ret = fgets(buf.as_mut_ptr(), -1, stdin_stream());
         assert!(ret.is_null());
     }
 
@@ -3838,7 +3956,7 @@ mod tests {
         let _g = lock_std_streams_for_test();
         // POSIX: size=1 writes NUL and returns buf (empty string, no read).
         let mut buf = [0xFFu8; 10];
-        let ret = fgets(buf.as_mut_ptr(), 1, STDIN_SENTINEL as *mut u8);
+        let ret = fgets(buf.as_mut_ptr(), 1, stdin_stream());
         assert_eq!(ret, buf.as_mut_ptr());
         assert_eq!(buf[0], 0, "size=1 must write NUL terminator");
     }
@@ -3850,7 +3968,7 @@ mod tests {
     #[test]
     fn test_fgets_chk_negative_count() {
         let mut buf = [0u8; 10];
-        let ret = __fgets_chk(buf.as_mut_ptr(), 10, -1, STDIN_SENTINEL as *mut u8);
+        let ret = __fgets_chk(buf.as_mut_ptr(), 10, -1, stdin_stream());
         assert!(ret.is_null());
     }
 
@@ -3859,7 +3977,7 @@ mod tests {
         // size (object) = 1 clamps the effective count to 1, so fgets writes
         // only the NUL terminator and returns buf — never touching the read.
         let mut buf = [0xFFu8; 10];
-        let ret = __fgets_chk(buf.as_mut_ptr(), 1, 100, STDIN_SENTINEL as *mut u8);
+        let ret = __fgets_chk(buf.as_mut_ptr(), 1, 100, stdin_stream());
         assert_eq!(ret, buf.as_mut_ptr());
         assert_eq!(buf[0], 0, "clamp to object size 1 must write only NUL");
     }
@@ -3867,7 +3985,7 @@ mod tests {
     #[test]
     fn test_fread_chk_zero_size() {
         let mut buf = [0u8; 10];
-        let ret = unsafe { __fread_chk(buf.as_mut_ptr(), 10, 0, 10, STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { __fread_chk(buf.as_mut_ptr(), 10, 0, 10, stdin_stream()) };
         assert_eq!(ret, 0);
     }
 
@@ -3876,14 +3994,14 @@ mod tests {
         // ptrlen too small for size*nmemb: nmemb clamps to ptrlen/size = 0,
         // so nothing is read regardless of the requested 10 elements.
         let mut buf = [0u8; 2];
-        let ret = unsafe { __fread_chk(buf.as_mut_ptr(), 2, 4, 10, STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { __fread_chk(buf.as_mut_ptr(), 2, 4, 10, stdin_stream()) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fread_chk_null_ptr() {
         let ret =
-            unsafe { __fread_chk(core::ptr::null_mut(), 10, 1, 10, STDIN_SENTINEL as *mut u8) };
+            unsafe { __fread_chk(core::ptr::null_mut(), 10, 1, 10, stdin_stream()) };
         assert_eq!(ret, 0);
     }
 
@@ -3894,17 +4012,17 @@ mod tests {
     #[test]
     fn test_flockfile_is_noop() {
         // Should not crash — our locking is a no-op.
-        flockfile(STDOUT_SENTINEL as *mut core::ffi::c_void);
+        flockfile(stdout_stream().cast::<core::ffi::c_void>());
     }
 
     #[test]
     fn test_ftrylockfile_always_succeeds() {
-        assert_eq!(ftrylockfile(STDOUT_SENTINEL as *mut core::ffi::c_void), 0);
+        assert_eq!(ftrylockfile(stdout_stream().cast::<core::ffi::c_void>()), 0);
     }
 
     #[test]
     fn test_funlockfile_is_noop() {
-        funlockfile(STDOUT_SENTINEL as *mut core::ffi::c_void);
+        funlockfile(stdout_stream().cast::<core::ffi::c_void>());
     }
 
     // -----------------------------------------------------------------------
@@ -4015,9 +4133,9 @@ mod tests {
     #[test]
     fn test_setbuf_null_makes_unbuffered() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_mode = unsafe { (*file).buf_mode };
-        setbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut());
+        setbuf(stderr_stream(), core::ptr::null_mut());
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_NONE);
         unsafe {
             (*file).buf_mode = old_mode;
@@ -4027,10 +4145,10 @@ mod tests {
     #[test]
     fn test_setbuf_nonnull_makes_fully_buffered() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_mode = unsafe { (*file).buf_mode };
         let mut dummy = [0u8; 1];
-        setbuf(STDERR_SENTINEL as *mut u8, dummy.as_mut_ptr());
+        setbuf(stderr_stream(), dummy.as_mut_ptr());
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_FULL);
         unsafe {
             (*file).buf_mode = old_mode;
@@ -4044,9 +4162,9 @@ mod tests {
     #[test]
     fn test_setlinebuf_makes_line_buffered() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_mode = unsafe { (*file).buf_mode };
-        setlinebuf(STDERR_SENTINEL as *mut u8);
+        setlinebuf(stderr_stream());
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_LINE);
         unsafe {
             (*file).buf_mode = old_mode;
@@ -4060,9 +4178,9 @@ mod tests {
     #[test]
     fn test_setbuffer_null_makes_unbuffered() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_mode = unsafe { (*file).buf_mode };
-        setbuffer(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 0);
+        setbuffer(stderr_stream(), core::ptr::null_mut(), 0);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_NONE);
         unsafe {
             (*file).buf_mode = old_mode;
@@ -4072,10 +4190,10 @@ mod tests {
     #[test]
     fn test_setbuffer_nonnull_makes_fully_buffered() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_mode = unsafe { (*file).buf_mode };
         let mut dummy = [0u8; 1];
-        setbuffer(STDERR_SENTINEL as *mut u8, dummy.as_mut_ptr(), 4096);
+        setbuffer(stderr_stream(), dummy.as_mut_ptr(), 4096);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_FULL);
         unsafe {
             (*file).buf_mode = old_mode;
@@ -4089,15 +4207,15 @@ mod tests {
     #[test]
     fn test_setvbuf_full_to_line() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_mode = unsafe { (*file).buf_mode };
 
         // Set to fully buffered first.
-        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 0, 0);
+        setvbuf(stderr_stream(), core::ptr::null_mut(), 0, 0);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_FULL);
 
         // Switch to line-buffered.
-        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 1, 0);
+        setvbuf(stderr_stream(), core::ptr::null_mut(), 1, 0);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_LINE);
 
         unsafe {
@@ -4108,13 +4226,13 @@ mod tests {
     #[test]
     fn test_setvbuf_line_to_none() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_mode = unsafe { (*file).buf_mode };
 
-        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 1, 0);
+        setvbuf(stderr_stream(), core::ptr::null_mut(), 1, 0);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_LINE);
 
-        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 2, 0);
+        setvbuf(stderr_stream(), core::ptr::null_mut(), 2, 0);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_NONE);
 
         unsafe {
@@ -4125,7 +4243,7 @@ mod tests {
     #[test]
     fn test_setvbuf_clears_read_buffer_on_mode_change() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_dir = unsafe { (*file).buf_dir };
         let old_pos = unsafe { (*file).buf_pos };
         let old_len = unsafe { (*file).buf_len };
@@ -4138,7 +4256,7 @@ mod tests {
             (*file).buf_len = 50;
         }
 
-        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 2, 0);
+        setvbuf(stderr_stream(), core::ptr::null_mut(), 2, 0);
 
         // Buffer state should be cleared.
         assert_eq!(unsafe { (*file).buf_pos }, 0);
@@ -4157,19 +4275,19 @@ mod tests {
     #[test]
     fn test_setvbuf_returns_zero_on_success() {
         for mode in [0, 1, 2] {
-            let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), mode, 0);
+            let ret = setvbuf(stderr_stream(), core::ptr::null_mut(), mode, 0);
             assert_eq!(ret, 0, "setvbuf(mode={mode}) should return 0");
         }
         // Restore stderr to unbuffered.
-        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 2, 0);
+        setvbuf(stderr_stream(), core::ptr::null_mut(), 2, 0);
     }
 
     #[test]
     fn test_setvbuf_returns_neg1_on_invalid() {
-        let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 3, 0);
+        let ret = setvbuf(stderr_stream(), core::ptr::null_mut(), 3, 0);
         assert_eq!(ret, -1);
 
-        let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), -1, 0);
+        let ret = setvbuf(stderr_stream(), core::ptr::null_mut(), -1, 0);
         assert_eq!(ret, -1);
     }
 
@@ -4184,7 +4302,7 @@ mod tests {
         // is callable without crash for a valid sentinel.
         // putc writes to the stream buffer; in test mode the underlying
         // write syscall returns 0 (writes go to a non-existent fd).
-        let ret = putc(b'X' as i32, STDERR_SENTINEL as *mut u8);
+        let ret = putc(b'X' as i32, stderr_stream());
         // stderr is unbuffered so it calls write immediately.
         // In test mode write returns 0 (no actual kernel).
         // fputc returns EOF on write error or the byte value on success.
@@ -4213,7 +4331,7 @@ mod tests {
             freopen(
                 b"/tmp/x\0".as_ptr(),
                 core::ptr::null(),
-                STDOUT_SENTINEL as *mut u8,
+                stdout_stream(),
             )
         };
         assert!(ret.is_null());
@@ -4231,8 +4349,8 @@ mod tests {
         let _g = lock_and_reset_file_pool();
 
         // Reset stdout and stderr write buffers to idle.
-        let f_out = stream_to_file(STDOUT_SENTINEL as *mut u8);
-        let f_err = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let f_out = stream_to_file(stdout_stream()).unwrap();
+        let f_err = stream_to_file(stderr_stream()).unwrap();
         let old_out_dir = unsafe { (*f_out).buf_dir };
         let old_out_pos = unsafe { (*f_out).buf_pos };
         let old_err_dir = unsafe { (*f_err).buf_dir };
@@ -4264,7 +4382,7 @@ mod tests {
     #[test]
     fn test_fflush_idle_stream_returns_zero() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_dir = unsafe { (*file).buf_dir };
         let old_pos = unsafe { (*file).buf_pos };
 
@@ -4273,7 +4391,7 @@ mod tests {
             (*file).buf_pos = 0;
         }
 
-        let ret = fflush(STDERR_SENTINEL as *mut u8);
+        let ret = fflush(stderr_stream());
         assert_eq!(ret, 0);
 
         unsafe {
@@ -4289,7 +4407,7 @@ mod tests {
     #[test]
     fn test_rewind_clears_error() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let file = stream_to_file(stderr_stream()).unwrap();
         let old_flags = unsafe { (*file).flags };
 
         // Set error flag.
@@ -4297,7 +4415,7 @@ mod tests {
             (*file).flags |= FLAG_ERR;
         }
 
-        rewind(STDERR_SENTINEL as *mut u8);
+        rewind(stderr_stream());
         assert_eq!(
             unsafe { (*file).flags } & FLAG_ERR,
             0,
@@ -4317,24 +4435,24 @@ mod tests {
     fn test_fseeko_is_fseek_alias() {
         // Both should produce the same result for the same arguments.
         // On LP64, fseeko == fseek — verify the function exists.
-        let _ret = fseeko(STDERR_SENTINEL as *mut u8, 0, SEEK_SET);
+        let _ret = fseeko(stderr_stream(), 0, SEEK_SET);
         // Can't verify exact result (depends on lseek syscall in test mode)
         // but it should not crash.
     }
 
     #[test]
     fn test_ftello_is_ftell_alias() {
-        let _ret = ftello(STDERR_SENTINEL as *mut u8);
+        let _ret = ftello(stderr_stream());
     }
 
     #[test]
     fn test_fseeko64_is_fseek_alias() {
-        let _ret = fseeko64(STDERR_SENTINEL as *mut u8, 0, SEEK_SET);
+        let _ret = fseeko64(stderr_stream(), 0, SEEK_SET);
     }
 
     #[test]
     fn test_ftello64_is_ftell_alias() {
-        let _ret = ftello64(STDERR_SENTINEL as *mut u8);
+        let _ret = ftello64(stderr_stream());
     }
 
     // -----------------------------------------------------------------------
@@ -4343,14 +4461,14 @@ mod tests {
 
     #[test]
     fn test_fgetpos64_null_pos() {
-        let ret = fgetpos64(STDOUT_SENTINEL as *mut u8, core::ptr::null_mut());
+        let ret = fgetpos64(stdout_stream(), core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_fsetpos64_null_pos() {
-        let ret = fsetpos64(STDOUT_SENTINEL as *mut u8, core::ptr::null());
+        let ret = fsetpos64(stdout_stream(), core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -4383,7 +4501,7 @@ mod tests {
         // Verify it's callable without crashing.  The return value
         // depends on stdin state (may have a pushed-back byte from
         // a prior test), so we only assert it doesn't panic.
-        let _ret = getc_unlocked(STDIN_SENTINEL as *mut u8);
+        let _ret = getc_unlocked(stdin_stream());
     }
 
     #[test]
@@ -4394,7 +4512,7 @@ mod tests {
 
     #[test]
     fn test_putc_unlocked_exists() {
-        let _ret = putc_unlocked(b'X' as i32, STDERR_SENTINEL as *mut u8);
+        let _ret = putc_unlocked(b'X' as i32, stderr_stream());
     }
 
     #[test]
@@ -4432,15 +4550,15 @@ mod tests {
     #[test]
     fn test_ungetc_overwrites_previous() {
         let _g = lock_std_streams_for_test();
-        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let file = stream_to_file(stdin_stream()).unwrap();
         let old_byte = unsafe { (*file).ungetc_byte };
         let old_flags = unsafe { (*file).flags };
 
-        ungetc(b'A' as i32, STDIN_SENTINEL as *mut u8);
+        ungetc(b'A' as i32, stdin_stream());
         assert_eq!(unsafe { (*file).ungetc_byte }, b'A' as i16);
 
         // Second pushback overwrites the first.
-        ungetc(b'B' as i32, STDIN_SENTINEL as *mut u8);
+        ungetc(b'B' as i32, stdin_stream());
         assert_eq!(unsafe { (*file).ungetc_byte }, b'B' as i16);
 
         unsafe {
@@ -4461,7 +4579,7 @@ mod tests {
         assert!(!stream.is_null(), "fdopen(42) should allocate from pool");
 
         // Check it's a valid File pointer.
-        let file = stream_to_file(stream);
+        let file = stream_to_file(stream).unwrap();
         assert_eq!(unsafe { (*file).fd }, 42);
 
         // Clean up — return the slot.
@@ -4476,7 +4594,7 @@ mod tests {
     fn test_fclose_stdin_flushes_only() {
         let _g = lock_std_streams_for_test();
         // fclose on stdin should flush but NOT actually close fd 0.
-        let ret = fclose(STDIN_SENTINEL as *mut u8);
+        let ret = fclose(stdin_stream());
         // Standard streams are not freed; fclose returns 0 on success.
         assert_eq!(ret, 0);
     }
@@ -4484,14 +4602,14 @@ mod tests {
     #[test]
     fn test_fclose_stdout_flushes_only() {
         let _g = lock_std_streams_for_test();
-        let ret = fclose(STDOUT_SENTINEL as *mut u8);
+        let ret = fclose(stdout_stream());
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fclose_stderr_flushes_only() {
         let _g = lock_std_streams_for_test();
-        let ret = fclose(STDERR_SENTINEL as *mut u8);
+        let ret = fclose(stderr_stream());
         assert_eq!(ret, 0);
     }
 
@@ -4507,7 +4625,7 @@ mod tests {
         // The slot should be freed — verify we can re-allocate.
         let stream2 = fdopen(100, b"r\0".as_ptr());
         assert!(!stream2.is_null());
-        free_file(stream_to_file(stream2));
+        free_file(stream_to_file(stream2).unwrap());
     }
 
     // -----------------------------------------------------------------------
@@ -4519,7 +4637,7 @@ mod tests {
         let _g = lock_std_streams_for_test();
         // fgetc reads from a stream. On the test host the stdin fd may
         // return EOF immediately (not a tty), but must not crash.
-        let _ret = fgetc(STDIN_SENTINEL as *mut u8);
+        let _ret = fgetc(stdin_stream());
         // We can't assert the value — it depends on host stdin state.
     }
 
@@ -4527,7 +4645,7 @@ mod tests {
     fn test_fgetc_returns_ungetc_byte() {
         let _g = lock_std_streams_for_test();
         // Push back a byte, then read it with fgetc.
-        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let file = stream_to_file(stdin_stream()).unwrap();
         let old_byte = unsafe { (*file).ungetc_byte };
         let old_flags = unsafe { (*file).flags };
 
@@ -4539,7 +4657,7 @@ mod tests {
             (*file).flags &= !FLAG_EOF;
         }
 
-        let c = fgetc(STDIN_SENTINEL as *mut u8);
+        let c = fgetc(stdin_stream());
         assert_eq!(c, b'Z' as i32, "fgetc should return the pushed-back byte");
 
         // Restore.
@@ -4556,7 +4674,7 @@ mod tests {
 
     #[test]
     fn test_getc_no_crash() {
-        let _ret = getc(STDIN_SENTINEL as *mut u8);
+        let _ret = getc(stdin_stream());
     }
 
     // -----------------------------------------------------------------------
@@ -4569,7 +4687,7 @@ mod tests {
             freopen64(
                 b"/tmp/x\0".as_ptr(),
                 core::ptr::null(),
-                STDOUT_SENTINEL as *mut u8,
+                stdout_stream(),
             )
         };
         assert!(ret.is_null(), "freopen64 with null mode should fail");
@@ -4583,10 +4701,10 @@ mod tests {
             freopen64(
                 core::ptr::null(),
                 b"r\0".as_ptr(),
-                STDOUT_SENTINEL as *mut u8,
+                stdout_stream(),
             )
         };
-        assert_eq!(ret as usize, STDOUT_SENTINEL);
+        assert_eq!(ret, stdout_stream());
     }
 
     // -----------------------------------------------------------------------
@@ -4596,7 +4714,7 @@ mod tests {
     #[test]
     fn test_getline_null_lineptr() {
         let mut n: usize = 0;
-        let ret = unsafe { getline(core::ptr::null_mut(), &raw mut n, STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { getline(core::ptr::null_mut(), &raw mut n, stdin_stream()) };
         assert_eq!(ret, -1);
     }
 
@@ -4607,7 +4725,7 @@ mod tests {
             getline(
                 &raw mut ptr,
                 core::ptr::null_mut(),
-                STDIN_SENTINEL as *mut u8,
+                stdin_stream(),
             )
         };
         assert_eq!(ret, -1);
@@ -4623,7 +4741,7 @@ mod tests {
                 core::ptr::null_mut(),
                 &raw mut n,
                 b';' as i32,
-                STDIN_SENTINEL as *mut u8,
+                stdin_stream(),
             )
         };
         assert_eq!(ret, -1);
@@ -4642,7 +4760,7 @@ mod tests {
                 &raw mut ptr,
                 &raw mut n,
                 b'\n' as i32,
-                STDIN_SENTINEL as *mut u8,
+                stdin_stream(),
             )
         };
         // Either -1 (EOF) or some positive value depending on host stdin.

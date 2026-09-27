@@ -1690,6 +1690,12 @@ D's to act on once answered).
       building the instrument is not the measurement, and the line stays until
       a run produces a number. That distinction is the whole reason this item
       sat here for a week while everything around it argued the path was fine.
+      **It has run** (lane-d `c721b2a13`, 2026-09-26): exit 4, and the
+      interpreter never read the terminal -- C's `stdin` was a NULL pointer,
+      which CPython's tokenizer takes for "the input is a string", so it
+      parsed its own uninitialised buffer (known-issues.md,
+      `D-POSIX-STDIN-WAS-A-NULL-POINTER`; fixed 2026-09-27). The line stays
+      until a run answers 42.
       The expression is `6*7` rather than `1+1` because a pty echoes what is
       typed: a scan for `2` would match the echo of `print(1+1)` and pass
       without the interpreter evaluating anything.

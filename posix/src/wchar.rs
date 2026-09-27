@@ -2523,16 +2523,14 @@ pub unsafe extern "C" fn getwc(stream: *mut u8) -> WcharT {
 /// Write a wide character to stdout.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putwchar(wc: WcharT) -> WcharT {
-    // Use STDOUT_SENTINEL explicitly — dangling_mut::<u8>() happens to
-    // return the same value today but is not guaranteed to.
-    unsafe { fputwc(wc, crate::stdio::STDOUT_SENTINEL as *mut u8) }
+    unsafe { fputwc(wc, crate::stdio::stdout_stream()) }
 }
 
 /// Read a wide character from stdin.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getwchar() -> WcharT {
-    // SAFETY: STDIN_SENTINEL (null) is the stdio convention.
-    unsafe { fgetwc(core::ptr::null_mut()) }
+    // SAFETY: `stdin_stream` is standard input.
+    unsafe { fgetwc(crate::stdio::stdin_stream()) }
 }
 
 /// Push back a wide character onto a stream.
@@ -5640,7 +5638,7 @@ mod tests {
     fn test_fputwc_ascii() {
         let _g = crate::stdio::lock_std_streams_for_test();
         // Writing an ASCII character to stdout should succeed.
-        let ret = unsafe { fputwc(b'A' as WcharT, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputwc(b'A' as WcharT, crate::stdio::stdout_stream()) };
         // On test host, write to stdout may or may not succeed,
         // but the return value should be either the char or WEOF.
         assert!(ret == b'A' as WcharT || ret == WEOF);
@@ -5651,7 +5649,7 @@ mod tests {
         let _g = crate::stdio::lock_std_streams_for_test();
         // Codepoints above U+10FFFF are invalid → WEOF + EILSEQ.
         crate::errno::set_errno(0);
-        let ret = unsafe { fputwc(0x11_0000, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputwc(0x11_0000, crate::stdio::stdout_stream()) };
         assert_eq!(ret, WEOF);
         assert_eq!(crate::errno::get_errno(), crate::errno::EILSEQ);
     }
@@ -5660,7 +5658,7 @@ mod tests {
     fn test_fputwc_two_byte_utf8() {
         let _g = crate::stdio::lock_std_streams_for_test();
         // U+00E9 (é) encodes as 2-byte UTF-8 (0xC3 0xA9).
-        let ret = unsafe { fputwc(0xE9, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputwc(0xE9, crate::stdio::stdout_stream()) };
         assert!(ret == 0xE9 || ret == WEOF);
     }
 
@@ -5668,7 +5666,7 @@ mod tests {
     fn test_fputwc_three_byte_utf8() {
         let _g = crate::stdio::lock_std_streams_for_test();
         // U+4E16 (世) encodes as 3-byte UTF-8.
-        let ret = unsafe { fputwc(0x4E16, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputwc(0x4E16, crate::stdio::stdout_stream()) };
         assert!(ret == 0x4E16 || ret == WEOF);
     }
 
@@ -5676,7 +5674,7 @@ mod tests {
     fn test_fputwc_four_byte_utf8() {
         let _g = crate::stdio::lock_std_streams_for_test();
         // U+1F600 (😀) encodes as 4-byte UTF-8.
-        let ret = unsafe { fputwc(0x1F600, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputwc(0x1F600, crate::stdio::stdout_stream()) };
         assert!(ret == 0x1F600 || ret == WEOF);
     }
 
@@ -5684,7 +5682,7 @@ mod tests {
     fn test_fputwc_max_valid_codepoint() {
         let _g = crate::stdio::lock_std_streams_for_test();
         // U+10FFFF is the maximum valid codepoint.
-        let ret = unsafe { fputwc(0x10_FFFF, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputwc(0x10_FFFF, crate::stdio::stdout_stream()) };
         assert!(ret == 0x10_FFFF || ret == WEOF);
     }
 
@@ -5693,7 +5691,7 @@ mod tests {
     #[test]
     fn test_fgetwc_stdin_no_crash() {
         // On test host, stdin may return EOF immediately.
-        let _ret = unsafe { fgetwc(crate::stdio::STDIN_SENTINEL as *mut u8) };
+        let _ret = unsafe { fgetwc(crate::stdio::stdin_stream()) };
     }
 
     // -- putwc / getwc (aliases) --
@@ -5701,13 +5699,13 @@ mod tests {
     #[test]
     fn test_putwc_ascii() {
         let _g = crate::stdio::lock_std_streams_for_test();
-        let ret = unsafe { putwc(b'X' as WcharT, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { putwc(b'X' as WcharT, crate::stdio::stdout_stream()) };
         assert!(ret == b'X' as WcharT || ret == WEOF);
     }
 
     #[test]
     fn test_getwc_no_crash() {
-        let _ret = unsafe { getwc(crate::stdio::STDIN_SENTINEL as *mut u8) };
+        let _ret = unsafe { getwc(crate::stdio::stdin_stream()) };
     }
 
     // -- putwchar / getwchar --
@@ -5734,7 +5732,7 @@ mod tests {
 
     #[test]
     fn test_ungetwc_weof_returns_weof() {
-        let ret = unsafe { ungetwc(WEOF, crate::stdio::STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { ungetwc(WEOF, crate::stdio::stdin_stream()) };
         assert_eq!(ret, WEOF);
     }
 
@@ -5742,12 +5740,12 @@ mod tests {
     fn test_ungetwc_ascii() {
         // Push back an ASCII character via ungetwc, which internally
         // calls ungetc.  The return value should be the pushed-back char.
-        let ret = unsafe { ungetwc(b'Q' as WcharT, crate::stdio::STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { ungetwc(b'Q' as WcharT, crate::stdio::stdin_stream()) };
         // ungetc pushes back onto stdin's ungetc_byte field.
         // It should succeed for ASCII.
         assert_eq!(ret, b'Q' as WcharT);
         // Read it back to restore state.
-        let readback = crate::stdio::fgetc(crate::stdio::STDIN_SENTINEL as *mut u8);
+        let readback = crate::stdio::fgetc(crate::stdio::stdin_stream());
         assert_eq!(readback, b'Q' as i32);
     }
 
@@ -5755,7 +5753,7 @@ mod tests {
     fn test_ungetwc_multibyte_returns_weof() {
         // Multi-byte pushback is not supported → WEOF + EILSEQ.
         crate::errno::set_errno(0);
-        let ret = unsafe { ungetwc(0x00E9, crate::stdio::STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { ungetwc(0x00E9, crate::stdio::stdin_stream()) };
         assert_eq!(ret, WEOF);
         assert_eq!(crate::errno::get_errno(), crate::errno::EILSEQ);
     }
@@ -5765,7 +5763,7 @@ mod tests {
     #[test]
     fn test_fputws_null_returns_error() {
         let _g = crate::stdio::lock_std_streams_for_test();
-        let ret = unsafe { fputws(core::ptr::null(), crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputws(core::ptr::null(), crate::stdio::stdout_stream()) };
         assert_eq!(ret, -1);
     }
 
@@ -5774,7 +5772,7 @@ mod tests {
         let _g = crate::stdio::lock_std_streams_for_test();
         // An empty wide string (just null terminator) should succeed.
         let ws: [WcharT; 1] = [0];
-        let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::stdout_stream()) };
         assert_eq!(ret, 0);
     }
 
@@ -5782,7 +5780,7 @@ mod tests {
     fn test_fputws_ascii_string() {
         let _g = crate::stdio::lock_std_streams_for_test();
         let ws: [WcharT; 4] = [b'H' as WcharT, b'i' as WcharT, b'!' as WcharT, 0];
-        let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::stdout_stream()) };
         // 0 = success, -1 = write failed on host
         assert!(ret == 0 || ret == -1);
     }
@@ -5795,7 +5793,7 @@ mod tests {
             fgetws(
                 core::ptr::null_mut(),
                 10,
-                crate::stdio::STDIN_SENTINEL as *mut u8,
+                crate::stdio::stdin_stream(),
             )
         };
         assert!(ret.is_null());
@@ -5804,7 +5802,7 @@ mod tests {
     #[test]
     fn test_fgetws_zero_n_returns_null() {
         let mut buf: [WcharT; 8] = [0; 8];
-        let ret = unsafe { fgetws(buf.as_mut_ptr(), 0, crate::stdio::STDIN_SENTINEL as *mut u8) };
+        let ret = unsafe { fgetws(buf.as_mut_ptr(), 0, crate::stdio::stdin_stream()) };
         assert!(ret.is_null());
     }
 
@@ -5815,7 +5813,7 @@ mod tests {
             fgetws(
                 buf.as_mut_ptr(),
                 -1,
-                crate::stdio::STDIN_SENTINEL as *mut u8,
+                crate::stdio::stdin_stream(),
             )
         };
         assert!(ret.is_null());

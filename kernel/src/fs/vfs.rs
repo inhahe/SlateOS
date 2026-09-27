@@ -3214,21 +3214,62 @@ impl Vfs {
         Ok(())
     }
 
-    /// Append data to the end of a file.
+    /// Append data to the end of a file, creating it if it doesn't exist.
     ///
-    /// Creates the file if it doesn't exist.  Uses write_at at the
-    /// current file size for efficient append without rewriting.
+    /// The end is found and written in **one hold of the filesystem's lock**
+    /// ([`append_resolved`](Self::append_resolved)), so two appenders never
+    /// land on the same offset and two creators never replace each other.
+    /// Until 2026-09-26 this was `stat` and then `write_at`, two separate
+    /// holds: concurrent appenders could both read the same size, and the
+    /// second silently overwrote the first's record (known-issues.md
+    /// `A-VFS-APPEND-RACES`).
     pub fn append(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
         let path = path.as_ref();
-        let offset = match Self::stat(path) {
-            Ok(entry) => entry.size,
-            Err(KernelError::NotFound) => {
-                // File doesn't exist — create it.
-                return Self::write_file(path, data);
+        crate::ipc::namespace::check_writable(path)?;
+        let path = Self::resolve_follow(path)?;
+        Self::append_resolved(&path, data)
+    }
+
+    /// Like [`append`](Self::append) but on an **already-resolved** host path
+    /// (see [`read_at_resolved`](Self::read_at_resolved)).
+    ///
+    /// The checks and bookkeeping are [`write_file_resolved`]'s, less the
+    /// version-history snapshot, which records content about to be
+    /// overwritten and an append overwrites nothing.
+    ///
+    /// [`write_file_resolved`]: Self::write_file_resolved
+    pub fn append_resolved(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
+        check_path_access(path, PathAccess::Write)?;
+        check_writable(path)?;
+        // Before the VFS lock, as for every write: interceptors must not
+        // call back into the VFS while it is held.
+        super::intercept::pre_write(path)?;
+        enforce_quota_write(path, data.len() as u64)?;
+        let cache_inval = {
+            let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
+            let mut guard = fs.lock();
+            // The end, and the write at it, under the same hold: nothing can
+            // move the end in between. A missing file is created under the
+            // same hold, so a second creator finds it and appends.
+            match guard.stat(&relative) {
+                Ok(entry) => guard.write_at(&relative, entry.size, data)?,
+                Err(KernelError::NotFound) => guard.write_file(&relative, data)?,
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
+            cache_identity(&mut guard, fs_id, &relative)
         };
-        Self::write_at(path, offset, data)
+        if let Some((fs_id, ino)) = cache_inval {
+            crate::mm::page_cache::invalidate_identity(fs_id, ino);
+        }
+        super::quota::charge_bytes(0, 0, data.len() as u64);
+        // The append may have created the file: drop negative entries.
+        VFS_DCACHE.lock().invalidate_negative_prefix(path);
+        super::notify::emit_modified(path);
+        super::index::on_file_changed(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        super::audit::log_ok(super::audit::AuditOp::Write, 0, path);
+        Ok(())
     }
 
     /// Truncate a file to the given size.
@@ -9753,5 +9794,110 @@ pub fn glob_self_test() -> KernelResult<()> {
     serial_println!("[glob]   edge cases: OK");
 
     serial_println!("[glob] Self-test passed.");
+    Ok(())
+}
+
+/// Records each [`append_race_worker`] appends to the shared file.
+const APPEND_RACE_RECORDS: usize = 200;
+/// The shared file both workers append to.
+const APPEND_RACE_PATH: &str = "/tmp/.vfs-append-race";
+/// Workers finished (each adds one on exit).
+static APPEND_RACE_DONE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// `i`'s last three decimal digits, as ASCII.
+fn append_race_digits(i: usize) -> [u8; 3] {
+    let digit = |d: usize| b'0'.saturating_add(u8::try_from(d % 10).unwrap_or(0));
+    [digit(i / 100), digit(i / 10), digit(i)]
+}
+
+/// One appender for [`self_test_append_is_atomic`]: `arg` is its tag byte.
+/// Each record is `<tag><3 digits>\n`, five bytes, so a record that was
+/// overwritten shows up as a missing number.
+extern "C" fn append_race_worker(arg: u64) {
+    let tag = u8::try_from(arg).unwrap_or(b'?');
+    for i in 0..APPEND_RACE_RECORDS {
+        let [d0, d1, d2] = append_race_digits(i);
+        let rec = [tag, d0, d1, d2, b'\n'];
+        // Ignored on purpose: the main task judges the file, and a failed
+        // append shows there as a missing record.
+        let _ = Vfs::append(APPEND_RACE_PATH, &rec);
+        if i % 16 == 0 {
+            crate::sched::yield_now();
+        }
+    }
+    APPEND_RACE_DONE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Stress self-test: two tasks appending to one file lose no record.
+///
+/// Probabilistic by nature -- the old race needed the two appenders
+/// interleaved between a `stat` and a `write_at`, which two tasks
+/// yielding every sixteen appends make likely but cannot force -- so it can
+/// catch a regression, not prove its absence. The absence is by
+/// construction: [`Vfs::append_resolved`] reads the end and writes at it
+/// under one hold of the filesystem lock.
+///
+/// # Errors
+///
+/// `InternalError` when the file does not hold exactly the 400 records --
+/// every one of `A000..A199` and `B000..B199` once, whole.
+pub fn self_test_append_is_atomic() -> KernelResult<()> {
+    // A stale file from an earlier run would add records.
+    match Vfs::remove(APPEND_RACE_PATH) {
+        Ok(()) | Err(KernelError::NotFound) => {}
+        Err(e) => return Err(e),
+    }
+    APPEND_RACE_DONE.store(0, core::sync::atomic::Ordering::SeqCst);
+    crate::sched::spawn(b"append-race-a", 16, append_race_worker, u64::from(b'A'), 0)?;
+    crate::sched::spawn(b"append-race-b", 16, append_race_worker, u64::from(b'B'), 0)?;
+    let deadline = crate::hrtimer::now_ns().saturating_add(20_000_000_000); // 20 s
+    while APPEND_RACE_DONE.load(core::sync::atomic::Ordering::SeqCst) < 2 {
+        if crate::hrtimer::now_ns() >= deadline {
+            crate::serial_println!("[vfs]   FAIL: append race: workers did not finish in 20 s");
+            return Err(KernelError::InternalError);
+        }
+        crate::sched::yield_now();
+    }
+    let data = Vfs::read_file(APPEND_RACE_PATH)?;
+    let _ = Vfs::remove(APPEND_RACE_PATH); // best-effort tidy-up; judged below
+    let mut seen = [[false; APPEND_RACE_RECORDS]; 2];
+    let mut whole = 0usize;
+    for rec in data.chunks(5) {
+        let (tag, digits, nl) = match rec {
+            [t, a, b, c, n] => (*t, [*a, *b, *c], *n),
+            _ => break,
+        };
+        let which = match tag {
+            b'A' => 0,
+            b'B' => 1,
+            _ => break,
+        };
+        if nl != b'\n' {
+            break;
+        }
+        let Some(i) = core::str::from_utf8(&digits)
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            break;
+        };
+        match seen.get_mut(which).and_then(|s| s.get_mut(i)) {
+            Some(slot) if !*slot => *slot = true,
+            _ => break,
+        }
+        whole = whole.saturating_add(1);
+    }
+    let want = APPEND_RACE_RECORDS.saturating_mul(2);
+    if data.len() != want.saturating_mul(5) || whole != want {
+        crate::serial_println!(
+            "[vfs]   FAIL: append race: {} bytes, {} whole records (want {} and {}) -- \
+             concurrent appends overwrote each other",
+            data.len(),
+            whole,
+            want.saturating_mul(5),
+            want
+        );
+        return Err(KernelError::InternalError);
+    }
     Ok(())
 }

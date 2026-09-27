@@ -3685,6 +3685,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         proc::spawn::self_test_munmap_abi(),
     );
+    // Two tasks appending to one file lose no record (known-issues.md
+    // A-VFS-APPEND-RACES): the end is found and written under one lock hold.
+    selftest::dispatch_debug(
+        "VFS append atomicity (two concurrent appenders)",
+        selftest::Severity::Diagnostic,
+        fs::vfs::self_test_append_is_atomic(),
+    );
     // Pipe and socketpair calls copy at most what one call can move
     // (known-issues.md A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC).
     selftest::dispatch_debug(

@@ -22,9 +22,11 @@ pub fn siphash24(key: &[u8; 16], data: &[u8]) -> u64 {
         0x6c79_6765_6e65_7261 ^ k0,
         0x7465_6462_7974_6573 ^ k1,
     ];
-    let mut chunks = data.chunks_exact(8);
-    for chunk in &mut chunks {
-        let m = le_word(chunk);
+    // `as_chunks`, not `chunks_exact(8)`: newer clippy flags the latter for a
+    // constant size, and the fixed-size arrays make each word a plain read.
+    let (words, tail) = data.as_chunks::<8>();
+    for word in words {
+        let m = u64::from_le_bytes(*word);
         v[3] ^= m;
         round(&mut v);
         round(&mut v);
@@ -34,7 +36,7 @@ pub fn siphash24(key: &[u8; 16], data: &[u8]) -> u64 {
     // length modulo 256 in the top byte.
     #[allow(clippy::cast_possible_truncation)] // only the low 8 bits are wanted
     let mut last = u64::from(data.len() as u8) << 56;
-    for (i, &b) in chunks.remainder().iter().enumerate() {
+    for (i, &b) in tail.iter().enumerate() {
         last |= u64::from(b) << (8 * i);
     }
     v[3] ^= last;
@@ -74,8 +76,8 @@ fn split_key(key: &[u8; 16]) -> (u64, u64) {
     (le_word(lo), le_word(hi))
 }
 
-/// Up to eight bytes as a little-endian word (short input is zero-filled,
-/// which only `split_key`'s and the loop's exact eights ever pass).
+/// Up to eight bytes as a little-endian word (short input is zero-filled;
+/// `split_key` only ever passes exact eights).
 fn le_word(bytes: &[u8]) -> u64 {
     let mut w = [0u8; 8];
     for (dst, src) in w.iter_mut().zip(bytes) {

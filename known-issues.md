@@ -170480,6 +170480,31 @@ A), `userspace/coreutils/src/bin/tar.rs` (lane B), `apps/undelete` -- could
 use `tararchive`; not filed as requests yet, since the kernel's is `no_std`
 and `tararchive` reads through `std::io`.
 
+### [E] The credential manager said "Copied Password" over a clipboard no other program could read -- 2026-09-27
+**Status:** OPEN, waiting on lane A -- the false claim is FIXED (Copy refuses
+in words); copying itself needs `requests/e-a-a-clipboard-door-for-applications.md`.
+
+**In short:** pressing Copy on a password showed "Copied Password -- clears in
+30s". The password went into a variable inside the credential manager, and
+nothing else on the machine could paste it: SlateOS's system clipboard is in
+the kernel (`fs::clipboard`) and only kshell can reach it. A user went to
+paste the password somewhere, got nothing, and had no way to tell why. An
+earlier fix had wired Copy to that variable "so the one operation a
+credential manager exists for" could be done -- which made the missing
+capability look present.
+
+**Now:** Copy copies nothing and says so where "Copied" was: "Password not
+copied: no other program could paste it -- applications have no clipboard
+yet; reveal it to read it". The in-app clipboard and its auto-clear are gone
+(a secret held in memory for nothing to use), and the Settings row for the
+auto-clear says it does not apply. The same gap stops every program's copy
+at its own window -- the file manager's is
+`TD-C-THE-FILE-MANAGER-CLIPBOARD-STOPS-AT-ITS-OWN-WINDOW`.
+
+**When the door lands:** copy through it, with the auto-clear back as a
+clear-if-still-mine (the request asks for one), so a wipe after thirty
+seconds cannot erase something the user copied since.
+
 ### [E] The Camera listed three invented webcams and streamed a test pattern as their video -- 2026-09-27
 **Status:** FIXED 2026-09-27 (lane E). A real build lists no camera and says
 why; Take Photo and Record refuse without one.

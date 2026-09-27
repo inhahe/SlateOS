@@ -100,7 +100,6 @@ const HEADING_FONT_SIZE: f32 = 18.0;
 const SMALL_FONT_SIZE: f32 = 12.0;
 const CORNER_RADIUS: f32 = 6.0;
 const DEFAULT_AUTO_LOCK_MINUTES: u32 = 15;
-const CLIPBOARD_CLEAR_SECONDS: u32 = 30;
 const PASSWORD_OLD_DAYS: u64 = 90;
 const WEAK_PASSWORD_LEN: usize = 8;
 
@@ -2921,59 +2920,20 @@ impl NewEntryForm {
 }
 
 // =============================================================================
-// Clipboard state (simulated)
+// Copying: refused, because applications have no clipboard
 // =============================================================================
 
-/// Tracks clipboard content and auto-clear timing.
-#[derive(Clone, Debug)]
-struct ClipboardState {
-    content: Option<String>,
-    copied_at: u64,
-    auto_clear_seconds: u32,
-}
-
-impl ClipboardState {
-    fn new() -> Self {
-        Self {
-            content: None,
-            copied_at: 0,
-            auto_clear_seconds: CLIPBOARD_CLEAR_SECONDS,
-        }
-    }
-
-    fn copy(&mut self, text: &str, now: u64) {
-        self.content = Some(text.to_string());
-        self.copied_at = now;
-    }
-
-    /// Seconds until the copy is wiped, or `None` when nothing is held.
-    ///
-    /// Saturating rather than wrapping: `now` comes from outside, and a clock
-    /// that goes backwards would otherwise turn "2 seconds left" into four
-    /// billion.
-    fn remaining(&self, now: u64) -> Option<u64> {
-        self.content.as_ref()?;
-        let elapsed = now.saturating_sub(self.copied_at);
-        Some(u64::from(self.auto_clear_seconds).saturating_sub(elapsed))
-    }
-
-    fn should_clear(&self, now: u64) -> bool {
-        if self.content.is_none() {
-            return false;
-        }
-        now.saturating_sub(self.copied_at) >= u64::from(self.auto_clear_seconds)
-    }
-
-    fn clear(&mut self) {
-        self.content = None;
-    }
-
-    fn tick(&mut self, now: u64) {
-        if self.should_clear(now) {
-            self.clear();
-        }
-    }
-}
+/// Why a Copy press copies nothing, drawn where "Copied" would have been.
+///
+/// SlateOS has a system clipboard in the kernel (`fs::clipboard`), but only
+/// kshell can reach it: no call lets an application put text there, or read
+/// it back. This program used to copy into a clipboard of its own -- a
+/// variable -- and say "Copied Password -- clears in 30s", which no other
+/// program could paste from. For a password manager that is the worst
+/// answer: the user goes to paste, gets nothing, and cannot tell why.
+/// `requests/e-a-a-clipboard-door-for-applications.md` asks for the door.
+const NOT_COPIED: &str =
+    "no other program could paste it -- applications have no clipboard yet; reveal it to read it";
 
 // =============================================================================
 // Application state
@@ -2993,7 +2953,6 @@ struct AppState {
     /// Shown in place of the password so the refusal cannot be mistaken for
     /// a generator the user simply has not pressed yet.
     generator_error: Option<String>,
-    clipboard: ClipboardState,
     show_password: bool,
     now: u64,
     /// Filtered and sorted entry IDs for the list.
@@ -3025,8 +2984,9 @@ struct AppState {
     /// visits: a half-typed password left in memory after the user cancelled
     /// is a thing a credential manager should not be holding.
     new_entry: Option<NewEntryForm>,
-    /// What the last copy put on the clipboard, for the status line.
-    last_copied: Option<String>,
+    /// The field a Copy press was refused for, to say so in the toolbar --
+    /// see [`NOT_COPIED`].
+    copy_refused: Option<String>,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -3058,7 +3018,6 @@ impl AppState {
             password_generator: PasswordGenerator::new(),
             generated_password: String::new(),
             generator_error: None,
-            clipboard: ClipboardState::new(),
             show_password: false,
             now: 1000000,
             filtered_ids: Vec::new(),
@@ -3071,7 +3030,7 @@ impl AppState {
             height: DEFAULT_WINDOW_HEIGHT,
             settings_auto_lock: DEFAULT_AUTO_LOCK_MINUTES,
             new_entry: None,
-            last_copied: None,
+            copy_refused: None,
         };
         state.refresh_filter();
         state
@@ -3227,7 +3186,6 @@ impl AppState {
 
     fn tick(&mut self, elapsed_ms: u64) {
         self.now = self.now.saturating_add(elapsed_ms / 1000);
-        self.clipboard.tick(self.now);
 
         if self.vault.should_auto_lock(self.now) {
             self.vault.lock();
@@ -3645,35 +3603,19 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     );
     frame.hit(Target::Settings, settings);
 
-    // WHAT WAS COPIED, AND HOW LONG IT LASTS.
-    //
-    // `copy_field` has recorded the label in `last_copied` since this program
-    // was written and nothing rendered it -- there is no status line, toast or
-    // banner anywhere in this program. Pressing Copy on a password therefore
-    // showed the user *nothing*, and the only way to learn whether it had
-    // worked, or which row it had taken, was to paste somewhere and look. In a
-    // password manager the difference between "copied" and "copied the wrong
-    // row" is the entire point of the press.
-    //
-    // The countdown is the same omission from the other side. The clipboard
-    // wipes itself after `auto_clear_seconds`, which is a good thing to do and
-    // a bad thing to do invisibly: a user who does not know it is coming reads
-    // the empty paste as the program having failed.
-    //
-    // Left-aligned after the last button rather than right-aligned, because
-    // right-aligning needs the rendered width and guessing it from the
-    // character count is wrong for every proportional face in the tree.
-    if let (Some(label), Some(secs)) = (
-        state.last_copied.as_deref(),
-        state.clipboard.remaining(state.now),
-    ) {
+    // WHY NOTHING WAS COPIED. A press on Copy used to be answered with
+    // "Copied Password -- clears in 30s" over a clipboard only this program
+    // could read. The press is answered in words still -- a press that
+    // shows nothing reads as a program that did not hear it -- but with what
+    // is true.
+    if let Some(label) = state.copy_refused.as_deref() {
         let notice_x = x + TOOLBAR_GAP;
         draw_text(
             frame,
             notice_x,
             (TOOLBAR_HEIGHT - DEFAULT_FONT_SIZE) / 2.0,
-            &format!("Copied {label} — clears in {secs}s"),
-            state.palette.green,
+            &format!("{label} not copied: {NOT_COPIED}"),
+            state.palette.ink(state.palette.yellow),
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
             Some((width - notice_x).max(0.0)),
@@ -5471,7 +5413,9 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         FontWeightHint::Regular,
         None,
     );
-    let clear_text = format!("{} seconds", state.clipboard.auto_clear_seconds);
+    // Nothing is ever copied, so there is nothing to clear -- said, rather
+    // than a thirty-second promise about a clipboard that does not exist.
+    let clear_text = String::from("Not applicable: applications have no clipboard yet");
     draw_text(
         frame,
         x_start + pad + 200.0,
@@ -6173,24 +6117,18 @@ fn copyable_fields(state: &AppState) -> Vec<(&'static str, String)> {
     }
 }
 
-/// Copy field `index` of the selected entry. Returns whether anything moved.
-///
-/// `ClipboardState` has had a `copy` and a thirty-second `tick` that clears it
-/// since this file was written, and nothing ever called `copy` -- so the one
-/// operation a credential manager exists for was the one it could not do.
+/// Answer a Copy press on field `index` of the selected entry: nothing is
+/// copied, because applications have no clipboard, and the toolbar says so
+/// for that field ([`NOT_COPIED`]). Returns whether the press named a field.
 fn copy_field(state: &mut AppState, index: usize) -> bool {
     let fields = copyable_fields(state);
     let Some((label, value)) = fields.get(index) else {
         return false;
     };
     if value.is_empty() {
-        // Nothing to put on the clipboard, and clearing what is already there
-        // because a blank row was pressed would lose the thing the user copied
-        // a moment ago.
         return false;
     }
-    state.clipboard.copy(value, state.now);
-    state.last_copied = Some((*label).to_string());
+    state.copy_refused = Some((*label).to_string());
     true
 }
 
@@ -7552,68 +7490,6 @@ mod tests {
             .collect()
     }
 
-    /// **Copying a credential says so, and says when it will be wiped.**
-    ///
-    /// `copy_field` recorded the label and this program drew no message of any
-    /// kind, so pressing Copy on a password was indistinguishable from
-    /// pressing nothing. The clipboard's own auto-clear was equally silent: a
-    /// user who does not know the wipe is coming reads the empty paste as a
-    /// failure.
-    #[test]
-    fn copying_says_what_was_copied_and_when_it_clears() {
-        let mut state = AppState::for_test();
-        state.now = 100;
-        state.clipboard.copy("hunter2", state.now);
-        state.last_copied = Some("Password".to_string());
-
-        let texts = toolbar_texts(&state);
-        assert!(
-            texts.iter().any(|t| t.starts_with("Copied Password")),
-            "nothing on the toolbar says a copy happened: {texts:?}"
-        );
-        assert!(
-            texts.iter().any(|t| t.contains("clears in")),
-            "the wipe is still invisible: {texts:?}"
-        );
-    }
-
-    /// The countdown counts down rather than sitting still.
-    #[test]
-    fn the_countdown_shrinks_as_time_passes() {
-        let mut state = AppState::for_test();
-        state.now = 100;
-        state.clipboard.copy("hunter2", state.now);
-        state.last_copied = Some("Password".to_string());
-
-        let first = state
-            .clipboard
-            .remaining(state.now)
-            .expect("holding nothing");
-        let later = state
-            .clipboard
-            .remaining(state.now + 3)
-            .expect("holding nothing");
-        assert_eq!(later, first.saturating_sub(3), "{first} -> {later}");
-    }
-
-    /// Once the clipboard has wiped itself there is nothing to announce.
-    #[test]
-    fn the_notice_goes_when_the_clipboard_does() {
-        let mut state = AppState::for_test();
-        state.now = 100;
-        state.clipboard.copy("hunter2", state.now);
-        state.last_copied = Some("Password".to_string());
-
-        state.now += u64::from(state.clipboard.auto_clear_seconds) + 1;
-        state.clipboard.tick(state.now);
-
-        let texts = toolbar_texts(&state);
-        assert!(
-            !texts.iter().any(|t| t.starts_with("Copied")),
-            "a stale copy notice outlived the clipboard: {texts:?}"
-        );
-    }
-
     #[test]
     fn the_refusal_is_shown_where_the_password_would_be() {
         let mut state = AppState::for_test();
@@ -8028,46 +7904,6 @@ mod tests {
     }
 
     // == ClipboardState tests ==================================================
-
-    #[test]
-    fn test_clipboard_new() {
-        let c = ClipboardState::new();
-        assert!(c.content.is_none());
-        assert_eq!(c.auto_clear_seconds, CLIPBOARD_CLEAR_SECONDS);
-    }
-
-    #[test]
-    fn test_clipboard_copy() {
-        let mut c = ClipboardState::new();
-        c.copy("secret", 100);
-        assert_eq!(c.content, Some("secret".to_string()));
-        assert_eq!(c.copied_at, 100);
-    }
-
-    #[test]
-    fn test_clipboard_auto_clear() {
-        let mut c = ClipboardState::new();
-        c.copy("secret", 100);
-        assert!(!c.should_clear(100));
-        assert!(!c.should_clear(129));
-        assert!(c.should_clear(130));
-    }
-
-    #[test]
-    fn test_clipboard_tick_clears() {
-        let mut c = ClipboardState::new();
-        c.copy("secret", 100);
-        c.tick(131);
-        assert!(c.content.is_none());
-    }
-
-    #[test]
-    fn test_clipboard_clear_explicit() {
-        let mut c = ClipboardState::new();
-        c.copy("data", 100);
-        c.clear();
-        assert!(c.content.is_none());
-    }
 
     // == AppState tests ========================================================
 
@@ -9603,49 +9439,48 @@ mod tests {
         state
     }
 
+    /// **A Copy press says nothing was copied, and why** -- where it said
+    /// "Copied Password -- clears in 30s" over a clipboard only this program
+    /// could read, so the user pasted nothing elsewhere and could not tell
+    /// why. The secret is not kept anywhere by the press.
     #[test]
-    fn a_copy_button_puts_the_field_on_the_clipboard() {
+    fn a_copy_press_says_nothing_was_copied_and_why() {
         let mut state = state_with_login();
-        assert_eq!(state.clipboard.content, None);
-        // Field 2 of a login is the password.
-        assert_eq!(
-            press(&mut state, Target::CopyField(2)),
-            EventResult::Consumed
+        let fields = copyable_fields(&state);
+        let (label, _) = fields
+            .iter()
+            .find(|(l, v)| *l == "Password" && !v.is_empty())
+            .expect("the fixture has a password")
+            .clone();
+        let index = fields
+            .iter()
+            .position(|(l, _)| *l == label)
+            .expect("its row");
+        assert!(copy_field(&mut state, index), "the press was not answered");
+        assert_eq!(state.copy_refused.as_deref(), Some("Password"));
+        let said = format!("Password not copied: {NOT_COPIED}");
+        assert!(
+            toolbar_texts(&state).contains(&said),
+            "the refusal is not drawn: {:?}",
+            toolbar_texts(&state)
         );
-        assert_eq!(
-            state.clipboard.content.as_deref(),
-            Some("hunter2"),
-            "`ClipboardState::copy` had no caller at all: the one operation a \
-             credential manager exists for was the one it could not do"
+        assert!(
+            !toolbar_texts(&state)
+                .iter()
+                .any(|t| t.starts_with("Copied")),
+            "something still claims a copy"
         );
-        assert_eq!(state.last_copied.as_deref(), Some("Password"));
     }
 
+    /// An empty field is not a press worth answering: nothing is said.
     #[test]
-    fn each_copy_button_copies_its_own_field() {
+    fn an_empty_field_is_not_answered() {
         let mut state = state_with_login();
-        press(&mut state, Target::CopyField(0));
-        assert_eq!(state.clipboard.content.as_deref(), Some("example.com"));
-        press(&mut state, Target::CopyField(1));
-        assert_eq!(state.clipboard.content.as_deref(), Some("alice"));
-    }
-
-    #[test]
-    fn copying_an_empty_field_leaves_the_clipboard_alone() {
-        let mut state = state_with_login();
-        press(&mut state, Target::CopyField(2));
-        assert_eq!(state.clipboard.content.as_deref(), Some("hunter2"));
-        // Field 3 is the URL, which was never filled in.
-        assert_eq!(
-            press(&mut state, Target::CopyField(3)),
-            EventResult::Ignored
-        );
-        assert_eq!(
-            state.clipboard.content.as_deref(),
-            Some("hunter2"),
-            "pressing a blank row must not throw away what was copied a \
-             moment ago"
-        );
+        let fields = copyable_fields(&state);
+        if let Some(index) = fields.iter().position(|(_, v)| v.is_empty()) {
+            assert!(!copy_field(&mut state, index));
+            assert_eq!(state.copy_refused, None);
+        }
     }
 
     #[test]
@@ -9655,7 +9490,10 @@ mod tests {
             press(&mut state, Target::CopyField(99)),
             EventResult::Ignored
         );
-        assert_eq!(state.clipboard.content, None);
+        assert_eq!(
+            state.copy_refused, None,
+            "a press past the fields was answered"
+        );
     }
 
     #[test]
@@ -9665,20 +9503,6 @@ mod tests {
         assert_eq!(
             press(&mut state, Target::CopyField(0)),
             EventResult::Ignored
-        );
-    }
-
-    #[test]
-    fn the_clipboard_clears_itself_after_the_timeout() {
-        let mut state = state_with_login();
-        press(&mut state, Target::CopyField(2));
-        assert!(state.clipboard.content.is_some());
-        state.tick(u64::from(CLIPBOARD_CLEAR_SECONDS).saturating_mul(1000));
-        state.tick(1000);
-        assert_eq!(
-            state.clipboard.content, None,
-            "the auto-clear was written and could never run, because nothing \
-             ever put anything on the clipboard to clear"
         );
     }
 
@@ -9784,21 +9608,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn a_copy_is_stamped_with_the_time_it_happened() {
-        let mut state = state_with_login();
-        state.now = 10_000;
-        press(&mut state, Target::CopyField(2));
-        // One second later it is still there; the clear is thirty seconds off,
-        // not thirty seconds after the epoch.
-        state.tick(1000);
-        assert_eq!(
-            state.clipboard.content.as_deref(),
-            Some("hunter2"),
-            "a copy stamped with zero is one the auto-clear thinks is already ancient"
-        );
     }
 
     #[test]

@@ -447,6 +447,7 @@ pub mod spawn;
 pub mod stat;
 pub mod statvfs;
 pub mod stdio;
+pub mod stdio_mem;
 pub mod stdlib;
 pub mod string;
 pub mod strings;

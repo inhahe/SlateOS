@@ -66,9 +66,10 @@ pub extern "C" fn exit(status: i32) -> ! {
     exit_list::run_thread_dtors();
     exit_list::run(Which::Exit, status);
 
-    // POSIX: flush all open output streams before termination.
-    // This ensures buffered printf/fputs output is not lost.
-    crate::stdio::fflush(core::ptr::null_mut());
+    // Every stream's output flushed, and every used input stream's
+    // descriptor moved back to where the program stopped reading --
+    // glibc's `_IO_cleanup`.
+    crate::stdio::exit_cleanup();
 
     #[allow(clippy::used_underscore_items)]
     crate::process::_exit(status);

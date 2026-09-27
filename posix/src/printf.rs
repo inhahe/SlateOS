@@ -224,6 +224,17 @@ const PRINTF_BUF_SIZE: usize = 4096;
 /// count: every output over 4096 bytes was cut at 4096, silently, and the
 /// return value said it had all been written.
 fn format_to_sink(sink: Sink, fmt: *const u8, args: &mut Args) -> i32 {
+    // A stream is held for the whole call, as glibc's `vfprintf` holds it, so
+    // another thread's output cannot land in the middle of this one's; and a
+    // wide stream is refused, as glibc refuses it (-1, `errno` untouched).
+    let _held = if let Sink::Stream(stream) = &sink {
+        match crate::stdio::lock_byte_stream(*stream) {
+            Some(guard) => Some(guard),
+            None => return -1,
+        }
+    } else {
+        None
+    };
     let mut buf = [0u8; PRINTF_BUF_SIZE];
     let mut dst = FmtOutput::streaming(buf.as_mut_ptr(), PRINTF_BUF_SIZE, sink);
     let n = format_into(&mut dst, fmt, args);
@@ -732,8 +743,10 @@ unsafe fn narrow_wide_format(fmt: *const crate::wchar::WcharT) -> Option<*mut u8
 /// argument with a broken sequence -- is `EILSEQ` with nothing written, as it
 /// would be when glibc converts it to a wide string.
 ///
-/// Stream orientation (`fwide`) is not modelled, so mixing this with narrow
-/// output on one stream -- undefined in C -- simply interleaves the bytes.
+/// The stream is held for the call and claimed wide, as glibc's `ORIENT`
+/// claims it: on a byte stream -- one `printf` or `fputs` has written -- this
+/// fails with -1, and a later byte call on this one fails in turn.  A NULL
+/// stream is `EBADF` (§1120).
 ///
 /// # Safety
 ///
@@ -745,10 +758,13 @@ pub unsafe extern "C" fn vfwprintf(
     fmt: *const crate::wchar::WcharT,
     ap: *mut VaList,
 ) -> i32 {
-    if stream.is_null() || fmt.is_null() || ap.is_null() {
+    if fmt.is_null() || ap.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
+    let Some(ws) = crate::stdio::lock_wide_stream(stream) else {
+        return -1;
+    };
     // SAFETY: `fmt` is a valid wide string (caller contract).
     let Some(narrow_fmt) = (unsafe { narrow_wide_format(fmt) }) else {
         return -1;
@@ -773,7 +789,7 @@ pub unsafe extern "C" fn vfwprintf(
         Ok(count) => {
             #[allow(clippy::cast_sign_loss)]
             let len = bytes as usize;
-            let written = crate::stdio::write_stream(stream, out, len);
+            let written = crate::stdio::write_stream(ws.stream(), out, len);
             if usize::try_from(written).is_ok_and(|w| w == len) {
                 count
             } else {
@@ -4477,15 +4493,29 @@ mod tests {
     /// ring 3 by services/ctest-printf-streams).
     #[test]
     fn vfwprintf_refuses_before_writing() {
+        static WRITES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        unsafe extern "C" fn count_write(_: *mut core::ffi::c_void, _: *const u8, n: usize) -> isize {
+            WRITES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            n as isize
+        }
         let f = wide("x=%s");
-        // A stream pointer that must never be used: every case below fails
-        // before the write.
-        let stream = core::ptr::dangling_mut::<u8>();
+        // A stream whose far end must never be reached: every case below
+        // fails before the write.
+        let io = crate::stdio::CookieIoFunctions {
+            read: None,
+            write: Some(count_write),
+            seek: None,
+            close: None,
+        };
+        let stream = unsafe {
+            crate::stdio::fopencookie(core::ptr::null_mut(), c"w".as_ptr().cast(), io)
+        };
+        assert!(!stream.is_null());
         crate::errno::set_errno(0);
         let n = with_valist(&[0], &[], |ap| unsafe {
             vfwprintf(core::ptr::null_mut(), f.as_ptr(), ap)
         });
-        assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EINVAL));
+        assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EBADF), "NULL is no stream (§1120)");
         let n = with_valist(&[0], &[], |_| unsafe {
             vfwprintf(stream, f.as_ptr(), core::ptr::null_mut())
         });
@@ -4504,6 +4534,8 @@ mod tests {
             vfwprintf(stream, bad_fmt.as_ptr(), ap)
         });
         assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EILSEQ));
+        assert_eq!(crate::stdio::fclose(stream), 0);
+        assert_eq!(WRITES.load(core::sync::atomic::Ordering::Relaxed), 0, "nothing reached the far end");
     }
 
     /// The buffer need not be zeroed. `format_core` does not terminate what it

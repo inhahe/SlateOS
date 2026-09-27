@@ -1586,7 +1586,15 @@ pub extern "C" fn tmpfile() -> *mut u8 {
         return core::ptr::null_mut();
     }
     // Return a FILE* (not a raw fd) per POSIX.
-    crate::stdio::fdopen(fd, c"w+".as_ptr().cast::<u8>())
+    // SAFETY: a C string for the mode.
+    let f = unsafe { crate::stdio::fdopen(fd, c"w+".as_ptr().cast::<u8>()) };
+    if f.is_null() {
+        // The descriptor is ours to close if no stream took it.
+        let e = crate::errno::get_errno();
+        crate::file::close(fd);
+        crate::errno::set_errno(e);
+    }
+    f
 }
 
 // ---------------------------------------------------------------------------

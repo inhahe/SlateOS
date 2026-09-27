@@ -28,7 +28,7 @@
 //! - `wcscasecmp`, `wcsncasecmp` — case-insensitive wide string comparison
 //! - `fputwc`, `fgetwc`, `putwc`, `getwc`, `putwchar`, `getwchar` — wide char I/O
 //! - `fputws`, `fgetws` — wide string I/O
-//! - `ungetwc` — push back wide character (ASCII only; multi-byte is best-effort)
+//! - `ungetwc` — push back a wide character, whatever its UTF-8 length
 //! - `wcsftime` — format date/time as wide string (delegates to narrow strftime)
 
 /// Wide character type (32-bit Unicode code point).
@@ -2417,207 +2417,299 @@ pub unsafe extern "C" fn wcsncasecmp(s1: *const WcharT, s2: *const WcharT, n: us
 // ---------------------------------------------------------------------------
 // Wide character I/O
 // ---------------------------------------------------------------------------
+//
+// A stream holds the multibyte form of what the wide calls read and write --
+// UTF-8 here, the only encoding this library has -- and these convert at the
+// edge, through `stdio::WideStream`: the stream is held for the call and
+// claimed wide, as glibc's `_IO_fwide(fp, 1)` claims it, so a wide call on a
+// byte stream fails (and a byte call on a wide one; `stdio.rs` has that half).
+// A byte sequence that is no character is `EILSEQ` and a stream error, as
+// glibc's converter makes it.
 
-/// Write a wide character to a stream.
-///
-/// Encodes `wc` as UTF-8 and writes the bytes to `stream`.
-/// Returns `wc` on success, `WEOF` on error.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::indexing_slicing)]
-pub unsafe extern "C" fn fputwc(wc: WcharT, stream: *mut u8) -> WcharT {
-    let cp = wc as u32;
-    let mut buf = [0u8; 4];
-    let len = if cp < 0x80 {
-        buf[0] = cp as u8;
-        1
-    } else if cp < 0x800 {
-        buf[0] = 0xC0 | (cp >> 6) as u8;
-        buf[1] = 0x80 | (cp & 0x3F) as u8;
-        2
-    } else if cp < 0x1_0000 {
-        buf[0] = 0xE0 | (cp >> 12) as u8;
-        buf[1] = 0x80 | ((cp >> 6) & 0x3F) as u8;
-        buf[2] = 0x80 | (cp & 0x3F) as u8;
-        3
-    } else if cp <= 0x10_FFFF {
-        buf[0] = 0xF0 | (cp >> 18) as u8;
-        buf[1] = 0x80 | ((cp >> 12) & 0x3F) as u8;
-        buf[2] = 0x80 | ((cp >> 6) & 0x3F) as u8;
-        buf[3] = 0x80 | (cp & 0x3F) as u8;
-        4
-    } else {
-        crate::errno::set_errno(crate::errno::EILSEQ);
-        return WEOF;
-    };
-
-    let mut i: usize = 0;
-    while i < len {
-        if crate::stdio::fputc(i32::from(buf[i]), stream) < 0 {
-            return WEOF;
-        }
-        i = i.wrapping_add(1);
+/// `wc` as UTF-8 in `buf`: the length, or `None` for no character (a
+/// surrogate, or above U+10FFFF -- glibc's UTF-8 converter refuses both).
+fn encode_wide(wc: WcharT, buf: &mut [u8; 4]) -> Option<usize> {
+    let cp = u32::try_from(wc).ok()?;
+    match utf8_encode(cp, buf) {
+        0 => None,
+        n => Some(n),
     }
-    wc
 }
 
-/// Read a wide character from a stream.
-///
-/// Reads one UTF-8 encoded character from `stream` and returns
-/// the wide character value.  Returns `WEOF` on error or EOF.
+/// The next character from `ws`: `Ok(Some(wc))`, `Ok(None)` at end of file
+/// or on a read error (the stream says which), or `Err(())` for a sequence
+/// that is no character -- over-long, a surrogate, out of range, cut short
+/// -- after which the stream is in error and `errno` is `EILSEQ`
+/// ([`BadSequence`]).  A byte
+/// that cannot continue the sequence is left to be read again.
+fn read_wide(ws: &crate::stdio::WideStream) -> Result<Option<WcharT>, BadSequence> {
+    let first = ws.getc();
+    let Ok(b0) = u8::try_from(first) else {
+        return Ok(None);
+    };
+    let (len, init, min) = match b0 {
+        0x00..=0x7f => return Ok(Some(WcharT::from(b0))),
+        0xc2..=0xdf => (2, u32::from(b0 & 0x1f), 0x80),
+        0xe0..=0xef => (3, u32::from(b0 & 0x0f), 0x800),
+        0xf0..=0xf4 => (4, u32::from(b0 & 0x07), 0x1_0000),
+        _ => return Err(bad_sequence(ws)),
+    };
+    let mut cp = init;
+    for _ in 1..len {
+        let next = ws.getc();
+        let Ok(b) = u8::try_from(next) else {
+            // Cut short by end of file or an error: not a character.
+            return Err(bad_sequence(ws));
+        };
+        if b & 0xc0 != 0x80 {
+            let _ = ws.unget(b); // there is room: one byte was just read
+            return Err(bad_sequence(ws));
+        }
+        cp = (cp << 6) | u32::from(b & 0x3f);
+    }
+    if cp < min || char::from_u32(cp).is_none() {
+        return Err(bad_sequence(ws));
+    }
+    Ok(WcharT::try_from(cp).ok())
+}
+
+/// A byte sequence that was no character, already reported: `EILSEQ` and a
+/// stream error.
+struct BadSequence;
+
+/// Report a byte sequence that is no character: `EILSEQ` and a stream error,
+/// as glibc's converter reports it.
+fn bad_sequence(ws: &crate::stdio::WideStream) -> BadSequence {
+    crate::errno::set_errno(crate::errno::EILSEQ);
+    ws.set_error();
+    BadSequence
+}
+
+/// Write `wc` to `ws`: `false` on a write error or for no character
+/// (`EILSEQ`, and a stream error).
+fn write_wide(ws: &crate::stdio::WideStream, wc: WcharT) -> bool {
+    let mut buf = [0u8; 4];
+    let Some(len) = encode_wide(wc, &mut buf) else {
+        let _ = bad_sequence(ws); // reported; the caller says WEOF
+        return false;
+    };
+    buf.get(..len).unwrap_or(&[]).iter().all(|&b| ws.putc(b))
+}
+
+/// Write a wide character: `wc`, or `WEOF` on an error, for a character
+/// UTF-8 cannot encode (`EILSEQ`), or on a byte stream.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fputwc(wc: WcharT, stream: *mut u8) -> WcharT {
+    let Some(ws) = crate::stdio::lock_wide_stream(stream) else {
+        return WEOF;
+    };
+    if write_wide(&ws, wc) { wc } else { WEOF }
+}
+
+/// Read a wide character: `WEOF` at end of file, on an error, for a byte
+/// sequence that is no character (`EILSEQ`), or on a byte stream.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fgetwc(stream: *mut u8) -> WcharT {
-    let first = crate::stdio::fgetc(stream);
-    if first < 0 {
-        return WEOF;
-    }
-    let b0 = first as u8;
-
-    // Single-byte ASCII.
-    if b0 < 0x80 {
-        return WcharT::from(b0);
-    }
-
-    // Determine expected length and initial bits.
-    let (expected_len, mut cp): (usize, u32) = if b0 & 0xE0 == 0xC0 {
-        (2, u32::from(b0 & 0x1F))
-    } else if b0 & 0xF0 == 0xE0 {
-        (3, u32::from(b0 & 0x0F))
-    } else if b0 & 0xF8 == 0xF0 {
-        (4, u32::from(b0 & 0x07))
-    } else {
-        crate::errno::set_errno(crate::errno::EILSEQ);
+    let Some(ws) = crate::stdio::lock_wide_stream(stream) else {
         return WEOF;
     };
-
-    // Read continuation bytes.
-    let mut i: usize = 1;
-    while i < expected_len {
-        let next = crate::stdio::fgetc(stream);
-        if next < 0 {
-            return WEOF;
-        }
-        let nb = next as u8;
-        if nb & 0xC0 != 0x80 {
-            crate::errno::set_errno(crate::errno::EILSEQ);
-            return WEOF;
-        }
-        cp = (cp << 6) | u32::from(nb & 0x3F);
-        i = i.wrapping_add(1);
+    match read_wide(&ws) {
+        Ok(Some(wc)) => wc,
+        _ => WEOF,
     }
-
-    cp as WcharT
 }
 
-/// Write a wide character to a stream (alias for `fputwc`).
+/// `fputwc`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn putwc(wc: WcharT, stream: *mut u8) -> WcharT {
+    // SAFETY: forwarded.
     unsafe { fputwc(wc, stream) }
 }
 
-/// Read a wide character from a stream (alias for `fgetwc`).
+/// `fgetwc`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getwc(stream: *mut u8) -> WcharT {
+    // SAFETY: forwarded.
     unsafe { fgetwc(stream) }
 }
 
-/// Write a wide character to stdout.
+/// `fputwc(wc, stdout)`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putwchar(wc: WcharT) -> WcharT {
+    // SAFETY: `stdout` is a stream.
     unsafe { fputwc(wc, crate::stdio::stdout_stream()) }
 }
 
-/// Read a wide character from stdin.
+/// `fgetwc(stdin)`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getwchar() -> WcharT {
-    // SAFETY: `stdin_stream` is standard input.
+    // SAFETY: `stdin` is a stream.
     unsafe { fgetwc(crate::stdio::stdin_stream()) }
 }
 
-/// Push back a wide character onto a stream.
-///
-/// Only one character of pushback is guaranteed.  Returns `wc` on
-/// success, `WEOF` if pushback fails.  We encode the wide character
-/// back to UTF-8 and push the first byte via `ungetc`.  Since our
-/// stdio only supports one byte of pushback, this only works reliably
-/// for ASCII characters; multi-byte pushback is best-effort.
+/// `fputwc`: the stream's lock is recursive, so taking it again for a caller
+/// that holds it costs a count.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fputwc_unlocked(wc: WcharT, stream: *mut u8) -> WcharT {
+    // SAFETY: forwarded.
+    unsafe { fputwc(wc, stream) }
+}
+
+/// `fgetwc`, as [`fputwc_unlocked`] is `fputwc`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fgetwc_unlocked(stream: *mut u8) -> WcharT {
+    // SAFETY: forwarded.
+    unsafe { fgetwc(stream) }
+}
+
+/// `putwc`, as [`fputwc_unlocked`] is `fputwc`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn putwc_unlocked(wc: WcharT, stream: *mut u8) -> WcharT {
+    // SAFETY: forwarded.
+    unsafe { fputwc(wc, stream) }
+}
+
+/// `getwc`, as [`fputwc_unlocked`] is `fputwc`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getwc_unlocked(stream: *mut u8) -> WcharT {
+    // SAFETY: forwarded.
+    unsafe { fgetwc(stream) }
+}
+
+/// `putwchar`, as [`fputwc_unlocked`] is `fputwc`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn putwchar_unlocked(wc: WcharT) -> WcharT {
+    putwchar(wc)
+}
+
+/// `getwchar`, as [`fputwc_unlocked`] is `fputwc`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getwchar_unlocked() -> WcharT {
+    getwchar()
+}
+
+/// Push a wide character back: its UTF-8 goes back into the stream, so the
+/// next `fgetwc` reads it again, whatever its length.  `wc`, or `WEOF` for
+/// `WEOF`, a character UTF-8 cannot encode (`EILSEQ`), a byte stream, or no
+/// room.  Clears end of file.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn ungetwc(wc: WcharT, stream: *mut u8) -> WcharT {
     if wc == WEOF {
         return WEOF;
     }
-    // For ASCII, push back directly.
-    let cp = wc as u32;
-    if cp < 0x80 {
-        if crate::stdio::ungetc(cp as i32, stream) < 0 {
-            return WEOF;
-        }
-        return wc;
+    let Some(ws) = crate::stdio::lock_wide_stream(stream) else {
+        return WEOF;
+    };
+    let mut buf = [0u8; 4];
+    let Some(len) = encode_wide(wc, &mut buf) else {
+        crate::errno::set_errno(crate::errno::EILSEQ);
+        return WEOF;
+    };
+    if buf.get(..len).unwrap_or(&[]).iter().rev().all(|&b| ws.unget(b)) {
+        wc
+    } else {
+        WEOF
     }
-    // Multi-byte: best-effort single-byte pushback of first UTF-8 byte.
-    // This is a known limitation — full multi-byte pushback would
-    // require expanding the stdio ungetc buffer.
-    crate::errno::set_errno(crate::errno::EILSEQ);
-    WEOF
 }
 
-/// Write a wide string to a stream.
+/// `fputws`'s body.
 ///
-/// Writes each character of the null-terminated wide string `s` to
-/// `stream` using `fputwc`.  Does NOT write the null terminator.
-/// Returns a non-negative value on success, `WEOF` on error.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn fputws(s: *const WcharT, stream: *mut u8) -> i32 {
+/// # Safety
+///
+/// `s` is a wide C string or NULL.
+unsafe fn fputws_raw(s: *const WcharT, stream: *mut u8) -> i32 {
     if s.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
-    let mut i: usize = 0;
+    let Some(ws) = crate::stdio::lock_wide_stream(stream) else {
+        return -1;
+    };
+    let mut i = 0usize;
     loop {
+        // SAFETY: a wide C string; the loop stops at its terminator.
         let wc = unsafe { *s.add(i) };
         if wc == 0 {
-            return 0; // Success.
+            return 1;
         }
-        if unsafe { fputwc(wc, stream) } == WEOF {
+        if !write_wide(&ws, wc) {
             return -1;
         }
         i = i.wrapping_add(1);
     }
 }
 
-/// Read a wide string from a stream.
-///
-/// Reads at most `n-1` wide characters from `stream` into `ws`,
-/// stopping at a newline (which is included) or EOF.  The resulting
-/// string is null-terminated.  Returns `ws` on success, null on
-/// error or EOF with no characters read.
+/// Write a wide string: 1 (glibc's answer), or -1 on an error, for a
+/// character UTF-8 cannot encode, or on a byte stream.  A NULL `s` is
+/// `EFAULT` (§1115).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn fgetws(ws: *mut WcharT, n: i32, stream: *mut u8) -> *mut WcharT {
-    if ws.is_null() || n <= 0 {
+pub unsafe extern "C" fn fputws(s: *const WcharT, stream: *mut u8) -> i32 {
+    // SAFETY: forwarded.
+    unsafe { fputws_raw(s, stream) }
+}
+
+/// `fputws`, as [`fputwc_unlocked`] is `fputwc`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fputws_unlocked(s: *const WcharT, stream: *mut u8) -> i32 {
+    // SAFETY: forwarded.
+    unsafe { fputws_raw(s, stream) }
+}
+
+/// Read a wide line of at most `n - 1` characters, through its newline:
+/// glibc's `fgetws`, whose NULL means nothing was read, or an error new to
+/// this call stopped it (not `EAGAIN`); an error already on the stream does
+/// not count.  An invalid sequence is such an error.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fgetws(buf: *mut WcharT, n: i32, stream: *mut u8) -> *mut WcharT {
+    if n <= 0 {
         return core::ptr::null_mut();
     }
-    let max = (n as usize).wrapping_sub(1); // Reserve space for null terminator.
-    let mut count: usize = 0;
-    while count < max {
-        let wc = unsafe { fgetwc(stream) };
-        if wc == WEOF {
-            if count == 0 {
-                return core::ptr::null_mut(); // EOF with nothing read.
+    if buf.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return core::ptr::null_mut();
+    }
+    if n == 1 {
+        // SAFETY: `buf` holds one character.
+        unsafe { *buf = 0 };
+        return buf;
+    }
+    let Some(ws) = crate::stdio::lock_wide_stream(stream) else {
+        return core::ptr::null_mut();
+    };
+    let old_error = ws.error();
+    ws.clear_error();
+    let room = usize::try_from(n).unwrap_or(0).wrapping_sub(1);
+    let mut count = 0usize;
+    while count < room {
+        match read_wide(&ws) {
+            Ok(Some(wc)) => {
+                // SAFETY: `count < room < n` characters fit in `buf`.
+                unsafe { *buf.add(count) = wc };
+                count = count.wrapping_add(1);
+                if wc == WcharT::from(b'\n') {
+                    break;
+                }
             }
-            break;
-        }
-        unsafe {
-            *ws.add(count) = wc;
-        }
-        count = count.wrapping_add(1);
-        // Stop after newline.
-        if wc == WcharT::from(b'\n') {
-            break;
+            _ => break,
         }
     }
-    // Null-terminate.
-    unsafe {
-        *ws.add(count) = 0;
+    let new_error = ws.error();
+    if old_error {
+        ws.set_error();
     }
-    ws
+    if count == 0 || (new_error && crate::errno::get_errno() != crate::errno::EAGAIN) {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `count <= n - 1`, so the terminator fits.
+    unsafe { *buf.add(count) = 0 };
+    buf
+}
+
+/// `fgetws`, as [`fputwc_unlocked`] is `fputwc`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fgetws_unlocked(buf: *mut WcharT, n: i32, stream: *mut u8) -> *mut WcharT {
+    // SAFETY: forwarded.
+    unsafe { fgetws(buf, n, stream) }
 }
 
 /// Own archive member — gnulib replaces `wmempcpy`.
@@ -5632,192 +5724,8 @@ mod tests {
         assert_eq!(&dst[..3], b"ABC");
     }
 
-    // -- fputwc --
-
-    #[test]
-    fn test_fputwc_ascii() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        // Writing an ASCII character to stdout should succeed.
-        let ret = unsafe { fputwc(b'A' as WcharT, crate::stdio::stdout_stream()) };
-        // On test host, write to stdout may or may not succeed,
-        // but the return value should be either the char or WEOF.
-        assert!(ret == b'A' as WcharT || ret == WEOF);
-    }
-
-    #[test]
-    fn test_fputwc_invalid_codepoint() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        // Codepoints above U+10FFFF are invalid → WEOF + EILSEQ.
-        crate::errno::set_errno(0);
-        let ret = unsafe { fputwc(0x11_0000, crate::stdio::stdout_stream()) };
-        assert_eq!(ret, WEOF);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EILSEQ);
-    }
-
-    #[test]
-    fn test_fputwc_two_byte_utf8() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        // U+00E9 (é) encodes as 2-byte UTF-8 (0xC3 0xA9).
-        let ret = unsafe { fputwc(0xE9, crate::stdio::stdout_stream()) };
-        assert!(ret == 0xE9 || ret == WEOF);
-    }
-
-    #[test]
-    fn test_fputwc_three_byte_utf8() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        // U+4E16 (世) encodes as 3-byte UTF-8.
-        let ret = unsafe { fputwc(0x4E16, crate::stdio::stdout_stream()) };
-        assert!(ret == 0x4E16 || ret == WEOF);
-    }
-
-    #[test]
-    fn test_fputwc_four_byte_utf8() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        // U+1F600 (😀) encodes as 4-byte UTF-8.
-        let ret = unsafe { fputwc(0x1F600, crate::stdio::stdout_stream()) };
-        assert!(ret == 0x1F600 || ret == WEOF);
-    }
-
-    #[test]
-    fn test_fputwc_max_valid_codepoint() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        // U+10FFFF is the maximum valid codepoint.
-        let ret = unsafe { fputwc(0x10_FFFF, crate::stdio::stdout_stream()) };
-        assert!(ret == 0x10_FFFF || ret == WEOF);
-    }
-
-    // -- fgetwc --
-
-    #[test]
-    fn test_fgetwc_stdin_no_crash() {
-        // On test host, stdin may return EOF immediately.
-        let _ret = unsafe { fgetwc(crate::stdio::stdin_stream()) };
-    }
-
-    // -- putwc / getwc (aliases) --
-
-    #[test]
-    fn test_putwc_ascii() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        let ret = unsafe { putwc(b'X' as WcharT, crate::stdio::stdout_stream()) };
-        assert!(ret == b'X' as WcharT || ret == WEOF);
-    }
-
-    #[test]
-    fn test_getwc_no_crash() {
-        let _ret = unsafe { getwc(crate::stdio::stdin_stream()) };
-    }
-
-    // -- putwchar / getwchar --
-
-    #[test]
-    fn test_putwchar_ascii() {
-        let ret = putwchar(b'!' as WcharT);
-        assert!(ret == b'!' as WcharT || ret == WEOF);
-    }
-
-    #[test]
-    fn test_putwchar_invalid_codepoint() {
-        crate::errno::set_errno(0);
-        let ret = putwchar(0x11_0000);
-        assert_eq!(ret, WEOF);
-    }
-
-    #[test]
-    fn test_getwchar_no_crash() {
-        let _ret = getwchar();
-    }
-
-    // -- ungetwc --
-
-    #[test]
-    fn test_ungetwc_weof_returns_weof() {
-        let ret = unsafe { ungetwc(WEOF, crate::stdio::stdin_stream()) };
-        assert_eq!(ret, WEOF);
-    }
-
-    #[test]
-    fn test_ungetwc_ascii() {
-        // Push back an ASCII character via ungetwc, which internally
-        // calls ungetc.  The return value should be the pushed-back char.
-        let ret = unsafe { ungetwc(b'Q' as WcharT, crate::stdio::stdin_stream()) };
-        // ungetc pushes back onto stdin's ungetc_byte field.
-        // It should succeed for ASCII.
-        assert_eq!(ret, b'Q' as WcharT);
-        // Read it back to restore state.
-        let readback = crate::stdio::fgetc(crate::stdio::stdin_stream());
-        assert_eq!(readback, b'Q' as i32);
-    }
-
-    #[test]
-    fn test_ungetwc_multibyte_returns_weof() {
-        // Multi-byte pushback is not supported → WEOF + EILSEQ.
-        crate::errno::set_errno(0);
-        let ret = unsafe { ungetwc(0x00E9, crate::stdio::stdin_stream()) };
-        assert_eq!(ret, WEOF);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EILSEQ);
-    }
-
-    // -- fputws --
-
-    #[test]
-    fn test_fputws_null_returns_error() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        let ret = unsafe { fputws(core::ptr::null(), crate::stdio::stdout_stream()) };
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn test_fputws_empty_string_succeeds() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        // An empty wide string (just null terminator) should succeed.
-        let ws: [WcharT; 1] = [0];
-        let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::stdout_stream()) };
-        assert_eq!(ret, 0);
-    }
-
-    #[test]
-    fn test_fputws_ascii_string() {
-        let _g = crate::stdio::lock_std_streams_for_test();
-        let ws: [WcharT; 4] = [b'H' as WcharT, b'i' as WcharT, b'!' as WcharT, 0];
-        let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::stdout_stream()) };
-        // 0 = success, -1 = write failed on host
-        assert!(ret == 0 || ret == -1);
-    }
-
-    // -- fgetws --
-
-    #[test]
-    fn test_fgetws_null_ws_returns_null() {
-        let ret = unsafe {
-            fgetws(
-                core::ptr::null_mut(),
-                10,
-                crate::stdio::stdin_stream(),
-            )
-        };
-        assert!(ret.is_null());
-    }
-
-    #[test]
-    fn test_fgetws_zero_n_returns_null() {
-        let mut buf: [WcharT; 8] = [0; 8];
-        let ret = unsafe { fgetws(buf.as_mut_ptr(), 0, crate::stdio::stdin_stream()) };
-        assert!(ret.is_null());
-    }
-
-    #[test]
-    fn test_fgetws_negative_n_returns_null() {
-        let mut buf: [WcharT; 8] = [0; 8];
-        let ret = unsafe {
-            fgetws(
-                buf.as_mut_ptr(),
-                -1,
-                crate::stdio::stdin_stream(),
-            )
-        };
-        assert!(ret.is_null());
-    }
+    // The wide stream calls (fputwc, fgetwc, ungetwc, fputws, fgetws) are
+    // tested in stdio.rs, over in-memory streams whose bytes can be checked.
 
     // -- wcswidth --
 

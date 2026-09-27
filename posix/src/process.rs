@@ -917,6 +917,11 @@ pub extern "C" fn fork() -> PidT {
     // leaving child/parent state consistent.
     crate::pthread::atfork_run_prepare();
 
+    // The stream list is held across the fork, as glibc's `_IO_list_lock`
+    // is, so the child's is not caught half-linked; it is taken before the
+    // heap, in glibc's order.
+    crate::stdio::lock_for_fork();
+
     // The heap is taken last and given back first -- after the `prepare`
     // handlers and before the `child`/`parent` ones, because handlers may
     // allocate -- which is glibc's order. Held across the system call, it
@@ -945,8 +950,10 @@ pub extern "C" fn fork() -> PidT {
         // One thread: this one.  Its `pthread_exit` is the last.
         crate::pthread::reset_live_threads_after_fork();
         crate::malloc::unlock_after_fork_child();
+        crate::stdio::unlock_after_fork_child();
     } else {
         crate::malloc::unlock_after_fork_parent();
+        crate::stdio::unlock_after_fork_parent();
     }
 
     if pid == 0 {

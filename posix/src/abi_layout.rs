@@ -644,6 +644,17 @@ pub(crate) fn abi_asserts() -> String {
         mnt_freq,
         mnt_passno
     );
+    abi!(
+        out,
+        hdrs,
+        crate::stdio::CookieIoFunctions,
+        "cookie_io_functions_t",
+        "stdio.h",
+        read,
+        write,
+        seek,
+        close
+    );
 
     // --- more by-value types, and the rest of the ordinary libc surface -----
     //

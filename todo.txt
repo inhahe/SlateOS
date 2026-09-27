@@ -7872,7 +7872,9 @@ Remaining net improvements (diminishing returns):
   VT100 escape sequences.  Will need real terminal mode support when
   porting interactive programs (vim, less, etc.).
 
-- (DONE) stdio buffering: Replaced unbuffered FILE* sentinels with real
+- (DONE, SUPERSEDED 2026-09-27 by the rewrite in design-decisions.md §1121 --
+  the pool, the 1 KiB buffers and the stdout rule below are gone) stdio
+  buffering: Replaced unbuffered FILE* sentinels with real
   FILE structs backed by 1 KiB internal buffers.  stdout is line-buffered
   (flushes on '\n'), stderr is unbuffered, fopen'd files fully-buffered.
   Static pool of 16 FILE slots for fopen'd files.  Read-ahead buffering

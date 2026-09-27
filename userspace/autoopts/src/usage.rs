@@ -520,10 +520,10 @@ impl Options {
                 out.put(&bug_line(prog.bug_addr));
             }
             _ => {
-                let mut msg = b"error: version option argument '".to_vec();
-                msg.push(ch);
+                let mut msg = b"error: version option argument ".to_vec();
+                msg.extend_from_slice(&crate::shown_in_quotes(&[ch]));
                 msg.extend_from_slice(
-                    b"' invalid.  Use:\n\t'v' - version only\n\t'c' - version and copyright\n\t'n' - version and full copyright notice\n",
+                    b" invalid.  Use:\n\t'v' - version only\n\t'c' - version and copyright\n\t'n' - version and full copyright notice\n",
                 );
                 ulclosestream::stderr_write(&msg);
                 return Exit(1);

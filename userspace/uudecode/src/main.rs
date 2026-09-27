@@ -38,6 +38,14 @@
 //!   `invalid input`), and error(3)'s name the program by its argv\[0\].
 //! * Failures OR together across files, except the ones that `die`, which
 //!   end the run on the spot with 2.
+//!
+//! # Where this port departs
+//!
+//! * A name in a message -- an input file, an output file, a `~user` -- is
+//!   [`autoopts::shown`]: upstream's bytes where they are printable, `\012`
+//!   and its like where not, so a `begin` line naming `x\nuudecode: ...`
+//!   cannot forge a line of stderr. Upstream prints the raw bytes
+//!   (design-decisions.md §1033).
 
 use std::env;
 use std::fs::{self, File};
@@ -434,7 +442,7 @@ impl Run<'_> {
     fn decode(&mut self, inname: &[u8], input: &mut Lines) -> Result<i32, Exit> {
         let mut buf = vec![0u8; LINE_BUF];
         let bad_beginning =
-            |r: &Run<'_>| r.invalid(&[inname, b": Invalid or missing 'begin' line\n"]);
+            |r: &Run<'_>| r.invalid(&[&autoopts::shown(inname), b": Invalid or missing 'begin' line\n"]);
         let (mode, do_base64, encoded) = loop {
             if input.fgets(&mut buf).is_none() {
                 return Err(bad_beginning(self));
@@ -523,7 +531,7 @@ impl Run<'_> {
                 self.out.s.error().is_some()
             };
             if failed {
-                let mut msg = outname.clone();
+                let mut msg = autoopts::shown(&outname);
                 msg.extend_from_slice(b": Write error");
                 self.error(None, &msg);
                 return Ok(EXIT_NO_OUTPUT);
@@ -550,7 +558,7 @@ impl Run<'_> {
             },
         );
         if !ok {
-            return Err(self.invalid(&[b"invalid base64 encoded name: ", &name]));
+            return Err(self.invalid(&[b"invalid base64 encoded name: ", &autoopts::shown(&name)]));
         }
         store(buf, &decoded);
         Ok(())
@@ -590,7 +598,7 @@ impl Run<'_> {
             let db = pwdb::Db::load();
             let Some(pw) = db.user_by_name(&user) else {
                 let mut msg = b"No user '".to_vec();
-                msg.extend_from_slice(&user);
+                msg.extend_from_slice(&autoopts::shown(&user));
                 msg.push(b'\'');
                 self.error(None, &msg);
                 return Ok(None);
@@ -615,7 +623,7 @@ impl Run<'_> {
             && let Err(e) = fs::symlink_metadata(bytes_os(outname))
         {
             let mut msg = b"cannot access ".to_vec();
-            msg.extend_from_slice(outname);
+            msg.extend_from_slice(&autoopts::shown(outname));
             self.error(Some(&e), &msg);
             return Ok(EXIT_NO_OUTPUT);
         }
@@ -624,7 +632,7 @@ impl Run<'_> {
         }
         if let Err(e) = fchmod_stdout(mode & 0o777) {
             let mut msg = b"chmod of ".to_vec();
-            msg.extend_from_slice(outname);
+            msg.extend_from_slice(&autoopts::shown(outname));
             self.error(Some(&e), &msg);
             if !self.opts.have(IGNORE_CHMOD) && env::var_os("POSIXLY_CORRECT").is_none() {
                 return Ok(EXIT_NO_OUTPUT);
@@ -655,7 +663,7 @@ impl Run<'_> {
         let at = |buf: &[u8], i: usize| dec(buf.get(i).copied().unwrap_or(0));
         loop {
             if input.fgets(&mut buf).is_none() {
-                return Err(self.invalid(&[inname, b": Short file"]));
+                return Err(self.invalid(&[&autoopts::shown(inname), b": Short file"]));
             }
             let mut n = at(&buf, 0);
             if n == 0 {
@@ -698,7 +706,7 @@ impl Run<'_> {
         {
             return Ok(EXIT_SUCCESS);
         }
-        Err(self.invalid(&[inname, b": No `end' line"]))
+        Err(self.invalid(&[&autoopts::shown(inname), b": No `end' line"]))
     }
 
     /// `read_base64`: lines through gnulib's decoder until one starts with
@@ -731,7 +739,7 @@ impl Run<'_> {
                 },
             );
             if !ok {
-                return Err(self.invalid(&[inname, b": invalid input"]));
+                return Err(self.invalid(&[&autoopts::shown(inname), b": invalid input"]));
             }
             if decoded.is_empty() {
                 // `fwrite` of zero bytes returns 0, which is not 1.
@@ -773,7 +781,7 @@ fn run(args: Vec<Vec<u8>>, out: &mut Out) -> Result<i32, Exit> {
                 status |= run.decode(f, &mut input)?;
             }
             Err(e) => {
-                run.error(Some(&e), f);
+                run.error(Some(&e), &autoopts::shown(f));
                 status |= EXIT_NO_INPUT;
             }
         }

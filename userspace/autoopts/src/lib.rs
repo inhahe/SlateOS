@@ -63,6 +63,11 @@
 //! * `--save-opts`' warnings pass one argument to a message with two `%s`
 //!   (`save.c`); upstream prints whatever a register held -- nothing when
 //!   `HOME` is unset, a stray byte elsewhere. This port prints nothing there.
+//! * A file name or a word from the command line that reaches a diagnostic is
+//!   [`shown`]: printable bytes as upstream prints them, an octal escape
+//!   (`\012`) for each byte that is not, so no name can start a line of its
+//!   own on stderr or drive the terminal. Upstream writes the raw bytes. For
+//!   every printable name the text is upstream's (design-decisions.md §1033).
 //! * No message catalogs: text is the C locale's, as everywhere in the tree.
 //! * Only what sharutils' descriptors use: argument types none and string,
 //!   optional arguments, disablement names. No equivalence classes, stacked
@@ -554,18 +559,38 @@ impl Options {
     }
 
     /// `fserr`: `die` with "fserr ERRNO (REASON) performing 'OP' on NAME".
+    /// The name is [`shown`]: upstream's bytes, unless they could forge a
+    /// line.
     #[must_use]
     pub fn fserr(&self, code: i32, op: &str, fname: &[u8], err: &io::Error) -> Exit {
         let mut msg = format!(
-            "fserr {} ({}) performing '{op}' on ",
+            "fserr {} ({}) performing {} on ",
             err.raw_os_error().unwrap_or(0),
-            errmsg::strerror(err)
+            errmsg::strerror(err),
+            quoting::escaped_in_quotes(op.as_bytes())
         )
         .into_bytes();
-        msg.extend_from_slice(fname);
+        msg.extend_from_slice(&shown(fname));
         msg.push(b'\n');
         self.die(code, &msg)
     }
+}
+
+/// A file name or a word from the command line, as a diagnostic shows it:
+/// the bytes upstream prints, where they are printable, and an octal escape
+/// for each byte that is not -- so a name holding a newline cannot start a
+/// line of its own on stderr, nor an escape sequence drive the terminal. For
+/// every printable name this is upstream's text exactly (design-decisions.md
+/// §1033, the rule `logger` set).
+#[must_use]
+pub fn shown(text: &[u8]) -> Vec<u8> {
+    quoting::escape_unprintable(text).into_bytes()
+}
+
+/// [`shown`], inside the `'...'` upstream writes around it.
+#[must_use]
+pub fn shown_in_quotes(text: &[u8]) -> Vec<u8> {
+    quoting::escaped_in_quotes(text).into_bytes()
 }
 
 /// An `OsStr` as the bytes the C program would have seen.

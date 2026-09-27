@@ -63,7 +63,7 @@ else
   our_uudecode=$(diff_ours uudecode)
 fi
 
-pass=0; fail=0
+pass=0; fail=0; xfail=0
 W=$DIFF_TMP/w
 RUN=$DIFF_TMP/run
 IN=$DIFF_TMP/in
@@ -298,6 +298,33 @@ check() {
   reset_case
 }
 
+# xcheck LABEL WANT ARGV...: a difference the port makes on purpose. Every part
+# must agree but stderr, where ours must print exactly WANT and upstream
+# something else. Upstream printing WANT too is an XPASS: the difference is
+# gone, and so should this case be.
+xcheck() {
+  local label=$1 want=$2; shift 2
+  run_side ours "$@" || { fail=$((fail + 1)); reset_case; return; }
+  run_side gnu "$@" || { fail=$((fail + 1)); reset_case; return; }
+  local what=
+  printf '%s' "$want" > "$OUT/want"
+  cmp -s "$OUT/ours/stdout" "$OUT/gnu/stdout" || what="$what stdout"
+  cmp -s "$OUT/ours/stderr" "$OUT/want" || what="$what stderr"
+  cmp -s "$OUT/gnu/stderr" "$OUT/want" && what="$what XPASS"
+  cmp -s "$OUT/ours/rc" "$OUT/gnu/rc" || what="$what status"
+  cmp -s "$OUT/ours/world" "$OUT/gnu/world" || what="$what files"
+  cmp -s "$OUT/ours/contents" "$OUT/gnu/contents" || what="$what contents"
+  if [ -z "$what" ]; then
+    pass=$((pass + 1)); xfail=$((xfail + 1))
+  else
+    fail=$((fail + 1))
+    echo "FAIL $label:$what"
+    diff -u --label want --label ours/stderr "$OUT/want" "$OUT/ours/stderr" | head -10 | sed 's/^/    /'
+    echo "    gnu/stderr: $(od -c < "$OUT/gnu/stderr" | head -3 | tr -s ' ')"
+  fi
+  reset_case
+}
+
 # --- uuencode ---------------------------------------------------------------------
 for f in empty n1 n2 n3 n4 n5 n44 n45 n46 n89 n90 n91 n135 all256 zeros big text; do
   C_IN=$IN/$f; check "uuencode <$f" uuencode name
@@ -310,6 +337,11 @@ for m in mode600 mode755 mode4755 mode2755 mode1644 mode777 mode444; do
 done
 check "unreadable input" uuencode "$IN/unreadable" x
 check "missing input" uuencode "$IN/nosuch" x
+# A name that could forge a line of stderr is escaped where upstream prints it
+# raw (design-decisions.md §1033; autoopts' crate docs).
+xcheck "missing input, a newline in its name" \
+  $'uuencode fatal error:\nfserr 2 (No such file or directory) performing \'freopen of stdin\' on no\\012such\n' \
+  uuencode $'no\nsuch' x
 check "directory input" uuencode "$IN" x
 check "input named -" uuencode - x
 for u in 000 022 077 027 0777 0666; do
@@ -513,6 +545,12 @@ check "two files" uudecode "$IN/n3.file.uu" "$IN/n1.file.b64"
 check "two files to stdout" uudecode "$IN/n3.uu" "$IN/n1.b64"
 check "a file, then stdout" uudecode "$IN/n3.file.uu" "$IN/n1.uu"
 check "missing file among others" uudecode "$IN/n3.file.uu" "$IN/nosuch" "$IN/n1.file.uu"
+xcheck "a missing file with a newline in its name" \
+  $'uudecode: no\\012such: No such file or directory\n' \
+  uudecode $'no\nsuch'
+xcheck "-o into a missing directory with a newline in its name" \
+  $'uudecode fatal error:\nfserr 2 (No such file or directory) performing \'freopen-ing for stdout\' on no\\012dir/f\n' \
+  uudecode -o $'no\ndir/f' "$IN/n3.file.uu"
 check "missing file, then a bad one" uudecode "$IN/nosuch" "$IN/h-none"
 check "an unreadable file" uudecode "$IN/unreadable"
 check "a directory" uudecode "$IN"
@@ -526,5 +564,5 @@ C_IN=$IN/n3.uu C_OUT=closed; check "uudecode, stdout closed" uudecode
 C_IN=$IN/n3.file.uu C_OUT=closed; check "uudecode to a file, stdout closed" uudecode
 C_ERR=full; check "uudecode, stderr full" uudecode "$IN/nosuch"
 
-echo "uu-diff: $pass passed, $fail differed"
+echo "uu-diff: $pass passed ($xfail of them expected differences), $fail differed"
 [ "$fail" -eq 0 ]

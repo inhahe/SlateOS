@@ -657,9 +657,9 @@ impl Options {
             .as_bytes(),
         );
         msg.extend_from_slice(op);
-        msg.extend_from_slice(b" for '");
-        msg.extend_from_slice(fname);
-        msg.extend_from_slice(b"'\n");
+        msg.extend_from_slice(b" for ");
+        msg.extend_from_slice(&crate::shown_in_quotes(fname));
+        msg.push(b'\n');
         ulclosestream::stderr_write(&msg);
         Exit(1)
     }

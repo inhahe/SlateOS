@@ -19,6 +19,9 @@ errmsg = { path = "../errmsg" }
 localtime = { path = "../localtime" }
 # system(3) for --more-help's pager: `sh -c`, the one way the tree does it.
 shellcmd = { path = "../shellcmd" }
+# A file name or a typed word in a diagnostic: upstream's bytes where they are
+# printable, octal escapes where not (design-decisions.md §1033).
+quoting = { path = "../quoting" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

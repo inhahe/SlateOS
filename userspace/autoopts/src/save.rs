@@ -19,7 +19,7 @@ use crate::{Options, bytes_os, getenv, st};
 fn save_warn(prog_name: &[u8], what: &[u8]) {
     let mut msg = prog_name.to_vec();
     msg.extend_from_slice(b" warning:  cannot save options - ");
-    msg.extend_from_slice(what);
+    msg.extend_from_slice(&crate::shown(what));
     msg.extend_from_slice(b" not regular file\n");
     ulclosestream::stderr_write(&msg);
 }
@@ -32,7 +32,7 @@ fn errno_line(verb: &str, err: &io::Error, name: &[u8]) {
         errmsg::strerror(err)
     )
     .into_bytes();
-    msg.extend_from_slice(name);
+    msg.extend_from_slice(&crate::shown(name));
     msg.push(b'\n');
     ulclosestream::stderr_write(&msg);
 }

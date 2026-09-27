@@ -244,7 +244,7 @@ impl Options {
                 return Ok(Res::Problem);
             }
             if self.set & pr::LONGOPT == 0 {
-                let msg = cat(&[&self.prog_path, b": illegal option -- ", &word, b"\n"]);
+                let msg = cat(&[&self.prog_path, b": illegal option -- ", &crate::shown(&word), b"\n"]);
                 ulclosestream::stderr_write(&msg);
                 return Ok(Res::Failure);
             }
@@ -273,7 +273,7 @@ impl Options {
             if !self.errstop() {
                 return Ok(Res::Failure);
             }
-            let msg = cat(&[&self.prog_name, b": invalid option name: ", name, b"\n"]);
+            let msg = cat(&[&self.prog_name, b": invalid option name: ", &crate::shown(name), b"\n"]);
             ulclosestream::stderr_write(&msg);
             return Err(self.option_usage(1));
         }
@@ -284,7 +284,7 @@ impl Options {
                 if !self.errstop() {
                     return Ok(Res::Failure);
                 }
-                let msg = cat(&[&self.prog_path, b": illegal option -- ", name, b"\n"]);
+                let msg = cat(&[&self.prog_path, b": illegal option -- ", &crate::shown(name), b"\n"]);
                 ulclosestream::stderr_write(&msg);
                 Err(self.option_usage(1))
             }
@@ -292,7 +292,7 @@ impl Options {
                 if !self.errstop() {
                     return Ok(Res::Failure);
                 }
-                let mut msg = cat(&[&self.prog_path, b": ambiguous option name: ", name]);
+                let mut msg = cat(&[&self.prog_path, b": ambiguous option name: ", &crate::shown(name)]);
                 msg.extend_from_slice(format!(" (matches {ct} options)\n").as_bytes());
                 ulclosestream::stderr_write(&msg);
                 if ct <= 4 {
@@ -417,7 +417,7 @@ impl Options {
         if !self.errstop() {
             return Ok(Res::Failure);
         }
-        let msg = cat(&[&self.prog_path, b": illegal option -- ", &[c], b"\n"]);
+        let msg = cat(&[&self.prog_path, b": illegal option -- ", &crate::shown(&[c]), b"\n"]);
         ulclosestream::stderr_write(&msg);
         Err(self.option_usage(1))
     }

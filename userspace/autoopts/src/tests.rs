@@ -560,3 +560,21 @@ fn pathfind_walks_path_and_skips_empty_elements() {
     assert_eq!(pathfind(Some(path.as_bytes()), b"b/prog"), None);
     assert_eq!(pathfind(None, b"prog"), None);
 }
+
+/// A name in a message is upstream's bytes when they are printable, and
+/// escaped where they could end the line or drive the terminal
+/// (design-decisions.md §1033).
+#[test]
+fn a_name_in_a_message_cannot_forge_a_line() {
+    use crate::{shown, shown_in_quotes};
+    assert_eq!(shown(b"plain name.uu"), b"plain name.uu");
+    assert_eq!(shown("caf\u{e9}".as_bytes()), "caf\u{e9}".as_bytes());
+    assert_eq!(
+        shown(b"x\nuudecode: forged"),
+        br"x\012uudecode: forged".to_vec()
+    );
+    assert_eq!(shown(b"\x1b[31mred"), br"\033[31mred".to_vec());
+    assert_eq!(shown(b"\xff"), br"\377".to_vec());
+    assert_eq!(shown_in_quotes(b"it's"), b"'it's'");
+    assert_eq!(shown_in_quotes(b"a\rb"), br"'a\015b'".to_vec());
+}

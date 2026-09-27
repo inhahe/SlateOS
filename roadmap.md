@@ -1859,6 +1859,13 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The start menu lights what the pointer is over** -- done
+  2026-09-26 (`design-decisions.md` §1406). Nothing in the start menu changed
+  under the pointer until a click; now a program's row, a place, "Shut down",
+  the caret and each power choice light as the reference's `:hover` rules
+  light them, apart from the keyboard's row. The caret names itself, "Power
+  options".
+
 - `[C]` **"Shut down" in one click, the rest behind a caret** -- done
   2026-09-26 (`design-decisions.md` §1405). The start menu's power button was
   "Power", and opened a menu; it is the reference's now: "Shut down", which

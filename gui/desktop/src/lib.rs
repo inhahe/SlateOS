@@ -383,6 +383,9 @@ const POWER_CARET_GAP: f32 = 1.0;
 const POWER_BUTTON_GLASS_ALPHA: u8 = 23;
 /// The line round each part of the power button: the reference's 0.2.
 const POWER_BUTTON_EDGE_ALPHA: u8 = 51;
+/// A part of the power button under the pointer: the reference's
+/// `aero-sm-power-main:hover`, white at 0.2.
+const POWER_BUTTON_LIT_ALPHA: u8 = 51;
 /// The caret's chevron points up, the way the choices behind it open -- the
 /// reference's `crumb` glyph turned by `rotate(-90deg)`.
 const POWER_CARET_ICON: &str = "pan-up";
@@ -543,6 +546,21 @@ const FOLDER_CLOSED_ICON: &str = "pan-end";
 /// How strongly the start menu marks the row the keyboard is on: the accent
 /// at this alpha, under the row's own text.
 const START_MENU_SELECTED_ALPHA: u8 = 70;
+/// A row under the pointer, in the accent: the reference's `aero-sm-app:hover`
+/// wash, a pale tint of its blue -- quieter than the keyboard's row, which
+/// says where Enter goes rather than where the pointer is.
+const START_MENU_LIT_ALPHA: u8 = 36;
+/// The line round a row under the pointer, in the accent: the reference's
+/// `#bcdcf5` edge, which is its blue at about a third.
+const START_MENU_LIT_EDGE_ALPHA: u8 = 90;
+/// A place under the pointer, in the column's text colour: the reference's
+/// `aero-sm-link:hover`, white at 0.16.
+const START_LINK_LIT_ALPHA: u8 = 41;
+/// The line round a place under the pointer: the reference's 0.26.
+const START_LINK_LIT_EDGE_ALPHA: u8 = 66;
+/// A power choice under the pointer, in the accent: the reference's
+/// `aero-sm-power-item:hover`, its blue at 0.3.
+const POWER_MENU_LIT_ALPHA: u8 = 77;
 /// How strongly the start menu draws a hint -- the empty search field's
 /// "Type to search", and what Enter will do when nothing is found: the
 /// menu's text colour at this alpha, quieter than anything that can be
@@ -711,6 +729,31 @@ enum TooltipKey {
     Window(WindowId),
     /// The "Show desktop" strip.
     ShowDesktop,
+    /// The caret at the start menu power button's end, which is only a
+    /// chevron -- the reference's `title="Power options"`.
+    PowerOptions,
+}
+
+/// What in the open start menu the pointer is over, drawn lit as the
+/// reference's `:hover` rules light it: `aero-sm-app`, `aero-sm-link`,
+/// `aero-sm-power-main`, `aero-sm-power-caret` and `aero-sm-power-item`.
+///
+/// A row is its place on screen, not the program in it. The list scrolls
+/// under a resting pointer, and what is lit has to be what the pointer is
+/// over -- the row a click there would reach -- not the program that has
+/// just scrolled out from under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartLit {
+    /// A row of the list, counted from the top of what is showing.
+    Row(usize),
+    /// A place in the places column.
+    Place(StartShortcut),
+    /// The power button's "Shut down".
+    PowerButton,
+    /// The caret at the power button's end.
+    PowerCaret,
+    /// A row of the power choices.
+    PowerRow(usize),
 }
 
 /// A place in the start menu's places column: the user's own folders, as the
@@ -1653,6 +1696,10 @@ pub struct DesktopShell {
     hover_tile: Option<TaskbarSlot>,
     /// Whether the pointer is on the "Show desktop" strip, which then lights.
     show_desktop_lit: bool,
+    /// What in the open start menu the pointer is over, which is drawn lit.
+    /// Forgotten when the menu closes (`close_start_menu`), so a menu opened
+    /// again lights nothing until the pointer moves over it.
+    start_lit: Option<StartLit>,
     /// The windows the last "Show desktop" put away, bottom of the stack
     /// first -- so the next brings them back as they were -- or `None` when
     /// the next should put windows away. Forgotten the moment a window is
@@ -2371,6 +2418,7 @@ impl DesktopShell {
             hover_changed: false,
             hover_tile: None,
             show_desktop_lit: false,
+            start_lit: None,
             desktop_shown: None,
             ending: None,
             ending_ready: false,
@@ -4107,6 +4155,7 @@ impl DesktopShell {
     pub fn close_start_menu(&mut self) {
         self.start_menu_open = false;
         self.power_menu_open = false;
+        self.start_lit = None;
         // A drag from it has nothing left to drop from.
         self.start_drag = None;
     }
@@ -4744,8 +4793,9 @@ impl DesktopShell {
         }
     }
 
-    /// Note what on the taskbar the pointer is resting on -- a tray icon or a
-    /// tile -- and put up the tooltip naming it, or take the tooltip down.
+    /// Note what the pointer is resting on -- on the taskbar a tray icon or a
+    /// tile, in the start menu a row, a place or the power button -- light
+    /// it, and put up the tooltip naming it, or take the tooltip down.
     ///
     /// Resolved through [`hit_test`](Self::hit_test) rather than by walking
     /// the rectangles again, so that the thing a tooltip names and the thing a
@@ -4771,6 +4821,22 @@ impl DesktopShell {
             self.show_desktop_lit = lit;
             self.hover_changed = true;
         }
+        let start_lit = match hit {
+            // The entry's place on screen: `start_menu_entry_at` is the
+            // scroll plus the row, so this is the row it was found on.
+            Hit::StartMenuEntry(index) => {
+                index.checked_sub(self.start_menu_scroll).map(StartLit::Row)
+            }
+            Hit::StartMenuShortcut(which) => Some(StartLit::Place(which)),
+            Hit::PowerButton => Some(StartLit::PowerButton),
+            Hit::PowerCaret => Some(StartLit::PowerCaret),
+            Hit::PowerMenuEntry(row) => Some(StartLit::PowerRow(row)),
+            _ => None,
+        };
+        if start_lit != self.start_lit {
+            self.start_lit = start_lit;
+            self.hover_changed = true;
+        }
         let over = match hit {
             Hit::TrayIcon(index) => self.ordered_tray_icons().get(index).and_then(|icon| {
                 // A program that registered no tooltip has given the shell
@@ -4794,6 +4860,9 @@ impl DesktopShell {
             }),
             // The strip is a blank; the reference's `title` says what it does.
             Hit::ShowDesktop => Some((TooltipKey::ShowDesktop, "Show desktop".to_string())),
+            // The caret is a chevron alone, and says what it opens as the
+            // reference's does.
+            Hit::PowerCaret => Some((TooltipKey::PowerOptions, "Power options".to_string())),
             // A window's title is on its tile, but cut to what fits.
             Hit::TaskbarButton(id) => self
                 .windows
@@ -7692,19 +7761,40 @@ impl DesktopShell {
                 break;
             };
             let rect = self.start_menu_row_rect(row);
+            let mark = Rect::new(
+                rect.x + self.scale(6.0),
+                rect.y + self.scale(2.0),
+                (rect.w - self.scale(12.0)).max(0.0),
+                (rect.h - self.scale(4.0)).max(0.0),
+            );
+            let mark_radii = CornerRadii::all(self.scale(4.0));
+            // The row under the pointer, lit as the reference's
+            // `aero-sm-app:hover`: a pale wash and a line round it. A heading
+            // is not something to click, and does not light.
+            if self.start_lit == Some(StartLit::Row(row)) && !matches!(item, StartRow::Section(_)) {
+                fill_round(
+                    &mut tree,
+                    mark,
+                    with_alpha(self.theme.accent_color, START_MENU_LIT_ALPHA),
+                    mark_radii,
+                );
+                stroke_round(
+                    &mut tree,
+                    mark,
+                    with_alpha(self.theme.accent_color, START_MENU_LIT_EDGE_ALPHA),
+                    self.scale(1.0),
+                    mark_radii,
+                );
+            }
             // The keyboard's row, marked as the accent marks "you are here"
-            // everywhere else in the shell.
+            // everywhere else in the shell -- over the light, when the two are
+            // one row.
             if self.start_selected == Some(index) {
                 fill_round(
                     &mut tree,
-                    Rect::new(
-                        rect.x + self.scale(6.0),
-                        rect.y + self.scale(2.0),
-                        (rect.w - self.scale(12.0)).max(0.0),
-                        (rect.h - self.scale(4.0)).max(0.0),
-                    ),
+                    mark,
                     with_alpha(self.theme.accent_color, START_MENU_SELECTED_ALPHA),
-                    CornerRadii::all(self.scale(4.0)),
+                    mark_radii,
                 );
             }
             self.render_start_row(&mut tree, rect, item);
@@ -7779,9 +7869,19 @@ impl DesktopShell {
             bottom_right: round,
             bottom_left: 0.0,
         };
-        let glass = with_alpha(self.theme.start_menu_fg, POWER_BUTTON_GLASS_ALPHA);
+        // Each part brighter under the pointer, as the reference's `:hover`.
+        let glass = |lit: StartLit| {
+            with_alpha(
+                self.theme.start_menu_fg,
+                if self.start_lit == Some(lit) {
+                    POWER_BUTTON_LIT_ALPHA
+                } else {
+                    POWER_BUTTON_GLASS_ALPHA
+                },
+            )
+        };
         let edge = with_alpha(self.theme.start_menu_fg, POWER_BUTTON_EDGE_ALPHA);
-        fill_round(&mut tree, main, glass, main_radii);
+        fill_round(&mut tree, main, glass(StartLit::PowerButton), main_radii);
         stroke_round(&mut tree, main, edge, self.scale(1.0), main_radii);
         let label_size = self.font_size(TextRole::Body);
         let ink = self.theme.start_menu_fg;
@@ -7811,7 +7911,7 @@ impl DesktopShell {
             fill_round(&mut tree, caret, self.theme.accent_color, caret_radii);
             self.theme.start_menu_bg
         } else {
-            fill_round(&mut tree, caret, glass, caret_radii);
+            fill_round(&mut tree, caret, glass(StartLit::PowerCaret), caret_radii);
             self.theme.start_menu_fg
         };
         stroke_round(&mut tree, caret, edge, self.scale(1.0), caret_radii);
@@ -7879,6 +7979,25 @@ impl DesktopShell {
             let place = self.start_shortcut_rect(*which);
             if place.w <= 0.0 || place.h <= 0.0 {
                 continue;
+            }
+            // The place under the pointer, lit as the reference's
+            // `aero-sm-link:hover`: a wash of the column's text colour and a
+            // line round it.
+            if self.start_lit == Some(StartLit::Place(*which)) {
+                let radii = CornerRadii::all(self.scale(4.0).min(place.h / 2.0));
+                fill_round(
+                    tree,
+                    place,
+                    with_alpha(self.theme.start_menu_fg, START_LINK_LIT_ALPHA),
+                    radii,
+                );
+                stroke_round(
+                    tree,
+                    place,
+                    with_alpha(self.theme.start_menu_fg, START_LINK_LIT_EDGE_ALPHA),
+                    self.scale(1.0),
+                    radii,
+                );
             }
             tree.push(guitk::render::RenderCommand::Image {
                 x: place.x + inset,
@@ -8491,6 +8610,7 @@ impl DesktopShell {
                     .map(|choice| power::PowerMenuRow {
                         label: choice.label(),
                         rect: self.power_menu_row_rect(row),
+                        lit: self.start_lit == Some(StartLit::PowerRow(row)),
                     })
             })
             .collect();
@@ -8508,6 +8628,8 @@ impl DesktopShell {
                 radii,
                 font_size: self.font_size(TextRole::Item),
                 text_inset: self.scale(POWER_MENU_TEXT_INSET),
+                lit: with_alpha(self.theme.accent_color, POWER_MENU_LIT_ALPHA),
+                lit_radii: CornerRadii::all(self.scale(4.0)),
             },
         ));
     }

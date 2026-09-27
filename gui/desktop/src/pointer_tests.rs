@@ -824,6 +824,317 @@ fn the_power_caret_toggles_its_menu_and_leaves_the_start_menu_open() {
     );
 }
 
+// ---- what the pointer is over in the start menu, lit ------------------------
+
+/// The rectangles the open start menu fills in `color`, in drawing order.
+fn filled_in(shell: &DesktopShell, color: guitk::color::Color) -> Vec<Rect> {
+    shell
+        .render_start_menu()
+        .expect("the menu is open")
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color: c,
+                ..
+            } if *c == color => Some(Rect::new(*x, *y, *width, *height)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `inner` lies within `outer`.
+fn lies_in(inner: Rect, outer: Rect) -> bool {
+    inner.x >= outer.x - 0.01
+        && inner.y >= outer.y - 0.01
+        && inner.x + inner.w <= outer.x + outer.w + 0.01
+        && inner.y + inner.h <= outer.y + outer.h + 0.01
+}
+
+/// The wash a program row under the pointer is lit with.
+fn row_light(shell: &DesktopShell) -> guitk::color::Color {
+    guitk::theme::with_alpha(shell.theme.accent_color, crate::START_MENU_LIT_ALPHA)
+}
+
+/// **The row under the pointer lights**, as the reference's
+/// `aero-sm-app:hover` does, and goes out when the pointer leaves -- each
+/// change reported, so the session repaints for it, and a move within the
+/// row not, so it does not repaint for nothing.
+#[test]
+fn the_start_menu_row_under_the_pointer_lights_and_goes_out_when_it_leaves() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let wash = row_light(&shell);
+    assert_eq!(
+        filled_in(&shell, wash),
+        Vec::<Rect>::new(),
+        "lit before the pointer came"
+    );
+    shell.take_hover_changed();
+
+    let row = shell
+        .start_row_of_program(0)
+        .expect("a program in the menu");
+    let rect = shell.start_menu_row_rect(row);
+    let (x, y) = centre(rect);
+    move_to(&mut shell, (x, y));
+    assert!(
+        shell.take_hover_changed(),
+        "the row lit and nobody was told"
+    );
+    let lit = filled_in(&shell, wash);
+    assert_eq!(lit.len(), 1, "{lit:?}");
+    assert!(
+        lies_in(lit[0], rect),
+        "the light {:?} is not on the row {rect:?}",
+        lit[0]
+    );
+    // Lit with a line round it too, as the reference's edge.
+    let edge = guitk::theme::with_alpha(shell.theme.accent_color, crate::START_MENU_LIT_EDGE_ALPHA);
+    let tree = shell.render_start_menu().expect("open");
+    assert!(
+        tree.commands.iter().any(|cmd| matches!(cmd,
+            RenderCommand::StrokeRect { x, y, width, height, color, .. }
+                if *color == edge && (*x, *y, *width, *height) == (lit[0].x, lit[0].y, lit[0].w, lit[0].h))),
+        "the lit row has no edge"
+    );
+
+    move_to(&mut shell, (x + 5.0, y));
+    assert!(
+        !shell.take_hover_changed(),
+        "a move within the row asked for a repaint"
+    );
+
+    move_to(&mut shell, (900.0, 300.0));
+    assert!(
+        shell.take_hover_changed(),
+        "the light went out and nobody was told"
+    );
+    assert_eq!(
+        filled_in(&shell, wash),
+        Vec::<Rect>::new(),
+        "the row stayed lit after the pointer left"
+    );
+}
+
+/// **A heading does not light**: it is not something to click. The program
+/// under it does.
+#[test]
+fn a_start_menu_heading_does_not_light() {
+    let mut shell = shell();
+    shell.note_started(&crate::hotkeys::Launch::program(crate::launcher::TERMINAL));
+    shell.toggle_start_menu();
+    assert!(
+        matches!(
+            shell.start_menu_rows().first(),
+            Some(crate::StartRow::Section(_))
+        ),
+        "the fixture must start the list with a heading"
+    );
+    let wash = row_light(&shell);
+    let (x, y) = centre(shell.start_menu_row_rect(0));
+    move_to(&mut shell, (x, y));
+    assert_eq!(
+        filled_in(&shell, wash),
+        Vec::<Rect>::new(),
+        "the heading lit"
+    );
+
+    let rect = shell.start_menu_row_rect(1);
+    let (x, y) = centre(rect);
+    move_to(&mut shell, (x, y));
+    let lit = filled_in(&shell, wash);
+    assert!(
+        lit.len() == 1 && lies_in(lit[0], rect),
+        "the program under the heading did not light: {lit:?}"
+    );
+}
+
+/// **The light stays under a resting pointer while the list scrolls**: what
+/// is lit is the row a click there would reach, which is the row now under
+/// the pointer -- not the program that scrolled away from it.
+#[test]
+fn the_light_stays_under_the_pointer_when_the_list_scrolls_under_it() {
+    let mut shell = shell_with_a_long_menu();
+    shell.toggle_start_menu();
+    let wash = row_light(&shell);
+    let rect = shell.start_menu_row_rect(4);
+    let (x, y) = centre(rect);
+    move_to(&mut shell, (x, y));
+    let before = filled_in(&shell, wash);
+    assert_eq!(before.len(), 1, "{before:?}");
+
+    shell.handle_mouse(&scroll(x, y, -1.0));
+    assert_eq!(shell.start_menu_scroll, 3, "the fixture did not scroll");
+    assert_eq!(
+        filled_in(&shell, wash),
+        before,
+        "the light left the pointer when the list moved under it"
+    );
+
+    // And a move in the scrolled list lights the row under the pointer --
+    // not the row that the program under it would have with the list at
+    // its top.
+    move_to(&mut shell, (x + 5.0, y));
+    assert_eq!(
+        filled_in(&shell, wash),
+        before,
+        "a move in the scrolled list lit a row other than the one under the pointer"
+    );
+}
+
+/// **A place, and each part of the power button, lights under the pointer**,
+/// as the reference's `aero-sm-link:hover` and `aero-sm-power-main:hover` /
+/// `aero-sm-power-caret:hover` -- one part at a time, since they are two
+/// buttons.
+#[test]
+fn a_place_and_each_part_of_the_power_button_light_under_the_pointer() {
+    use guitk::theme::with_alpha;
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let fg = shell.theme.start_menu_fg;
+
+    let place = shell.start_shortcut_rect(crate::StartShortcut::Documents);
+    let place_light = with_alpha(fg, crate::START_LINK_LIT_ALPHA);
+    assert_eq!(
+        filled_in(&shell, place_light),
+        Vec::<Rect>::new(),
+        "a place lit before the pointer came"
+    );
+    let (x, y) = centre(place);
+    move_to(&mut shell, (x, y));
+    assert_eq!(
+        filled_in(&shell, place_light),
+        [place],
+        "the place under the pointer is not lit"
+    );
+
+    let glass = with_alpha(fg, crate::POWER_BUTTON_GLASS_ALPHA);
+    let lit = with_alpha(fg, crate::POWER_BUTTON_LIT_ALPHA);
+    let button = shell.power_button_rect();
+    let main = shell.power_main_rect();
+    let caret = shell.power_caret_rect();
+    let lit_parts = |shell: &DesktopShell| -> Vec<Rect> {
+        filled_in(shell, lit)
+            .into_iter()
+            .filter(|r| lies_in(*r, button))
+            .collect()
+    };
+    assert_eq!(filled_in(&shell, glass), [main, caret]);
+    assert_eq!(
+        lit_parts(&shell),
+        Vec::<Rect>::new(),
+        "the power button lit with the pointer on a place"
+    );
+
+    let (x, y) = centre(main);
+    move_to(&mut shell, (x, y));
+    assert_eq!(
+        lit_parts(&shell),
+        [main],
+        "\"Shut down\" is not lit under the pointer"
+    );
+    assert_eq!(filled_in(&shell, glass), [caret], "the caret lit with it");
+    assert_eq!(
+        filled_in(&shell, place_light),
+        Vec::<Rect>::new(),
+        "the place stayed lit"
+    );
+
+    let (x, y) = centre(caret);
+    move_to(&mut shell, (x, y));
+    assert_eq!(
+        lit_parts(&shell),
+        [caret],
+        "the caret is not lit under the pointer"
+    );
+    assert_eq!(filled_in(&shell, glass), [main], "\"Shut down\" stayed lit");
+}
+
+/// **The power choice under the pointer lights**, as the reference's
+/// `aero-sm-power-item:hover` -- over the list, which is behind it.
+#[test]
+fn the_power_choice_under_the_pointer_lights() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    shell.toggle_power_menu();
+    let wash = guitk::theme::with_alpha(shell.theme.accent_color, crate::POWER_MENU_LIT_ALPHA);
+    assert_eq!(
+        filled_in(&shell, wash),
+        Vec::<Rect>::new(),
+        "a choice lit before the pointer came"
+    );
+    for row in [0, 2] {
+        let rect = shell.power_menu_row_rect(row);
+        let (x, y) = centre(rect);
+        move_to(&mut shell, (x, y));
+        assert_eq!(
+            filled_in(&shell, wash),
+            [rect],
+            "choice {row} is not lit under the pointer"
+        );
+        assert_eq!(
+            filled_in(&shell, row_light(&shell)),
+            Vec::<Rect>::new(),
+            "a row behind the choices lit"
+        );
+    }
+}
+
+/// **A menu opened again lights nothing** until the pointer moves over it:
+/// what was lit when it closed is not where the pointer is now.
+#[test]
+fn a_start_menu_opened_again_lights_nothing_until_the_pointer_moves() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let row = shell
+        .start_row_of_program(0)
+        .expect("a program in the menu");
+    let (x, y) = centre(shell.start_menu_row_rect(row));
+    move_to(&mut shell, (x, y));
+    assert_eq!(filled_in(&shell, row_light(&shell)).len(), 1);
+
+    shell.toggle_start_menu();
+    shell.toggle_start_menu();
+    assert_eq!(
+        filled_in(&shell, row_light(&shell)),
+        Vec::<Rect>::new(),
+        "lit from the last time it was open"
+    );
+}
+
+/// **The caret names itself**, as the reference's `title="Power options"`:
+/// it is a chevron alone. "Shut down" says what it does on its face.
+#[test]
+fn the_power_caret_names_itself() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let (x, y) = centre(shell.power_caret_rect());
+    move_to(&mut shell, (x, y));
+    assert!(
+        shell.tooltip_due_in().is_some(),
+        "nothing waits to name the caret"
+    );
+    shell.advance_osd(5_000);
+    let drawn = format!(
+        "{:?}",
+        shell.render_tooltip().expect("the caret has no name")
+    );
+    assert!(drawn.contains("Power options"), "{drawn}");
+
+    let (x, y) = centre(shell.power_main_rect());
+    move_to(&mut shell, (x, y));
+    shell.advance_osd(5_000);
+    assert!(
+        shell.render_tooltip().is_none(),
+        "\"Shut down\" grew a tooltip"
+    );
+}
+
 /// A submenu is allowed to cover the menu it opened from -- but then a click
 /// anywhere in it has to reach the popup, not the place or the row buried
 /// under it. Swept over the popup at three scales rather than tried at one

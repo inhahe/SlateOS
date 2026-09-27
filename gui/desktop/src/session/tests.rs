@@ -621,6 +621,36 @@ fn the_bar_is_redrawn_when_a_tile_lights_up() {
     );
 }
 
+/// **The start menu is redrawn when a row lights up under the pointer**: the
+/// light is on the popup surface, which is repainted only when told.
+#[test]
+fn the_start_menu_is_redrawn_when_a_row_lights_up() {
+    let (mut session, desktop, _turn) = session();
+    let start = centre(session.shell().start_button_rect());
+    press_at(&desktop, session.panel(), start.0, start.1);
+    session.pump().expect("pump");
+    let popups = session.popups();
+    let first = session.shell().start_row_of_program(0).expect("a program");
+    let (x, y) = centre(session.shell().start_menu_row_rect(first));
+    let frames = frames_on(&desktop, popups.window());
+
+    let (ox, oy) = popups.origin();
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        popups.window(),
+        guitk::event::Event::Mouse(guitk::event::MouseEvent {
+            x: x - ox,
+            y: y - oy,
+            kind: MouseEventKind::Move,
+        }),
+    )]);
+    session.pump().expect("pump");
+
+    assert!(
+        frames_on(&desktop, popups.window()) > frames,
+        "the row lit in the model and the menu was not redrawn"
+    );
+}
+
 /// **What the desktop starts is remembered as recently used**, whichever
 /// part of it asked -- here a pinned tile, not the start menu -- and written
 /// down for the next login.

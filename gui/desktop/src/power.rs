@@ -1551,6 +1551,8 @@ pub struct PowerMenuRow<'a> {
     pub label: &'a str,
     /// Where the row is drawn, and where a click on it is accepted.
     pub rect: Rect,
+    /// Whether the pointer is over it, which lights it.
+    pub lit: bool,
 }
 
 /// The colours and sizes a power menu is drawn with.
@@ -1573,6 +1575,10 @@ pub struct PowerMenuStyle {
     pub font_size: f32,
     /// Distance from a row's left edge to the start of its label.
     pub text_inset: f32,
+    /// The wash under the row the pointer is over.
+    pub lit: Color,
+    /// The rounding of that wash.
+    pub lit_radii: CornerRadii,
 }
 
 /// Draw a power menu: a panel, and one label per row.
@@ -1608,6 +1614,16 @@ pub fn render_power_menu(
     });
 
     for row in rows {
+        if row.lit {
+            cmds.push(RenderCommand::FillRect {
+                x: row.rect.x,
+                y: row.rect.y,
+                width: row.rect.w,
+                height: row.rect.h,
+                color: style.lit,
+                corner_radii: style.lit_radii,
+            });
+        }
         cmds.push(RenderCommand::Text {
             x: row.rect.x + style.text_inset,
             // Centred in the row rather than offset by a constant, so a larger

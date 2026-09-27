@@ -170,7 +170,7 @@ pub struct Reloads {
 /// A picture an application wants the compositor to be holding, or to stop
 /// holding.
 ///
-/// [`RenderCommand::Image`] names an `image_id` and carries no pixels — a
+/// [`RenderCommand::Image`](crate::RenderCommand::Image) names an `image_id` and carries no pixels — a
 /// protocol that shipped the pixels with the draw would re-send a megabyte
 /// sixty times a second to keep a still picture on screen. The pixels go up
 /// once, by a different route, and an id the compositor has never been given
@@ -192,7 +192,7 @@ pub struct Reloads {
 pub enum ImageChange {
     /// Store these pixels under `id`, replacing whatever was there.
     ///
-    /// The fields are [`WindowHandle::upload_image`]'s, in its order.
+    /// The fields are [`WindowHandle::upload_image`](crate::WindowHandle::upload_image)'s, in its order.
     Upload {
         /// The application's own number for the picture, scoped to its window.
         id: u64,
@@ -913,7 +913,7 @@ impl Args {
         Ok(Self { display, rest })
     }
 
-    /// [`Args::parse`] over this process's own arguments, less argv[0].
+    /// [`Args::parse`] over this process's own arguments, less `argv[0]`.
     ///
     /// Read as bytes first ([`ArgsOs::from_env`]), so that an argument that is
     /// not UTF-8 -- a SlateOS file name may be any bytes but `/` and NUL -- is
@@ -1024,7 +1024,7 @@ impl ArgsOs {
         Ok(Self { display, rest })
     }
 
-    /// [`ArgsOs::parse`] over this process's own arguments, less argv[0].
+    /// [`ArgsOs::parse`] over this process's own arguments, less `argv[0]`.
     ///
     /// # Errors
     ///

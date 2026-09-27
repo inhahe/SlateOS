@@ -1642,7 +1642,7 @@ impl DamageRegion {
 /// # Why one buffer, and what the ring is for
 ///
 /// This was a front/back pair until 2026-09-24, swapped on every present. The
-/// pair bought nothing: every [`Present`](crate::present::Present)
+/// pair bought nothing: every [`Present`]
 /// implementation copies the finished frame out *synchronously* inside the
 /// same loop iteration that composited it — the DRM presenter into its own
 /// double-buffered scanout memory, the host window through `StretchDIBits` —
@@ -1947,7 +1947,7 @@ impl Framebuffer {
     /// the blend math wants.
     ///
     /// Returning `u8` rather than `u32` is the point: this is the one place the
-    /// "alpha is a byte" bound is established, so [`blend_channel`] can take it
+    /// "alpha is a byte" bound is established, so [`blend_channel`](Self::blend_channel) can take it
     /// from the type instead of from a comment at every call site.
     #[inline]
     fn effective_alpha(color: u32, opacity: f32) -> u8 {
@@ -2003,7 +2003,7 @@ impl Framebuffer {
     /// `color` across columns `columns.0..columns.1`, skipping the horizontal
     /// spans covered by any `covered` rect.
     ///
-    /// Shared by the single-threaded and parallel [`clear_except`] paths so the
+    /// Shared by the single-threaded and parallel [`clear_except`](Self::clear_except) paths so the
     /// per-scanline span-merging logic lives in exactly one place. `covered`
     /// rects are given in absolute framebuffer coordinates; the vertical overlap
     /// test uses the absolute row `y0 + r`, and writes target the band-local row
@@ -2114,7 +2114,7 @@ impl Framebuffer {
     /// fully-opaque covering windows. Per-scanline interval math is O(rows ×
     /// covered) which is negligible next to the pixel stores it elides.
     ///
-    /// Confined to the [frame clip](Self::set_frame_clip) when one is set: a
+    /// Confined to the frame clip (`set_frame_clip`) when one is set: a
     /// partial frame clears its damage one repaint rectangle at a time, and the
     /// pixels outside the rectangle belong to a frame that is being kept.
     pub fn clear_except(&mut self, color: u32, covered: &[Rect]) {
@@ -4145,8 +4145,9 @@ fn family_of(family: FontFamily) -> Family {
 /// would be a second place for the baseline, the clip and the mark offsets to
 /// drift out of agreement with the first.
 ///
-/// Free rather than a method for the same borrow reason as [`blend_mask`], and
-/// takes the font by `&mut` because the glyph cache rasterises on demand.
+/// Free rather than a method because it borrows the render target and the
+/// font at once, and takes the font by `&mut` because the glyph cache
+/// rasterises on demand.
 ///
 /// `spans` colours the run per glyph, by the byte each glyph came from; empty —
 /// which it is for every plain `Text` command — draws the whole run in `color`.
@@ -7726,7 +7727,7 @@ impl Compositor {
     /// The same shape as [`grab_modifier_chord`](Self::grab_modifier_chord):
     /// the window claims something and thereafter receives an event it would
     /// not otherwise get. Unlike a chord, the claim is not exclusive -- see
-    /// [`IdleWatch`].
+    /// `IdleWatch`.
     ///
     /// Calling again for the same window replaces the delay, and arms it
     /// afresh: a caller that has just been told "five minutes" should not have
@@ -11140,7 +11141,7 @@ impl Compositor {
     /// out of the compositor is what lets a presenter hand the same
     /// description to a hardware cursor plane instead.
     ///
-    /// The size is [`pointer_preferences`](Self::pointer_preferences)' size
+    /// The size is `pointer_preferences`' size
     /// times the scale of the display the pointer is on, so a pointer crossing
     /// onto a 2x monitor doubles as it crosses, exactly as the window
     /// decorations there do.

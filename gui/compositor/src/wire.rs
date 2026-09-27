@@ -126,7 +126,7 @@ pub struct ClientLink {
 ///
 /// ## Why there is a limit at all
 ///
-/// [`RequestBody::UploadImage`](guiremote::control::RequestBody::UploadImage) is
+/// [`RequestBody::UploadImage`] is
 /// the only request on this wire whose cost to the compositor is chosen by the
 /// sender. `MAX_IMAGE_BYTES` bounds *one* upload; nothing bounds their number,
 /// so without this a client with one window could hand over a 126 MiB picture

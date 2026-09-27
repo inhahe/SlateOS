@@ -716,7 +716,7 @@ impl WindowBuilder {
     /// program's windows" keys on — window rules, taskbar grouping, the icon
     /// lookup. Conventionally the executable's file stem, lower-cased.
     ///
-    /// Applications built on [`app::run`](crate::app::run) do not call this:
+    /// Applications built on [`app::launch`] do not call this:
     /// [`App::app_id`](crate::app::App::app_id) supplies the executable's name
     /// for them, and overriding *that* is the place to disagree.
     ///
@@ -2462,7 +2462,7 @@ pub mod testing {
         /// time, so there is nothing here to time out. What it makes testable
         /// is the question that matters to anything driving the loop by hand:
         /// did the park go through [`EventLoop::wait`], which knows about
-        /// wake-ups, or through [`Connection::wait`], which does not? The
+        /// wake-ups, or through [`Connection::wait`](guiremote::client::Connection::wait), which does not? The
         /// second parks past every registered deadline, and the only visible
         /// symptom is an animation that stops.
         pub asked: Vec<Option<Duration>>,

@@ -935,7 +935,7 @@ impl<S: KmsSys> Present for DrmScanout<S> {
     }
 
     /// The next hotplug probe. Nothing tells this module a cable moved (see
-    /// [`PROBE_INTERVAL`]), so a desktop nobody is touching must still wake
+    /// `PROBE_INTERVAL`), so a desktop nobody is touching must still wake
     /// this often for a monitor plugged into it to light up.
     ///
     /// None for a zero interval, which asks to be probed whenever the loop

@@ -4324,7 +4324,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] cron/crontab/anacron/at/atd/batch/atq/atrm: job scheduling (cron expressions, time parsing, 8 special strings, 103 tests)
   - [x] cryptsetup/veritysetup/integritysetup: disk encryption (SHA-256, PBKDF2, LUKS header, key slots, cipher benchmark, 144 tests)
   - [x] pstree: process tree display (Unicode/ASCII tree drawing, PID/UID/threads, compact mode)
-  - [x] findmnt/mountpoint: mounted filesystem finder (/proc/mountinfo, tree/list/JSON/raw/pairs output)
+  - [x] findmnt/mountpoint: mounted filesystem finder (/proc/mountinfo, tree/list/JSON/raw/pairs output) -- since 2026-09-26 ports of util-linux 2.39.3's `findmnt` (with `--verify` and `--poll`) and `mountpoint`, reading tables through `userspace/ulmount` (libmount's table code, and libblkid's device cache) and printing through `smartcols`; `scripts/findmnt-diff.sh`: 4953 cases agree, 8 more where only upstream never finishes; `scripts/mountpoint-diff.sh` (400 cases); probing knows ext only (known-issues TD-B-ULMOUNT-PROBES-ONLY-EXT)
   - [x] lsns: namespace listing (8 namespace types, JSON output, per-PID filtering)
   - [x] ldconfig: shared library cache manager (ELF header parsing, soname extraction, /etc/ld.so.conf)
   - [x] mdadm/mdmon: RAID management (superblock v1.2, RAID 0/1/5/6/10, bitmap tracking, UUID generation, 143 tests)

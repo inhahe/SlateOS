@@ -169771,9 +169771,16 @@ and so does `lscpu` (`scripts/lscpu-diff.sh`: 1421 cases on
 util-linux's snapshots of nineteen machines, trees of its own and WSL
 itself, plus 3 narrow terminals at which only upstream never
 finishes -- a port that needed tree symbols of the program's own added to
-the crate); the others still do not use it.
+the crate), and so does `findmnt` (`scripts/findmnt-diff.sh`: 4953 cases on
+util-linux's own test tables, tables of its own and WSL's, including
+`--verify` and `--poll`, plus 8 narrow terminals at which only upstream
+never finishes -- a port that needed libmount's table code and libblkid's
+device cache, as `userspace/ulmount`, and newline-wrapped cells, JSON arrays
+and range printing added to the crate; `mountpoint`, which the old program
+doubled as, is its own port now, `scripts/mountpoint-diff.sh`); the others
+still do not use it.
 
-**Where:** `userspace/lsblk`, `findmnt`,
+**Where:** `userspace/lsblk`,
 `lsns`, `losetup` (`--list`), `swapon` (`--show`), `rfkill`,
 `fdisk` (`-l`'s partition table). `rfkill`'s reference, like `lsirq`'s,
 is not installed in WSL; `scripts/util-linux-extra.sh` unpacks both without
@@ -169784,10 +169791,57 @@ root.
 the table handed to the crate -- with a differential harness against WSL's
 util-linux that includes a pty at several widths. Parts of libsmartcols not
 yet ported (the crate's module docs list them: groups, sorting, custom wrap
-functions, colours) are added when a program needs them; `lsblk`,
-`findmnt` and `lsns` need only trees, which are ported. Each of these is
+functions other than the newline one, colours) are added when a program
+needs them; `lsblk` and `lsns` need only trees, which are ported. Each of these is
 also on TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE's list, and the two
 are one job per program.
+
+## TD-B-ULMOUNT-PROBES-ONLY-EXT (lane B, 2026-09-26) — **open**
+
+**In short:** to learn a disk's filesystem type, label or UUID, util-linux
+reads the disk's first blocks and compares them against over a hundred
+known layouts ("probing", libblkid's job). The port in `userspace/ulmount`
+knows five of them -- ext2, ext3, ext4 and their test and journal
+variants -- and no partition tables. So for a device holding anything else
+(a FAT EFI partition, a swap area, XFS, btrfs), or for a partition's own
+PARTUUID and PARTLABEL, probing finds nothing where upstream names it.
+
+**What a user sees:** where udev is running, nothing -- `findmnt` asks
+udev's database first, as upstream does, and udev did the probing. Where it
+is not (SlateOS today, and any root that cannot read `/run/udev/data`):
+
+- `findmnt -o UUID,LABEL,PARTUUID` shows blanks for non-ext filesystems and
+  for every PARTUUID/PARTLABEL.
+- `findmnt --verify` says `cannot detect on-disk filesystem type (reason
+  unknown)` for a vfat, swap, xfs or btrfs entry that upstream checks, and
+  so cannot say `vfat does not match with on-disk ...` either.
+- libblkid's cache, as root writes it (`/run/blkid/blkid.tab`), lists only
+  ext devices' tags, so `findmnt -o SOURCES` and a `LABEL=` source are only
+  resolved for ext filesystems when their udev link is missing.
+
+For ext filesystems the port reports exactly libblkid's values (LABEL,
+UUID, EXT_JOURNAL, SEC_TYPE, BLOCK_SIZE, LOGUUID, TYPE, in its order, with
+its checksum check and its rule that two probers claiming one superblock is
+no answer), and an unreadable device fails with `EACCES` as upstream's does.
+
+**Where:** `userspace/ulmount/src/blkid.rs` -- `probe_file` and
+`probe_ext`; everything above them (`mnt_cache_read_tags`, `mnt_get_fstype`,
+`blkid_verify`) is ported whole and calls these two.
+
+**How to see it:** on SlateOS, `findmnt -o TARGET,UUID` with the EFI
+partition mounted; or `findmnt -x -F` an fstab with a swap line whose
+device is readable.
+
+**The proper fix:** port libblkid's probing as its own crate -- `probe.c`
+(the chains, `blkid_do_safeprobe`'s ambivalence and "tolerant" rules, the
+tiny-device and CD-ROM cases), the superblocks chain in its list order
+(`superblocks/*.c`; vfat, swap and iso9660 first, since those are what
+SlateOS images and its users' disks carry, then the rest) and the
+partitions chain (`partitions/*.c`: dos and gpt first, for PARTUUID and
+PARTLABEL) -- and have `ulmount::blkid::probe_file` call it. `blkid`,
+`lsblk`, `wipefs` and `findfs` need the same crate, so it is one job for
+all of them; each prober gets the differential treatment the programs got,
+on disk images built by `mkfs.*` in WSL.
 
 ## TD-B-UTIL-LINUX-PORTS-WRITE-THROUGH-RUST-STDIO (lane B, 2026-09-26) — ✅ FIXED 2026-09-26 (lane B)
 

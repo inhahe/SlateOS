@@ -682,7 +682,13 @@ mod tests {
         let ip = [93, 184, 216, 34];
         let port = 443u16;
         let aux = Sqe::pack_endpoint(&ip, port) | CONNECT_NONBLOCK;
-        let sqe = Sqe { op: OP_CONNECT, conn_id: 3, user_data: 7, aux, ..Sqe::default() };
+        let sqe = Sqe {
+            op: OP_CONNECT,
+            conn_id: 3,
+            user_data: 7,
+            aux,
+            ..Sqe::default()
+        };
         let back = Sqe::from_bytes(&sqe.to_bytes()).unwrap();
         assert_eq!(back.aux & CONNECT_NONBLOCK, CONNECT_NONBLOCK);
         // The endpoint still unpacks correctly with the flag ORed in.
@@ -703,7 +709,9 @@ mod tests {
     #[test]
     fn listen_accept_opcodes_round_trip_and_are_distinct() {
         // OP_LISTEN / OP_ACCEPT must not collide with any prior opcode or each other.
-        let existing = [OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL];
+        let existing = [
+            OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL,
+        ];
         for other in existing {
             assert_ne!(OP_LISTEN, other, "OP_LISTEN aliases another opcode");
             assert_ne!(OP_ACCEPT, other, "OP_ACCEPT aliases another opcode");
@@ -776,8 +784,17 @@ mod tests {
     fn shutdown_opcode_is_unique_and_carries_how_in_aux() {
         // OP_SHUTDOWN must not collide with any prior opcode.
         let existing = [
-            OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL, OP_LISTEN, OP_ACCEPT,
-            OP_CONNECT6, OP_LOCALADDR,
+            OP_NOP,
+            OP_CONNECT,
+            OP_SEND,
+            OP_RECV,
+            OP_CLOSE,
+            OP_STOP,
+            OP_POLL,
+            OP_LISTEN,
+            OP_ACCEPT,
+            OP_CONNECT6,
+            OP_LOCALADDR,
         ];
         for other in existing {
             assert_ne!(OP_SHUTDOWN, other, "OP_SHUTDOWN aliases another opcode");
@@ -808,8 +825,18 @@ mod tests {
         // The three UDP datagram opcodes must not collide with any stream opcode
         // or with each other.
         let existing = [
-            OP_NOP, OP_CONNECT, OP_SEND, OP_RECV, OP_CLOSE, OP_STOP, OP_POLL, OP_LISTEN, OP_ACCEPT,
-            OP_CONNECT6, OP_LOCALADDR, OP_SHUTDOWN,
+            OP_NOP,
+            OP_CONNECT,
+            OP_SEND,
+            OP_RECV,
+            OP_CLOSE,
+            OP_STOP,
+            OP_POLL,
+            OP_LISTEN,
+            OP_ACCEPT,
+            OP_CONNECT6,
+            OP_LOCALADDR,
+            OP_SHUTDOWN,
         ];
         for op in [OP_UDP_BIND, OP_UDP_SEND, OP_UDP_RECV] {
             for other in existing {
@@ -863,7 +890,11 @@ mod tests {
 
     #[test]
     fn cqe_round_trip() {
-        let cqe = Cqe { user_data: 0xAABB_CCDD_1122_3344, result: -11, flags: 0 };
+        let cqe = Cqe {
+            user_data: 0xAABB_CCDD_1122_3344,
+            result: -11,
+            flags: 0,
+        };
         let bytes = cqe.to_bytes();
         assert_eq!(bytes.len(), CQE_SIZE);
         let back = Cqe::from_bytes(&bytes).unwrap();
@@ -946,7 +977,10 @@ mod tests {
         let (sq, cq, data) = (64u32, 64u32, 65536u32);
         assert_eq!(sqe_array_off(), HEADER_LEN);
         assert_eq!(cqe_array_off(sq), HEADER_LEN + 64 * SQE_SIZE);
-        assert_eq!(data_area_off(sq, cq), HEADER_LEN + 64 * SQE_SIZE + 64 * CQE_SIZE);
+        assert_eq!(
+            data_area_off(sq, cq),
+            HEADER_LEN + 64 * SQE_SIZE + 64 * CQE_SIZE
+        );
         assert_eq!(
             region_size(sq, cq, data),
             HEADER_LEN + 64 * SQE_SIZE + 64 * CQE_SIZE + 65536

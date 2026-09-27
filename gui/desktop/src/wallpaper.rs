@@ -1438,7 +1438,12 @@ impl Default for WallpaperManager {
 // Helper functions
 // ============================================================================
 
-/// Parse a 6-character hex color string (e.g., "1E1E2E") into a Color.
+/// Read a colour as the wallpaper's file keeps it: six hex digits, the `#`
+/// optional ("1E1E2E").
+///
+/// Checked as [`Color::from_hex_text`] checks, which the `from_str_radix`
+/// this used to be did not: it takes a leading `+`, so "+1E1E2" read as a
+/// colour.
 fn parse_hex_color(s: &str) -> Result<Color, ConfigError> {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 {
@@ -1446,9 +1451,8 @@ fn parse_hex_color(s: &str) -> Result<Color, ConfigError> {
             "color: {s} (expected 6 hex digits)"
         )));
     }
-    let val =
-        u32::from_str_radix(s, 16).map_err(|_| ConfigError::InvalidValue(format!("color: {s}")))?;
-    Ok(Color::from_hex(val))
+    Color::from_hex_text(&format!("#{s}"))
+        .ok_or_else(|| ConfigError::InvalidValue(format!("color: {s}")))
 }
 
 /// Compute the destination rectangle for an image given the display area,
@@ -3283,6 +3287,8 @@ mod tests {
     #[test]
     fn parse_hex_invalid_chars() {
         assert!(parse_hex_color("ZZZZZZ").is_err());
+        // A sign is not a digit, though `from_str_radix` takes one.
+        assert!(parse_hex_color("+1E1E2").is_err());
     }
 
     // ------------------------------------------------------------------

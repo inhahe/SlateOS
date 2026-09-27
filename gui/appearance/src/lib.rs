@@ -2109,36 +2109,6 @@ yaml_enum!(TaskbarStyle {
     Transparent => "transparent",
 });
 
-/// Spell a colour as CSS-style hex, the notation a user editing the file by
-/// hand will already know. The alpha byte appears only when it is not opaque,
-/// so the common case stays a familiar six digits.
-pub fn color_to_hex(color: Color) -> String {
-    if color.a == 255 {
-        format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
-    } else {
-        format!(
-            "#{:02x}{:02x}{:02x}{:02x}",
-            color.r, color.g, color.b, color.a
-        )
-    }
-}
-
-/// Read a `#rrggbb` or `#rrggbbaa` colour. `None` for anything else, so a
-/// mistyped colour falls back to the default rather than to black.
-pub fn color_from_hex(text: &str) -> Option<Color> {
-    let digits = text.strip_prefix('#')?;
-    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let byte =
-        |i: usize| -> Option<u8> { u8::from_str_radix(digits.get(i..i.checked_add(2)?)?, 16).ok() };
-    match digits.len() {
-        6 => Some(Color::rgb(byte(0)?, byte(2)?, byte(4)?)),
-        8 => Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
-        _ => None,
-    }
-}
-
 /// Read a value if the file has one, otherwise keep what is already there.
 ///
 /// This is the whole reason settings are read into a `Default` rather than
@@ -2290,7 +2260,7 @@ impl AppearanceSettings {
         read_into!(
             s.custom_accent,
             doc.get_str(&["theme", "custom_accent"])
-                .and_then(|v| color_from_hex(&v))
+                .and_then(|v| Color::from_hex_text(&v))
         );
         read_into!(
             s.transparency,
@@ -2385,15 +2355,15 @@ impl AppearanceSettings {
                 "desktop" => LoginBackground::SameAsDesktop,
                 "color" => doc
                     .get_str(&["login", "color"])
-                    .and_then(|v| color_from_hex(&v))
+                    .and_then(|v| Color::from_hex_text(&v))
                     .map_or(LoginBackground::Theme, LoginBackground::SolidColor),
                 "gradient" => {
                     let top = doc
                         .get_str(&["login", "gradient_top"])
-                        .and_then(|v| color_from_hex(&v));
+                        .and_then(|v| Color::from_hex_text(&v));
                     let bottom = doc
                         .get_str(&["login", "gradient_bottom"])
-                        .and_then(|v| color_from_hex(&v));
+                        .and_then(|v| Color::from_hex_text(&v));
                     match (top, bottom) {
                         (Some(top), Some(bottom)) => LoginBackground::Gradient { top, bottom },
                         // Half a gradient is not a gradient. The theme is the
@@ -2479,11 +2449,11 @@ impl AppearanceSettings {
         doc.set_str(&["login", "background"], self.login_background.yaml_name());
         match &self.login_background {
             LoginBackground::SolidColor(color) => {
-                doc.set_str(&["login", "color"], &color_to_hex(*color));
+                doc.set_str(&["login", "color"], &Color::hex_text(*color));
             }
             LoginBackground::Gradient { top, bottom } => {
-                doc.set_str(&["login", "gradient_top"], &color_to_hex(*top));
-                doc.set_str(&["login", "gradient_bottom"], &color_to_hex(*bottom));
+                doc.set_str(&["login", "gradient_top"], &Color::hex_text(*top));
+                doc.set_str(&["login", "gradient_bottom"], &Color::hex_text(*bottom));
             }
             LoginBackground::CustomImage(path) => {
                 // Percent-encoded under the same marker as the wallpaper, and
@@ -2534,7 +2504,7 @@ impl AppearanceSettings {
         doc.set_str(&["theme", "accent"], self.accent_color.yaml_name());
         doc.set_str(
             &["theme", "custom_accent"],
-            &color_to_hex(self.custom_accent),
+            &Color::hex_text(self.custom_accent),
         );
         doc.set_str(&["theme", "transparency"], self.transparency.yaml_name());
 
@@ -3711,19 +3681,22 @@ mod tests {
 
     #[test]
     fn test_config_colors_use_css_hex() {
-        assert_eq!(color_to_hex(Color::rgb(0x89, 0xB4, 0xFA)), "#89b4fa");
-        assert_eq!(color_to_hex(Color::rgba(1, 2, 3, 4)), "#01020304");
+        assert_eq!(Color::hex_text(Color::rgb(0x89, 0xB4, 0xFA)), "#89b4fa");
+        assert_eq!(Color::hex_text(Color::rgba(1, 2, 3, 4)), "#01020304");
         assert_eq!(
-            color_from_hex("#89b4fa"),
+            Color::from_hex_text("#89b4fa"),
             Some(Color::rgb(0x89, 0xB4, 0xFA))
         );
         assert_eq!(
-            color_from_hex("#89B4FA"),
+            Color::from_hex_text("#89B4FA"),
             Some(Color::rgb(0x89, 0xB4, 0xFA))
         );
-        assert_eq!(color_from_hex("#01020304"), Some(Color::rgba(1, 2, 3, 4)));
+        assert_eq!(
+            Color::from_hex_text("#01020304"),
+            Some(Color::rgba(1, 2, 3, 4))
+        );
         for bad in ["89b4fa", "#89b4f", "#gggggg", "#", "", "#89b4fa00ff"] {
-            assert_eq!(color_from_hex(bad), None, "{bad} should not parse");
+            assert_eq!(Color::from_hex_text(bad), None, "{bad} should not parse");
         }
     }
 

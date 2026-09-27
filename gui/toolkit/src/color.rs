@@ -29,6 +29,48 @@ impl Color {
         }
     }
 
+    /// The colour as text: `#rrggbb`, or `#rrggbbaa` when it is not opaque --
+    /// every bit, so [`from_hex_text`](Self::from_hex_text) reads it back as
+    /// the same colour.
+    ///
+    /// Lowercase, as the desktop's settings and themes write their colours,
+    /// and the alpha byte only when it says something, so the common case
+    /// stays the six digits a person editing a file by hand already knows.
+    #[must_use]
+    pub fn hex_text(self) -> String {
+        if self.a == 255 {
+            format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+        } else {
+            format!("#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, self.a)
+        }
+    }
+
+    /// A colour written `#rrggbb` or `#rrggbbaa`, in either case -- or `None`
+    /// for anything else: no `#`, another number of digits, a character that
+    /// is not a hex digit. A sign is one such character, and worth naming:
+    /// the standard library's radix parsing takes a leading `+`, so a reader
+    /// built on it alone reads `+9b4fa` as a colour.
+    ///
+    /// `None` rather than a guess, so a mistyped colour falls back to its
+    /// caller's default instead of to some other colour.
+    #[must_use]
+    pub fn from_hex_text(text: &str) -> Option<Self> {
+        let digits = text.strip_prefix('#')?;
+        // Every byte a hex digit, first: that makes the length a count of
+        // digits and every offset below a character boundary.
+        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let byte = |i: usize| -> Option<u8> {
+            u8::from_str_radix(digits.get(i..i.checked_add(2)?)?, 16).ok()
+        };
+        match digits.len() {
+            6 => Some(Self::rgb(byte(0)?, byte(2)?, byte(4)?)),
+            8 => Some(Self::rgba(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
+            _ => None,
+        }
+    }
+
     /// Blend this color over `below` using alpha compositing.
     pub fn over(self, below: Color) -> Color {
         if self.a == 255 {
@@ -191,6 +233,54 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **A colour's text reads back as the same colour**, every bit of it --
+    /// opaque as six digits, anything else as eight -- over the channel
+    /// values at every edge a formatter or a parser gets wrong.
+    #[test]
+    fn a_colours_hex_text_reads_back_as_the_same_colour() {
+        for v in [0u8, 1, 0x0f, 0x10, 0x7f, 0x80, 0xfe, 0xff] {
+            for a in [0u8, 1, 0x80, 0xfe, 0xff] {
+                let c = Color::rgba(v, v.wrapping_add(0x33), v ^ 0xa5, a);
+                let text = c.hex_text();
+                assert_eq!(text.len(), if a == 255 { 7 } else { 9 }, "{text}");
+                assert_eq!(Color::from_hex_text(&text), Some(c), "{text}");
+            }
+        }
+        assert_eq!(Color::rgb(0x1e, 0x1e, 0x2e).hex_text(), "#1e1e2e");
+        assert_eq!(Color::rgba(0x1e, 0x1e, 0x2e, 0x80).hex_text(), "#1e1e2e80");
+    }
+
+    /// **Either case reads, and anything else is refused**: no `#`, the wrong
+    /// number of digits, a sign, a letter past `f`, a space, a multi-byte
+    /// character whose bytes make the count come out right, and the
+    /// three-digit shorthand, which is not this format.
+    #[test]
+    fn hex_text_reads_either_case_and_refuses_anything_else() {
+        let blue = Some(Color::rgb(0x89, 0xb4, 0xfa));
+        assert_eq!(Color::from_hex_text("#89B4FA"), blue);
+        assert_eq!(Color::from_hex_text("#89b4fa"), blue);
+        assert_eq!(
+            Color::from_hex_text("#89b4fa80"),
+            Some(Color::rgba(0x89, 0xb4, 0xfa, 0x80))
+        );
+        for bad in [
+            "",
+            "#",
+            "89b4fa",
+            "#89b4f",
+            "#89b4fa8",
+            "#89b4fa800",
+            "#+9b4fa",
+            "#89b4fg",
+            " #89b4fa",
+            "#89b4fa ",
+            "#\u{e9}9b4f",
+            "#fff",
+        ] {
+            assert_eq!(Color::from_hex_text(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn an_opaque_or_transparent_source_needs_no_blending() {

@@ -93,7 +93,6 @@
 //!
 //! [`AppearanceSettings::read_from`]: crate::AppearanceSettings::read_from
 
-use crate::color_from_hex;
 use guitk::color::Color;
 use guitk::palette::{THEME_ROLES, ThemeColors};
 use std::collections::BTreeMap;
@@ -472,7 +471,7 @@ fn read_colors(doc: &Document, section: &str, warnings: &mut Warnings) -> BTreeM
             continue;
         };
         let value = value.trim();
-        match color_from_hex(value) {
+        match Color::from_hex_text(value) {
             Some(color) if color.a == 255 => {
                 out.insert(role, color);
             }

@@ -687,15 +687,17 @@ impl Default for EventStore {
     }
 }
 
-/// Parse a 6-digit hex color string (e.g., "89B4FA") into a Color.
+/// Read a colour as the calendar's file keeps it: six hex digits and no `#`
+/// ("89B4FA").
+///
+/// Checked as [`Color::from_hex_text`] checks, which the three
+/// `from_str_radix` calls this used to be did not: they take a leading `+`,
+/// so "+9B4FA" read as a colour.
 fn parse_hex_color(s: &str) -> Option<Color> {
     if s.len() != 6 {
         return None;
     }
-    let r = u8::from_str_radix(s.get(0..2)?, 16).ok()?;
-    let g = u8::from_str_radix(s.get(2..4)?, 16).ok()?;
-    let b = u8::from_str_radix(s.get(4..6)?, 16).ok()?;
-    Some(Color::rgb(r, g, b))
+    Color::from_hex_text(&format!("#{s}"))
 }
 
 /// Expand recurring event occurrences within a time range.
@@ -4933,6 +4935,10 @@ description: Just a test";
     #[test]
     fn parse_hex_color_invalid_chars() {
         assert!(parse_hex_color("ZZZZZZ").is_none());
+        // A sign is not a digit, though `from_str_radix` takes one.
+        assert!(parse_hex_color("+9B4FA").is_none());
+        // Nor is the `#` the file never writes.
+        assert!(parse_hex_color("#9B4FA").is_none());
     }
 
     #[test]

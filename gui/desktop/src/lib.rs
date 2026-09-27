@@ -275,6 +275,16 @@ fn scroll_rows(acc: &mut wheel::Accumulator, dy: f32) -> i32 {
 
 /// Width of the start button at the left end of the taskbar.
 const START_BUTTON_WIDTH: f32 = 64.0;
+/// A tray icon, the chevron or the bell under the pointer, in white: the
+/// reference's `aero-trayico:hover` and `aero-tray-arrow:hover`, 0.16.
+const TRAY_LIT: u8 = 41;
+/// The clock under the pointer, in white: the reference's `aero-clock:hover`,
+/// 0.13.
+const TRAY_CLOCK_LIT: u8 = 33;
+/// How tall a lit tray icon's box is: the reference's `aero-trayico`, 26.
+const TRAY_LIT_HEIGHT: f32 = 26.0;
+/// The rounding of a lit tray item: the reference's 3.
+const TRAY_LIT_RADIUS: f32 = 3.0;
 /// The line of light along the bar's top edge, in white: the reference's
 /// `border-top: 1px` at 0.45.
 const TASKBAR_EDGE_LIGHT: u8 = 115;
@@ -1777,6 +1787,9 @@ pub struct DesktopShell {
     show_desktop_lit: bool,
     /// Whether the pointer is on the start button, whose orb then glows.
     start_button_lit: bool,
+    /// What in the tray the pointer is over -- a program's icon, the
+    /// chevron, the bell or the clock -- which is drawn lit.
+    tray_lit: Option<Hit>,
     /// What in the open start menu the pointer is over, which is drawn lit.
     /// Forgotten when the menu closes (`close_start_menu`), so a menu opened
     /// again lights nothing until the pointer moves over it.
@@ -2509,6 +2522,7 @@ impl DesktopShell {
             hover_tile: None,
             show_desktop_lit: false,
             start_button_lit: false,
+            tray_lit: None,
             start_lit: None,
             desktop_shown: None,
             ending: None,
@@ -4940,6 +4954,14 @@ impl DesktopShell {
         let lit = matches!(hit, Hit::StartButton);
         if lit != self.start_button_lit {
             self.start_button_lit = lit;
+            self.hover_changed = true;
+        }
+        let tray = match hit {
+            Hit::TrayIcon(_) | Hit::TrayOverflow | Hit::NotificationBell | Hit::Clock => Some(hit),
+            _ => None,
+        };
+        if tray != self.tray_lit {
+            self.tray_lit = tray;
             self.hover_changed = true;
         }
         let start_lit = match hit {
@@ -7539,6 +7561,14 @@ impl DesktopShell {
         // these switches can produce, so a narrower one leaves a few pixels of
         // slack at the end instead of sliding the text sideways every minute.
         let clock_x = self.tray_right() - padding - self.clock_width();
+        if self.tray_lit == Some(Hit::Clock) {
+            fill_round(
+                &mut tree,
+                self.clock_rect(),
+                with_alpha(Color::WHITE, TRAY_CLOCK_LIT),
+                CornerRadii::all(self.scale(TRAY_LIT_RADIUS)),
+            );
+        }
         if self.clock_has_two_lines() {
             // The reference's two lines, each centred in the slot: the time,
             // bold, and under it the weekday and date, smaller and dimmer.
@@ -7606,6 +7636,9 @@ impl DesktopShell {
         // The chevron first, at the left of the run, so that a reader of this
         // function meets the strip in the order it is drawn.
         if let Some(rect) = self.tray_overflow_rect() {
+            if self.tray_lit == Some(Hit::TrayOverflow) {
+                self.light_tray_item(&mut tree, rect);
+            }
             self.icon_in(
                 &mut tree,
                 rect,
@@ -7614,7 +7647,15 @@ impl DesktopShell {
                 self.theme.taskbar_fg,
             );
         }
-        for (rect, icon) in self.tray_icon_rects().iter().zip(self.ordered_tray_icons()) {
+        for (index, (rect, icon)) in self
+            .tray_icon_rects()
+            .iter()
+            .zip(self.ordered_tray_icons())
+            .enumerate()
+        {
+            if self.tray_lit == Some(Hit::TrayIcon(index)) {
+                self.light_tray_item(&mut tree, *rect);
+            }
             // The icon being dragged is drawn faint.
             //
             // `DragSource` has maintained `show_ghost` and `dragging_key`
@@ -7638,6 +7679,9 @@ impl DesktopShell {
         }
 
         let bell = self.bell_rect();
+        if self.tray_lit == Some(Hit::NotificationBell) {
+            self.light_tray_item(&mut tree, bell);
+        }
         let unread = self.notifications.attention_count();
         // In the bell's own width at the slot's left, as the glyph was: the
         // badge below is right-aligned in the slot.
@@ -8286,6 +8330,19 @@ impl DesktopShell {
             with_alpha(accent, TASKBAR_TILE_LIT),
             TASKBAR_TILE_EDGE_LIT,
             TASKBAR_TILE_HIGHLIGHT_LIT,
+        );
+    }
+
+    /// Light a tray item under the pointer, as the reference's
+    /// `aero-trayico:hover`: a rounded wash of white, as tall as the
+    /// reference's icon box and centred on the bar.
+    fn light_tray_item(&self, tree: &mut RenderTree, rect: Rect) {
+        let h = self.scale(TRAY_LIT_HEIGHT).min(rect.h);
+        fill_round(
+            tree,
+            Rect::new(rect.x, rect.y + (rect.h - h) / 2.0, rect.w, h),
+            with_alpha(Color::WHITE, TRAY_LIT),
+            CornerRadii::all(self.scale(TRAY_LIT_RADIUS)),
         );
     }
 
@@ -20841,6 +20898,93 @@ mod taskbar_pin_tests {
                 "the date is named over the calendar that shows it"
             );
         });
+    }
+
+    /// **What in the tray the pointer is over lights**, as the reference's
+    /// `aero-trayico:hover`, `aero-tray-arrow:hover` and `aero-clock:hover`:
+    /// a program's icon, the chevron, the bell and the clock, one at a time,
+    /// each change reported so the bar is drawn again.
+    #[test]
+    fn what_in_the_tray_the_pointer_is_over_lights() {
+        use guitk::render::RenderCommand;
+        let mut s = DesktopShell::new(1024, 768);
+        let flood: Vec<_> = (1..=80)
+            .map(|id| guiremote::tray::TrayIcon {
+                owner: 99,
+                id,
+                glyph: "X".to_string(),
+                tooltip: "x".to_string(),
+            })
+            .collect();
+        s.apply_tray_icons(flood);
+        let lights = |s: &DesktopShell| -> Vec<(super::Rect, u8)> {
+            s.render_taskbar()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (color.r, color.g, color.b) == (255, 255, 255)
+                        && (color.a == super::TRAY_LIT || color.a == super::TRAY_CLOCK_LIT) =>
+                    {
+                        Some((super::Rect::new(*x, *y, *width, *height), color.a))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(lights(&s), Vec::new(), "lit at rest");
+        s.take_hover_changed();
+        let items = [
+            (s.tray_icon_rects()[0], super::TRAY_LIT, "an icon"),
+            (
+                s.tray_overflow_rect().expect("overflowing"),
+                super::TRAY_LIT,
+                "the chevron",
+            ),
+            (s.bell_rect(), super::TRAY_LIT, "the bell"),
+            (s.clock_rect(), super::TRAY_CLOCK_LIT, "the clock"),
+        ];
+        for (rect, alpha, what) in items {
+            s.handle_mouse(&at(
+                rect.x + rect.w / 2.0,
+                rect.y + rect.h / 2.0,
+                MouseEventKind::Move,
+            ));
+            assert!(s.take_hover_changed(), "{what} lit and nobody was told");
+            let lit = lights(&s);
+            assert_eq!(lit.len(), 1, "{what}: {lit:?}");
+            let (light, a) = lit[0];
+            assert_eq!(a, alpha, "{what} is lit in the wrong strength");
+            assert!(
+                light.x >= rect.x - 0.01 && light.x + light.w <= rect.x + rect.w + 0.01,
+                "{what}'s light {light:?} is not on it {rect:?}"
+            );
+        }
+        s.handle_mouse(&at(600.0, 300.0, MouseEventKind::Move));
+        assert!(
+            s.take_hover_changed(),
+            "the light went out and nobody was told"
+        );
+        assert_eq!(lights(&s), Vec::new(), "lit after the pointer left");
+
+        // The bell names nothing, so a move onto it from bare desktop changes
+        // only the light -- no tooltip comes or goes to report it instead.
+        let bell = s.bell_rect();
+        s.handle_mouse(&at(
+            bell.x + bell.w / 2.0,
+            bell.y + bell.h / 2.0,
+            MouseEventKind::Move,
+        ));
+        assert!(
+            s.take_hover_changed(),
+            "the bell lit and nobody was told, so the bar was not drawn again"
+        );
     }
 
     // ---- the start orb ----

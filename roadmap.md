@@ -1859,6 +1859,11 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The tray lights what the pointer is over** -- done 2026-09-26. A
+  program's icon, the chevron, the bell and the clock each light under the
+  pointer, as the reference's `aero-trayico:hover`, `aero-tray-arrow:hover`
+  and `aero-clock:hover` do: a rounded wash of white, one thing at a time.
+
 - `[C]` **The bar is the reference's glass, and the tray names its parts** --
   done 2026-09-26. The bar was one flat colour; it has the reference's
   `aero-taskbar` glass now -- a line of light along its top edge and another

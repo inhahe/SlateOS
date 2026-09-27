@@ -36,6 +36,8 @@ ASKS = "connect_asks_for_the_password_and_refuses_what_is_not_vnc"
 OVERLAP = "an_overlapping_copy_reads_the_old_pixels"
 DURATION = "a_sessions_duration_runs_from_its_handshake"
 RECONNECT = "test_reconnect_session"
+CLOCK = "a_connecting_session_works_through_to_connected"
+IDLE_CLOCK = "an_idle_window_asks_for_no_clock"
 RECONNECT_ASKS = "reconnect_asks_for_the_password_again"
 HANDSHAKE = "a_session_shakes_hands_and_shows_the_screen"
 PASSWORD = "a_password_is_proven_by_the_challenge"
@@ -118,6 +120,12 @@ MAIN = [
         "                    let _id = self.connect_vnc(prompt.profile_index, &prompt.text);",
         "                    let _ = prompt;",
         [ASKS],
+    ),
+    (
+        "a session is put back on the clock",
+        "    pub fn has_work_in_flight(&self) -> bool {\n        self.transfers",
+        "    pub fn has_work_in_flight(&self) -> bool {\n        !self.sessions.is_empty() || self.transfers",
+        [CLOCK, IDLE_CLOCK],
     ),
     (
         "reconnect claims an attempt again",

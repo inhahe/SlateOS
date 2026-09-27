@@ -56,12 +56,14 @@ mod rfb;
 // Layout Constants
 // ============================================================================
 
-/// How often a connecting session or a running transfer takes a step.
+/// How often a queued transfer takes a step -- in the tests, which are the
+/// only thing that can queue one.
 ///
-/// Both are simulated -- there is no RDP, VNC or SSH client behind this -- so
-/// this is the pace of the animation and not of any network. Slow enough that
-/// "Authenticating" is legible, fast enough that a connection does not feel
-/// stuck.
+/// There is no file-transfer transport: the notice says so, and
+/// [`RemoteDesktopApp::queue_transfer`] is test-only, so the table's
+/// progress is a simulation no build can show. A session is not on this
+/// clock at all: a VNC session's news arrives on its own connection, which
+/// wakes the window (`App::on_wake`).
 const WORK_STEP: Duration = Duration::from_millis(400);
 
 /// How many bytes one [`WORK_STEP`] moves, for a transfer of `size`.
@@ -1769,6 +1771,12 @@ impl RemoteDesktopApp {
     // ========================================================================
 
     /// Queue a new file transfer.
+    ///
+    /// `#[cfg(test)]`: nothing can move a file to a remote machine yet, and a
+    /// transfer queued in a real build would be walked to "Completed" by the
+    /// test simulator on the clock -- a transfer that never happened, shown
+    /// finishing.
+    #[cfg(test)]
     pub fn queue_transfer(
         &mut self,
         filename: String,
@@ -1951,21 +1959,15 @@ impl RemoteDesktopApp {
             .position(|t| matches!(t.state, TransferState::Queued | TransferState::InProgress))
     }
 
-    /// Whether anything on screen is still moving.
+    /// Whether anything on screen is still moving on the window's clock.
     ///
-    /// A session part-way through connecting, or a transfer with bytes left to
-    /// move. When neither is true the window is a list of saved profiles and
-    /// has nothing to redraw, so [`App::tick_interval`] asks for no clock.
+    /// Only a transfer with bytes left to move -- which only a test can queue.
+    /// A connecting session is not on the clock: a real one is woken by its
+    /// connection, and asking for ticks while it connects would wake the
+    /// machine every 400 ms for nothing. [`App::tick_interval`] asks for no
+    /// clock otherwise.
     pub fn has_work_in_flight(&self) -> bool {
-        self.sessions.iter().any(|s| {
-            matches!(
-                s.state,
-                SessionState::Connecting
-                    | SessionState::Authenticating
-                    | SessionState::Reconnecting
-            )
-        }) || self
-            .transfers
+        self.transfers
             .iter()
             .any(|t| matches!(t.state, TransferState::Queued | TransferState::InProgress))
     }
@@ -4588,8 +4590,8 @@ mod tests {
         assert_eq!(app.sessions[index].state, SessionState::Connecting);
         assert_eq!(
             app.tick_interval(),
-            Some(WORK_STEP),
-            "a connecting session needs a clock"
+            None,
+            "a connecting session asked for a clock: its connection wakes it"
         );
 
         let mut seen = vec![app.sessions[index].state];
@@ -4618,8 +4620,13 @@ mod tests {
         assert_eq!(app.tick_interval(), None);
 
         app.connect_profile_fixture(0);
-        assert!(app.tick_interval().is_some());
-        for _ in 0..8 {
+        assert_eq!(app.tick_interval(), None, "a session asked for a clock");
+        app.queue_transfer("moving.bin".to_string(), 100, TransferDirection::Upload);
+        assert!(
+            app.tick_interval().is_some(),
+            "a moving transfer asked for none"
+        );
+        for _ in 0..30 {
             // `handle_tick` stopped advancing sessions on 2026-09-15: the
             // advance is a simulator -- its own doc said so -- and calling it
             // from the tick made the simulation the shipping behaviour. The

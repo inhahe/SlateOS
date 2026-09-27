@@ -149925,7 +149925,7 @@ comments and docstrings counts documentation as defect.
 is real and is theirs to repair with
 `python scripts/check-collapsed-messages.py --apply`. It was never lane A's.
 
-## TD-A-THE-HEAD-OF-LINE-WITNESS-MAY-BE-TESTING-A-DEAD-DATAPATH (lane A, 2026-09-14) -- SEE CORRECTION
+## TD-A-THE-HEAD-OF-LINE-WITNESS-MAY-BE-TESTING-A-DEAD-DATAPATH (lane A, 2026-09-14) -- SEE CORRECTION -- FIXED 2026-09-27 (A-Q15, §972)
 
 **In short:** the witness written for `D-NETSOCK-SYNC` fails at its first
 `accept`, 64 retries, `InternalError` every time. That is not a race and the
@@ -150136,6 +150136,23 @@ decision rather than a patch.
 
 **`D-NETSOCK-SYNC` still has ONE witness.** Three boots have now failed on this
 test and none of them said anything about the property.
+
+**FIXED 2026-09-27, both of the shapes named above (A-Q15, design-decisions
+§972).** Both halves are lane A's since the six-lane split, which removed the
+ownership block.
+- **The kernel half.** Every socket submits on one shared ring (design A,
+  `netstack_client`'s `SHARED_RING`), or each on its own (design B, behind
+  `RingMode`).
+- **The daemon half.** The daemon holds every socket in one daemon-wide `Net`,
+  keyed by session and id. It maps up to 64 rings (`Sessions`), and a session
+  ends only on its own ring's `OP_STOP`.
+- **The listener id** is allocated per socket (`alloc_conn_id`), no longer the
+  constant 100.
+
+The witness now runs in every boot in both designs (`proc/spawn.rs`), and a
+failed accept is a regression. The constant that declared the limitation is
+retired (§941's closing note). This reaches `main` only on a boot that ran the
+witness in both designs.
 
 ## TD-A-GIT-STASH-ON-A-CLEAN-TREE-MAKES-NO-ENTRY-SO-POP-TAKES-SOMEONE-ELSES (lane A, 2026-09-14)
 

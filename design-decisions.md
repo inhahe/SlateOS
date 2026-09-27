@@ -71666,6 +71666,13 @@ working on this stack and this entry does not pretend otherwise; 932's
 mirror-versus-witness distinction applies, and what exists here is neither --
 it is an honest gap with its own alarm attached.
 
+**Retired 2026-09-27: the alarm did its job.** A-Q15's fix (§972) let two
+sockets coexist, and the positive control's demand to flip the constant was met
+in the same change. Both ring designs now hold every socket, so there is no mode
+left in which the constant has a limitation to declare. It was removed along
+with both of its arms. A failed accept is now simply a regression, and the case
+declines for one reason only: no IPv4 lease.
+
 ## 942. A green verdict is only as good as its corpus, and the corpus is invisible in the output
 
 **Date:** 2026-09-15 · **Decided by:** Claude (autonomous) · **Lane:** A ·

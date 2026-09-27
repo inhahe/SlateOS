@@ -877,29 +877,11 @@ pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
     const SETTLE_YIELDS: u32 = 8;
     /// Yields waited for the reader to reach `recv` before calling it a setup
     /// failure rather than a property failure.
+    const START_YIELDS: u32 = 10_000;
     /// Accept retries. `connect` is non-blocking, so the handshake completes
     /// over several scheduler passes; netstack_client uses 16 for the same
     /// reason and this allows more because the machine is busier here.
     const ACCEPT_SPINS: u32 = 64;
-
-    /// Whether the netstack daemon can hold more than one socket at a time.
-    ///
-    /// `true` since 2026-09-27: every socket submits on one shared ring
-    /// (`netstack_client`'s `SHARED_RING`, design A of A-Q15, design-decisions
-    /// §972), so the daemon keeps one session with every socket in it. Before,
-    /// each socket opened its own SHM ring while the daemon held a single
-    /// `RingSession` and reset its `conns` and `listeners` whenever a ring
-    /// arrived on a different handle: creating a second socket destroyed the
-    /// first one's listener, and head-of-line blocking -- which needs two live
-    /// sockets -- could not be observed at all.
-    ///
-    /// It is a **declaration**, deliberately: a constant this test reads is a
-    /// reason looked up, which `check-selftest-skips` permits, where a skip
-    /// inferred from `accept` returning an error is one it refuses. The arms
-    /// below check the declaration against reality, so it cannot go stale
-    /// unnoticed: with it `true`, a failed accept is a regression.
-    const NETSTACK_HOLDS_MULTIPLE_SOCKETS: bool = true;
-    const START_YIELDS: u32 = 10_000;
 
     let me_ip = crate::net::interface::ip().0;
     if me_ip == [0, 0, 0, 0] {
@@ -955,65 +937,28 @@ pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
 
     let c1 = step!("create(client 1)", create(2));
     step!("connect(client 1)", connect(c1, &me_ip, PORT, true));
-    // A-Q15's limitation is DECLARED, not inferred from a failed call.
-    //
-    // `check-selftest-skips` refuses a skip decided by the outcome of a call
-    // into the code under test, on grounds better than any argument against
-    // them: a test that skips when its subject errors stops testing at exactly
-    // the moment the subject breaks. That rule is why this case used to FAIL
-    // outright. The rule is satisfied differently here -- the reason is looked
-    // up from `NETSTACK_HOLDS_MULTIPLE_SOCKETS` above, and the declaration is
-    // then checked against reality by the positive control in the `Ok` arm.
+    // A second socket must leave the listener alone in both ring designs of
+    // A-Q15 (design-decisions §972), so an accept that never becomes ready is a
+    // regression. Until 2026-09-27 it was the known limitation: each socket
+    // opened its own SHM ring, and the daemon, holding a single session, reset
+    // its listener table whenever a ring on a different handle arrived, so
+    // `create(client 1)` destroyed the listener. This case declined then, on a
+    // constant declaring that limitation, with a positive control that would
+    // fail the boot once a fix made the constant stale (design-decisions §941).
+    // The fix did, and the constant is gone: no ring mode has the limitation.
     let a1 = match accept_ready(srv) {
-        Ok(h) => {
-            // POSITIVE CONTROL. Reaching here means `create(c1)` did NOT
-            // destroy the listener, so the limitation the constant declares is
-            // gone. Fail loudly rather than quietly start passing: a stale
-            // declaration that silently retires its own test case is the whole
-            // reason a bare skip would be unacceptable here.
-            if !NETSTACK_HOLDS_MULTIPLE_SOCKETS {
-                close(c1);
-                close(srv);
-                crate::serial_println!(
-                    "[netsock]   FAIL: a second socket no longer destroys the listener, so \
-                     NETSTACK_HOLDS_MULTIPLE_SOCKETS is STALE. A-Q15 appears fixed -- set it \
-                     to true so this case actually runs, and close A-Q15."
-                );
-                return Err(KernelError::InternalError);
-            }
-            h
-        }
+        Ok(h) => h,
         Err(e) => {
             close(c1);
             close(srv);
-            if NETSTACK_HOLDS_MULTIPLE_SOCKETS {
-                // The declaration says two sockets coexist, so this is a real
-                // regression rather than the known limitation.
-                crate::serial_println!(
-                    "[netsock]   FAIL: accept never became ready in {} spins and the netstack \
-                     is declared able to hold two sockets, so this is a regression, not \
-                     A-Q15: {:?}",
-                    ACCEPT_SPINS,
-                    e
-                );
-                return Err(e);
-            }
-            // Declined for a looked-up reason. This is the last thing this
-            // function prints on this path -- the success line below is
-            // unreachable -- so the run cannot end up claiming coverage.
             crate::serial_println!(
-                "[netsock]   NOT CHECKED: head-of-line blocking is UNTESTED, not passing. \
-                 `create(client 1)` destroyed the listener `listen(srv)` had just \
-                 registered, because every socket opens its own SHM ring and the daemon \
-                 holds ONE RingSession, resetting its listener table when a ring on a \
-                 different handle appears. That is A-Q15, it is open, and it is the \
-                 operator's call: {:?}",
+                "[netsock]   FAIL: accept never became ready in {} spins with a second \
+                 socket open -- the netstack lost the listener or stopped pumping its \
+                 handshake: {:?}",
+                ACCEPT_SPINS,
                 e
             );
-            // `Ok(None)` is this suite's existing spelling for "declined"; the
-            // caller must not restate the reason, because there are now two
-            // (no IPv4 lease, and this one).
-            return Ok(None);
+            return Err(e);
         }
     };
     let c2 = step!("create(client 2)", create(2));

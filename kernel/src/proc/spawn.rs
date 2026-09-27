@@ -5067,14 +5067,13 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         // The check prints its own OK line, including the byte count.
         Ok(Some(())) => {}
         Ok(None) => {
-            // Names no cause. There are two decline paths -- no IPv4 lease, and
-            // A-Q15's single-session netstack -- and this arm cannot tell them
-            // apart, so it used to report the wrong one half the time. The
-            // callee prints which it was, immediately above this line.
+            // The one decline left since A-Q15's fix retired the other
+            // (design-decisions §941): the loopback divert keys on a non-zero
+            // local address, so without a lease there is nothing to assert.
             serial_println!(
-                "[spawn]   net::socket head-of-line: declined -- see the reason on the \
-                 line above. The property is UNTESTED, not passing."
-            )
+                "[spawn]   net::socket head-of-line: no IPv4 lease -- check skipped. The \
+                 property is UNTESTED, not passing."
+            );
         }
         Err(e) => {
             serial_println!(

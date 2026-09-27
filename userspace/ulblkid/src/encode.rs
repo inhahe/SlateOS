@@ -233,11 +233,24 @@ fn whitelisted(c: u8) -> bool {
 /// `len` bytes with room to spare, as upstream fails.
 #[must_use]
 pub fn encode_string(s: &[u8], len: usize) -> Option<Vec<u8>> {
+    encode_string_into(s, len).ok()
+}
+
+/// [`encode_string`], and on failure what upstream had written into the
+/// buffer by then (`Err`) -- which `blkid -o udev` prints regardless.
+/// Upstream leaves that buffer unterminated, so its output then runs on
+/// into whatever follows it in memory; the written part is what can be
+/// reproduced.
+///
+/// # Errors
+///
+/// The partial output, when the result would not fit.
+pub fn encode_string_into(s: &[u8], len: usize) -> Result<Vec<u8>, Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len());
     if len == 0 {
-        return None;
+        return Err(out);
     }
     let s = crate::c_str(s);
-    let mut out = Vec::with_capacity(s.len());
     let mut i = 0usize;
     while i < s.len() {
         let rest = s.get(i..).unwrap_or_default();
@@ -245,7 +258,7 @@ pub fn encode_string(s: &[u8], len: usize) -> Option<Vec<u8>> {
         match utf8_valid_len(rest) {
             Some(n) if n > 1 => {
                 if len.saturating_sub(out.len()) < n {
-                    return None;
+                    return Err(out);
                 }
                 out.extend_from_slice(rest.get(..n).unwrap_or_default());
                 i = i.saturating_add(n);
@@ -253,12 +266,12 @@ pub fn encode_string(s: &[u8], len: usize) -> Option<Vec<u8>> {
             _ => {
                 if c == b'\\' || !whitelisted(c) {
                     if len.saturating_sub(out.len()) < 4 {
-                        return None;
+                        return Err(out);
                     }
                     out.extend_from_slice(format!("\\x{c:02x}").as_bytes());
                 } else {
                     if len.saturating_sub(out.len()) < 1 {
-                        return None;
+                        return Err(out);
                     }
                     out.push(c);
                 }
@@ -266,13 +279,13 @@ pub fn encode_string(s: &[u8], len: usize) -> Option<Vec<u8>> {
             }
         }
         if out.len().saturating_add(3) >= len {
-            return None;
+            return Err(out);
         }
     }
     if len.saturating_sub(out.len()) < 1 {
-        return None;
+        return Err(out);
     }
-    Some(out)
+    Ok(out)
 }
 
 /// `blkid_safe_string(str, str_safe, len)`: white space normalized, then

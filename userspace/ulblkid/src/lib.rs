@@ -54,7 +54,7 @@ pub mod topology;
 mod tests;
 
 pub use blkdev::{get_sector_size as blkdev_get_sector_size, get_size as blkdev_get_size};
-pub use probe::{Buf, ChainId, IdInfo, IdMag, Probe, Value};
+pub use probe::{Buf, ChainId, IdInfo, IdMag, Probe, Value, open_nonblock, parse_tag_string};
 
 /// `BLKID_PROBE_OK`.
 pub const PROBE_OK: i32 = 0;

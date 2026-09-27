@@ -330,7 +330,8 @@ impl Default for Probe {
 /// `blkid_parse_tag_string(token, &type, &val)`: `NAME=value`, the value
 /// optionally in matching quotes (the last such quote closes it). `None`
 /// without an `=`, with an unclosed quote, or with an empty value.
-pub(crate) fn parse_tag_string(token: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+#[must_use]
+pub fn parse_tag_string(token: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let eq = token.iter().position(|&b| b == b'=')?;
     let name = token.get(..eq)?.to_vec();
     let mut value = crate::c_str(token.get(eq.saturating_add(1)..)?);

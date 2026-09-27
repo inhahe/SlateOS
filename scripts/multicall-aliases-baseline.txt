@@ -26,7 +26,6 @@ audit:auditd
 audit:aureport
 audit:ausearch
 audit:autrace
-blkid:findfs
 capsh:captest
 capsh:getcap
 capsh:getpcaps

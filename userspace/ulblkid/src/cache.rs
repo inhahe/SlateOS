@@ -342,6 +342,34 @@ impl BlkCache {
         Some(d.xname.as_deref().unwrap_or(&d.name))
     }
 
+    /// `blkid_tag_iterate_begin(dev)` and `blkid_tag_next`: the device's
+    /// tags, `(name, value)`, in the order they were first set.
+    #[must_use]
+    pub fn tags(&self, id: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.dev(id)
+            .map(|d| {
+                d.tags
+                    .iter()
+                    .map(|t| (t.name.clone(), t.val.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// `blkid_gc_cache(cache)`: forget every device whose node no longer
+    /// exists.
+    pub fn gc_cache(&mut self) {
+        for id in self.dev_ids() {
+            let gone = self
+                .dev(id)
+                .is_some_and(|d| std::fs::metadata(path_of(&d.name)).is_err());
+            if gone {
+                self.free_dev(id);
+                self.flags |= BIC_FL_CHANGED;
+            }
+        }
+    }
+
     /// The live devices, in list order (`blkid_dev_iterate_begin`).
     #[must_use]
     pub fn dev_ids(&self) -> Vec<usize> {

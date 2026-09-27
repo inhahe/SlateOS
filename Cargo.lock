@@ -207,6 +207,16 @@ version = "0.1.0"
 [[package]]
 name = "blkid"
 version = "0.1.0"
+dependencies = [
+ "getoptlong",
+ "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulstrutils",
+ "ulsysfs",
+]
 
 [[package]]
 name = "blockbuf"
@@ -973,6 +983,17 @@ dependencies = [
  "textfmt",
  "textline",
  "tzrules",
+]
+
+[[package]]
+name = "findfs"
+version = "0.1.0"
+dependencies = [
+ "getoptlong",
+ "quoting",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
 ]
 
 [[package]]

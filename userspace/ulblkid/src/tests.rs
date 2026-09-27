@@ -71,7 +71,7 @@ impl Image {
 fn probe_of(dir: &ScratchDir, name: &str, img: &Image) -> Probe {
     let p = dir.path(name);
     std::fs::write(&p, &img.0).unwrap();
-    Probe::from_filename(p.to_str().unwrap().as_bytes()).unwrap()
+    Probe::from_filename(&quoting::os_bytes(p.as_os_str())).unwrap()
 }
 
 /// A value, as `%s` prints it.

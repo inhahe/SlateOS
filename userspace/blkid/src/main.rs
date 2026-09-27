@@ -1,1546 +1,1211 @@
-// Slate OS blkid — block device identification
-//
-// Multi-personality binary:
-//   blkid   — locate/print block device attributes
-//   findfs  — find a filesystem by label or UUID
-//
-// Usage:
-//   blkid [OPTIONS] [device...]
-//   findfs LABEL=<label> | UUID=<uuid> | PARTUUID=<uuid>
+//! blkid -- locate and print block device attributes.
+//!
+//! A port of util-linux 2.39.3's `misc-utils/blkid.c`, function by function
+//! and with upstream's names, on top of `ulblkid` -- the port of libblkid:
+//! its probing for `-p` and `-i`, its device cache (`/run/blkid/blkid.tab`)
+//! for the default mode and `-l`, its tag evaluation for `-L` and `-U`.
+//! Measured against `blkid from util-linux 2.39.3` by
+//! `scripts/blkid-cli-diff.sh`.
+//!
+//! This replaces a hand-written program that recognised a handful of
+//! filesystems itself, read argv as UTF-8, and doubled as `findfs` (which is
+//! a program of its own, `userspace/findfs`).
+//!
+//! Upstream's quirks are kept where they show:
+//!
+//! * The default output format is "full", but `-o full` is a different
+//!   value that means the same -- except that only the latter lets `-i`
+//!   switch to the export format by itself.
+//! * `-o list` widens its columns on each of the first two lines of a wide
+//!   terminal, as upstream's static widths do.
+//! * A device whose values `-s` filters out entirely still ends its (empty)
+//!   line.
+//! * A hint that does not parse is reported with whatever `errno` was left
+//!   -- by loading the locale, if nothing since.
+//!
+//! # What is not upstream's
+//!
+//! * **A name in a diagnostic** has its unprintable bytes escaped
+//!   (design-decisions §370).
+//! * **`-o udev` with an encoded value too long for its buffer** prints the
+//!   part that was encoded; upstream's buffer is then unterminated, and its
+//!   output runs on into whatever follows it in memory.
 
-#![cfg_attr(not(test), no_main)]
-// BlkidInfo::fs_size is part of the BLKGETSIZE64 ioctl surface and the
-// blkid -o size output the real implementation must produce. Dead-code
-// lint cannot see across that future boundary.
+use getoptlong::{Opt, Program, Takes};
+use quoting::{escape_unprintable, os_bytes};
+use std::ffi::{OsStr, OsString};
+use std::process::ExitCode;
+use std::rc::Rc;
+use ulblkid::cache::{BlkCache, DEV_NORMAL};
+use ulblkid::encode::{encode_string_into, safe_string};
+use ulblkid::{
+    FLTR_NOTIN, FLTR_ONLYIN, PARTS_ENTRY_DETAILS, PROBE_AMBIGUOUS, Probe, SUBLKS_FSINFO,
+    SUBLKS_LABEL, SUBLKS_SECTYPE, SUBLKS_TYPE, SUBLKS_USAGE, SUBLKS_UUID, SUBLKS_VERSION,
+    USAGE_CRYPTO, USAGE_FILESYSTEM, USAGE_OTHER, USAGE_RAID,
+};
+use ulclosestream::{Stdout, stderr_write, warn, warnx};
+use ulsysfs::ismounted::{MF_BUSY, MF_MOUNTED, check_mount_point};
 
-#[cfg(not(test))]
-use std::env;
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+/// Getopt's errors are only sentences here; the referral follows them.
+const BLKID: Program = Program::new("blkid", 1);
 
-// ---------------------------------------------------------------------------
-// Personality detection
-// ---------------------------------------------------------------------------
+/// `OUTPUT_FULL`.
+const OUTPUT_FULL: i32 = 1 << 0;
+/// `OUTPUT_VALUE_ONLY`.
+const OUTPUT_VALUE_ONLY: i32 = 1 << 1;
+/// `OUTPUT_DEVICE_ONLY`.
+const OUTPUT_DEVICE_ONLY: i32 = 1 << 2;
+/// `OUTPUT_PRETTY_LIST`: deprecated.
+const OUTPUT_PRETTY_LIST: i32 = 1 << 3;
+/// `OUTPUT_UDEV_LIST`: deprecated.
+const OUTPUT_UDEV_LIST: i32 = 1 << 4;
+/// `OUTPUT_EXPORT_LIST`.
+const OUTPUT_EXPORT_LIST: i32 = 1 << 5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Personality {
-    Blkid,
-    Findfs,
-}
+/// `BLKID_EXIT_NOTFOUND`: token or device not found.
+const BLKID_EXIT_NOTFOUND: u8 = 2;
+/// `BLKID_EXIT_OTHER`: bad usage or other error.
+const BLKID_EXIT_OTHER: u8 = 4;
+/// `BLKID_EXIT_AMBIVAL`: ambivalent low-level probing detected.
+const BLKID_EXIT_AMBIVAL: u8 = 8;
 
-fn detect_personality(argv0: &str) -> Personality {
-    let base = argv0.rsplit('/').next().unwrap_or(argv0);
-    let base = base.rsplit('\\').next().unwrap_or(base);
-    let lower = base.to_ascii_lowercase();
-    let lower = lower.strip_suffix(".exe").unwrap_or(&lower);
-    match lower {
-        "findfs" => Personality::Findfs,
-        _ => Personality::Blkid,
-    }
-}
+/// `ERANGE`.
+const ERANGE: i32 = 34;
 
-// ---------------------------------------------------------------------------
-// Filesystem detection via magic numbers
-// ---------------------------------------------------------------------------
+/// Upstream's option string.
+const SHORTS: &str = "c:DdgH:hilL:n:ko:O:ps:S:t:u:U:w:Vv";
 
-#[derive(Debug, Clone)]
-struct BlkidInfo {
-    device: PathBuf,
-    fs_type: String,
-    /// The volume label, EXACTLY as it sits on the device.
-    ///
-    /// Bytes, not `String`, because a label is OS-boundary data: the on-disk
-    /// field is a fixed-width run of bytes and no filesystem promises it is
-    /// UTF-8. Decoding it with `from_utf8_lossy` replaced every invalid
-    /// sequence with U+FFFD, which made DIFFERENT labels compare EQUAL --
-    /// `41 ff fe 42` and `41 fe ff 42` both became `A<fffd><fffd>B`. That is
-    /// the same collision the all-zero UUID caused, from a different cause,
-    /// and it broke `findfs LABEL=` in both directions: it could never match
-    /// a label it had corrupted, and it could match the wrong device among
-    /// several that corrupted to the same string.
-    ///
-    /// Self-review item 7: never force UTF-8 on OS-boundary data, and no
-    /// `from_utf8_lossy` -- that is silent data corruption.
-    label: Vec<u8>,
-    uuid: String,
-    partuuid: String,
-    part_label: Vec<u8>,
-    block_size: u64,
-    // Filesystem size, read and not printed by the current columns.
-    #[allow(dead_code)]
-    fs_size: u64,
-}
-
-/// Bytes `-o udev` passes through unencoded.
-///
-/// util-linux's `blkid_encode_string` allows ASCII alphanumerics and this
-/// handful of punctuation; everything else -- every byte over 0x7f, every
-/// control byte, space, and the shell-significant characters -- is escaped.
-/// Taken from the reference rather than guessed, because the point of the
-/// format is that a udev rule can consume it without quoting.
-fn udev_safe(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'#' | b'+' | b'-' | b'.' | b':' | b'=' | b'@' | b'_')
-}
-
-/// `ID_FS_<TAG>_ENC`: unsafe bytes become `\x<hh>`.
-///
-/// This is `blkid_encode_string`. It is reversible -- a consumer can recover
-/// the exact on-disk bytes -- which is why it exists alongside the plain form.
-fn udev_encode(raw: &[u8]) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for &b in raw {
-        if udev_safe(b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("\\x{b:02x}"));
-        }
-    }
-    out
-}
-
-/// `ID_FS_<TAG>`: each unsafe byte becomes a single `_`.
-///
-/// NOT the same function as [`udev_encode`], and deliberately not built on it.
-/// util-linux emits both tags in the same output and they differ: one byte
-/// gives one underscore here and four characters there. Sharing an encoder
-/// would make them agree, which would quietly destroy the reason there are
-/// two of them.
-///
-/// # Why util-linux prints both
-///
-/// It is refusing to choose. `LABEL` in the other formats is the raw bytes;
-/// the escaping question is answered by emitting the safe-to-display form and
-/// the lossless form under DIFFERENT NAMES, so a consumer picks the one it can
-/// handle rather than having a policy imposed on it. The plain form is lossy
-/// on purpose -- `A\xff\xfeB` and `A\xfe\xffB` both render `A__B` -- which is
-/// exactly why the `_ENC` tag has to be there too.
-fn udev_plain(raw: &[u8]) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for &b in raw {
-        out.push(if udev_safe(b) { b as char } else { '_' });
-    }
-    out
-}
-
-/// Known filesystem magic signatures
-struct FsMagic {
-    offset: usize,
-    magic: &'static [u8],
-    fs_type: &'static str,
-}
-
-const FS_MAGICS: &[FsMagic] = &[
-    FsMagic {
-        offset: 0x438,
-        magic: &[0x53, 0xEF],
-        fs_type: "ext4",
-    }, // ext2/3/4
-    FsMagic {
-        offset: 0,
-        magic: b"\xeb\x3c\x90",
-        fs_type: "vfat",
-    }, // FAT
-    FsMagic {
-        offset: 0,
-        magic: b"\xeb\x58\x90",
-        fs_type: "vfat",
-    }, // FAT32
-    FsMagic {
-        offset: 0x10040,
-        magic: b"-FVE-FS-",
-        fs_type: "bitlocker",
-    },
-    FsMagic {
-        offset: 3,
-        magic: b"NTFS    ",
-        fs_type: "ntfs",
-    },
-    FsMagic {
-        offset: 0x8001,
-        magic: b"CD001",
-        fs_type: "iso9660",
-    },
-    FsMagic {
-        offset: 0,
-        magic: b"XFSB",
-        fs_type: "xfs",
-    },
-    FsMagic {
-        offset: 0x10034,
-        magic: b"ReIsEr",
-        fs_type: "reiserfs",
-    },
-    FsMagic {
-        offset: 0xFF6,
-        magic: b"\x41\xc6\x4e\x92",
-        fs_type: "swap",
-    },
+/// Upstream's `longopts[]`, in its order, and each one's `val`.
+const LONGS: &[(&str, Takes)] = &[
+    ("cache-file", Takes::Required),
+    ("no-encoding", Takes::Nothing),
+    ("no-part-details", Takes::Nothing),
+    ("garbage-collect", Takes::Nothing),
+    ("output", Takes::Required),
+    ("list-filesystems", Takes::Nothing),
+    ("match-tag", Takes::Required),
+    ("match-token", Takes::Required),
+    ("list-one", Takes::Nothing),
+    ("label", Takes::Required),
+    ("uuid", Takes::Required),
+    ("probe", Takes::Nothing),
+    ("hint", Takes::Required),
+    ("info", Takes::Nothing),
+    ("size", Takes::Required),
+    ("offset", Takes::Required),
+    ("usages", Takes::Required),
+    ("match-types", Takes::Required),
+    ("version", Takes::Nothing),
+    ("help", Takes::Nothing),
+];
+const LONG_VALS: [u8; 20] = [
+    b'c', b'd', b'D', b'g', b'o', b'k', b's', b't', b'l', b'L', b'U', b'p', b'H', b'i', b'S', b'O',
+    b'u', b'n', b'V', b'h',
 ];
 
-/// Read up to `buf.len()` bytes, stopping only at EOF.
-///
-/// `Read::read` is allowed to return fewer bytes than asked for even when more
-/// are available, and on a block device a short read is ordinary rather than
-/// exceptional -- one call tends to stop at a sector or page boundary. A
-/// single `read` here therefore under-reports the device, and every caller
-/// below decides what it may parse from the length it gets back.
-fn read_up_to(file: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
-    let mut total = 0usize;
-    while total < buf.len() {
-        let Some(rest) = buf.get_mut(total..) else {
-            break;
-        };
-        match file.read(rest) {
-            Ok(0) => break,
-            Ok(n) => total = total.saturating_add(n),
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(total)
+/// `excl[]`: `-n` and `-u` exclude each other.
+const EXCL: [&[i32]; 1] = [&[b'n' as i32, b'u' as i32]];
+
+/// `struct blkid_control`, and the statics upstream keeps in functions.
+struct Ctl {
+    output: i32,
+    offset: u64,
+    size: u64,
+    /// `show[]`: the tags `-s` asked for.
+    show: Vec<Vec<u8>>,
+    eval: bool,
+    gc: bool,
+    lookup: bool,
+    lowprobe: bool,
+    lowprobe_superblocks: bool,
+    lowprobe_topology: bool,
+    no_part_details: bool,
+    raw_chars: bool,
+    /// `print_tags`'s `static int first`.
+    tags_first: bool,
+    /// `lowprobe_device`'s `static int first`.
+    lowprobe_first: bool,
+    /// `pretty_print_line`'s statics: the column widths, and the terminal's
+    /// width as it is used up.
+    pretty: Pretty,
 }
 
-fn detect_filesystem(device_path: &Path) -> Option<BlkidInfo> {
-    let mut file = std::fs::File::open(device_path).ok()?;
-    let mut buf = vec![0u8; 0x20000]; // Read first 128KB
-    let bytes_read = read_up_to(&mut file, &mut buf).ok()?;
-
-    if bytes_read < 512 {
-        return None;
-    }
-
-    // THE LOAD-BEARING LINE. Without it every `buf.len()` test in every
-    // parser below is vacuously true, because `buf` is a 128 KiB zero-filled
-    // `Vec` whose length never depended on the device at all.
-    //
-    // The parsers are already careful: each one guards each field with
-    // `if buf.len() >= <end of that field>` before reading it, and the output
-    // path already suppresses an empty label, an empty UUID and a zero block
-    // size. Both halves of the check were written. Neither could fire, so a
-    // device that stopped short of a field still produced one -- read out of
-    // the zero padding and printed as measured fact.
-    //
-    // What that looked like: a 1082-byte image carrying only the ext4 magic
-    // reported `UUID="00000000-0000-0000-0000-000000000000"`. Not merely
-    // wrong -- EVERY short device reported that same UUID, so `findfs UUID=`
-    // matched whichever it enumerated first. A UUID's one job is to be
-    // unique, and the zero padding manufactured collisions.
-    //
-    // `bytes_read` was measured and then thrown away; this hands it to the
-    // parsers, which is what they were already written to expect.
-    buf.truncate(bytes_read);
-
-    let mut info = BlkidInfo {
-        device: device_path.to_path_buf(),
-        fs_type: String::new(),
-        label: Vec::new(),
-        uuid: String::new(),
-        partuuid: String::new(),
-        part_label: Vec::new(),
-        block_size: 0,
-        fs_size: 0,
-    };
-
-    // Check magic signatures
-    for magic in FS_MAGICS {
-        if buf
-            .get(magic.offset..)
-            .is_some_and(|tail| tail.starts_with(magic.magic))
-        {
-            info.fs_type = magic.fs_type.to_string();
-
-            // Extract more info based on FS type
-            match magic.fs_type {
-                "ext4" => parse_ext4_info(&buf, &mut info),
-                "vfat" => parse_fat_info(&buf, &mut info),
-                "ntfs" => parse_ntfs_info(&buf, &mut info),
-                "xfs" => parse_xfs_info(&buf, &mut info),
-                "swap" => parse_swap_info(&buf, &mut info),
-                _ => {}
-            }
-
-            return Some(info);
-        }
-    }
-
-    None
+/// `pretty_print_line`'s statics.
+struct Pretty {
+    device_len: usize,
+    fs_type_len: usize,
+    label_len: usize,
+    mtpt_len: usize,
+    term_width: Option<i64>,
 }
 
-// ---------------------------------------------------------------------------
-// Bounded reads
-//
-// Every superblock field below is at a fixed offset chosen by the ON-DISK
-// FORMAT, and the buffer is however much of the device we managed to read.
-// Those two facts are independent, so each read has to state what it needs
-// and tolerate not getting it. `get(offset..)?.get(..N)?` says exactly that
-// in one expression, and has no arithmetic to overflow.
-//
-// The alternative -- one `if buf.len() >= X` guard covering a run of fields --
-// is what this file used to do, and it is how a whole parser ends up
-// reporting nothing because its last field was missing. Per-field reads
-// degrade one field at a time.
-// ---------------------------------------------------------------------------
-
-/// The `N` bytes at `offset`, or `None` if the device is too short.
-#[inline]
-fn bytes_at<const N: usize>(buf: &[u8], offset: usize) -> Option<[u8; N]> {
-    buf.get(offset..)?.get(..N)?.try_into().ok()
-}
-
-/// The `len`-byte field at `offset`, or `None` if the device is too short.
-#[inline]
-fn field_at(buf: &[u8], offset: usize, len: usize) -> Option<&[u8]> {
-    buf.get(offset..)?.get(..len)
-}
-
-fn u16_le(buf: &[u8], offset: usize) -> Option<u16> {
-    bytes_at::<2>(buf, offset).map(u16::from_le_bytes)
-}
-
-fn u32_le(buf: &[u8], offset: usize) -> Option<u32> {
-    bytes_at::<4>(buf, offset).map(u32::from_le_bytes)
-}
-
-fn u32_be(buf: &[u8], offset: usize) -> Option<u32> {
-    bytes_at::<4>(buf, offset).map(u32::from_be_bytes)
-}
-
-fn u64_le(buf: &[u8], offset: usize) -> Option<u64> {
-    bytes_at::<8>(buf, offset).map(u64::from_le_bytes)
-}
-
-/// A fixed-width on-disk label field, trimmed to its content.
-///
-/// `pad` is the byte the filesystem pads with: NUL for ext4, XFS and swap.
-/// The result is still raw bytes -- trimming is the only processing a label
-/// gets on the way through.
-fn trim_pad(field: &[u8], pad: u8) -> &[u8] {
-    let end = field
+/// `program_invocation_short_name`: argv[0] past its last `/`.
+fn short_name(arg0: &OsStr) -> Vec<u8> {
+    let bytes = os_bytes(arg0);
+    let start = bytes
         .iter()
-        .rposition(|&b| b != pad)
+        .rposition(|&b| b == b'/')
         .map_or(0, |i| i.saturating_add(1));
-    field.get(..end).unwrap_or_default()
+    bytes.get(start..).unwrap_or_default().to_vec()
 }
 
-/// Format 16 raw bytes as a canonical 8-4-4-4-12 lowercase UUID.
-///
-/// ext4, XFS and swap all store a UUID this way and all three used to format
-/// it with a sixteen-argument `format!`, which is where 48 of this crate's 91
-/// indexing warnings came from. One loop replaces all three.
-fn format_uuid(bytes: [u8; 16]) -> String {
-    use core::fmt::Write as _;
-    let mut out = String::with_capacity(36);
-    for (i, byte) in bytes.iter().enumerate() {
-        if matches!(i, 4 | 6 | 8 | 10) {
-            out.push('-');
-        }
-        // Ignored: `write!` to a `String` is infallible -- `fmt::Error` exists
-        // for writers that can fail, and `String`'s impl never returns it.
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+/// Bytes shown in a diagnostic: upstream's text, unprintable bytes escaped.
+fn shown(text: &[u8]) -> String {
+    escape_unprintable(text)
 }
 
-fn parse_ext4_info(buf: &[u8], info: &mut BlkidInfo) {
-    // The ext2/3/4 superblock sits at a fixed 1024-byte offset.
-    let Some(sb) = buf.get(0x400..) else {
-        return;
-    };
-
-    // Block size: 1024 << s_log_block_size (offset 0x18)
-    if let Some(log_block_size) = u32_le(sb, 0x18) {
-        info.block_size = 1024u64.checked_shl(log_block_size).unwrap_or(4096);
-    }
-
-    // Volume label: offset 0x78, 16 bytes
-    if let Some(label) = field_at(sb, 0x78, 16) {
-        info.label = trim_pad(label, 0).to_vec();
-    }
-
-    // UUID: offset 0x68, 16 bytes
-    if let Some(uuid) = bytes_at::<16>(sb, 0x68) {
-        info.uuid = format_uuid(uuid);
-    }
-
-    // ext2 / ext3 / ext4 are told apart by their feature flags, not by the
-    // magic -- all three share it. Without the flags the family name from
-    // the magic table stands, which is the honest answer for a device that
-    // stops before offset 0x464.
-    if let (Some(compat), Some(incompat)) = (u32_le(sb, 0x5C), u32_le(sb, 0x60)) {
-        info.fs_type = if incompat & 0x0040 != 0 {
-            "ext4"
-        } else if compat & 0x0004 != 0 {
-            "ext3"
-        } else {
-            "ext2"
-        }
-        .to_string();
-    }
+/// `errtryhelp(status)`.
+fn errtryhelp(short: &[u8], status: u8) -> u8 {
+    stderr_write(format!("Try '{} --help' for more information.\n", shown(short)).as_bytes());
+    status
 }
 
-fn parse_fat_info(buf: &[u8], info: &mut BlkidInfo) {
-    info.fs_type = "vfat".to_string();
-
-    // A zero 16-bit total-sector count means the real count lives in the
-    // 32-bit field, which is what distinguishes FAT32 from FAT12/16. The two
-    // layouts then put the label and serial in different places.
-    let Some(total_sectors_16) = u16_le(buf, 19) else {
-        return;
-    };
-    let (label_off, serial_off) = if total_sectors_16 == 0 {
-        (71, 67) // FAT32
+/// `warn(msg)` with an `errno` that may be 0 -- glibc's `Success`.
+fn warn_errno(short: &[u8], msg: &str, errno: i32) {
+    if errno == 0 {
+        warnx(short, &format!("{msg}: Success"));
     } else {
-        (43, 39) // FAT12/16
-    };
-
-    if let Some(label) = field_at(buf, label_off, 11) {
-        // FAT pads its label with spaces rather than NUL.
-        info.label = label.trim_ascii().to_vec();
-    }
-    if let Some([b0, b1, b2, b3]) = bytes_at::<4>(buf, serial_off) {
-        // Shown high half first, as blkid(8) prints it.
-        info.uuid = format!("{b3:02X}{b2:02X}-{b1:02X}{b0:02X}");
+        warn(short, msg, &std::io::Error::from_raw_os_error(errno));
     }
 }
 
-fn parse_ntfs_info(buf: &[u8], info: &mut BlkidInfo) {
-    // Volume serial at offset 0x48
-    if let Some(serial) = u64_le(buf, 0x48) {
-        info.uuid = format!("{serial:016X}");
+/// `get_terminal_width(default)`.
+fn get_terminal_width(default: i64) -> i64 {
+    match smartcols::tty::terminal_dimension().0 {
+        Some(w) if w > 0 => i64::try_from(w).unwrap_or(i64::MAX),
+        _ => default,
     }
 }
 
-fn parse_xfs_info(buf: &[u8], info: &mut BlkidInfo) {
-    // Block size at offset 4, big-endian
-    if let Some(block_size) = u32_be(buf, 4) {
-        info.block_size = u64::from(block_size);
-    }
-
-    // UUID at offset 32, 16 bytes
-    if let Some(uuid) = bytes_at::<16>(buf, 32) {
-        info.uuid = format_uuid(uuid);
-    }
-
-    // Label at offset 0x6C, 12 bytes
-    if let Some(label) = field_at(buf, 0x6C, 12) {
-        info.label = trim_pad(label, 0).to_vec();
-    }
+/// `usage()`.
+fn usage(short: &[u8]) -> Vec<u8> {
+    let s = shown(short);
+    let mut t = String::from("\nUsage:\n");
+    t.push_str(&format!(" {s} --label <label> | --uuid <uuid>\n\n"));
+    t.push_str(&format!(
+        " {s} [--cache-file <file>] [-ghlLv] [--output <format>] [--match-tag <tag>] \n       [--match-token <token>] [<dev> ...]\n\n"
+    ));
+    t.push_str(&format!(
+        " {s} -p [--match-tag <tag>] [--offset <offset>] [--size <size>] \n       [--output <format>] <dev> ...\n\n"
+    ));
+    t.push_str(&format!(
+        " {s} -i [--match-tag <tag>] [--output <format>] <dev> ...\n"
+    ));
+    t.push_str("\nOptions:\n");
+    t.push_str(" -c, --cache-file <file>    read from <file> instead of reading from the default\n                              cache file (-c /dev/null means no cache)\n");
+    t.push_str(" -d, --no-encoding          don't encode non-printing characters\n");
+    t.push_str(" -g, --garbage-collect      garbage collect the blkid cache\n");
+    t.push_str(" -o, --output <format>      output format; can be one of:\n                              value, device, export or full; (default: full)\n");
+    t.push_str(" -k, --list-filesystems     list all known filesystems/RAIDs and exit\n");
+    t.push_str(" -s, --match-tag <tag>      show specified tag(s) (default show all tags)\n");
+    t.push_str(" -t, --match-token <token>  find device with a specific token (NAME=value pair)\n");
+    t.push_str(
+        " -l, --list-one             look up only first device with token specified by -t\n",
+    );
+    t.push_str(" -L, --label <label>        convert LABEL to device name\n");
+    t.push_str(" -U, --uuid <uuid>          convert UUID to device name\n");
+    t.push('\n');
+    t.push_str("Low-level probing options:\n");
+    t.push_str(" -p, --probe                low-level superblocks probing (bypass cache)\n");
+    t.push_str(" -i, --info                 gather information about I/O limits\n");
+    t.push_str(" -H, --hint <value>         set hint for probing function\n");
+    t.push_str(" -S, --size <size>          overwrite device size\n");
+    t.push_str(" -O, --offset <offset>      probe at the given offset\n");
+    t.push_str(" -u, --usages <list>        filter by \"usage\" (e.g. -u filesystem,raid)\n");
+    t.push_str(" -n, --match-types <list>   filter by filesystem type (e.g. -n vfat,ext3)\n");
+    t.push_str(" -D, --no-part-details      don't print info from partition table\n");
+    t.push('\n');
+    t.push_str(&format!(
+        "{:<28}{}\n{:<28}{}\n",
+        " -h, --help", "display this help", " -V, --version", "display version"
+    ));
+    t.push_str("\nArguments:\n");
+    t.push_str(" <size> and <offset> arguments may be followed by the suffixes for\n   GiB, TiB, PiB, EiB, ZiB, and YiB (the \"iB\" is optional)\n");
+    t.push('\n');
+    t.push_str(" <dev> specify device(s) to probe (default: all devices)\n");
+    t.push_str("\nFor more details see blkid(8).\n");
+    t.into_bytes()
 }
 
-fn parse_swap_info(buf: &[u8], info: &mut BlkidInfo) {
-    // Linux swap header has "SWAPSPACE2" at end of first page
-    // UUID at offset 0x40C
-    if let Some(uuid) = bytes_at::<16>(buf, 0x40C) {
-        info.uuid = format_uuid(uuid);
-    }
-    // Label at offset 0x41C, 16 bytes
-    if let Some(label) = field_at(buf, 0x41C, 16) {
-        info.label = trim_pad(label, 0).to_vec();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Device enumeration
-// ---------------------------------------------------------------------------
-
-fn enumerate_block_devices() -> Vec<PathBuf> {
-    let mut devices = Vec::new();
-
-    // Scan /dev/ for block devices
-    if let Ok(entries) = std::fs::read_dir("/dev") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            // Common block device patterns
-            if name.starts_with("sd")
-                || name.starts_with("hd")
-                || name.starts_with("vd")
-                || name.starts_with("nvme")
-                || name.starts_with("loop")
-                || name.starts_with("dm-")
-            {
-                devices.push(entry.path());
+/// `safe_print(ctl, cp, len, esc)`: non-printing bytes in `^` and `M-`
+/// notation, and each byte of `esc` after a backslash -- unless `-d`.
+fn safe_print(ctl: &Ctl, out: &mut Stdout, cp: &[u8], esc: &[u8]) {
+    let mut buf = Vec::with_capacity(cp.len());
+    for &c in cp {
+        let mut ch = c;
+        if !ctl.raw_chars {
+            if ch >= 128 {
+                buf.extend_from_slice(b"M-");
+                ch = ch.wrapping_sub(128);
+            }
+            if ch < 32 || ch == 0x7f {
+                buf.push(b'^');
+                // ^@, ^A, ^B...; ^? for DEL.
+                ch ^= 0x40;
+            } else if esc.contains(&ch) {
+                buf.push(b'\\');
             }
         }
+        buf.push(ch);
     }
+    out.write(&buf);
+}
 
-    // Also check /sys/block for more devices
-    if let Ok(entries) = std::fs::read_dir("/sys/block") {
-        for entry in entries.flatten() {
-            let dev_path = PathBuf::from("/dev").join(entry.file_name());
-            if dev_path.exists() && !devices.contains(&dev_path) {
-                devices.push(dev_path);
-            }
+/// `pretty_print_word(str, max_len, left_len, overflow_nl)`: the word, then
+/// spaces to its column's end; how far it ran past the column.
+fn pretty_print_word(
+    out: &mut Stdout,
+    s: &[u8],
+    max_len: usize,
+    left_len: usize,
+    overflow_nl: bool,
+) -> usize {
+    let mut len = s.len().saturating_add(left_len);
+    let mut ret = 0usize;
+    out.write(s);
+    if overflow_nl && len > max_len {
+        out.write(b"\n");
+        len = 0;
+    } else if len > max_len {
+        ret = len.saturating_sub(max_len);
+    }
+    // `do { fputc(' ') } while (len++ < max_len);`: at least one space.
+    let spaces = max_len.saturating_sub(len).saturating_add(1);
+    out.write(&vec![b' '; spaces]);
+    ret
+}
+
+/// `pretty_print_line(device, fs_type, label, mtpt, uuid)`. On a terminal
+/// wider than 80 columns the widths grow -- on each line while the
+/// terminal's width, used up 80 columns at a time, still exceeds 80.
+fn pretty_print_line(
+    ctl: &mut Ctl,
+    out: &mut Stdout,
+    device: &[u8],
+    fs_type: &[u8],
+    label: &[u8],
+    mtpt: &[u8],
+    uuid: &[u8],
+) {
+    let p = &mut ctl.pretty;
+    let term_width = *p.term_width.get_or_insert_with(|| get_terminal_width(80));
+    if term_width > 80 {
+        let mut tw = term_width.saturating_sub(80);
+        let w = (tw / 10).min(8);
+        tw = tw.saturating_sub(w.saturating_mul(2));
+        let w_u = usize::try_from(w).unwrap_or(0);
+        p.label_len = p.label_len.saturating_add(w_u);
+        p.fs_type_len = p.fs_type_len.saturating_add(w_u);
+        let half = usize::try_from(tw / 2).unwrap_or(0);
+        p.device_len = p.device_len.saturating_add(half);
+        p.mtpt_len = p.mtpt_len.saturating_add(half);
+        p.term_width = Some(tw);
+    }
+    let (dl, fl, ll, ml) = (p.device_len, p.fs_type_len, p.label_len, p.mtpt_len);
+    let len = pretty_print_word(out, device, dl, 0, true);
+    let len = pretty_print_word(out, fs_type, fl, len, false);
+    let len = pretty_print_word(out, label, ll, len, false);
+    pretty_print_word(out, mtpt, ml, len, false);
+    out.write(uuid);
+    out.write(b"\n");
+}
+
+/// `pretty_print_dev(dev)`: one line of `-o list` -- or, for no device, its
+/// heading and a rule the terminal's width.
+fn pretty_print_dev(ctl: &mut Ctl, out: &mut Stdout, cache: Option<&BlkCache>, dev: Option<usize>) {
+    let (Some(cache), Some(dev)) = (cache, dev) else {
+        pretty_print_line(
+            ctl,
+            out,
+            b"device",
+            b"fs_type",
+            b"label",
+            b"mount point",
+            b"UUID",
+        );
+        let n = get_terminal_width(0).saturating_sub(1);
+        if n > 0 {
+            out.write(&vec![b'-'; usize::try_from(n).unwrap_or(0)]);
         }
-    }
-
-    devices.sort();
-    devices
-}
-
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-struct Config {
-    personality: Personality,
-    devices: Vec<PathBuf>,
-    output_format: OutputFormat,
-    tag_filter: Option<(String, String)>, // TAG=VALUE
-    show_all: bool,
-    cache_file: Option<PathBuf>,
-    /// `-n, --match-types`: which superblock types to report.
-    ///
-    /// `None` means no filter. Replaces `no_encoding`, which this short
-    /// option was wrongly bound to -- see `parse_type_filter`.
-    match_types: Option<TypeFilter>,
-    show_help: bool,
-    show_version: bool,
-    // findfs
-    findfs_spec: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OutputFormat {
-    Default,   // blkid standard
-    ValueOnly, // -o value
-    Full,      // -o full
-    List,      // -o list
-    Export,    // -o export
-    Udev,      // -o udev
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            personality: Personality::Blkid,
-            devices: Vec::new(),
-            output_format: OutputFormat::Default,
-            tag_filter: None,
-            show_all: false,
-            cache_file: None,
-            match_types: None,
-            show_help: false,
-            show_version: false,
-            findfs_spec: None,
-        }
-    }
-}
-
-fn parse_args(args: &[String]) -> Result<Config, String> {
-    let personality = args
-        .first()
-        .map(|a| detect_personality(a))
-        .unwrap_or(Personality::Blkid);
-
-    let mut cfg = Config {
-        personality,
-        ..Default::default()
+        out.write(b"\n");
+        return;
     };
-
-    let mut i = 1;
-
-    while i < args.len() {
-        let Some(arg) = args.get(i) else {
-            break;
+    let Some(devname) = cache.devname(dev).map(<[u8]>::to_vec) else {
+        return;
+    };
+    // `access(devname, F_OK)`.
+    if std::fs::metadata(quoting::os_from_bytes(&devname)).is_err() {
+        return;
+    }
+    let (mut uuid, mut fs_type, mut label) = (Vec::new(), Vec::new(), Vec::new());
+    for (ty, value) in cache.tags(dev) {
+        match ty.as_slice() {
+            b"UUID" => uuid = value,
+            b"TYPE" => fs_type = value,
+            b"LABEL" => label = value,
+            _ => {}
+        }
+    }
+    // The mount point, in a buffer of 80.
+    let mut mtpt = Vec::new();
+    if let Ok(mc) = check_mount_point(&devname, 80) {
+        mtpt = mc.mtpt;
+        let msg: Option<&[u8]> = if mc.flags & MF_MOUNTED != 0 {
+            mtpt.is_empty().then_some(b"(mounted, mtpt unknown)")
+        } else if mc.flags & MF_BUSY != 0 {
+            Some(b"(in use)")
+        } else {
+            Some(b"(not mounted)")
         };
-        match personality {
-            Personality::Blkid => match arg.as_str() {
-                "-o" => {
-                    i = i.saturating_add(1);
-                    let fmt = args.get(i).ok_or("-o requires a format")?;
-                    cfg.output_format = match fmt.as_str() {
-                        "value" => OutputFormat::ValueOnly,
-                        "full" => OutputFormat::Full,
-                        "list" => OutputFormat::List,
-                        "export" => OutputFormat::Export,
-                        "udev" => OutputFormat::Udev,
-                        "device" => OutputFormat::Default,
-                        other => return Err(format!("unknown output format: {other}")),
-                    };
-                }
-                "-s" => {
-                    i = i.saturating_add(1);
-                    // Show specific tag only
-                    if let Some(tag) = args.get(i) {
-                        cfg.tag_filter = Some((tag.clone(), String::new()));
-                    }
-                }
-                "-t" => {
-                    i = i.saturating_add(1);
-                    if let Some(spec) = args.get(i)
-                        && let Some((tag, val)) = spec.split_once('=')
-                    {
-                        cfg.tag_filter = Some((tag.to_string(), val.to_string()));
-                    }
-                }
-                "-c" => {
-                    i = i.saturating_add(1);
-                    cfg.cache_file = args.get(i).map(PathBuf::from);
-                }
-                "-p" | "--probe" => cfg.show_all = true,
-                "-g" | "--garbage-collect" => {} // no-op
-                // `-n` IS `--match-types` in util-linux, and was bound here
-                // to `--no-encoding`. That is not a missing feature but a
-                // WRONG one: `blkid -n vfat,ext3 dev` is an ordinary real
-                // invocation, and this build used to set a no-op flag and
-                // then treat `vfat,ext3` as a device path -- reporting
-                // filesystems the caller had asked to exclude, with no
-                // diagnostic. The short option for `--no-encoding` is `-d`.
-                "-n" | "--match-types" => {
-                    i = i.saturating_add(1);
-                    let list = args
-                        .get(i)
-                        .ok_or_else(|| "-n requires a type list".to_string())?;
-                    cfg.match_types = Some(parse_type_filter(list)?);
-                }
-                // Accepted and deliberately not stored: this build never
-                // encodes. Labels are carried and printed as raw device
-                // bytes, which is what util-linux does for LABEL too -- its
-                // encoding lives in `-o udev`'s separate `ID_FS_LABEL_ENC`
-                // tag, which this build does not implement. So the request
-                // asks for behaviour already in force.
-                "-d" | "--no-encoding" => {}
-                "-h" | "--help" => cfg.show_help = true,
-                "-V" | "--version" => cfg.show_version = true,
-                other if other.starts_with('-') => {
-                    return Err(format!("blkid: unknown option: {other}"));
-                }
-                _ => cfg.devices.push(PathBuf::from(arg)),
-            },
-            Personality::Findfs => {
-                if arg == "-h" || arg == "--help" {
-                    cfg.show_help = true;
-                } else if arg == "-V" || arg == "--version" {
-                    cfg.show_version = true;
-                } else if !arg.starts_with('-') {
-                    cfg.findfs_spec = Some(arg.clone());
-                }
-            }
+        if let Some(m) = msg {
+            mtpt = m.to_vec();
         }
-        i = i.saturating_add(1);
     }
-
-    Ok(cfg)
+    pretty_print_line(ctl, out, &devname, &fs_type, &label, &mtpt, &uuid);
 }
 
-/// A `--match-types` list: the names, and whether they include or exclude.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TypeFilter {
-    names: Vec<String>,
-    /// `true` for `vfat,ext3` (report only these), `false` for `novfat`
-    /// (report everything else).
-    include: bool,
-}
-
-impl TypeFilter {
-    /// Whether an entry of this filesystem type should be reported.
-    fn admits(&self, fs_type: &str) -> bool {
-        self.names.iter().any(|n| n == fs_type) == self.include
+/// `blkid_encode_string(value, enc, size)` as upstream then prints `enc`.
+fn encoded(value: &[u8], size: usize) -> Vec<u8> {
+    match encode_string_into(value, size) {
+        Ok(e) | Err(e) => e,
     }
 }
 
-/// Parse a `--match-types` list.
-///
-/// Measured against util-linux 2.39.3's man page rather than recalled:
-///
-///     -n, --match-types list
-///         Restrict the probing functions to the specified
-///         (comma-separated) list of superblock types (names). The list
-///         items may be prefixed with "no" to specify the types which
-///         should be ignored.
-///
-/// A MIXED list is REFUSED rather than guessed at. The documentation gives a
-/// pure include (`vfat,ext3,ext4`) and a pure exclude (`nominix`) and says
-/// nothing about what `ext4,novfat` means; libblkid has an answer, but I
-/// could not read it here, and a silently-wrong filter is worse than a
-/// visible error -- the whole reason this option is being touched is that it
-/// used to mean something else entirely and said nothing.
-fn parse_type_filter(list: &str) -> Result<TypeFilter, String> {
-    let mut names = Vec::new();
-    let mut negated = 0usize;
-    let mut total = 0usize;
+/// `print_udev_format(name, value)`: udev's `ID_FS_*` names.
+fn print_udev_format(out: &mut Stdout, name: &[u8], value: &[u8]) {
+    let mut line = Vec::new();
+    let is = |n: &[u8]| name == n;
+    if is(b"TYPE")
+        || is(b"VERSION")
+        || is(b"SYSTEM_ID")
+        || is(b"PUBLISHER_ID")
+        || is(b"APPLICATION_ID")
+        || is(b"BOOT_SYSTEM_ID")
+        || is(b"VOLUME_ID")
+        || is(b"LOGICAL_VOLUME_ID")
+        || is(b"VOLUME_SET_ID")
+        || is(b"DATA_PREPARER_ID")
+    {
+        line.extend_from_slice(b"ID_FS_");
+        line.extend_from_slice(name);
+        line.push(b'=');
+        line.extend_from_slice(&encoded(value, 265));
+        line.push(b'\n');
+    } else if is(b"UUID") || name.starts_with(b"LABEL") || is(b"UUID_SUB") {
+        line.extend_from_slice(b"ID_FS_");
+        line.extend_from_slice(name);
+        line.push(b'=');
+        line.extend_from_slice(&safe_string(value, 256));
+        line.extend_from_slice(b"\nID_FS_");
+        line.extend_from_slice(name);
+        line.extend_from_slice(b"_ENC=");
+        line.extend_from_slice(&encoded(value, 265));
+        line.push(b'\n');
+    } else if is(b"PTUUID") {
+        line.extend_from_slice(b"ID_PART_TABLE_UUID=");
+        line.extend_from_slice(value);
+        line.push(b'\n');
+    } else if is(b"PTTYPE") {
+        line.extend_from_slice(b"ID_PART_TABLE_TYPE=");
+        line.extend_from_slice(value);
+        line.push(b'\n');
+    } else if is(b"PART_ENTRY_NAME") || is(b"PART_ENTRY_TYPE") {
+        line.extend_from_slice(b"ID_");
+        line.extend_from_slice(name);
+        line.push(b'=');
+        line.extend_from_slice(&encoded(value, 265));
+        line.push(b'\n');
+    } else if name.starts_with(b"PART_ENTRY_") {
+        line.extend_from_slice(b"ID_");
+        line.extend_from_slice(name);
+        line.push(b'=');
+        line.extend_from_slice(value);
+        line.push(b'\n');
+    } else if name.len() >= 15
+        && (name.ends_with(b"_SECTOR_SIZE")
+            || name.ends_with(b"_IO_SIZE")
+            || is(b"ALIGNMENT_OFFSET"))
+    {
+        line.extend_from_slice(b"ID_IOLIMIT_");
+        line.extend_from_slice(name);
+        line.push(b'=');
+        line.extend_from_slice(value);
+        line.push(b'\n');
+    } else {
+        line.extend_from_slice(b"ID_FS_");
+        line.extend_from_slice(name);
+        line.push(b'=');
+        line.extend_from_slice(value);
+        line.push(b'\n');
+    }
+    out.write(&line);
+}
 
-    for item in list.split(',') {
-        let item = item.trim();
-        if item.is_empty() {
+/// `has_item(ctl, item)`: `-s` named it.
+fn has_item(ctl: &Ctl, item: &[u8]) -> bool {
+    ctl.show.iter().any(|s| s.as_slice() == item)
+}
+
+/// `print_value(ctl, num, devname, value, name, valsz)`.
+fn print_value(
+    ctl: &Ctl,
+    out: &mut Stdout,
+    num: usize,
+    devname: Option<&[u8]>,
+    value: &[u8],
+    name: &[u8],
+) {
+    if ctl.output & OUTPUT_VALUE_ONLY != 0 {
+        out.write(value);
+        out.write(b"\n");
+    } else if ctl.output & OUTPUT_UDEV_LIST != 0 {
+        print_udev_format(out, name, value);
+    } else if ctl.output & OUTPUT_EXPORT_LIST != 0 {
+        if num == 1
+            && let Some(d) = devname
+        {
+            out.write(b"DEVNAME=");
+            out.write(d);
+            out.write(b"\n");
+        }
+        out.write(name);
+        out.write(b"=");
+        safe_print(ctl, out, value, b" \\\"'$`<>");
+        out.write(b"\n");
+    } else {
+        if num == 1
+            && let Some(d) = devname
+        {
+            out.write(d);
+            out.write(b":");
+        }
+        out.write(b" ");
+        out.write(name);
+        out.write(b"=\"");
+        safe_print(ctl, out, value, b"\"\\");
+        out.write(b"\"");
+    }
+}
+
+/// `print_tags(ctl, dev)`: a cached device's tags.
+fn print_tags(ctl: &mut Ctl, out: &mut Stdout, cache: &BlkCache, dev: usize) {
+    if ctl.output & OUTPUT_PRETTY_LIST != 0 {
+        pretty_print_dev(ctl, out, Some(cache), Some(dev));
+        return;
+    }
+    let Some(devname) = cache.devname(dev).map(<[u8]>::to_vec) else {
+        return;
+    };
+    if ctl.output & OUTPUT_DEVICE_ONLY != 0 {
+        out.write(&devname);
+        out.write(b"\n");
+        return;
+    }
+    let mut num = 1usize;
+    for (ty, value) in cache.tags(dev) {
+        if !ctl.show.is_empty() && !has_item(ctl, &ty) {
             continue;
         }
-        total = total.saturating_add(1);
-        match item.strip_prefix("no") {
-            Some(rest) if !rest.is_empty() => {
-                negated = negated.saturating_add(1);
-                names.push(rest.to_string());
+        if num == 1 && !ctl.tags_first && ctl.output & (OUTPUT_UDEV_LIST | OUTPUT_EXPORT_LIST) != 0
+        {
+            // An empty line between devices.
+            out.write(b"\n");
+        }
+        // `strlen(value)`.
+        let v = ulblkid::c_str(&value);
+        print_value(ctl, out, num, Some(&devname), v, &ty);
+        num = num.saturating_add(1);
+    }
+    if num > 1 {
+        if ctl.output & (OUTPUT_VALUE_ONLY | OUTPUT_UDEV_LIST | OUTPUT_EXPORT_LIST) == 0 {
+            out.write(b"\n");
+        }
+        ctl.tags_first = false;
+    }
+}
+
+/// `print_udev_ambivalent(pr)`: every signature on the device, as
+/// `ID_FS_AMBIVALENT=usage:type[:version] ...`, when there is more than one.
+fn print_udev_ambivalent(out: &mut Stdout, pr: &mut Probe) {
+    let mut val: Vec<u8> = Vec::new();
+    let mut count = 0usize;
+    while pr.do_probe() == 0 {
+        let get = |pr: &Probe, n: &str| pr.lookup_value(n).map(|v| v.as_c_str().to_vec());
+        let (Some(usage_txt), Some(ty)) = (get(pr, "USAGE"), get(pr, "TYPE")) else {
+            continue;
+        };
+        let version = get(pr, "VERSION");
+        val.extend_from_slice(&encoded(&usage_txt, 256));
+        val.push(b':');
+        val.extend_from_slice(&encoded(&ty, 256));
+        match &version {
+            Some(v) => {
+                val.push(b':');
+                val.extend_from_slice(&encoded(v, 256));
+                val.push(b' ');
             }
-            _ => names.push(item.to_string()),
+            None => val.push(b' '),
+        }
+        count = count.saturating_add(1);
+    }
+    if count > 1 {
+        // The trailing space off.
+        val.pop();
+        out.write(b"ID_FS_AMBIVALENT=");
+        out.write(&val);
+        out.write(b"\n");
+    }
+}
+
+/// `lowprobe_superblocks(pr, ctl)`: a small whole disk is looked at for a
+/// partition table first, and not for filesystems if it has one.
+fn lowprobe_superblocks(pr: &mut Probe, ctl: &Ctl) -> i32 {
+    let Some(meta) = pr.file().and_then(|f| f.metadata().ok()) else {
+        return -1;
+    };
+    pr.enable_partitions(true);
+    let is_chr = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            meta.file_type().is_char_device()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = &meta;
+            false
+        }
+    };
+    if !is_chr && pr.size() <= 1024 * 1440 && pr.is_wholedisk() {
+        pr.enable_superblocks(false);
+        let rc = pr.do_fullprobe();
+        if rc < 0 {
+            return rc;
+        }
+        if pr.lookup_value("PTTYPE").is_some() {
+            // A partition table.
+            return 0;
+        }
+    }
+    if !ctl.no_part_details {
+        pr.set_partitions_flags(PARTS_ENTRY_DETAILS);
+    }
+    pr.enable_superblocks(true);
+    pr.do_safeprobe()
+}
+
+/// `lowprobe_topology(pr)`: topology alone.
+fn lowprobe_topology(pr: &mut Probe) -> i32 {
+    pr.enable_topology(true);
+    pr.enable_superblocks(false);
+    pr.enable_partitions(false);
+    pr.do_fullprobe()
+}
+
+/// `lowprobe_device(pr, devname, ctl)`: `-p` and `-i` on one device.
+fn lowprobe_device(
+    pr: &mut Probe,
+    devname: &[u8],
+    ctl: &mut Ctl,
+    out: &mut Stdout,
+    short: &[u8],
+) -> u8 {
+    let file = match ulblkid::open_nonblock(devname) {
+        Ok(f) => f,
+        Err(e) => {
+            warn(
+                short,
+                &format!("error: {}", shown(devname)),
+                &std::io::Error::from_raw_os_error(e),
+            );
+            return BLKID_EXIT_NOTFOUND;
+        }
+    };
+    let mut rc = 0;
+    let mut nvals = 0usize;
+    pr.errno = 0;
+    // The offset and size as the `blkid_loff_t`s they are passed as.
+    let (off, size) = (ctl.offset.cast_signed(), ctl.size.cast_signed());
+    if pr.set_device(Some(Rc::new(file)), off, size) != 0 {
+        if pr.errno != 0 {
+            warn(
+                short,
+                &format!("error: {}", shown(devname)),
+                &std::io::Error::from_raw_os_error(pr.errno),
+            );
+        }
+    } else {
+        'probe: {
+            if ctl.lowprobe_topology {
+                rc = lowprobe_topology(pr);
+            }
+            if rc >= 0 && ctl.lowprobe_superblocks {
+                rc = lowprobe_superblocks(pr, ctl);
+            }
+            if rc < 0 {
+                break 'probe;
+            }
+            if rc == 0 {
+                nvals = pr.numof_values();
+            }
+            if nvals != 0
+                && !ctl.lowprobe_first
+                && ctl.output & (OUTPUT_UDEV_LIST | OUTPUT_EXPORT_LIST) != 0
+            {
+                // An empty line between devices.
+                out.write(b"\n");
+            }
+            if nvals != 0 && ctl.output & OUTPUT_DEVICE_ONLY != 0 {
+                out.write(devname);
+                out.write(b"\n");
+                break 'probe;
+            }
+            let values: Vec<(Vec<u8>, Vec<u8>)> = pr
+                .values()
+                .iter()
+                .map(|v| (v.name.as_bytes().to_vec(), v.as_c_str().to_vec()))
+                .collect();
+            let mut num = 1usize;
+            for (name, data) in values {
+                if !ctl.show.is_empty() && !has_item(ctl, &name) {
+                    continue;
+                }
+                print_value(ctl, out, num, Some(devname), &data, &name);
+                num = num.saturating_add(1);
+            }
+            ctl.lowprobe_first = false;
+            if nvals >= 1
+                && ctl.output & (OUTPUT_VALUE_ONLY | OUTPUT_UDEV_LIST | OUTPUT_EXPORT_LIST) == 0
+            {
+                out.write(b"\n");
+            }
+        }
+    }
+    if rc == PROBE_AMBIGUOUS {
+        if ctl.output & OUTPUT_UDEV_LIST != 0 {
+            print_udev_ambivalent(out, pr);
+        } else {
+            warnx(
+                short,
+                &format!(
+                    "{}: ambivalent result (probably more filesystems on the device, use wipefs(8) to see more details)",
+                    shown(devname)
+                ),
+            );
+        }
+    }
+    if rc == PROBE_AMBIGUOUS {
+        return BLKID_EXIT_AMBIVAL;
+    }
+    if nvals == 0 {
+        return BLKID_EXIT_NOTFOUND;
+    }
+    0
+}
+
+/// `list_to_usage(list, &flag)`: a comma-separated list of usages, `no`
+/// before it for all but these. An unknown word ends the program.
+fn list_to_usage(list: &[u8], flag: &mut u32, short: &[u8]) -> Result<u32, u8> {
+    let mut mask = 0u32;
+    let mut p: Option<&[u8]> = Some(list);
+    if list.starts_with(b"no") {
+        *flag = FLTR_NOTIN;
+        p = list.get(2..);
+    }
+    let mut word: Option<&[u8]> = None;
+    let fail = |flag: &mut u32, word: Option<&[u8]>| {
+        *flag = 0;
+        warnx(
+            short,
+            &format!(
+                "unknown keyword in -u <list> argument: '{}'",
+                shown(word.unwrap_or(list))
+            ),
+        );
+        BLKID_EXIT_OTHER
+    };
+    if p.is_none_or(<[u8]>::is_empty) {
+        return Err(fail(flag, word));
+    }
+    while let Some(rest) = p {
+        word = Some(rest);
+        p = rest
+            .iter()
+            .position(|&b| b == b',')
+            .and_then(|i| rest.get(i.saturating_add(1)..));
+        // `strncmp(word, "filesystem", 10)`: a prefix of the rest.
+        if rest.starts_with(b"filesystem") {
+            mask |= USAGE_FILESYSTEM;
+        } else if rest.starts_with(b"raid") {
+            mask |= USAGE_RAID;
+        } else if rest.starts_with(b"crypto") {
+            mask |= USAGE_CRYPTO;
+        } else if rest.starts_with(b"other") {
+            mask |= USAGE_OTHER;
+        } else {
+            return Err(fail(flag, word));
+        }
+    }
+    Ok(mask)
+}
+
+/// `list_to_types(list, &flag)`: a comma-separated list of types, `no`
+/// before it for all but these.
+fn list_to_types(list: &[u8], flag: &mut u32, short: &[u8]) -> Result<Vec<Vec<u8>>, u8> {
+    let mut p = list;
+    if list.starts_with(b"no") {
+        *flag = FLTR_NOTIN;
+        p = list.get(2..).unwrap_or_default();
+    }
+    if p.is_empty() {
+        warnx(short, "error: -u <list> argument is empty");
+        *flag = 0;
+        return Err(BLKID_EXIT_OTHER);
+    }
+    // Upstream starts again from the list, skipping "no" only if the flag
+    // says NOTIN -- which a second `-n` without "no" leaves in place.
+    let p = if *flag & FLTR_NOTIN != 0 {
+        list.get(2..).unwrap_or_default()
+    } else {
+        list
+    };
+    Ok(p.split(|&b| b == b',').map(<[u8]>::to_vec).collect())
+}
+
+/// The option each parsed item stands for, as upstream's switch sees it.
+fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
+    match opt {
+        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
+        Opt::Long(name, value) => {
+            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
+            Some((i32::from(*LONG_VALS.get(i)?), value.clone()))
+        }
+        Opt::Operand(_) => None,
+    }
+}
+
+/// `option_to_longopt(c, opts)`: the first long option with this `val`.
+fn option_to_longopt(c: i32) -> Option<&'static str> {
+    LONG_VALS
+        .iter()
+        .position(|&v| i32::from(v) == c)
+        .and_then(|i| LONGS.get(i))
+        .map(|&(name, _)| name)
+}
+
+/// The `errno` a failed `blkid_probe_set_hint(pr, hint, 0)` leaves for
+/// `warn` to print: what was there before (`errno_left`) when the hint does
+/// not parse as `NAME=value`, else `strtoumax`'s -- `ERANGE`, or the 0 it
+/// was cleared to.
+fn hint_errno(hint: &[u8], errno_left: i32) -> i32 {
+    let Some(eq) = hint.iter().position(|&b| b == b'=') else {
+        return errno_left;
+    };
+    let value = hint.get(eq.saturating_add(1)..).unwrap_or_default();
+    let quoted = value.first().is_some_and(|&q| q == b'"' || q == b'\'');
+    let parsed = if quoted {
+        let q = value.first().copied().unwrap_or(0);
+        let inner = value.get(1..).unwrap_or_default();
+        inner
+            .iter()
+            .rposition(|&b| b == q)
+            .and_then(|i| inner.get(..i))
+    } else {
+        Some(ulblkid::c_str(value))
+    };
+    match parsed {
+        Some(v) if !v.is_empty() => match ulstrutils::scan_integer(v, 10) {
+            Some(sc) if sc.saturated || sc.magnitude > u128::from(u64::MAX) => ERANGE,
+            _ => 0,
+        },
+        _ => errno_left,
+    }
+}
+
+/// `S_ISBLK`, `S_ISREG`, or a UBI character device: what upstream probes.
+fn is_probeable(dev: &[u8]) -> bool {
+    let Ok(meta) = std::fs::metadata(quoting::os_from_bytes(dev)) else {
+        return false;
+    };
+    if meta.is_file() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let ft = meta.file_type();
+        if ft.is_block_device() {
+            return true;
+        }
+        if ft.is_char_device() {
+            return ulsysfs::chrdev_devno_to_devname(meta.rdev(), ulsysfs::PATH_MAX)
+                .is_some_and(|n| n.starts_with(b"ubi"));
+        }
+    }
+    false
+}
+
+stdfdguard::guard_std_fds!();
+
+fn main() -> ExitCode {
+    stdfdguard::restore();
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let short = short_name(
+        argv.first()
+            .map_or(OsStr::new("blkid"), OsString::as_os_str),
+    );
+    // `close_stdout`, with CLOSE_EXIT_CODE = BLKID_EXIT_OTHER.
+    let mut out = Stdout::new(BLKID_EXIT_OTHER);
+    let status = run(&argv, &short, &mut out);
+    ExitCode::from(out.close(status, &short))
+}
+
+/// `main()`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "upstream's main, kept in one piece so it can be read against it"
+)]
+fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
+    let arg0 = argv
+        .first()
+        .map_or(OsStr::new("blkid"), OsString::as_os_str);
+    // `setlocale` may leave an `errno` that a later message prints.
+    let errno_left = smartcols::tty::setlocale_errno();
+    let mut ctl = Ctl {
+        output: OUTPUT_FULL,
+        offset: 0,
+        size: 0,
+        show: Vec::new(),
+        eval: false,
+        gc: false,
+        lookup: false,
+        lowprobe: false,
+        lowprobe_superblocks: false,
+        lowprobe_topology: false,
+        no_part_details: false,
+        raw_chars: false,
+        tags_first: true,
+        lowprobe_first: true,
+        pretty: Pretty {
+            device_len: 10,
+            fs_type_len: 7,
+            label_len: 8,
+            mtpt_len: 14,
+            term_width: None,
+        },
+    };
+    let mut devices: Vec<Vec<u8>> = Vec::new();
+    let mut operands: Vec<Vec<u8>> = Vec::new();
+    let mut search: Option<(Vec<u8>, Vec<u8>)> = None;
+    let mut read: Option<Vec<u8>> = None;
+    let mut hint: Option<Vec<u8>> = None;
+    let mut fltr_usage = 0u32;
+    let mut fltr_type: Option<Vec<Vec<u8>>> = None;
+    let mut fltr_flag = FLTR_ONLYIN;
+    let mut excl_st = [0i32; 1];
+
+    let own = argv.get(1..).unwrap_or_default();
+    for item in BLKID.parse(own, SHORTS, LONGS) {
+        let opt = match item {
+            Ok(opt) => opt,
+            Err(e) => {
+                // glibc names the program by argv[0] as given.
+                stderr_write(format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence).as_bytes());
+                return errtryhelp(short, 1);
+            }
+        };
+        let Some((c, value)) = option_code(&opt) else {
+            if let Opt::Operand(o) = &opt {
+                operands.push(os_bytes(o).into_owned());
+            }
+            continue;
+        };
+        if let Some(msg) =
+            ulstrutils::err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, short)
+        {
+            stderr_write(msg.as_bytes());
+            return BLKID_EXIT_OTHER;
+        }
+        let arg = value.as_deref().map(|v| os_bytes(v).into_owned());
+        let arg_os = value.clone().unwrap_or_default();
+        match u8::try_from(c).unwrap_or(0) {
+            b'c' => read = arg,
+            b'd' => ctl.raw_chars = true,
+            b'D' => ctl.no_part_details = true,
+            b'H' => hint = arg,
+            b'L' => {
+                ctl.eval = true;
+                search = Some((b"LABEL".to_vec(), arg.unwrap_or_default()));
+            }
+            b'n' => match list_to_types(&arg.unwrap_or_default(), &mut fltr_flag, short) {
+                Ok(t) => fltr_type = Some(t),
+                Err(rc) => return rc,
+            },
+            b'u' => match list_to_usage(&arg.unwrap_or_default(), &mut fltr_flag, short) {
+                Ok(m) => fltr_usage = m,
+                Err(rc) => return rc,
+            },
+            b'U' => {
+                ctl.eval = true;
+                search = Some((b"UUID".to_vec(), arg.unwrap_or_default()));
+            }
+            b'i' => ctl.lowprobe_topology = true,
+            b'l' => ctl.lookup = true,
+            b'g' => ctl.gc = true,
+            b'k' => {
+                let mut idx = 0usize;
+                while let Some((name, _)) = ulblkid::superblocks::get_name(idx) {
+                    out.write(name.as_bytes());
+                    out.write(b"\n");
+                    idx = idx.saturating_add(1);
+                }
+                return 0;
+            }
+            b'o' => {
+                ctl.output = match arg.as_deref() {
+                    Some(b"value") => OUTPUT_VALUE_ONLY,
+                    Some(b"device") => OUTPUT_DEVICE_ONLY,
+                    Some(b"list") => OUTPUT_PRETTY_LIST,
+                    Some(b"udev") => OUTPUT_UDEV_LIST,
+                    Some(b"export") => OUTPUT_EXPORT_LIST,
+                    Some(b"full") => 0,
+                    _ => {
+                        warnx(
+                            short,
+                            &format!(
+                                "unsupported output format {}",
+                                shown(&arg.unwrap_or_default())
+                            ),
+                        );
+                        return BLKID_EXIT_OTHER;
+                    }
+                };
+            }
+            b'O' => match ulstrutils::parse_size(&arg.unwrap_or_default()) {
+                Ok(v) => ctl.offset = v,
+                Err(e) => {
+                    warnx(
+                        short,
+                        &ulstrutils::size_error_message("invalid offset argument", &arg_os, e),
+                    );
+                    return BLKID_EXIT_OTHER;
+                }
+            },
+            b'p' => ctl.lowprobe_superblocks = true,
+            b's' => {
+                // `numtag + 1 >= 128`.
+                if ctl.show.len().saturating_add(1) >= 128 {
+                    warnx(short, "Too many tags specified");
+                    return errtryhelp(short, BLKID_EXIT_OTHER);
+                }
+                ctl.show.push(arg.unwrap_or_default());
+            }
+            b'S' => match ulstrutils::parse_size(&arg.unwrap_or_default()) {
+                Ok(v) => ctl.size = v,
+                Err(e) => {
+                    warnx(
+                        short,
+                        &ulstrutils::size_error_message("invalid size argument", &arg_os, e),
+                    );
+                    return BLKID_EXIT_OTHER;
+                }
+            },
+            b't' => {
+                if search.is_some() {
+                    warnx(short, "Can only search for one NAME=value pair");
+                    return errtryhelp(short, BLKID_EXIT_OTHER);
+                }
+                match ulblkid::parse_tag_string(&arg.unwrap_or_default()) {
+                    Some(tv) => search = Some(tv),
+                    None => {
+                        warnx(short, "-t needs NAME=value pair");
+                        return errtryhelp(short, BLKID_EXIT_OTHER);
+                    }
+                }
+            }
+            b'V' | b'v' => {
+                out.write(
+                    format!(
+                        "{} from util-linux 2.39.3  (libblkid 2.39.3, 04-Dec-2023)\n",
+                        shown(short)
+                    )
+                    .as_bytes(),
+                );
+                return 0;
+            }
+            // Ignored, for backward compatibility.
+            b'w' => {}
+            b'h' => {
+                out.write(&usage(short));
+                return 0;
+            }
+            _ => return errtryhelp(short, 1),
         }
     }
 
-    if total == 0 {
-        return Err("--match-types: empty type list".to_string());
-    }
-    if negated != 0 && negated != total {
-        return Err(format!(
-            "--match-types {list}: mixing included and excluded types is not supported; \
-use either a list of types or a list of no-prefixed types"
-        ));
+    if ctl.lowprobe_topology || ctl.lowprobe_superblocks {
+        ctl.lowprobe = true;
     }
 
-    Ok(TypeFilter {
-        names,
-        include: negated == 0,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Output
-// ---------------------------------------------------------------------------
-
-/// Write one `TAG="value"` pair, where `value` is raw bytes off the device.
-///
-/// `write!` cannot be used for the value: it goes through `Display`, which
-/// only speaks `str`. The bytes are handed to `write_all` untouched.
-fn write_tag(writer: &mut dyn Write, first: &mut bool, tag: &str, value: &[u8]) -> io::Result<()> {
-    if !*first {
-        writer.write_all(b" ")?;
+    // The rest of the arguments are devices: block devices, regular files
+    // and UBI volumes; anything else is skipped.
+    if !operands.is_empty() {
+        devices = operands.into_iter().filter(|d| is_probeable(d)).collect();
+        if devices.is_empty() {
+            // Only unsupported devices.
+            return BLKID_EXIT_NOTFOUND;
+        }
     }
-    *first = false;
-    write!(writer, "{tag}=\"")?;
-    writer.write_all(value)?;
-    writer.write_all(b"\"")
-}
 
-fn run_blkid(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
-    let devices = if cfg.devices.is_empty() {
-        enumerate_block_devices()
+    // A LABEL or UUID lookup of a device name is an evaluation.
+    if ctl.lookup
+        && ctl.output == OUTPUT_DEVICE_ONLY
+        && search
+            .as_ref()
+            .is_some_and(|(t, _)| t.as_slice() == b"LABEL" || t.as_slice() == b"UUID")
+    {
+        ctl.eval = true;
+        ctl.lookup = false;
+    }
+
+    let mut cache: Option<BlkCache> = None;
+    if !ctl.lowprobe && !ctl.eval {
+        cache = Some(BlkCache::get_cache(read.as_deref()));
+    }
+
+    if ctl.gc {
+        if let Some(c) = cache.as_mut() {
+            c.gc_cache();
+        }
+        return 0;
+    }
+    let mut err = BLKID_EXIT_NOTFOUND;
+
+    if !ctl.eval && ctl.output & OUTPUT_PRETTY_LIST != 0 {
+        if ctl.lowprobe {
+            warnx(
+                short,
+                "The low-level probing mode does not support 'list' output format",
+            );
+            return BLKID_EXIT_OTHER;
+        }
+        pretty_print_dev(&mut ctl, out, None, None);
+    }
+
+    if ctl.lowprobe {
+        // The low-level API.
+        if devices.is_empty() {
+            warnx(short, "The low-level probing mode requires a device");
+            return BLKID_EXIT_OTHER;
+        }
+        // I/O limits print as `export` unless asked otherwise.
+        if ctl.output == 0 && ctl.lowprobe_topology {
+            ctl.output = OUTPUT_EXPORT_LIST;
+        }
+        let mut pr = Probe::new();
+        if let Some(h) = &hint
+            && pr.set_hint(h, 0) != 0
+        {
+            warn_errno(
+                short,
+                &format!("Failed to use probing hint: {}", shown(h)),
+                hint_errno(h, errno_left),
+            );
+            return err;
+        }
+        if ctl.lowprobe_superblocks {
+            pr.set_superblocks_flags(
+                SUBLKS_LABEL
+                    | SUBLKS_UUID
+                    | SUBLKS_TYPE
+                    | SUBLKS_SECTYPE
+                    | SUBLKS_USAGE
+                    | SUBLKS_VERSION
+                    | SUBLKS_FSINFO,
+            );
+            if fltr_usage != 0 {
+                if pr.filter_superblocks_usage(fltr_flag, fltr_usage) != 0 {
+                    return err;
+                }
+            } else if let Some(types) = &fltr_type {
+                let names: Vec<&[u8]> = types.iter().map(Vec::as_slice).collect();
+                if pr.filter_superblocks_type(fltr_flag, &names) != 0 {
+                    return err;
+                }
+            }
+        }
+        for dev in &devices {
+            err = lowprobe_device(&mut pr, dev, &mut ctl, out, short);
+            if err != 0 {
+                break;
+            }
+        }
+    } else if ctl.eval {
+        // The evaluation API.
+        let (t, v) = search.clone().unwrap_or_default();
+        if let Some(res) = ulblkid::evaluate::evaluate_tag(&t, Some(&v), None) {
+            err = 0;
+            out.write(&res);
+            out.write(b"\n");
+        }
+    } else if ctl.lookup {
+        // The classic, cache-based API.
+        let Some((t, v)) = search.clone() else {
+            warnx(
+                short,
+                "The lookup option requires a search type specified using -t",
+            );
+            return BLKID_EXIT_OTHER;
+        };
+        let Some(c) = cache.as_mut() else {
+            return err;
+        };
+        // Devices not in the cache yet.
+        for dev in &devices {
+            // Upstream ignores what `blkid_get_dev` returns here.
+            let _ = c.get_dev(dev, DEV_NORMAL);
+        }
+        if let Some(dev) = c.find_dev_with_tag(&t, &v) {
+            print_tags(&mut ctl, out, c, dev);
+            err = 0;
+        }
+    } else if devices.is_empty() {
+        // No devices named: every device there is.
+        let Some(c) = cache.as_mut() else {
+            return err;
+        };
+        c.probe_all();
+        let mut cursor = c.dev_iter_begin();
+        let search_ref = search.as_ref().map(|(t, v)| (t.as_slice(), v.as_slice()));
+        while let Some(id) = c.dev_next(&mut cursor, search_ref) {
+            let Some(id) = c.verify(id) else {
+                continue;
+            };
+            print_tags(&mut ctl, out, c, id);
+            err = 0;
+        }
     } else {
-        cfg.devices.clone()
-    };
-
-    let mut found_any = false;
-
-    for device in &devices {
-        if let Some(info) = detect_filesystem(device) {
-            // Type filter, before the tag filter: -n selects which
-            // superblock types are reported at all.
-            if let Some(ref filter) = cfg.match_types
-                && !filter.admits(&info.fs_type)
+        // The devices named, added to the cache (and shown).
+        let Some(c) = cache.as_mut() else {
+            return err;
+        };
+        for dev in &devices {
+            let Some(id) = c.get_dev(dev, DEV_NORMAL) else {
+                continue;
+            };
+            if let Some((t, v)) = &search
+                && !c.dev_has_tag(id, t, Some(v))
             {
                 continue;
             }
-
-            // Tag filter
-            if let Some((ref tag, ref val)) = cfg.tag_filter {
-                let tag_val: &[u8] = match tag.to_uppercase().as_str() {
-                    "TYPE" => info.fs_type.as_bytes(),
-                    "LABEL" => &info.label,
-                    "UUID" => info.uuid.as_bytes(),
-                    "PARTUUID" => info.partuuid.as_bytes(),
-                    _ => continue,
-                };
-                // Compared as bytes so a label that is not UTF-8 can still be
-                // matched exactly, rather than never.
-                if !val.is_empty() && tag_val != val.as_bytes() {
-                    continue;
-                }
-            }
-
-            match cfg.output_format {
-                OutputFormat::Default | OutputFormat::Full => {
-                    write!(writer, "{}: ", info.device.display())?;
-                    let mut first = true;
-                    if !info.label.is_empty() {
-                        write_tag(writer, &mut first, "LABEL", &info.label)?;
-                    }
-                    if !info.uuid.is_empty() {
-                        write_tag(writer, &mut first, "UUID", info.uuid.as_bytes())?;
-                    }
-                    if !info.partuuid.is_empty() {
-                        write_tag(writer, &mut first, "PARTUUID", info.partuuid.as_bytes())?;
-                    }
-                    if info.block_size > 0 {
-                        let size = info.block_size.to_string();
-                        write_tag(writer, &mut first, "BLOCK_SIZE", size.as_bytes())?;
-                    }
-                    write_tag(writer, &mut first, "TYPE", info.fs_type.as_bytes())?;
-                    writer.write_all(b"\n")?;
-                }
-                OutputFormat::ValueOnly => {
-                    if let Some((ref tag, _)) = cfg.tag_filter {
-                        let val: &[u8] = match tag.to_uppercase().as_str() {
-                            "LABEL" => &info.label,
-                            "UUID" => info.uuid.as_bytes(),
-                            _ => info.fs_type.as_bytes(),
-                        };
-                        writer.write_all(val)?;
-                        writer.write_all(b"\n")?;
-                    } else {
-                        if !info.label.is_empty() {
-                            writer.write_all(&info.label)?;
-                            writer.write_all(b"\n")?;
-                        }
-                        if !info.uuid.is_empty() {
-                            writeln!(writer, "{}", info.uuid)?;
-                        }
-                        writeln!(writer, "{}", info.fs_type)?;
-                    }
-                }
-                OutputFormat::List => {
-                    // The label is written separately because it is bytes; it
-                    // is last in the row, so nothing needs padding after it.
-                    write!(
-                        writer,
-                        "{:<20} {:<10} {:<36} ",
-                        info.device.display(),
-                        info.fs_type,
-                        info.uuid,
-                    )?;
-                    writer.write_all(&info.label)?;
-                    writer.write_all(b"\n")?;
-                }
-                OutputFormat::Export => {
-                    writeln!(writer, "DEVNAME={}", info.device.display())?;
-                    if !info.label.is_empty() {
-                        writer.write_all(b"LABEL=")?;
-                        writer.write_all(&info.label)?;
-                        writer.write_all(b"\n")?;
-                    }
-                    if !info.uuid.is_empty() {
-                        writeln!(writer, "UUID={}", info.uuid)?;
-                    }
-                    writeln!(writer, "TYPE={}", info.fs_type)?;
-                    if info.block_size > 0 {
-                        writeln!(writer, "BLOCK_SIZE={}", info.block_size)?;
-                    }
-                    writeln!(writer)?;
-                }
-                OutputFormat::Udev => {
-                    // No DEVNAME line: `-o udev` is consumed by a udev rule
-                    // that already knows which device it is processing, and
-                    // util-linux does not emit one. Checked against the
-                    // reference rather than assumed from `-o export` above,
-                    // which does.
-                    if !info.fs_type.is_empty() {
-                        writeln!(writer, "ID_FS_TYPE={}", info.fs_type)?;
-                    }
-                    if !info.uuid.is_empty() {
-                        // UUIDs are generated hex-and-dashes, so both forms
-                        // are identical -- but both are still emitted, because
-                        // a consumer reading `ID_FS_UUID_ENC` uniformly should
-                        // not have to special-case the field that happens to
-                        // need no escaping.
-                        writeln!(writer, "ID_FS_UUID={}", info.uuid)?;
-                        writeln!(
-                            writer,
-                            "ID_FS_UUID_ENC={}",
-                            udev_encode(info.uuid.as_bytes())
-                        )?;
-                    }
-                    if !info.label.is_empty() {
-                        writeln!(writer, "ID_FS_LABEL={}", udev_plain(&info.label))?;
-                        writeln!(writer, "ID_FS_LABEL_ENC={}", udev_encode(&info.label))?;
-                    }
-                    if !info.partuuid.is_empty() {
-                        writeln!(writer, "ID_PART_ENTRY_UUID={}", info.partuuid)?;
-                    }
-                    if !info.part_label.is_empty() {
-                        writeln!(
-                            writer,
-                            "ID_PART_ENTRY_NAME={}",
-                            udev_plain(&info.part_label)
-                        )?;
-                        writeln!(
-                            writer,
-                            "ID_PART_ENTRY_NAME_ENC={}",
-                            udev_encode(&info.part_label)
-                        )?;
-                    }
-                }
-            }
-            found_any = true;
+            print_tags(&mut ctl, out, c, id);
+            err = 0;
         }
     }
-
-    Ok(if found_any { 0 } else { 2 })
+    // The cache is put (written back) as it goes out of scope.
+    drop(cache);
+    err
 }
-
-fn run_findfs(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
-    let spec = match &cfg.findfs_spec {
-        Some(s) => s.clone(),
-        None => {
-            writeln!(writer, "findfs: usage: findfs LABEL=<label> | UUID=<uuid>")?;
-            return Ok(1);
-        }
-    };
-
-    let (tag, value) = match spec.split_once('=') {
-        Some((t, v)) => (t.to_uppercase(), v.to_string()),
-        None => {
-            writeln!(writer, "findfs: invalid spec: {spec}")?;
-            return Ok(1);
-        }
-    };
-
-    let devices = enumerate_block_devices();
-
-    for device in &devices {
-        if let Some(info) = detect_filesystem(device) {
-            let matches = match tag.as_str() {
-                "LABEL" => info.label == value.as_bytes(),
-                "UUID" => info.uuid == value,
-                "PARTUUID" => info.partuuid == value,
-                "PARTLABEL" => info.part_label == value.as_bytes(),
-                "TYPE" => info.fs_type == value,
-                _ => false,
-            };
-            if matches {
-                writeln!(writer, "{}", info.device.display())?;
-                return Ok(0);
-            }
-        }
-    }
-
-    writeln!(writer, "findfs: unable to resolve '{spec}'")?;
-    Ok(1)
-}
-
-// ---------------------------------------------------------------------------
-// Help / version
-// ---------------------------------------------------------------------------
-
-// Reachable only from `main`, which the test harness replaces, so this is dead
-// in the test build and live in the real one. Scoped to `test` rather than
-// allowed outright, so a genuinely dead item here is still reported.
-#[cfg_attr(test, allow(dead_code))]
-fn print_help(personality: Personality) {
-    match personality {
-        Personality::Blkid => {
-            println!("Usage: blkid [OPTIONS] [device...]");
-            println!();
-            println!("Locate/print block device attributes.");
-            println!();
-            println!("Options:");
-            println!("  -o <format>   Output format (value, full, list, export)");
-            println!("  -s <tag>      Show only specified tag (TYPE, LABEL, UUID)");
-            println!("  -t <spec>     Find device by tag (e.g., TYPE=ext4)");
-            println!("  -c <file>     Cache file (default: /etc/blkid.tab)");
-            println!("  -n, --match-types <list>  Only these superblock types (or no<type>)");
-            println!("  -d, --no-encoding         Don't encode non-printing characters");
-            println!("  -p            Low-level probing mode");
-            println!("  -h, --help    Show this help");
-            println!("  -V, --version Show version");
-        }
-        Personality::Findfs => {
-            println!("Usage: findfs LABEL=<label> | UUID=<uuid> | PARTUUID=<uuid>");
-            println!();
-            println!("Find a filesystem by label or UUID.");
-        }
-    }
-}
-
-#[cfg_attr(test, allow(dead_code))]
-fn print_version(personality: Personality) {
-    let name = match personality {
-        Personality::Blkid => "blkid",
-        Personality::Findfs => "findfs",
-    };
-    println!("{name} (Slate OS) 0.1.0");
-}
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    let args: Vec<String> = env::args().collect();
-
-    let cfg = match parse_args(&args) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
-    };
-
-    if cfg.show_help {
-        print_help(cfg.personality);
-        return 0;
-    }
-
-    if cfg.show_version {
-        print_version(cfg.personality);
-        return 0;
-    }
-
-    let stdout = io::stdout();
-    let mut writer = stdout.lock();
-
-    let result = match cfg.personality {
-        Personality::Blkid => run_blkid(&cfg, &mut writer),
-        Personality::Findfs => run_findfs(&cfg, &mut writer),
-    };
-
-    match result {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("blkid: {e}");
-            1
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    // Panicking on bad data is the point in a test: an `unwrap` that fires is
-    // a failed assertion with a stack trace, which is what a test is for.
-    // CLAUDE.md allows the defensive lints to be switched off here for
-    // exactly that reason.
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::panic,
-        clippy::arithmetic_side_effects
-    )]
-
-    use super::*;
-
-    // -- `-o udev` -------------------------------------------------------
-    //
-    // The expected strings here are not invented. They were measured from
-    // util-linux 2.39.3 against a real ext4 image whose label was set with
-    // `mkfs.ext4 -L $(printf 'A\xff\xfeB')` -- deliberately not valid UTF-8:
-    //
-    //     $ blkid -o udev lbl.img
-    //     ID_FS_LABEL=A__B
-    //     ID_FS_LABEL_ENC=A\xff\xfeB
-
-    /// The two label tags differ, and that difference is the whole point.
-    ///
-    /// util-linux emits both because it refuses to answer the escaping
-    /// question for the consumer: the plain tag is safe to display and
-    /// LOSSY, the `_ENC` tag is reversible. A single shared encoder would
-    /// make them agree and quietly remove the reason there are two.
-    #[test]
-    fn udev_label_tags_are_not_the_same_encoding() {
-        let raw = b"A\xff\xfeB";
-        assert_eq!(udev_plain(raw), "A__B");
-        assert_eq!(udev_encode(raw), r"A\xff\xfeB");
-        assert_ne!(
-            udev_plain(raw),
-            udev_encode(raw),
-            "the two tags collapsed to one encoding"
-        );
-    }
-
-    /// The plain form is lossy, and the encoded form is not.
-    ///
-    /// This is the control for the test above and the reason `_ENC` has to
-    /// exist: two DIFFERENT labels render identically in the plain tag. A
-    /// consumer that keyed on `ID_FS_LABEL` alone would merge these two
-    /// devices -- which is exactly the collision `from_utf8_lossy` caused
-    /// in this program before labels were carried as bytes.
-    #[test]
-    fn the_plain_tag_is_lossy_and_the_enc_tag_is_not() {
-        let a = b"A\xff\xfeB";
-        let b = b"A\xfe\xffB";
-        assert_eq!(udev_plain(a), udev_plain(b));
-        assert_ne!(
-            udev_encode(a),
-            udev_encode(b),
-            "the reversible tag lost the difference too"
-        );
-    }
-
-    /// Ordinary labels pass through untouched in both tags.
-    ///
-    /// Without this, an encoder that escaped everything would satisfy every
-    /// assertion above while making `ID_FS_LABEL=\x6d\x79..." out of
-    /// `my-disk`.
-    #[test]
-    fn safe_labels_are_unchanged_by_both_tags() {
-        for s in ["my-disk", "ROOT", "a.b:c=d@e_f+g#h", "123"] {
-            assert_eq!(udev_plain(s.as_bytes()), s, "plain mangled {s}");
-            assert_eq!(udev_encode(s.as_bytes()), s, "enc mangled {s}");
-        }
-    }
-
-    /// A space is not safe, which is the case a udev rule cares about most.
-    ///
-    /// The format exists so a rule can consume the value without quoting;
-    /// an unescaped space would split it. Called out separately because a
-    /// space looks harmless and is the likeliest byte to be added to the
-    /// safe set by someone tidying up.
-    #[test]
-    fn a_space_is_escaped_in_both_tags() {
-        assert_eq!(udev_plain(b"my disk"), "my_disk");
-        assert_eq!(udev_encode(b"my disk"), r"my\x20disk");
-    }
-
-    #[test]
-    fn test_detect_personality() {
-        assert_eq!(detect_personality("blkid"), Personality::Blkid);
-        assert_eq!(detect_personality("findfs"), Personality::Findfs);
-        assert_eq!(detect_personality("/sbin/blkid"), Personality::Blkid);
-    }
-
-    #[test]
-    fn test_parse_args_basic() {
-        let args = vec!["blkid".to_string()];
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.personality, Personality::Blkid);
-        assert!(cfg.devices.is_empty());
-    }
-
-    #[test]
-    fn test_parse_args_device() {
-        let args = vec!["blkid".to_string(), "/dev/sda1".to_string()];
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.devices.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_args_output_format() {
-        for (fmt, expected) in [
-            ("value", OutputFormat::ValueOnly),
-            ("full", OutputFormat::Full),
-            ("list", OutputFormat::List),
-            ("export", OutputFormat::Export),
-        ] {
-            let args = vec!["blkid".to_string(), "-o".to_string(), fmt.to_string()];
-            let cfg = parse_args(&args).unwrap();
-            assert_eq!(cfg.output_format, expected);
-        }
-    }
-
-    #[test]
-    fn test_parse_args_tag_filter() {
-        let args = vec![
-            "blkid".to_string(),
-            "-t".to_string(),
-            "TYPE=ext4".to_string(),
-        ];
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(
-            cfg.tag_filter,
-            Some(("TYPE".to_string(), "ext4".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_parse_args_findfs() {
-        let args = vec!["findfs".to_string(), "UUID=abc-123".to_string()];
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.findfs_spec, Some("UUID=abc-123".to_string()));
-    }
-
-    #[test]
-    fn test_parse_args_help() {
-        for name in &["blkid", "findfs"] {
-            let args = vec![name.to_string(), "--help".to_string()];
-            let cfg = parse_args(&args).unwrap();
-            assert!(cfg.show_help);
-        }
-    }
-
-    #[test]
-    fn test_parse_ext4_info() {
-        // Create a minimal ext4-like superblock
-        let mut buf = vec![0u8; 0x500];
-        // Magic at 0x438
-        buf[0x438] = 0x53;
-        buf[0x439] = 0xEF;
-        // Block size = 2 (4096)
-        buf[0x418] = 2;
-        // Label at 0x478
-        buf[0x478] = b'T';
-        buf[0x479] = b'E';
-        buf[0x47A] = b'S';
-        buf[0x47B] = b'T';
-        // Incompat flags (extents = 0x40)
-        buf[0x460] = 0x40;
-
-        let mut info = BlkidInfo {
-            device: PathBuf::from("/dev/test"),
-            fs_type: "ext4".to_string(),
-            label: Vec::new(),
-            uuid: String::new(),
-            partuuid: String::new(),
-            part_label: Vec::new(),
-            block_size: 0,
-            fs_size: 0,
-        };
-        parse_ext4_info(&buf, &mut info);
-        assert_eq!(info.block_size, 4096);
-        assert_eq!(info.fs_type, "ext4");
-        assert!(info.label.starts_with(b"TEST"));
-    }
-
-    /// A device that stops short of a field must not report that field.
-    ///
-    /// Both images carry a valid ext4 magic at 0x438, so both are detected.
-    /// They differ only in whether the superblock's UUID (0x468..0x478) and
-    /// label (0x478..0x488) are actually present on the device.
-    ///
-    /// The truncated case is the regression: before `buf.truncate`, the
-    /// parser read those offsets out of the zero padding of a 128 KiB buffer
-    /// and reported an all-zero UUID as fact.
-    /// Sixteen distinguishable bytes: every position differs, so a parser
-    /// that transposes two of them fails rather than coincidentally passing.
-    const UUID_BYTES: [u8; 16] = [
-        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
-        0x20,
-    ];
-    const UUID_TEXT: &str = "11121314-1516-1718-191a-1b1c1d1e1f20";
-
-    /// `size` zero bytes with `fields` written into them -- a device image.
-    fn image(size: usize, fields: &[(usize, &[u8])]) -> Vec<u8> {
-        let mut buf = vec![0u8; size];
-        for (off, data) in fields {
-            buf[*off..*off + data.len()].copy_from_slice(data);
-        }
-        buf
-    }
-
-    fn blank(fs_type: &str) -> BlkidInfo {
-        BlkidInfo {
-            device: PathBuf::from("/dev/test"),
-            fs_type: fs_type.to_string(),
-            label: Vec::new(),
-            uuid: String::new(),
-            partuuid: String::new(),
-            part_label: Vec::new(),
-            block_size: 0,
-            fs_size: 0,
-        }
-    }
-
-    /// Two devices whose labels DIFFER on disk must not report the same
-    /// label, and must be told apart by `-t LABEL=`.
-    ///
-    /// Neither byte string is valid UTF-8, and both used to decode to
-    /// `A<U+FFFD><U+FFFD>B`. The collision is the bug: a label is an
-    /// identifier, and an identifier that merges distinct values is worse
-    /// than one that is merely unreadable.
-    #[test]
-    fn labels_that_are_not_utf8_stay_distinct() {
-        let parse = |label: &[u8]| {
-            let mut info = blank("ext4");
-            parse_ext4_info(&image(0x500, &[(0x478, label)]), &mut info);
-            info.label
-        };
-        let a = parse(b"A\xff\xfeB");
-        let b = parse(b"A\xfe\xffB");
-        assert_eq!(
-            a,
-            b"A\xff\xfeB".to_vec(),
-            "label was not preserved verbatim"
-        );
-        assert_eq!(
-            b,
-            b"A\xfe\xffB".to_vec(),
-            "label was not preserved verbatim"
-        );
-        assert_ne!(a, b, "two different on-disk labels collided");
-    }
-
-    /// Padding is trimmed, and a label that is ALL padding is empty rather
-    /// than a run of NULs -- the output path keys off `is_empty`.
-    #[test]
-    fn trim_pad_keeps_interior_bytes() {
-        assert_eq!(trim_pad(b"AB\0\0", 0), b"AB");
-        assert_eq!(trim_pad(b"A\0B\0", 0), b"A\0B");
-        assert_eq!(trim_pad(b"\0\0\0", 0), b"");
-        assert_eq!(trim_pad(b"", 0), b"");
-        assert_eq!(trim_pad(b"AB", 0), b"AB");
-    }
-
-    /// `-n` selects superblock types; it is not `--no-encoding`.
-    ///
-    /// The regression this guards is not a missing feature but a wrong one:
-    /// `-n` used to set a no-op `no_encoding` flag, so `blkid -n vfat,ext3 dev`
-    /// consumed the type list as a device path and then reported filesystems
-    /// the caller had asked to exclude.
-    #[test]
-    fn match_types_includes_or_excludes_by_superblock_type() {
-        let only = parse_type_filter("vfat,ext3,ext4").expect("a plain list parses");
-        assert!(only.include);
-        assert!(only.admits("vfat"));
-        assert!(only.admits("ext4"));
-        assert!(!only.admits("ext2"), "ext2 is not in the list");
-
-        let except = parse_type_filter("nominix").expect("a no-prefixed list parses");
-        assert!(!except.include);
-        assert!(!except.admits("minix"));
-        assert!(except.admits("ext4"), "everything but minix is admitted");
-
-        // Whitespace around items, as a shell may leave it.
-        let spaced = parse_type_filter(" vfat , ext3 ").expect("spaced list parses");
-        assert!(spaced.admits("ext3"));
-
-        // `no` alone is a TYPE NAME, not a negation with nothing after it.
-        let literal = parse_type_filter("no").expect("bare 'no' parses");
-        assert!(literal.include, "bare 'no' is a type name, not a prefix");
-        assert!(literal.admits("no"));
-    }
-
-    /// A mixed list is refused rather than guessed at.
-    #[test]
-    fn match_types_refuses_a_mixed_list() {
-        let err = parse_type_filter("ext4,novfat")
-            .expect_err("mixing include and exclude has no documented meaning");
-        assert!(
-            err.contains("mixing"),
-            "the refusal must say what is wrong, got: {err}"
-        );
-        assert!(parse_type_filter("").is_err(), "an empty list is an error");
-        assert!(parse_type_filter(",,").is_err(), "no items is an error");
-    }
-
-    #[test]
-    fn format_uuid_groups_the_bytes_8_4_4_4_12() {
-        assert_eq!(format_uuid(UUID_BYTES), UUID_TEXT);
-        assert_eq!(format_uuid([0; 16]), "00000000-0000-0000-0000-000000000000");
-        assert_eq!(
-            format_uuid([0xFF; 16]),
-            "ffffffff-ffff-ffff-ffff-ffffffffffff"
-        );
-    }
-
-    /// Each parser gets both probes: a device carrying the field, and one
-    /// that ends before it. Without the second, a parser that silently gave
-    /// up would pass; without the first, one that never ran would.
-    #[test]
-    fn xfs_reads_block_size_uuid_and_label() {
-        let mut info = blank("xfs");
-        parse_xfs_info(
-            &image(
-                0x100,
-                &[
-                    (0, b"XFSB"),
-                    (4, &[0x00, 0x00, 0x10, 0x00]), // big-endian 4096
-                    (32, &UUID_BYTES),
-                    (0x6C, b"XFSLABEL"),
-                ],
-            ),
-            &mut info,
-        );
-        assert_eq!(info.block_size, 4096);
-        assert_eq!(info.uuid, UUID_TEXT);
-        assert_eq!(info.label, b"XFSLABEL".to_vec());
-
-        // Ends at 40: the block size (needs 8) is there, the UUID (needs 48)
-        // is not. The fields degrade one at a time, not all together.
-        let mut info = blank("xfs");
-        parse_xfs_info(&image(40, &[(4, &[0x00, 0x00, 0x10, 0x00])]), &mut info);
-        assert_eq!(info.block_size, 4096);
-        assert!(info.uuid.is_empty(), "uuid was {:?}", info.uuid);
-        assert!(info.label.is_empty(), "label was {:?}", info.label);
-    }
-
-    #[test]
-    fn swap_reads_uuid_and_label() {
-        let mut info = blank("swap");
-        parse_swap_info(
-            &image(0x500, &[(0x40C, &UUID_BYTES), (0x41C, b"SWAPLBL")]),
-            &mut info,
-        );
-        assert_eq!(info.uuid, UUID_TEXT);
-        assert_eq!(info.label, b"SWAPLBL".to_vec());
-
-        let mut info = blank("swap");
-        parse_swap_info(&image(0x410, &[]), &mut info);
-        assert!(info.uuid.is_empty(), "uuid was {:?}", info.uuid);
-        assert!(info.label.is_empty(), "label was {:?}", info.label);
-    }
-
-    #[test]
-    fn ntfs_reads_the_volume_serial() {
-        let mut info = blank("ntfs");
-        parse_ntfs_info(
-            &image(
-                0x100,
-                &[(0x48, &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef])],
-            ),
-            &mut info,
-        );
-        assert_eq!(info.uuid, "EFCDAB8967452301");
-
-        let mut info = blank("ntfs");
-        parse_ntfs_info(&image(0x4F, &[]), &mut info);
-        assert!(info.uuid.is_empty(), "uuid was {:?}", info.uuid);
-    }
-
-    #[test]
-    fn fat_picks_its_layout_from_the_16_bit_sector_count() {
-        // FAT32: the 16-bit count is zero, so label and serial are at the
-        // FAT32 offsets. Serial bytes are printed high half first.
-        let mut info = blank("vfat");
-        parse_fat_info(
-            &image(
-                0x100,
-                &[
-                    (19, &[0x00, 0x00]),
-                    (67, &[0x78, 0x56, 0x34, 0x12]),
-                    (71, b"FATLABEL   "),
-                ],
-            ),
-            &mut info,
-        );
-        assert_eq!(info.label, b"FATLABEL".to_vec());
-        assert_eq!(info.uuid, "1234-5678");
-
-        // FAT16: a non-zero count moves both fields, and reading the FAT32
-        // offsets here would give the wrong answer rather than no answer --
-        // which is why the two cases carry different label text.
-        let mut info = blank("vfat");
-        parse_fat_info(
-            &image(
-                0x100,
-                &[
-                    (19, &[0x10, 0x00]),
-                    (39, &[0x78, 0x56, 0x34, 0x12]),
-                    (43, b"FAT16LBL   "),
-                ],
-            ),
-            &mut info,
-        );
-        assert_eq!(info.label, b"FAT16LBL".to_vec());
-        assert_eq!(info.uuid, "1234-5678");
-
-        // Ends before the sector count at 19: nothing is knowable but the
-        // type, which came from the magic rather than from this parser.
-        let mut info = blank("vfat");
-        parse_fat_info(&image(20, &[]), &mut info);
-        assert_eq!(info.fs_type, "vfat");
-        assert!(info.uuid.is_empty(), "uuid was {:?}", info.uuid);
-        assert!(info.label.is_empty(), "label was {:?}", info.label);
-    }
-
-    #[test]
-    fn ext4_family_is_decided_by_feature_flags_not_by_the_magic() {
-        // The magic is shared by all three, so the flags at 0x5C/0x60 are
-        // what separates them.
-        let probe = |compat: u32, incompat: u32| {
-            let mut info = blank("ext4");
-            parse_ext4_info(
-                &image(
-                    0x500,
-                    &[
-                        (0x45C, &compat.to_le_bytes()),
-                        (0x460, &incompat.to_le_bytes()),
-                    ],
-                ),
-                &mut info,
-            );
-            info.fs_type
-        };
-        assert_eq!(probe(0, 0x0040), "ext4");
-        assert_eq!(probe(0x0004, 0), "ext3");
-        assert_eq!(probe(0, 0), "ext2");
-
-        // Without the flags the family name from the magic table stands,
-        // rather than a conclusion drawn from absent bits.
-        let mut info = blank("ext4");
-        parse_ext4_info(&image(0x43A, &[]), &mut info);
-        assert_eq!(info.fs_type, "ext4");
-    }
-
-    #[test]
-    fn short_device_reports_no_uuid_or_label() {
-        let dir = std::env::temp_dir().join("blkid-short-device-test");
-        // Ignored: a leftover directory from a previous run is fine, and any
-        // real failure to create it surfaces on the `write` below.
-        let _ = std::fs::create_dir_all(&dir);
-
-        let write = |name: &str, size: usize, fields: &[(usize, &[u8])]| -> PathBuf {
-            let path = dir.join(name);
-            std::fs::write(&path, image(size, fields)).expect("write test image");
-            path
-        };
-
-        let full = write(
-            "full.img",
-            0x1000,
-            &[
-                (0x438, &[0x53, 0xEF]),
-                (0x468, &UUID_BYTES),
-                (0x478, b"REALLABEL"),
-            ],
-        );
-        // One byte past the magic: the UUID at 0x468 is beyond end-of-file.
-        let short = write("short.img", 0x43A, &[(0x438, &[0x53, 0xEF])]);
-
-        // Probe one: the parser RUNS. Without this the test below would pass
-        // against a blkid that simply never parsed anything.
-        let got = detect_filesystem(&full).expect("full image is detected");
-        assert_eq!(got.uuid, UUID_TEXT);
-        assert_eq!(got.label, b"REALLABEL".to_vec());
-
-        // Probe two: the parser REFUSES. The fields are not on the device, so
-        // no value may be reported for them -- least of all a zero one.
-        let got = detect_filesystem(&short).expect("short image is still detected");
-        assert!(
-            got.uuid.is_empty(),
-            "reported UUID {:?} for a device that ends before the UUID field",
-            got.uuid
-        );
-        assert!(
-            got.label.is_empty(),
-            "reported label {:?} for a device that ends before the label field",
-            got.label
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_run_blkid_no_devices() {
-        let cfg = Config {
-            personality: Personality::Blkid,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        let code = run_blkid(&cfg, &mut buf).unwrap();
-        // Likely returns 2 (no devices found on test system)
-        assert!(code == 0 || code == 2);
-    }
-
-    #[test]
-    fn test_run_findfs_no_spec() {
-        let cfg = Config {
-            personality: Personality::Findfs,
-            findfs_spec: None,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        let code = run_findfs(&cfg, &mut buf).unwrap();
-        assert_eq!(code, 1);
-    }
-
-    #[test]
-    fn test_run_findfs_invalid() {
-        let cfg = Config {
-            personality: Personality::Findfs,
-            findfs_spec: Some("badspec".to_string()),
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        let code = run_findfs(&cfg, &mut buf).unwrap();
-        assert_eq!(code, 1);
-    }
-
-    #[test]
-    fn test_default_config() {
-        let cfg = Config::default();
-        assert_eq!(cfg.output_format, OutputFormat::Default);
-        assert!(cfg.devices.is_empty());
-        assert!(!cfg.show_all);
-    }
-}
+mod tests;

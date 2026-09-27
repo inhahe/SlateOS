@@ -1985,6 +1985,53 @@ pub fn read_leaf_pte(pml4_phys: u64, virt: VirtAddr) -> Option<PageTableEntry> {
     if pte.is_present() { Some(pte) } else { None }
 }
 
+/// The physical address of the byte at `virt` in the address space
+/// `pml4_phys`, if and only if `virt` lies on a present 4 KiB leaf marked
+/// [`PageFlags::SHARED`].
+///
+/// `None` for everything else: unmapped, a private page, a kernel address
+/// space (`pml4_phys == 0`), or a huge-page leaf (no shared-by-design
+/// mapping is ever made with one, and a huge leaf's bit 7 is not the PAT
+/// bit a 4 KiB leaf's is, so the walk would have to tell the two apart for
+/// nothing).
+///
+/// This is the fact a process-shared futex is keyed by: two processes that
+/// map one region at different addresses reach the same physical word here,
+/// and a private page -- whose frame may *also* be shared, copy-on-write,
+/// after a fork -- is deliberately not reported, since its contents are not
+/// shared.
+#[must_use]
+pub fn shared_phys(pml4_phys: u64, virt: VirtAddr) -> Option<u64> {
+    let hhdm = hhdm()?;
+    if pml4_phys == 0 || !virt.is_canonical() {
+        return None;
+    }
+
+    // SAFETY for all read_entry calls: pml4_phys is a live PML4 (caller
+    // guarantee), each later table address comes from a present, non-huge
+    // parent entry via phys_addr(), and every index comes from a canonical
+    // VirtAddr, so it is in 0..512.  hhdm is valid (checked above).
+    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return None;
+    }
+    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() || pdpte.is_huge() {
+        return None;
+    }
+    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() || pde.is_huge() {
+        return None;
+    }
+    let pte = unsafe { read_entry(pde.phys_addr(), virt.pt_index(), hhdm) };
+    if !pte.is_present() || !pte.is_shared() {
+        return None;
+    }
+    // page_offset() < 4096 and phys_addr() is 4 KiB-aligned below 2^52, so
+    // this cannot overflow; checked anyway rather than asserted.
+    pte.phys_addr().checked_add(virt.page_offset() as u64)
+}
+
 /// Write a swap entry into all 4 leaf PTEs for a 16 KiB frame.
 ///
 /// Used by the swap subsystem to mark a frame as swapped-out.  All

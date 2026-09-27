@@ -3476,7 +3476,7 @@ fn dump_all_tasks_serial() {
             task.pending_wake,
             task.ready_since_tick,
             waited,
-            task.blocked_on_pi_addr.unwrap_or(0),
+            task.blocked_on_pi.map_or(0, |key| key.0),
             BlockSite(task.block_site),
             task.block_tick,
             task.block_seq,
@@ -5280,7 +5280,8 @@ pub fn set_inherited_priority(task_id: TaskId, new_inherited: Option<u8>) -> Opt
 // Transitive PI support
 // ---------------------------------------------------------------------------
 
-/// Set or clear the PI futex address a task is blocked on.
+/// Set or clear the key of the PI futex a task is blocked on
+/// ([`task::PiWaitKey`]).
 ///
 /// Called by `futex_lock_pi()` just before blocking to record which
 /// lock this task is waiting for.  Called with `None` when the task
@@ -5288,16 +5289,16 @@ pub fn set_inherited_priority(task_id: TaskId, new_inherited: Option<u8>) -> Opt
 ///
 /// This metadata enables **transitive priority inheritance**: when a
 /// chain of tasks A→B→C exists (A waits on B's lock, B waits on C's
-/// lock), the chain walker can follow each task's `blocked_on_pi_addr`
+/// lock), the chain walker can follow each task's `blocked_on_pi`
 /// to find the next link.
-pub fn set_blocked_on_pi_addr(task_id: TaskId, addr: Option<u64>) {
+pub fn set_blocked_on_pi(task_id: TaskId, key: Option<task::PiWaitKey>) {
     let mut state = SCHED.lock();
     if let Some(task) = state.tasks.get_mut(&task_id) {
-        task.blocked_on_pi_addr = addr;
+        task.blocked_on_pi = key;
     }
 }
 
-/// Get the PI futex address a task is blocked on.
+/// Get the key of the PI futex a task is blocked on.
 ///
 /// Returns `None` if the task is not blocking on any PI futex, or
 /// if the task doesn't exist.
@@ -5305,17 +5306,17 @@ pub fn set_blocked_on_pi_addr(task_id: TaskId, addr: Option<u64>) {
 /// Used by the PI chain walker to determine if a lock owner is itself
 /// blocked on another PI lock, enabling transitive boost propagation.
 #[must_use]
-pub fn get_blocked_on_pi_addr(task_id: TaskId) -> Option<u64> {
+pub fn get_blocked_on_pi(task_id: TaskId) -> Option<task::PiWaitKey> {
     let state = SCHED.lock();
-    state.tasks.get(&task_id).and_then(|t| t.blocked_on_pi_addr)
+    state.tasks.get(&task_id).and_then(|t| t.blocked_on_pi)
 }
 
 /// Walk the PI chain and boost all owners transitively.
 ///
 /// Starting from `start_owner`, boosts each task in the dependency
 /// chain to `donor_priority`.  The chain is followed by reading each
-/// task's `blocked_on_pi_addr` and then looking up the owner of that
-/// address via the provided `find_owner` callback.
+/// task's `blocked_on_pi` and then looking up the owner of that
+/// key via the provided `find_owner` callback.
 ///
 /// The walk stops when:
 /// - A task is not blocked on any PI address (chain terminates)
@@ -5331,13 +5332,13 @@ pub fn get_blocked_on_pi_addr(task_id: TaskId) -> Option<u64> {
 /// - `start_owner`: The direct lock owner (already boosted by the caller).
 /// - `donor_priority`: The priority to propagate through the chain
 ///   (typically the highest-priority waiter's priority).
-/// - `find_owner`: Callback that maps a futex address to its current
-///   owner task ID.  Provided by the futex subsystem since the scheduler
-///   doesn't own the PI ownership table.
+/// - `find_owner`: Callback that maps a blocked task's futex key to the
+///   key's current owner task ID.  Provided by the futex subsystem since
+///   the scheduler doesn't own the PI ownership table.
 pub fn pi_chain_boost(
     start_owner: TaskId,
     donor_priority: u8,
-    find_owner: impl Fn(u64) -> Option<TaskId>,
+    find_owner: impl Fn(task::PiWaitKey) -> Option<TaskId>,
 ) -> usize {
     let mut boosted = 0;
     let mut current = start_owner;
@@ -5347,12 +5348,12 @@ pub fn pi_chain_boost(
     // by the caller.
     for _ in 1..task::PI_CHAIN_DEPTH_LIMIT {
         // Does the current owner block on another PI futex?
-        let Some(addr) = get_blocked_on_pi_addr(current) else {
+        let Some(key) = get_blocked_on_pi(current) else {
             break;
         };
 
         // Who owns that futex?
-        let Some(next_owner) = find_owner(addr) else {
+        let Some(next_owner) = find_owner(key) else {
             break;
         };
 
@@ -5362,9 +5363,10 @@ pub fn pi_chain_boost(
         // would need allocation.  Real lock chains should never cycle.
         if next_owner == start_owner {
             serial_println!(
-                "[sched] PI chain: cycle detected at task {} (addr {:#x})",
+                "[sched] PI chain: cycle detected at task {} (futex {:#x} in space {:#x})",
                 next_owner,
-                addr
+                key.0,
+                key.1
             );
             break;
         }
@@ -10272,7 +10274,7 @@ fn test_smp_idle_task_safety() -> KernelResult<()> {
 /// Test: transitive PI infrastructure.
 ///
 /// Verifies the building blocks for transitive priority inheritance:
-/// 1. `set_blocked_on_pi_addr` / `get_blocked_on_pi_addr` — field set/get
+/// 1. `set_blocked_on_pi` / `get_blocked_on_pi` — field set/get
 /// 2. `pi_chain_boost` — chain walking with a mock owner-lookup callback
 /// 3. Priority is boosted transitively through the chain
 /// 4. Chain walk stops at depth limit
@@ -10317,20 +10319,21 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
         }
     }
 
-    // --- Test 1: set_blocked_on_pi_addr / get_blocked_on_pi_addr ---
+    // --- Test 1: set_blocked_on_pi / get_blocked_on_pi ---
     //
     // Scenario: B owns lock at 0xDEAD_0001, and is itself blocked on
     // the lock at 0xDEAD_0002 (which C owns).  C is not blocked on
-    // anything (end of chain).  A is not blocked on any PI addr.
-    set_blocked_on_pi_addr(task_b, Some(0xDEAD_0002));
+    // anything (end of chain).  A is not blocked on any PI addr.  The
+    // keys' second half is the address space; 0 (the kernel's) here.
+    set_blocked_on_pi(task_b, Some((0xDEAD_0002, 0)));
 
-    let b_addr = get_blocked_on_pi_addr(task_b);
-    let a_addr = get_blocked_on_pi_addr(task_a); // Should be None.
-    let c_addr = get_blocked_on_pi_addr(task_c); // Should be None.
+    let b_addr = get_blocked_on_pi(task_b);
+    let a_addr = get_blocked_on_pi(task_a); // Should be None.
+    let c_addr = get_blocked_on_pi(task_c); // Should be None.
 
-    if b_addr != Some(0xDEAD_0002) || a_addr.is_some() || c_addr.is_some() {
+    if b_addr != Some((0xDEAD_0002, 0)) || a_addr.is_some() || c_addr.is_some() {
         serial_println!(
-            "[sched]   FAIL: blocked_on_pi_addr: A={:?}, B={:?}, C={:?}",
+            "[sched]   FAIL: blocked_on_pi: A={:?}, B={:?}, C={:?}",
             a_addr,
             b_addr,
             c_addr
@@ -10353,7 +10356,7 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
     //                  → C(owns 0xDEAD_0002, not blocked)
     //
     // Direct boost of B is done by the caller (simulating futex_lock_pi).
-    // pi_chain_boost walks B→C: checks B's blocked_on_pi_addr (0xDEAD_0002),
+    // pi_chain_boost walks B→C: checks B's blocked_on_pi (0xDEAD_0002),
     // finds C as owner, boosts C.
 
     // First, directly boost B (simulating what futex_lock_pi does).
@@ -10362,8 +10365,8 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
     // Now walk the chain from B.
     // Mock owner lookup: 0xDEAD_0002 → task_c, everything else → None.
     let mock_c = task_c; // Capture for closure.
-    let chain_boosted = pi_chain_boost(task_b, 4, |addr| {
-        if addr == 0xDEAD_0002 {
+    let chain_boosted = pi_chain_boost(task_b, 4, |key| {
+        if key == (0xDEAD_0002, 0) {
             Some(mock_c)
         } else {
             None
@@ -10397,10 +10400,10 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
     }
     serial_println!("[sched]   PI chain boost (A→B→C): OK (C boosted to prio 4)");
 
-    // --- Test 3: clearing blocked_on_pi_addr ---
-    set_blocked_on_pi_addr(task_b, None);
-    if get_blocked_on_pi_addr(task_b).is_some() {
-        serial_println!("[sched]   FAIL: blocked_on_pi_addr not cleared");
+    // --- Test 3: clearing blocked_on_pi ---
+    set_blocked_on_pi(task_b, None);
+    if get_blocked_on_pi(task_b).is_some() {
+        serial_println!("[sched]   FAIL: blocked_on_pi not cleared");
         kill_task(task_a);
         kill_task(task_b);
         kill_task(task_c);
@@ -10409,7 +10412,7 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
     }
     serial_println!("[sched]   PI addr clear: OK");
 
-    // --- Test 4: chain terminates when no blocked_on_pi_addr ---
+    // --- Test 4: chain terminates when no blocked_on_pi ---
     // B no longer has a blocked_on address, so chain from B stops.
     let chain_boosted_2 = pi_chain_boost(task_b, 2, |_| Some(task_c));
     if chain_boosted_2 != 0 {
@@ -10427,16 +10430,16 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
 
     // --- Test 5: cycle detection ---
     // Set up a cycle: B→C→B
-    set_blocked_on_pi_addr(task_b, Some(0xDEAD_0002));
-    set_blocked_on_pi_addr(task_c, Some(0xDEAD_0001));
+    set_blocked_on_pi(task_b, Some((0xDEAD_0002, 0)));
+    set_blocked_on_pi(task_c, Some((0xDEAD_0001, 0)));
 
     // Mock: 0xDEAD_0002→C, 0xDEAD_0001→B (back to start).
     let mock_b = task_b;
     let mock_c2 = task_c;
-    let cycle_boosted = pi_chain_boost(task_b, 2, |addr| {
-        if addr == 0xDEAD_0002 {
+    let cycle_boosted = pi_chain_boost(task_b, 2, |key| {
+        if key == (0xDEAD_0002, 0) {
             Some(mock_c2)
-        } else if addr == 0xDEAD_0001 {
+        } else if key == (0xDEAD_0001, 0) {
             Some(mock_b)
         } else {
             None
@@ -10457,6 +10460,40 @@ fn test_transitive_pi_infrastructure() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[sched]   PI cycle detection: OK");
+
+    // --- Test 6: the walk hands the owner lookup the whole key ---
+    // B waits on the word at 0xDEAD_0002 in space 0x5000; the only owner
+    // the mock knows is of the same address in *another* space.  Until
+    // 2026-09-27 the chain recorded the address alone, and the futex side
+    // looked it up in the walking task's space -- so a link into another
+    // process found the wrong lock or none.  The mock must be asked with
+    // B's space, and must not match the other one.
+    set_blocked_on_pi(task_c, None);
+    set_blocked_on_pi(task_b, Some((0xDEAD_0002, 0x5000)));
+    let mock_c3 = task_c;
+    let asked = core::cell::Cell::new(None);
+    let space_boosted = pi_chain_boost(task_b, 2, |key| {
+        asked.set(Some(key));
+        if key == (0xDEAD_0002, 0x6000) {
+            Some(mock_c3)
+        } else {
+            None
+        }
+    });
+    if space_boosted != 0 || asked.get() != Some((0xDEAD_0002, 0x5000)) {
+        serial_println!(
+            "[sched]   FAIL: PI chain key: {} boost(s), owner lookup asked with {:?}",
+            space_boosted,
+            asked.get()
+        );
+        kill_task(task_a);
+        kill_task(task_b);
+        kill_task(task_c);
+        reap_dead_tasks();
+        return Err(KernelError::InternalError);
+    }
+    set_blocked_on_pi(task_b, None);
+    serial_println!("[sched]   PI chain keys carry their address space: OK");
 
     // --- Cleanup ---
     // Clear inherited priorities and kill all test tasks.

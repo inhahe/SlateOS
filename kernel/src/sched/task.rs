@@ -40,6 +40,18 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// for the idle task.
 pub type TaskId = u64;
 
+/// Which PI futex a blocked task waits on, as the futex subsystem keys it:
+/// `(addr, space)` -- a virtual address and its address space for a private
+/// word, a physical address and the shared key space for a word on a page
+/// shared by design (`ipc::futex::FutexKey`).
+///
+/// Opaque to the scheduler, which only stores it for a blocked task and
+/// hands it back to the futex subsystem's owner lookup while walking a
+/// priority-inheritance chain.  A bare virtual address is not enough: the
+/// walk runs in whichever task is boosting, and an address means nothing
+/// without the address space it was taken in.
+pub type PiWaitKey = (u64, u64);
+
 /// Counter for generating unique task IDs.
 static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -506,7 +518,8 @@ pub struct Task {
     /// task blocks on our lock, cleared when we release the lock.
     pub inherited_priority: Option<u8>,
 
-    /// The PI futex address this task is currently blocked on, if any.
+    /// The key of the PI futex this task is currently blocked on, if any
+    /// ([`PiWaitKey`]).
     ///
     /// Set by `futex_lock_pi()` just before the task blocks on a
     /// contended PI mutex.  Cleared when the task acquires the lock
@@ -515,13 +528,13 @@ pub struct Task {
     /// Used for **transitive priority inheritance**: when task A blocks
     /// on a lock held by B, and B is itself blocked on a lock held by
     /// C, the chain A→B→C is walked by following each task's
-    /// `blocked_on_pi_addr` to find the next owner.  This ensures C
+    /// `blocked_on_pi` to find the next owner.  This ensures C
     /// gets boosted to A's priority, preventing unbounded priority
     /// inversion chains.
     ///
     /// The chain walk is depth-limited by [`PI_CHAIN_DEPTH_LIMIT`] to
     /// prevent cycles or excessive traversal.
-    pub blocked_on_pi_addr: Option<u64>,
+    pub blocked_on_pi: Option<PiWaitKey>,
 
     /// The CPU this task last ran on.
     ///
@@ -1033,7 +1046,7 @@ impl Task {
             sleep_credit: 0,
             interactive: false,
             inherited_priority: None,
-            blocked_on_pi_addr: None,
+            blocked_on_pi: None,
             last_cpu: 0,
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
@@ -1120,7 +1133,7 @@ impl Task {
             sleep_credit: 0,
             interactive: false,
             inherited_priority: None,
-            blocked_on_pi_addr: None,
+            blocked_on_pi: None,
             last_cpu: cpu_index,
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,
@@ -1275,7 +1288,7 @@ impl Task {
             sleep_credit: 0,
             interactive: false,
             inherited_priority: None,
-            blocked_on_pi_addr: None,
+            blocked_on_pi: None,
             last_cpu: 0,
             cpu_affinity: CPU_AFFINITY_ALL,
             total_ticks: 0,

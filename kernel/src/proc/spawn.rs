@@ -24082,6 +24082,177 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test that a futex on shared memory is one futex in every process
+/// that maps it: the kernel half of process-shared mutexes, condition
+/// variables and semaphores (lane D's request
+/// `d-a-futexes-keyed-by-physical-page-for-process-shared-objects`).
+///
+/// One shared-memory region, two processes:
+/// 1. the waiter ([`elf::build_shm_futex_waiter_elf`]) maps it and parks on
+///    the word at its start;
+/// 2. once the waiter is really queued -- under the word's physical key,
+///    which [`futex::waiters_on_shared_word`] reports -- the waker
+///    ([`elf::build_shm_futex_waker_elf`]) maps the region twice, stores 1
+///    through its *second* mapping, an address the waiter never used, and
+///    `FUTEX_WAKE`s it.  The wake must report one task woken, and the waiter
+///    must exit 0.
+///
+/// Before 2026-09-27 a futex was keyed by (address space, virtual address),
+/// so the waker's wake searched its own address space, woke nobody, and the
+/// waiter slept until this test killed it.
+///
+/// [`futex::waiters_on_shared_word`]: crate::ipc::futex::waiters_on_shared_word
+pub fn self_test_shm_futex() -> KernelResult<()> {
+    use crate::ipc::shm;
+
+    serial_println!("[spawn] Running cross-process shared-memory futex (ring 3) test...");
+    let region = shm::create(FRAME_SIZE)?;
+    let outcome = shm_futex_between_processes(region);
+    shm::close(region);
+    outcome
+}
+
+/// Spawn one side of [`self_test_shm_futex`] and authorize it to map
+/// `region`.  Its program retries the map until the authorization lands.
+fn spawn_shm_futex_side(
+    region: crate::ipc::shm::ShmHandle,
+    image: &[u8],
+    name: &'static str,
+) -> KernelResult<SpawnResult> {
+    let argv: &[&[u8]] = &[name.as_bytes()];
+    let options = SpawnOptions {
+        name,
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let side = spawn_process(image, &options)?;
+    if let Err(e) = crate::ipc::shm::authorize(region, side.pid) {
+        stop_shm_futex_side(&side);
+        return Err(e);
+    }
+    Ok(side)
+}
+
+/// Yield until `pid` is a zombie, up to `rounds` times; whether it got there.
+fn shm_futex_side_exited(pid: ProcessId, rounds: u32) -> bool {
+    for _ in 0..rounds {
+        if pcb::state(pid) == Some(pcb::ProcessState::Zombie) {
+            return true;
+        }
+        crate::sched::yield_now();
+    }
+    pcb::state(pid) == Some(pcb::ProcessState::Zombie)
+}
+
+/// Force one side of [`self_test_shm_futex`] down and reclaim it, as the
+/// other runners here do, so a parked probe cannot outlive its test.
+fn stop_shm_futex_side(side: &SpawnResult) {
+    if pcb::state(side.pid) != Some(pcb::ProcessState::Zombie) {
+        // A forced exit's code is not what anything reads: the caller has
+        // already decided the outcome.  Ignoring a failure is safe for the
+        // same reason -- the kill below is what matters.
+        let _ = pcb::set_exit_code(side.pid, -1);
+        let killed = thread::kill_process_threads(side.pid);
+        serial_println!(
+            "[spawn]   (killed {} thread(s) of a shm-futex probe)",
+            killed
+        );
+        let _ = shm_futex_side_exited(side.pid, 2000);
+    }
+    thread::on_thread_exit(side.task_id);
+    pcb::destroy(side.pid);
+}
+
+/// The body of [`self_test_shm_futex`], for one region the caller closes.
+fn shm_futex_between_processes(region: crate::ipc::shm::ShmHandle) -> KernelResult<()> {
+    let phys = *crate::ipc::shm::frame_addrs(region)?
+        .first()
+        .ok_or(KernelError::InternalError)?;
+
+    let waiter = spawn_shm_futex_side(
+        region,
+        &elf::build_shm_futex_waiter_elf(region.raw()),
+        "spawn-test-shm-futex-waiter",
+    )?;
+
+    // Wait for the waiter to park under the word's *physical* key.  That is
+    // the first half of what is being tested -- a private key here would mean
+    // the mapping was not seen as shared -- and it is what makes the wake
+    // below meaningful: a wake that ran before the wait would find nobody for
+    // an innocent reason.
+    let mut queued = false;
+    for _ in 0..4000 {
+        if crate::ipc::futex::waiters_on_shared_word(phys) == 1 {
+            queued = true;
+            break;
+        }
+        if pcb::state(waiter.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    if !queued {
+        let code = pcb::exit_code(waiter.pid);
+        stop_shm_futex_side(&waiter);
+        serial_println!(
+            "[spawn]   FAIL: shm futex (ring 3) -- the waiter never queued under the word's \
+             physical key (exit {:?}; 0x81: it could not map the region)",
+            code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let waker = match spawn_shm_futex_side(
+        region,
+        &elf::build_shm_futex_waker_elf(region.raw()),
+        "spawn-test-shm-futex-waker",
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            stop_shm_futex_side(&waiter);
+            return Err(e);
+        }
+    };
+
+    let waker_done = shm_futex_side_exited(waker.pid, 4000);
+    let waiter_done = shm_futex_side_exited(waiter.pid, 4000);
+    let waker_code = pcb::exit_code(waker.pid);
+    let waiter_code = pcb::exit_code(waiter.pid);
+    stop_shm_futex_side(&waker);
+    stop_shm_futex_side(&waiter);
+
+    if !waker_done || waker_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: shm futex (ring 3) -- the waker exited {:?} (finished: {}); \
+             0x85 means its FUTEX_WAKE woke nobody, see build_shm_futex_waker_elf",
+            waker_code,
+            waker_done
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !waiter_done || waiter_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: shm futex (ring 3) -- the woken waiter exited {:?} (finished: {})",
+            waiter_code,
+            waiter_done
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   shm futex across processes (ring 3): a waiter parked on a shared word \
+         was woken by another process through a different mapping of it: OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of native `SYS_MUNMAP`'s argument checks, run as an attacker
 /// would run them: from a process, holding no capability.
 ///

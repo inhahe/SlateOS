@@ -3685,6 +3685,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         proc::spawn::self_test_munmap_abi(),
     );
+    // A futex on shared memory is one futex in every process that maps it
+    // (lane D's d-a-futexes-keyed-by-physical-page-for-process-shared-objects).
+    selftest::dispatch_debug(
+        "shm futex across processes (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_shm_futex(),
+    );
     // File reads and writes stream through a bounded bounce buffer
     // (known-issues.md A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC, class 3).
     selftest::dispatch_debug(

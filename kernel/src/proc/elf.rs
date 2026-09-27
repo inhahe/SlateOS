@@ -7094,6 +7094,163 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Wrap ring-3 test `code` in a one-segment ELF image loaded, read and
+/// execute, at `0x40_0000_0000` -- the layout every probe program in this
+/// file uses.  `code` must be position-independent or linked for that
+/// address, and must end in `SYS_EXIT`.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+fn single_segment_test_elf(code: &[u8]) -> alloc::vec::Vec<u8> {
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 + 56
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let code_len = code.len();
+    let file_size = code_offset as usize + code_len;
+    let mut buf = alloc::vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0); // e_shnum
+    write_u16(&mut buf, 62, 0); // e_shstrndx
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset); // p_offset
+    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, code_len as u64); // p_filesz
+    write_u64(&mut buf, ph + 40, code_len as u64); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    buf[code_offset as usize..file_size].copy_from_slice(code);
+    buf
+}
+
+/// `exit(status)`: the tail every path of a probe program ends in.
+fn emit_exit(code: &mut alloc::vec::Vec<u8>, status: u32) {
+    code.push(0xBF); // mov edi, status
+    code.extend_from_slice(&status.to_le_bytes());
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.push(0xCC); // int3 -- exit does not return
+}
+
+/// `SYS_SHM_MAP(handle, MAP_READ | MAP_WRITE)`, retried with a `SYS_YIELD`
+/// between tries until it returns an address (left in `rax`), or
+/// `exit(fail)` after 2000 tries.
+///
+/// The retry is for the test harness, not for robustness: the kernel
+/// authorizes the process to map the region only once `spawn` has given it a
+/// pid, and by then the program may already have asked.
+fn emit_shm_map_retry(code: &mut alloc::vec::Vec<u8>, handle: u64, fail: u32) {
+    code.extend_from_slice(&[0x41, 0xBF]); // mov r15d, 2000
+    code.extend_from_slice(&2000u32.to_le_bytes());
+    // retry:                                                      (36 bytes)
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, handle
+    code.extend_from_slice(&handle.to_le_bytes());
+    code.extend_from_slice(&[0xBE, 0x03, 0x00, 0x00, 0x00]); // mov esi, MAP_READ | MAP_WRITE
+    code.extend_from_slice(&[0xB8, 0xE9, 0x00, 0x00, 0x00]); // mov eax, SYS_SHM_MAP (233)
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x7F, 0x16]); // jg +22 -- past the fail exit: mapped
+    code.extend_from_slice(&[0x31, 0xC0]); // xor eax, eax (SYS_YIELD)
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0x41, 0xFF, 0xCF]); // dec r15d
+    code.extend_from_slice(&[0x75, 0xDC]); // jnz -36 -- retry
+    emit_exit(code, fail); //                                          (13 bytes)
+    // mapped: the address is in rax.
+}
+
+/// Build the waiting half of the cross-process futex test
+/// (`proc::spawn::self_test_shm_futex`).
+///
+/// Maps the shared-memory region `shm_handle` and parks on the futex word at
+/// its start -- `while *word == 0 { FUTEX_WAIT(word, 0) }` -- then exits 0.
+/// It can only get past the loop if the word turns nonzero, which only the
+/// waker process does, and it can only notice while parked if the waker's
+/// `FUTEX_WAKE` reaches its queue.
+///
+/// | Exit | Meaning |
+/// |---|---|
+/// | `0` | the word read nonzero after a wait |
+/// | `0x81` | `SYS_SHM_MAP` never succeeded |
+#[must_use]
+pub fn build_shm_futex_waiter_elf(shm_handle: u64) -> alloc::vec::Vec<u8> {
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    emit_shm_map_retry(&mut code, shm_handle, 0x81);
+    code.extend_from_slice(&[0x48, 0x89, 0xC3]); // mov rbx, rax -- the word
+    // wait_loop:                                                    (20 bytes)
+    code.extend_from_slice(&[0x8B, 0x03]); // mov eax, [rbx]
+    code.extend_from_slice(&[0x85, 0xC0]); // test eax, eax
+    code.extend_from_slice(&[0x75, 0x0E]); // jnz +14 -- done
+    code.extend_from_slice(&[0x48, 0x89, 0xDF]); // mov rdi, rbx
+    code.extend_from_slice(&[0x31, 0xF6]); // xor esi, esi -- expected 0
+    code.extend_from_slice(&[0xB8, 0xD2, 0x00, 0x00, 0x00]); // mov eax, SYS_FUTEX_WAIT (210)
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0xEB, 0xEC]); // jmp -20 -- wait_loop
+    // done:
+    emit_exit(&mut code, 0);
+    single_segment_test_elf(&code)
+}
+
+/// Build the waking half of the cross-process futex test
+/// (`proc::spawn::self_test_shm_futex`).
+///
+/// Maps the shared-memory region `shm_handle` twice and uses the *second*
+/// mapping, so the address it wakes through is one the waiter never used
+/// (the first mapping of a fresh process may well land where the waiter's
+/// did).  Stores 1 to the word and `FUTEX_WAKE`s one waiter; the call must
+/// report that it woke one.
+///
+/// | Exit | Meaning |
+/// |---|---|
+/// | `0` | the wake woke one task |
+/// | `0x82`, `0x83` | the first or second `SYS_SHM_MAP` never succeeded |
+/// | `0x84` | the two mappings came back at one address |
+/// | `0x85` | `FUTEX_WAKE` woke nobody: the waiter's queue was not the word's |
+#[must_use]
+pub fn build_shm_futex_waker_elf(shm_handle: u64) -> alloc::vec::Vec<u8> {
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    emit_shm_map_retry(&mut code, shm_handle, 0x82);
+    code.extend_from_slice(&[0x48, 0x89, 0xC3]); // mov rbx, rax -- first mapping
+    emit_shm_map_retry(&mut code, shm_handle, 0x83);
+    code.extend_from_slice(&[0x49, 0x89, 0xC4]); // mov r12, rax -- second mapping
+    code.extend_from_slice(&[0x49, 0x39, 0xDC]); // cmp r12, rbx
+    code.extend_from_slice(&[0x75, 0x0D]); // jne +13 -- over the exit
+    emit_exit(&mut code, 0x84);
+    code.extend_from_slice(&[0x41, 0xC7, 0x04, 0x24, 0x01, 0x00, 0x00, 0x00]); // mov dword [r12], 1
+    code.extend_from_slice(&[0x4C, 0x89, 0xE7]); // mov rdi, r12
+    code.extend_from_slice(&[0xBE, 0x01, 0x00, 0x00, 0x00]); // mov esi, 1 -- wake one
+    code.extend_from_slice(&[0xB8, 0xD3, 0x00, 0x00, 0x00]); // mov eax, SYS_FUTEX_WAKE (211)
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.extend_from_slice(&[0x48, 0x3D, 0x01, 0x00, 0x00, 0x00]); // cmp rax, 1
+    code.extend_from_slice(&[0x74, 0x0D]); // je +13 -- over the exit
+    emit_exit(&mut code, 0x85);
+    emit_exit(&mut code, 0);
+    single_segment_test_elf(&code)
+}
+
 /// Build the ring-3 probe for native `SYS_MUNMAP`'s argument checks.
 ///
 /// Until 2026-09-26 `sys_munmap` unmapped and freed whatever canonical range a

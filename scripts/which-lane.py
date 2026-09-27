@@ -37,6 +37,32 @@ worktree, and that is the one failure this whole arrangement exists to prevent.
 Likewise a worktree whose directory says `os-lane-d` but whose HEAD is
 `lane-a` -- someone ran `git checkout` inside it -- is refused, not guessed at.
 
+EVERY TRACKED FILE HAS AN OWNER (design-decisions §973)
+-------------------------------------------------------
+The operator's answer to A-Q11: every file gets exactly one owning lane, a lane
+that wants a change in another lane's file asks for it, and no file is left
+with ambiguous ownership. So `ownership(path)` answers every tracked path with
+one of four things, never with a shrug:
+
+  * a **lane** -- the tables below (`OWNERSHIP`, `SCRIPT_OWNERS`), or, for a
+    request, its sender: `requests/a-bc-<slug>.md` is lane A's;
+  * the **operator** -- `OPERATOR_OWNS`: CLAUDE.md, the design texts, the
+    operator's notes and backups. No lane edits these without being told to;
+  * a **shared document** -- `SHARED_DOCUMENTS`: the files every lane writes
+    under a named per-lane rule (roadmap.md rule 3), which is an owner, not an
+    ambiguity;
+  * **nobody** -- which `--check-all` refuses. That is the gate: a new file at
+    the top of the tree, or a new script, gets its owner in the commit that
+    creates it.
+
+`owner_of` keeps its old contract -- a lane letter or None -- so its importers
+are unaffected: an operator file or a shared document is no lane's tree.
+
+A lane that adds a script under `scripts/` adds its line to its own block of
+`SCRIPT_OWNERS` in the same commit. That additive line, naming the adding lane,
+is the one edit to this file (lane A's) that another lane may make without a
+request; anything else here goes through `requests/`.
+
 WHAT NO LONGER IDENTIFIES A LANE
 --------------------------------
 `CLAUDE_CONFIG_DIR`.  Under three lanes each Claude account ran exactly one
@@ -52,10 +78,13 @@ Usage::
     python scripts/which-lane.py --letter                # just the letter, for scripting
     python scripts/which-lane.py --owner gui/window/src/lib.rs posix/src/unistd.rs
     python scripts/which-lane.py --table                 # the whole ownership table
+    python scripts/which-lane.py --check-all [--head REV] # the gate: every tracked file owned
     python scripts/which-lane.py --self-test
 
 Exit status: 0 when the lane was identified (or for `--owner` / `--table`),
-2 when it could not be.  On 2, *stop and ask the operator* rather than
+2 when it could not be. `--check-all`: 0 when every tracked file has an owner
+and every table entry names a tracked file, 1 when not, 2 when git could not
+list the files.  On 2, *stop and ask the operator* rather than
 guessing -- writing outside your lane is the one failure mode that silently
 destroys another agent's work.
 """
@@ -225,18 +254,607 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("gui/font/", "F"),
     ("gui/imagecodec/", "F"),
     ("gui/vulkan/", "F"),
+    # Reserved before its first file (lane F, 2026-09-27): the video codec
+    # crate of F-Q2 / design-decisions §1332, beside gui/imagecodec and
+    # gui/remote. Without the carve-out it would fall to lane C's gui/.
+    ("gui/video/", "F"),
+    # --- §973: every file that had no lane (2026-09-27) --------------------
+    # Root leaf crates go to the lane whose code depends on them most, counted
+    # from the manifests -- except the hash and crypto family, which stays in
+    # one lane (A, with aes/ and hmac/) because design-decisions §539 wants its
+    # primitives ported, vetted and collapsed to one copy, and that is one
+    # owner's job.
+    ("blockbuf/", "A"),
+    ("crc32/", "A"),
+    ("md5/", "A"),
+    ("pwkdf/", "A"),
+    ("sha1/", "A"),
+    ("sha2/", "A"),
+    ("civildate/", "B"),
+    ("cronspool/", "B"),
+    ("killconv/", "B"),
+    ("libcall/", "B"),
+    ("monoclock/", "B"),
+    ("optionalfile/", "B"),
+    ("procinfo/", "B"),
+    ("readpass/", "B"),
+    ("ttyidle/", "B"),
+    ("utmpfile/", "B"),
+    ("byteread/", "E"),
+    ("deflate/", "E"),
+    ("textfind/", "E"),
+    ("textfmt/", "E"),
+    ("tzrules/", "E"),
+    ("yamldoc/", "E"),
+    ("ziparchive/", "E"),
+    # Boot, build and repository configuration: lane A, which owns the boot
+    # and the gates.
+    ("esp/", "A"),
+    (".cargo/", "A"),
+    ("limine.conf", "A"),
+    ("ovmf-code.fd", "A"),
+    ("clippy.toml", "A"),
+    (".gitattributes", "A"),
+    (".gitignore", "A"),
+    (".git-blame-ignore-revs", "A"),
+    ("bare-metal-boot.md", "A"),
+    ("net-userspace-migration.md", "A"),
+    ("performance-targets.md", "A"),
+    ("reference-implementations.md", "A"),
+    ("subsystem-map.md", "A"),
+    ("apply_clippy_fixes.py", "A"),
+    ("find_gaps.py", "A"),
+    ("serial_err.txt", "A"),
+    ("serial_new.txt", "A"),
+    ("serial_new_err.txt", "A"),
+    ("requests/.gitkeep", "A"),
+    ("coreutils-canonical-answer.md", "B"),
+    ("fix_placeholder_tests.py", "B"),
+    ("loosen_stub_cli_tests.py", "B"),
+    ("build-env.md", "D"),
+    ("posix-blockers.md", "D"),
+    ("strace_6.8-0ubuntu2_amd64.deb", "D"),
+    # The three requests filed before requests were named by sender, by the
+    # zone that filed them.
+    ("requests/coreutils_needs_kernel_embedding.md", "B"),
+    ("requests/shell_needs_kernel_embedding.md", "B"),
+    ("requests/osb2_needs_compositor_syscalls.md", "C"),
+    # scripts/ subdirectories; the files directly in scripts/ are in
+    # SCRIPT_OWNERS below.
+    ("scripts/hooks/", "A"),
+    ("scripts/lib/", "A"),
+    ("scripts/coreutils-spike/", "B"),
+    ("scripts/dup-differential-cases/", "B"),
+    ("scripts/bash-spike/", "D"),
+    ("scripts/cmake-spike/", "D"),
+    ("scripts/cpython-spike/", "D"),
+    ("scripts/fixtures/", "D"),
+    ("scripts/make-spike/", "D"),
+    ("scripts/pkgconf-spike/", "D"),
+    ("scripts/espeak-spike/", "E"),
 )
 
-#: What the table deliberately leaves to nobody, for the briefing.  These are
-#: not free-for-alls: the shared documents and the workspace Cargo.toml have
-#: their own rules (roadmap.md rules 3 and 4), and scripts/** plus the root leaf
-#: crates are the open question A-Q11 ("who owns files that are not one lane's
-#: tree?").  Until that is answered, change them through a request to the lanes
-#: that use them, or keep the change additive and say so in the commit.
+#: Every file directly under `scripts/`, by owning lane (design-decisions
+#: §973). A script belongs to the lane whose code it judges or serves; a test
+#: suite goes with the script it tests; a data file with the script that reads
+#: it; the gate machinery, and the gates that judge every lane's files, are lane
+#: A's. Lanes C and D named their own on 2026-09-27. A lane adding a script adds
+#: its line to its own block in the same commit -- the one edit to this file
+#: another lane may make without a request.
+SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
+    "A": (
+        "abi-reach.py",
+        "absent-operand-ledger.txt",
+        "audit-rustfmt-drift.py",
+        "backfill-lane-fields.py",
+        "bench-history.py",
+        "boot-history.py",
+        "bootstrap-worktree.sh",
+        "build-image.ps1",
+        "build-iso.sh",
+        "build-usb-image.py",
+        "bytestr-oracle.rs",
+        "canary-load-test.sh",
+        "canary-load.py",
+        "canary-spread-survey.py",
+        "check-absent-operand-default.py",
+        "check-accidental-headings.py",
+        "check-ansic-quoting-vs-bash.py",
+        "check-boot-skips.py",
+        "check-boot-test-reexec.sh",
+        "check-cfg-unix.py",
+        "check-collapsed-messages.py",
+        "check-config-turn-guards.py",
+        "check-control-bytes.py",
+        "check-crate-names.py",
+        "check-dead-code-allows.py",
+        "check-design-decisions-bands.py",
+        "check-eol.py",
+        "check-evdev-elf-asm.py",
+        "check-excluded-crate-tests.py",
+        "check-foreign-worktree-paths.py",
+        "check-gate-call-sites.py",
+        "check-gate-invocation-parity.py",
+        "check-gated-selftests.py",
+        "check-gates-are-wired.py",
+        "check-gates-can-refuse.py",
+        "check-known-issues-index.py",
+        "check-kshell-pipeline-vs-bash.py",
+        "check-kshell-rungs-vs-bash.py",
+        "check-lane-signals.py",
+        "check-linux-only-capabilities.py",
+        "check-live-counter-reads.py",
+        "check-mutation-needles.py",
+        "check-open-questions.py",
+        "check-option-refusal.py",
+        "check-query-status.py",
+        "check-ran-if.py",
+        "check-recursive-locks.py",
+        "check-refusals-refuse.py",
+        "check-release-staleness.py",
+        "check-requests-not-deleted.py",
+        "check-ring3-entry-regs.py",
+        "check-roadmap-done.py",
+        "check-scratch-config.py",
+        "check-self-tests-wired.py",
+        "check-selftest-flag-spellings.py",
+        "check-selftest-format-wording.py",
+        "check-selftest-reach.py",
+        "check-selftest-reinit.py",
+        "check-selftest-rung-numbers.py",
+        "check-selftest-skips.py",
+        "check-selftest-wording.py",
+        "check-shell-callables.py",
+        "check-shell-message-names.py",
+        "check-shell-noun-article.py",
+        "check-shellquote-vs-bash.py",
+        "check-stale-blockers.py",
+        "check-test-order-independence.py",
+        "check-test-root-writes.py",
+        "check-text-mode-writes.py",
+        "check-unreachable-mutators.py",
+        "check-untested-crates.py",
+        "check-usage-names-reach-the-command.py",
+        "check-usage-status.py",
+        "check-user-access-sites.py",
+        "check-variant-lists.py",
+        "check-vfs-permission-gate.py",
+        "check-vfs-under-lock.py",
+        "check-workspace-lints.py",
+        "clippy-diff.py",
+        "clippy-sites.py",
+        "control-bytes-baseline.txt",
+        "create-disk.py",
+        "design-decisions-baseline.json",
+        "display_rename.py",
+        "echo-escapes-oracle.rs",
+        "flake-hunt.sh",
+        "gen-script-index.py",
+        "gitenv.py",
+        "gittree.py",
+        "grade-positional.py",
+        "hang-repro-loop.sh",
+        "hostload.py",
+        "install-hooks.sh",
+        "kasan-build.sh",
+        "kasan-check-preshadow.py",
+        "ki_archive.py",
+        "ki_dupes.py",
+        "ki_split.py",
+        "layout-sweep.py",
+        "live-counter-ledger.txt",
+        "merge-readiness.py",
+        "migrate-worktrees-to-drive.ps1",
+        "msysbash.py",
+        "mutate-gate.py",
+        "never-read-probe.py",
+        "open-requests.py",
+        "option-refusal-ledger.txt",
+        "orphan-modules-baseline.txt",
+        "positional-model-limits.py",
+        "pre-boot.py",
+        "proctree.py",
+        "prune-build-cache.py",
+        "prune-build-trees.py",
+        "qemu-probe.py",
+        "raced-globals-baseline.txt",
+        "raced-globals.py",
+        "reclaim-space.py",
+        "resolve-rip.sh",
+        "roadmap-done-baseline.txt",
+        "run-checker.sh",
+        "run-qemu.ps1",
+        "rust_scopes.py",
+        "rustemit.py",
+        "rustlex.py",
+        "rustrungs.py",
+        "rustscan.py",
+        "scan-orphan-modules.py",
+        "scan-unwrap.py",
+        "selftest-boot-gate-identity.py",
+        "selftestflag.py",
+        "shellcheck-all.sh",
+        "snapshot-todo2.sh",
+        "soak-nmi-check.sh",
+        "split-frames.py",
+        "split-hunks.py",
+        "src_digest.py",
+        "srcload.py",
+        "stack-frames.py",
+        "stage-hunks.py",
+        "straddle-check.py",
+        "symbolize.py",
+        "test-backfill-lane-fields.py",
+        "test-bench-history.py",
+        "test-boot-history-commit.py",
+        "test-boot-history.py",
+        "test-boot-lock.sh",
+        "test-boot-test.py",
+        "test-bootstrap-worktree.py",
+        "test-build-usb-image.py",
+        "test-canary-load.py",
+        "test-check-boot-skips.py",
+        "test-check-design-decisions-bands.py",
+        "test-check-gated-selftests.py",
+        "test-check-release-staleness.py",
+        "test-check-requests-not-deleted.py",
+        "test-check-self-tests-wired.py",
+        "test-gittree.py",
+        "test-grade-positional.py",
+        "test-hostload.py",
+        "test-ki-dupes.py",
+        "test-layout-sweep.py",
+        "test-msysbash.py",
+        "test-open-requests.py",
+        "test-pre-push-fmt-gate.py",
+        "test-pre-push-identity-gate.py",
+        "test-pre-push-python-choice.py",
+        "test-pre-push-run-checker.py",
+        "test-pre-push-suites-scope.py",
+        "test-pre-push-touches.py",
+        "test-proctree.py",
+        "test-prune-build-cache.py",
+        "test-prune-build-trees.py",
+        "test-reclaim-space.py",
+        "test-rustemit.py",
+        "test-selftests-are-repo-safe.py",
+        "test-src-digest.py",
+        "test-srcload.py",
+        "test-straddle-check.py",
+        "test-worktree.sh",
+        "untested-crates-baseline.txt",
+        "variant-lists-partial.txt",
+        "wdog-nmi-soak.sh",
+        "wdog-reset-experiment.sh",
+        "which-lane.py",
+        "who-holds-dir.py",
+        "workspace-lints-baseline.txt",
+        "workspace-test.py",
+        "write-usb-stick.ps1",
+    ),
+    "B": (
+        "all-diff.sh",
+        "argv-ignored-baseline.txt",
+        "argv-utf8-baseline.txt",
+        "argv-utf8.py",
+        "audit-cli-fabrication.py",
+        "awk-diff.sh",
+        "bashprobe.py",
+        "bc-diff.sh",
+        "build-userspace.ps1",
+        "c-maybe-probe.py",
+        "cal-diff.sh",
+        "calc-diff.sh",
+        "cat-diff.sh",
+        "check-argv-ignored.py",
+        "check-cp-diff-sees-nul.py",
+        "check-diff-preamble-order.py",
+        "check-doc-links.py",
+        "check-drive-root-litter.py",
+        "check-help-vs-parser.py",
+        "check-option-stops.py",
+        "check-read-defaults.py",
+        "chown-diff.sh",
+        "cli-fabrication-baseline.txt",
+        "cmp-diff.sh",
+        "comm-diff.sh",
+        "comm-probe.py",
+        "compare-short-options.py",
+        "coreutils-check.sh",
+        "cp-diff.sh",
+        "csplit-diff.sh",
+        "cut-diff.sh",
+        "date-diff.sh",
+        "dd-diff.sh",
+        "df-diff.sh",
+        "diff-diff.sh",
+        "diff-wsl.sh",
+        "digest-diff.sh",
+        "du-diff.sh",
+        "dup-bins-survey.py",
+        "dup-differential.py",
+        "echo-diff.sh",
+        "ed-diff.sh",
+        "env-diff.sh",
+        "expand-diff.sh",
+        "expr-diff.sh",
+        "extfloat-cases.py",
+        "extfloat-diff.sh",
+        "extfloat-probe.c",
+        "find-diff.sh",
+        "fnmatch-probe.c",
+        "fold-diff.sh",
+        "free-diff.sh",
+        "frozen-flag-answered.txt",
+        "gen-oils-bind-tables.py",
+        "getopt-ambiguity-check.py",
+        "grep-diff.sh",
+        "head-diff.sh",
+        "host-errmsg-baseline.txt",
+        "host-errmsg.py",
+        "hostname-diff.sh",
+        "interleave-diff.sh",
+        "join-diff.sh",
+        "join-probe.py",
+        "logname-diff.sh",
+        "ls-diff.sh",
+        "ls-quote-probe.py",
+        "more-diff.sh",
+        "multicall-aliases-baseline.txt",
+        "multicall-aliases.py",
+        "multicall-shadowed-baseline.txt",
+        "mv-diff.sh",
+        "nice-diff.sh",
+        "nl-diff.sh",
+        "nohup-diff.sh",
+        "od-diff.sh",
+        "option-gap-baseline.txt",
+        "option-gap-ref.sh",
+        "option-gap.sh",
+        "option-stops-baseline.txt",
+        "osh-bash-diff.py",
+        "osh-diff.sh",
+        "paste-diff.sh",
+        "paste-probe.py",
+        "patch-diff.sh",
+        "printable-audit.py",
+        "printf-cases.py",
+        "printf-diff.sh",
+        "printf-probe.sh",
+        "probe-cp-diff-nul.sh",
+        "probe-date-d-grammar.sh",
+        "probe-date-f.sh",
+        "probe-date-r-quoting.sh",
+        "probe-diff-name-quoting.sh",
+        "probe-diff-side-by-side.sh",
+        "probe-env-empty-name.sh",
+        "probe-env-split-empty.sh",
+        "probe-env-split-escapes.sh",
+        "probe-env-split-expansion-env.sh",
+        "probe-env-split-options.sh",
+        "probe-env-split-string.sh",
+        "ps-diff.sh",
+        "pwd-diff.sh",
+        "quote-names-baseline.txt",
+        "quote-names-why.py",
+        "quote-names-wire.py",
+        "quote-names.py",
+        "quote-probe.py",
+        "quote-sweep.py",
+        "read-defaults-baseline.txt",
+        "rm-diff.sh",
+        "sed-diff.sh",
+        "seq-cases.py",
+        "seq-diff.sh",
+        "seq-probe.sh",
+        "sh-diff.sh",
+        "sort-diff.sh",
+        "split-diff.sh",
+        "stat-diff.sh",
+        "stderr-exit-zero-sweep.py",
+        "stdin-hang-sweep.sh",
+        "strings-diff.sh",
+        "tail-diff.sh",
+        "tar-diff.sh",
+        "tee-diff.sh",
+        "test-check-cp-diff-sees-nul.py",
+        "test-checkers-honour-head.py",
+        "test-diff-bound.sh",
+        "test-diff-forward.sh",
+        "test-diff.sh",
+        "test-pre-push-doclinks-gate.py",
+        "test-pre-push-gates.py",
+        "test-pre-push-unixhalf-gate.py",
+        "time-diff.sh",
+        "touch-diff.sh",
+        "tr-diff.sh",
+        "tsort-diff.sh",
+        "tsort-probe.py",
+        "tty-diff.sh",
+        "uname-diff.sh",
+        "unexpand-diff.sh",
+        "uniq-diff.sh",
+        "unknown-option-sweep.py",
+        "uptime-diff.sh",
+        "wc-diff.sh",
+        "whoami-diff.sh",
+        "write-error-diff.sh",
+        "xargs-diff.sh",
+        "yes-diff.sh",
+    ),
+    "C": (
+        "check-contrast-explorer.js",
+        "check-fields-written-never-read.py",
+        "check-overlay0-ink.py",
+        "check-tested-but-uncalled.py",
+        "check-text-ink.py",
+        "check-window-wiring.py",
+        "contrast-explorer.html",
+        "fields-written-never-read-baseline.txt",
+        "lanec_scan.py",
+        "reintro-input-settings.py",
+        "reintro-keylayout.py",
+        "reintro-list-hit-tests.py",
+        "reintro-modal-geometry.py",
+        "reintro-mouse-page.py",
+        "reintro-palette.py",
+        "reintro-reload-input.py",
+        "reintro-row-hit-tests.py",
+        "reintro-scroll-panes.py",
+        "reintro-textview.py",
+        "reintro-toolkit-focus.py",
+    ),
+    "D": (
+        "check-duplicate-exports.py",
+        "check-env-identity.py",
+        "check-libc-abi.py",
+        "check-libc-shape.py",
+        "check-manifest-producers.py",
+        "check-one-libc-per-process.py",
+        "check-pinned-target-build.py",
+        "convert-fastpy-embeds.py",
+        "ctest-fixtures.py",
+        "duplicate-exports-baseline.txt",
+        "env-identity-baseline.txt",
+        "extract-tcc-strace.sh",
+        "find-reachable-fixtures.py",
+        "gen-chmod-fixture.sh",
+        "gen-human-fixture.sh",
+        "p37-check.sh",
+        "p38-check.sh",
+        "probe-tcc-hosted.sh",
+        "rootfs-bin-manifest.txt",
+        "setup-toolchain.sh",
+        "test-ctest-fixtures.py",
+        "test-rootfs-staging.sh",
+    ),
+    "E": (
+        "check-diskcleanup-test-roots.py",
+        "check-frame-needles.py",
+        "check-key-release-wiring.py",
+        "check-tick-wiring.py",
+        "check-unused-exports.py",
+        "count_centrings.py",
+        "find-claimed-acts.py",
+        "find-echoed-settings.py",
+        "find-overstated-records.py",
+        "find-silent-incapacity.py",
+        "find-stale-admissions.py",
+        "find-stale-dead-code-allows.py",
+        "find-stranded-serialisers.py",
+        "find-swallowed-ticks.py",
+        "find-unpinned-picker-routing.py",
+        "frozen-flag-survey.py",
+        "key-survey-answered.txt",
+        "key-survey-baseline.txt",
+        "key-survey.py",
+        "lossy-decode-baseline.txt",
+        "lossy-decode.py",
+        "mutation_harness.py",
+        "reintro-benchmark.py",
+        "reintro-credmanager.py",
+        "reintro-lockscreen.py",
+        "reintro-spreadsheet.py",
+        "reintro-sysinfo.py",
+        "sabotage.py",
+        "scan-unwired.py",
+        "verify_mutations.py",
+    ),
+    "F": (
+        "check-generated-tables.py",
+        "q45_apply.py",
+        "q45_survey.py",
+        "reintro-evdev.py",
+    ),
+}
+
+#: Files only the operator edits: the instructions, the original design texts,
+#: the operator's own notes, reference images and backups. A lane does not edit
+#: these unless the operator says to (CLAUDE.md: "Do not edit this file during
+#: normal development").
+OPERATOR_OWNS: tuple[str, ...] = (
+    ".claude/",
+    "backups/",
+    "CLAUDE.md",
+    "claude.md.bak",
+    "design.txt",
+    "design desicions.txt",
+    "other design decisions.txt",
+    "design-review.txt",
+    "differences from windows.txt",
+    "ipc.txt",
+    "scheduler.txt",
+    "memory management.txt",
+    "os.md",
+    "api.txt",
+    "answer.md",
+    "operator-answers-2026-06-13.md",
+    "convo1.txt",
+    "claude_use.txt",
+    "dual_use.txt",
+    "effort_level.txt",
+    "names.txt",
+    "resetdate.txt",
+    "todo.old.txt",
+    "todo.old.2.txt",
+    "todo3.txt",
+    "roadmap.single-agent.md",
+    "Aero Desktop (offline).html",
+    "aero-window-frame.png",
+    "file explorer.png",
+    "slate os.png",
+    "go.bat",
+    "push.bat",
+)
+
+#: Files every lane writes, each under a named per-lane rule. A rule that says
+#: who writes which part is an owner, not an ambiguity. The rules themselves
+#: are in roadmap.md -> "Six-Agent Parallel Execution" rules 3 and 4.
+SHARED_DOCUMENTS: dict[str, str] = {
+    "roadmap.md": "rule 3: your lane's own items and sections",
+    "roadmap-detailed.md": "rule 3: status flags in place, nothing deleted",
+    "known-issues.md": "rule 3: your own entries, new ones in your lane's section",
+    "known-issues-resolved.md": "rule 3: your own archived entries",
+    "design-decisions.md": "rule 3: your lane's numbering band",
+    "open-questions.md": "rule 3: questions with your lane's letter",
+    "deferred-questions.md": "rule 3: questions with your lane's letter",
+    "awaiting-operator.md": "rule 3: items with your lane's letter",
+    "todo.txt": "rule 3: your own `## Lane <X>` headings",
+    "manual-testing.txt": "rule 3: items for your own lane's features",
+    "README.md": "rule 3: the paragraphs about your own subsystems",
+    "Cargo.toml": "rule 4: the workspace manifest's member and dependency lists",
+    "Cargo.lock": "rule 4: regenerated by cargo, never hand-edited",
+    "scripts/INDEX.md": "generated by scripts/gen-script-index.py: every lane adding a script regenerates it, nobody hand-edits it",
+}
+
+#: A request's owner is its sender: `requests/<from>-<to...>-<slug>.md`.
+_REQUEST_NAME = re.compile(r"^requests/([a-f])-[a-f]+-[^/]+$")
+
+#: What `ownership()` answers.  `kind` is "lane", "operator", "shared" or
+#: "none"; `lane` is the letter for a lane; `rule` says why.
+class Ownership:
+    __slots__ = ("kind", "lane", "rule")
+
+    def __init__(self, kind: str, lane: str | None, rule: str) -> None:
+        self.kind = kind
+        self.lane = lane
+        self.rule = rule
+
+    def __repr__(self) -> str:
+        return f"Ownership({self.kind!r}, {self.lane!r}, {self.rule!r})"
+
+    def label(self) -> str:
+        """One word for a report: the lane letter, `operator`, `shared` or `-`."""
+        if self.kind == "lane":
+            return self.lane or "-"
+        return {"operator": "operator", "shared": "shared"}.get(self.kind, "-")
+
+
+#: What the briefing says about the files no lane owns.
 UNASSIGNED_NOTE = (
-    "shared documents and the workspace Cargo.toml (roadmap.md rules 3-4); "
-    "scripts/** other than the named files; the root leaf crates (sha2, "
-    "procinfo, tzrules, deflate, ...) -- see open-questions.md A-Q11"
+    "the operator's files (CLAUDE.md, the design texts, notes, backups) and the "
+    "shared documents, each under its roadmap.md rule 3/4 -- see "
+    "`--owner PATH`; nothing else (design-decisions 973)"
 )
 
 
@@ -266,25 +884,107 @@ def _normalise(path: str | os.PathLike[str]) -> str:
     return "" if rel_posix in (".", "") else rel_posix
 
 
+def _build_tables() -> tuple[dict[str, str], list[tuple[str, str]]]:
+    """Exact-file and directory-prefix lookups from OWNERSHIP + SCRIPT_OWNERS.
+
+    An exact entry is always the longest possible match for its own path, so
+    looking it up first and falling back to the longest directory prefix is
+    the same rule as "longest prefix wins", at dictionary speed -- which the
+    gate needs, since it asks about every tracked file.
+    """
+    exact: dict[str, str] = {}
+    prefixes: list[tuple[str, str]] = []
+    for prefix, lane in OWNERSHIP:
+        if prefix.endswith("/"):
+            prefixes.append((prefix, lane))
+        else:
+            exact[prefix] = lane
+    for lane, names in SCRIPT_OWNERS.items():
+        for name in names:
+            exact["scripts/" + name] = lane
+    prefixes.sort(key=lambda pl: len(pl[0]), reverse=True)
+    return exact, prefixes
+
+
+_EXACT, _PREFIXES = _build_tables()
+
+
+def _lane_of_rel(rel: str) -> str | None:
+    """The lane owning a normalised repo-relative path, or None."""
+    if not rel:
+        return None
+    hit = _EXACT.get(rel)
+    if hit is not None:
+        return hit
+    m = _REQUEST_NAME.match(rel)
+    if m:
+        return m.group(1).upper()
+    for prefix, lane in _PREFIXES:
+        if rel.startswith(prefix) or rel == prefix[:-1]:
+            return lane
+    return None
+
+
 def owner_of(path: str | os.PathLike[str]) -> str | None:
     """The letter of the lane that owns `path`, or None if no lane does.
 
-    Longest prefix wins (see `OWNERSHIP`).  A directory may be named with or
-    without its trailing slash.  None means "no lane's tree" -- a shared
-    document, a script nobody owns, a root leaf crate -- never "anyone's".
+    Longest prefix wins (see `OWNERSHIP`); a file named in `SCRIPT_OWNERS` or a
+    request named by its sender is an exact answer.  A directory may be named
+    with or without its trailing slash.  None means "no lane's tree" -- an
+    operator file or a shared document, or a path nothing covers, which
+    `ownership` tells apart -- never "anyone's".
     """
+    return _lane_of_rel(_normalise(path))
+
+
+def ownership(path: str | os.PathLike[str]) -> Ownership:
+    """Who owns `path`: a lane, the operator, a shared-document rule, or nobody."""
     rel = _normalise(path)
-    if not rel:
-        return None
-    best: tuple[int, str] | None = None
-    for prefix, lane in OWNERSHIP:
-        if prefix.endswith("/"):
-            hit = rel.startswith(prefix) or rel == prefix[:-1]
-        else:
-            hit = rel == prefix
-        if hit and (best is None or len(prefix) > best[0]):
-            best = (len(prefix), lane)
-    return best[1] if best else None
+    lane = _lane_of_rel(rel)
+    if lane is not None:
+        return Ownership("lane", lane, "the ownership table")
+    if rel in SHARED_DOCUMENTS:
+        return Ownership("shared", None, SHARED_DOCUMENTS[rel])
+    for entry in OPERATOR_OWNS:
+        if rel == entry or (entry.endswith("/") and
+                            (rel.startswith(entry) or rel == entry[:-1])):
+            return Ownership("operator", None, "only the operator edits it")
+    return Ownership("none", None, "nothing in the table covers it")
+
+
+def unowned(paths: list[str]) -> list[str]:
+    """The paths among `paths` that nothing owns."""
+    return [p for p in paths if ownership(p).kind == "none"]
+
+
+def stale_entries(paths: list[str]) -> list[str]:
+    """Exact-file table entries that name no tracked file: a script deleted,
+    or renamed, whose line stayed behind.
+
+    Only exact entries.  A directory entry with nothing under it is a
+    *reservation*, not a stale line -- `gui/video/` was claimed for lane F on
+    2026-09-27, before the crate's first file existed, which is what lets that
+    first commit land with the right owner instead of falling to `gui/`'s.
+    """
+    tracked = set(paths)
+    exact = [e for e in list(_EXACT) + list(SHARED_DOCUMENTS) + list(OPERATOR_OWNS)
+             if not e.endswith("/")]
+    return sorted(e for e in exact if e not in tracked)
+
+
+def duplicate_scripts(
+    table: Mapping[str, tuple[str, ...]] | None = None,
+) -> list[str]:
+    """Script names listed under more than one lane in `SCRIPT_OWNERS` (or in
+    `table`, which is how the self-test feeds it a fixture)."""
+    seen: dict[str, str] = {}
+    dups = []
+    for lane, names in (SCRIPT_OWNERS if table is None else table).items():
+        for name in names:
+            if name in seen:
+                dups.append(f"{name} ({seen[name]} and {lane})")
+            seen[name] = lane
+    return dups
 
 
 def owned_by(letter: str) -> list[str]:
@@ -303,6 +1003,10 @@ def owned_by(letter: str) -> list[str]:
             shown += " (except " + ", ".join(c + "**" if c.endswith("/") else c
                                              for c in carved) + ")"
         out.append(shown)
+    scripts = SCRIPT_OWNERS.get(letter, ())
+    if scripts:
+        out.append(f"{len(scripts)} files in scripts/ (SCRIPT_OWNERS)")
+    out.append(f"requests/{letter.lower()}-*.md (the requests it sent)")
     return out
 
 
@@ -534,8 +1238,71 @@ def table() -> str:
     for letter, lane in LANES.items():
         rows.append(f"{letter}  {lane.agent_name:<7} {lane.name:<27} "
                     f"{', '.join(owned_by(letter))}")
-    rows.append(f"-  (none)  {'':<27} {UNASSIGNED_NOTE}")
+    rows.append(f"-  operator {'':<26} {', '.join(OPERATOR_OWNS)}")
+    rows.append(f"-  shared   {'':<26} "
+                + ", ".join(f"{doc} ({rule})" for doc, rule in SHARED_DOCUMENTS.items()))
     return "\n".join(rows)
+
+
+def _tracked_files(head: str | None) -> list[str] | None:
+    """Every tracked path: the index's, or revision `head`'s.  None on a git
+    failure -- which the gate reports as no verdict, never as a pass."""
+    import subprocess
+    if head is None:
+        cmd = ["git", "-C", str(PROJECT_ROOT), "ls-files", "-z"]
+    else:
+        cmd = ["git", "-C", str(PROJECT_ROOT), "ls-tree", "-r", "-z",
+               "--name-only", head]
+    try:
+        out = subprocess.run(cmd, capture_output=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [p for p in out.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def check_all(head: str | None) -> int:
+    """The §973 gate: every tracked file has an owner, and every table entry
+    names something tracked.  0 clean, 1 findings, 2 no verdict."""
+    paths = _tracked_files(head)
+    if paths is None:
+        print("which-lane: cannot list the tracked files "
+              f"({'the index' if head is None else head}) -- no verdict.",
+              file=sys.stderr)
+        return 2
+    # A floor: a listing this short means git answered for the wrong tree
+    # (or none), and "0 unowned" over it would be a verdict about nothing.
+    if len(paths) < 1000:
+        print(f"which-lane: only {len(paths)} tracked file(s) listed -- fewer "
+              "than this tree has ever had, so no verdict.", file=sys.stderr)
+        return 2
+    lost = unowned(paths)
+    stale = stale_entries(paths)
+    dups = duplicate_scripts()
+    for p in lost:
+        print(f"unowned: {p}")
+    for e in stale:
+        print(f"stale:   {e} (a table entry naming nothing tracked)")
+    for d in dups:
+        print(f"twice:   {d}")
+    if lost or stale or dups:
+        print(f"\nwhich-lane: {len(lost)} unowned file(s), {len(stale)} stale "
+              f"entr{'y' if len(stale) == 1 else 'ies'}, {len(dups)} script(s) "
+              "owned twice.\n"
+              "Every tracked file has exactly one owner (design-decisions 973).\n"
+              "Give a new file its owner in the commit that creates it:\n"
+              "  * a script directly in scripts/: add its name to your lane's "
+              "block of SCRIPT_OWNERS\n"
+              "    in scripts/which-lane.py (the one edit to that file that "
+              "needs no request);\n"
+              "  * a request: name it requests/<your letter>-<to>-<slug>.md;\n"
+              "  * anything else new at the top of the tree: ask lane A, "
+              "which owns the table.\n"
+              "A stale entry is a line whose file is gone: delete the line.",
+              file=sys.stderr)
+        return 1
+    print(f"ok -- all {len(paths)} tracked file(s) have an owner "
+          f"({'the index' if head is None else head}).")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -617,13 +1384,88 @@ def _self_test() -> int:
         ("gui/imagecodec/src/png.rs", "F"),
         ("gui/vulkan/src/lib.rs", "F"),
         ("gui/compositorx/src/lib.rs", "C"),
-        ("scripts/check-eol.py", None),
+        # §973: scripts, root crates and requests have lanes now.
+        ("scripts/check-eol.py", "A"),
+        ("scripts/hooks/pre-push", "A"),
+        ("scripts/run-checker.sh", "A"),
+        ("scripts/cat-diff.sh", "B"),
+        ("scripts/check-window-wiring.py", "C"),
+        ("scripts/check-libc-abi.py", "D"),
+        ("scripts/bash-spike/run.sh", "D"),
+        ("scripts/key-survey.py", "E"),
+        ("scripts/espeak-spike/run.sh", "E"),
+        ("sha2/src/lib.rs", "A"),
+        ("procinfo/src/lib.rs", "B"),
+        ("deflate/src/lib.rs", "E"),
+        ("requests/a-bc-some-slug.md", "A"),
+        ("requests/c-abf-the-operator-answered.md", "C"),
+        ("requests/f-a-x.md", "F"),
+        ("requests/g-a-x.md", None),
+        ("requests/A-b-uppercase-is-not-a-sender.md", None),
+        ("requests/a-b-sub/dir.md", None),
+        ("requests/osb2_needs_compositor_syscalls.md", "C"),
+        ("requests/.gitkeep", "A"),
+        # Operator files and shared documents are still no lane's tree.
+        ("CLAUDE.md", None),
         ("Cargo.toml", None),
         ("roadmap.md", None),
-        ("sha2/src/lib.rs", None),
         ("", None),
     ]:
         check(f"owner_of({path!r})", owner_of(path), want)
+
+    for path, want in [
+        ("kernel/src/main.rs", "lane"),
+        ("CLAUDE.md", "operator"),
+        ("backups/three-lanes/README.md", "operator"),
+        ("backups", "operator"),
+        ("roadmap.md", "shared"),
+        ("Cargo.lock", "shared"),
+        ("known-issues.md", "shared"),
+        ("a-brand-new-top-level-file.txt", "none"),
+        ("scripts/a-brand-new-script.py", "none"),
+    ]:
+        check(f"ownership({path!r}).kind", ownership(path).kind, want)
+    check("ownership label of a lane path", ownership("apps/chess").label(), "E")
+    check("ownership label of an operator file", ownership("design.txt").label(),
+          "operator")
+
+    # --- the gate's three findings, over a synthetic listing -------------------
+    # Everything the tables name, as a tracked-file list: an exact entry as
+    # itself, a directory entry as one file under it.
+    def listing_of_tables() -> list[str]:
+        out = []
+        for entry in list(_EXACT) + [p for p, _ in _PREFIXES] + \
+                list(SHARED_DOCUMENTS) + list(OPERATOR_OWNS):
+            out.append(entry + "x" if entry.endswith("/") else entry)
+        return out
+
+    full = listing_of_tables()
+    check("a listing of exactly the tables has nothing unowned",
+          unowned(full), [])
+    check("...and nothing stale", stale_entries(full), [])
+    check("a new top-level file is unowned",
+          unowned(full + ["new-thing.txt"]), ["new-thing.txt"])
+    check("a new file under an owned directory is not",
+          unowned(full + ["kernel/src/new.rs"]), [])
+    dropped = "scripts/cat-diff.sh"
+    check("a script deleted but still in the table is stale",
+          stale_entries([p for p in full if p != dropped]), [dropped])
+    check("a directory entry with nothing under it is a reservation, not stale",
+          stale_entries([p for p in full if not p.startswith("scripts/lib/")]),
+          [])
+    check("a reserved directory still owns the first file created in it",
+          owner_of("gui/video/src/lib.rs"), "F")
+    check("the real table owns no script twice", duplicate_scripts(), [])
+    check("a script under two lanes is reported",
+          duplicate_scripts({"A": ("x.py", "y.py"), "B": ("x.py",)}),
+          ["x.py (A and B)"])
+    check("SCRIPT_OWNERS names only files directly in scripts/",
+          [n for names in SCRIPT_OWNERS.values() for n in names if "/" in n], [])
+    check("every SCRIPT_OWNERS key is a lane",
+          sorted(k for k in SCRIPT_OWNERS if k not in LANES), [])
+    check("no shared document or operator file also has a lane",
+          [p for p in list(SHARED_DOCUMENTS) + list(OPERATOR_OWNS)
+           if _lane_of_rel(p.rstrip("/")) is not None], [])
 
     sibling = PROJECT_ROOT.parent / "os-lane-a" / "gui" / "window" / "src" / "lib.rs"
     check("owner_of(absolute path in a sibling checkout)", owner_of(sibling), "F")
@@ -713,6 +1555,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the lane that owns each PATH and exit")
     parser.add_argument("--table", action="store_true",
                         help="print the whole ownership table and exit")
+    parser.add_argument("--check-all", action="store_true",
+                        help="the gate: refuse a tracked file with no owner, a "
+                             "table entry naming nothing, or a script owned "
+                             "twice (design-decisions 973)")
+    parser.add_argument("--head", metavar="REV",
+                        help="with --check-all: judge REV's files, not the index")
     parser.add_argument("--self-test", "--selftest", "--self_test",
                         dest="selftest", action="store_true",
                         help="run this script's own fixtures and exit")
@@ -720,12 +1568,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.selftest:
         return _self_test()
+    if args.head and not args.check_all:
+        parser.error("--head only means something with --check-all")
+    if args.check_all:
+        return check_all(args.head)
     if args.table:
         print(table())
         return 0
     if args.owner:
         for path in args.owner:
-            print(f"{owner_of(path) or '-'}\t{path}")
+            own = ownership(path)
+            note = "" if own.kind == "lane" else f"\t({own.rule})"
+            print(f"{own.label()}\t{path}{note}")
         return 0
 
     letter, how = detect_lane(args.agent_name, args.lane)

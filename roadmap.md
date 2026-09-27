@@ -194,12 +194,12 @@ day. Prune on the schedule above from the start, not once the volume is tight.
 
 | Lane | Agent name | Name | Owns (writes freely) |
 |------|------|------|----------------------|
-| **A** | `Lane A` | **Kernel, Core & Networking** | `kernel/**`, `bench/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `services/netstack/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh` |
-| **B** | `Lane B` | **Userland** | `userspace/**`, `init/**` |
-| **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's six crates |
-| **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` |
-| **E** | `Lane E` | **Applications** | `apps/**`, `randrange/**` |
-| **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**` |
+| **A** | `Lane A` | **Kernel, Core & Networking** | `kernel/**`, `bench/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `services/netstack/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh`; since §973 also the gate machinery (`scripts/hooks/**`, `scripts/run-checker.sh`, `scripts/which-lane.py`, the gates that judge every lane) and the kernel's scripts, the hash and crypto crates (`sha1`, `sha2`, `md5`, `pwkdf`, `blockbuf`, `crc32`), and the boot and repository configuration (`esp/**`, `limine.conf`, `.gitignore`, `.gitattributes`, `clippy.toml`, `.cargo/**`) |
+| **B** | `Lane B` | **Userland** | `userspace/**`, `init/**`; since §973 also the differential harnesses and userland checkers in `scripts/`, and ten root crates (`procinfo`, `libcall`, `optionalfile`, …) |
+| **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's six crates; since §973 also the GUI gates and gui/ reintroduction harnesses in `scripts/` |
+| **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh`; since §973 also the libc checkers, fixtures, rootfs manifest, toolchain setup and port spikes in `scripts/`, `build-env.md`, `posix-blockers.md` |
+| **E** | `Lane E` | **Applications** | `apps/**`, `randrange/**`; since §973 also the app gates and surveys in `scripts/`, and seven root crates (`deflate`, `tzrules`, `yamldoc`, `textfmt`, …) |
+| **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**`, `gui/video/**` (reserved 2026-09-27 for F-Q2's video codec crate, before its first file); since §973 also four scripts (`check-generated-tables.py`, `reintro-evdev.py`, the `q45_*` pair) |
 
 **Never writes** is simply everything another row owns. Where two rows
 overlap, the **longer path wins**: `gui/compositor/` is lane F's although
@@ -209,13 +209,34 @@ that rule, from the machine-readable copy of this table in
 `scripts/which-lane.py` — which every script that needs ownership reads, so
 **when this table changes, that one changes in the same commit.**
 
-**Owned by no lane:** the shared documents and the workspace `Cargo.toml`
-(rules 3 and 4 govern those), `scripts/**` other than the files named above,
-and the small top-level library crates (`sha2`, `procinfo`, `tzrules`,
-`deflate`, `crc32`, … — most are used by three to five lanes). Who may change
-those is `open-questions.md` → **A-Q11**, still unanswered; until it is,
-change one through a request to the lanes that use it, or keep the change
-additive and say so in the commit.
+**Every tracked file has exactly one owner** (`design-decisions.md` §973, the
+operator's answer to A-Q11, 2026-09-27). `python scripts/which-lane.py --owner
+<path>` answers every path with one of four things:
+- **a lane.** The table above, the file-by-file table of `scripts/` in
+  `which-lane.py` (`SCRIPT_OWNERS`), and, for a request, its sender:
+  `requests/a-bc-<slug>.md` is lane A's.
+- **the operator.** `CLAUDE.md`, the design texts, the operator's notes and
+  backups. No lane edits these unless the operator says to.
+- **a shared document.** The files every lane writes under a named per-lane
+  rule: `roadmap.md`, `known-issues.md`, `design-decisions.md`,
+  `open-questions.md` and the rest, rule 3; the workspace `Cargo.toml` and
+  `Cargo.lock`, rule 4.
+- **nobody**, which the boot test and the push hook (gate 51) refuse.
+
+A lane that wants a change in another lane's file files a request, as for
+any tree. A new file gets its owner **in the commit that creates it**:
+- a script directly in `scripts/`: add its name to your own lane's block of
+  `SCRIPT_OWNERS`. That additive line is the one edit to `which-lane.py`
+  (lane A's) that needs no request. Then regenerate `scripts/INDEX.md`,
+  which is shared and generated: run `gen-script-index.py`, never hand-edit
+  it.
+- a request: name it by sender.
+- anything else new at the top of the tree: ask lane A, which owns the table.
+
+An owner does not make a script run. A harness that nothing runs rots however
+clearly it is owned; lane C's palette harness did, 308 of 1,459 entries
+(`known-issues.md` TD-C-THE-PALETTE-REINTRODUCTION-HARNESS-HAS-ROTTED). Its
+owner is also who wires it into a gate.
 
 **Rationale for the cut** (2026-09-22; `design-decisions.md` §1100). Each of
 the three old lanes had one part with a deep backlog and one part coupled
@@ -288,9 +309,8 @@ phantom `pkg/**` until the six-lane rewrite of 2026-09-22 removed it.)
 
 **Programs reach the disk image through lane D's recipe.** How `rootfs.ext4`
 is built (`scripts/create-ext4-rootfs.sh`) is lane D's. The list of which
-programs go on it, `scripts/rootfs-bin-manifest.txt`, sits under `scripts/`
-and so is covered by A-Q11 like the rest of that directory; lanes B and D
-coordinate changes to it by request.
+programs go on it, `scripts/rootfs-bin-manifest.txt`, is lane D's too since
+§973 (lane D claimed it); lane B asks for changes to it by request.
 
 ### Lane C — Desktop & Toolkit
 
@@ -963,7 +983,7 @@ What lane A actually has left:
 | A-Q10 half 2 (defer the read-back) | **done 2026-09-27**: A-Q14 answered A (design-decisions §971); the `fs-history` worker records each save after it returns |
 | C-Q11 idea 2: run only the gates a change needs | **open, next after A-Q15's first increment.** Lane C relayed the operator's idea (`requests/c-a-two-ways-to-test-a-change-without-a-full-boot.md`); lane A's answer is `requests/a-c-testing-without-a-full-boot-lane-a-takes-both.md`. A gate cache keyed on what each checker actually read, traced as it runs. Only passes are cached, a checker that spawns a process or opens a socket is never cached, and release boots run everything. rq12: 9279 s of gates against about five minutes of QEMU |
 | C-Q11 idea 1: a way into a running guest | **open, after idea 2.** Lane A: the host-guest channel and its kernel side. The in-guest agent (userland) and the host tool (`scripts/`) are to be split with the lanes that own them |
-| every file gets one owner (A-Q11, §973) | **answered 2026-09-27, open.** Assign the ~1050 tracked files `which-lane.py` gives to nobody: `scripts/`, `requests/` (by sender), the root leaf crates (by who depends on them) and the root files. The push hook goes to lane A. Add a gate, in the boot test and the hook, that refuses a tracked file with no owner. Tell every lane |
+| every file gets one owner (A-Q11, §973) | **done on lane-a 2026-09-27.** `which-lane.py` answers all 8114 tracked files with a lane, the operator or a shared-document rule. `scripts/` is assigned file by file (lanes C and D named theirs), requests go by sender, and root crates by who depends on them. The crypto family goes to A with `aes`/`hmac`. `--check-all` is the gate, in the boot test and in the hook as gate 51. The rule is in the six-lane section above. Every lane is told when it reaches `main` |
 | fast checks at push time (A-Q13, §974) | **answered 2026-09-27, open.** Inventory the boot-only gates by cost, move the fast deterministic ones into the push hook, and fix the gates that raise false alarms first. Measure each gate's cost against its catches |
 | bare-metal USB boot, then §263's iGPU half | **blocked on the operator being physically at the machine** |
 | A-Q16: convert the non-leaf `PreemptSpinMutex`es (§975) | **answered 2026-09-27 (A), open.** Convert the outer locks of §949's 89 pairs, checking interrupt-safety per lock first. Price each at acquisitions × ~235ns (26 / 160 / 395ns for raw / preempt-spin / tracked). Revert the hot-path ones, pinning their order with a self-test instead |

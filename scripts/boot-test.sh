@@ -3888,6 +3888,53 @@ check_requests_not_deleted() {
 
 check_requests_not_deleted
 
+# Every tracked file has exactly one owner (design-decisions §973, the
+# operator's answer to A-Q11).  Until 2026-09-27 which-lane.py gave about a
+# thousand files to nobody -- scripts/, requests/, the root crates, the files at
+# the top of the tree -- and two lanes once edited one of them, the push hook,
+# on the same night, each believing it was theirs.  The table now answers every
+# path with a lane, the operator, or a shared-document rule; this refuses a
+# file it cannot answer, a table line naming nothing tracked, and a script
+# owned twice, so a new file gets its owner in the commit that creates it.
+#
+# The self-test runs first and a failure disqualifies the verdict: every lane's
+# write scope rests on these answers, so a table that misreads a path is worse
+# than no gate.
+check_every_file_owned() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== file-ownership check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the ownership table against its own cases ==="
+    if ! run_checker which-lane-selftest "$py" "$PROJECT_ROOT/scripts/which-lane.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  which-lane.py failed its own self-test, so" >&2
+        echo "its answer to \"whose file is this?\" -- which every lane's write scope" >&2
+        echo "rests on -- is not trustworthy until it passes." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that every tracked file has an owner ==="
+    if run_checker which-lane-check-all "$py" "$PROJECT_ROOT/scripts/which-lane.py" --check-all; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Every tracked file has exactly one owner" >&2
+    echo "(design-decisions §973); the lines above name what has none, what the" >&2
+    echo "table lists that no longer exists, or what it lists twice.  How to give" >&2
+    echo "a new file its owner is printed with them." >&2
+    exit 1
+}
+
+check_every_file_owned
+
 # A file declared `text eol=lf` that holds CRLF on disk, which no git command
 # you would think to run will tell you about.
 #

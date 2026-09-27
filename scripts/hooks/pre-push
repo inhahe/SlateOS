@@ -167,6 +167,10 @@
 #      three, and it is worth it because the failure it catches is one lane
 #      handing another a red main -- twice in one day, from the same lane,
 #      through the same hole.
+#  51. Refuse a pushed revision holding a tracked file with no owner, a line
+#      in the ownership table naming nothing tracked, or a script owned by
+#      two lanes (design-decisions §973, the operator's answer to A-Q11). A
+#      new file gets its owner in the commit that creates it.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -2845,6 +2849,78 @@ If a deletion genuinely is right, record why rather than bypassing:
 
 To push anyway:
     ALLOW_REQUEST_DELETION=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 51 -- file ownership: refuse to publish a tracked file with no owner.
+#
+# (Placed here, beside gate 9, rather than after gate 50: both judge what a
+# push adds under shared paths, and a reader looking for one finds the other.)
+#
+# WHY THIS EXISTS. The operator's answer to A-Q11 (design-decisions §973):
+# every file has exactly one owning lane, a lane wanting a change in another
+# lane's file asks for it, and no file is left with ambiguous ownership. Until
+# 2026-09-27 which-lane.py gave about a thousand files to nobody, and two lanes
+# edited one of them -- this hook -- on the same night, each believing it was
+# theirs. The table now answers every path with a lane, the operator, or a
+# shared-document rule; this refuses a pushed revision holding a file it cannot
+# answer, a table line naming nothing tracked, or a script owned twice.
+#
+# Unscoped: any push can add a file, and the check is one `git ls-tree` per sha
+# and a dictionary lookup per path. Self-test first, because every lane's write
+# scope rests on these answers.
+#
+# Bypass: ALLOW_UNOWNED_FILES=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_UNOWNED_FILES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNOWNED_FILES=1 set — file-ownership check skipped." >&2
+    skip_owned=1
+else
+    skip_owned=$skip
+fi
+
+whichlane="${repo_root:-.}/scripts/which-lane.py"
+[ -f "$whichlane" ] || skip_owned=1
+[ -n "${pushed_shas# }" ] || skip_owned=1
+note_gate file-ownership "$skip_owned"
+
+owned_failed=0
+if [ "$skip_owned" != "1" ]; then
+    if ! run_checker file-ownership-selftest "$py" "$whichlane" --self-test; then
+        echo "pre-push: which-lane.py FAILED ITS OWN SELF-TEST — its ownership answers are not trustworthy." >&2
+        owned_failed=1
+    else
+        for sha in $pushed_shas; do
+            # Per-sha gate name, for gate 9's reason: a shared name lets a later
+            # clean sha delete the kept log of an earlier failing one.
+            if ! run_checker "file-ownership-$sha" "$py" "$whichlane" --check-all --head "$sha"; then
+                owned_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$owned_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a commit being published holds a file with no
+owner, or the ownership table names something that is not there.
+
+Every tracked file has exactly one owner (design-decisions §973). Give a new
+file its owner in the commit that creates it:
+  * a script directly in scripts/: add its name to your lane's block of
+    SCRIPT_OWNERS in scripts/which-lane.py -- the one edit to that file that
+    needs no request;
+  * a request: name it requests/<your letter>-<to>-<slug>.md;
+  * anything else new at the top of the tree: ask lane A, which owns the table.
+A stale entry is a line whose file is gone: delete the line.
+
+To push anyway:
+    ALLOW_UNOWNED_FILES=1 git push $remote_name ...
 
 EOF
     exit 1

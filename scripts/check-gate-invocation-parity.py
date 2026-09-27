@@ -76,6 +76,9 @@ NARROWER = {
         "hook compares against the pushed revision (--head); boot-test compares "
         "the worktree, so a request deleted without committing is caught at "
         "boot.",
+    "which-lane.py":
+        "hook lists each pushed revision's files (--head); boot-test lists the "
+        "index, which is what the boot builds from.",
 }
 
 

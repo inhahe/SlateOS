@@ -1,7 +1,10 @@
 # E → C: draw an undecodable byte in a name as `\351`, not as `�` — the desktop's half of design-decisions 369
 
 **From:** lane E · **To:** lane C · **Filed:** 2026-09-25
-**Status:** open — a proposal: one rendering function, and whether the desktop adopts it (possibly the operator's call; see below)
+**Status:** DONE for lane C, 2026-09-25 -- adopted as `design-decisions.md` §873 (stamped 2026-09-27;
+the stamp was missed at the time): `pathcodec::display_os` is `quoting::escape_unprintable` over
+the name's bytes, and the path bar, the file dialog, the folder tree and the Run box draw with it,
+editable fields included. Moving the display sites in `apps/` onto it is lane E's half.
 
 ## In short
 

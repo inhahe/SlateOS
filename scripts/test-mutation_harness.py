@@ -62,13 +62,13 @@ def crate(tmp: Path, beside: str = "", integration: str = "") -> Path:
     """A crate with `src/lib.rs`, and optionally a file beside it and one in tests/."""
     src = tmp / "src"
     src.mkdir(parents=True)
-    (src / "lib.rs").write_text(SRC, encoding="utf-8")
+    (src / "lib.rs").write_text(SRC, encoding="utf-8", newline="")
     if beside:
-        (src / "other.rs").write_text(beside, encoding="utf-8")
+        (src / "other.rs").write_text(beside, encoding="utf-8", newline="")
     if integration:
         tests = tmp / "tests"
         tests.mkdir()
-        (tests / "it.rs").write_text(integration, encoding="utf-8")
+        (tests / "it.rs").write_text(integration, encoding="utf-8", newline="")
     return src
 
 
@@ -105,9 +105,9 @@ def main() -> int:
         base = Path(d) / "d"
         other = base / "lib"
         other.mkdir(parents=True)
-        (other / "lib.rs").write_text(SRC, encoding="utf-8")
+        (other / "lib.rs").write_text(SRC, encoding="utf-8", newline="")
         (base / "tests").mkdir()
-        (base / "tests" / "it.rs").write_text("#[test]\nfn only_in_tests() {}\n", encoding="utf-8")
+        (base / "tests" / "it.rs").write_text("#[test]\nfn only_in_tests() {}\n", encoding="utf-8", newline="")
         results.append(check(
             "only a src/ directory's crate is searched for tests/",
             check_the_table(SRC, row("only_in_tests"), other), 1))

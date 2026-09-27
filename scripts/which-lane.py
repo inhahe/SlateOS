@@ -268,6 +268,9 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("crc32/", "A"),
     ("md5/", "A"),
     ("pwkdf/", "A"),
+    # The DRM plane-composition arithmetic (design-decisions §976): the
+    # kernel's display backends' crate, host-tested on its own.
+    ("planecompose/", "A"),
     ("sha1/", "A"),
     ("sha2/", "A"),
     ("civildate/", "B"),

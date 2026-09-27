@@ -139,102 +139,56 @@ connected, if the prompt proves tiresome. Not D.
 prompt or picker), `gui/window` (the call an application makes);
 `apps/screenshot` and the screen recorder on lane E's side.
 
-## F-Q2 — [F] Remote desktop's video fallback (for games and video): which video format do we write an encoder for? — Status: OPEN (raised 2026-09-26)
+## F-Q1 — [F] iPhone photos (HEIC) will not open. May SlateOS include a decoder for a patented video format? — Status: OPEN (raised 2026-09-25, narrowed 2026-09-27)
 
-**In short:** remote desktop here sends *drawing instructions* rather than
-pictures, which keeps text sharp and uses little bandwidth -- but a game or a
-playing video has no drawing instructions, only changing pixels, so today it
-arrives blank. The design's answer is a fallback that films the screen and
-sends it as video. Nothing in the tree can make video yet, so lane F would
-write an encoder (the part that compresses the screen into a video stream)
-and, for a SlateOS viewer, the matching decoder. Which video format to write
-decides the cost, who can watch it, and whether patents are involved.
+**In short:** an iPhone saves every photograph as HEIC, and SlateOS cannot
+open one. Opening one means decoding HEVC, a video format covered by patents
+that their owners license for a fee. That fee is why Windows sells HEIC support
+separately for $0.99 and why Fedora Linux leaves it out. The question is
+whether SlateOS should include such a decoder, offer it as a separate install,
+or neither. (The other half of this question, AVIF, you answered "yes":
+design-decisions.md §1333.)
 
-**The options.**
+**Your question: what is hard about "letting users replace the library"?**
+You are right that it is nearly trivial. The usable open decoder, libde265, is
+under the LGPL (a licence that lets anyone ship it, on one condition). The
+condition is that a user must be able to swap in their own build of that one
+library. The two things that could get in the way both have easy answers:
 
-| Option | *What changes:* |
-|---|---|
-| **A.** VP8 | Streams play in any browser and in SlateOS's own viewer; no patent fees; roughly the quality of 2010-era web video. |
-| **B.** H.264 | Plays anywhere, often decoded by the graphics chip; somewhat better quality per bit than VP8; patent-pooled (fees for some uses in some countries until about 2030). |
-| **C.** VP9 | Better quality per bit than either (roughly half H.264's bitrate); no patent fees; plays in browsers; several times the work to write, and slower to encode. |
-| **D.** VP8 first, VP9 later | A working fallback soon, and the efficient one when it is worth the effort. |
+- **Rust bakes libraries into each program.** Linked that way, the decoder
+  would sit inside every program that shows a picture, and we would owe users
+  a way to rebuild all of them. So it goes in a separate library file or
+  helper program instead. That is easy, and the helper program is the safer
+  design anyway: a crafted picture that attacks the decoder then attacks a
+  helper that can do nothing else.
+- **This version of the LGPL (3) also forbids locking the user out.** If
+  SlateOS ever insists that only software it signed may run, a user's own
+  build of the decoder must still be allowed to run. As long as users can
+  always add their own signing key, this costs nothing.
 
-**What each means for us.**
+So the licence is not the obstacle. The **patents** are, and they are a legal
+and policy question rather than an engineering one.
 
-- **VP8** (a video format Google made royalty-free) is the one this tree
-  already half-knows: a WebP photograph *is* a single VP8 frame, and
-  `gui/imagecodec` decodes those, to the bit. An encoder reuses that
-  understanding, and a viewer's decoder extends it with motion (the part that
-  says "this block moved from there"). Smallest effort by a wide margin.
-- **H.264** is the one every device can decode with dedicated hardware, which
-  matters for a phone or an old laptop as the *viewer*. Its patents are
-  pooled and licensed; most of the basic-profile ones have expired, not all.
-  That makes it a legal and policy question as much as an engineering one --
-  the same one F-Q1 asks about HEVC.
-- **VP9** is what the design text names alongside H.264. It is the best of
-  the three at a given bandwidth, and much the largest to write.
-
-**If never answered:** safe. Games and videos keep arriving blank over remote
-desktop, as they do now; ordinary windows are unaffected. Lane F works on
-other things meanwhile.
-
-**Claude's recommendation:** **D** -- VP8 now (royalty-free, playable
-everywhere, and a direct extension of code we already have and have tested to
-the bit), VP9 once the fallback is in use and bandwidth is the complaint. H.264
-only if hardware decoding on the viewer side turns out to matter more than the
-patent question.
-
-**Where it bites:** a new encoder beside `gui/imagecodec/src/webp/lossy/` (or
-its own crate), `gui/remote` (the stream), and the compositor's
-`capture_stream_frame`, which today sends buffer-backed windows -- games, video
--- as empty command lists (roadmap: "Video-encoded capture fallback").
-
-## F-Q1 — [F] iPhone photos (HEIC) and many web pictures (AVIF) will not open. Bring in the video decoders they need? — Status: OPEN (raised 2026-09-25)
-
-**In short:** two common kinds of picture cannot be opened at all: HEIC, which
-is how an iPhone saves every photograph unless told otherwise, and AVIF, which
-more and more websites serve and which a browser saves when you "Save image
-as". Each stores the picture as one frame of a modern video format, so opening
-it means bringing in a video decoder -- someone else's code, tens of thousands
-of lines -- and for HEIC, a format under patent licensing. Everything else
-people commonly open now works (PNG, JPEG, GIF, WebP, BMP, icons). Should we
-take these on, and which?
-
-**The question.** `gui/imagecodec` (the one picture decoder every program
-here uses) would need:
-
-- for **AVIF**: an **AV1** decoder (AV1: a video format made royalty-free by
-  its designers) and the **HEIF** container (a file layout of nested boxes,
-  shared by both formats);
-- for **HEIC**: an **HEVC** decoder (HEVC, also "H.265": a video format whose
-  patents are licensed for a fee through patent pools) and the same container.
+**The options** (the engineering is the same for all three up to the last
+step: the decoder is built as a separate, replaceable helper, and the only
+difference is whether a fresh install includes it):
 
 | Option | *What changes:* |
 |---|---|
-| **A.** AVIF now, HEIC not yet | AVIF pictures open and get thumbnails; iPhone photos still say they cannot be displayed. |
-| **B.** Both now | iPhone photos open too. |
-| **C.** Neither yet | Both keep failing to open, with a message saying so. |
+| **A.** Include it | iPhone photos open out of the box. If SlateOS is ever sold or distributed widely, the HEVC patent pools may ask for royalties. |
+| **B.** A separate install, one click away | The first time a HEIC file is opened, SlateOS offers to install "HEIC support". The base system contains no HEVC code; whoever installs it takes on the patent question, as with Windows' paid extension. |
+| **C.** Not yet | iPhone photos keep saying they cannot be displayed. |
 
-- **AVIF** has a clean path: `rav1d`, a Rust translation of the AV1 decoder
-  Chrome and Firefox use (dav1d), under a permissive licence (BSD, no conditions
-  beyond keeping the notice). AV1 decoding is defined to the bit, so its
-  pixels are the browsers'. Cost: a large port to vendor and keep current.
-- **HEIC** is where the real decision is. The usable open decoder (libde265)
-  is **LGPL** (a licence that lets you ship it, but obliges you to let users
-  replace that library with their own build), and the HEVC **patents** are why
-  Windows sells HEVC support separately and Fedora ships without it. That is a
-  legal and policy call about what this system ships, not an engineering one.
+**If never answered:** safe. HEIC files show an error saying they cannot be
+displayed, as now; nothing else is affected.
 
-**If never answered:** safe. Nothing breaks; these files show an error saying
-they cannot be displayed. It gets more noticeable as AVIF spreads.
+**Claude's recommendation:** **B**. Almost A's convenience, with the base
+system free of the one kind of code that carries a fee. If SlateOS will only
+ever be used privately, A is just as good, and simpler.
 
-**Claude's recommendation:** **A** -- AVIF through `rav1d` -- and HEIC held
-until you decide whether this system may ship an HEVC decoder (or offers one as
-a separate download, as Windows does). Meanwhile lane F is working on TIFF,
-which needs no such decision.
-
-**Where it bites:** `gui/imagecodec/src/lib.rs` (the format dispatch); a new
-`heif`/`avif` module; a `requests/` note to lanes C and E when it lands.
+**Where it bites:** `gui/imagecodec` (the format dispatch; the HEIF container
+reader §1333 builds for AVIF serves HEIC too), a helper program for the
+decoder, and the image viewer's "cannot display" message.
 
 ## A-Q14: When we keep a previous copy of a file, should it be the content from *before* that save, or *after* it?
 
@@ -3783,7 +3737,15 @@ DQ1 and DQ2 and are never reissued.)*
 
 ## Resolved — lane F
 
-*(None yet. Lane F was created on 2026-09-22.)*
+- F-Q2 Remote desktop's video fallback: which video format? — resolved
+  2026-09-27 (1332): **VP9**, with hardware encoders and decoders where they
+  can be found, and a software fallback threaded across every core.
+- F-Q1, AVIF half: open AVIF pictures? — resolved 2026-09-27 (1333):
+  **yes**, through a port of rav1d. The HEIC half is still open as F-Q1.
+- C-Q18 (lane C's entry, lane F's code) What happens to the pointer over
+  fullscreen video and games? — resolved 2026-09-27 (1334): **always shown**:
+  on the presenter's copy today, and by the display's cursor plane when a
+  screen is shown without copying. Lane C retires the entry.
 
 ## Resolved — pre-split (unprefixed `Q<n>`, single-agent era)
 

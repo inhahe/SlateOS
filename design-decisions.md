@@ -12330,6 +12330,107 @@ the lines come out exactly as before at about a sixth of the cost.
 **How to reverse.** `Paragraph::extend` in `gui/font/src/shape.rs`: dropping
 the two `fits` checks trusts the run.
 
+## 1332. Remote desktop's video fallback is VP9: hardware where it can be found, and a CPU codec that uses every core
+
+**Date:** 2026-09-27
+**Lane:** F
+**Decided by:** Operator — answering `open-questions.md` F-Q2. Claude
+recommended D (VP8 first, VP9 later); the operator chose VP9 directly, and
+added the hardware and threading requirements.
+
+**In short:** when a game or a video is on screen, remote desktop will film
+the screen and send it as VP9 video. VP9 is a free (no patent fees) format that
+needs about half the bandwidth of H.264 at the same quality. Where the
+computer's graphics chip can encode or decode VP9 itself, it does; everywhere
+else a software codec does it, split across as many threads as the machine has
+cores. The operator's words: "do vp9. if possible, find or write hardware
+encoders and decoders for it (preferably find), and also have cpu fallback
+either way - multithreaded according to the number of cores in a user's
+system."
+
+**What that means in practice.**
+
+- **Software: port libvpx**, Google's reference VP9 encoder and decoder (BSD
+  licence, so no conditions beyond keeping the notice). It is the codec every
+  browser's VP9 was checked against, and it is the "find" the operator
+  prefers to "write". It threads by tile columns and rows, and the thread
+  count is the machine's core count. SIMD (vector instructions) comes with it.
+- **Hardware: find, not write.** Graphics chips expose their video engines
+  through drivers. The open ones that do VP9 are Intel's media driver (MIT
+  licence) and AMD's through Mesa (MIT). Both need the GPU stack (lane A's
+  kernel driver, lane F's Mesa port), so they come when it does. NVIDIA's video
+  engines are reachable only through its closed driver, so they are out of
+  reach until that changes.
+- **Both directions.** The encoder runs where the screen is filmed (the
+  compositor's capture stream). The decoder runs in SlateOS's own remote
+  viewer, and anywhere else VP9 is played.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| VP9 (chosen) | half H.264's bandwidth at the same quality; no patent fees; plays in browsers | the most work of the three; slower to encode than VP8 |
+| VP8 first, VP9 later (Claude's recommendation) | a working fallback soonest, extending the WebP decoder already here | two codecs to maintain, and the worse one first |
+| H.264 | decoded in hardware almost everywhere | patent-pooled; the basic profile's patents mostly expired, not all |
+
+**How to reverse.** The capture stream names its codec; a second codec
+is an addition beside libvpx, not a replacement of it.
+
+## 1333. AVIF pictures open, through a port of rav1d
+
+**Date:** 2026-09-27
+**Lane:** F
+**Decided by:** Operator ("AVIF: yes"), answering the AVIF half of
+`open-questions.md` F-Q1 — Claude's recommendation. The HEIC half stays open
+in F-Q1, rewritten to answer the operator's question about its licence.
+
+**In short:** AVIF, the picture format more and more websites serve, will open
+everywhere a picture opens, and get thumbnails. An AVIF file is one frame of
+AV1 video in a HEIF container (a file layout of nested boxes). Decoding it
+means an AV1 decoder, and the one to port is `rav1d`: a Rust translation of
+dav1d, the AV1 decoder Chrome and Firefox use, under a permissive BSD licence.
+AV1 decoding is defined to the bit, so the pixels will be the browsers' own.
+
+**What that means in practice.** `gui/imagecodec` gains a HEIF container
+reader and an AVIF format beside PNG, JPEG, WebP and the rest. `rav1d` is
+vendored and kept current as its own crate. The container reader is written
+once and later serves HEIC too, if that is ever decided.
+
+**Alternatives.** Writing an AV1 decoder from scratch would buy nothing
+dav1d's translation does not already have. It would lose the bit-exactness
+checked against every browser.
+
+## 1334. The mouse pointer is always shown: drawn on the presenter's copy today, by the display's cursor plane when a screen is shown without copying
+
+**Date:** 2026-09-27
+**Lane:** F
+**Decided by:** Operator ("Claude's recommendation"), answering
+`open-questions.md` C-Q18, which lane C filed and lane F acts on; lane F's
+code since 2026-09-24 (§1301) already drew the pointer everywhere. The
+recommendation was C, built as B first: the display controller's hardware
+cursor, with software as the fallback.
+
+**In short:** the mouse pointer never disappears, including over fullscreen
+video and games (unless the program itself hides it over its own window).
+Today every way SlateOS shows a picture copies it to the screen, and the
+pointer is painted onto that copy for free. When a future display path shows
+a fullscreen program's picture without copying it, the pointer moves to the
+graphics chip's own cursor layer (the kernel's `SYS_DRM_CURSOR_SET`/`MOVE`).
+The software pointer stays as the fallback wherever there is no such layer.
+Neither costs a fullscreen program its shortcut.
+
+**Pointers that show on light and on dark.** The operator also asked for a
+pointer set visible on both light and dark scenes. Every pointer already has a
+body and an outline of the opposite shade, and the outline is the body grown by
+a pixel or two, so it stays exactly around it at every size. The Default scheme
+is a white body with a black outline (Windows' convention); Inverted is a black
+body with a white outline (the Mac's). Both show on either background. The
+operator also named, as an alternative, a pointer XORed with what is behind it.
+That is not built, because the outlined schemes already do what it is for.
+
+**How to reverse.** The policy is one condition in the compositor's
+`Server::show` and one per presenter.
+
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 
 **Date:** 2026-08-15

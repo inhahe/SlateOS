@@ -12609,8 +12609,13 @@ mod tests {
 
     /// Tick until nothing is moving: the operations are finished, or every one
     /// left is waiting on a question.
+    ///
+    /// Bounded at a few thousand ticks, not `settle`'s hundred thousand: the
+    /// pastes here are two or three small files and settle in a handful, and
+    /// an operation that neither finishes nor asks spends its whole slice every
+    /// tick -- a hundred thousand of those is a quarter of an hour.
     fn settle_until_asked(state: &mut ExplorerState) {
-        for _ in 0..100_000 {
+        for _ in 0..2_000 {
             if !state.work_moving() {
                 return;
             }

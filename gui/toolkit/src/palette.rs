@@ -667,7 +667,12 @@ impl TerminalColors {
     pub fn of(palette: &Palette) -> Self {
         let p = palette;
         let (black, white, bright_black, bright_white) = if p.light {
-            (p.text, p.surface2, legible_on(p.overlay0, p.base), p.surface1)
+            (
+                p.text,
+                p.surface2,
+                legible_on(p.overlay0, p.base),
+                p.surface1,
+            )
         } else {
             (p.surface1, p.subtext1, p.surface2, p.subtext0)
         };

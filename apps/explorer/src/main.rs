@@ -853,7 +853,15 @@ fn conflict_button_rows(inner: f32) -> ([(f32, u8, f32); 4], u8) {
 fn describe_for_prompt(label: &str, path: &Path) -> String {
     match fs::symlink_metadata(path) {
         Ok(meta) => {
-            let size = if meta.is_dir() {
+            // A link's own size is the length of the path it holds, which
+            // tells nobody anything; what it points at does. (Links reach the
+            // prompt since they are copied as links -- `fileops::PlannedAction::is_link`.)
+            let size = if meta.file_type().is_symlink() {
+                fs::read_link(path).map_or_else(
+                    |_| "a link".to_string(),
+                    |target| format!("a link to {}", target.shown()),
+                )
+            } else if meta.is_dir() {
                 "a folder".to_string()
             } else {
                 format_size(meta.len())
@@ -2304,7 +2312,14 @@ impl ExplorerState {
         for mut running in done {
             running.executor.finish();
             running.events.append(&mut running.executor.take_events());
-            self.report(Self::describe_outcome(&running.events, running.verb));
+            let mut outcome = Self::describe_outcome(&running.events, running.verb);
+            // The summary counts what was done and cannot say the rest was
+            // not attempted: without this, a paste stopped at its first taken
+            // name read "Pasted 0 item(s)", like one that had nothing to do.
+            if running.executor.progress().state == fileops::OperationState::Cancelled {
+                outcome.message.push_str(" -- stopped before the rest");
+            }
+            self.report(outcome);
 
             if running.keep_undo {
                 let (undo_op, entries) = running.executor.into_undo_entries();
@@ -12720,6 +12735,11 @@ mod tests {
         assert!(state.handle_event(&Event::Key(key_press(Key::Escape))));
         settle(&mut state);
         assert!(!state.work_in_flight());
+        assert!(
+            state.status_message.contains("stopped"),
+            "the status does not say the paste was stopped: {}",
+            state.status_message
+        );
         assert_eq!(
             fs::read_to_string(root.join("dst").join("f0.txt")).unwrap(),
             "already here"
@@ -12826,5 +12846,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A link arriving at a taken name is described as a link, with where it
+    /// points -- its own size is the length of a path, which says nothing.
+    #[test]
+    fn the_prompt_says_a_link_is_a_link() {
+        let scratch = temp_dir("ask_link");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let link = root.join("src").join("shortcut");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(root.join("target"), &link).is_ok()
+            || std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(root.join("target"))
+                .output()
+                .is_ok_and(|o| o.status.success());
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(root.join("target"), &link).is_ok();
+        if !made {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        write(&root.join("dst").join("shortcut"), "a file of that name");
+        let mut state = state_at(&root.join("dst"));
+        state.conflict_policy = ConflictPolicy::Ask;
+        state.clipboard = Some(ClipboardOp::Copy(vec![link]));
+        state.paste();
+        settle_until_asked(&mut state);
+        let prompt = prompt_of(&state).expect("nobody was asked");
+        assert!(prompt.arriving.contains("a link to"), "{}", prompt.arriving);
+        assert!(!prompt.there.contains("a link"), "{}", prompt.there);
     }
 }

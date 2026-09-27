@@ -100,21 +100,73 @@ pub struct DiskInfo {
     pub partitions: Vec<PartitionInfo>,
 }
 
+/// One of an adapter's addresses, as far as anything says.
+///
+/// Three states, not two, because two different things leave an address
+/// blank and a reader needs to tell them apart. "Nothing publishes this" is a
+/// gap in what the system reports -- Linux's `/proc/net/dev` carries no
+/// addresses at all. "The kernel says there is none" is a fact about the
+/// machine -- SlateOS writes `0.0.0.0`, the unspecified address, until DHCP
+/// has configured the interface -- and it is the answer to "why can nothing
+/// be reached?". Shown as "Not reported" it would hide exactly that.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Address {
+    /// Nothing read publishes this address.
+    NotReported,
+    /// It is published, and the kernel says there is none.
+    Unassigned,
+    /// The address, as the kernel wrote it.
+    Is(String),
+}
+
 /// Network adapter information.
 #[derive(Clone, Debug)]
 pub struct NetworkAdapterInfo {
     pub name: String,
     pub adapter_type: String,
+    /// Empty when nothing publishes one. SlateOS always does, for a real
+    /// interface: an adapter whose MAC would be all zeros is the kernel's
+    /// placeholder for "no network card was found", and is not listed.
     pub mac_address: String,
-    pub ipv4: String,
-    pub ipv6: String,
-    pub subnet: String,
-    pub gateway: String,
-    pub dns: String,
-    pub speed_mbps: u32,
+    pub ipv4: Address,
+    pub ipv6: Address,
+    pub subnet: Address,
+    pub gateway: Address,
+    pub dns: Address,
+    /// Whether the link is up, when the kernel says (`/proc/net`).
+    pub up: Option<bool>,
+    /// The link speed, when something reports one -- nothing does yet.
+    /// `None`, never 0, which would be a dead link.
+    pub speed_mbps: Option<u32>,
     pub duplex: String,
-    pub bytes_sent: u64,
-    pub bytes_received: u64,
+    /// The counters, when published (`/proc/net/dev` on Linux). SlateOS's
+    /// `/proc/net` has none, and `None` is not zero traffic.
+    pub bytes_sent: Option<u64>,
+    pub bytes_received: Option<u64>,
+}
+
+impl NetworkAdapterInfo {
+    /// An adapter of which only the name is known: every other field reads
+    /// as not reported, so what a source does publish is filled in over a
+    /// blank rather than over a guess.
+    #[must_use]
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            adapter_type: String::new(),
+            mac_address: String::new(),
+            ipv4: Address::NotReported,
+            ipv6: Address::NotReported,
+            subnet: Address::NotReported,
+            gateway: Address::NotReported,
+            dns: Address::NotReported,
+            up: None,
+            speed_mbps: None,
+            duplex: String::new(),
+            bytes_sent: None,
+            bytes_received: None,
+        }
+    }
 }
 
 /// Display/GPU information.

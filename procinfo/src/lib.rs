@@ -1285,6 +1285,27 @@ impl ProcFs {
         Ok(self.read_optional("monitors")?.map(|c| Monitors::parse(&c)))
     }
 
+    /// `/proc/net` -- on SlateOS a file, not Linux's directory: the network
+    /// interfaces the kernel's stack runs, with their link state and
+    /// addresses. The kernel writes one today; every block it writes is
+    /// returned, so a second is not dropped on the day it appears.
+    ///
+    /// Added 2026-09-26 by lane E, for `apps/hwquery`: the kernel serves no
+    /// `/proc/net/dev` (its interface counters are `/proc/netdev`, which no
+    /// driver fills yet), so this is the one place the machine's network
+    /// state is published at all.
+    ///
+    /// # Errors
+    ///
+    /// Any read error other than "no such file", which is `Ok(None)` -- among
+    /// them "is a directory", which is what a Linux host's `/proc/net` is.
+    pub fn net_interfaces(&self) -> io::Result<Option<Vec<NetInterface>>> {
+        Ok(self
+            .read_optional("net")?
+            .as_deref()
+            .map(NetInterface::parse_all))
+    }
+
     /// `/proc/ioport`, parsed.
     ///
     /// Requested by lane C in
@@ -2379,6 +2400,86 @@ fn parse_paren_pair(tok: &[u8]) -> Option<(i32, i32)> {
     let a = parse_i64(inner.get(..comma)?)?;
     let b = parse_i64(inner.get(comma.saturating_add(1)..)?)?;
     Some((i32::try_from(a).ok()?, i32::try_from(b).ok()?))
+}
+
+// ---------------------------------------------------------------------------
+// /proc/net (SlateOS)
+// ---------------------------------------------------------------------------
+
+/// One interface `/proc/net` describes, as the kernel writes it:
+///
+/// ```text
+/// Interface: eth0  (UP)
+///   MAC:     52:54:00:12:34:56
+///   IPv4:    10.0.2.15
+///   Netmask: 255.255.255.0
+///   Gateway: 10.0.2.2
+///   DNS:     10.0.2.3
+/// ```
+///
+/// Every field is `None` when its line is missing, so a caller never shows
+/// a default as if it had been read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NetInterface {
+    /// The interface's name, bytes as written.
+    pub name: Vec<u8>,
+    /// `UP` or `DOWN`, after the name.
+    pub up: Option<bool>,
+    pub mac: Option<Vec<u8>>,
+    pub ipv4: Option<Vec<u8>>,
+    pub netmask: Option<Vec<u8>>,
+    pub gateway: Option<Vec<u8>>,
+    pub dns: Option<Vec<u8>>,
+}
+
+impl NetInterface {
+    /// Parse `/proc/net`: one interface per `Interface:` line, with the
+    /// fields indented under it. Empty when it names none. A field before
+    /// any `Interface:` line belongs to nothing and is skipped, as is an
+    /// `Interface:` line with no name.
+    #[must_use]
+    pub fn parse_all(content: &[u8]) -> Vec<Self> {
+        let mut out: Vec<Self> = Vec::new();
+        for line in content.split(|&b| b == b'\n') {
+            let line = trim(line);
+            if let Some(rest) = line.strip_prefix(b"Interface:") {
+                let rest = trim(rest);
+                let (name, state) = split_first_token(rest).unwrap_or((rest, &[]));
+                let state = trim(state);
+                out.push(Self {
+                    name: name.to_vec(),
+                    up: match state {
+                        b"(UP)" => Some(true),
+                        b"(DOWN)" => Some(false),
+                        _ => None,
+                    },
+                    ..Self::default()
+                });
+                continue;
+            }
+            let Some(iface) = out.last_mut() else {
+                continue;
+            };
+            let field = |key: &[u8]| {
+                line.strip_prefix(key)
+                    .map(|v| trim(v).to_vec())
+                    .filter(|v| !v.is_empty())
+            };
+            if let Some(v) = field(b"MAC:") {
+                iface.mac = Some(v);
+            } else if let Some(v) = field(b"IPv4:") {
+                iface.ipv4 = Some(v);
+            } else if let Some(v) = field(b"Netmask:") {
+                iface.netmask = Some(v);
+            } else if let Some(v) = field(b"Gateway:") {
+                iface.gateway = Some(v);
+            } else if let Some(v) = field(b"DNS:") {
+                iface.dns = Some(v);
+            }
+        }
+        out.retain(|iface| !iface.name.is_empty());
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------

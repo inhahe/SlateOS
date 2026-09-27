@@ -151439,6 +151439,17 @@ The lesson repeats: **production fixture data is load-bearing for tests nobody
 recorded as depending on it**, and the tests that break loudest are the ones
 that never mentioned the fixture at all.
 
+**Update 2026-09-26 (lane E): the interface list is now the machine's.** It is
+read through `hwquery` from SlateOS's `/proc/net` on opening and on Refresh,
+so "there is no state in which this app can see the network" stopped being
+true, and the unconditional banner went with it. The banner is drawn only
+while the list is empty, and says which of three things that means: not read
+yet, not readable (with the reason), or read and **no card found** -- the one
+empty list that is now a finding. The status bar counts only after a read
+that worked. The Wi-Fi and VPN tabs, which the banner used to explain, say
+for themselves that nothing here can scan for or read one. Everything else
+above still refuses, in the same words.
+
 ## TD-C-A-RECORDER-THAT-RAN-A-CLOCK-OVER-NO-AUDIO -- FIXED 2026-09-15
 
 **In short:** `apps/soundrecorder` showed a recording timer counting up, a

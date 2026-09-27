@@ -1196,7 +1196,14 @@ impl IrcClientApp {
                 if let Some(server) = msg.nick() {
                     self.server_name = server.to_string();
                 }
-                for channel in self.server_config.auto_join.clone() {
+                // The channels the user configured to join are ones they
+                // asked for: the first is where they land, once the server
+                // says they are in it.
+                let auto_join = self.server_config.auto_join.clone();
+                if self.pending_switch.is_none() {
+                    self.pending_switch = auto_join.first().cloned();
+                }
+                for channel in auto_join {
                     self.outbox.push(cmd_join(&channel));
                 }
             }
@@ -1222,13 +1229,24 @@ impl IrcClientApp {
     // Channel management
     // ========================================================================
 
+    /// Open `name` as joined and show it.
     pub fn join_channel(&mut self, name: &str) {
-        if self.find_channel(name).is_none() {
+        self.open_channel(name);
+        self.active_panel = ActivePanel::Channel(name.to_string());
+    }
+
+    /// Open `name` as joined, without showing it: what a JOIN the server
+    /// reports does, since only a join the user asked for is somewhere they
+    /// want to be taken (`pending_switch`). A channel parted earlier is
+    /// joined again, not left marked as parted.
+    fn open_channel(&mut self, name: &str) {
+        if let Some(ch) = self.find_channel_mut(name) {
+            ch.joined = true;
+        } else {
             let mut ch = Channel::new(name.to_string());
             ch.joined = true;
             self.channels.push(ch);
         }
-        self.active_panel = ActivePanel::Channel(name.to_string());
     }
 
     pub fn part_channel(&mut self, name: &str) {
@@ -1397,7 +1415,10 @@ impl IrcClientApp {
             .to_string();
 
         if nick.eq_ignore_ascii_case(&self.my_nick) {
-            self.join_channel(&channel);
+            // Opened, not shown: a join the server made on its own (or one
+            // the user asked for, which `pending_switch` then shows) must
+            // not pull the user out of the conversation they are in.
+            self.open_channel(&channel);
         } else if let Some(ch) = self.find_channel_mut(&channel) {
             ch.add_user(ChannelUser {
                 nick: nick.clone(),
@@ -4212,6 +4233,30 @@ mod tests {
         assert_eq!(app.active_panel, ActivePanel::Channel("#three".to_string()));
     }
 
+    /// A JOIN the user did not ask for -- a server-forced one -- opens the
+    /// channel without pulling them out of the one they are in; and a
+    /// channel parted earlier is joined again, not left marked parted.
+    #[test]
+    fn a_join_nobody_asked_for_does_not_move_the_user() {
+        let mut app = joined();
+        assert_eq!(app.active_panel, ActivePanel::Channel("#one".to_string()));
+        app.receive(":me!u@h JOIN #forced");
+        assert!(app.find_channel("#forced").is_some_and(|ch| ch.joined));
+        assert_eq!(
+            app.active_panel,
+            ActivePanel::Channel("#one".to_string()),
+            "a join the user did not ask for took them away"
+        );
+
+        app.receive(":me!u@h PART #forced");
+        app.receive(":me!u@h JOIN #forced");
+        assert_eq!(
+            app.find_channel("#forced").map(|ch| ch.joined),
+            Some(true),
+            "a channel joined again still says it was left"
+        );
+    }
+
     #[test]
     fn slash_part_leaves_the_channel_you_are_in() {
         let mut app = joined();
@@ -4295,6 +4340,14 @@ mod tests {
             app.find_channel("#local")
                 .is_some_and(|ch| ch.messages.iter().all(|m| m.text != "hello?")),
             "a line that was never sent was shown in the channel"
+        );
+        // Nor is an action: `/me` shows its own line only once it is sent.
+        type_line(&mut app, "/me waves");
+        app.handle_event(&key(Key::Enter));
+        assert!(
+            app.find_channel("#local")
+                .is_some_and(|ch| ch.messages.iter().all(|m| m.text != "waves")),
+            "an action that was never sent was shown in the channel"
         );
     }
 

@@ -172,3 +172,20 @@ flashcards	W	ditto
 flashcards	Z	ditto
 flashcards	Num6	ditto
 flashcards	Num7	ditto
+
+# --- remotedesktop: keys sent to the remote machine, not answered here ----
+# `keysym_of_key` (apps/remotedesktop/src/main.rs) turns a key into the X
+# keysym RFB sends while a remote screen is shown. What F5 does there belongs
+# to the remote machine, not to this window, exactly as the terminal's keys
+# belong to the program inside it. The one key kept back -- the escape hotkey,
+# F11 -- is named on screen, and is not listed here.
+remotedesktop	F2	sent to the remote machine as its X keysym, by keysym_of_key; not answered here
+remotedesktop	F3	ditto
+remotedesktop	F4	ditto
+remotedesktop	F5	ditto
+remotedesktop	F6	ditto
+remotedesktop	F7	ditto
+remotedesktop	F8	ditto
+remotedesktop	F9	ditto
+remotedesktop	F10	ditto
+remotedesktop	F12	ditto

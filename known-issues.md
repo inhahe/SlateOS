@@ -24391,6 +24391,19 @@ design-decisions.md §1115 sets out -- `B-D-C-CALLBACKS-COULD-NOT-BE-NULL`
 (new, fixed with it). Beside them, `lfind`, `lsearch` and `bsearch` lost
 checks glibc does not make.
 
+**Fortieth pass, 2026-09-26 — `pipe.rs` (1 site), lane D.** Against Linux
+6.6's fs/pipe.c. The first of the ten files the sweep counted at one.
+
+- **`pipe(NULL)`, `pipe2(NULL, …)`** were `EFAULT` before the pipe existed.
+  `do_pipe2` copies the descriptors out last -- after the flags, the pipe and
+  the two descriptors -- so a full descriptor table is `EMFILE` there, not
+  `EFAULT`. The check is at the copy now, and the pipe and its descriptors
+  are given back.
+- Beside it, `O_NOTIFICATION_PIPE` (`O_EXCL`'s bit, Linux 5.8's keyring and
+  mount notifications) was outside the flag mask and `EINVAL`; Linux 6.6
+  accepts it there and refuses it as the pipe is made, `ENOPKG` from a kernel
+  built without watch queues -- which is what this one is.
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24413,10 +24426,11 @@ thirty-eight swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 finishes every file the sweep counted at four, three and two, the three the
 recount of 2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs`
 needed nothing at their NULLs -- `pwd.rs`'s database did
-(`B-D-PWD-KNEW-ONLY-ROOT`). Next are the ten it counted at one:
-`linux_bpf.rs`, `linux_perf_event.rs`, `malloc.rs`, `ndbm.rs`, `pipe.rs`,
-`poll.rs`, `shadow.rs`, `uio.rs` (new, and already right), `utmpx.rs` and
-`utsname.rs`.
+(`B-D-PWD-KNEW-ONLY-ROOT`). Of the ten it counted at one, `pipe.rs` is
+done (the fortieth pass); next are `linux_bpf.rs`, `linux_perf_event.rs`,
+`malloc.rs`, `ndbm.rs`, `poll.rs`, `shadow.rs`, `uio.rs` (new, and already
+right), `utmpx.rs` and `utsname.rs`. The thirty-ninth pass was across files,
+not at a count: the callbacks.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
 (`posix/src/file.rs`) still test a NULL buffer where `access_ok` sits, so a NULL

@@ -171242,7 +171242,7 @@ needs them; `lsblk` needs only trees, which are ported. Each of these is
 also on TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE's list, and the two
 are one job per program.
 
-## TD-B-ULMOUNT-PROBES-ONLY-EXT (lane B, 2026-09-26) — **open**
+## TD-B-ULMOUNT-PROBES-ONLY-EXT (lane B, 2026-09-26) — ✅ FIXED 2026-09-27 (lane B)
 
 **In short:** to learn a disk's filesystem type, label or UUID, util-linux
 reads the disk's first blocks and compares them against over a hundred
@@ -171289,16 +171289,48 @@ PARTLABEL) -- and have `ulmount::blkid::probe_file` call it. `blkid`,
 all of them; each prober gets the differential treatment the programs got,
 on disk images built by `mkfs.*` in WSL.
 
-**Progress (2026-09-27):** the crate exists -- `userspace/ulblkid`, the whole
-of libblkid 2.39.3's probing: `probe.c`, all 79 superblock probers, all 13
+**Fixed (2026-09-27):** libblkid's probing is ported whole as its own
+crate, `userspace/ulblkid` -- `probe.c`, all 79 superblock probers, all 13
 partition-table probers (nested BSD, Minix, Solaris and UnixWare tables
-included) and the topology chain. It builds clippy-clean and passes 27 unit
-tests on synthetic images. Still to do, in order: the differential harness
-against WSL's libblkid over util-linux's own test images
-(`scripts/blkid-diff.sh`), then `ulmount::blkid::probe_file` switched to it,
-then the `blkid` and `findfs` programs ported onto it. Until the harness has
-run, treat its answers as unverified; nothing calls it yet, so nothing a
-user runs has changed.
+included) and the topology chain -- together with libblkid's device cache
+and tag evaluation, which moved there from `ulmount`. `ulmount` now probes
+through it, so every filesystem, RAID member and partition table libblkid
+knows is recognised by `findmnt` (tags, `--verify`) where only the ext
+family was. `blkid` and `findfs` are ports of util-linux's programs on top
+of it (`findfs` a crate of its own, as upstream's is a program of its own).
+
+Measured: `scripts/blkid-diff.sh` compares every value, byte for byte,
+with WSL's libblkid 2.39.3 -- safeprobe (and again accepting bad
+checksums), fullprobe, the wipefs walk, the binary partition list with and
+without FORCE_GPT -- and 621 images agree, none differs: util-linux's 128
+test images, 9 made with mkfs/mkswap/sfdisk, 484 truncated copies.
+`scripts/blkid-cli-diff.sh` compares the two programs: 144 cases agree.
+
+What remains for other programs is theirs: `lsblk` and `wipefs` are still
+hand-written and do not use the crate yet -- TD-B-LSBLK-AND-WIPEFS-ARE-NOT-PORTS.
+
+## TD-B-LSBLK-AND-WIPEFS-ARE-NOT-PORTS (lane B, 2026-09-27) — **open**
+
+**In short:** `lsblk` (list block devices) and `wipefs` (find and erase
+filesystem signatures) are hand-written programs, not ports of util-linux's.
+They each recognise a handful of formats by their own code -- `wipefs`
+fifteen signature types -- where util-linux's use libblkid, which knows
+every format and is now ported (`userspace/ulblkid`, measured against the
+real libblkid on 621 images).
+
+**What a user sees:** `wipefs` misses signatures libblkid finds (and would
+leave them on a disk it was asked to clean); `lsblk -f` shows no FSTYPE,
+LABEL or UUID for the formats its own code does not know; both parse
+options by hand (whole long names only), and their output formats are
+approximations of upstream's.
+
+**Where:** `userspace/wipefs/src/main.rs`, `userspace/lsblk/src/main.rs`.
+
+**The proper fix:** port `misc-utils/wipefs.c` onto `ulblkid` -- its core
+is exactly `blkid_do_probe` and `blkid_do_wipe`, which the port has and
+which `blkid-diff.sh`'s wipefs walk already compares -- and
+`misc-utils/lsblk*.c` onto `ulblkid`, `ulmount` and `smartcols`, each with
+a differential harness against WSL's, as `blkid` and `findfs` were.
 
 ## TD-B-UTIL-LINUX-PORTS-WRITE-THROUGH-RUST-STDIO (lane B, 2026-09-26) — ✅ FIXED 2026-09-26 (lane B)
 

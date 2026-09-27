@@ -32,10 +32,12 @@
 //! Pure functions over bytes; no I/O. Callers wrap the messages in their own
 //! error types, because each program reports through its own diagnostic path.
 
+mod matching;
 mod optstr;
 mod optutils;
 mod strtod;
 
+pub use matching::match_fstype;
 pub use optstr::{OptstrInvalid, OptstrItem, parse_range, ul_optstr_next};
 pub use optutils::err_exclusive_options;
 pub use strtod::{Strtod, strtod};

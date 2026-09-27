@@ -51,10 +51,27 @@ paths are held to the same results by its test suite.
    nightly-2025-05-01; today's compiler warns about three lifetimes left
    elided in return types (now `'_`, in `include/dav1d/picture.rs` and
    `src/cdf.rs`), a comparison derived for function pointers that nothing
-   calls (`src/wrap_fn_ptr.rs`, allowed on the item), and a struct nothing
-   constructs (`src/internal.rs`, allowed on the item). This project builds
-   with no warnings, and item-level allows keep the change to the lines
-   concerned.
+   calls (`src/wrap_fn_ptr.rs`, allowed on the item), a struct nothing
+   constructs (`src/internal.rs`, allowed on the item), and -- in a release
+   build only -- a method only the debug build's overlap checks call
+   (`Bounds::overlaps`, `src/disjoint_mut.rs`, now compiled with them). Its
+   clippy also asks for a safety comment on four `unsafe impl Send`/`Sync`
+   (`src/internal.rs`) that upstream marks with a TODO to remove once the
+   types are thread-safe; those are allowed on the item as upstream wrote
+   them, since the TODO is the whole of upstream's argument. This
+   project builds with no warnings, and item-level changes keep each one to
+   the lines concerned.
+6. **A damaged frame is an error, not a panic.** When `rav1d_decode_frame`
+   fails, `rav1d_submit_frame` (`src/decode.rs`) cleans up through its
+   `on_error`, which unwrapped the frame header to ask whether the frame
+   refreshed its entropy context -- but `rav1d_decode_frame_exit` has already
+   taken the header by then (and released that context if so), so any AV1
+   frame whose tile data failed to decode panicked the decoder. dav1d's C
+   reads the header through a pointer whose reference it has just dropped.
+   `on_error` now skips the context when there is no header. Found by
+   `imagecodec`'s test that decodes every byte-damaged copy of its AVIF
+   fixtures (`a_damaged_file_decodes_or_is_refused_but_never_panics`); worth
+   reporting upstream.
 
 Every change is marked in the source with `SlateOS (VENDORED.md, change N)`,
 except the formatting and the lifetimes.
@@ -62,7 +79,7 @@ except the formatting and the lifetimes.
 ## Updating
 
 `vendor.py` does step 1 and the copying: `python vendor.py <new .crate>
-<empty directory>`, after updating the checksum it holds. Carry changes 2 to 5
+<empty directory>`, after updating the checksum it holds. Carry changes 2 to 6
 across from this copy (`git diff` of this directory against a fresh run shows
 exactly them), drop any the new release makes unnecessary, and update this
 file's table.

@@ -305,8 +305,16 @@ pub(crate) struct TaskThreadDataDelayedFg {
 }
 
 // TODO(SJC): Remove when TaskThreadDataDelayedFg is thread-safe
+// SlateOS (VENDORED.md, change 5): today's clippy asks for a safety comment on
+// an `unsafe impl` too; upstream's is the TODO above -- an assertion rav1d has
+// not proven yet -- so it is carried as upstream wrote it.
+#[allow(clippy::undocumented_unsafe_blocks)]
 unsafe impl Send for TaskThreadDataDelayedFg {}
 // TODO(SJC): Remove when TaskThreadDataDelayedFg is thread-safe
+// SlateOS (VENDORED.md, change 5): today's clippy asks for a safety comment on
+// an `unsafe impl` too; upstream's is the TODO above -- an assertion rav1d has
+// not proven yet -- so it is carried as upstream wrote it.
+#[allow(clippy::undocumented_unsafe_blocks)]
 unsafe impl Sync for TaskThreadDataDelayedFg {}
 
 #[derive(Default)]
@@ -437,8 +445,16 @@ pub struct Rav1dContext {
 }
 
 // TODO(SJC): Remove when Rav1dContext is thread-safe
+// SlateOS (VENDORED.md, change 5): today's clippy asks for a safety comment on
+// an `unsafe impl` too; upstream's is the TODO above -- an assertion rav1d has
+// not proven yet -- so it is carried as upstream wrote it.
+#[allow(clippy::undocumented_unsafe_blocks)]
 unsafe impl Send for Rav1dContext {}
 // TODO(SJC): Remove when Rav1dContext is thread-safe
+// SlateOS (VENDORED.md, change 5): today's clippy asks for a safety comment on
+// an `unsafe impl` too; upstream's is the TODO above -- an assertion rav1d has
+// not proven yet -- so it is carried as upstream wrote it.
+#[allow(clippy::undocumented_unsafe_blocks)]
 unsafe impl Sync for Rav1dContext {}
 
 #[derive(Default)]

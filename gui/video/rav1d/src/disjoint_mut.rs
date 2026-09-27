@@ -611,6 +611,8 @@ impl Debug for Bounds {
 }
 
 impl Bounds {
+    // SlateOS (VENDORED.md, change 5): only the debug-build checks call this.
+    #[cfg(debug_assertions)]
     fn overlaps(&self, other: &Bounds) -> bool {
         let a = &self.range;
         let b = &other.range;

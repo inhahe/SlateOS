@@ -997,17 +997,27 @@ pub fn capacity(handle: PipeHandle) -> KernelResult<usize> {
 /// Resize the ring buffer behind `handle` to exactly `new_cap`
 /// bytes, preserving any data currently buffered.
 ///
-/// This helper enforces only the invariant that data must not be
-/// silently dropped:
+/// This helper enforces two invariants:
 ///
-/// - `new_cap < currently buffered bytes` → `DeviceBusy`.
+/// - `new_cap < currently buffered bytes` → `DeviceBusy`: data must not be
+///   silently dropped.
+/// - `new_cap > MAX_PIPE_BUFFER_CAPACITY` → `InvalidArgument`: no pipe may
+///   hold more than one call's worth, because the syscall layer bounds every
+///   pipe call's copy of a user buffer by that constant (`PIPE_CALL_MAX` in
+///   `syscall/handlers.rs`), and a bigger pipe would make those copies
+///   truncate transfers silently.  `F_SETPIPE_SZ` refuses first, with the
+///   EPERM Linux gives, so this arm guards kernel callers rather than being a
+///   user-visible error.
 ///
-/// User-facing policy (the per-page lower bound and the
-/// `MAX_PIPE_BUFFER_CAPACITY` upper bound that Linux distinguishes
-/// as EINVAL vs EPERM) lives in the syscall layer — see
-/// `sys_fcntl`'s `F_SETPIPE_SZ` arm.  Kernel callers that need to
-/// resize within the [`MIN_PIPE_BUFFER_CAPACITY`, `MAX_PIPE_BUFFER_CAPACITY`]
-/// window should consult those constants themselves.
+/// User-facing policy (the per-page lower bound, and EINVAL vs EPERM) lives
+/// in the syscall layer — see `sys_fcntl`'s `F_SETPIPE_SZ` arm.  The lower
+/// bound is deliberately not enforced here: the self-test shrinks a pipe
+/// below it to reach the `DeviceBusy` arm.
+///
+/// The new buffer is allocated before the pipe table is locked, and
+/// fallibly: a 1 MiB request under memory pressure is `OutOfMemory`, not the
+/// panic an infallible `vec!` makes of it, and no other pipe waits on the
+/// global lock while the allocator works.
 ///
 /// On success the call replaces the underlying `Vec<u8>` and returns
 /// the realised capacity (the same value as `new_cap`).  Linux rounds
@@ -1023,7 +1033,18 @@ pub fn capacity(handle: PipeHandle) -> KernelResult<usize> {
 /// - `Ok(new_cap)` — the new buffer capacity.
 /// - `Err(InvalidHandle)` — the pipe no longer exists.
 /// - `Err(DeviceBusy)` — buffered data wouldn't fit in `new_cap`.
+/// - `Err(InvalidArgument)` — `new_cap` exceeds `MAX_PIPE_BUFFER_CAPACITY`.
+/// - `Err(OutOfMemory)` — the new buffer could not be allocated.
 pub fn set_capacity(handle: PipeHandle, new_cap: usize) -> KernelResult<usize> {
+    if new_cap > MAX_PIPE_BUFFER_CAPACITY {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut new_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    new_buf
+        .try_reserve_exact(new_cap)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    new_buf.resize(new_cap, 0);
+
     let mut table = PIPES.lock();
     let pipe = table
         .get_mut(&handle.pipe_id())
@@ -1033,10 +1054,9 @@ pub fn set_capacity(handle: PipeHandle, new_cap: usize) -> KernelResult<usize> {
         return Err(KernelError::DeviceBusy);
     }
 
-    // Allocate the new buffer and copy logical contents starting from
-    // `head`.  After the move the new buffer is unwrapped: data sits
-    // at indices [0, len) and head resets to 0.
-    let mut new_buf = vec![0u8; new_cap];
+    // Copy logical contents starting from `head` into the new buffer.
+    // After the move it is unwrapped: data sits at indices [0, len) and
+    // head resets to 0.
     if pipe.len > 0 {
         let old_cap = pipe.buf.len();
         let head = pipe.head;

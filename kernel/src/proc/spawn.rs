@@ -24209,6 +24209,85 @@ pub fn self_test_sizegate_abi() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of the per-call copy bound on the pipe and socketpair data
+/// syscalls: a 2 GiB request moves one buffer's worth, and a claim that runs
+/// out of user space is still refused.  The probe program is
+/// [`elf::build_callmax_abi_test_elf`]; its doc has the table of exit codes.
+pub fn self_test_callmax_abi() -> KernelResult<()> {
+    serial_println!("[spawn] Running pipe/socketpair per-call copy bound (ring 3) test...");
+
+    let probe_elf = elf::build_callmax_abi_test_elf();
+    let argv: &[&[u8]] = &[b"callmax"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "spawn-test-callmax",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&probe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: callmax probe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Nine calls, four of which copy a megabyte: not three yields' worth on a
+    // loaded host.  Bounded, so a regression that blocks -- `0x55` without
+    // the span check reads an empty pipe forever -- fails rather than wedging
+    // the boot.
+    let deadline = crate::hrtimer::now_ns().saturating_add(5_000_000_000); // 5 s
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: per-call copy bound (ring 3) — probe did not exit within 5s \
+             (state {:?}); a blocked 0x55 means the span check is gone",
+            state
+        );
+        // Forced down, as the other runners here do, so a blocked probe
+        // cannot outlive its test.
+        let killed = thread::kill_process_threads(result.pid);
+        serial_println!("[spawn]   (killed the probe's {} thread(s))", killed);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: per-call copy bound (ring 3) — probe {:#04x} disagreed \
+             (exit {:?}); see build_callmax_abi_test_elf's probe table",
+            exit_code.unwrap_or(-1),
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   per-call copy bound (ring 3: 9 probes — 2 GiB pipe and socketpair \
+         transfers move one 64 KiB buffer from a 1 MiB segment; a claim past user \
+         space is still InvalidAddress): OK"
+    );
+    Ok(())
+}
+
 /// Path Z end-to-end test: run a **real, prebuilt, dynamically-linked glibc**
 /// Linux binary to completion.
 ///

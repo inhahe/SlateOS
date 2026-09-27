@@ -115,6 +115,29 @@ pub fn validate_user_write(ptr: u64, len: usize) -> KernelResult<()> {
     validate_user_range(ptr, len, true)
 }
 
+/// Check that `[ptr, ptr+len)` could be a user buffer, without touching it.
+///
+/// The arithmetic half of [`validate_user_read`]: an empty span is always
+/// fine; otherwise the pointer is not null, the end does not wrap, and the
+/// whole span lies below `USER_SPACE_END`.  No page is examined, so the cost
+/// is the same however long the span -- which is the point.  A handler that
+/// will touch only the first part of a buffer (one pipe call moves at most one
+/// pipe buffer) checks the caller's whole claim with this, as Linux's
+/// `access_ok` does, and validates only the part it touches, through the copy.
+///
+/// **Kernel context bypass**: as [`validate_user_read`].
+///
+/// # Errors
+///
+/// [`KernelError::InvalidAddress`] if the span is null, wraps, or reaches
+/// kernel space.
+pub fn check_user_span(ptr: u64, len: usize) -> KernelResult<()> {
+    if is_kernel_context() || len == 0 {
+        return Ok(());
+    }
+    user_span_end(ptr, len).map(|_| ())
+}
+
 /// Validate that a single user-space pointer refers to a valid, mapped
 /// byte.  Shorthand for `validate_user_read(ptr, 1)`.
 ///
@@ -149,6 +172,26 @@ fn is_kernel_context() -> bool {
 /// etc.) calls `is_kernel_context()` first and skips this function
 /// for bare kernel tasks.
 ///
+/// The end of `[ptr, ptr+len)` if it is a well-formed user span: `ptr` not
+/// null, `ptr + len` not wrapping, and no byte at or above `USER_SPACE_END`.
+/// The arithmetic shared by [`check_user_span`] and [`validate_user_range`];
+/// both handle `len == 0` first, since an empty span is valid anywhere.
+fn user_span_end(ptr: u64, len: usize) -> KernelResult<u64> {
+    // Null pointer is never valid.
+    if ptr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    // Overflow is the failure condition here, not a bug: a wrapping span.
+    let end = ptr
+        .checked_add(len as u64)
+        .ok_or(KernelError::InvalidAddress)?;
+    // The entire range must be in user space.
+    if end > USER_SPACE_END {
+        return Err(KernelError::InvalidAddress);
+    }
+    Ok(end)
+}
+
 /// Arithmetic here is for address-range boundary checking.  Overflow
 /// is the failure condition, not a bug — it means the user passed a
 /// wrapping pointer range.
@@ -159,22 +202,7 @@ fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResul
         return Ok(());
     }
 
-    // Null pointer is never valid.
-    if ptr == 0 {
-        return Err(KernelError::InvalidAddress);
-    }
-
-    let len_u64 = len as u64;
-
-    // Check for overflow: ptr + len must not wrap around.
-    let end = ptr
-        .checked_add(len_u64)
-        .ok_or(KernelError::InvalidAddress)?;
-
-    // The entire range must be in user space.
-    if end > USER_SPACE_END {
-        return Err(KernelError::InvalidAddress);
-    }
+    let end = user_span_end(ptr, len)?;
 
     // Get the current PML4 from CR3.
     let cr3 = page_table::read_cr3();
@@ -1323,6 +1351,29 @@ pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
 /// the kernel-context shortcut) to verify the actual range and
 /// page-table checks work correctly.
 pub fn self_test() -> KernelResult<()> {
+    // Test 0: the span arithmetic on its own (`check_user_span` bypasses it
+    // in this kernel context, so its shared half is driven directly).  The
+    // edges: the last user byte is in, one past it is out, and a length that
+    // wraps is out however small the pointer.
+    for (ptr, len, ok) in [
+        (0x1000_u64, 16_usize, true),
+        (0_u64, 1_usize, false),
+        (USER_SPACE_END - 16, 16, true),
+        (USER_SPACE_END - 16, 17, false),
+        (0x1000, usize::MAX, false),
+        (0x1000, 1 << 62, false),
+    ] {
+        if user_span_end(ptr, len).is_ok() != ok {
+            crate::serial_println!(
+                "[user]   FAIL: user_span_end({:#x}, {:#x}) should be {}",
+                ptr,
+                len,
+                if ok { "a span" } else { "refused" }
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
     // Test 1: Zero-length buffer is always valid.
     validate_user_range(0x1000, 0, false)?;
 

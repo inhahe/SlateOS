@@ -64,6 +64,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// direction, 8 per pair.
 const DEFAULT_BUFFER_CAPACITY: usize = 64 * 1024;
 
+/// The most one send, receive or peek can move: a direction's ring holds
+/// [`DEFAULT_BUFFER_CAPACITY`] bytes and is never resized, and every transfer
+/// is partial.  The syscall layer bounds its copies of user buffers by this
+/// (`SOCKETPAIR_CALL_MAX` in `syscall/handlers.rs`), so a resize, if one is
+/// ever added, must raise it -- or those copies silently truncate.
+pub const MAX_TRANSFER: usize = DEFAULT_BUFFER_CAPACITY;
+
 /// `shutdown(how)` — disable further receives on this endpoint.
 pub const SHUT_RD: u32 = 0;
 /// `shutdown(how)` — disable further sends on this endpoint.

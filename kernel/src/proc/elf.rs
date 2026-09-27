@@ -7415,6 +7415,243 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build the ring-3 probe for the per-call copy bound of the pipe and
+/// socketpair data syscalls.
+///
+/// The program has a 1 MiB zero-filled data segment -- exactly one pipe
+/// call's maximum -- and asks each call to move **2 GiB** from or into it.
+/// A handler that bounces the whole length through the kernel cannot answer
+/// that: 2 GiB is more than the vmalloc region holds, and the read side
+/// page-walks the full length into the unmapped memory past the segment.
+/// Until 2026-09-26 every one of them did (known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`).  A handler that copies at
+/// most what one call can move answers with one buffer's worth: 64 KiB, an
+/// empty pipe's default capacity and a socketpair ring's.
+///
+/// The `2^63` probes are the other half: the caller's whole claim is still
+/// checked as a user span, as Linux's `access_ok` does, so a length that runs
+/// past user space is `InvalidAddress` although the copy would stop at 1 MiB.
+/// Without that check the write would succeed and the read would block.
+///
+/// | Code | Call | Length | Expect |
+/// |---|---|---|---|
+/// | `0x51` | `pipe_create` (220) | -- | two handles |
+/// | `0x52` | `pipe_write` (221) | 2 GiB | `65536` |
+/// | `0x53` | `pipe_read` (222) | 2 GiB | `65536`, what `0x52` wrote |
+/// | `0x54` | `pipe_write` | `2^63` | `-101` InvalidAddress |
+/// | `0x55` | `pipe_read` | `2^63` | `-101`, not a block on the empty pipe |
+/// | `0x56` | `socketpair_create` (300) | -- | two handles |
+/// | `0x57` | `socketpair_send` (301) | 2 GiB | `65536` |
+/// | `0x58` | `socketpair_recv` (302) | 2 GiB | `65536` |
+/// | `0x59` | `socketpair_send` | `2^63` | `-101` |
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_callmax_abi_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    const PHNUM: u64 = 2;
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 64 + PHNUM * 56;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // The data segment: one pipe call's worth, committed and zero-filled.
+    const DATA_VADDR: u64 = 0x0000_0050_0000_0000;
+    const DATA_LEN: u64 = 1024 * 1024;
+    const TWO_GIB: u64 = 2 * 1024 * 1024 * 1024;
+    const PAST_USER_SPACE: u64 = 1 << 63;
+    const ONE_BUFFER: i32 = 64 * 1024;
+    const EFAULT: i32 = -101;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    /// `jcc` over an `exit(fail)` block: the flags just set decide whether
+    /// the program goes on or reports `fail`.
+    fn exit_unless(code: &mut alloc::vec::Vec<u8>, jcc: u8, fail: u32) {
+        code.extend_from_slice(&[jcc, 0x0D]); // jcc +13 — over the exit block
+        code.push(0xBF); // mov edi, <fail>
+        code.extend_from_slice(&fail.to_le_bytes());
+        code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.push(0xCC); // int3 — exit does not return
+    }
+
+    /// A create call that returns a handle pair in `rax`/`rdx`: kept in two
+    /// registers the kernel's syscall entry preserves.
+    fn create(code: &mut alloc::vec::Vec<u8>, nr: u32, keep: [[u8; 3]; 2], fail: u32) {
+        code.push(0xB8); // mov eax, nr
+        code.extend_from_slice(&nr.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+        exit_unless(code, 0x79, fail); // jns: a handle, not an error
+        code.extend_from_slice(&keep[0]); // mov <first>, rax
+        code.extend_from_slice(&keep[1]); // mov <second>, rdx
+    }
+
+    /// `nr(handle, rsi, rdx)`, the handle moved into `rdi` from where
+    /// `create` kept it; `exit(fail)` unless `rax == expect`.
+    fn transfer(
+        code: &mut alloc::vec::Vec<u8>,
+        handle: [u8; 3],
+        nr: u32,
+        buf: u64,
+        len: u64,
+        expect: i32,
+        fail: u32,
+    ) {
+        code.extend_from_slice(&handle); // mov rdi, <handle>
+        code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, imm64
+        code.extend_from_slice(&buf.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xBA]); // movabs rdx, imm64
+        code.extend_from_slice(&len.to_le_bytes());
+        code.push(0xB8); // mov eax, nr
+        code.extend_from_slice(&nr.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
+        code.extend_from_slice(&(expect as u32).to_le_bytes());
+        exit_unless(code, 0x74, fail); // je
+    }
+
+    const MOV_RBX_RAX: [u8; 3] = [0x48, 0x89, 0xC3];
+    const MOV_R12_RDX: [u8; 3] = [0x49, 0x89, 0xD4];
+    const MOV_R13_RAX: [u8; 3] = [0x49, 0x89, 0xC5];
+    const MOV_R14_RDX: [u8; 3] = [0x49, 0x89, 0xD6];
+    const RDI_FROM_RBX: [u8; 3] = [0x48, 0x89, 0xDF]; // mov rdi, rbx
+    const RDI_FROM_R12: [u8; 3] = [0x4C, 0x89, 0xE7]; // mov rdi, r12
+    const RDI_FROM_R13: [u8; 3] = [0x4C, 0x89, 0xEF]; // mov rdi, r13
+    const RDI_FROM_R14: [u8; 3] = [0x4C, 0x89, 0xF7]; // mov rdi, r14
+
+    // --- a pipe: rbx = read end, r12 = write end --------------------------
+    create(&mut code, 220, [MOV_RBX_RAX, MOV_R12_RDX], 0x51);
+    transfer(
+        &mut code,
+        RDI_FROM_R12,
+        221,
+        DATA_VADDR,
+        TWO_GIB,
+        ONE_BUFFER,
+        0x52,
+    );
+    transfer(
+        &mut code,
+        RDI_FROM_RBX,
+        222,
+        DATA_VADDR,
+        TWO_GIB,
+        ONE_BUFFER,
+        0x53,
+    );
+    transfer(
+        &mut code,
+        RDI_FROM_R12,
+        221,
+        DATA_VADDR,
+        PAST_USER_SPACE,
+        EFAULT,
+        0x54,
+    );
+    transfer(
+        &mut code,
+        RDI_FROM_RBX,
+        222,
+        DATA_VADDR,
+        PAST_USER_SPACE,
+        EFAULT,
+        0x55,
+    );
+
+    // --- a socketpair: r13 = one end, r14 = the other ----------------------
+    create(&mut code, 300, [MOV_R13_RAX, MOV_R14_RDX], 0x56);
+    transfer(
+        &mut code,
+        RDI_FROM_R13,
+        301,
+        DATA_VADDR,
+        TWO_GIB,
+        ONE_BUFFER,
+        0x57,
+    );
+    transfer(
+        &mut code,
+        RDI_FROM_R14,
+        302,
+        DATA_VADDR,
+        TWO_GIB,
+        ONE_BUFFER,
+        0x58,
+    );
+    transfer(
+        &mut code,
+        RDI_FROM_R13,
+        301,
+        DATA_VADDR,
+        PAST_USER_SPACE,
+        EFAULT,
+        0x59,
+    );
+
+    // --- every probe agreed -------------------------------------------------
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.push(0xCC); // int3
+
+    // --- file image ---------------------------------------------------------
+    let code_len = code.len();
+    let file_size = code_offset as usize + code_len;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, PHNUM as u16); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0); // e_shnum
+    write_u16(&mut buf, 62, 0); // e_shstrndx
+
+    // The code.
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset); // p_offset
+    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, code_len as u64); // p_filesz
+    write_u64(&mut buf, ph + 40, code_len as u64); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    // The data: nothing in the file, 1 MiB in memory.
+    let ph = ph + ELF64_PHDR_SIZE;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_W);
+    write_u64(&mut buf, ph + 8, 0); // p_offset
+    write_u64(&mut buf, ph + 16, DATA_VADDR); // p_vaddr
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, 0); // p_filesz
+    write_u64(&mut buf, ph + 40, DATA_LEN); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    buf[code_offset as usize..file_size].copy_from_slice(&code);
+
+    buf
+}
+
 /// Build a test ELF for SEH: exception handler catches fault and exits.
 ///
 /// The ELF contains two code regions:

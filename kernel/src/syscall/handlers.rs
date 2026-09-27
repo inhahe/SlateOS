@@ -2220,6 +2220,48 @@ pub fn sys_pipe_create(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok2(r0, r1)
 }
 
+/// The most bytes one pipe call can move: one pipe buffer, which
+/// [`pipe::set_capacity`] never lets exceed
+/// [`pipe::MAX_PIPE_BUFFER_CAPACITY`].
+///
+/// Every pipe transfer is partial -- a write stores what fits, a read or a
+/// peek returns what is buffered -- so a `len` beyond this asks for more than
+/// any single call can deliver.  Bouncing it through the kernel anyway held a
+/// kernel copy of the whole user buffer for the length of the call -- up to
+/// 1 GiB since large allocations reach vmalloc (design-decisions.md §959) --
+/// and on the read side zeroed it and page-walked the whole range first.  See
+/// [`read_call_buffer`] and known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`.
+const PIPE_CALL_MAX: usize = pipe::MAX_PIPE_BUFFER_CAPACITY;
+
+/// As [`PIPE_CALL_MAX`], for a socketpair endpoint, whose ring is fixed at
+/// [`stream_socket::MAX_TRANSFER`].
+const SOCKETPAIR_CALL_MAX: usize = stream_socket::MAX_TRANSFER;
+
+/// Copy in the part of a user buffer that one call can move.
+///
+/// The caller's whole claim `(ptr, len)` is checked as a user span first --
+/// arithmetic only, as Linux's `access_ok`, so a length that runs into kernel
+/// space is still `InvalidAddress` -- and then only `min(len, call_max)`
+/// bytes are copied, validated as they are.  A buffer whose unmapped tail no
+/// call could reach is therefore no longer refused: the kernel never needed
+/// those bytes, and Linux does not refuse it either.
+fn read_call_buffer(ptr: u64, len: usize, call_max: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+    crate::mm::user::check_user_span(ptr, len)?;
+    crate::mm::user::read_user_vec(ptr, len.min(call_max), usize::MAX)
+}
+
+/// The receiving twin of [`read_call_buffer`]: the whole `(ptr, cap)` claim
+/// is span-checked, `fill` gets a kernel buffer of at most `call_max` bytes,
+/// and what it reports is copied out.
+fn with_call_out_buf<F>(ptr: u64, cap: usize, call_max: usize, fill: F) -> KernelResult<usize>
+where
+    F: FnOnce(&mut [u8]) -> KernelResult<usize>,
+{
+    crate::mm::user::check_user_span(ptr, cap)?;
+    crate::mm::user::with_user_out_buf(ptr, cap.min(call_max), usize::MAX, fill)
+}
+
 /// `SYS_PIPE_WRITE` — write bytes to a pipe (blocking).
 ///
 /// `arg0`: write-end pipe handle.
@@ -2241,7 +2283,7 @@ pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
     // SMAP is on, and — SMAP or not — another thread in the same process can
     // unmap or remap the range while this one sleeps on the pipe, turning the
     // slice into a dangling pointer.  Copying first makes both impossible.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    let data = match read_call_buffer(args.arg1, len, PIPE_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -2274,7 +2316,7 @@ pub fn sys_pipe_read(args: &SyscallArgs) -> SyscallResult {
     // `pipe::read` blocks, so it fills a kernel-side buffer that is copied out
     // only after it returns.  See `sys_pipe_write` for why a user slice must
     // never cross a blocking call.
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+    match with_call_out_buf(args.arg1, buf_cap, PIPE_CALL_MAX, |buf| {
         pipe::read(handle, buf)
     }) {
         Ok(n) => {
@@ -2299,7 +2341,7 @@ pub fn sys_pipe_try_write(args: &SyscallArgs) -> SyscallResult {
 
     // Non-blocking, but bounced anyway: `try_write` still touches the buffer
     // from supervisor mode, which SMAP forbids outside a STAC window.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    let data = match read_call_buffer(args.arg1, len, PIPE_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -2325,7 +2367,7 @@ pub fn sys_pipe_try_read(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+    match with_call_out_buf(args.arg1, buf_cap, PIPE_CALL_MAX, |buf| {
         pipe::try_read(handle, buf)
     }) {
         Ok(n) => {
@@ -2387,7 +2429,7 @@ pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+    match with_call_out_buf(args.arg1, buf_cap, PIPE_CALL_MAX, |buf| {
         pipe::read_timeout(handle, buf, timeout_ns)
     }) {
         Ok(n) => {
@@ -2416,7 +2458,7 @@ pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+    let data = match read_call_buffer(args.arg1, data_len, PIPE_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -2449,7 +2491,7 @@ pub fn sys_pipe_peek(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::mm::user::with_user_out_buf(args.arg2, buf_cap, usize::MAX, |buf| {
+    match with_call_out_buf(args.arg2, buf_cap, PIPE_CALL_MAX, |buf| {
         pipe::peek_at(handle, offset, buf)
     }) {
         Ok(n) => {
@@ -2510,7 +2552,7 @@ pub fn sys_socketpair_send(args: &SyscallArgs) -> SyscallResult {
 
     // `stream_socket::send` blocks when the peer's buffer is full; see
     // `sys_pipe_write` for why the payload is copied in first.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    let data = match read_call_buffer(args.arg1, len, SOCKETPAIR_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -2534,7 +2576,7 @@ pub fn sys_socketpair_recv(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+    match with_call_out_buf(args.arg1, buf_cap, SOCKETPAIR_CALL_MAX, |buf| {
         stream_socket::recv(handle, buf)
     }) {
         Ok(n) => {
@@ -2555,7 +2597,7 @@ pub fn sys_socketpair_try_send(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    let data = match read_call_buffer(args.arg1, len, SOCKETPAIR_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -2579,7 +2621,7 @@ pub fn sys_socketpair_try_recv(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+    match with_call_out_buf(args.arg1, buf_cap, SOCKETPAIR_CALL_MAX, |buf| {
         stream_socket::try_recv(handle, buf)
     }) {
         Ok(n) => {
@@ -2611,7 +2653,7 @@ pub fn sys_socketpair_send_timeout(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    let data = match read_call_buffer(args.arg1, len, SOCKETPAIR_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -2636,7 +2678,7 @@ pub fn sys_socketpair_recv_timeout(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+    match with_call_out_buf(args.arg1, buf_cap, SOCKETPAIR_CALL_MAX, |buf| {
         stream_socket::recv_timeout(handle, buf, timeout_ns)
     }) {
         Ok(n) => {

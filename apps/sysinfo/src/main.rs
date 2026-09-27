@@ -16,6 +16,12 @@
 
 // The machine's hardware, read where the kernel publishes it -- shared with
 // the Device Manager, so the two cannot disagree about the machine.
+/// What one category's read gave: its rows, or why there are none. Kept as
+/// read, because an unreadable category and an empty one are different
+/// answers -- a blank pane says "this machine has none of those", which is a
+/// finding the read did not make.
+type Read<T> = Result<T, hwquery::HwQueryError>;
+
 use hwquery::{
     Address, CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
     MemoryMapEntry, NetworkAdapterInfo, PciDeviceInfo, ProcessEntry, ServiceInfo, SoundInfo,
@@ -455,15 +461,16 @@ pub struct SysInfoState {
     pub status_message: String,
 
     // Data sources (populated from system or stubbed).
-    /// What the hardware query returned for the processor, or `None` if it
-    /// could not be read.
+    /// What the hardware query returned for the processor, or why it could
+    /// not be read.
     ///
-    /// An `Option` rather than a zero-filled `CpuInfo`, which would draw as a
-    /// processor with no cores and a blank name -- a description of a machine
-    /// rather than an admission that none was obtained.
-    pub cpu_info: Option<CpuInfo>,
+    /// Not a zero-filled `CpuInfo`, which would draw as a processor with no
+    /// cores and a blank name -- a description of a machine rather than an
+    /// admission that none was obtained -- and not an `Option` either, which
+    /// drops the reason and left the window naming a path it never read.
+    pub cpu_info: Read<CpuInfo>,
     /// As [`SysInfoApp::cpu_info`], for memory.
-    pub memory_info: Option<MemoryInfo>,
+    pub memory_info: Read<MemoryInfo>,
     /// How long the machine has been up, re-read on every tick.
     ///
     /// `None` when `/proc/uptime` cannot be read, which is what the Summary
@@ -471,22 +478,23 @@ pub struct SysInfoState {
     /// the same on every machine and at every moment, including the moment
     /// after you watched it for a minute.
     pub uptime: Option<Duration>,
-    pub disks: Vec<DiskInfo>,
-    pub network_adapters: Vec<NetworkAdapterInfo>,
+    /// Each list as read, or why it could not be: see [`Read`].
+    pub disks: Read<Vec<DiskInfo>>,
+    pub network_adapters: Read<Vec<NetworkAdapterInfo>>,
     /// As [`SysInfoApp::cpu_info`], for the display.
-    pub display_info: Option<DisplayInfo>,
-    pub pci_devices: Vec<PciDeviceInfo>,
-    pub services: Vec<ServiceInfo>,
-    pub processes: Vec<ProcessEntry>,
-    pub drivers: Vec<DriverInfo>,
-    pub env_vars: Vec<(String, String)>,
-    pub irqs: Vec<IrqInfo>,
-    pub io_ports: Vec<IoPortInfo>,
-    pub memory_map: Vec<MemoryMapEntry>,
-    pub dma_channels: Vec<DmaInfo>,
-    pub usb_devices: Vec<UsbDeviceInfo>,
-    pub sound_devices: Vec<SoundInfo>,
-    pub startup_programs: Vec<StartupEntry>,
+    pub display_info: Read<DisplayInfo>,
+    pub pci_devices: Read<Vec<PciDeviceInfo>>,
+    pub services: Read<Vec<ServiceInfo>>,
+    pub processes: Read<Vec<ProcessEntry>>,
+    pub drivers: Read<Vec<DriverInfo>>,
+    pub env_vars: Read<Vec<(String, String)>>,
+    pub irqs: Read<Vec<IrqInfo>>,
+    pub io_ports: Read<Vec<IoPortInfo>>,
+    pub memory_map: Read<Vec<MemoryMapEntry>>,
+    pub dma_channels: Read<Vec<DmaInfo>>,
+    pub usb_devices: Read<Vec<UsbDeviceInfo>>,
+    pub sound_devices: Read<Vec<SoundInfo>>,
+    pub startup_programs: Read<Vec<StartupEntry>>,
 }
 
 impl Default for SysInfoState {
@@ -559,24 +567,24 @@ impl SysInfoState {
             show_help: false,
             search_focused: false,
             status_message: String::from("Ready"),
-            cpu_info: provider.query_cpu().ok(),
-            memory_info: provider.query_memory().ok(),
+            cpu_info: provider.query_cpu(),
+            memory_info: provider.query_memory(),
             uptime: provider.query_uptime().ok(),
-            disks: provider.query_storage().unwrap_or_default(),
-            network_adapters: provider.query_network().unwrap_or_default(),
-            display_info: provider.query_display().ok(),
-            pci_devices: provider.query_pci().unwrap_or_default(),
-            services: provider.query_services().unwrap_or_default(),
-            processes: provider.query_processes().unwrap_or_default(),
-            drivers: provider.query_drivers().unwrap_or_default(),
-            env_vars: provider.query_env_vars().unwrap_or_default(),
-            irqs: provider.query_irqs().unwrap_or_default(),
-            io_ports: provider.query_io_ports().unwrap_or_default(),
-            memory_map: provider.query_memory_map().unwrap_or_default(),
-            dma_channels: provider.query_dma().unwrap_or_default(),
-            usb_devices: provider.query_usb().unwrap_or_default(),
-            sound_devices: provider.query_sound().unwrap_or_default(),
-            startup_programs: provider.query_startup().unwrap_or_default(),
+            disks: provider.query_storage(),
+            network_adapters: provider.query_network(),
+            display_info: provider.query_display(),
+            pci_devices: provider.query_pci(),
+            services: provider.query_services(),
+            processes: provider.query_processes(),
+            drivers: provider.query_drivers(),
+            env_vars: provider.query_env_vars(),
+            irqs: provider.query_irqs(),
+            io_ports: provider.query_io_ports(),
+            memory_map: provider.query_memory_map(),
+            dma_channels: provider.query_dma(),
+            usb_devices: provider.query_usb(),
+            sound_devices: provider.query_sound(),
+            startup_programs: provider.query_startup(),
         }
     }
 
@@ -625,11 +633,29 @@ impl SysInfoState {
     /// Says what was not read and where it would have come from, rather than
     /// leaving the pane blank. A blank pane reads as "this machine has none of
     /// those", which is a claim; this is the absence of one.
-    fn unreadable(what: &str, path: &str) -> Vec<Property> {
-        vec![Property::new(
-            what,
-            &format!("Not available — nothing on this system provides {path}"),
-        )]
+    ///
+    /// The path is the read's own, from its error -- the window used to name
+    /// `/sys/hardware/cpu` and the like, paths nothing reads any more.
+    fn unreadable(what: &str, err: &hwquery::HwQueryError) -> Vec<Property> {
+        let why = match err {
+            hwquery::HwQueryError::NotAvailable { path } => {
+                format!("Not available — nothing on this system provides {path}")
+            }
+            other => format!("Could not be read — {other}"),
+        };
+        vec![Property::new(what, &why)]
+    }
+
+    /// A category's list, or the row that says why it shows none: the read's
+    /// failure, or "None found" when the read worked and found nothing. The
+    /// two used to look the same -- an empty pane -- which read as "this
+    /// machine has none of those" whether or not anything had been read.
+    fn listed<'a, T>(what: &str, read: &'a Read<Vec<T>>) -> Result<&'a [T], Vec<Property>> {
+        match read {
+            Ok(list) if !list.is_empty() => Ok(list),
+            Ok(_) => Err(vec![Property::new(what, "None found")]),
+            Err(e) => Err(Self::unreadable(what, e)),
+        }
     }
 
     /// A value the system did not report, said as an absence.
@@ -712,15 +738,20 @@ impl SysInfoState {
     }
 
     fn props_system_summary(&self) -> Vec<Property> {
-        let (Some(cpu), Some(mem)) = (&self.cpu_info, &self.memory_info) else {
+        let (Ok(cpu), Ok(mem)) = (&self.cpu_info, &self.memory_info) else {
             // The OS rows below are this program's own constants and stay
-            // truthful; only the hardware half is unobtainable.
+            // truthful; only the hardware half is unobtainable -- and each
+            // half says why, or nothing if it was read.
             let mut props = vec![
                 Property::new("OS Name", "Slate OS"),
                 Property::new("OS Version", "1.0.0"),
             ];
-            props.extend(Self::unreadable("Processor", "/sys/hardware/cpu"));
-            props.extend(Self::unreadable("Memory", "/sys/hardware/memory"));
+            if let Err(e) = &self.cpu_info {
+                props.extend(Self::unreadable("Processor", e));
+            }
+            if let Err(e) = &self.memory_info {
+                props.extend(Self::unreadable("Memory", e));
+            }
             return props;
         };
         vec![
@@ -769,8 +800,9 @@ impl SysInfoState {
     }
 
     fn props_cpu(&self) -> Vec<Property> {
-        let Some(cpu) = &self.cpu_info else {
-            return Self::unreadable("Processor", "/sys/hardware/cpu");
+        let cpu = match &self.cpu_info {
+            Ok(cpu) => cpu,
+            Err(e) => return Self::unreadable("Processor", e),
         };
         let mut props = vec![
             Property::new("Processor Name", &Self::or_absent(cpu.brand.as_deref())),
@@ -810,8 +842,9 @@ impl SysInfoState {
     }
 
     fn props_memory(&self) -> Vec<Property> {
-        let Some(mem) = &self.memory_info else {
-            return Self::unreadable("Memory", "/sys/hardware/memory");
+        let mem = match &self.memory_info {
+            Ok(mem) => mem,
+            Err(e) => return Self::unreadable("Memory", e),
         };
         let mut props = vec![
             Property::new(
@@ -851,8 +884,12 @@ impl SysInfoState {
     }
 
     fn props_storage(&self) -> Vec<Property> {
+        let list = match Self::listed("Disks", &self.disks) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = Vec::new();
-        for (idx, disk) in self.disks.iter().enumerate() {
+        for (idx, disk) in list.iter().enumerate() {
             if idx > 0 {
                 props.push(Property::blank());
             }
@@ -882,8 +919,9 @@ impl SysInfoState {
     }
 
     fn props_display(&self) -> Vec<Property> {
-        let Some(d) = &self.display_info else {
-            return Self::unreadable("Display", "/sys/hardware/display");
+        let d = match &self.display_info {
+            Ok(d) => d,
+            Err(e) => return Self::unreadable("Display", e),
         };
         let mut props = vec![
             Property::new("GPU Name", &d.gpu_name),
@@ -910,8 +948,12 @@ impl SysInfoState {
     }
 
     fn props_sound(&self) -> Vec<Property> {
+        let list = match Self::listed("Sound devices", &self.sound_devices) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = Vec::new();
-        for (idx, snd) in self.sound_devices.iter().enumerate() {
+        for (idx, snd) in list.iter().enumerate() {
             if idx > 0 {
                 props.push(Property::blank());
             }
@@ -924,8 +966,12 @@ impl SysInfoState {
     }
 
     fn props_network(&self) -> Vec<Property> {
+        let list = match Self::listed("Network adapters", &self.network_adapters) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = Vec::new();
-        for (idx, adapter) in self.network_adapters.iter().enumerate() {
+        for (idx, adapter) in list.iter().enumerate() {
             if idx > 0 {
                 props.push(Property::blank());
             }
@@ -994,8 +1040,12 @@ impl SysInfoState {
     }
 
     fn props_usb(&self) -> Vec<Property> {
+        let list = match Self::listed("USB devices", &self.usb_devices) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = Vec::new();
-        for (idx, dev) in self.usb_devices.iter().enumerate() {
+        for (idx, dev) in list.iter().enumerate() {
             if idx > 0 {
                 props.push(Property::blank());
             }
@@ -1011,8 +1061,12 @@ impl SysInfoState {
     }
 
     fn props_pci(&self) -> Vec<Property> {
+        let list = match Self::listed("PCI devices", &self.pci_devices) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = Vec::new();
-        for (idx, dev) in self.pci_devices.iter().enumerate() {
+        for (idx, dev) in list.iter().enumerate() {
             if idx > 0 {
                 props.push(Property::blank());
             }
@@ -1032,11 +1086,15 @@ impl SysInfoState {
     }
 
     fn props_services(&self) -> Vec<Property> {
+        let list = match Self::listed("Services", &self.services) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = vec![
             Property::new("Name", "Status / Start Type"),
             Property::new("---", "---"),
         ];
-        for svc in &self.services {
+        for svc in list {
             props.push(Property::new(
                 &svc.name,
                 &format!("{} ({})", svc.status, svc.start_type),
@@ -1046,11 +1104,15 @@ impl SysInfoState {
     }
 
     fn props_processes(&self) -> Vec<Property> {
+        let list = match Self::listed("Processes", &self.processes) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = vec![
             Property::new("PID  Name", "Memory / CPU"),
             Property::new("---", "---"),
         ];
-        for proc_entry in &self.processes {
+        for proc_entry in list {
             props.push(Property::new(
                 &format!("{:<5} {}", proc_entry.pid, proc_entry.name),
                 &format!(
@@ -1063,11 +1125,15 @@ impl SysInfoState {
     }
 
     fn props_drivers(&self) -> Vec<Property> {
+        let list = match Self::listed("Drivers", &self.drivers) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = vec![
             Property::new("Name", "Path / Status"),
             Property::new("---", "---"),
         ];
-        for drv in &self.drivers {
+        for drv in list {
             props.push(Property::new(
                 &drv.name,
                 &format!("{} [{}]", drv.path, drv.status),
@@ -1077,15 +1143,20 @@ impl SysInfoState {
     }
 
     fn props_env_vars(&self) -> Vec<Property> {
-        self.env_vars
-            .iter()
-            .map(|(k, v)| Property::new(k, v))
-            .collect()
+        let list = match Self::listed("Environment variables", &self.env_vars) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
+        list.iter().map(|(k, v)| Property::new(k, v)).collect()
     }
 
     fn props_startup(&self) -> Vec<Property> {
+        let list = match Self::listed("Startup programs", &self.startup_programs) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = Vec::new();
-        for entry in &self.startup_programs {
+        for entry in list {
             let state = if entry.enabled {
                 String::new()
             } else {
@@ -1100,11 +1171,15 @@ impl SysInfoState {
     }
 
     fn props_irqs(&self) -> Vec<Property> {
+        let list = match Self::listed("IRQs", &self.irqs) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = vec![
             Property::new("IRQ #", "Device / Type"),
             Property::new("---", "---"),
         ];
-        for irq in &self.irqs {
+        for irq in list {
             props.push(Property::new(
                 &format!("IRQ {}", irq.irq_number),
                 &format!("{} ({})", irq.device, irq.irq_type),
@@ -1114,11 +1189,15 @@ impl SysInfoState {
     }
 
     fn props_io_ports(&self) -> Vec<Property> {
+        let list = match Self::listed("I/O ports", &self.io_ports) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = vec![
             Property::new("Range", "Device"),
             Property::new("---", "---"),
         ];
-        for port in &self.io_ports {
+        for port in list {
             props.push(Property::new(
                 &format!("{:#06X}-{:#06X}", port.start, port.end),
                 &port.device,
@@ -1128,11 +1207,15 @@ impl SysInfoState {
     }
 
     fn props_memory_map(&self) -> Vec<Property> {
+        let list = match Self::listed("Memory map", &self.memory_map) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = vec![
             Property::new("Range", "Type / Description"),
             Property::new("---", "---"),
         ];
-        for entry in &self.memory_map {
+        for entry in list {
             props.push(Property::new(
                 &format!("{:#012X}-{:#012X}", entry.start, entry.end),
                 &format!("{}: {}", entry.region_type, entry.description),
@@ -1142,11 +1225,15 @@ impl SysInfoState {
     }
 
     fn props_dma(&self) -> Vec<Property> {
+        let list = match Self::listed("DMA channels", &self.dma_channels) {
+            Ok(list) => list,
+            Err(rows) => return rows,
+        };
         let mut props = vec![
             Property::new("Channel", "Device / Mode"),
             Property::new("---", "---"),
         ];
-        for dma in &self.dma_channels {
+        for dma in list {
             props.push(Property::new(
                 &format!("DMA {}", dma.channel),
                 &format!("{} ({})", dma.device, dma.mode),
@@ -1593,7 +1680,7 @@ impl SysInfoState {
             self.uptime = Some(up);
         }
         if let Ok(mem) = provider.query_memory() {
-            self.memory_info = Some(mem);
+            self.memory_info = Ok(mem);
         }
     }
 
@@ -2457,7 +2544,9 @@ mod tests {
     fn a_tick_re_reads_the_figures_that_age() {
         let mut app = SysInfoState::new();
         app.uptime = None;
-        app.memory_info = None;
+        app.memory_info = Err(hwquery::HwQueryError::NotAvailable {
+            path: String::from("/proc/meminfo"),
+        });
 
         assert_eq!(
             app.handle_event(&Event::Tick { elapsed_ms: 1000 }),
@@ -2560,10 +2649,10 @@ mod tests {
 
     fn app_with_env(vars: &[(&str, &str)]) -> SysInfoState {
         let mut app = SysInfoState::new();
-        app.env_vars = vars
+        app.env_vars = Ok(vars
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
+            .collect());
         app
     }
 
@@ -2650,7 +2739,7 @@ mod tests {
         // The CPU section comes from a fixture now: the application no
         // longer invents a processor, so there are no features to head.
         let mut app = SysInfoState::new();
-        app.cpu_info = Some(fixture_cpu());
+        app.cpu_info = Ok(fixture_cpu());
         let report = app.export_text();
         let at_zero = column_zero_lines(&report);
         assert!(
@@ -2765,8 +2854,8 @@ mod tests {
         // on screen. The same defect in `apps/settings` had no such guard and
         // surfaced only because a list became empty rather than merely
         // shorter.
-        app.cpu_info = Some(fixture_cpu());
-        app.memory_info = Some(fixture_memory());
+        app.cpu_info = Ok(fixture_cpu());
+        app.memory_info = Ok(fixture_memory());
         app.window_height = 300.0;
         assert!(
             app.max_tree_scroll() > 0,
@@ -3118,18 +3207,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **An unreadable category says why, an empty one says none** -- where
+    /// both drew an empty pane, which read as "this machine has none of
+    /// those" whether or not anything had been read. And the reason names the
+    /// path the read used, not the `/sys/hardware/...` the window used to
+    /// name whatever the read had been.
+    #[test]
+    fn an_unreadable_category_is_not_an_empty_one() {
+        let mut app = SysInfoState::new();
+        app.pci_devices = Err(hwquery::HwQueryError::NotAvailable {
+            path: String::from("/sys/devices/pci"),
+        });
+        let rows = app.props_pci();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].value,
+            "Not available — nothing on this system provides /sys/devices/pci"
+        );
+        app.pci_devices = Ok(Vec::new());
+        let rows = app.props_pci();
+        assert_eq!(
+            (rows[0].name.as_str(), rows[0].value.as_str()),
+            ("PCI devices", "None found")
+        );
+        app.cpu_info = Err(hwquery::HwQueryError::NotAvailable {
+            path: String::from("/sys/devices/system/cpu"),
+        });
+        let said = app.props_cpu();
+        assert!(
+            said[0].value.ends_with("/sys/devices/system/cpu"),
+            "{:?}",
+            said[0].value
+        );
+        assert!(
+            !said[0].value.contains("/sys/hardware"),
+            "a path nothing reads was named"
+        );
+    }
+
     /// An address the kernel says there is none of reads "None assigned" --
     /// the answer to "why can nothing be reached?" -- and one nothing reports
     /// reads as not reported. Two absences, told apart.
     #[test]
     fn an_unassigned_address_is_not_an_unreported_one() {
         let mut app = SysInfoState::new();
-        app.network_adapters = vec![NetworkAdapterInfo {
+        app.network_adapters = Ok(vec![NetworkAdapterInfo {
             up: Some(false),
             ipv4: Address::Unassigned,
             gateway: Address::Is(String::from("10.0.2.2")),
             ..NetworkAdapterInfo::named("eth0")
-        }];
+        }]);
         let props = app.props_network();
         let value = |name: &str| {
             props
@@ -3583,8 +3710,7 @@ mod tests {
                         // find, put there rather than assumed -- this machine
                         // has no /proc, so every category the provider fills
                         // is empty whatever the query is.
-                        app.env_vars
-                            .push((String::from("CARDKEY"), String::from("present")));
+                        app.env_vars = Ok(vec![(String::from("CARDKEY"), String::from("present"))]);
                         app.search_text = String::from("cardkey");
                         app.search_focused = true;
                     }

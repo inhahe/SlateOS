@@ -5973,6 +5973,16 @@ impl DesktopShell {
     /// Ids are issued by a sequence and never reused, so a window cannot arrive
     /// twice under the same name.
     pub fn apply_window_list(&mut self, list: &WindowList) -> Vec<ShellRequest> {
+        // The window a switch under way is on, by id, from the list before
+        // this one -- see `keep_switch_on`, below.
+        let switching_to = self
+            .alt_tab_active
+            .then(|| {
+                self.switcher_windows()
+                    .get(self.alt_tab_index)
+                    .map(|w| w.id)
+            })
+            .flatten();
         let mut kept: BTreeMap<WindowId, ManagedWindow> = BTreeMap::new();
         let mut focused = None;
         let mut requests = Vec::new();
@@ -6111,7 +6121,32 @@ impl DesktopShell {
         // them could have been refreshed and the other not.
         self.overview
             .apply_window_list(list, self.num_desktops.max(1));
+        if let Some(chosen) = switching_to {
+            self.keep_switch_on(chosen);
+        }
         requests
+    }
+
+    /// Keep a switch under way on the window it was on when the list changed.
+    ///
+    /// The switch counts into [`switcher_windows`](Self::switcher_windows) by
+    /// position, and a window closing -- or opening -- while Alt is held moves
+    /// every position after it: the lit cell stayed where it was and the window
+    /// under it changed, so letting go raised a window the user had not chosen.
+    /// So the choice is found again by id. If the chosen window is the one that
+    /// went, the choice moves to whichever window is now where it was (the
+    /// last, if the list got shorter than that), and is lit, as the switcher on
+    /// every desktop does.
+    fn keep_switch_on(&mut self, chosen: WindowId) {
+        let windows = self.switcher_windows();
+        let found = windows.iter().position(|w| w.id == chosen);
+        let last = windows.len().checked_sub(1);
+        match (found, last) {
+            (Some(at), _) => self.alt_tab_index = at,
+            (None, Some(last)) => self.alt_tab_index = self.alt_tab_index.min(last),
+            (None, None) => {}
+        }
+        self.light_switch_selection();
     }
 
     /// Turn the actions a rule matched into asks the compositor understands.
@@ -15663,6 +15698,58 @@ mod window_manager_tests {
         assert!(shell.alt_tab_index < shell.taskbar_windows().len());
     }
 
+    /// A window closing while Alt is held does not move the switch onto a
+    /// different window: it stays on the one it was on, found again by id.
+    ///
+    /// It counted by position alone, so closing a window earlier in the list
+    /// slid the next one under the lit cell, and letting go raised a window the
+    /// user never chose.
+    #[test]
+    fn a_window_closing_mid_switch_leaves_the_switch_on_its_window() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        // Most recent first: w3 w2 w1 w0. Two Tabs: on w1.
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 2);
+
+        close(&mut shell, ids[2]);
+        assert_eq!(
+            shell.finish_alt_tab(),
+            Some(ShellRequest::window(ids[1], ShellControlAction::Activate)),
+            "the switch slid onto another window when w2 closed"
+        );
+    }
+
+    /// And when the window that closes is the one the switch is on, the
+    /// switch moves to the window now in its place -- the next one back -- and
+    /// the overview lights it, so what letting go picks is still what is lit.
+    #[test]
+    fn the_chosen_window_closing_moves_the_switch_to_the_next_one_back() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        for _ in 0..2 {
+            assert!(
+                shell
+                    .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                    .consumed
+            );
+        }
+        assert_eq!(shell.overview.hovered_window, Some(ids[1].0));
+
+        close(&mut shell, ids[1]);
+        assert_eq!(
+            shell.overview.hovered_window,
+            Some(ids[0].0),
+            "nothing is lit, or the wrong card"
+        );
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[0])
+        );
+    }
+
     /// The same property, from the one starting index that actually exercises
     /// the clamp.
     ///
@@ -15688,6 +15775,10 @@ mod window_manager_tests {
         for id in &ids[1..] {
             close(&mut shell, *id);
         }
+        // Closing windows no longer leaves the index stale -- the switch is
+        // kept on its window by id -- so the stale index the clamp is for is
+        // made here, as a caller that set the field would make it.
+        shell.alt_tab_index = 3;
 
         shell.prev_alt_tab();
         assert!(
@@ -15724,6 +15815,9 @@ mod window_manager_tests {
         for id in &ids[1..] {
             close(&mut shell, *id);
         }
+        // As above: windows closing no longer strand the index, so it is
+        // stranded by hand.
+        shell.alt_tab_index = 2;
 
         assert_eq!(
             shell.finish_alt_tab(),

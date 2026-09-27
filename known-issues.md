@@ -171235,11 +171235,13 @@ doubled as, is its own port now, `scripts/mountpoint-diff.sh`), and so does
 and mount namespace the harness makes for itself -- every type of namespace,
 user and PID namespaces nested three deep, persistent ones, assigned network
 IDs -- plus 4 where only upstream crashes, dereferencing the missing process
-of a persistent namespace whose owner `-t` filtered out); the others still do
-not use it.
+of a persistent namespace whose owner `-t` filtered out), and so does `lsblk`
+(`scripts/lsblk-diff.sh`: 502 cases on util-linux's `--sysroot` snapshots
+and WSL itself -- a port that needed libsmartcols' sorting and line groups,
+measured on their own against the real library by
+`scripts/smartcols-diff.sh`: 2954 tables); the others still do not use it.
 
-**Where:** `userspace/lsblk`,
-`losetup` (`--list`), `swapon` (`--show`), `rfkill`,
+**Where:** `losetup` (`--list`), `swapon` (`--show`), `rfkill`,
 `fdisk` (`-l`'s partition table). `rfkill`'s reference, like `lsirq`'s,
 is not installed in WSL; `scripts/util-linux-extra.sh` unpacks both without
 root.
@@ -171248,9 +171250,9 @@ root.
 `smartcols`, as `lsmem` was -- the program's own logic function by function,
 the table handed to the crate -- with a differential harness against WSL's
 util-linux that includes a pty at several widths. Parts of libsmartcols not
-yet ported (the crate's module docs list them: groups, sorting, custom wrap
-functions other than the newline one, colours) are added when a program
-needs them; `lsblk` needs only trees, which are ported. Each of these is
+yet ported (the crate's module docs list them: custom wrap functions other
+than the newline one, and colours) are added when a program needs them;
+groups and sorting are in since lsblk's port. Each of these is
 also on TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE's list, and the two
 are one job per program.
 

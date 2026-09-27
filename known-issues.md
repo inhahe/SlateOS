@@ -170822,6 +170822,25 @@ releases 0.5 s after the controller announces it is waiting: the hold is
 measured as file-system time, the stamps follow it, `window-missed`, and
 `controller_explains` would excuse it) reproduce the failure without the
 host; "controller attribution" and `read_gap_of` are unit-tested.
+
+**Follow-up, rq10 (6afde425d), 2026-09-26.** The next boot refused at the same
+suite, in `replay #1`. There the controller saw the whole replayed suite in one
+read and held the load 75 us; "window share" then divided by a suite span of
+0.0, and the `ZeroDivisionError` killed the suite before `timing_case` could
+weigh its failures against the host. The hold was not in a file-system call.
+The controller's `time.sleep(0.1)` woke seconds late on a starved host, which
+the I/O-only rule above deliberately does not excuse. Fixed in fae81d7de:
+- the controller times its sleep and records the worst overrun of what it
+  asked for (`max_poll_oversleep_seconds`); the code names the length it
+  wants, so the rest is the scheduler's;
+- `controller_explains` excuses a whole poll of oversleep as it does a whole
+  poll of file-system time;
+- the share is judged, never computed blind, and the deterministic cases read
+  stamps and fire times so that a regression fails by name instead of raising.
+
+Run against a controller whose first poll oversleeps 2 s on every run, the
+suite ends "all passed (18 declined)", each declined check naming the
+measured oversleep, instead of in a traceback.
 `test-grade-positional.py`: `window-missed` derived from stamps, its
 precedence, and no false conviction of a tail read later. The three real
 records in `build/` (P22 runs 2 and 3, the last record) derive exactly as

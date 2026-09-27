@@ -274,7 +274,48 @@ fn scroll_rows(acc: &mut wheel::Accumulator, dy: f32) -> i32 {
 // --- Taskbar ---------------------------------------------------------------
 
 /// Width of the start button at the left end of the taskbar.
-const START_BUTTON_WIDTH: f32 = 48.0;
+const START_BUTTON_WIDTH: f32 = 64.0;
+/// The start orb's diameter: the reference's `aero-orb`, 42. The reference
+/// lets it rise 5 above its bar; this bar's surface ends at its edge, so the
+/// orb is kept inside, [`START_ORB_MARGIN`] clear of the top and bottom.
+const START_ORB: f32 = 42.0;
+/// The orb's clearance from the bar's top and bottom edges.
+const START_ORB_MARGIN: f32 = 2.0;
+/// The orb's shadow, in black: the reference's `0 3px 9px` at 0.55.
+const START_ORB_SHADOW_ALPHA: u8 = 140;
+/// How far below the orb its shadow falls: the reference's 3.
+const START_ORB_SHADOW_Y: f32 = 3.0;
+/// How soft the orb's shadow is: the reference's 9.
+const START_ORB_SHADOW_BLUR: f32 = 9.0;
+/// The ring of light round the orb, in white: the reference's
+/// `0 0 0 1.5px` at 0.6.
+const START_ORB_RING: f32 = 1.5;
+/// The ring of light's strength.
+const START_ORB_RING_ALPHA: u8 = 153;
+/// The dark ring outside the light one, in black: the reference's 3.5 at 0.4,
+/// of which the 2 beyond the light ring shows.
+const START_ORB_OUTER_RING: f32 = 2.0;
+/// The dark ring's strength.
+const START_ORB_OUTER_RING_ALPHA: u8 = 102;
+/// The gloss's bright cap, in white: the reference's radial highlight, 0.9 at
+/// the top falling to nothing by the middle -- the renderer draws no
+/// gradients, so it is taken in two steps, a cap over a wider skirt.
+const START_ORB_GLOSS_CAP_ALPHA: u8 = 115;
+/// The gloss's skirt, in white.
+const START_ORB_GLOSS_SKIRT_ALPHA: u8 = 46;
+/// The shade at the orb's foot, in black: the reference's radial 0.55 from
+/// below, taken as one step.
+const START_ORB_SHADE_ALPHA: u8 = 56;
+/// The line just inside the orb's edge, in white: the reference's
+/// `inset 0 0 0 1px` at 0.42.
+const START_ORB_INNER_ALPHA: u8 = 107;
+/// The glow round the orb under the pointer, in the accent: the reference's
+/// `0 0 18px` at 0.9.
+const START_ORB_GLOW_BLUR: f32 = 18.0;
+/// The glow's strength.
+const START_ORB_GLOW_ALPHA: u8 = 230;
+/// The start picture's share of the orb's width.
+const START_ORB_PICTURE_SHARE: f32 = 0.55;
 /// Gap between the start button and the first taskbar tile: the Aero
 /// reference's `padding: 0 6px` on its row of tiles.
 const TASKBAR_BUTTON_START_GAP: f32 = 6.0;
@@ -751,6 +792,8 @@ enum TooltipKey {
     /// The caret at the start menu power button's end, which is only a
     /// chevron -- the reference's `title="Power options"`.
     PowerOptions,
+    /// The start orb, a picture alone -- the reference's `title="Start"`.
+    Start,
 }
 
 /// What in the open start menu the pointer is over, drawn lit as the
@@ -1715,6 +1758,8 @@ pub struct DesktopShell {
     hover_tile: Option<TaskbarSlot>,
     /// Whether the pointer is on the "Show desktop" strip, which then lights.
     show_desktop_lit: bool,
+    /// Whether the pointer is on the start button, whose orb then glows.
+    start_button_lit: bool,
     /// What in the open start menu the pointer is over, which is drawn lit.
     /// Forgotten when the menu closes (`close_start_menu`), so a menu opened
     /// again lights nothing until the pointer moves over it.
@@ -2446,6 +2491,7 @@ impl DesktopShell {
             hover_changed: false,
             hover_tile: None,
             show_desktop_lit: false,
+            start_button_lit: false,
             start_lit: None,
             desktop_shown: None,
             ending: None,
@@ -3014,7 +3060,26 @@ impl DesktopShell {
             .set_desktop_area(self.screen_width, self.screen_height, bar);
     }
 
-    /// The start button at the left end of the taskbar.
+    /// The start orb, centred in the start button: the reference's round
+    /// `aero-orb`, as large as the bar allows.
+    #[must_use]
+    pub fn start_orb_rect(&self) -> Rect {
+        let button = self.start_button_rect();
+        let d = self
+            .scale(START_ORB)
+            .min(button.h - 2.0 * self.scale(START_ORB_MARGIN))
+            .min(button.w)
+            .max(0.0);
+        Rect::new(
+            button.x + (button.w - d) / 2.0,
+            button.y + (button.h - d) / 2.0,
+            d,
+            d,
+        )
+    }
+
+    /// The start button at the left end of the taskbar: a press anywhere on
+    /// it opens the start menu -- a larger target than the orb drawn in it.
     #[must_use]
     pub fn start_button_rect(&self) -> Rect {
         let bar = self.taskbar_rect();
@@ -4855,6 +4920,11 @@ impl DesktopShell {
             self.show_desktop_lit = lit;
             self.hover_changed = true;
         }
+        let lit = matches!(hit, Hit::StartButton);
+        if lit != self.start_button_lit {
+            self.start_button_lit = lit;
+            self.hover_changed = true;
+        }
         let start_lit = match hit {
             // The entry's place on screen: `start_menu_entry_at` is the
             // scroll plus the row, so this is the row it was found on.
@@ -4894,6 +4964,8 @@ impl DesktopShell {
             }),
             // The strip is a blank; the reference's `title` says what it does.
             Hit::ShowDesktop => Some((TooltipKey::ShowDesktop, "Show desktop".to_string())),
+            // The orb is a picture alone, as the reference's, and its `title`.
+            Hit::StartButton => Some((TooltipKey::Start, "Start".to_string())),
             // The caret is a chevron alone, and says what it opens as the
             // reference's does.
             Hit::PowerCaret => Some((TooltipKey::PowerOptions, "Power options".to_string())),
@@ -7312,23 +7384,7 @@ impl DesktopShell {
         // Taskbar background
         fill(&mut tree, bar, self.theme.taskbar_bg);
 
-        // Start button
-        let start = self.start_button_rect();
-        let start_bg = if self.start_menu_open {
-            self.theme.taskbar_active_bg
-        } else {
-            self.theme.taskbar_bg
-        };
-        fill(&mut tree, start, start_bg);
-        // An icon, not the `≡` it used to be: the built-in font has no such
-        // character, and the start button drew a box (design-decisions §881).
-        self.icon_in(
-            &mut tree,
-            start,
-            "start-here",
-            TASKBAR_ICON,
-            self.theme.taskbar_accent,
-        );
+        self.draw_start_orb(&mut tree);
 
         // The tiles: pinned programs, then windows, as the Aero reference
         // draws them. Rounded as the windows they stand for are, at half their
@@ -8204,6 +8260,137 @@ impl DesktopShell {
             with_alpha(accent, TASKBAR_TILE_LIT),
             TASKBAR_TILE_EDGE_LIT,
             TASKBAR_TILE_HIGHLIGHT_LIT,
+        );
+    }
+
+    /// The start button, as the reference's orb (`aero-orb`): a round button
+    /// in the accent with the start picture on it, a gloss across its top and
+    /// a shade at its foot, a ring of light round it and a shadow under it --
+    /// glowing in the accent while the pointer is on it, as the reference's
+    /// `:hover`, and while its menu is open, which the reference does not
+    /// mark but which the bar has always shown.
+    ///
+    /// The reference fills the orb with the system's logo; there is none in
+    /// the repository yet (`open-questions.md` C-Q28), so the picture is the
+    /// icon theme's `start-here`, on the accent. The renderer draws no
+    /// gradients, so the gloss and the shade are each a pill of translucent
+    /// white or black, the gloss in two steps.
+    fn draw_start_orb(&self, tree: &mut RenderTree) {
+        let orb = self.start_orb_rect();
+        let d = orb.w;
+        if d <= 0.0 {
+            return;
+        }
+        let round = CornerRadii::all(d / 2.0);
+        // Under it: the glow when lit, and the shadow.
+        if self.start_button_lit || self.start_menu_open {
+            tree.box_shadow(
+                orb.x,
+                orb.y,
+                orb.w,
+                orb.h,
+                Shadow {
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    blur: self.scale(START_ORB_GLOW_BLUR),
+                    spread: 0.0,
+                    color: with_alpha(self.theme.accent_color, START_ORB_GLOW_ALPHA),
+                },
+                round,
+            );
+        }
+        tree.box_shadow(
+            orb.x,
+            orb.y,
+            orb.w,
+            orb.h,
+            Shadow {
+                offset_x: 0.0,
+                offset_y: self.scale(START_ORB_SHADOW_Y),
+                blur: self.scale(START_ORB_SHADOW_BLUR),
+                spread: 0.0,
+                color: with_alpha(Color::BLACK, START_ORB_SHADOW_ALPHA),
+            },
+            round,
+        );
+        // The rings, outside the orb: dark, then light just inside it.
+        let ring = self.scale(START_ORB_RING);
+        let outer = self.scale(START_ORB_OUTER_RING);
+        let dark = ring + outer / 2.0;
+        stroke_round(
+            tree,
+            Rect::new(orb.x - dark, orb.y - dark, d + 2.0 * dark, d + 2.0 * dark),
+            with_alpha(Color::BLACK, START_ORB_OUTER_RING_ALPHA),
+            outer,
+            CornerRadii::all(d / 2.0 + dark),
+        );
+        let light = ring / 2.0;
+        stroke_round(
+            tree,
+            Rect::new(
+                orb.x - light,
+                orb.y - light,
+                d + 2.0 * light,
+                d + 2.0 * light,
+            ),
+            with_alpha(Color::WHITE, START_ORB_RING_ALPHA),
+            ring,
+            CornerRadii::all(d / 2.0 + light),
+        );
+        // The orb, and the picture on it.
+        let body = self.theme.taskbar_accent;
+        fill_round(tree, orb, body, round);
+        let px = self.icon_px(d * START_ORB_PICTURE_SHARE / self.scale(1.0).max(f32::EPSILON));
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        image_centred(
+            tree,
+            orb,
+            side,
+            self.icon("start-here", px, readable_on(body)),
+        );
+        // The shade at its foot, and the gloss across its top: pills inside
+        // the circle, so that nothing of either shows beyond its edge.
+        let pill = |x0: f32, y0: f32, w: f32, h: f32| {
+            (
+                Rect::new(orb.x + d * x0, orb.y + d * y0, d * w, d * h),
+                CornerRadii::all(d * h.min(w) / 2.0),
+            )
+        };
+        let (shade, shade_radii) = pill(0.2, 0.62, 0.6, 0.32);
+        fill_round(
+            tree,
+            shade,
+            with_alpha(Color::BLACK, START_ORB_SHADE_ALPHA),
+            shade_radii,
+        );
+        let (skirt, skirt_radii) = pill(0.12, 0.05, 0.76, 0.5);
+        fill_round(
+            tree,
+            skirt,
+            with_alpha(Color::WHITE, START_ORB_GLOSS_SKIRT_ALPHA),
+            skirt_radii,
+        );
+        let (cap, cap_radii) = pill(0.2, 0.06, 0.6, 0.3);
+        fill_round(
+            tree,
+            cap,
+            with_alpha(Color::WHITE, START_ORB_GLOSS_CAP_ALPHA),
+            cap_radii,
+        );
+        // And the line just inside its edge.
+        let inner = self.scale(1.0).max(1.0);
+        stroke_round(
+            tree,
+            Rect::new(
+                orb.x + inner / 2.0,
+                orb.y + inner / 2.0,
+                (d - inner).max(0.0),
+                (d - inner).max(0.0),
+            ),
+            with_alpha(Color::WHITE, START_ORB_INNER_ALPHA),
+            inner,
+            CornerRadii::all((d - inner).max(0.0) / 2.0),
         );
     }
 
@@ -15367,10 +15554,9 @@ mod overview_wiring_tests {
         let s = shell();
         let icons = taskbar_icons(&s);
         assert!(
-            icons
-                .iter()
-                .any(|(name, color)| *name == "start-here" && *color == s.theme.taskbar_accent),
-            "no start button icon in the accent: {icons:?}"
+            icons.iter().any(|(name, color)| *name == "start-here"
+                && *color == super::readable_on(s.theme.taskbar_accent)),
+            "no start picture readable on the accent orb: {icons:?}"
         );
         assert!(
             icons
@@ -20479,6 +20665,231 @@ mod taskbar_pin_tests {
             MouseEventKind::Move,
         ));
         shell.advance_osd(5_000);
+    }
+
+    // ---- the start orb ----
+
+    /// The glows drawn round `orb` in the taskbar -- a `BoxShadow` on it in
+    /// the accent.
+    fn orb_glows(shell: &DesktopShell, orb: super::Rect) -> usize {
+        use guitk::render::RenderCommand;
+        let glow = super::with_alpha(shell.theme.accent_color, super::START_ORB_GLOW_ALPHA);
+        shell
+            .render_taskbar()
+            .commands
+            .iter()
+            .filter(|c| {
+                matches!(c, RenderCommand::BoxShadow { x, y, width, height, color, .. }
+                    if (*x, *y, *width, *height) == (orb.x, orb.y, orb.w, orb.h) && *color == glow)
+            })
+            .count()
+    }
+
+    /// **The start button is the reference's orb**: a circle in the accent,
+    /// centred in the button and inside the bar, the start picture on it in a
+    /// colour it can be read in, a shadow under it, and a gloss across its top
+    /// and a shade at its foot that stay inside the circle.
+    #[test]
+    fn the_start_button_is_the_references_orb() {
+        use guitk::render::RenderCommand;
+        let s = shell();
+        let button = s.start_button_rect();
+        let bar = s.taskbar_rect();
+        let orb = s.start_orb_rect();
+        let d = orb.w;
+        assert!(d > 0.0 && (orb.h - d).abs() < 0.01, "not round: {orb:?}");
+        assert!(
+            (orb.x + d / 2.0 - (button.x + button.w / 2.0)).abs() < 0.01
+                && (orb.y + d / 2.0 - (button.y + button.h / 2.0)).abs() < 0.01,
+            "not centred in the button: {orb:?} in {button:?}"
+        );
+        assert!(
+            orb.y >= bar.y && orb.y + d <= bar.y + bar.h,
+            "the orb leaves the bar, whose surface ends at its edge: {orb:?} in {bar:?}"
+        );
+        let tree = s.render_taskbar();
+        let body = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::FillRect { x, y, width, height, color, corner_radii }
+                if (*x, *y, *width, *height) == (orb.x, orb.y, orb.w, orb.h)
+                    && *color == s.theme.taskbar_accent
+                    && *corner_radii == super::CornerRadii::all(d / 2.0))
+        });
+        assert!(body, "no round orb in the accent");
+        let shadow = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::BoxShadow { x, y, width, height, offset_y, color, .. }
+                if (*x, *y, *width, *height) == (orb.x, orb.y, orb.w, orb.h)
+                    && *offset_y > 0.0
+                    && *color == super::with_alpha(guitk::color::Color::BLACK, super::START_ORB_SHADOW_ALPHA))
+        });
+        assert!(shadow, "no shadow under the orb");
+        assert_eq!(orb_glows(&s, orb), 0, "glowing at rest");
+
+        // The reference's three rings, each round the orb's centre: light
+        // just outside its edge, dark outside that, and a line just inside.
+        let rings: Vec<(super::Rect, u8, bool)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if matches!((color.r, color.g, color.b), (255, 255, 255) | (0, 0, 0)) => Some((
+                    super::Rect::new(*x, *y, *width, *height),
+                    color.a,
+                    color.r == 255,
+                )),
+                _ => None,
+            })
+            .filter(|(r, _, _)| {
+                (r.x + r.w / 2.0 - (orb.x + d / 2.0)).abs() < 0.01
+                    && (r.y + r.h / 2.0 - (orb.y + d / 2.0)).abs() < 0.01
+            })
+            .collect();
+        let ring = |white: bool, alpha: u8, what: &str| {
+            rings
+                .iter()
+                .find(|(_, a, w)| *w == white && *a == alpha)
+                .map(|(r, _, _)| *r)
+                .unwrap_or_else(|| panic!("no {what}: {rings:?}"))
+        };
+        let light = ring(true, super::START_ORB_RING_ALPHA, "ring of light");
+        let dark = ring(false, super::START_ORB_OUTER_RING_ALPHA, "dark ring");
+        let inner = ring(true, super::START_ORB_INNER_ALPHA, "line inside the edge");
+        assert!(
+            light.w > d && dark.w > light.w,
+            "the rings are not round the orb, dark outside light: {light:?} {dark:?}"
+        );
+        assert!(
+            inner.w < d,
+            "the inner line is not inside the edge: {inner:?}"
+        );
+
+        // The start picture, centred on the orb.
+        let pictures: Vec<(f32, f32, f32, u64)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } if orb.contains(*x + 1.0, *y + 1.0) => Some((*x, *y, *width, *image_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pictures.len(), 1, "{pictures:?}");
+        let (x, y, w, id) = pictures[0];
+        assert!(
+            (x + w / 2.0 - (orb.x + d / 2.0)).abs() < 1.0
+                && (y + w / 2.0 - (orb.y + d / 2.0)).abs() < 1.0,
+            "the picture is not centred on the orb"
+        );
+        let request = s.icon_request(id).expect("an icon");
+        assert_eq!(request.name, "start-here");
+        assert_eq!(request.color, super::readable_on(s.theme.taskbar_accent));
+
+        // Every translucent white or black fill on the orb -- the gloss and
+        // the shade -- lies inside its circle: sampled round each pill's edge.
+        let centre = (orb.x + d / 2.0, orb.y + d / 2.0);
+        let inside = |px: f32, py: f32| {
+            let (dx, dy) = (px - centre.0, py - centre.1);
+            (dx * dx + dy * dy).sqrt() <= d / 2.0 + 0.5
+        };
+        let mut glosses = 0;
+        let mut shades = 0;
+        for c in &tree.commands {
+            let RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                corner_radii,
+            } = c
+            else {
+                continue;
+            };
+            let white = (color.r, color.g, color.b) == (255, 255, 255);
+            let black = (color.r, color.g, color.b) == (0, 0, 0);
+            if !(white || black) || color.a == 255 || !orb.contains(*x + 0.5, *y + 0.5) {
+                continue;
+            }
+            if white {
+                glosses += 1;
+                assert!(
+                    y + height / 2.0 < centre.1,
+                    "a gloss below the orb's middle"
+                );
+            } else {
+                shades += 1;
+                assert!(
+                    y + height / 2.0 > centre.1,
+                    "a shade above the orb's middle"
+                );
+            }
+            let r = corner_radii.top_left;
+            for step in 0..32 {
+                #[allow(clippy::cast_precision_loss)]
+                let t = step as f32 / 32.0 * std::f32::consts::TAU;
+                // Round the pill's two end caps and along its flat sides.
+                for (cx, cy) in [
+                    (x + r, y + r),
+                    (x + width - r, y + r),
+                    (x + r, y + height - r),
+                    (x + width - r, y + height - r),
+                ] {
+                    let (px, py) = (cx + r * t.cos(), cy + r * t.sin());
+                    if px >= *x - 0.01
+                        && px <= x + width + 0.01
+                        && py >= *y - 0.01
+                        && py <= y + height + 0.01
+                    {
+                        assert!(
+                            inside(px, py),
+                            "the pill {x},{y} {width}x{height} leaves the orb at ({px}, {py})"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(glosses, 2, "the gloss is a cap over a skirt");
+        assert_eq!(shades, 1, "no shade at the orb's foot");
+    }
+
+    /// **The orb glows under the pointer, and while its menu is open**, and
+    /// names itself -- the reference's `:hover` and `title="Start"`. Each
+    /// change is reported, so the session redraws the bar for it.
+    #[test]
+    fn the_orb_glows_under_the_pointer_and_while_its_menu_is_open() {
+        let mut s = shell();
+        let orb = s.start_orb_rect();
+        s.take_hover_changed();
+        let button = s.start_button_rect();
+        rest_on(&mut s, button);
+        assert!(s.take_hover_changed(), "the orb lit and nobody was told");
+        assert_eq!(orb_glows(&s, orb), 1, "not glowing under the pointer");
+        let tip = format!("{:?}", s.render_tooltip().expect("the orb has no name"));
+        assert!(tip.contains("Start"), "{tip}");
+
+        s.handle_mouse(&at(600.0, 300.0, MouseEventKind::Move));
+        assert!(
+            s.take_hover_changed(),
+            "the glow went out and nobody was told"
+        );
+        assert_eq!(
+            orb_glows(&s, orb),
+            0,
+            "still glowing after the pointer left"
+        );
+
+        s.toggle_start_menu();
+        assert_eq!(orb_glows(&s, orb), 1, "not glowing with its menu open");
     }
 
     /// **Resting on a tile names it**: a pin -- whose name is nowhere else --

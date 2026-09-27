@@ -478,6 +478,8 @@ pub struct SysInfoState {
     /// the same on every machine and at every moment, including the moment
     /// after you watched it for a minute.
     pub uptime: Option<Duration>,
+    /// The kernel's release (`uname -r`), from `/proc/version`.
+    pub kernel_release: Read<String>,
     /// Each list as read, or why it could not be: see [`Read`].
     pub disks: Read<Vec<DiskInfo>>,
     pub network_adapters: Read<Vec<NetworkAdapterInfo>>,
@@ -570,6 +572,7 @@ impl SysInfoState {
             cpu_info: provider.query_cpu(),
             memory_info: provider.query_memory(),
             uptime: provider.query_uptime().ok(),
+            kernel_release: provider.query_kernel_release(),
             disks: provider.query_storage(),
             network_adapters: provider.query_network(),
             display_info: provider.query_display(),
@@ -744,7 +747,7 @@ impl SysInfoState {
             // half says why, or nothing if it was read.
             let mut props = vec![
                 Property::new("OS Name", "Slate OS"),
-                Property::new("OS Version", "1.0.0"),
+                Property::new("OS Version", Self::NOT_REPORTED),
             ];
             if let Err(e) = &self.cpu_info {
                 props.extend(Self::unreadable("Processor", e));
@@ -756,10 +759,21 @@ impl SysInfoState {
         };
         vec![
             Property::new("OS Name", "Slate OS"),
-            Property::new("OS Version", "1.0.0"),
-            Property::new("OS Build", "2026.05.17-nightly"),
-            Property::new("Kernel Version", "0.1.0-slateos"),
-            Property::new("System Manufacturer", "SMBIOS: To Be Filled By O.E.M."),
+            // These four were constants: an OS version and build date nothing
+            // publishes, a kernel version the kernel does not report (it says
+            // `6.6.0-slateos`), and an SMBIOS manufacturer string no DMI table
+            // was read for. The kernel's release is read; the rest are not
+            // published anywhere, and say so.
+            Property::new("OS Version", Self::NOT_REPORTED),
+            Property::new("OS Build", Self::NOT_REPORTED),
+            Property::new(
+                "Kernel Version",
+                match &self.kernel_release {
+                    Ok(release) => release.as_str(),
+                    Err(_) => Self::NOT_REPORTED,
+                },
+            ),
+            Property::new("System Manufacturer", Self::NOT_REPORTED),
             Property::new("Processor", &Self::or_absent(cpu.brand.as_deref())),
             Property::new(
                 "Cores / Threads",
@@ -3205,6 +3219,29 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The summary invents nothing: the kernel's release is the one it
+    /// reports, and the OS version, build and manufacturer -- which nothing
+    /// publishes -- say so, where they were "1.0.0", "2026.05.17-nightly" and
+    /// "SMBIOS: To Be Filled By O.E.M.".
+    #[test]
+    fn the_summary_invents_no_version_build_or_manufacturer() {
+        let mut app = SysInfoState::new();
+        app.cpu_info = Ok(fixture_cpu());
+        app.memory_info = Ok(fixture_memory());
+        app.kernel_release = Ok(String::from("6.6.0-slateos"));
+        let rows = app.props_system_summary();
+        let value = |name: &str| {
+            rows.iter()
+                .find(|p| p.name == name)
+                .map(|p| p.value.clone())
+                .unwrap_or_else(|| panic!("no {name} row"))
+        };
+        assert_eq!(value("Kernel Version"), "6.6.0-slateos");
+        for invented in ["OS Version", "OS Build", "System Manufacturer"] {
+            assert_eq!(value(invented), SysInfoState::NOT_REPORTED, "{invented}");
+        }
     }
 
     /// **An unreadable category says why, an empty one says none** -- where

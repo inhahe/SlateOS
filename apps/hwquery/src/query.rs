@@ -213,6 +213,15 @@ pub trait HardwareProvider {
     /// only one that knows how much room it has to draw it in -- and because a
     /// provider that returned "4h 23m 17s" is exactly what this replaced.
     fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError>;
+    /// The kernel's release, as `uname -r` gives it, from `/proc/version`.
+    ///
+    /// A default that says "not available", so a provider that has no kernel
+    /// to ask need not invent one.
+    fn query_kernel_release(&self) -> Result<String, HwQueryError> {
+        Err(HwQueryError::NotAvailable {
+            path: String::from("/proc/version"),
+        })
+    }
     /// Query startup programs.
     fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError>;
     /// Human-readable name of this provider.
@@ -1113,6 +1122,27 @@ impl HardwareProvider for SyscallProvider {
     /// repeating here is that **0.0 is also what an invented value would look
     /// like if nobody had thought about it.**
     /// Read `/proc/uptime`.
+    /// `/proc/version` is `<name> version <release> ...`; the release is the
+    /// third word. SlateOS names itself Linux there, for the software that
+    /// checks, and its release says `-slateos`.
+    fn query_kernel_release(&self) -> Result<String, HwQueryError> {
+        let line =
+            self.procfs()
+                .version()
+                .ok()
+                .flatten()
+                .ok_or_else(|| HwQueryError::NotAvailable {
+                    path: self.rooted("/proc/version"),
+                })?;
+        line.split(|b| b.is_ascii_whitespace())
+            .filter(|w| !w.is_empty())
+            .nth(2)
+            .map(shown)
+            .ok_or_else(|| HwQueryError::ParseError {
+                detail: String::from("/proc/version names no release"),
+            })
+    }
+
     fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError> {
         self.procfs()
             .uptime()
@@ -2712,6 +2742,29 @@ mod tests {
         assert!(matches!(
             provider.query_network(),
             Err(HwQueryError::NotAvailable { .. })
+        ));
+    }
+
+    /// The release is the third word of `/proc/version`, as SlateOS's kernel
+    /// writes it (`kernel/src/fs/procfs.rs`, `gen_version`).
+    #[test]
+    fn the_kernel_release_is_read_from_proc_version() {
+        let dir = scratchdir::ScratchDir::new("hwquery_version");
+        std::fs::create_dir_all(dir.dir().join("proc")).expect("fixture");
+        std::fs::write(
+            dir.dir().join("proc/version"),
+            "Linux version 6.6.0-slateos (slateos@slateos) (rustc) #1 SMP\n",
+        )
+        .expect("fixture");
+        let provider = SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+        assert_eq!(
+            provider.query_kernel_release().as_deref(),
+            Ok("6.6.0-slateos")
+        );
+        std::fs::write(dir.dir().join("proc/version"), "Linux\n").expect("fixture");
+        assert!(matches!(
+            provider.query_kernel_release(),
+            Err(HwQueryError::ParseError { .. })
         ));
     }
 }

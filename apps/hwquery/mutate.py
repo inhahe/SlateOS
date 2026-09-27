@@ -29,6 +29,7 @@ PLACEHOLDER = "the_placeholder_for_no_card_is_not_an_adapter"
 MISSING = "a_missing_line_is_not_reported"
 ESCAPED = "a_name_that_is_not_text_is_escaped_not_replaced"
 NEITHER = "neither_file_is_not_available"
+RELEASE = "the_kernel_release_is_read_from_proc_version"
 
 QUERY = [
     (
@@ -99,6 +100,12 @@ QUERY = [
         "                .ok_or_else(|| HwQueryError::NotAvailable {\n"
         '                    path: self.rooted("/proc/net"),',
         [NEITHER],
+    ),
+    (
+        "the kernel's name is taken for its release",
+        "            .nth(2)",
+        "            .nth(0)",
+        [RELEASE],
     ),
 ]
 

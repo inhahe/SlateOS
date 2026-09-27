@@ -24,6 +24,7 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src" / "main.rs"
 
 UNREADABLE = "an_unreadable_category_is_not_an_empty_one"
+SUMMARY = "the_summary_invents_no_version_build_or_manufacturer"
 
 MUTATIONS = [
     (
@@ -49,6 +50,18 @@ MUTATIONS = [
         '            Err(e) => return Self::unreadable("Processor", e),',
         '            Err(_) => return vec![Property::new("Processor", "Not available — nothing on this system provides /sys/hardware/cpu")],',
         [UNREADABLE],
+    ),
+    (
+        "the kernel version is invented again",
+        "                    Ok(release) => release.as_str(),",
+        '                    Ok(_) => "0.1.0-slateos",',
+        [SUMMARY],
+    ),
+    (
+        "the manufacturer is invented again",
+        '            Property::new("System Manufacturer", Self::NOT_REPORTED),',
+        '            Property::new("System Manufacturer", "SMBIOS: To Be Filled By O.E.M."),',
+        [SUMMARY],
     ),
 ]
 

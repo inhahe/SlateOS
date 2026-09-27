@@ -129,6 +129,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub mod bmp;
+mod encode;
 pub mod gif;
 pub mod ico;
 pub mod jpeg;
@@ -138,6 +139,8 @@ mod scale;
 pub mod testing;
 pub mod tiff;
 pub mod webp;
+
+pub use encode::{EncodeError, encode_png};
 
 /// A decoded picture: densely packed `0xAARRGGBB`, row-major, no padding.
 #[derive(Clone, Debug, PartialEq, Eq)]

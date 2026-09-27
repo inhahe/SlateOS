@@ -308,12 +308,16 @@ impl SyscallProvider {
     }
 
     /// A scalar file parsed as a number.
+    ///
+    /// A file that is there and holds no number is a `ParseError`, naming the
+    /// file and what it held. It was `NotAvailable`, so System Information
+    /// said "nothing on this system provides" a file it had just read -- and
+    /// named it by its unrooted path, not the one opened.
     fn read_num<T: core::str::FromStr>(&self, path: &str) -> Result<T, HwQueryError> {
-        self.read_scalar(path)?
-            .parse()
-            .map_err(|_| HwQueryError::NotAvailable {
-                path: path.to_string(),
-            })
+        let text = self.read_scalar(path)?;
+        text.parse().map_err(|_| HwQueryError::ParseError {
+            detail: format!("{}: expected a number, got {text:?}", self.rooted(path)),
+        })
     }
 
     /// How many CPUs a Linux-style range names: `"0-7"` is 8, `"0,2-3"` is 3.
@@ -2154,5 +2158,35 @@ mod tests {
             "the first row taken for the primary"
         );
         assert_eq!(display.vram_mb, None);
+    }
+
+    /// A file that is there but holds no number is a parse error naming it
+    /// and what it held -- not "not available", which is what a missing file
+    /// is, and which says nothing provides the file.
+    #[test]
+    fn a_file_that_holds_no_number_is_a_parse_error_not_a_missing_file() {
+        let dir = scratchdir::ScratchDir::new("hwquery_read_num");
+        let cpuid = dir.dir().join("sys/devices/system/cpu/cpuid");
+        std::fs::create_dir_all(&cpuid).expect("fixture");
+        std::fs::write(cpuid.join("family"), "six\n").expect("fixture");
+        std::fs::write(cpuid.join("model"), "158\n").expect("fixture");
+        std::fs::write(cpuid.join("stepping"), "10\n").expect("fixture");
+        let provider = SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+        match provider.query_cpu() {
+            Err(HwQueryError::ParseError { detail }) => {
+                assert!(detail.contains("cpuid/family"), "names the file: {detail}");
+                assert!(detail.contains("\"six\""), "says what it held: {detail}");
+                assert!(
+                    detail.starts_with(dir.dir().to_str().expect("text")),
+                    "names the path opened: {detail}"
+                );
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+        std::fs::remove_file(cpuid.join("family")).expect("fixture");
+        assert!(matches!(
+            provider.query_cpu(),
+            Err(HwQueryError::NotAvailable { .. })
+        ));
     }
 }

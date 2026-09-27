@@ -38,6 +38,7 @@ NEITHER = "neither_file_is_not_available"
 RELEASE = "the_kernel_release_is_read_from_proc_version"
 CPU = "the_processor_is_read_from_sys_devices"
 UNPUBLISHED = "what_nothing_publishes_is_none_not_zero"
+MALFORMED = "a_file_that_holds_no_number_is_a_parse_error_not_a_missing_file"
 
 QUERY = [
     (
@@ -150,6 +151,26 @@ QUERY = [
         "            refresh_rate_hz: primary.map(|mon| mon.refresh_hz),",
         "            refresh_rate_hz: mons.outputs.first().map(|mon| mon.refresh_hz),",
         [UNPUBLISHED],
+    ),
+    (
+        "a malformed file is called missing",
+        "        text.parse().map_err(|_| HwQueryError::ParseError {\n"
+        '            detail: format!("{}: expected a number, got {text:?}", self.rooted(path)),\n',
+        "        text.parse().map_err(|_| HwQueryError::NotAvailable {\n"
+        "            path: self.rooted(path),\n",
+        [MALFORMED],
+    ),
+    (
+        "a malformed file is named by the path not opened",
+        '            detail: format!("{}: expected a number, got {text:?}", self.rooted(path)),',
+        '            detail: format!("{path}: expected a number, got {text:?}"),',
+        [MALFORMED],
+    ),
+    (
+        "a malformed file's content is not shown",
+        '            detail: format!("{}: expected a number, got {text:?}", self.rooted(path)),',
+        '            detail: format!("{}: expected a number", self.rooted(path)),',
+        [MALFORMED],
     ),
 ]
 

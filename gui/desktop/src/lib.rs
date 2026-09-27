@@ -562,14 +562,24 @@ const START_LINK_LIT_EDGE_ALPHA: u8 = 66;
 /// `aero-sm-power-item:hover`, its blue at 0.3.
 const POWER_MENU_LIT_ALPHA: u8 = 77;
 /// How strongly the start menu draws a hint -- the empty search field's
-/// "Type to search", and what Enter will do when nothing is found: the
+/// "Search programs", and what Enter will do when nothing is found: the
 /// menu's text colour at this alpha, quieter than anything that can be
 /// chosen.
 const START_MENU_HINT_ALPHA: u8 = 150;
+/// What the empty search field says it does.
+const START_SEARCH_HINT: &str = "Search programs";
 /// The band at the foot of the programs column that holds the search field.
 const START_MENU_SEARCH_BAND: f32 = 50.0;
 /// The search field's height inside that band.
 const START_SEARCH_HEIGHT: f32 = 30.0;
+/// The start menu search field's magnifier, in logical pixels: the
+/// reference's 16.
+const START_SEARCH_ICON: f32 = 16.0;
+/// From the search field's left edge to the magnifier: the reference's
+/// `padding: 0 9px`.
+const START_SEARCH_INSET: f32 = 9.0;
+/// From the magnifier to where typing starts: the reference's `gap: 7px`.
+const START_SEARCH_ICON_GAP: f32 = 7.0;
 /// Width of the scroll indicator drawn when the list is longer than the menu.
 const START_MENU_SCROLLBAR_WIDTH: f32 = 4.0;
 /// The block at the top of the places column: the user's picture and name.
@@ -2217,6 +2227,13 @@ pub struct DesktopTheme {
     /// The start menu's places column: a shade apart from the programs
     /// column, as the reference's darker glass is, so the two read as two.
     pub start_menu_side_bg: Color,
+    /// The well of the start menu's search field: the palette's `crust`,
+    /// where the toolkit sinks every text input.
+    pub start_menu_field_bg: Color,
+    /// The line round that well: the palette's `border`, as quiet as the
+    /// reference's `#aac6e0` edge. The caret, not a coloured ring, is what
+    /// says the typing goes there.
+    pub start_menu_field_border: Color,
     /// Floating overlays such as the Alt+Tab switcher.
     pub overlay_bg: Color,
     pub overlay_fg: Color,
@@ -2270,6 +2287,8 @@ impl DesktopTheme {
             start_menu_bg: p.base,
             start_menu_fg: p.text,
             start_menu_side_bg: p.mantle,
+            start_menu_field_bg: p.crust,
+            start_menu_field_border: p.border,
             overlay_bg: p.base,
             overlay_fg: p.text,
             overlay_selected_bg: p.surface1,
@@ -8555,12 +8574,35 @@ impl DesktopShell {
     /// Draw the start menu's search field: what has been typed, with a caret,
     /// or a hint saying what typing does -- and, when the search finds
     /// nothing, what Enter will do instead.
+    ///
+    /// The reference's `aero-sm-search`: a well with a quiet line round it and
+    /// a magnifier at its start.
     fn render_start_search(&self, tree: &mut RenderTree) {
         let field = self.start_search_rect();
         let size = self.font_size(TextRole::Body);
         let radii = CornerRadii::all(self.scale(4.0));
-        stroke_round(tree, field, self.theme.accent_color, self.scale(1.0), radii);
-        let inset = self.scale(8.0);
+        fill_round(tree, field, self.theme.start_menu_field_bg, radii);
+        stroke_round(
+            tree,
+            field,
+            self.theme.start_menu_field_border,
+            self.scale(1.0),
+            radii,
+        );
+        let hint = with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA);
+        let inset = self.scale(START_SEARCH_INSET);
+        let px = self.icon_px(START_SEARCH_ICON);
+        #[allow(clippy::cast_precision_loss)]
+        let side = px as f32;
+        tree.push(guitk::render::RenderCommand::Image {
+            x: field.x + inset,
+            y: field.y + (field.h - side).max(0.0) / 2.0,
+            width: side,
+            height: side,
+            image_id: self.icon("system-search", px, hint),
+        });
+        let text_x = field.x + inset + side + self.scale(START_SEARCH_ICON_GAP);
+        let text_w = (field.x + field.w - inset - text_x).max(1.0);
         let line = text::line_height(size, guitk::render::FontWeightHint::Regular);
         let y = field.y + ((field.h - line) / 2.0).max(0.0);
         let query = self.start_query.text();
@@ -8571,9 +8613,9 @@ impl DesktopShell {
                 cursor: self.start_query.cursor(),
                 selection_anchor: self.start_query.selection_anchor(),
                 focused: true,
-                x: field.x + inset,
+                x: text_x,
                 y,
-                width: (field.w - inset * 2.0).max(1.0),
+                width: text_w,
                 line_height: line,
                 font_size: size,
                 weight: guitk::render::FontWeightHint::Regular,
@@ -8584,12 +8626,15 @@ impl DesktopShell {
             },
         );
         if query.is_empty() {
+            // What it searches, as the reference's placeholder says -- the
+            // programs, which is all it does search; a command it finds
+            // nothing for is run, and the list says so when that happens.
             tree.text_in(
-                field.x + inset + self.scale(4.0),
+                text_x + self.scale(4.0),
                 y,
-                (field.w - inset * 2.0).max(0.0),
-                "Type to search",
-                with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA),
+                (text_w - self.scale(4.0)).max(0.0),
+                START_SEARCH_HINT,
+                hint,
                 size,
             );
         } else if self.start_menu_rows().is_empty() {
@@ -24226,7 +24271,7 @@ mod start_search_tests {
     fn the_empty_field_says_what_typing_does() {
         let shell = shell();
         let drawn = format!("{:?}", shell.render_start_menu().expect("the menu is open"));
-        assert!(drawn.contains("Type to search"), "no hint: {drawn}");
+        assert!(drawn.contains("Search programs"), "no hint: {drawn}");
         assert!(
             !drawn.contains("\"Applications\""),
             "the old title is still drawn"

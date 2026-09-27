@@ -1859,6 +1859,14 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The start menu's search field is the reference's** -- done
+  2026-09-26. It was an accent-coloured ring with "Type to search" in it; it
+  is the reference's `aero-sm-search` now: a well (the palette's `crust`, where
+  the toolkit sinks every text input) with a quiet line round it, a magnifier
+  at its start, and a hint saying what it searches -- "Search programs", not
+  the reference's "programs, settings, and files", since programs are all it
+  finds. The caret, not a coloured ring, says the typing goes there.
+
 - `[C]` **The power choices are the reference's flyout** -- done 2026-09-26
   (`design-decisions.md` §1407). Each choice with its picture, in the
   reference's order -- log out, lock, sleep, hibernate, restart, shut down --

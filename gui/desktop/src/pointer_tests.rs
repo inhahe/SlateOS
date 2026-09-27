@@ -418,6 +418,108 @@ fn a_wheel_over_either_part_of_the_power_button_scrolls_the_list() {
     }
 }
 
+/// **The search field is the reference's `aero-sm-search`**: a well with a
+/// quiet line round it -- not the accent's ring -- and a magnifier at its
+/// start, before the hint and before anything typed.
+#[test]
+fn the_start_menu_search_field_is_a_well_with_a_magnifier() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let field = shell.start_search_rect();
+    let same =
+        |x: f32, y: f32, w: f32, h: f32| (x, y, w, h) == (field.x, field.y, field.w, field.h);
+    let tree = shell.render_start_menu().expect("open");
+    assert!(
+        tree.commands.iter().any(|c| matches!(c,
+            RenderCommand::FillRect { x, y, width, height, color, .. }
+                if same(*x, *y, *width, *height) && *color == shell.theme.start_menu_field_bg)),
+        "the field is not a well"
+    );
+    let rings: Vec<guitk::color::Color> = tree
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::StrokeRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if same(*x, *y, *width, *height) => Some(*color),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rings,
+        [shell.theme.start_menu_field_border],
+        "the field's line is not the quiet border alone"
+    );
+
+    // The magnifier, inside the field at its start.
+    let magnifier = |shell: &DesktopShell, tree: &RenderTree| -> (f32, f32) {
+        let found: Vec<(f32, f32, u64)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } if field.contains(*x + 1.0, *y + 1.0) => Some((*x, *width, *image_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        let (x, width, id) = found[0];
+        let request = shell.icon_request(id).expect("an icon");
+        assert_eq!(request.name, "system-search");
+        (x, width)
+    };
+    let (icon_x, icon_w) = magnifier(&shell, &tree);
+    assert!(
+        icon_x < field.x + field.w / 4.0,
+        "the magnifier is not at the field's start"
+    );
+    let text_at = |tree: &RenderTree, wanted: &str| -> f32 {
+        tree.commands
+            .iter()
+            .find_map(|c| match c {
+                // The hint is a `Text`; what is typed is the field's own
+                // `RichText`, which carries the caret and selection.
+                RenderCommand::Text { x, text, .. } | RenderCommand::RichText { x, text, .. }
+                    if text == wanted =>
+                {
+                    Some(*x)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{wanted:?} is not drawn"))
+    };
+    assert!(
+        text_at(&tree, "Search programs") >= icon_x + icon_w,
+        "the hint runs over the magnifier"
+    );
+
+    // And what is typed starts after it too.
+    for c in "calc".chars() {
+        drop(shell.handle_hotkey(&KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        }));
+    }
+    let typed = shell.render_start_menu().expect("open");
+    let (icon_x, icon_w) = magnifier(&shell, &typed);
+    assert!(
+        text_at(&typed, "calc") >= icon_x + icon_w,
+        "the typing runs over the magnifier"
+    );
+}
+
 /// A fraction left over from one visit to the menu must not move the next one.
 #[test]
 fn reopening_the_menu_forgets_the_leftover_fraction() {

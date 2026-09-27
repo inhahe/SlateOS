@@ -840,6 +840,10 @@ pub struct Rendering {
     /// [`ScaledFont`](crate::scaled::ScaledFont), which knows the face;
     /// [`rasterize_with`] takes the outline as it is given.
     pub hinting: bool,
+    /// Which of a colour font's palettes its colour glyphs are painted with
+    /// -- a dark-background one on a dark theme, where the font has one
+    /// ([`crate::colr::ColourPalette`]). Nothing else is drawn differently.
+    pub palette: crate::colr::ColourPalette,
 }
 
 impl Default for Rendering {
@@ -848,6 +852,7 @@ impl Default for Rendering {
             smoothing: true,
             subpixel: Subpixel::None,
             hinting: false,
+            palette: crate::colr::ColourPalette::Normal,
         }
     }
 }
@@ -1406,6 +1411,7 @@ mod tests {
             smoothing: true,
             subpixel: order,
             hinting: false,
+            ..Rendering::default()
         }
     }
 
@@ -1473,6 +1479,7 @@ mod tests {
             smoothing: false,
             subpixel: Subpixel::Rgb,
             hinting: false,
+            ..Rendering::default()
         };
         let m = rasterize_with(&shape, 1.0, off).unwrap();
         assert!(m.lcd.is_none(), "no subpixels without anti-aliasing");

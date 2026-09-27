@@ -502,13 +502,7 @@ impl<'a> Reader<'a> {
                     .pixarlog
                     .as_ref()
                     .ok_or(ImageError::Unsupported("TIFF PixarLog"))?;
-                codec.decode(
-                    bytes,
-                    out,
-                    self.dir.width,
-                    self.file.big_endian,
-                    self.limits.max_decompressed_bytes,
-                )
+                codec.decode(bytes, out, self.dir.width, self.file.big_endian)
             }
             compression::SGILOG | compression::SGILOG24 => {
                 // A row at a time: the image's scanline, or a tile's row, of
@@ -530,13 +524,26 @@ impl<'a> Reader<'a> {
                 }
             }
             compression::DEFLATE | compression::ADOBE_DEFLATE => {
-                let full = if self.dir.tiled {
+                let whole = if self.dir.tiled {
                     self.dir.tile_size()
                 } else {
-                    self.dir.strip_size()
+                    // The strip's own height -- `RowsPerStrip`, or what is
+                    // left of the image below the row `TIFFStartStrip` puts
+                    // the strip at -- in the 32-bit arithmetic libtiff does
+                    // it in.
+                    let row = index
+                        .checked_rem(self.dir.strips_per_image.max(1))
+                        .unwrap_or(0)
+                        .wrapping_mul(self.dir.rows_per_strip);
+                    let height = self
+                        .dir
+                        .length
+                        .wrapping_sub(row)
+                        .min(self.dir.rows_per_strip);
+                    self.dir.strip_size_rows(height)
                 };
-                let slack = usize::try_from(full.unwrap_or(0)).unwrap_or(usize::MAX);
-                inflate(bytes, out, slack)
+                let whole = whole.is_some_and(|w| u64::try_from(out.len()).is_ok_and(|n| n == w));
+                inflate(bytes, out, whole)
             }
             scheme if !compression::known(scheme) => {
                 Err(ImageError::Unsupported("TIFF compression scheme"))
@@ -738,61 +745,34 @@ fn packbits(raw: &[u8], out: &mut [u8]) -> ImageResult<()> {
     Ok(())
 }
 
-/// A zlib stream decoded as libtiff decodes a whole strip: through
-/// libdeflate (`libdeflate_zlib_decompress`), which accepts a stream that
-/// holds more than the strip needs and refuses one that holds less.
+/// A zlib stream decoded as libtiff 4.7.1's `ZIPDecode` decodes a strip or
+/// tile, by the shared `deflate` crate's ports of the two libraries it uses.
 ///
-/// Two differences remain, both confined to damaged streams, because the
-/// shared `deflate` crate decodes a block at a time and does not say where
-/// its input ended: damage later in the block that finishes the strip is
-/// seen here and not by libdeflate, and the checksum of a stream that ends
-/// exactly at the strip's end is read from the strip's last four bytes, not
-/// from just after the stream. `slack` is how much more than the strip a
-/// block may hold before this gives up.
-fn inflate(raw: &[u8], out: &mut [u8], slack: usize) -> ImageResult<()> {
-    let bad = ImageError::Corrupt("TIFF deflate data");
-    let [cmf, flg, ..] = raw else { return Err(bad) };
-    if raw.len() < 6 {
-        return Err(bad);
-    }
-    let header = u16::from_be_bytes([*cmf, *flg]);
-    if header % 31 != 0 || (header >> 8) & 0xF != 8 || header >> 12 > 7 || (header >> 5) & 1 != 0 {
-        return Err(bad);
-    }
-    let trailer = raw.len().saturating_sub(4);
-    let body = raw.get(2..trailer).ok_or(ImageError::Truncated)?;
-    let mut stream = deflate::inflate_stream(body, out.len().saturating_add(slack));
-    let mut filled = 0usize;
-    while filled < out.len() {
-        let rest = out.get_mut(filled..).ok_or(ImageError::Truncated)?;
-        match stream.read(rest)? {
-            0 => {
-                return Err(ImageError::Corrupt(
-                    "TIFF deflate data ends before the strip does",
-                ));
-            }
-            n => filled = filled.saturating_add(n),
+/// A request for the `whole` of a tile or strip -- a strip's own rows, so
+/// the shorter last strip too -- goes through libdeflate
+/// (`libdeflate_zlib_decompress` with no size out-parameter,
+/// `deflate::zlib_decompress_into`): content with a stream that holds more
+/// than the buffer, stopping at the first literal, match or stored block that
+/// does not fit and writing none of it, and refusing one that holds less.
+/// A request for less goes through zlib's `inflate`
+/// (`deflate::zlib_inflate_into`), done once the buffer is full or the stream
+/// ends exactly with it. The RGBA reader asks for less only of a subsampled
+/// YCbCr strip whose line size libtiff rounds down: 4 rows of a 4x4-sampled
+/// block of 18 bytes are asked for as 4 lines of 4.
+fn inflate(raw: &[u8], out: &mut [u8], whole: bool) -> ImageResult<()> {
+    let short = || ImageError::Corrupt("TIFF deflate data ends before the strip does");
+    if whole {
+        match deflate::zlib_decompress_into(raw, out) {
+            Ok(_) => Ok(()),
+            Err(deflate::Error::ShortOutput { .. }) => Err(short()),
+            Err(e) => Err(e.into()),
         }
-    }
-    let mut probe = [0u8; 1];
-    match stream.read(&mut probe) {
-        // The stream ends with the strip: its checksum must hold.
-        Ok(0) => {
-            let tail = raw.get(trailer..).ok_or(ImageError::Truncated)?;
-            let stored = u32::from_be_bytes([
-                tail.first().copied().unwrap_or(0),
-                tail.get(1).copied().unwrap_or(0),
-                tail.get(2).copied().unwrap_or(0),
-                tail.get(3).copied().unwrap_or(0),
-            ]);
-            if deflate::adler32(out) != stored {
-                return Err(ImageError::Corrupt("TIFF deflate checksum"));
-            }
-            Ok(())
+    } else {
+        match deflate::zlib_inflate_into(raw, out)? {
+            deflate::ZlibStop::Full => Ok(()),
+            deflate::ZlibStop::Ended(n) if n == out.len() => Ok(()),
+            deflate::ZlibStop::Ended(_) => Err(short()),
         }
-        // More than the strip needs: libdeflate stops, content.
-        Ok(_) | Err(deflate::Error::OutputTooLarge) => Ok(()),
-        Err(e) => Err(e.into()),
     }
 }
 
@@ -838,12 +818,43 @@ mod tests {
     fn a_zlib_stream_with_more_than_the_strip_needs_is_accepted() {
         let data: Vec<u8> = (0..200u8).collect();
         let z = deflate::zlib_deflate(&data);
+        for whole in [true, false] {
+            // More than the strip holds: accepted by both libraries, though
+            // how much of it libdeflate writes depends on where its blocks
+            // and matches fall (see the next test).
+            let mut out = [0u8; 100];
+            inflate(&z, &mut out, whole).unwrap();
+            // Exactly the strip: accepted, and all of it.
+            let mut all = [0u8; 200];
+            inflate(&z, &mut all, whole).unwrap();
+            assert_eq!(&all[..], &data[..], "whole: {whole}");
+            // Less than the strip: refused.
+            let mut more = [0u8; 201];
+            assert!(inflate(&z, &mut more, whole).is_err(), "whole: {whole}");
+        }
+        // zlib writes as far as the strip goes.
         let mut out = [0u8; 100];
-        inflate(&z, &mut out, 100).unwrap();
+        inflate(&z, &mut out, false).unwrap();
         assert_eq!(&out[..], &data[..100]);
-        let mut all = [0u8; 200];
-        inflate(&z, &mut all, 0).unwrap();
-        let mut more = [0u8; 201];
-        assert!(inflate(&z, &mut more, 0).is_err());
+    }
+
+    /// A stored block bigger than the strip: libdeflate, for a whole strip,
+    /// writes none of it and is content; zlib, for part of one, copies as
+    /// much as fits.
+    #[test]
+    fn a_whole_strip_and_a_short_one_stop_where_their_libraries_do() {
+        let data: Vec<u8> = (0..200u8).collect();
+        let len = u16::try_from(data.len()).unwrap();
+        let mut z = alloc::vec![0x78, 0x01, 0x01];
+        z.extend_from_slice(&len.to_le_bytes());
+        z.extend_from_slice(&(!len).to_le_bytes());
+        z.extend_from_slice(&data);
+        z.extend_from_slice(&deflate::adler32(&data).to_be_bytes());
+        let mut whole = [0xAAu8; 100];
+        inflate(&z, &mut whole, true).unwrap();
+        assert!(whole.iter().all(|&b| b == 0xAA), "libdeflate wrote nothing");
+        let mut short = [0xAAu8; 100];
+        inflate(&z, &mut short, false).unwrap();
+        assert_eq!(&short[..], &data[..100]);
     }
 }

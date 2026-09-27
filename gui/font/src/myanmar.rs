@@ -9,7 +9,7 @@
 //!
 //! * **It sorts.** Indic and Khmer move a small fixed number of things: Khmer
 //!   rotates a `COENG + RO` pair and a `VPre` to the front and touches nothing
-//!   else. Myanmar assigns a [`Position`](crate::indic::Position) to *every*
+//!   else. Myanmar assigns a [`Position`] to *every*
 //!   glyph of the syllable and then stably sorts by it. That is the whole
 //!   reordering — [`reorder_consonant_syllable`] is one pass to label and one
 //!   sort, and every rule from the Microsoft Myanmar script-development notes

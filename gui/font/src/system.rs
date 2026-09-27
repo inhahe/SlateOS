@@ -51,7 +51,7 @@ use crate::{FONT_HEIGHT, Font, FontMetrics, GlyphBitmap};
 /// are drawn from the first fallback face that has them, so a line comes out
 /// in as many faces as it needs rather than as a row of boxes. Which face
 /// draws which part is decided a grapheme cluster at a time
-/// ([`itemize`](crate::itemize)), and the parts are shaped each in its own
+/// (`itemize.rs`), and the parts are shaped each in its own
 /// face and joined into one [`ShapedRun`], so measuring, drawing and
 /// hit-testing still walk one list.
 #[derive(Debug)]
@@ -1587,6 +1587,7 @@ mod tests {
             smoothing: true,
             subpixel: Subpixel::Rgb,
             hinting: false,
+            ..Rendering::default()
         };
         let mut cache = FontCache::new();
         let face = Arc::new(Face::parse(build_test_font()).unwrap());
@@ -1649,6 +1650,7 @@ mod tests {
             smoothing: true,
             subpixel: Subpixel::Rgb,
             hinting: false,
+            ..Rendering::default()
         });
         assert!(coloured(&lcd) > 0, "no colour fringe at all");
         let grey = draw(Rendering::default());

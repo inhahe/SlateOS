@@ -683,6 +683,23 @@ def fixtures() -> dict[str, bytes]:
                                                 Layout(scheme=LZW, predictor=2, big_endian=True),
                                                 extra=[(EXTRA_SAMPLES, SHORT, [2])])
     f["grey16_deflate_predictor"] = tiff(picture(W, H, 1, 16, 29), 16, 1, Layout(scheme=DEFLATE, predictor=2))
+    # A last strip whose stream holds a full strip's rows, as some writers
+    # leave it. libtiff decodes the whole of any strip -- the last one's
+    # fewer rows too -- with libdeflate, which stops at the first literal,
+    # match or stored block that no longer fits and writes none of it: so a
+    # compressed strip shows what fitted, and a stored one nothing, the
+    # buffer keeping the strip before it.
+    lines = [bytes(p[0] for p in row) for row in picture(W, H + 1, 1, 8, 43)]
+    grey8 = [(WIDTH, LONG, [W]), (LENGTH, LONG, [H]), (BITS, SHORT, [8]), (COMPRESSION, SHORT, [DEFLATE]),
+             (SAMPLES, SHORT, [1]), (PHOTOMETRIC, SHORT, [1]), (ROWS_PER_STRIP, LONG, [3])]
+    f["grey8_deflate_last_strip_holds_more_stored"] = write_tiff(
+        grey8, [zlib.compress(b"".join(lines[y:y + 3]), 0) for y in range(0, H + 1, 3)])
+    # The last strip's first row as literals and the two after it as one
+    # match, which libdeflate does not start: the strip's second row stays
+    # as the strip before left it.
+    repeated = lines[:H - 2] + [bytes((x * 5 + 7) % 128 for x in range(W))] * 3
+    f["grey8_deflate_last_strip_holds_more_match"] = write_tiff(
+        grey8, [zlib.compress(b"".join(repeated[y:y + 3])) for y in range(0, H + 1, 3)])
     f["rgb8_separate_deflate_predictor"] = tiff(rgb, 8, 2, Layout(planar=2, scheme=DEFLATE, predictor=2))
     f["rgb8_tiled_lzw_predictor"] = tiff(big, 8, 2, Layout(tile=(16, 16), scheme=LZW, predictor=2))
     f["rgb8_old_style_lzw"] = tiff(rgb, 8, 2, Layout(scheme=LZW, old_lzw=True))

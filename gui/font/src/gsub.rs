@@ -582,7 +582,8 @@ pub struct SubGlyph {
     ///
     /// Read twice, for two different questions. [`Skipper`] asks which *kind*
     /// it is, to decide whether a lookup may step over the glyph on its way
-    /// past; [`ScaledFont::shape`] asks only whether it is one at all, to erase
+    /// past; [`ScaledFont::shape`](crate::scaled::ScaledFont::shape) asks only
+    /// whether it is one at all, to erase
     /// it at the end. See [`Ignorable`] for why the two questions have
     /// different answers.
     ///
@@ -602,7 +603,8 @@ pub struct SubGlyph {
     /// component's — which, since a ligature is a substitution, is cleared
     /// anyway.
     ///
-    /// A glyph still carrying one at the very end of [`ScaledFont::shape`] is
+    /// A glyph still carrying one at the very end of
+    /// [`ScaledFont::shape`](crate::scaled::ScaledFont::shape) is
     /// replaced by the face's space glyph, or dropped.
     pub(crate) ignorable: Ignorable,
 }

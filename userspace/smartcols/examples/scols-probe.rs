@@ -180,14 +180,20 @@ fn main() {
                     Some(member) => tb.group_lines(line_at(&lines, arg(1)), member),
                     None => Err(Error::Invalid),
                 };
-                say(&mut err, &[b"group ", arg(1), b" ", arg(2), b": ", rc(r).as_bytes()]);
+                say(
+                    &mut err,
+                    &[b"group ", arg(1), b" ", arg(2), b": ", rc(r).as_bytes()],
+                );
             }
             (b"link", 3) => {
                 let r = match (line_at(&lines, arg(1)), line_at(&lines, arg(2))) {
                     (Some(ln), Some(member)) => tb.line_link_group(ln, member),
                     _ => Err(Error::Invalid),
                 };
-                say(&mut err, &[b"link ", arg(1), b" ", arg(2), b": ", rc(r).as_bytes()]);
+                say(
+                    &mut err,
+                    &[b"link ", arg(1), b" ", arg(2), b": ", rc(r).as_bytes()],
+                );
             }
             (b"cmp", 3) => {
                 if let Some(cl) = col_at(&cols, arg(1)) {

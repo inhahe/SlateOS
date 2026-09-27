@@ -133,7 +133,8 @@ impl Table {
         if self.is_tree_root(ln) && !self.is_last_tree_root(ln) {
             return false;
         }
-        if self.is_group_member(ln) && (!self.is_last_group_member(ln) || self.has_group_children(ln))
+        if self.is_group_member(ln)
+            && (!self.is_last_group_member(ln) || self.has_group_children(ln))
         {
             return false;
         }

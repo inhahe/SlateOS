@@ -377,7 +377,10 @@ impl Table {
         let mut i = self.grpset.len();
         while i > 0 {
             if let Some(gr) = self.grpset.get(i.saturating_sub(1)).copied().flatten()
-                && matches!(self.group_state(gr), GState::ContChildren | GState::LastMember)
+                && matches!(
+                    self.group_state(gr),
+                    GState::ContChildren | GState::LastMember
+                )
             {
                 return Some(gr);
             }

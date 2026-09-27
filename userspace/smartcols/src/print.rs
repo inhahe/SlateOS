@@ -637,8 +637,10 @@ impl Table {
             buf.reset();
             // Above the groups' chart, as many blanks as it is wide.
             if col.is_groups && self.is_tree() && col.is_tree() {
-                buf.data
-                    .extend(std::iter::repeat_n(b' ', self.grpset.len().saturating_add(1)));
+                buf.data.extend(std::iter::repeat_n(
+                    b' ',
+                    self.grpset.len().saturating_add(1),
+                ));
             }
             let name = if self.is_shellvar {
                 col.name_as_shellvar()

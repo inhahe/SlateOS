@@ -541,7 +541,8 @@ fn a_list_is_sorted_stably_with_cells_without_data_first() {
             tb.line_set_data(ln, name, n).unwrap();
         }
         if let Some(s) = s {
-            tb.line_set_data(ln, size, s.to_string().as_bytes()).unwrap();
+            tb.line_set_data(ln, size, s.to_string().as_bytes())
+                .unwrap();
             tb.cell_set_userdata(ln, 1, s).unwrap();
         }
     }

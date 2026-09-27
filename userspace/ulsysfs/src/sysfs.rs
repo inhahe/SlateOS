@@ -305,8 +305,7 @@ fn get_subsystem(chain: &mut Vec<u8>) -> Option<Vec<u8>> {
 /// upstream compares it, over no more bytes than the file held.
 fn devchain_is_removable(chain: &[u8]) -> bool {
     const FILENAME: &[u8] = b"/removable";
-    if chain.is_empty() || chain.len().saturating_add(FILENAME.len()).saturating_add(1) > PATH_MAX
-    {
+    if chain.is_empty() || chain.len().saturating_add(FILENAME.len()).saturating_add(1) > PATH_MAX {
         return false;
     }
     let mut chain = chain.to_vec();
@@ -383,10 +382,7 @@ impl PathCxt {
         }
         blk.hctl.set(Hctl::Failed);
         let link = self.readlink(Some(b"device"))?;
-        let slash = link
-            .iter()
-            .rposition(|&b| b == b'/')
-            .ok_or(crate::EINVAL)?;
+        let slash = link.iter().rposition(|&b| b == b'/').ok_or(crate::EINVAL)?;
         let hctl = scan_hctl(link.get(slash.saturating_add(1)..).unwrap_or_default())
             .ok_or(crate::EINVAL)?;
         blk.hctl.set(Hctl::Known(hctl));
@@ -396,7 +392,12 @@ impl PathCxt {
     /// `scsi_host_attribute_path(pc, type, buf, bufsz, attr)`:
     /// `/sys/class/TYPE_host/hostH[/ATTR]` under the prefix, if it fits in
     /// `bufsz` with its NUL.
-    fn scsi_host_attribute_path(&self, ty: &[u8], bufsz: usize, attr: Option<&[u8]>) -> Option<Vec<u8>> {
+    fn scsi_host_attribute_path(
+        &self,
+        ty: &[u8],
+        bufsz: usize,
+        attr: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
         let [host, ..] = self.blkdev_scsi_hctl().ok()?;
         let mut p = self.prefix().unwrap_or_default().to_vec();
         p.extend_from_slice(PATH_SYS_CLASS);

@@ -113,7 +113,10 @@ where
             merged = merge(&mut cmp, p, merged);
         }
     }
-    let first = part.get_mut(max_lev).and_then(Option::take).unwrap_or_default();
+    let first = part
+        .get_mut(max_lev)
+        .and_then(Option::take)
+        .unwrap_or_default();
     *list = merge(&mut cmp, first, merged);
 }
 
@@ -152,7 +155,11 @@ impl Table {
             for child in children {
                 self.sort_line_children(child, cmp, n, deeper);
             }
-            if let Some(mut list) = self.lines.get_mut(ln.0).map(|l| std::mem::take(&mut l.children)) {
+            if let Some(mut list) = self
+                .lines
+                .get_mut(ln.0)
+                .map(|l| std::mem::take(&mut l.children))
+            {
                 list_sort(&mut list, |a, b| self.cmp_lines(cmp, n, a, b));
                 if let Some(line) = self.lines.get_mut(ln.0) {
                     line.children = list;
@@ -165,7 +172,11 @@ impl Table {
             for child in self.group_children_of(ln) {
                 self.sort_line_children(child, cmp, n, deeper);
             }
-            if let Some(mut list) = self.groups.get_mut(gr.0).map(|g| std::mem::take(&mut g.children)) {
+            if let Some(mut list) = self
+                .groups
+                .get_mut(gr.0)
+                .map(|g| std::mem::take(&mut g.children))
+            {
                 list_sort(&mut list, |a, b| self.cmp_lines(cmp, n, a, b));
                 if let Some(g) = self.groups.get_mut(gr.0) {
                     g.children = list;

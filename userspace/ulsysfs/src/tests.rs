@@ -235,19 +235,28 @@ fn a_disks_subsystems_and_scsi_host_are_found_up_its_chain() {
     let pci = "sys/devices/pci0000:00/0000:00:1f.2";
     let lun = format!("{pci}/ata1/host0/target0:0:0/0:0:0:0");
     w(&format!("{lun}/block/sda/dev"), "8:0\n");
-    l("../../../../../../../../../class/block", &format!("{lun}/block/sda/subsystem"));
+    l(
+        "../../../../../../../../../class/block",
+        &format!("{lun}/block/sda/subsystem"),
+    );
     l("../../../0:0:0:0", &format!("{lun}/block/sda/device"));
     l("../../../../../../../bus/scsi", &format!("{lun}/subsystem"));
     // A second SCSI link on the way up: "block:scsi:scsi" is not repeated
     // by the caller, but the chain does hold it.
-    l("../../../../../../bus/scsi", &format!("{pci}/ata1/host0/target0:0:0/subsystem"));
+    l(
+        "../../../../../../bus/scsi",
+        &format!("{pci}/ata1/host0/target0:0:0/subsystem"),
+    );
     l("../../../bus/pci", &format!("{pci}/subsystem"));
     w(&format!("{pci}/removable"), "fixed\n");
     w("sys/class/scsi_host/host0/proc_name", "ahci\n");
     w(&format!("{lun}/vpd_pg80"), "x");
     // The same directories as links from the top of sysfs see them.
     let lun_rel = lun.strip_prefix("sys/").unwrap();
-    l(&format!("../../../{lun_rel}"), "sys/bus/scsi/devices/0:0:0:0");
+    l(
+        &format!("../../../{lun_rel}"),
+        "sys/bus/scsi/devices/0:0:0:0",
+    );
     l(&format!("../../{lun_rel}/block/sda"), "sys/dev/block/8:0");
 
     let usb = "sys/devices/pci0000:00/0000:00:14.0/usb1/1-1";
@@ -304,13 +313,21 @@ fn a_device_without_a_scsi_address_is_asked_once() {
     std::fs::create_dir_all(root.join("sys/devices/virtual/block/loop0")).unwrap();
     std::fs::write(root.join("sys/devices/virtual/block/loop0/dev"), "7:0\n").unwrap();
     std::fs::create_dir_all(root.join("sys/dev/block")).unwrap();
-    symlink("../../devices/virtual/block/loop0", root.join("sys/dev/block/7:0")).unwrap();
+    symlink(
+        "../../devices/virtual/block/loop0",
+        root.join("sys/dev/block/7:0"),
+    )
+    .unwrap();
     let prefix = quoting::os_bytes(root.as_os_str()).into_owned();
     let prefix = prefix.strip_suffix(b"/").unwrap_or(&prefix).to_vec();
     let pc = crate::new_sysfs_path(makedev(7, 0), None, Some(&prefix)).unwrap();
     assert_eq!(pc.blkdev_scsi_hctl(), Err(crate::ENOENT));
     // Even once a `device` link appears, the answer stays no.
-    symlink("../../../x/0:0:0:0", root.join("sys/devices/virtual/block/loop0/device")).unwrap();
+    symlink(
+        "../../../x/0:0:0:0",
+        root.join("sys/devices/virtual/block/loop0/device"),
+    )
+    .unwrap();
     assert_eq!(pc.blkdev_scsi_hctl(), Err(crate::EINVAL));
     assert!(!pc.blkdev_is_hotpluggable());
 }

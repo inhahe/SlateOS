@@ -233,7 +233,10 @@ mod tests {
         assert_eq!(dev.property(b"ID_FS_LABEL"), None);
         assert_eq!(
             dev.devlinks,
-            vec![b"/dev/disk/by-id/b".to_vec(), b"/dev/disk/by-uuid/x".to_vec()]
+            vec![
+                b"/dev/disk/by-id/b".to_vec(),
+                b"/dev/disk/by-uuid/x".to_vec()
+            ]
         );
     }
 

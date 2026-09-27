@@ -1377,6 +1377,58 @@ def case_gate5_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
           "nosuchrev" in proc.stderr, True)
 
 
+def _run_checker_with_no_wsl(root: str, script: str, *args: str) -> subprocess.CompletedProcess:
+    """`run_checker`, with every directory holding `wsl` taken off PATH.
+
+    What a host in the middle of a WSL outage looks like to the checker --
+    "no GNU userland" -- on demand, rather than only when WSL happens to be
+    down.
+    """
+    env = gitenv.clean_env()
+    hidden = set()
+    while True:
+        found = shutil.which("wsl", path=env.get("PATH", ""))
+        if not found:
+            break
+        hidden.add(os.path.normcase(os.path.dirname(found)).rstrip("\\/"))
+        env["PATH"] = os.pathsep.join(
+            d for d in env.get("PATH", "").split(os.pathsep)
+            if os.path.normcase(d).rstrip("\\/") not in hidden
+        )
+    return subprocess.run(
+        [sys.executable, os.path.join(root, "scripts", script), *args],
+        cwd=root, env=env, capture_output=True, text=True, check=False,
+    )
+
+
+def case_gate5_an_unopenable_revision_is_exit_2_while_gnu_is_unreachable(tmp: str) -> None:
+    """Exit 2 however WSL is: the revision is read before WSL is asked for.
+
+    Asking WSL first answered 3 -- run-checker.sh's "skipped, could not run"
+    -- for a revision that will not open, whenever WSL was down: the caller's
+    mistake reported as the weather. It failed the case above, and a boot
+    test with it, on 2026-09-26, and only because WSL happened to be refusing
+    sessions; with WSL hidden it is shown on every run.
+    """
+    if sys.platform.startswith("linux"):
+        print("  SKIP gate 5 with GNU unreachable: on Linux the GNU side is the host itself")
+        return
+    root = _getopt_repo(tmp, "g5e")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+    commit(root)
+
+    # The fixture's own witness: with WSL hidden, the working tree cannot be
+    # judged -- or this case would prove nothing about the order.
+    disk = _run_checker_with_no_wsl(root, "getopt-ambiguity-check.py", "yes")
+    check("gate 5 with GNU unreachable: the working tree is declined, exit 3",
+          disk.returncode, 3)
+    proc = _run_checker_with_no_wsl(root, "getopt-ambiguity-check.py", "--head", "nosuchrev")
+    check("gate 5 with GNU unreachable: an unopenable revision still exits 2",
+          proc.returncode, 2)
+    check("gate 5 with GNU unreachable: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
 # --------------------------------------------------------------------------
 # Gate 6 -- host-errmsg.py
 #
@@ -4407,6 +4459,7 @@ CASES = (
     case_gate5_an_uncommitted_edit_does_not_block_a_clean_push,
     case_gate5_a_bin_absent_from_the_disk_is_still_judged,
     case_gate5_an_unopenable_revision_is_not_a_finding,
+    case_gate5_an_unopenable_revision_is_exit_2_while_gnu_is_unreachable,
     case_gate5_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate5_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate5_the_hook_judges_a_branch_it_is_not_standing_on,

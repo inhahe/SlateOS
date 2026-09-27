@@ -179,37 +179,45 @@ def controller_explains(records):
     """Why the host, by holding the load controller, answers for a failure.
 
     The probe beside a case measures whether *spinners* get CPU.  The
-    controller can be held without CPU being short: each poll is a file-system
-    call, and on a busy Windows host one can take seconds.  That is how this
-    suite failed a boot test on 2026-09-26 -- one read held 2.4 s, the whole
-    window arriving in it, while the probe alongside read a healthy host.
+    controller can be held without CPU being short, and held where the probe
+    does not look, so it times itself, and the attribution is a reading of two
+    things nothing this code does can make long:
 
-    So the controller times its own file-system calls, and the attribution is
-    a reading: one poll's calls -- a stop-file check and a read of a log a few
-    kilobytes long -- taking a whole poll or more is the host's disk (or its
-    scheduler, stopping the process mid-call), since nothing this code does
-    can make them slow.  That is the whole rule, and its narrowness is the
-    point.  A wide gap between reads with fast calls is *not* excused here: an
-    oversleep is the host's too, but a loop that sleeps or works too long is
-    this code's, and the record cannot tell those apart -- the probe can, and
-    `host_explains` is where that is decided.  Tried first on 2026-09-26 as a
-    median-cadence rule, it could not excuse the very failure it was for: a
+    * **file-system calls** -- a stop-file check and a read of a log a few
+      kilobytes long.  On a busy Windows host one can take seconds (2026-09-26:
+      a read held 2.4 s while the probe alongside read a healthy host);
+    * **oversleep** -- how far the poll's `time.sleep(POLL_SECONDS)` ran past
+      what it asked for.  The code names the length it wants; the rest is the
+      host's scheduler (2026-09-26 again: a boot test's host woke the loop so
+      late that its next read found the whole replayed suite written).
+
+    Either taking a whole poll or more excuses the case's timing failures.
+    Deliberately no wider.  A gap between reads that neither explains -- the
+    loop's own work, or a stall somewhere else in it -- may be this code's, a
+    loop that works too long or sleeps twice, and the record cannot tell; the
+    probe can, and `host_explains` is where that is decided.  A median-cadence
+    rule was tried first and could not excuse the very failure it was for: a
     stall that fills a short run leaves two intervals, and their median is
     half the stall.
     """
     for record in records:
-        io = record.get("max_poll_io_seconds")
         poll = record.get("poll_seconds")
-        if io is None or poll is None:
+        if poll is None:
             continue
-        if io >= poll:
-            gap = record.get("max_observation_gap")
-            widened = (f", widening one read's window to {gap:.2f}s"
-                       if gap is not None else "")
+        io = record.get("max_poll_io_seconds")
+        oversleep = record.get("max_poll_oversleep_seconds")
+        gap = record.get("max_observation_gap")
+        widened = (f", widening one read's window to {gap:.2f}s"
+                   if gap is not None else "")
+        if io is not None and io >= poll:
             return (f"one of the load controller's polls spent {io:.2f}s in "
                     f"file-system calls on a log a few KB long, where it polls "
                     f"every {poll}s{widened} -- the host held it, not this "
                     f"code")
+        if oversleep is not None and oversleep >= poll:
+            return (f"one of the load controller's {poll}s sleeps ran "
+                    f"{oversleep:.2f}s over{widened} -- the host's scheduler "
+                    f"held it, not this code")
     return None
 
 
@@ -518,13 +526,19 @@ with timing_case("replay #1") as tmpdir:
     check("clean prefix counted",
           record["completions_before_on"], 11)
     check("whole suite seen", record["completions_seen"], len(SUITE))
+    held = record["load_seconds"]
     check_true("load held for about the window's duration",
-               0.15 < record["load_seconds"] < 0.75,
-               f"load_seconds={record['load_seconds']}")
+               held is not None and 0.15 < held < 0.75,
+               f"load_seconds={held}")
+    # Judged, never computed blind: a suite that arrived in one read spans no
+    # time at all, and dividing by it crashed this whole suite on 2026-09-26
+    # before the case's failures could be weighed against the host.
+    suite_span = record["suite_seconds_seen"]
+    share = (100 * record["load_seconds"] / suite_span
+             if suite_span and record["load_seconds"] is not None else None)
     check_true("window share is a sane fraction",
-               5 < 100 * record["load_seconds"]
-               / record["suite_seconds_seen"] < 60,
-               f"{record['load_seconds']} / {record['suite_seconds_seen']}")
+               share is not None and 5 < share < 60,
+               f"{record['load_seconds']} / {suite_span}")
     check("exit code 0 when the load fired", rc, 0)
 
 
@@ -1230,12 +1244,14 @@ with timing_case("a window already in the log when its trigger is read",
     check_true("and the operator is told the load covered none of it",
                "covered none of it" in out, out[-600:])
     stamp_of = dict(record["completions"])
-    shared = {stamp_of[f"bench_{i:02d}"] for i in range(10, 22)}
+    shared = {stamp_of.get(f"bench_{i:02d}") for i in range(10, 22)}
     check_true("the trigger, the window and the line after it share one read",
-               len(shared) == 1, f"{sorted(shared)}")
+               len(shared) == 1 and None not in shared, f"{shared}")
+    trigger_stamp = stamp_of.get("bench_10")
     check_true("whose stamp does not follow the fire it triggered",
-               stamp_of["bench_10"] <= record["fired_at"],
-               f"stamp {stamp_of['bench_10']}, fired {record['fired_at']}")
+               trigger_stamp is not None and record["fired_at"] is not None
+               and trigger_stamp <= record["fired_at"],
+               f"stamp {trigger_stamp}, fired {record['fired_at']}")
     check_true("and every line in it has the same lower bound",
                len(set(record["completions_not_before"])) == 1,
                f"{set(record['completions_not_before'])}")
@@ -1325,18 +1341,20 @@ with timing_case("a controller held inside its first read",
         # `fired_monotonic` says so), so the difference moves the
         # stamps onto the clock `gate_opened` was read from.  Both figures in
         # the difference are rounded to 0.1 ms, hence the 1 ms of slack.
-        origin = record["fired_monotonic"] - record["fired_at"]
+        fired = record["fired_at"]
+        origin = (record["fired_monotonic"] - fired
+                  if fired is not None and record["fired_monotonic"] is not None
+                  else None)
         stamp_of = dict(record["completions"])
         inside = [stamp_of[n] for n in record["during_names"]
                   if n in stamp_of]
         check_true("the window's stamps come after the hold, not before it",
-                   inside and gate_opened and all(
+                   origin is not None and inside and gate_opened and all(
                        origin + t >= gate_opened[0] - 1e-3 for t in inside),
-                   f"gate opened {gate_opened}, stamps "
-                   f"{[round(origin + t, 4) for t in inside]}")
+                   f"gate opened {gate_opened}, fired {fired}, stamps {inside}")
         check_true("and none follows the fire its own read triggered",
-                   all(t <= record["fired_at"] for t in inside),
-                   f"fired {record['fired_at']}, times {inside}")
+                   fired is not None and all(t <= fired for t in inside),
+                   f"fired {fired}, times {inside}")
         check("the whole window is counted as finished before the load",
               record["during_seen_with_trigger"], 10)
         check("so the run is a missed window", record.get("problem"),
@@ -1862,10 +1880,11 @@ print("controller attribution")
 POLL = cl.POLL_SECONDS
 
 
-def timed(io, gap=None, work=0.0005):
+def timed(io, gap=None, work=0.0005, oversleep=0.0):
     """A record carrying what `controller_explains` reads, and a distractor."""
     return {"poll_seconds": POLL, "max_poll_io_seconds": io,
-            "max_observation_gap": gap, "max_poll_work_seconds": work}
+            "max_observation_gap": gap, "max_poll_work_seconds": work,
+            "max_poll_oversleep_seconds": oversleep}
 
 
 for label, records, excused in [
@@ -1878,8 +1897,16 @@ for label, records, excused in [
     ("just under a poll is not", [timed(POLL - 0.001, 0.2)], False),
     # A wide gap with fast calls is an oversleep or a slow loop, and the
     # record cannot say which -- so it is not this rule's to excuse.
-    ("a wide gap with fast calls is not excused here",
+    ("a wide gap with fast calls and an on-time sleep is not excused here",
      [timed(0.002, 2.5)], False),
+    # The rq10 failure's shape: the loop's sleep woke seconds late.
+    ("a sleep that ran a second over is the host's",
+     [timed(0.002, 1.4, oversleep=1.2)], True),
+    ("a whole poll of oversleep is enough", [timed(0.002, 0.25, oversleep=POLL)], True),
+    ("just under a poll of oversleep is not",
+     [timed(0.002, 0.2, oversleep=POLL - 0.001)], False),
+    ("a record predating the oversleep field is judged on its calls alone",
+     [{"poll_seconds": POLL, "max_poll_io_seconds": 0.002}], False),
     ("nor is slow work of the controller's own",
      [timed(0.002, 2.5, work=1.2)], False),
     ("a record predating the timing fields excuses nothing",
@@ -1893,6 +1920,9 @@ reason = controller_explains([timed(2.4184, 2.5308)]) or ""
 check_true("the excuse states what was measured, not merely that it was",
            "2.42s" in reason and "2.53s" in reason and f"{POLL}s" in reason,
            reason)
+reason = controller_explains([timed(0.002, 1.4, oversleep=1.2)]) or ""
+check_true("and an oversleep's excuse says it was the sleep",
+           "sleeps ran 1.20s over" in reason and "scheduler" in reason, reason)
 
 # `read_gap_of`: the resolution at one named line, which the controller's
 # `window-missed` message quotes.

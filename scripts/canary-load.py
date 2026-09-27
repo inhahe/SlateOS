@@ -894,6 +894,8 @@ def run(args):
     max_io = 0.0
     max_work = 0.0
     last_read_io = 0.0
+    # The worst overrun of a POLL_SECONDS sleep (see the loop's sleep).
+    max_oversleep = 0.0
     # Window lines that arrived in the same read as the trigger -- they had
     # finished before the load went on -- and lines after the window that
     # arrived in the same read as the `--until` -- they ran under a load that
@@ -1111,7 +1113,15 @@ def run(args):
                 record["outcome"] = "complete"
                 break
 
+            # The sleep is timed too. It is the one wait this loop asks for by
+            # name, so what it takes beyond POLL_SECONDS is the host's
+            # scheduler and nothing of this code's: on 2026-09-26 a boot
+            # test's host woke this loop so late that its next read found the
+            # whole replayed suite already written.
+            slept_from = time.monotonic()
             time.sleep(POLL_SECONDS)
+            max_oversleep = max(max_oversleep,
+                                time.monotonic() - slept_from - POLL_SECONDS)
     finally:
         # Unconditionally: an exception, a timeout and a clean finish must all
         # leave the host idle.  `release()` is idempotent in effect (setting a
@@ -1166,14 +1176,16 @@ def run(args):
                 for bound in not_before],
             "max_observation_gap": (round(max_gap, 4)
                                     if max_gap is not None else None),
-            # The two parts of a poll's cost, worst case each: file-system
-            # calls (the stop-file check and the read -- the host's, on a file
-            # this small) and the controller's own processing of what it read
-            # (parsing, and `fire()`/`release()` with their spinner barriers).
-            # A wide gap with small figures here was spent asleep or
-            # descheduled: the host's too.
+            # A poll's cost in three parts, worst case each: file-system calls
+            # (the stop-file check and the read -- the host's, on a file this
+            # small); the controller's own processing of what it read
+            # (parsing, and `fire()`/`release()` with their spinner barriers);
+            # and how far the poll's sleep overran the POLL_SECONDS it asked
+            # for -- the host's scheduler. A wide gap that none of the three
+            # explains was spent descheduled somewhere else in the loop.
             "max_poll_io_seconds": round(max_io, 4),
             "max_poll_work_seconds": round(max_work, 4),
+            "max_poll_oversleep_seconds": round(max(max_oversleep, 0.0), 4),
             "during_seen_with_trigger": seen_with_trigger,
             "after_seen_with_until": seen_with_until,
             "fired_at": round(fired_rel, 4) if fired_rel is not None else None,

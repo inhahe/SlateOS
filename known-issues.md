@@ -171339,6 +171339,18 @@ names only), and its output formats approximate upstream's.
 **The proper fix:** port `misc-utils/lsblk*.c` onto `ulblkid`, `ulmount`
 and `smartcols`, with a differential harness against WSL's.
 
+**Progress (2026-09-27):** the two libsmartcols features lsblk depends on
+and the port lacked are in: sorting (lsblk sorts every table, by MAJ:MIN
+unless `--sort` says otherwise, and `--list --raw/--pairs/--inverse` by tree
+too) and line groups (`--merge`'s chart). `scripts/smartcols-diff.sh`
+compares the port with util-linux's own libsmartcols.so.1 on 1500 generated
+tables in two locales: 2954 agree, 764 of them drawing a group chart, 22
+aborting on both sides where upstream aborts; the 46 upstream never finishes
+(the known narrow-terminal loop, and a recursion through a line made its
+own group's child) the port finishes. What remains is lsblk itself and the
+`lib/sysfs.c` helpers it needs that `ulsysfs` lacks (the device chain and
+subsystems, hot-plug, the SCSI host/attribute tests and HCTL).
+
 **Also:** the hand-written `wipefs` answered to `blkdiscard` too -- a
 personality no executable was ever produced for (the multicall baseline
 listed it as unreachable). `blkdiscard` is now a port of util-linux's in a

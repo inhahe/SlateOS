@@ -75,7 +75,7 @@ const LONGS: &[(&str, Takes)] = &[
     ("help", Takes::Nothing),
     ("version", Takes::Nothing),
 ];
-const LONG_VALS: [u8; 8] = [b's', b'n', b'o', b'S', b'J', b'P', b'h', b'V'];
+const LONG_VALS: [u8; 8] = *b"snoSJPhV";
 
 /// `excl[]`.
 const EXCL: [&[i32]; 1] = [&[b'J' as i32, b'P' as i32]];

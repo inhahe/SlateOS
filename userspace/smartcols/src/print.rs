@@ -21,8 +21,15 @@ impl Buf {
     }
 
     /// `ul_buffer_append_string`: nothing for an empty string.
-    fn append(&mut self, s: &[u8]) {
+    pub(crate) fn append(&mut self, s: &[u8]) {
         self.data.extend_from_slice(mbs::c_str(s));
+    }
+
+    /// `ul_buffer_append_ntimes`: `s`, `n` times.
+    pub(crate) fn append_ntimes(&mut self, n: usize, s: &[u8]) {
+        for _ in 0..n {
+            self.append(s);
+        }
     }
 
     /// `ul_buffer_save_pointer(buf, SCOLS_BUFPTR_TREEEND)`.
@@ -48,14 +55,44 @@ impl Buf {
 /// upstream then pads it until it is killed.
 const MAX_PRINTED_WIDTH: usize = 1 << 32;
 
-/// The drawing symbols of a table printed with none set: Unicode box lines
-/// in a UTF-8 locale unless ASCII was asked for.
+// table.c's box-drawing characters, byte for byte as its octal escapes
+// spell them. (Its comments name U+2504 for `UTF_H3`; the bytes are U+2508.)
+/// `UTF_V`: U+2502 `│`.
+const UTF_V: &[u8] = b"\xe2\x94\x82";
+/// `UTF_VR`: U+251C `├`.
+const UTF_VR: &[u8] = b"\xe2\x94\x9c";
+/// `UTF_H`: U+2500 `─`.
+const UTF_H: &[u8] = b"\xe2\x94\x80";
+/// `UTF_UR`: U+2514 `└`.
+const UTF_UR: &[u8] = b"\xe2\x94\x94";
+/// `UTF_V3`: U+2506 `┆`.
+const UTF_V3: &[u8] = b"\xe2\x94\x86";
+/// `UTF_H3`: U+2508 `┈`.
+const UTF_H3: &[u8] = b"\xe2\x94\x88";
+/// `UTF_DR`: U+250C `┌`.
+const UTF_DR: &[u8] = b"\xe2\x94\x8c";
+/// `UTF_DH`: U+252C `┬`.
+const UTF_DH: &[u8] = b"\xe2\x94\xac";
+/// `UTF_TR`: U+25B6 `▶`.
+const UTF_TR: &[u8] = b"\xe2\x96\xb6";
+
+/// `scols_table_set_default_symbols`: the drawing symbols of a table printed
+/// with none set -- Unicode box lines in a UTF-8 locale unless ASCII was
+/// asked for.
 fn default_symbols(ascii: bool, utf8: bool) -> Symbols {
+    let s = |parts: &[&[u8]]| Some(parts.concat());
     if !ascii && utf8 {
         Symbols {
-            tree_branch: "\u{251c}\u{2500}".as_bytes().to_vec(),
-            tree_vert: "\u{2502} ".as_bytes().to_vec(),
-            tree_right: "\u{2514}\u{2500}".as_bytes().to_vec(),
+            tree_branch: [UTF_VR, UTF_H].concat(),
+            tree_vert: [UTF_V, b" "].concat(),
+            tree_right: [UTF_UR, UTF_H].concat(),
+            group_horz: s(&[UTF_H3]),
+            group_vert: s(&[UTF_V3]),
+            group_first_member: s(&[UTF_DR, UTF_H3, UTF_TR]),
+            group_last_member: s(&[UTF_UR, UTF_DH, UTF_TR]),
+            group_middle_member: s(&[UTF_VR, UTF_H3, UTF_TR]),
+            group_last_child: s(&[UTF_UR, UTF_H3]),
+            group_middle_child: s(&[UTF_VR, UTF_H3]),
             title_padding: b" ".to_vec(),
             cell_padding: b" ".to_vec(),
         }
@@ -64,6 +101,13 @@ fn default_symbols(ascii: bool, utf8: bool) -> Symbols {
             tree_branch: b"|-".to_vec(),
             tree_vert: b"| ".to_vec(),
             tree_right: b"`-".to_vec(),
+            group_horz: s(&[b"-"]),
+            group_vert: s(&[b"|"]),
+            group_first_member: s(&[b",->"]),
+            group_last_member: s(&[b"'->"]),
+            group_middle_member: s(&[b"|->"]),
+            group_last_child: s(&[b"`-"]),
+            group_middle_child: s(&[b"|-"]),
             title_padding: b" ".to_vec(),
             cell_padding: b" ".to_vec(),
         }
@@ -71,7 +115,7 @@ fn default_symbols(ascii: bool, utf8: bool) -> Symbols {
 }
 
 impl Table {
-    fn sym(&self) -> Symbols {
+    pub(crate) fn sym(&self) -> Symbols {
         self.symbols
             .clone()
             .unwrap_or_else(|| default_symbols(self.ascii, self.utf8))
@@ -79,11 +123,6 @@ impl Table {
 
     fn cell_padding(&self) -> Vec<u8> {
         self.sym().cell_padding
-    }
-
-    fn has_children(&self, ln: Option<LineId>) -> bool {
-        ln.and_then(|l| self.line(l))
-            .is_some_and(|l| !l.children.is_empty())
     }
 
     /// `tree_ascii_art_to_buffer(tb, ln, buf)`: for `ln` and each of its
@@ -101,8 +140,8 @@ impl Table {
         }
     }
 
-    /// `__cell_to_buffer`: the cell's data, after the tree's drawing in the
-    /// tree column.
+    /// `__cell_to_buffer`: the cell's data, after the groups' chart and the
+    /// tree's drawing in the tree column.
     pub(crate) fn cell_to_buffer(&self, ln: LineId, cl: usize, buf: &mut Buf) {
         buf.reset();
         let data = self.cell(ln, cl).and_then(Cell::data).map(<[u8]>::to_vec);
@@ -115,6 +154,10 @@ impl Table {
         }
         let parent = self.line(ln).and_then(|l| l.parent);
         let json = self.is_json();
+        let is_groups = self.columns.get(cl).is_some_and(|c| c.is_groups);
+        if !json && is_groups {
+            self.groups_art(buf, false);
+        }
         if let Some(parent) = parent
             && !json
         {
@@ -125,7 +168,6 @@ impl Table {
                 buf.append(&self.sym().tree_branch);
             }
         }
-        let is_groups = self.columns.get(cl).is_some_and(|c| c.is_groups);
         if (parent.is_some() || is_groups) && !json {
             buf.save_treeend();
         }
@@ -195,16 +237,20 @@ impl Table {
         true
     }
 
-    /// `print_empty_cell`: padding, or in the tree column the tree's
-    /// continuing lines.
+    /// `print_empty_cell`: padding, or in the tree column the groups' and
+    /// the tree's continuing lines.
     fn print_empty_cell(&self, out: &mut Vec<u8>, cl: usize, ln: Option<LineId>) {
         let mut len_pad = 0usize;
         if let Some(ln) = ln
-            && self.columns.get(cl).is_some_and(crate::Column::is_tree)
+            && let Some(col) = self.columns.get(cl)
+            && col.is_tree()
         {
             let mut art = Buf::default();
+            if col.is_groups {
+                self.groups_art(&mut art, true);
+            }
             self.tree_art(ln, &mut art);
-            if self.has_children(Some(ln)) && self.has_pending_data() {
+            if self.has_children(ln) && self.has_pending_data() {
                 art.append(&self.sym().tree_vert);
             }
             let data = if self.no_encode {
@@ -387,7 +433,7 @@ impl Table {
             })
         };
         let mut is_last = self.is_last_column(cl);
-        if is_last && self.is_json() && self.is_tree() && self.has_children(ln) {
+        if is_last && self.is_json() && self.is_tree() && ln.is_some_and(|l| self.has_children(l)) {
             // "children": [] is the real last value.
             is_last = false;
         }
@@ -589,6 +635,11 @@ impl Table {
                 continue;
             }
             buf.reset();
+            // Above the groups' chart, as many blanks as it is wide.
+            if col.is_groups && self.is_tree() && col.is_tree() {
+                buf.data
+                    .extend(std::iter::repeat_n(b' ', self.grpset.len().saturating_add(1)));
+            }
             let name = if self.is_shellvar {
                 col.name_as_shellvar()
             } else {
@@ -614,10 +665,10 @@ impl Table {
     /// that fails still gets its closing (`fput_line_close`), and ends the
     /// range.
     fn print_lines(&mut self, out: &mut Vec<u8>, buf: &mut Buf) -> Result<(), crate::Error> {
-        let n = self.lines.len();
-        for i in 0..n {
+        let order = self.order.clone();
+        let n = order.len();
+        for (i, ln) in order.into_iter().enumerate() {
             let last = i.saturating_add(1) == n;
-            let ln = LineId(i);
             if self.is_json() {
                 self.json.open(out, None, Kind::Object);
             }
@@ -636,66 +687,6 @@ impl Table {
         Ok(())
     }
 
-    fn is_tree_root(&self, ln: LineId) -> bool {
-        self.line(ln).is_some_and(|l| l.parent.is_none())
-    }
-
-    /// The lines `scols_walk_tree` visits, in its order: each root in table
-    /// order, then its children, depth first. A line no root leads to --
-    /// one whose ancestry loops -- is not among them.
-    pub(crate) fn walk_order(&self) -> Vec<LineId> {
-        let mut order = Vec::with_capacity(self.lines.len());
-        let mut stack: Vec<LineId> = Vec::new();
-        for i in 0..self.lines.len() {
-            let root = LineId(i);
-            if !self.is_tree_root(root) {
-                continue;
-            }
-            stack.push(root);
-            while let Some(ln) = stack.pop() {
-                order.push(ln);
-                if let Some(line) = self.line(ln) {
-                    stack.extend(line.children.iter().rev().copied());
-                }
-            }
-        }
-        order
-    }
-
-    fn is_last_tree_root(&self, ln: LineId) -> bool {
-        self.walk_last_tree_root == Some(ln)
-    }
-
-    /// `scols_walk_is_last`: the last line the walk will print.
-    fn walk_is_last(&self, ln: LineId) -> bool {
-        if !self.walk_last_done || self.has_children(Some(ln)) {
-            return false;
-        }
-        if self.is_tree_root(ln) && !self.is_last_tree_root(ln) {
-            return false;
-        }
-        if self.line(ln).and_then(|l| l.parent).is_some() {
-            if !self.is_last_child(ln) {
-                return false;
-            }
-            let mut parent = self.line(ln).and_then(|l| l.parent);
-            while let Some(p) = parent {
-                let pp = self.line(p).and_then(|l| l.parent);
-                if pp.is_some() && !self.is_last_child(p) {
-                    return false;
-                }
-                if pp.is_none() {
-                    if !self.is_last_tree_root(p) {
-                        return false;
-                    }
-                    break;
-                }
-                parent = pp;
-            }
-        }
-        true
-    }
-
     /// `print_tree_line`, the walk's callback. A line that fails ends the
     /// walk there, before its closing, as upstream's returns at once.
     fn print_tree_line(
@@ -708,7 +699,7 @@ impl Table {
             self.json.open(out, None, Kind::Object);
         }
         self.print_line(out, ln, buf)?;
-        if self.has_children(Some(ln)) {
+        if self.has_children(ln) {
             if self.is_json() {
                 self.json.open(out, Some(b"children"), Kind::Array);
             } else {
@@ -720,7 +711,7 @@ impl Table {
             // Close every object and "children" array this leaf ends.
             let mut cur = Some(ln);
             while let Some(line) = cur {
-                let is_child = self.line(line).and_then(|l| l.parent).is_some();
+                let is_child = self.is_child(line);
                 let last = (is_child && self.is_last_child(line))
                     || (self.is_tree_root(line) && self.is_last_tree_root(line));
                 self.json.close(out, Kind::Object);
@@ -739,59 +730,18 @@ impl Table {
         Ok(())
     }
 
-    /// `walk_line`: a line, then its children in order; the first failure
-    /// ends the walk.
-    fn walk_line(
-        &mut self,
-        out: &mut Vec<u8>,
-        ln: LineId,
-        buf: &mut Buf,
-    ) -> Result<(), crate::Error> {
-        self.print_tree_line(out, ln, buf)?;
-        let children = self
-            .line(ln)
-            .map(|l| l.children.clone())
-            .unwrap_or_default();
-        for child in children {
-            self.walk_line(out, child, buf)?;
-        }
-        Ok(())
-    }
-
     /// `__scols_print_tree`: `scols_walk_tree` with `print_tree_line`.
     fn print_tree(&mut self, out: &mut Vec<u8>, buf: &mut Buf) -> Result<(), crate::Error> {
-        self.walk_last_tree_root = None;
-        self.walk_last_done = false;
-        // The last root, in table order.
-        for i in 0..self.lines.len() {
-            let ln = LineId(i);
-            if self.walk_last_tree_root.is_none() {
-                self.walk_last_tree_root = Some(ln);
-            }
-            if !self.is_tree_root(ln) {
-                continue;
-            }
-            self.walk_last_tree_root = Some(ln);
-        }
-        for i in 0..self.lines.len() {
-            let ln = LineId(i);
-            if !self.is_tree_root(ln) {
-                continue;
-            }
-            if self.walk_last_tree_root == Some(ln) {
-                self.walk_last_done = true;
-            }
-            if let Err(e) = self.walk_line(out, ln, buf) {
-                self.walk_last_done = false;
-                return Err(e);
-            }
-        }
-        self.walk_last_done = false;
-        Ok(())
+        self.walk_tree(&mut |tb: &mut Table, ln| tb.print_tree_line(out, ln, buf))
     }
 
     /// `__scols_initialize_printing`.
-    fn initialize_printing(&mut self, buf: &mut Buf) {
+    ///
+    /// # Errors
+    ///
+    /// The width calculation's walk failed (see [`Table::walk_tree`]); the
+    /// printing is cleaned up again and nothing is printed.
+    fn initialize_printing(&mut self, buf: &mut Buf) -> Result<(), crate::Error> {
         if self.symbols.is_none() {
             self.symbols = Some(default_symbols(self.ascii, self.utf8));
             self.priv_symbols = true;
@@ -814,9 +764,17 @@ impl Table {
         if self.is_json() {
             self.json = crate::json::JsonWriter::new(0);
         }
-        if self.format == Format::Human {
-            self.calculate(buf);
+        // The groups' members in the order the tree will walk them.
+        if self.has_groups() && self.is_tree() {
+            self.groups_fix_members_order();
         }
+        if self.format == Format::Human
+            && let Err(e) = self.calculate(buf)
+        {
+            self.cleanup_printing();
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// `__scols_cleanup_printing`.
@@ -839,7 +797,7 @@ impl Table {
             return Err(crate::Error::Invalid);
         }
         let mut buf = Buf::default();
-        self.initialize_printing(&mut buf);
+        self.initialize_printing(&mut buf)?;
         if self
             .columns
             .iter()
@@ -879,7 +837,7 @@ impl Table {
         }
         self.header_printed = false;
         let mut buf = Buf::default();
-        self.initialize_printing(&mut buf);
+        self.initialize_printing(&mut buf)?;
         if self
             .columns
             .iter()

@@ -117,18 +117,29 @@ impl Table {
         }
     }
 
-    /// `count_column_deviation`: the mean width over every line -- an
-    /// integer division, as upstream's is -- and the sample deviation.
+    /// `count_column_deviation`: the mean width over every line in table
+    /// order -- an integer division, as upstream's is, with the groups'
+    /// chart counted into each tree cell's width -- and the sample deviation
+    /// (of the widths without it, as upstream's).
     fn count_column_deviation(&mut self, cl: usize) {
-        let widths: Vec<usize> = (0..self.lines.len())
-            .map(|ln| self.cell(LineId(ln), cl).map_or(0, |c| c.width))
+        let widths: Vec<usize> = self
+            .order
+            .iter()
+            .map(|&ln| self.cell(ln, cl).map_or(0, |c| c.width))
             .collect();
+        let extra = if self.is_tree_column(cl) && self.has_groups() {
+            self.grpset.len().saturating_add(1)
+        } else {
+            0
+        };
         let n = widths.len();
         let Some(col) = self.columns.get_mut(cl) else {
             return;
         };
         let st = &mut col.wstat;
-        let sum = widths.iter().fold(0usize, |a, &w| a.saturating_add(w));
+        let sum = widths
+            .iter()
+            .fold(0usize, |a, &w| a.saturating_add(w).saturating_add(extra));
         if let Some(avg) = sum.checked_div(n) {
             st.width_avg = to_f64(avg);
         }
@@ -143,7 +154,11 @@ impl Table {
     }
 
     /// `count_column_width`.
-    fn count_column_width(&mut self, cl: usize, buf: &mut Buf) {
+    ///
+    /// # Errors
+    ///
+    /// The tree's walk failed (see [`Table::walk_tree`]).
+    fn count_column_width(&mut self, cl: usize, buf: &mut Buf) -> Result<(), crate::Error> {
         let is_last = self.is_last_column(cl);
         let (maxout, is_term, termwidth) = (self.maxout, self.is_term, self.termwidth);
         let header = self
@@ -152,7 +167,7 @@ impl Table {
             .and_then(|c| c.header.data().map(<[u8]>::to_vec));
         let header_width = header.as_deref().map(|h| self.text_width(h));
         let Some(col) = self.columns.get_mut(cl) else {
-            return;
+            return Ok(());
         };
         col.width = 0;
         col.wstat = WStat::default();
@@ -173,17 +188,26 @@ impl Table {
         // A tree is measured as it is walked, so a line that no root leads
         // to -- one whose ancestry loops -- is not measured, as it is not
         // printed; a list, line by line.
-        let lines: Vec<LineId> = if self.is_tree() {
-            self.walk_order()
+        if self.is_tree() {
+            self.walk_tree(&mut |tb: &mut Table, ln| {
+                tb.count_cell_width(ln, cl, buf);
+                Ok(())
+            })?;
         } else {
-            (0..self.lines.len()).map(LineId).collect()
-        };
-        for ln in lines {
-            self.count_cell_width(ln, cl, buf);
+            for ln in self.order.clone() {
+                self.count_cell_width(ln, cl, buf);
+            }
         }
+        // The groups' chart is not drawn while measuring; the walk only made
+        // room for it, and the tree column is widened by that room.
+        let chart = (self.is_tree_column(cl) && self.has_groups())
+            .then(|| self.grpset.len().saturating_add(1));
         let Some(col) = self.columns.get_mut(cl) else {
-            return;
+            return Ok(());
         };
+        if let Some(width) = chart {
+            col.wstat.width_max = col.wstat.width_max.saturating_add(width);
+        }
         let st = col.wstat;
         col.width = st.width_max;
         let hint = to_size(col.width_hint);
@@ -197,6 +221,11 @@ impl Table {
             col.width = 0;
             col.wstat.width_min = 0;
         }
+        Ok(())
+    }
+
+    fn is_tree_column(&self, cl: usize) -> bool {
+        self.columns.get(cl).is_some_and(crate::Column::is_tree)
     }
 
     /// `reduce_to_68`: toward the mean plus one deviation.
@@ -318,20 +347,36 @@ impl Table {
     }
 
     /// `__scols_calculate`.
+    ///
+    /// # Errors
+    ///
+    /// A tree's walk failed (see [`Table::walk_tree`]).
     #[allow(
         clippy::too_many_lines,
         reason = "upstream's one function, kept whole to be read against it"
     )]
-    pub(crate) fn calculate(&mut self, buf: &mut Buf) {
+    pub(crate) fn calculate(&mut self, buf: &mut Buf) -> Result<(), crate::Error> {
         self.is_dummy_print = true;
         let colsepsz = self.text_width(&self.colsep());
         let (mut width, mut width_min) = (0usize, 0usize);
+        // The groups' chart goes in the first tree column only.
+        let mut chart_placed = !self.has_groups();
 
         for cl in 0..self.columns.len() {
             if self.columns.get(cl).is_some_and(crate::Column::is_hidden) {
                 continue;
             }
-            self.count_column_width(cl, buf);
+            if !chart_placed
+                && let Some(col) = self.columns.get_mut(cl)
+                && col.is_tree()
+            {
+                col.is_groups = true;
+                chart_placed = true;
+            }
+            if let Err(e) = self.count_column_width(cl, buf) {
+                self.is_dummy_print = false;
+                return Err(e);
+            }
             let sep = if self.is_last_column(cl) { 0 } else { colsepsz };
             if let Some(col) = self.columns.get(cl) {
                 width = width.saturating_add(col.width).saturating_add(sep);
@@ -343,7 +388,7 @@ impl Table {
 
         if !self.is_term {
             self.is_dummy_print = false;
-            return;
+            return Ok(());
         }
 
         let termwidth = self.termwidth;
@@ -491,6 +536,7 @@ impl Table {
             }
         }
         self.is_dummy_print = false;
+        Ok(())
     }
 }
 

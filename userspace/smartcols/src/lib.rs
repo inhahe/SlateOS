@@ -9,9 +9,10 @@
 //! one copy.
 //!
 //! It is util-linux 2.39.3's `libsmartcols/src/` -- `table.c`, `column.c`,
-//! `line.c`, `cell.c`, `calculate.c`, `print.c`, `print-api.c`, `walk.c` --
-//! and the `lib/` code they stand on (`mbsalign.c` as [`mbs`], `jsonwrt.c`
-//! as [`json`], `carefulputc.h` as [`careful`], `buffer.c` inline, and
+//! `line.c`, `cell.c`, `grouping.c`, `calculate.c`, `print.c`,
+//! `print-api.c`, `walk.c` -- and the `lib/` code they stand on
+//! (`mbsalign.c` as [`mbs`], `jsonwrt.c` as [`json`], `carefulputc.h` as
+//! [`careful`], `buffer.c` inline, `list.h`'s `list_sort`, and
 //! `ttyutils.c`'s terminal size), function by function and with upstream's
 //! names in the documentation.
 //!
@@ -19,13 +20,17 @@
 //!
 //! Upstream links lines, columns and cells through reference-counted
 //! pointers and intrusive lists. Here a [`Table`] owns everything: columns
-//! and lines live in vectors in upstream's list order. A [`LineId`] is a
-//! line's place in the table, which never changes (the removal API is not
-//! ported; no caller here uses it); a [`ColumnId`] is a column's identity,
-//! which [`Table::move_column`] does not change though it moves the column.
+//! live in a vector in upstream's list order; lines live in a vector in the
+//! order they were made, and a second vector holds the table's order of
+//! them (`tb_lines`), which sorting changes. A [`LineId`] is a line's
+//! identity, which never changes (the removal API is not ported; no caller
+//! here uses it); a [`ColumnId`] is a column's identity, which
+//! [`Table::move_column`] does not change though it moves the column.
 //! Each line's cells are indexed as upstream's are, by the column's
 //! `seqnum` -- its place in the list, except where upstream's own list
-//! surgery goes wrong (see `move_column`), which is kept.
+//! surgery goes wrong (see `move_column`), which is kept. A group of lines
+//! (`lsblk --merge`'s chart) is an entry in the table's list of them,
+//! named by its place there, which never changes either.
 //! Output is written into a byte buffer the caller then writes out, so a
 //! failed write is the caller's to report, as `close_stdout` reports it.
 //!
@@ -49,25 +54,37 @@
 //! where upstream pads it until it is killed. All four are cases in which
 //! upstream never finishes; nothing that finishes differs.
 //!
+//! Where upstream's own lists would be corrupted or walked without end,
+//! the port does what the list surgery means instead, and finishes: a
+//! group's child given a parent line (see [`Table::line_add_child`]); and a
+//! loop -- a line made its own ancestor, or a group member made its own
+//! group's child -- which upstream's sort recurses through until the stack
+//! runs out (see [`Table::sort`] and [`Table::sort_by_tree`]). No program
+//! builds any of them; `scripts/smartcols-diff.sh` meets them, and counts
+//! them apart.
+//!
 //! # What is not ported yet
 //!
 //! Each is refused or absent rather than approximated, and each is what a
-//! program that needs it will have to add: groups (`scols_line_link_group`,
-//! the group chart), custom wrapping functions other than upstream's own
-//! newline one (`scols_column_set_wrapfunc` with anything but
-//! `scols_wrapnl_chunksize`/`scols_wrapnl_nextchunk`, which is
-//! [`Table::column_set_wrapnl`]), sorting (`scols_sort_table`), colours
-//! (every colour is ignored, as upstream ignores them when colours are not
-//! wanted), printing a range that starts or ends mid-table, removing single
-//! lines, and the debug output.
+//! program that needs it will have to add: custom wrapping functions other
+//! than upstream's own newline one (`scols_column_set_wrapfunc` with
+//! anything but `scols_wrapnl_chunksize`/`scols_wrapnl_nextchunk`, which is
+//! [`Table::column_set_wrapnl`]), colours (every colour is ignored, as
+//! upstream ignores them when colours are not wanted), printing a range that
+//! starts or ends mid-table, removing single lines, and the debug output.
 
 mod calc;
 pub mod careful;
+mod grouping;
 pub mod json;
 pub mod mbs;
 mod print;
 mod props;
+mod sort;
 pub mod tty;
+mod walk;
+
+pub use sort::{CellView, CmpFunc, cmpstr_cells};
 
 /// `SCOLS_FL_TRUNC`: cut the data when the column is too narrow.
 pub const FL_TRUNC: u32 = 1 << 0;
@@ -133,9 +150,14 @@ pub(crate) enum Format {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ColumnId(pub(crate) usize);
 
-/// A line, by its position among the table's lines.
+/// A line, by identity: the order it was made in, which sorting the table
+/// does not change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LineId(pub(crate) usize);
+
+/// A group of lines, by its place in the table's list of groups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GroupId(pub(crate) usize);
 
 /// Why a table could not be printed or changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +181,10 @@ pub(crate) struct Cell {
     pub(crate) flags: u32,
     /// The data's width, as the last calculation measured it.
     pub(crate) width: usize,
+    /// `userdata`: what the program keeps with the cell, never printed --
+    /// `lsblk` keeps a number to sort by. Upstream's is a `void *`; the one
+    /// program that sets it points it at a `uint64_t`.
+    pub(crate) userdata: Option<u64>,
 }
 
 impl Cell {
@@ -201,7 +227,12 @@ pub(crate) struct Column {
     pub(crate) wrapnl: bool,
     /// The name, as a cell.
     pub(crate) header: Cell,
+    /// Whether this column draws the groups' chart: the first tree column
+    /// a calculation finds, once the table has groups. Never unset, as
+    /// upstream never unsets it.
     pub(crate) is_groups: bool,
+    /// `cmpfunc`: how [`Table::sort`] orders lines by this column.
+    pub(crate) cmpfunc: Option<CmpFunc>,
 }
 
 impl Column {
@@ -254,15 +285,61 @@ impl Column {
 pub(crate) struct Line {
     pub(crate) cells: Vec<Cell>,
     pub(crate) parent: Option<LineId>,
+    /// `ln_branch`: the children, in their order.
     pub(crate) children: Vec<LineId>,
+    /// `parent_group`: the group this line is a child of -- drawn after
+    /// the group's last member, as a child of all of them.
+    pub(crate) parent_group: Option<GroupId>,
+    /// `group`: the group this line is a member of.
+    pub(crate) group: Option<GroupId>,
 }
 
-/// `struct libscols_symbols`: the tree's drawing.
+/// `SCOLS_GSTATE_*`: where the walk is in a group, as its chart shows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum GState {
+    /// Not drawn: not reached yet, or finished.
+    #[default]
+    None,
+    FirstMember,
+    MiddleMember,
+    LastMember,
+    MiddleChild,
+    LastChild,
+    /// Another line, between two members.
+    ContMembers,
+    /// Another line, between the last member and the last child.
+    ContChildren,
+}
+
+/// `struct libscols_group`: lines drawn as one, with children in common.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Group {
+    /// `nmembers`: how many lines were made members -- which the members
+    /// list, rebuilt in the tree's order before each print, is checked
+    /// against.
+    pub(crate) nmembers: usize,
+    /// `gr_members`.
+    pub(crate) members: Vec<LineId>,
+    /// `gr_children`.
+    pub(crate) children: Vec<LineId>,
+    pub(crate) state: GState,
+}
+
+/// `struct libscols_symbols`: the tree's and the groups' drawing. A group
+/// symbol a program's own symbols leave unset (`None`) is drawn with
+/// print.c's fallback for it.
 #[derive(Clone, Debug)]
 pub(crate) struct Symbols {
     pub(crate) tree_branch: Vec<u8>,
     pub(crate) tree_vert: Vec<u8>,
     pub(crate) tree_right: Vec<u8>,
+    pub(crate) group_vert: Option<Vec<u8>>,
+    pub(crate) group_horz: Option<Vec<u8>>,
+    pub(crate) group_first_member: Option<Vec<u8>>,
+    pub(crate) group_last_member: Option<Vec<u8>>,
+    pub(crate) group_middle_member: Option<Vec<u8>>,
+    pub(crate) group_last_child: Option<Vec<u8>>,
+    pub(crate) group_middle_child: Option<Vec<u8>>,
     pub(crate) title_padding: Vec<u8>,
     pub(crate) cell_padding: Vec<u8>,
 }
@@ -280,7 +357,22 @@ pub struct Table {
     /// `tb->ncols`: every column ever added, detached ones too, and so the
     /// number of cells in each line.
     pub(crate) ncols: usize,
+    /// Every line, indexed by its [`LineId`].
     pub(crate) lines: Vec<Line>,
+    /// `tb_lines`: the lines in the table's order -- the order they were
+    /// made in, until [`Table::sort`] or [`Table::sort_by_tree`].
+    pub(crate) order: Vec<LineId>,
+    /// `tb_groups`: every group, indexed by its [`GroupId`].
+    pub(crate) groups: Vec<Group>,
+    /// `grpset`: the groups' chart as the walk has it at the current line,
+    /// [`grouping::GRPSET_CHUNKSIZ`] slots per group drawn. Grows as the
+    /// walk needs room, and is kept (emptied, not shrunk) between walks.
+    pub(crate) grpset: Vec<Option<GroupId>>,
+    /// `ngrpchlds_pending`: groups whose last member the walk has reached
+    /// and whose children it has not walked yet.
+    pub(crate) ngrpchlds_pending: usize,
+    /// `dflt_sort_column`: the column [`Table::sort`] last sorted by.
+    pub(crate) dflt_sort_column: Option<ColumnId>,
     pub(crate) ntreecols: usize,
     pub(crate) termwidth: usize,
     pub(crate) termheight: usize,
@@ -332,6 +424,11 @@ impl Table {
             detached: Vec::new(),
             ncols: 0,
             lines: Vec::new(),
+            order: Vec::new(),
+            groups: Vec::new(),
+            grpset: Vec::new(),
+            ngrpchlds_pending: 0,
+            dflt_sort_column: None,
             ntreecols: 0,
             termwidth: cols.filter(|&c| c > 0).unwrap_or(80),
             termheight: rows.filter(|&r| r > 0).unwrap_or(24),
@@ -518,11 +615,21 @@ impl Table {
     /// `_right`, then `scols_table_set_symbols`: the tree drawn with these
     /// pieces. The paddings, which a program setting its own symbols leaves
     /// `NULL`, are what upstream falls back to for `NULL` -- one space each.
+    ///
+    /// The groups' symbols are left unset too, and so drawn with print.c's
+    /// fallbacks.
     pub fn set_tree_symbols(&mut self, branch: &[u8], vertical: &[u8], right: &[u8]) {
         self.symbols = Some(Symbols {
             tree_branch: branch.to_vec(),
             tree_vert: vertical.to_vec(),
             tree_right: right.to_vec(),
+            group_vert: None,
+            group_horz: None,
+            group_first_member: None,
+            group_last_member: None,
+            group_middle_member: None,
+            group_last_child: None,
+            group_middle_child: None,
             title_padding: b" ".to_vec(),
             cell_padding: b" ".to_vec(),
         });
@@ -687,8 +794,17 @@ impl Table {
 
     /// `scols_table_remove_lines`: every line gone, the columns kept, so
     /// the table can be filled and printed again.
+    ///
+    /// The groups go with them. Upstream's stay, their members kept alive
+    /// by the groups' references though gone from the table, and would draw
+    /// a chart of lines no longer printed; no program groups lines and then
+    /// removes them.
     pub fn remove_lines(&mut self) {
         self.lines.clear();
+        self.order.clear();
+        self.groups.clear();
+        self.grpset.clear();
+        self.ngrpchlds_pending = 0;
     }
 
     /// The columns in their order (`scols_table_next_column`); detached
@@ -789,8 +905,9 @@ impl Table {
         self.lines.push(Line {
             cells: vec![Cell::default(); self.ncols],
             parent,
-            children: Vec::new(),
+            ..Line::default()
         });
+        self.order.push(id);
         if let Some(p) = parent
             && let Some(line) = self.lines.get_mut(p.0)
         {
@@ -800,9 +917,36 @@ impl Table {
     }
 
     /// The lines in table order (`scols_table_next_line`), which moving a
-    /// line in the tree does not change.
+    /// line in the tree does not change and sorting does.
     pub fn line_ids(&self) -> impl Iterator<Item = LineId> + use<> {
-        (0..self.lines.len()).map(LineId)
+        self.order.clone().into_iter()
+    }
+
+    /// `scols_line_get_cell(ln, n)` and `scols_cell_set_userdata`: a number
+    /// kept with the line's `n`th cell for a comparison function to read
+    /// ([`CellView::userdata`]); never printed.
+    ///
+    /// # Errors
+    ///
+    /// The line is not this table's, or has no `n`th cell.
+    pub fn cell_set_userdata(&mut self, ln: LineId, n: usize, data: u64) -> Result<(), Error> {
+        self.lines
+            .get_mut(ln.0)
+            .and_then(|l| l.cells.get_mut(n))
+            .ok_or(Error::Invalid)?
+            .userdata = Some(data);
+        Ok(())
+    }
+
+    /// `scols_column_set_cmpfunc(cl, cmp, NULL)`: how [`Table::sort`]
+    /// orders lines by this column -- [`cmpstr_cells`], or the program's own.
+    ///
+    /// # Errors
+    ///
+    /// The column is not this table's.
+    pub fn column_set_cmpfunc(&mut self, cl: ColumnId, cmp: CmpFunc) -> Result<(), Error> {
+        self.column_mut(cl).ok_or(Error::Invalid)?.cmpfunc = Some(cmp);
+        Ok(())
     }
 
     /// `scols_line_set_column_data(ln, cl, data)`: the cell's data, copied
@@ -865,6 +1009,11 @@ impl Table {
     /// `scols_line_add_child(ln, child)`: `child` taken from its parent's
     /// children, if it has a parent, and put last among `ln`'s.
     ///
+    /// A group's child is taken from the group's children too. Upstream
+    /// links it into `ln`'s children while the group's list still holds it,
+    /// and so corrupts both lists; no program gives a group's child a
+    /// parent.
+    ///
     /// # Errors
     ///
     /// Either line is not this table's.
@@ -884,7 +1033,9 @@ impl Table {
 
     /// `scols_line_remove_child(ln, child)`: `child` taken from its parent's
     /// children, a root again. As upstream's, from whichever line is its
-    /// parent, `ln` or not.
+    /// parent, `ln` or not -- or from its group's children, since the one
+    /// link is in either list; a group's child so taken still names its
+    /// group, and so is no root, and is not printed.
     ///
     /// # Errors
     ///
@@ -897,14 +1048,22 @@ impl Table {
         Ok(())
     }
 
-    /// `list_del_init(&child->ln_children)` and `child->parent = NULL`.
+    /// `list_del_init(&child->ln_children)` -- out of its parent's children,
+    /// or its group's -- and `child->parent = NULL`.
     fn detach_line(&mut self, child: LineId) {
-        let old = self.lines.get_mut(child.0).and_then(|l| l.parent.take());
-        if let Some(old) = old
-            && let Some(parent) = self.lines.get_mut(old.0)
-            && let Some(i) = parent.children.iter().position(|&c| c == child)
+        let (old, group) = match self.lines.get_mut(child.0) {
+            Some(l) => (l.parent.take(), l.parent_group),
+            None => return,
+        };
+        let list = match (old, group) {
+            (Some(old), _) => self.lines.get_mut(old.0).map(|p| &mut p.children),
+            (None, Some(gr)) => self.groups.get_mut(gr.0).map(|g| &mut g.children),
+            (None, None) => None,
+        };
+        if let Some(list) = list
+            && let Some(i) = list.iter().position(|&c| c == child)
         {
-            parent.children.remove(i);
+            list.remove(i);
         }
     }
 

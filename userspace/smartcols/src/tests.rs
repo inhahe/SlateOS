@@ -375,3 +375,236 @@ fn a_tree_cannot_be_printed_as_a_range() {
     tb.new_line(None).unwrap();
     assert!(tb.print_range_into(&mut Vec::new()).is_err());
 }
+
+/// lsblk --merge's shape: sda1 and sdb1 grouped, md0 the group's child and
+/// md0p1 md0's -- in table order as lsblk adds them.
+fn merged(utf8: bool) -> Table {
+    let mut tb = Table::new();
+    tb.set_utf8(utf8);
+    tb.set_termforce(TermForce::Never);
+    let name = tb.new_column(b"NAME", 0.0, FL_TREE);
+    let size = tb.new_column(b"SIZE", 0.0, FL_RIGHT);
+    let rows: [(&[u8], &[u8], Option<usize>); 6] = [
+        (b"sda", b"10G", None),
+        (b"sda1", b"5G", Some(0)),
+        (b"sdb", b"10G", None),
+        (b"sdb1", b"5G", Some(2)),
+        (b"md0", b"5G", None),
+        (b"md0p1", b"1G", Some(4)),
+    ];
+    let mut lines = Vec::new();
+    for (n, s, parent) in rows {
+        let ln = tb.new_line(parent.map(|p| lines[p])).unwrap();
+        tb.line_set_data(ln, name, n).unwrap();
+        tb.line_set_data(ln, size, s).unwrap();
+        lines.push(ln);
+    }
+    tb.group_lines(Some(lines[1]), lines[1]).unwrap();
+    tb.group_lines(Some(lines[3]), lines[1]).unwrap();
+    tb.line_link_group(lines[4], lines[1]).unwrap();
+    tb
+}
+
+// The expected outputs from here on are util-linux 2.39.3's libsmartcols
+// own, from `scripts/scols-probe.c` running the same calls.
+
+#[test]
+fn a_groups_chart_is_drawn_left_of_the_tree() {
+    let mut tb = merged(false);
+    tb.enable_ascii(true);
+    assert_eq!(
+        text(tb.print().unwrap()),
+        "    NAME    SIZE\n    sda      10G\n,-> `-sda1    5G\n|   sdb      10G\n'-> `-sdb1    5G\n `--md0       5G\n    `-md0p1   1G\n"
+    );
+}
+
+#[test]
+fn a_groups_chart_in_utf8_is_drawn_with_dashed_lines() {
+    let mut tb = merged(true);
+    assert_eq!(
+        text(tb.print().unwrap()),
+        "    NAME    SIZE\n    sda      10G\n\u{250c}\u{2508}\u{25b6} \u{2514}\u{2500}sda1    5G\n\u{2506}   sdb      10G\n\u{2514}\u{252c}\u{25b6} \u{2514}\u{2500}sdb1    5G\n \u{2514}\u{2508}\u{2508}md0       5G\n    \u{2514}\u{2500}md0p1   1G\n"
+    );
+}
+
+#[test]
+fn in_json_a_groups_child_is_a_root() {
+    let mut tb = merged(true);
+    tb.enable_json(true);
+    tb.set_name(b"blockdevices");
+    let out = text(tb.print().unwrap());
+    assert!(out.contains(
+        "},{\n         \"name\": \"md0\",\n         \"size\": \"5G\",\n         \"children\": ["
+    ));
+    assert!(!out.contains('\u{2508}'));
+}
+
+#[test]
+fn a_second_groups_chart_goes_left_of_the_first() {
+    let mut tb = Table::new();
+    tb.set_utf8(false);
+    tb.set_termforce(TermForce::Never);
+    let name = tb.new_column(b"NAME", 0.0, FL_TREE);
+    let l: Vec<LineId> = [&b"a"[..], b"b", b"c", b"d", b"x", b"y"]
+        .iter()
+        .map(|n| {
+            let ln = tb.new_line(None).unwrap();
+            tb.line_set_data(ln, name, n).unwrap();
+            ln
+        })
+        .collect();
+    tb.group_lines(Some(l[0]), l[0]).unwrap();
+    tb.group_lines(Some(l[2]), l[0]).unwrap();
+    tb.group_lines(Some(l[1]), l[1]).unwrap();
+    tb.group_lines(Some(l[3]), l[1]).unwrap();
+    tb.line_link_group(l[4], l[0]).unwrap();
+    tb.line_link_group(l[5], l[1]).unwrap();
+    tb.enable_ascii(true);
+    // The horizontal line to a child runs through every empty slot to its
+    // right -- and, as upstream counts them without resetting the count,
+    // through the slots its earlier calls counted too.
+    assert_eq!(
+        text(tb.print().unwrap()),
+        "       NAME\n   ,-> a\n,->|   b\n|  '-> c\n|   `--x\n'->    d\n `-----y\n"
+    );
+}
+
+#[test]
+fn grouping_refuses_what_upstream_refuses() {
+    let mut tb = Table::new();
+    tb.set_utf8(true);
+    tb.set_termforce(TermForce::Never);
+    tb.new_column(b"N", 0.0, FL_TREE);
+    let l0 = tb.new_line(None).unwrap();
+    let l1 = tb.new_line(None).unwrap();
+    let l2 = tb.new_line(Some(l0)).unwrap();
+    let l3 = tb.new_line(None).unwrap();
+    tb.group_lines(Some(l0), l1).unwrap();
+    // l1 is in a group, l2 in none.
+    assert_eq!(tb.group_lines(Some(l1), l2), Err(Error::Invalid));
+    // l2 has a parent.
+    assert_eq!(tb.line_link_group(l2, l0), Err(Error::Invalid));
+    // l2 is in no group.
+    assert_eq!(tb.line_link_group(l3, l2), Err(Error::Invalid));
+    tb.line_link_group(l3, l0).unwrap();
+    // Already a group's child.
+    assert_eq!(tb.line_link_group(l3, l0), Err(Error::Invalid));
+    // A group of one, made without a second line.
+    tb.group_lines(None, l3).unwrap();
+    assert_eq!(
+        text(tb.print().unwrap()),
+        "       N\n   \u{250c}\u{2508}\u{25b6} \n   \u{2506}   \u{2514}\u{2500}\n   \u{2514}\u{252c}\u{25b6} \n\u{250c}\u{2508}\u{25b6} \u{2514}\u{2508}\u{2508}\n"
+    );
+}
+
+#[test]
+fn removing_the_lines_removes_the_groups() {
+    let mut tb = merged(false);
+    tb.remove_lines();
+    let name = tb.column(0).unwrap();
+    let ln = tb.new_line(None).unwrap();
+    tb.line_set_data(ln, name, b"sdc").unwrap();
+    tb.enable_ascii(true);
+    assert_eq!(text(tb.print().unwrap()), "NAME SIZE\nsdc  \n");
+}
+
+/// lsblk's `cmp_u64_cells`.
+fn cmp_u64(a: CellView<'_>, b: CellView<'_>) -> i32 {
+    match (a.userdata(), b.userdata()) {
+        (None, None) => 0,
+        (None, Some(_)) => -1,
+        (Some(_), None) => 1,
+        (Some(x), Some(y)) => match x.cmp(&y) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+    }
+}
+
+#[test]
+fn a_list_is_sorted_stably_with_cells_without_data_first() {
+    let mut tb = Table::new();
+    tb.set_termforce(TermForce::Never);
+    let name = tb.new_column(b"NAME", 0.0, 0);
+    let size = tb.new_column(b"SIZE", 0.0, FL_RIGHT);
+    let rows: [(Option<&[u8]>, Option<u64>); 5] = [
+        (Some(b"sdb"), Some(5)),
+        (Some(b"sda"), Some(10)),
+        (None, Some(5)),
+        (Some(b"sdc"), None),
+        (Some(b"loop0"), Some(0)),
+    ];
+    for (n, s) in rows {
+        let ln = tb.new_line(None).unwrap();
+        if let Some(n) = n {
+            tb.line_set_data(ln, name, n).unwrap();
+        }
+        if let Some(s) = s {
+            tb.line_set_data(ln, size, s.to_string().as_bytes()).unwrap();
+            tb.cell_set_userdata(ln, 1, s).unwrap();
+        }
+    }
+    // No comparison function yet.
+    assert_eq!(tb.sort(Some(size)), Err(Error::Invalid));
+    tb.column_set_cmpfunc(size, cmp_u64).unwrap();
+    tb.sort(Some(size)).unwrap();
+    assert_eq!(
+        text(tb.print().unwrap()),
+        "NAME  SIZE\nsdc   \nloop0    0\nsdb      5\n         5\nsda     10\n"
+    );
+    tb.column_set_cmpfunc(name, cmpstr_cells).unwrap();
+    tb.sort(Some(name)).unwrap();
+    let by_name = "NAME  SIZE\n         5\nloop0    0\nsda     10\nsdb      5\nsdc   \n";
+    assert_eq!(text(tb.print().unwrap()), by_name);
+    // Without a column: the one sorted by last.
+    tb.sort(None).unwrap();
+    assert_eq!(text(tb.print().unwrap()), by_name);
+}
+
+#[test]
+fn sorting_by_tree_puts_each_line_before_its_children() {
+    let mut tb = Table::new();
+    tb.set_termforce(TermForce::Never);
+    let name = tb.new_column(b"NAME", 0.0, 0);
+    tb.column_set_cmpfunc(name, cmpstr_cells).unwrap();
+    let mut l: Vec<LineId> = Vec::new();
+    for (n, parent) in [
+        (&b"z"[..], None),
+        (b"b", None),
+        (b"y", Some(0)),
+        (b"a", Some(1)),
+        (b"x", Some(0)),
+        (b"c", Some(3)),
+    ] {
+        let ln = tb.new_line(parent.map(|p: usize| l[p])).unwrap();
+        tb.line_set_data(ln, name, n).unwrap();
+        l.push(ln);
+    }
+    tb.sort_by_tree();
+    assert_eq!(text(tb.print().unwrap()), "NAME\nz\ny\nx\nb\na\nc\n");
+    // A list is sorted as one: the tree is not consulted.
+    tb.sort(Some(name)).unwrap();
+    assert_eq!(text(tb.print().unwrap()), "NAME\na\nb\nc\nx\ny\nz\n");
+    // By tree again, each line's children sorted by the name first.
+    tb.sort_by_tree();
+    assert_eq!(text(tb.print().unwrap()), "NAME\nb\na\nc\nz\nx\ny\n");
+}
+
+#[test]
+fn a_line_made_its_own_groups_child_is_sorted_without_end_upstream_but_not_here() {
+    // Upstream's sort recurses from the group's first member into the
+    // group's children -- the member itself -- until the stack runs out.
+    let mut tb = Table::new();
+    tb.set_termforce(TermForce::Never);
+    let name = tb.new_column(b"N", 0.0, FL_TREE);
+    tb.column_set_cmpfunc(name, cmpstr_cells).unwrap();
+    let a = tb.new_line(None).unwrap();
+    let b = tb.new_line(None).unwrap();
+    tb.line_set_data(a, name, b"a").unwrap();
+    tb.line_set_data(b, name, b"b").unwrap();
+    tb.group_lines(Some(b), a).unwrap();
+    tb.line_link_group(a, b).unwrap();
+    tb.sort(Some(name)).unwrap();
+    tb.print().unwrap();
+}

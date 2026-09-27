@@ -687,7 +687,7 @@ impl Lsns {
                     *pino = pfd
                         .metadata()
                         .map(|m| ino_of(&m))
-                        .map_err(|e| errno_of(&e))?
+                        .map_err(|e| errno_of(&e))?;
                 }
                 // The root of the hierarchy, or one outside ours.
                 Err(EPERM) => {}
@@ -699,7 +699,7 @@ impl Lsns {
                 *oino = ofd
                     .metadata()
                     .map(|m| ino_of(&m))
-                    .map_err(|e| errno_of(&e))?
+                    .map_err(|e| errno_of(&e))?;
             }
             Err(EPERM) => {}
             Err(e) => return Err(e),

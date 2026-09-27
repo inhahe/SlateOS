@@ -1898,11 +1898,13 @@ live.
   text area is its first user. Offered to the programs that keep their own
   straight-line undo (lane E adopts; `requests/c-e-the-operators-answers-to-c-q24-c-q25-c-q26.md`).
 
-- `[C]` **Each look keeps its own colours** -- open (C-Q15, §1421). In
-  `gui/appearance`: the accent and the user's other interface colours stored
-  per look (Outlined, Filled) in `appearance.yaml`, a one-accent file read as
-  that accent for both; the palette resolves the colours of the look in use.
-  Then lane E's Settings page edits the look being edited.
+- `[C]` **Each look keeps its own colours** -- **lane C's half done
+  2026-09-27** (C-Q15, §1421). `appearance::LookColours`; `accent_color` and
+  `custom_accent` are the look in use's, `other_look_colours` the other's, and
+  `set_surface_style` trades them over; `theme.cards` holds the filled look's in
+  `appearance.yaml`, and a one-accent file reads as that accent for both.
+  **Lane E:** Settings changes the look through `set_surface_style` rather than
+  assigning the field (`requests/c-e-the-operators-answers-c-q15-c-q16-c-q17-c-q19-c-q21.md` §5).
 
 - `[C]` **One list of the installed programs, in userspace** -- open (C-Q20,
   §1425). First an inventory of all four lists -- the kernel's

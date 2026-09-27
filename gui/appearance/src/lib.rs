@@ -124,6 +124,12 @@ pub fn surface_style_yaml_name(style: SurfaceStyle) -> &'static str {
     }
 }
 
+/// Where `appearance.yaml` keeps the filled look's own colours: `theme.cards`,
+/// under the look's own spelling (`design-decisions.md` §1421). The outlined
+/// look's are `theme.accent` and `theme.custom_accent` themselves, where the
+/// one accent was written before each look kept its own.
+const FILLED_LOOK_KEY: &str = "cards";
+
 /// The `SurfaceStyle` a configuration file spelling names.
 ///
 /// `None` for a spelling this build does not know, which is how a file
@@ -977,6 +983,35 @@ impl AccentColor {
     }
 }
 
+/// The interface colours a user sets, as one look keeps them.
+///
+/// `design-decisions.md` §1421, the operator's answer to C-Q15: each look --
+/// outlined boxes or filled ones, [`SurfaceStyle`] -- keeps its own, so an
+/// accent chosen to suit one is never carried onto the other, where it can
+/// read differently (under the filled look the accent is drawn deeper on the
+/// grey boxes to keep its text readable). Today that is the accent: which one,
+/// and the colour a custom accent names. A struct rather than two loose values
+/// so that an interface colour added later is kept per look by being added
+/// here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LookColours {
+    /// Which accent.
+    pub accent_color: AccentColor,
+    /// The colour an [`AccentColor::Custom`] accent names.
+    pub custom_accent: Color,
+}
+
+impl Default for LookColours {
+    /// Blue, the accent a machine with no settings file has -- under either
+    /// look, so a look nobody has chosen colours for shows the defaults.
+    fn default() -> Self {
+        Self {
+            accent_color: AccentColor::Blue,
+            custom_accent: BLUE,
+        }
+    }
+}
+
 // ============================================================================
 // Transparency / blur effects
 // ============================================================================
@@ -1442,6 +1477,10 @@ pub struct AppearanceSettings {
     pub auto_is_light: bool,
     /// Whether boxes are outlined or filled. See [`SurfaceStyle`]; defaults to
     /// [`SurfaceStyle::Borders`] (§829), with `Cards` the optional theme.
+    ///
+    /// Each look keeps its own colours (§1421), so change it with
+    /// [`set_surface_style`](Self::set_surface_style), which brings the new
+    /// look's back; see [`other_look_colours`](Self::other_look_colours).
     pub surface_style: SurfaceStyle,
     /// Whether a toolbar or status bar is a band or a hairline. See
     /// [`guitk::palette::StripStyle`]; defaults to `Filled` (§835).
@@ -1549,10 +1588,23 @@ pub struct AppearanceSettings {
     /// it has a background colour. The mode is left untouched so that turning
     /// high contrast off returns the user to the theme they had.
     pub high_contrast: Option<HighContrastScheme>,
-    /// Accent color selection.
+    /// The accent, as the look in use keeps it (§1421).
     pub accent_color: AccentColor,
-    /// Custom accent color (used when accent_color is Custom).
+    /// The colour a [`AccentColor::Custom`] accent names, as the look in use
+    /// keeps it.
     pub custom_accent: Color,
+    /// The colours kept for the look *not* in use: what changing
+    /// [`surface_style`](Self::surface_style) brings back
+    /// (`design-decisions.md` §1421).
+    ///
+    /// The look in use keeps its own in [`accent_color`](Self::accent_color)
+    /// and [`custom_accent`](Self::custom_accent), where every reader has always
+    /// found them, so nothing that draws needs to know there are two. Change
+    /// the look with [`set_surface_style`](Self::set_surface_style), which
+    /// trades the two over. **Assigning `surface_style` directly does not**:
+    /// the accent chosen under the old look is then on the new one -- the thing
+    /// §1421 exists to prevent.
+    pub other_look_colours: LookColours,
     /// Transparency/blur effect level.
     pub transparency: TransparencyLevel,
     /// Animation speed.
@@ -1656,8 +1708,9 @@ impl Default for AppearanceSettings {
             // somebody switches night light on. Unread while it is off.
             night_light_strength: 0.5,
             high_contrast: None,
-            accent_color: AccentColor::Blue,
-            custom_accent: BLUE,
+            accent_color: LookColours::default().accent_color,
+            custom_accent: LookColours::default().custom_accent,
+            other_look_colours: LookColours::default(),
             transparency: TransparencyLevel::Moderate,
             animation_speed: AnimationSpeed::Normal,
             fonts: FontSettings::default(),
@@ -1679,6 +1732,54 @@ impl Default for AppearanceSettings {
 }
 
 impl AppearanceSettings {
+    /// The colours of the look in use.
+    #[must_use]
+    pub const fn colours(&self) -> LookColours {
+        LookColours {
+            accent_color: self.accent_color,
+            custom_accent: self.custom_accent,
+        }
+    }
+
+    /// The colours `look` keeps, whether or not it is the look in use.
+    #[must_use]
+    pub fn colours_for(&self, look: SurfaceStyle) -> LookColours {
+        if look == self.surface_style {
+            self.colours()
+        } else {
+            self.other_look_colours
+        }
+    }
+
+    /// Set the colours `look` keeps: for the look in use, the accent on
+    /// screen; for the other, what changing to it will bring back.
+    pub fn set_colours_for(&mut self, look: SurfaceStyle, colours: LookColours) {
+        if look == self.surface_style {
+            self.accent_color = colours.accent_color;
+            self.custom_accent = colours.custom_accent;
+        } else {
+            self.other_look_colours = colours;
+        }
+    }
+
+    /// Change the look, bringing back the colours kept for it and keeping the
+    /// ones in use for the look being left (`design-decisions.md` §1421).
+    ///
+    /// Choosing the look already in use changes nothing -- in particular it
+    /// does not trade the colours over, which would put the other look's
+    /// accent on screen for a click that changed nothing.
+    pub fn set_surface_style(&mut self, look: SurfaceStyle) {
+        if look == self.surface_style {
+            return;
+        }
+        let leaving = self.colours();
+        let arriving = self.other_look_colours;
+        self.surface_style = look;
+        self.accent_color = arriving.accent_color;
+        self.custom_accent = arriving.custom_accent;
+        self.other_look_colours = leaving;
+    }
+
     /// The caret width this user asked for, in pixels.
     ///
     /// The one step between the stored setting and something that can be
@@ -2252,16 +2353,37 @@ impl AppearanceSettings {
                 .and_then(|v| ColorFilter::from_yaml_name(&v))
         );
 
+        // The accent, kept per look (§1421). `theme.accent` and
+        // `theme.custom_accent` are the outlined look's -- where the one accent
+        // was always written -- and `theme.cards` holds the filled look's.
+        // Whatever the filled look does not say it takes from the outlined
+        // one, which is how a file written before looks kept colours of their
+        // own reads: as that one accent for both, so nobody's choice is lost.
+        // After `surface_style`, which decides which of the two is on screen.
+        let mut outlined = LookColours::default();
         read_into!(
-            s.accent_color,
+            outlined.accent_color,
             doc.get_str(&["theme", "accent"])
                 .and_then(|v| AccentColor::from_yaml_name(&v))
         );
         read_into!(
-            s.custom_accent,
+            outlined.custom_accent,
             doc.get_str(&["theme", "custom_accent"])
                 .and_then(|v| Color::from_hex_text(&v))
         );
+        let mut filled = outlined;
+        read_into!(
+            filled.accent_color,
+            doc.get_str(&["theme", FILLED_LOOK_KEY, "accent"])
+                .and_then(|v| AccentColor::from_yaml_name(&v))
+        );
+        read_into!(
+            filled.custom_accent,
+            doc.get_str(&["theme", FILLED_LOOK_KEY, "custom_accent"])
+                .and_then(|v| Color::from_hex_text(&v))
+        );
+        s.set_colours_for(SurfaceStyle::Borders, outlined);
+        s.set_colours_for(SurfaceStyle::Cards, filled);
         read_into!(
             s.transparency,
             doc.get_str(&["theme", "transparency"])
@@ -2501,10 +2623,23 @@ impl AppearanceSettings {
             self.high_contrast
                 .map_or("off", HighContrastScheme::yaml_name),
         );
-        doc.set_str(&["theme", "accent"], self.accent_color.yaml_name());
+        // Per look (§1421), and both whichever is in use, so the file
+        // says what each look will show: the outlined look's where the one
+        // accent has always been, the filled look's under `theme.cards`.
+        let outlined = self.colours_for(SurfaceStyle::Borders);
+        let filled = self.colours_for(SurfaceStyle::Cards);
+        doc.set_str(&["theme", "accent"], outlined.accent_color.yaml_name());
         doc.set_str(
             &["theme", "custom_accent"],
-            &Color::hex_text(self.custom_accent),
+            &Color::hex_text(outlined.custom_accent),
+        );
+        doc.set_str(
+            &["theme", FILLED_LOOK_KEY, "accent"],
+            filled.accent_color.yaml_name(),
+        );
+        doc.set_str(
+            &["theme", FILLED_LOOK_KEY, "custom_accent"],
+            &Color::hex_text(filled.custom_accent),
         );
         doc.set_str(&["theme", "transparency"], self.transparency.yaml_name());
 
@@ -3166,6 +3301,14 @@ mod tests {
             high_contrast: Some(HighContrastScheme::YellowOnBlack),
             accent_color: AccentColor::Custom,
             custom_accent: Color::rgba(1, 2, 3, 4),
+            // The outlined look's, since the filled one is in use: a
+            // different accent *and* a different custom colour, so a writer
+            // that crossed the two looks over, or wrote one look twice, is
+            // caught on either value.
+            other_look_colours: LookColours {
+                accent_color: AccentColor::Mauve,
+                custom_accent: Color::rgba(5, 6, 7, 8),
+            },
             transparency: TransparencyLevel::Full,
             animation_speed: AnimationSpeed::Slow,
             fonts: FontSettings {
@@ -5887,5 +6030,215 @@ mod tests {
         s.caret_width_scale = 0.01;
         s.validate();
         assert_eq!(s.caret_width_scale, 0.5);
+    }
+
+    // ---- each look keeps its own colours (§1421) ----
+
+    fn colours(accent_color: AccentColor, custom_accent: Color) -> LookColours {
+        LookColours {
+            accent_color,
+            custom_accent,
+        }
+    }
+
+    /// **Changing the look brings back the colours kept for it**, and keeps
+    /// the ones being left for when that look comes back: an accent chosen
+    /// under one look never lands on the other.
+    #[test]
+    fn each_look_keeps_its_own_accent() {
+        let mut s = AppearanceSettings::default();
+        assert_eq!(s.surface_style, SurfaceStyle::Borders);
+        s.accent_color = AccentColor::Red;
+
+        s.set_surface_style(SurfaceStyle::Cards);
+        assert_eq!(
+            s.accent_color,
+            AccentColor::Blue,
+            "the outlined look's accent was carried onto the filled one"
+        );
+        s.accent_color = AccentColor::Teal;
+
+        s.set_surface_style(SurfaceStyle::Borders);
+        assert_eq!(
+            s.accent_color,
+            AccentColor::Red,
+            "the outlined look lost its accent"
+        );
+        s.set_surface_style(SurfaceStyle::Cards);
+        assert_eq!(
+            s.accent_color,
+            AccentColor::Teal,
+            "the filled look lost its accent"
+        );
+    }
+
+    /// A custom accent travels with its look, colour and all.
+    #[test]
+    fn a_custom_accent_is_kept_with_its_look() {
+        let chosen = Color::rgb(0x12, 0x34, 0x56);
+        let mut s = AppearanceSettings::default();
+        s.set_surface_style(SurfaceStyle::Cards);
+        s.accent_color = AccentColor::Custom;
+        s.custom_accent = chosen;
+        s.set_surface_style(SurfaceStyle::Borders);
+        assert_eq!(s.colours(), LookColours::default());
+        s.set_surface_style(SurfaceStyle::Cards);
+        assert_eq!(s.colours(), colours(AccentColor::Custom, chosen));
+    }
+
+    /// Choosing the look in use again is not a change, so nothing is traded
+    /// over: a second click on the selected look must not put the other look's
+    /// accent on screen.
+    #[test]
+    fn choosing_the_look_in_use_again_changes_no_colour() {
+        let mut s = AppearanceSettings::default();
+        s.accent_color = AccentColor::Red;
+        s.other_look_colours.accent_color = AccentColor::Teal;
+        s.set_surface_style(SurfaceStyle::Borders);
+        assert_eq!(s.accent_color, AccentColor::Red);
+        assert_eq!(s.other_look_colours.accent_color, AccentColor::Teal);
+    }
+
+    /// Either look's colours can be read and set without changing the look --
+    /// what a colour page that edits the look not in use needs -- and setting
+    /// the other look's leaves the screen alone.
+    #[test]
+    fn either_looks_colours_can_be_set_without_changing_the_look() {
+        let mut s = AppearanceSettings::default();
+        s.set_colours_for(SurfaceStyle::Cards, colours(AccentColor::Green, BLUE));
+        assert_eq!(s.surface_style, SurfaceStyle::Borders);
+        assert_eq!(s.accent_color, AccentColor::Blue, "the look in use changed");
+        assert_eq!(
+            s.colours_for(SurfaceStyle::Cards).accent_color,
+            AccentColor::Green
+        );
+
+        s.set_colours_for(SurfaceStyle::Borders, colours(AccentColor::Mauve, BLUE));
+        assert_eq!(s.accent_color, AccentColor::Mauve);
+        assert_eq!(s.colours_for(SurfaceStyle::Borders), s.colours());
+        assert_eq!(
+            s.colours_for(SurfaceStyle::Cards).accent_color,
+            AccentColor::Green
+        );
+    }
+
+    /// The palette draws the accent of the look in use -- the same palette a
+    /// settings file naming that accent directly would give.
+    #[test]
+    fn the_palette_draws_the_accent_of_the_look_in_use() {
+        let mut s = AppearanceSettings::default();
+        s.accent_color = AccentColor::Red;
+        s.set_colours_for(SurfaceStyle::Cards, colours(AccentColor::Green, BLUE));
+        let outlined = Palette::from_settings(&s).accent;
+        s.set_surface_style(SurfaceStyle::Cards);
+        let filled = Palette::from_settings(&s).accent;
+
+        let direct = |surface_style, accent_color| {
+            Palette::from_settings(&AppearanceSettings {
+                surface_style,
+                accent_color,
+                ..AppearanceSettings::default()
+            })
+            .accent
+        };
+        assert_eq!(outlined, direct(SurfaceStyle::Borders, AccentColor::Red));
+        assert_eq!(filled, direct(SurfaceStyle::Cards, AccentColor::Green));
+        assert_ne!(outlined, filled);
+    }
+
+    /// **Both looks' colours survive the file, whichever look is in use.**
+    #[test]
+    fn both_looks_colours_survive_the_file_whichever_is_in_use() {
+        let custom = Color::rgb(0x12, 0x34, 0x56);
+        for look in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+            let mut s = AppearanceSettings::default();
+            s.set_colours_for(SurfaceStyle::Borders, colours(AccentColor::Custom, custom));
+            s.set_colours_for(SurfaceStyle::Cards, colours(AccentColor::Teal, BLUE));
+            s.set_surface_style(look);
+
+            let mut doc = Document::new();
+            s.write_into(&mut doc);
+            let back = AppearanceSettings::read_from(&doc);
+            assert_eq!(back.surface_style, look);
+            for each in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+                assert_eq!(
+                    back.colours_for(each),
+                    s.colours_for(each),
+                    "{each:?}'s colours did not survive with {look:?} in use"
+                );
+            }
+        }
+    }
+
+    /// The file keeps the colours by look, not by which look is in use: the
+    /// outlined look's accent is where the one accent always was, so a file
+    /// read by a desktop from before this change still shows the default
+    /// look's colours.
+    #[test]
+    fn the_outlined_looks_accent_is_where_the_one_accent_always_was() {
+        let mut s = AppearanceSettings::default();
+        s.accent_color = AccentColor::Red;
+        s.set_surface_style(SurfaceStyle::Cards);
+        s.accent_color = AccentColor::Teal;
+
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+        assert_eq!(
+            doc.get_str(&["theme", "accent"]).as_deref(),
+            Some(AccentColor::Red.yaml_name())
+        );
+        assert_eq!(
+            doc.get_str(&["theme", "cards", "accent"]).as_deref(),
+            Some(AccentColor::Teal.yaml_name())
+        );
+    }
+
+    /// **A file written before each look kept its own colours** reads as its
+    /// one accent for both looks, so nobody's choice is lost -- whichever look
+    /// the file has in use.
+    #[test]
+    fn a_file_with_one_accent_gives_it_to_both_looks() {
+        for look in ["borders", "cards"] {
+            let doc = Document::parse(&format!(
+                "theme:\n  surface_style: {look}\n  accent: custom\n  custom_accent: '#123456'\n"
+            ));
+            let s = AppearanceSettings::read_from(&doc);
+            let one = colours(AccentColor::Custom, Color::rgb(0x12, 0x34, 0x56));
+            assert_eq!(s.colours(), one, "{look}: the accent in use");
+            assert_eq!(
+                s.colours_for(SurfaceStyle::Borders),
+                one,
+                "{look}: outlined"
+            );
+            assert_eq!(s.colours_for(SurfaceStyle::Cards), one, "{look}: filled");
+        }
+    }
+
+    /// What the filled look does not say it takes from the outlined one -- the
+    /// same rule as a file with no filled section at all, applied per value.
+    #[test]
+    fn what_the_filled_look_does_not_say_it_takes_from_the_outlined_one() {
+        let doc = Document::parse(
+            "theme:\n  accent: custom\n  custom_accent: '#123456'\n  cards:\n    accent: teal\n",
+        );
+        let s = AppearanceSettings::read_from(&doc);
+        assert_eq!(
+            s.colours_for(SurfaceStyle::Cards),
+            colours(AccentColor::Teal, Color::rgb(0x12, 0x34, 0x56))
+        );
+        assert_eq!(
+            s.colours_for(SurfaceStyle::Borders).accent_color,
+            AccentColor::Custom
+        );
+    }
+
+    /// The filled look's section is named by the look's own spelling, so the
+    /// two cannot come apart.
+    #[test]
+    fn the_filled_looks_section_is_the_looks_own_spelling() {
+        assert_eq!(
+            FILLED_LOOK_KEY,
+            surface_style_yaml_name(SurfaceStyle::Cards)
+        );
     }
 }

@@ -102,7 +102,31 @@ asking. The service is lane D's and its starting lane B's
 
 The accent and the other interface colours the user sets are to be kept per look
 (Outlined, Filled). Lane C changes `appearance`; then Settings' colour page
-edits the colours of the look being edited. Lane C will say when the API is in.
+edits the colours of the look being edited.
+
+**The API is in (lane C, 2026-09-27).** `accent_color` and `custom_accent` stay
+where they were and mean "the look in use's", so every reader keeps working and
+the colour page's writes land on the look in use. What changes for you is one
+line, and it matters:
+
+- **Change the look with `settings.set_surface_style(style)`**, not by assigning
+  `settings.surface_style`. The setter trades the colours over -- the new look's
+  come back, the old look's are kept in `other_look_colours`. Assigning the
+  field leaves the accent chosen under the old look on the new one, which is
+  exactly what §1421 exists to prevent. Two places in `apps/settings/src/main.rs`
+  assign it today: the look pill (`self.appearance.settings.surface_style =
+  *style`, around line 5843) and a test (around line 11977).
+- To show or edit the colours of a look *not* in use without switching to it:
+  `settings.colours_for(look)` and `settings.set_colours_for(look, colours)`,
+  with `appearance::LookColours { accent_color, custom_accent }`.
+- On disk: the outlined look's colours stay at `theme.accent` /
+  `theme.custom_accent`; the filled look's are under `theme.cards`. A file
+  written before this reads as its one accent for both looks.
+
+The field stays public: a private one would break every
+`AppearanceSettings { .., ..Default::default() }` outside `appearance`, the
+compositor's tests among them. So the setter is a convention the field's doc
+states, and Settings is the only program that changes the look.
 
 ## 6. The password manager's plain-text export must escape every character (C-Q25, §1417)
 

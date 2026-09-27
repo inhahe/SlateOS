@@ -82548,6 +82548,27 @@ unreadable under the other is exactly what keeping them apart prevents.
 | What Settings shows | the colours of the look being edited; changing a colour changes it for that look only -- lane E's page |
 | Readability | unchanged: every colour still passes through the palette's legibility floor, under either look |
 
+**As built (lane C, 2026-09-27).** `appearance::LookColours` -- today the accent
+and the colour a custom accent names; an interface colour added later is kept
+per look by being added to it.
+
+- **In memory:** `accent_color` and `custom_accent` keep meaning "the accent",
+  now the look in use's, so nothing that draws changed; the other look's are in
+  `other_look_colours`. `set_surface_style` changes the look and trades the two
+  over; choosing the look already in use trades nothing. `colours_for(look)` and
+  `set_colours_for(look, ..)` reach either look without switching.
+- **On disk:** the outlined look's colours stay at `theme.accent` and
+  `theme.custom_accent`, where the one accent always was, so a desktop from
+  before this still reads the default look's colours from a new file; the
+  filled look's are under `theme.cards`. Whatever `theme.cards` does not say is
+  taken from the outlined look -- which is the migration: an old file's one
+  accent reads for both.
+- **The one convention:** assigning `surface_style` directly does not trade the
+  colours. The field stays public because a private one would break every
+  `AppearanceSettings { .., ..Default::default() }` outside the crate; the
+  field's doc says to use the setter, and Settings -- the one program that
+  changes the look -- is asked to (lane E).
+
 ## 1422. The games: each board decided by whether its colours mean something, and every game polished
 
 **Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A; the operator chose C and left the per-game calls to Claude) &middot; **Lane:** C (the calls), E (the games)

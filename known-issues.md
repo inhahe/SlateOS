@@ -31,8 +31,13 @@ Two copies of one entry in two files is worse than either extreme — they drift
 and no reader can tell which is current. This happened on 2026-08-16 and went
 unnoticed until it was looked for; see the entry below.
 
-How to write in this file, in one paragraph. New entries go at the end with
-your lane letter in the heading. Put a `**Status:** …` line immediately under
+How to write in this file, in one paragraph. New entries go at the end of
+**your own lane's section**, one of the six `## Lane X: new entries` sections
+at the bottom of this file, with your lane letter in the heading
+(`design-decisions.md` §977). Until 2026-09-27 every lane appended at the end
+of the file, so any two lanes writing between merges collided there, eleven
+times on one day. An amendment still goes directly under the entry it amends,
+wherever that entry is. Put a `**Status:** …` line immediately under
 the heading — `OPEN` / `FIXED <date>` / `RESOLVED <date>` — and keep it
 current; **any lane may update any entry's status line**, without filing a
 request, because an issue you fixed but cannot mark stays open forever in the
@@ -171841,3 +171846,33 @@ self-test.
 - `netstack_client::self_test_nonblock_connect` now polls sixteen times back
   to back, then on a clock, up to 15 s. The old daemon refused the connect
   inside that burst whenever the server's reply took longer than five polls.
+
+## Lane A: new entries
+
+Lane A (kernel, core & networking) appends new entries at the end of this
+section, above the next lane's heading (design-decisions §977).
+
+## Lane B: new entries
+
+Lane B (userland) appends new entries at the end of this section, above the
+next lane's heading (design-decisions §977).
+
+## Lane C: new entries
+
+Lane C (desktop & toolkit) appends new entries at the end of this section,
+above the next lane's heading (design-decisions §977).
+
+## Lane D: new entries
+
+Lane D (POSIX, libc & toolchain) appends new entries at the end of this
+section, above the next lane's heading (design-decisions §977).
+
+## Lane E: new entries
+
+Lane E (applications) appends new entries at the end of this section, above the
+next lane's heading (design-decisions §977).
+
+## Lane F: new entries
+
+Lane F (graphics stack) appends new entries at the end of this section, which
+is the end of the file (design-decisions §977).

@@ -289,6 +289,15 @@ pub struct PlannedAction {
     pub size: u64,
     /// Whether this action is a directory creation rather than a file copy.
     pub is_dir: bool,
+    /// Whether the source is a symbolic link -- or, on Windows, a junction --
+    /// which is copied, moved and deleted *as the link* and never followed.
+    ///
+    /// Until 2026-09-27 every scan followed links. A permanent delete of a
+    /// folder holding a link to another folder deleted the other folder's
+    /// files, through the link; a move of it copied them and then deleted
+    /// them at the source; a link to a folder above it made the scan endless.
+    /// None of those files was ever selected.
+    pub is_link: bool,
     /// Unique index inside the plan (stable across pause/resume).
     pub index: u32,
 }
@@ -350,6 +359,7 @@ impl OperationPlan {
             action.src.hash(&mut hasher);
             action.dest.hash(&mut hasher);
             action.is_dir.hash(&mut hasher);
+            action.is_link.hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -427,7 +437,7 @@ impl OperationPlan {
             let file_name = src.file_name().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "source has no file name")
             })?;
-            if src.is_dir() && inside(dest_dir, src) {
+            if is_real_dir(src) && inside(dest_dir, src) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
@@ -437,7 +447,7 @@ impl OperationPlan {
                 ));
             }
             let mut dest = dest_dir.join(file_name);
-            if same_file(src, &dest) {
+            if same_entry(src, &dest) {
                 if operation == FileOperation::Move {
                     continue;
                 }
@@ -493,7 +503,7 @@ impl OperationPlan {
             // file to put a link to the deleted file in its place. See
             // `plan_transfer`.
             let mut dest = dest_dir.join(name);
-            if same_file(src, &dest) {
+            if same_entry(src, &dest) {
                 dest = resolve_rename(&dest);
             }
             actions.push(PlannedAction {
@@ -501,6 +511,7 @@ impl OperationPlan {
                 // Recorded from the *source*, and only so that a failure can
                 // say "directory" or "file". Nothing walks it.
                 is_dir: src.is_dir(),
+                is_link: is_link(src),
                 src: src.clone(),
                 size: 0,
                 index: u32::try_from(index).unwrap_or(u32::MAX),
@@ -556,7 +567,21 @@ impl OperationPlan {
         total_bytes: &mut u64,
     ) -> io::Result<()> {
         let dest = dest.to_path_buf();
-        let meta = fs::metadata(src)?;
+        // `symlink_metadata`, which does not follow: a link is one action,
+        // copied as the link. See `PlannedAction::is_link`.
+        let meta = fs::symlink_metadata(src)?;
+        if meta.file_type().is_symlink() {
+            actions.push(PlannedAction {
+                src: src.to_path_buf(),
+                dest: Some(dest),
+                size: 0,
+                is_dir: false,
+                is_link: true,
+                index: *index,
+            });
+            *index = index.checked_add(1).unwrap_or(*index);
+            return Ok(());
+        }
         if meta.is_dir() {
             // Directory creation action.
             actions.push(PlannedAction {
@@ -564,6 +589,7 @@ impl OperationPlan {
                 dest: Some(dest.clone()),
                 size: 0,
                 is_dir: true,
+                is_link: false,
                 index: *index,
             });
             *index = index.checked_add(1).unwrap_or(*index);
@@ -587,6 +613,7 @@ impl OperationPlan {
                 dest: Some(dest),
                 size,
                 is_dir: false,
+                is_link: false,
                 index: *index,
             });
             *index = index.checked_add(1).unwrap_or(*index);
@@ -605,7 +632,22 @@ impl OperationPlan {
         index: &mut u32,
         total_bytes: &mut u64,
     ) -> io::Result<()> {
-        let meta = fs::metadata(src)?;
+        // `symlink_metadata`, which does not follow: a link is deleted as
+        // the link, and what it names is left alone. Following it deleted the
+        // files of whatever folder the link reached.
+        let meta = fs::symlink_metadata(src)?;
+        if meta.file_type().is_symlink() {
+            actions.push(PlannedAction {
+                src: src.to_path_buf(),
+                dest: None,
+                size: 0,
+                is_dir: false,
+                is_link: true,
+                index: *index,
+            });
+            *index = index.checked_add(1).unwrap_or(*index);
+            return Ok(());
+        }
         if meta.is_dir() {
             // Children first.
             for entry in fs::read_dir(src)? {
@@ -618,6 +660,7 @@ impl OperationPlan {
                 dest: None,
                 size: 0,
                 is_dir: true,
+                is_link: false,
                 index: *index,
             });
             *index = index.checked_add(1).unwrap_or(*index);
@@ -629,6 +672,7 @@ impl OperationPlan {
                 dest: None,
                 size,
                 is_dir: false,
+                is_link: false,
                 index: *index,
             });
             *index = index.checked_add(1).unwrap_or(*index);
@@ -1380,7 +1424,14 @@ impl OperationExecutor {
                 if !journal.transferred(action.index) {
                     continue;
                 }
-                if let Err(e) = fs::remove_file(&action.src) {
+                // A link that moved is removed as the link: a Windows link to
+                // a folder does not go with `remove_file`.
+                let removed = if action.is_link {
+                    remove_link(&action.src)
+                } else {
+                    fs::remove_file(&action.src)
+                };
+                if let Err(e) = removed {
                     // A failed removal silently turned the Move into a Copy
                     // before this was reported: the summary said "moved" while
                     // the source was still there.
@@ -1512,7 +1563,7 @@ impl OperationExecutor {
         // "no" -- which would make the create below fail with a bare
         // AlreadyExists that the conflict policy never got to rule on.
         let occupied = fs::symlink_metadata(dest).is_ok();
-        let dest = if occupied && same_file(&action.src, dest) {
+        let dest = if occupied && same_entry(&action.src, dest) {
             // Occupied by the file it would link to: beside it, whatever the
             // policy -- see `plan_link`.
             resolve_rename(dest)
@@ -1526,10 +1577,10 @@ impl OperationExecutor {
                 // compare -- and said here rather than left to a reader to
                 // work out from the absence of an arm.
                 ConflictPolicy::Overwrite | ConflictPolicy::OverwriteIfNewer => {
-                    // `remove_file` and not `remove_dir_all`: what is being
-                    // replaced may be a link *to* a directory, and following
-                    // it would delete the user's folder to make room for a
-                    // shortcut.
+                    // A file or a link in the way is replaced; a folder is
+                    // not, and `remove_link_or_file` refuses one -- making
+                    // room for a link would delete the folder and everything
+                    // in it.
                     remove_link_or_file(dest)?;
                     dest.clone()
                 }
@@ -1561,11 +1612,15 @@ impl OperationExecutor {
             )
         })?;
 
+        if action.is_link {
+            return self.copy_link(action, dest, conflict);
+        }
+
         if action.is_dir {
             // A folder that is its own destination has nothing to create --
             // and must not be given an undo entry, since undoing a copy
             // removes what the copy made, and this would name the original.
-            if same_file(&action.src, dest) {
+            if same_entry(&action.src, dest) {
                 return Ok(ActionOutcome::Skipped);
             }
             if !dest.exists() {
@@ -1579,10 +1634,11 @@ impl OperationExecutor {
         // Conflict resolution.
         if dest.exists() {
             // The planner leaves no source that is its own destination, but a
-            // name can come to be one by another route -- a hard link, or a
-            // folder linked inside itself -- and the policy must never be
-            // asked about a file and itself: see `plan_transfer`.
-            if same_file(&action.src, dest) {
+            // name can come to be one by another route -- the same folder
+            // spelt two ways, or one renamed while the plan was waiting --
+            // and the policy must never be asked about a file and itself:
+            // see `plan_transfer`.
+            if same_entry(&action.src, dest) {
                 if self.plan.operation == FileOperation::Move {
                     return Ok(ActionOutcome::Skipped);
                 }
@@ -1639,9 +1695,51 @@ impl OperationExecutor {
         ActionOutcome::Waiting
     }
 
+    /// Copy the link `action.src` to `dest` as a link -- the same target,
+    /// never what it names. See [`PlannedAction::is_link`].
+    ///
+    /// A host that cannot make links (Windows without the privilege) fails
+    /// the one action and says why; a move then leaves that link where it
+    /// was, since only what arrived is removed at the source.
+    fn copy_link(
+        &mut self,
+        action: &PlannedAction,
+        dest: &Path,
+        conflict: ConflictPolicy,
+    ) -> io::Result<ActionOutcome> {
+        let target = fs::read_link(&action.src)?;
+        // Whether it names a folder: Windows makes the two kinds differently,
+        // and one made as the wrong kind does not open.
+        let target_is_dir = fs::metadata(&action.src).is_ok_and(|m| m.is_dir());
+        let dest = if fs::symlink_metadata(dest).is_ok() {
+            match conflict {
+                ConflictPolicy::Skip => return Ok(ActionOutcome::Skipped),
+                ConflictPolicy::Ask => return Ok(self.ask(action, dest)),
+                ConflictPolicy::Rename => resolve_rename(dest),
+                // A link has no contents whose age could be compared -- see
+                // `execute_link_action` -- so "if newer" is plain replace.
+                ConflictPolicy::Overwrite | ConflictPolicy::OverwriteIfNewer => {
+                    remove_link_or_file(dest)?;
+                    dest.to_path_buf()
+                }
+            }
+        } else {
+            dest.to_path_buf()
+        };
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        create_symlink(&target, &dest, target_is_dir)?;
+        self.undo_entries
+            .push((action.src.clone(), UndoTarget::Path(dest)));
+        Ok(ActionOutcome::Done)
+    }
+
     fn execute_delete_action(&mut self, action: &PlannedAction) -> io::Result<ActionOutcome> {
         if action.is_dir {
             fs::remove_dir(&action.src)?;
+        } else if action.is_link {
+            remove_link(&action.src)?;
         } else {
             fs::remove_file(&action.src)?;
         }
@@ -2106,35 +2204,31 @@ fn create_symlink(target: &Path, link: &Path, _target_is_dir: bool) -> io::Resul
     std::os::unix::fs::symlink(target, link)
 }
 
-/// Remove a path without following it if it is a link.
+/// Whether `a` and `b` are one directory entry: the same name in the same
+/// folder, however the folder is spelt -- `..`, a link on the way, another
+/// case on the Windows development host.
 ///
-/// `remove_dir_all` on a link to a directory deletes the *directory*. This is
-/// used where a link is being replaced, so following one would destroy the
-/// thing the old link pointed at in order to make room for a new link.
-/// Whether `a` and `b` name one file or folder: the same device and inode,
-/// as every unix and SlateOS can say.
-///
-/// "Cannot tell" -- either of them unreadable, or not there -- is `false`,
-/// which is what "no such file yet" should be.
-#[cfg(unix)]
-fn same_file(a: &Path, b: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (fs::metadata(a), fs::metadata(b)) {
-        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
-        _ => false,
-    }
-}
-
-/// [`same_file`] on the Windows development host, by resolved path: `std`
-/// keeps a file's identity there behind an unstable feature, so two names
-/// for one file through a hard link are missed. The rest -- the same path
-/// spelt differently, in another case, through `..` -- is caught.
-#[cfg(not(unix))]
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => false,
-    }
+/// The entry, and not the file it holds: two links to one file are two
+/// entries, and so are two hard links, and replacing one with a copy of the
+/// other loses nothing, since the copy is written beside the name and then
+/// moved over it. Only an entry and itself are in danger -- a file "replaced"
+/// by itself, and then deleted as the source of a move. "Cannot tell" is
+/// `false`, which is what "not there yet" should be.
+fn same_entry(a: &Path, b: &Path) -> bool {
+    let (Some(a_name), Some(b_name)) = (a.file_name(), b.file_name()) else {
+        return false;
+    };
+    let (Some(a_dir), Some(b_dir)) = (a.parent(), b.parent()) else {
+        return false;
+    };
+    let names_match = a_name == b_name || (cfg!(windows) && a_name.eq_ignore_ascii_case(b_name));
+    names_match
+        && fs::symlink_metadata(a).is_ok()
+        && fs::symlink_metadata(b).is_ok()
+        && matches!(
+            (fs::canonicalize(a_dir), fs::canonicalize(b_dir)),
+            (Ok(x), Ok(y)) if x == y
+        )
 }
 
 /// Whether `path` is `dir` or anywhere under it, compared as resolved paths.
@@ -2146,19 +2240,47 @@ fn inside(path: &Path, dir: &Path) -> bool {
     }
 }
 
+/// Whether `path` is a link (a symbolic link, or a junction on Windows).
+fn is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Whether `path` is a folder itself, and not a link to one.
+fn is_real_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+}
+
+/// Remove the link at `path` -- the link, never what it names.
+///
+/// Refused when `path` is no longer a link: something else has been put there
+/// since the plan was made, and removing it would remove what nobody chose.
+fn remove_link(path: &Path) -> io::Result<()> {
+    if !is_link(path) {
+        return Err(io::Error::other("it is no longer a link"));
+    }
+    // A Windows link to a folder, and a junction, go with `remove_dir`; every
+    // Unix link with `remove_file`. Neither follows it.
+    fs::remove_file(path).or_else(|_| fs::remove_dir(path))
+}
+
+/// Remove a file or a link that is in the way -- never a folder.
+///
+/// A folder in the way is refused rather than removed: this makes room for
+/// one file or one link, and "replace it" never meant deleting a folder and
+/// everything in it to do so. It removed one whole until 2026-09-27. A link
+/// is removed as the link, never followed: `remove_dir_all` on a link to a
+/// folder would delete the folder the old link pointed at.
 fn remove_link_or_file(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
-        // On Windows a directory symlink is removed with `remove_dir`; on Unix
-        // every symlink is removed with `remove_file`. Trying the file form
-        // first and falling back covers both without a second `cfg`.
-        return fs::remove_file(path).or_else(|_| fs::remove_dir(path));
+        return remove_link(path);
     }
     if meta.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
+        return Err(io::Error::other(
+            "a folder of that name is there, and a file or a link does not replace a folder",
+        ));
     }
+    fs::remove_file(path)
 }
 
 /// Move `from` back to `to`, creating the parent it used to live in.
@@ -3540,17 +3662,21 @@ mod tests {
         assert!(!victim.exists());
     }
 
-    /// A directory in the way is removed whole, since it is not a link.
+    /// A folder in the way is not removed to make room for a file or a link.
+    ///
+    /// It was, whole, until 2026-09-27: "replace it" on a link dropped onto
+    /// a folder's name deleted the folder and everything in it.
     #[test]
-    fn removing_a_directory_in_the_way_removes_the_directory() {
+    fn a_folder_in_the_way_is_never_removed_to_make_room() {
         let scratch = temp_dir("link_replace_dir");
         let dir = scratch.dir().to_path_buf();
         let victim = dir.join("in-the-way");
         fs::create_dir(&victim).expect("mkdir");
         write_file(&victim.join("child.txt"), "x");
 
-        remove_link_or_file(&victim).expect("remove");
-        assert!(!victim.exists());
+        let err = remove_link_or_file(&victim).expect_err("a folder was removed");
+        assert!(err.to_string().contains("folder"), "{err}");
+        assert_eq!(read_file(&victim.join("child.txt")), "x");
     }
 
     /// Undoing a link removes the link and leaves the target alone.
@@ -4136,5 +4262,200 @@ mod tests {
         // file it points at is still there.
         let _events = executor.execute();
         assert_eq!(read_file(&root.join("note.txt")), "hello");
+    }
+
+    // ---- links are never followed (2026-09-27) -----------------------------
+    //
+    // Every scan followed links: deleting a folder holding a link to another
+    // folder deleted that folder's files, moving it copied them and deleted
+    // them at the source, and a link to a folder above made the scan endless.
+    // Links here are junctions on Windows (no privilege needed) and symbolic
+    // links elsewhere.
+
+    /// A link at `link` to the folder `target`, or `None` if this host can
+    /// make neither kind.
+    fn folder_link(target: &Path, link: &Path) -> Option<()> {
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+                return Some(());
+            }
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .ok()?;
+            (made.status.success() && is_link(link)).then_some(())
+        }
+        #[cfg(not(windows))]
+        {
+            std::os::unix::fs::symlink(target, link).ok()
+        }
+    }
+
+    /// `outside/keep.txt`, and `doomed/` holding a file and a link to
+    /// `outside`.
+    fn a_folder_with_a_link_out(root: &Path) -> Option<()> {
+        write_file(&root.join("outside").join("keep.txt"), "not selected");
+        write_file(&root.join("doomed").join("mine.txt"), "selected");
+        folder_link(&root.join("outside"), &root.join("doomed").join("link"))
+    }
+
+    #[test]
+    fn deleting_a_folder_never_deletes_what_a_link_inside_it_reaches() {
+        let scratch = temp_dir("link_delete");
+        let root = scratch.dir().to_path_buf();
+        if a_folder_with_a_link_out(&root).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        let plan =
+            OperationPlan::plan_delete(&[root.join("doomed")], ErrorPolicy::StopOnFirst).unwrap();
+        assert!(
+            plan.actions.iter().all(|a| !a
+                .src
+                .starts_with(root.join("doomed").join("link").join("keep.txt"))),
+            "the plan reaches through the link"
+        );
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(
+            read_file(&root.join("outside").join("keep.txt")),
+            "not selected"
+        );
+        assert!(
+            !root.join("doomed").exists(),
+            "the folder itself was not deleted"
+        );
+    }
+
+    #[test]
+    fn moving_a_folder_never_takes_what_a_link_inside_it_reaches() {
+        let scratch = temp_dir("link_move");
+        let root = scratch.dir().to_path_buf();
+        if a_folder_with_a_link_out(&root).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let plan = OperationPlan::plan_move(
+            &[root.join("doomed")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+        let link_actions: Vec<_> = plan.actions.iter().filter(|a| a.is_link).collect();
+        assert_eq!(
+            link_actions.len(),
+            1,
+            "the link is one action: {:?}",
+            plan.actions
+        );
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(
+            read_file(&root.join("outside").join("keep.txt")),
+            "not selected"
+        );
+        assert_eq!(
+            read_file(&root.join("dst").join("doomed").join("mine.txt")),
+            "selected"
+        );
+        // Either the link arrived as a link, or this host could not make one
+        // and the link stayed where it was -- never a copy of what it reaches.
+        let arrived = root.join("dst").join("doomed").join("link");
+        assert!(
+            is_link(&arrived) || is_link(&root.join("doomed").join("link")),
+            "the link was neither moved nor left"
+        );
+        assert!(
+            !arrived.join("keep.txt").exists() || is_link(&arrived),
+            "the link's target was copied"
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_folder_above_does_not_make_the_scan_endless() {
+        let scratch = temp_dir("link_cycle");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("album").join("a.txt"), "a");
+        if folder_link(&root.join("album"), &root.join("album").join("again")).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let plan = OperationPlan::plan_copy(
+            &[root.join("album")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+        assert_eq!(plan.actions.len(), 3, "{:?}", plan.actions);
+        let deletion =
+            OperationPlan::plan_delete(&[root.join("album")], ErrorPolicy::StopOnFirst).unwrap();
+        assert_eq!(deletion.actions.len(), 3, "{:?}", deletion.actions);
+    }
+
+    #[test]
+    fn a_link_is_copied_as_the_link_where_the_host_can_make_one() {
+        let scratch = temp_dir("link_copy");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("outside").join("keep.txt"), "x");
+        if folder_link(&root.join("outside"), &root.join("shortcut")).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let plan = OperationPlan::plan_copy(
+            &[root.join("shortcut")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+        assert_eq!(plan.actions.len(), 1);
+        assert!(plan.actions[0].is_link);
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        let copy = root.join("dst").join("shortcut");
+        // A link, or nothing at all where no link can be made here -- never a
+        // folder holding a copy of what it reaches.
+        assert!(
+            is_link(&copy) || fs::symlink_metadata(&copy).is_err(),
+            "copied through the link"
+        );
+    }
+
+    #[test]
+    fn a_link_that_is_no_longer_one_is_not_removed() {
+        let scratch = temp_dir("link_gone");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("was-a-link"), "a file now");
+        let err = remove_link(&root.join("was-a-link")).expect_err("a file was removed as a link");
+        assert!(err.to_string().contains("no longer a link"), "{err}");
+        assert!(root.join("was-a-link").exists());
+    }
+
+    #[test]
+    fn the_same_entry_is_the_same_name_in_the_same_folder() {
+        let scratch = temp_dir("same_entry");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("a").join("note.txt"), "x");
+        write_file(&root.join("b").join("note.txt"), "x");
+        assert!(same_entry(
+            &root.join("a").join("note.txt"),
+            &root.join("a").join("..").join("a").join("note.txt")
+        ));
+        assert!(!same_entry(
+            &root.join("a").join("note.txt"),
+            &root.join("b").join("note.txt")
+        ));
+        assert!(!same_entry(
+            &root.join("a").join("note.txt"),
+            &root.join("a").join("absent.txt")
+        ));
     }
 }

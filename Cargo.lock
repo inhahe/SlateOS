@@ -574,7 +574,13 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
- "pwkdf",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "seal",
+ "settingsfile",
+ "sha2",
+ "textfmt",
 ]
 
 [[package]]

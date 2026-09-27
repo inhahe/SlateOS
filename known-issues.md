@@ -103127,6 +103127,21 @@ annotations anyway.
 
 ### C-CREDMANAGER-HAS-NO-VAULT-ON-DISK — 2026-08-26 — LANE C, OPEN
 
+**Status: FIXED 2026-09-27 (lane E, which owns `apps/` since the split).** The
+cipher this waited on is vendored -- RustCrypto's XChaCha20-Poly1305 and
+Argon2id under `rustcrypto/`, used through `rustcrypto/seal`
+(`design-decisions.md` §539, §1218) -- and the vault is one file,
+`<config>/credmanager/vault` (`apps/credmanager/src/vaultfile.rs`): a header
+naming the Argon2id parameters, the salt and the nonce, bound as associated
+data to the sealed contents. The three steps below happened, with one change
+of plan: there is no stored verifier at all. The key that opens the file *is*
+the check, so nothing checks a guess more cheaply than opening the vault does.
+A first run makes the vault from a master password typed twice (at least ten
+characters, strength shown); a file that is not a vault is shown as such and
+never written over; locking now forgets the key and every entry, where it used
+to change a flag; every change is saved as it is made, under a new nonce, and a
+save that fails is said in the window and holds a close once.
+
 **What happens.** credmanager now opens a real window, and that window opens an
 **empty vault, every launch**. There is no persistence layer at all: `main`
 calls `Vault::create("My Vault", "")` and hands it to `app::launch`. Anything

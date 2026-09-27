@@ -5456,15 +5456,7 @@ fn session_with_login() -> (
     let turn = settingsfile::testing::config_turn();
     let dir = scratchdir::ScratchDir::new("shell-login");
     let path = dir.path("users.yaml");
-    let mut setting_buf = posix::crypt::buf();
-    let setting =
-        posix::crypt::setting_into(posix::crypt::Method::Sha512, b"shelllgn", &mut setting_buf)
-            .expect("setting")
-            .to_string();
-    let mut hash_buf = posix::crypt::buf();
-    let stored = posix::crypt::hash_into(b"password", setting.as_bytes(), &mut hash_buf)
-        .expect("hash")
-        .to_string();
+    let stored = stored_hash(b"password");
     std::fs::write(
         &path,
         format!(
@@ -5481,6 +5473,20 @@ fn session_with_login() -> (
     let session =
         ShellSession::start_with_stores(events, &path).expect("the harness refused a surface");
     (session, desktop, dir, turn)
+}
+
+/// `password` as `users.yaml` stores it, computed through the system's own
+/// hasher -- see `session_with_login` for why it is not pasted.
+fn stored_hash(password: &[u8]) -> String {
+    let mut setting_buf = posix::crypt::buf();
+    let setting =
+        posix::crypt::setting_into(posix::crypt::Method::Sha512, b"shelllgn", &mut setting_buf)
+            .expect("setting")
+            .to_string();
+    let mut hash_buf = posix::crypt::buf();
+    posix::crypt::hash_into(password, setting.as_bytes(), &mut hash_buf)
+        .expect("hash")
+        .to_string()
 }
 
 /// **The login screen's icons reach its surface before its frame does** --
@@ -6552,6 +6558,161 @@ fn at_the_automatic_modes_edge_the_desktop_turns_dark_and_says_so() {
             "the compositor was not told, so no other program will look"
         );
     });
+}
+
+// ---- signing in by itself (design-decisions.md §1427) -----------------------
+
+/// A session over one account, Alice, marked to sign in by itself -- with the
+/// password `password` if `password`, and with none if not -- started in
+/// `start`. `extra` is appended to her record.
+fn session_signing_in_by_itself(
+    start: crate::autologin::StartConditions,
+    password: bool,
+    extra: &str,
+) -> (
+    Session,
+    Desktop,
+    scratchdir::ScratchDir,
+    settingsfile::testing::ConfigTurn,
+) {
+    let turn = settingsfile::testing::config_turn();
+    let dir = scratchdir::ScratchDir::new("shell-autologin");
+    let path = dir.path("users.yaml");
+    let hash = if password {
+        format!("   password_hash: {}\n", stored_hash(b"password"))
+    } else {
+        String::new()
+    };
+    std::fs::write(
+        &path,
+        format!(
+            "users:\n- username: alice\n   uid: 1000\n   display_name: Alice\n   \
+             auto_login: true\n{hash}{extra}"
+        ),
+    )
+    .unwrap();
+    let (events, desktop) = wired();
+    let session = ShellSession::start_with_conditions(events, &path, start)
+        .expect("the harness refused a surface");
+    (session, desktop, dir, turn)
+}
+
+/// **An account set to sign in by itself does, and the login screen is never
+/// drawn** -- not for one frame, which would be the pause the operator ruled
+/// out. The desktop is Alice's, by name, and locks as hers: she has a password,
+/// so the lock screen can ask for it.
+#[test]
+fn an_account_set_to_sign_in_by_itself_does_so_without_a_login_screen() {
+    let (mut session, desktop, _dir, _turn) =
+        session_signing_in_by_itself(crate::autologin::StartConditions::default(), true, "");
+    assert!(!session.is_locked(), "the login screen is up");
+    assert_eq!(session.shell().user_name(), "Alice");
+    // `drawn`, not `submitted`: the frames `start` sent may still be unread
+    // in the pipe, and an assertion over the ones read so far would pass
+    // whatever had been drawn.
+    let login = session.login_surface.window;
+    let drawn = desktop.borrow_mut().drawn();
+    assert!(
+        drawn
+            .iter()
+            .any(|(window, _)| *window == session.panel().window()),
+        "nothing had been drawn yet, so the check below would prove nothing"
+    );
+    assert!(
+        !drawn.iter().any(|(window, _)| *window == login),
+        "a login screen was drawn before signing in by itself"
+    );
+
+    press_lock_shortcut(&desktop, &mut session);
+    assert_eq!(
+        session
+            .take_launches()
+            .into_iter()
+            .map(|l| l.program)
+            .collect::<Vec<_>>(),
+        [std::path::PathBuf::from(crate::hotkeys::LOCK_COMMAND)],
+        "an account with a password that signed in by itself did not lock"
+    );
+}
+
+/// 818 holds on this way in too: an account with no password that signed in
+/// by itself is never locked, because a lock nobody needs a password to clear
+/// tells the person at the machine it is protected.
+#[test]
+fn an_account_with_no_password_that_signed_in_by_itself_does_not_lock() {
+    let (mut session, desktop, _dir, _turn) =
+        session_signing_in_by_itself(crate::autologin::StartConditions::default(), false, "");
+    assert!(!session.is_locked(), "the login screen is up");
+
+    press_lock_shortcut(&desktop, &mut session);
+    assert!(
+        session.take_launches().is_empty(),
+        "818: the lock screen must not even be asked for"
+    );
+}
+
+/// **Holding Shift as the machine starts shows the login screen instead**, on
+/// the account that would have signed in, and her password opens it as usual.
+#[test]
+fn the_chooser_key_held_at_start_shows_the_login_screen() {
+    let start = crate::autologin::StartConditions::new(Modifiers::shift(), b"");
+    let (mut session, desktop, _dir, _turn) = session_signing_in_by_itself(start, true, "");
+    assert!(
+        session.is_locked(),
+        "the chooser key was held and nobody was asked"
+    );
+    assert_eq!(session.shell().user_name(), "");
+
+    type_password(&desktop, &mut session, "password");
+    assert!(!session.is_locked(), "her password did not open it");
+    assert_eq!(session.shell().user_name(), "Alice");
+}
+
+/// **A start for repair skips signing in by itself** -- the operator: "it would
+/// be nice to skip auto-login during recovery anyway".
+#[test]
+fn a_start_for_repair_shows_the_login_screen() {
+    let start = crate::autologin::StartConditions::new(Modifiers::NONE, b"root=/dev/sda2 recovery");
+    let (session, _desktop, _dir, _turn) = session_signing_in_by_itself(start, true, "");
+    assert!(
+        session.is_locked(),
+        "a start for repair signed in by itself"
+    );
+}
+
+/// **A locked account never signs in by itself.** Nothing is typed, so the lock
+/// is all that stands between the account and its desktop.
+#[test]
+fn a_locked_account_set_to_sign_in_by_itself_is_asked_for_its_password() {
+    let (session, _desktop, _dir, _turn) = session_signing_in_by_itself(
+        crate::autologin::StartConditions::default(),
+        true,
+        "   locked: true\n",
+    );
+    assert!(session.is_locked(), "a locked account signed in by itself");
+}
+
+/// **Only at start.** Logging out of a desktop that signed in by itself returns
+/// to the login screen and stays there -- a log-out that signed the same
+/// account straight back in would be a desktop nobody could leave -- and time
+/// passing does not change that.
+#[test]
+fn logging_out_after_signing_in_by_itself_stays_at_the_login_screen() {
+    let (mut session, _desktop, _dir, _turn) =
+        session_signing_in_by_itself(crate::autologin::StartConditions::default(), true, "");
+    assert!(!session.is_locked());
+
+    session.act(crate::ShellAction::LogOut).expect("log out");
+    assert!(
+        session.is_locked(),
+        "logging out did not return to the login screen"
+    );
+    frame(&mut session, 5_000);
+    assert!(
+        session.is_locked(),
+        "the account signed itself straight back in"
+    );
+    assert_eq!(session.shell().user_name(), "");
 }
 
 // ---- the power menu --------------------------------------------------------

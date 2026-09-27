@@ -83,6 +83,7 @@
 
 pub mod about;
 pub mod animations;
+pub mod autologin;
 pub mod bluetooth;
 pub mod calendar;
 pub mod clipboard_viewer;

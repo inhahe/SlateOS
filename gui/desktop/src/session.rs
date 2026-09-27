@@ -81,7 +81,8 @@ use oswindow::{
 };
 
 use crate::animations::{AnimationManager, WindowAnimation};
-use crate::login_screen::{LoginAction, LoginScreen};
+use crate::autologin::StartConditions;
+use crate::login_screen::{LoginAction, LoginScreen, LoginUser};
 use crate::notif_pane;
 use crate::pictures::{Decoded, Job, PictureWorker, Slot};
 use crate::taskbar_autohide::{AutoHideConfig, AutoHideManager, ScreenEdge};
@@ -500,10 +501,19 @@ impl<T: Transport> ShellSession<T> {
     /// [`EventLoop::watch_desktop`]. A refused surface is fatal here rather
     /// than survivable: a shell with no taskbar is not a degraded shell, it is
     /// a desktop the user cannot switch windows from.
+    ///
+    /// # Signing in by itself
+    ///
+    /// An account set to sign in by itself is signed in here, before the
+    /// first frame, unless this start says otherwise -- the chooser key held,
+    /// or a start for repair ([`crate::autologin`], `design-decisions.md`
+    /// §1427). Only here: logging out
+    /// ([`ShellAction::LogOut`]) returns to the
+    /// login screen and stays there.
     pub fn start(events: EventLoop<T>) -> Result<Self, Error<T>> {
         // The system store, and with it the system failure tally, so that a
         // refused password here counts against one refused at `su` or `login`.
-        Self::start_with(events, None)
+        Self::start_with(events, None, StartConditions::of_this_start())
     }
 
     /// The same, against the account database at a given path.
@@ -517,11 +527,30 @@ impl<T: Transport> ShellSession<T> {
     /// must come from the same file, or the screen lists names nothing can
     /// authenticate.
     ///
+    /// An ordinary start: no key held, not for repair -- so an account the
+    /// file marks to sign in by itself does. What this machine's start says is
+    /// [`start`](Self::start)'s to read; a test states its own, through
+    /// [`start_with_conditions`](Self::start_with_conditions).
+    ///
     /// # Errors
     ///
     /// As [`start`](Self::start).
     pub fn start_with_stores(events: EventLoop<T>, users_yaml: &Path) -> Result<Self, Error<T>> {
-        Self::start_with(events, Some(users_yaml))
+        Self::start_with(events, Some(users_yaml), StartConditions::default())
+    }
+
+    /// The same, as a start in the given conditions: a key held, a start for
+    /// repair ([`crate::autologin`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start).
+    pub fn start_with_conditions(
+        events: EventLoop<T>,
+        users_yaml: &Path,
+        start: StartConditions,
+    ) -> Result<Self, Error<T>> {
+        Self::start_with(events, Some(users_yaml), start)
     }
 
     /// Start the desktop a person signs in to: [`start`](Self::start), then
@@ -551,7 +580,11 @@ impl<T: Transport> ShellSession<T> {
         Ok(session)
     }
 
-    fn start_with(mut events: EventLoop<T>, users_yaml: Option<&Path>) -> Result<Self, Error<T>> {
+    fn start_with(
+        mut events: EventLoop<T>,
+        users_yaml: Option<&Path>,
+        start: StartConditions,
+    ) -> Result<Self, Error<T>> {
         let display = events.display_info()?;
         let mut shell = DesktopShell::new(display.width, display.height);
         // Read back what the user left behind. This is the only place either
@@ -785,9 +818,52 @@ impl<T: Transport> ShellSession<T> {
         {
             session.shell.set_user_name(&pathcodec::display_os(&name));
         }
+        // Before the first frame, so a sign-in by itself never shows the login
+        // screen at all.
+        session.sign_in_automatically(start);
         session.refresh_installed_apps();
         session.repaint()?;
         Ok(session)
+    }
+
+    /// Sign in the account set to sign in by itself, if this start lets it
+    /// ([`crate::autologin`], `design-decisions.md` §1427).
+    ///
+    /// Nothing is asked of `authlib`, because nothing was typed: that is what
+    /// signing in by itself means, and the administrator's mark in the
+    /// database is the consent. What the database also says is respected -- a
+    /// locked account is never the one ([`loginusers::automatic_account`]).
+    fn sign_in_automatically(&mut self, start: StartConditions) {
+        let Some(screen) = &self.login else {
+            return;
+        };
+        let Some(user) = crate::autologin::account_to_sign_in(&screen.users, start) else {
+            return;
+        };
+        let shown = user.shown_name().to_string();
+        // Lockable exactly when the account has a password: the lock screen
+        // asks for it, and a lock on an account with none is a lock anybody
+        // clears -- 818's reason, reached here from the database because no
+        // verdict was asked for.
+        let lockable = user.has_password;
+        self.admit(&shown, lockable);
+    }
+
+    /// Let the person in: the desktop is theirs, named `shown`, and can be
+    /// locked if `lockable`.
+    ///
+    /// One place for both ways in -- a password accepted and a sign-in by
+    /// itself -- so the two cannot come to leave the desktop in different
+    /// states.
+    fn admit(&mut self, shown: &str, lockable: bool) {
+        // 818, recorded at the one moment it is known.
+        self.lockable = lockable;
+        // The start menu says who is using the desktop.
+        self.shell.set_user_name(shown);
+        // Nothing between this and the desktop: the screen's `LoggingIn` phase
+        // is a frame of feedback, not a step that can fail, and holding the
+        // machine on it would be inventing a failure mode.
+        self.login = None;
     }
 
     /// The shell being driven.
@@ -968,24 +1044,19 @@ impl<T: Transport> ShellSession<T> {
             // one on, and refusing it here would make that setting mean
             // "unusable account" rather than "no password".
             authlib::Outcome::Accepted | authlib::Outcome::NoPassword => {
-                // 818, recorded at the one moment it is known. `NoPassword` is
-                // not a failure -- the screen opens either way -- but it is the
-                // fact that decides whether this session can ever be locked.
-                self.lockable = outcome != authlib::Outcome::NoPassword;
-                // The start menu says who is using the desktop: the name the
-                // account gives itself, or its login name if it gives none.
+                // `NoPassword` is not a failure -- the screen opens either way
+                // -- but it is the fact that decides whether this session can
+                // ever be locked.
+                let lockable = outcome != authlib::Outcome::NoPassword;
+                // The name the account gives itself, or its login name if it
+                // gives none.
                 let shown = screen
                     .current_user()
-                    .filter(|user| user.username == username && !user.display_name.is_empty())
-                    .map_or(username, |user| user.display_name.as_str())
+                    .filter(|user| user.username == username)
+                    .map_or(username, LoginUser::shown_name)
                     .to_string();
-                self.shell.set_user_name(&shown);
                 screen.auth_success();
-                // Nothing between this and the desktop: the screen's
-                // `LoggingIn` phase is a frame of feedback, not a step that can
-                // fail, and holding the machine on it would be inventing a
-                // failure mode.
-                self.login = None;
+                self.admit(&shown, lockable);
             }
             // Deliberately the same words for a wrong password and an unknown
             // user. Distinguishing them tells someone standing at the machine

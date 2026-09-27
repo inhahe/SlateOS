@@ -1912,15 +1912,26 @@ live.
   shell; then Settings, the file manager and file associations (lane E); only
   then does lane A remove the kernel's registry.
 
-- `[C]` **Automatic sign-in, with a key held at start-up to choose** -- open
-  (C-Q22, §1427). `gui/desktop/src/login_screen.rs`: sign in automatically with
-  no pause; a key held as the login screen starts shows the chooser; the hint
-  shown until automatic sign-in begins; no automatic sign-in when starting for
-  repair. Lane A shows the hint on the earlier screens.
+- `[C]` **Automatic sign-in, with a key held at start-up to choose** --
+  **lane C's half done 2026-09-27** (C-Q22, §1427). `gui/desktop/src/autologin.rs`:
+  the one account `loginusers::automatic_account` names (marked, not locked,
+  the only one marked) signs in before the desktop's first frame, with no
+  password and no pause; Shift held at start, or `recovery`/`single` on the
+  kernel command line, shows the login screen instead; only at start, never
+  after logging out. **Waiting on others:** the key cannot be read until lane F
+  seeds the held keys at open and answers a query
+  (`requests/c-f-which-keys-are-held-when-the-desktop-starts.md`); a start for
+  repair is not visible until lane A publishes the real `/proc/cmdline` and
+  adds a repair boot entry, and lane A shows the hint on the screens before the
+  desktop (`requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md`).
+  When lane F's query lands: hand its answer to `StartConditions` in
+  `ShellSession::start`.
 
 - `[C]` **"Too close to see one on the other", one test for the two colour
-  warnings** -- open (C-Q19, §1424). In `appearance`, for the calendar's
-  event-colour warning and Settings' accent warning (lane E).
+  warnings** -- **done 2026-09-27** (C-Q19, §1424):
+  `appearance::hard_to_tell_apart`, with `perceptual_difference` (CIE76) beside
+  `contrast_ratio`. The two warnings that ask it are lane E's (the calendar's
+  event colour, Settings' accent).
 
 - `[C]` **A claim every lane sees when it starts a task outside its obvious
   territory** -- open (the operator's C-Q20 suggestion, §1425). A shared record

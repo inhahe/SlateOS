@@ -55030,14 +55030,9 @@ cleared -- so the risk is a future edit, not the present state.
     touches, and `procexplorer` sending a signal is filed under network. The
     label is not part of the finding and should not be read as one.
 
-- Autologin is read but not acted on. `LoginUser::autologin` comes from the
-  account database and `LoginScreen::autologin_user` finds it, but an account
-  marked for autologin still gets a password prompt. Skipping the prompt needs
-  two things this change deliberately did not decide: how a user *escapes* an
-  autologin to reach a different account (holding a key at boot? a "switch
-  user" affordance on the way past?), and how the machine holds the autologin
-  when it is being recovered. Both are user-visible policy. See
-  `design-decisions.md` §824, "What this does not decide".
+- Autologin: done 2026-09-27, as the operator decided it (§1427). What is
+  left waits on lanes F and A -- see "Lane C — automatic sign-in: the chooser
+  key and the start for repair" at the end of this file.
 
 ## ############################################################################
 (no lane-C-specific entries yet; see the pre-split entries above)
@@ -59004,3 +58999,22 @@ is already waiting, not whether the setter exists.
   that reached `main` and what each cost the lanes that inherited it (a boot is
   now about 2.5 hours); decide, and write the decision up as a
   `design-decisions.md` entry (Decided by: Claude, operator-approved scope).
+
+## Lane C — automatic sign-in: the chooser key and the start for repair (2026-09-27)
+
+- **Open, waiting on lane F.** Automatic sign-in (§1427) cannot read the
+  chooser key: `StartConditions::of_this_start` (`gui/desktop/src/autologin.rs`)
+  is handed `Modifiers::NONE`, because the compositor neither knows about a key
+  held before it opened the keyboard nor answers "what is held?".
+  **Trigger:** lane F lands `requests/c-f-which-keys-are-held-when-the-desktop-starts.md`
+  (a held-modifiers query on `EventLoop`). **Then:** in `ShellSession::start`,
+  ask it before building the session and hand the answer to
+  `StartConditions::new`; delete the comment in `of_this_start`; boot with an
+  account marked `auto_login: true` and confirm Shift held from power-on shows
+  the login screen.
+- **Open, waiting on lane A.** A start for repair is read from `/proc/cmdline`,
+  which the kernel makes up today, and no boot entry starts for repair.
+  **Trigger:** lane A's answer to
+  `requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md` item 3.
+  **Then:** nothing to change here -- boot the repair entry with an account
+  marked to sign in by itself and confirm the login screen shows.

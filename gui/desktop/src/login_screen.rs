@@ -3,7 +3,9 @@
 //! Renders a full-screen login UI before the desktop session starts.
 //! Features: user avatar list, password entry, login background image (can
 //! match desktop wallpaper), keyboard layout indicator, accessibility options,
-//! power options (shutdown/reboot/sleep), and on-screen keyboard toggle.
+//! power options (shutdown/reboot/sleep), and on-screen keyboard toggle. An
+//! account can instead be set to sign in by itself, in which case this screen
+//! is not shown at start at all (below).
 //!
 //! # Face unlock authenticates anybody, and is not wired here
 //!
@@ -27,23 +29,24 @@
 //! Found and reported by lane A, who rewrote that module's doc to lead with
 //! the fact rather than describing the comparison it does not do.
 //!
-//! # Autologin is modelled here but does *not* happen
+//! # Signing in by itself
 //!
-//! This list said "autologin" until 2026-09-16, and it was not true. The field
-//! exists on [`LoginUser`], [`LoginScreen::autologin_user`] finds the account
-//! marked for it, and nothing acts on either: an account set to log in
-//! automatically still gets a password prompt. The finder is called by this
-//! file's own tests and by nothing else in the tree.
+//! An account set to sign in by itself does, as the desktop starts, and this
+//! screen is never drawn -- unless the key that asks for it (Shift) was held,
+//! or the machine was started for repair. The decision is
+//! [`crate::autologin`]'s, over [`LoginUser::autologin`], which marks *the*
+//! account: [`loginusers::automatic_account`]'s answer, marked in the database,
+//! not locked, and the only one so marked. The session carries it out before
+//! its first frame. This screen never signs anybody in itself; it is what is
+//! shown when nobody was, and what logging out returns to.
 //!
-//! It is left modelled rather than deleted because the missing part is a
-//! decision, not code. Skipping the prompt needs two answers that are
-//! user-visible policy: how someone *escapes* an autologin to reach a
-//! different account, and how the machine behaves when it is being recovered.
-//! See design-decisions 824 and open-questions C-Q22.
-//!
-//! A feature list is a claim like any other. Naming autologin here made the
-//! shell appear to support something a reader could not get, and a doc comment
-//! is the one place such a claim is never caught by a test.
+//! Until 2026-09-27 this section said the opposite: the flag was read and
+//! nothing acted on it, because how someone reaches a different account and
+//! what a start for repair does were the operator's to decide. They were
+//! decided as `design-decisions.md` §1427 (C-Q22). The section before it
+//! said "autologin" in the feature list above while none happened, which is
+//! the lesson worth keeping: a feature list is a claim like any other, and a
+//! doc comment is the one place such a claim is never caught by a test.
 
 use appearance::ImageFit;
 use appearance::Palette;
@@ -158,7 +161,13 @@ pub struct LoginUser {
     /// `avatar-default`. It was a person emoji for everyone, which no font the
     /// desktop has can draw (design-decisions.md §881).
     pub avatar: String,
-    /// Whether autologin is enabled for this user.
+    /// Whether this is the account that signs in by itself as the machine
+    /// starts ([`crate::autologin`]).
+    ///
+    /// [`loginusers::automatic_account`]'s answer rather than the database's
+    /// flag alone: a locked account, or one of two marked, has the flag and is
+    /// not the account. So at most one user a screen is built from the
+    /// database with carries it.
     pub autologin: bool,
     /// Whether this user has a password set.
     pub has_password: bool,
@@ -210,6 +219,17 @@ impl LoginUser {
     pub fn with_no_password(mut self) -> Self {
         self.has_password = false;
         self
+    }
+
+    /// The name the desktop shows for this account: the name it gives itself,
+    /// or its login name when it gives none.
+    #[must_use]
+    pub fn shown_name(&self) -> &str {
+        if self.display_name.is_empty() {
+            &self.username
+        } else {
+            &self.display_name
+        }
     }
 }
 
@@ -398,6 +418,7 @@ pub fn users_from_db(users_yaml: &std::path::Path) -> Vec<LoginUser> {
 
 fn users_from(accounts: &[loginusers::Account]) -> Vec<LoginUser> {
     let recent = loginusers::most_recent(accounts);
+    let automatic = loginusers::automatic_account(accounts);
     accounts
         .iter()
         .enumerate()
@@ -421,7 +442,9 @@ fn users_from(accounts: &[loginusers::Account]) -> Vec<LoginUser> {
             if account.is_admin {
                 user = user.with_admin();
             }
-            if account.auto_login {
+            // The shared rule, not `account.auto_login`: the screens before
+            // this one say "hold Shift" exactly when this marks somebody.
+            if automatic == Some(i) {
                 user = user.with_autologin();
             }
             if !account.has_password {
@@ -871,11 +894,6 @@ impl LoginScreen {
     /// Currently selected user (if any).
     pub fn current_user(&self) -> Option<&LoginUser> {
         self.users.get(self.selected_user)
-    }
-
-    /// Check if any user has autologin enabled.
-    pub fn autologin_user(&self) -> Option<&LoginUser> {
-        self.users.iter().find(|u| u.autologin)
     }
 
     // ------------------------------------------------------------------
@@ -1990,21 +2008,50 @@ mod tests {
         assert_eq!(u.username, "alice");
     }
 
+    /// The rule is `loginusers`', so the list a screen is built from marks
+    /// what it marks: the one account, and not a locked one or one of two.
     #[test]
-    fn autologin_user() {
-        let users = vec![
-            LoginUser::new(Some(1), "a", "A"),
-            LoginUser::new(Some(2), "b", "B").with_autologin(),
-        ];
-        let s = LoginScreen::new(1920.0, 1080.0, users);
-        let auto = s.autologin_user().unwrap();
-        assert_eq!(auto.username, "b");
+    fn the_database_marks_only_the_account_that_signs_in_by_itself() {
+        let dir = scratchdir::ScratchDir::new("login-automatic");
+        let path = dir.path("users.yaml");
+        let marked = |body: &str| {
+            std::fs::write(&path, body).unwrap();
+            users_from_db(&path)
+                .into_iter()
+                .filter(|user| user.autologin)
+                .map(|user| user.username)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            marked(
+                "users:\n\
+                 - username: alice\n   uid: 1000\n\
+                 - username: bob\n   uid: 1001\n   auto_login: true\n"
+            ),
+            ["bob"]
+        );
+        assert!(
+            marked(
+                "users:\n\
+                 - username: alice\n   uid: 1000\n   auto_login: true\n\
+                 - username: bob\n   uid: 1001\n   auto_login: true\n"
+            )
+            .is_empty(),
+            "two marked accounts marked one"
+        );
+        assert!(
+            marked(
+                "users:\n- username: alice\n   uid: 1000\n   auto_login: true\n   locked: true\n"
+            )
+            .is_empty(),
+            "a locked account was marked"
+        );
     }
 
     #[test]
-    fn no_autologin() {
-        let s = make_screen();
-        assert!(s.autologin_user().is_none());
+    fn the_shown_name_is_the_display_name_or_else_the_login_name() {
+        assert_eq!(LoginUser::new(None, "alice", "Alice").shown_name(), "Alice");
+        assert_eq!(LoginUser::new(None, "alice", "").shown_name(), "alice");
     }
 
     #[test]

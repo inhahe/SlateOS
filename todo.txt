@@ -7864,8 +7864,9 @@ Remaining net improvements (diminishing returns):
   always-ready per POSIX.  Polling loop uses 10ms sleep — a true epoll/
   kqueue would still be a nice optimization but not a correctness issue.
 
-- getaddrinfo() uses static storage (no heap) and returns at most one
-  result.  Not re-entrant — same as POSIX gethostbyname().
+- (DONE 2026-09-27, lane D) getaddrinfo() used static storage and returned
+  one result: it is glibc's now (known-issues.md,
+  D-POSIX-GETADDRINFO-WAS-IPV4-ONLY-AND-UNSORTED).
 
 - ioctl TCSETS/TCGETS are accepted but don't actually change terminal
   behavior (no line discipline).  Programs that set raw mode work via

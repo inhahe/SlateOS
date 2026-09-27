@@ -368,6 +368,7 @@ pub mod glob;
 pub mod iconv;
 pub(crate) mod iconv_8bit;
 pub(crate) mod iconv_translit;
+pub mod inet;
 pub mod inttypes;
 pub mod ioctl;
 pub mod langinfo;

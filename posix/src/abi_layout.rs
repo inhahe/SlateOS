@@ -545,6 +545,14 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::socket::InAddr,
+        "struct in_addr",
+        "netinet/in.h",
+        s_addr
+    );
+    abi!(
+        out,
+        hdrs,
         crate::socket::Sockaddr,
         "struct sockaddr",
         "sys/socket.h",
@@ -734,6 +742,14 @@ pub(crate) fn abi_asserts() -> String {
         mq_maxmsg,
         mq_msgsize,
         mq_curmsgs
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::inet::EtherAddr,
+        "struct ether_addr",
+        "net/ethernet.h",
+        ether_addr_octet
     );
     abi!(
         out,

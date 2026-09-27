@@ -4,8 +4,8 @@
 //! ## Why this exists
 //!
 //! A family of standard functions — `strerror`, `gmtime`, `localtime`,
-//! `asctime`, `ctime`, `inet_ntoa`, `gethostbyname`, `getservbyname`,
-//! `getprotobyname`, … — return `*mut T` pointing at storage the *library*
+//! `asctime`, `ctime`, `inet_ntoa`, `ether_aton`, `gethostbyname`,
+//! `getservbyname`, `getprotobyname`, … — return `*mut T` pointing at storage the *library*
 //! owns, and `errno` is likewise a single lvalue per thread.  POSIX permits
 //! that storage to be overwritten by the next call **on the same thread**;
 //! that is exactly why the `_r` reentrant variants exist.  Implemented with
@@ -104,6 +104,12 @@ pub struct PerThread {
     /// Result buffer for `inet_ntoa`.  Exactly fits `"255.255.255.255\0"`.
     pub inet_ntoa: [u8; 16],
 
+    /// Result buffer for `ether_aton`.
+    pub ether_aton: crate::inet::EtherAddr,
+
+    /// Result buffer for `ether_ntoa`: `"xx:xx:xx:xx:xx:xx\0"`.
+    pub ether_ntoa: [u8; 18],
+
     /// Result web for `gethostbyname`.
     pub hostent: crate::socket::HostentBuf,
 
@@ -189,6 +195,8 @@ impl PerThread {
         tm: crate::time::Tm::ZERO,
         asctime: [0; 32],
         inet_ntoa: [0; 16],
+        ether_aton: crate::inet::EtherAddr::ZERO,
+        ether_ntoa: [0; 18],
         hostent: crate::socket::HostentBuf::ZERO,
         hostent_rev: crate::socket::HostentBuf::ZERO,
         servent: crate::socket::ServentBuf::ZERO,
@@ -316,6 +324,8 @@ mod tests {
         assert_eq!(zeroed.errno, PerThread::ZERO.errno);
         assert_eq!(zeroed.asctime, PerThread::ZERO.asctime);
         assert_eq!(zeroed.inet_ntoa, PerThread::ZERO.inet_ntoa);
+        assert_eq!(zeroed.ether_aton, PerThread::ZERO.ether_aton);
+        assert_eq!(zeroed.ether_ntoa, PerThread::ZERO.ether_ntoa);
         assert_eq!(zeroed.tm.tm_sec, PerThread::ZERO.tm.tm_sec);
         assert_eq!(zeroed.tm.tm_year, PerThread::ZERO.tm.tm_year);
         assert_eq!(zeroed.tm.tm_isdst, PerThread::ZERO.tm.tm_isdst);

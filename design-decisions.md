@@ -76608,6 +76608,12 @@ are easy to lose:
 and simply lacks the additions. The cost is only that the operator keeps two
 greps.
 
+**Superseded in part, 2026-09-27:** the proximity rule above -- the operator's
+program read as the rule, windows used up once satisfied -- is replaced by
+§1044. Answering B-Q10, the operator ruled their README right and the
+program wrong; both of their builds and ours now let a match belong to any
+number of windows. The flag spellings and the porting constraints stand.
+
 ## 1009. `SA_ONSTACK` is honoured in libc, and storing the stack without using it would have been worse than the stub
 
 **Date:** 2026-09-09
@@ -79633,6 +79639,477 @@ the port untestable against the reference, whose udev answers first.
 
 **Revisit** if SlateOS grows a udev-like device database: lsblk should then
 ask it first, as upstream asks udev.
+
+---
+
+## 1042. The character-width table is GNU's; SlateOS programs will also be able to ask the terminal
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Claude (operator-approved scope). Answering B-Q8, the
+operator left the choice of table to Claude ("just do whichever looks the
+best, or whichever you want") and asked for a width query in the terminal
+protocol; Claude took its own recommendation, (a). Answer relayed verbatim
+through lane F's session.
+
+**In short:** a terminal draws text in fixed cells, and every program that
+lines text up needs to know how many cells each character takes. Our one
+shared table matched bash's; the GNU tools ship a newer table that differs
+on 626 characters, almost all invisible marks and unassigned code points.
+We now use GNU's. Separately, the operator wants SlateOS's terminal to be
+able to *answer* "how wide will you draw this?", so programs written for
+SlateOS can ask instead of trusting a table; that is lane C's terminal, and
+has been requested from them.
+
+**The operator's answer, verbatim:**
+
+> I want a way to ask the terminal how wide it will draw something as part
+> of the protocol. It will be an addition purely for programs made for Slate
+> OS, so it won't interfere with POSIX or whatever, is that fine? Regarding
+> which table to keep, you say that bash and GNU tools will not be running
+> on Slate OS, only reimplementations, so does that not mean that,
+> regardlress of which we keep, nothing will show up improperly (because our
+> own implementations will naturally know the correct table to use)? If
+> that's the case, just do whichever looks the best, or whichever you want.
+> Though one thing that concerns me is the decision to make the renderer
+> obey the table rather than vice versa--what if the glyph it's trying to
+> render doesn't agree with the table in the current font? Wouldn't you
+> either get a glyph printed too wide or too narrow?
+
+**Why GNU's table (a).** It is a pinned upstream -- gnulib's, Unicode
+15.1.0 -- that can be re-derived mechanically, where ours came from whichever
+Python the build machine had. Six utilities consult a width against one
+shell, so matching GNU byte-for-byte in `ls`, `wc -L` and `column` is worth
+more than matching bash's line editor on characters nobody types. The
+operator's premise is right: nothing shows up improperly either way, because
+every program on SlateOS reads the one table.
+
+**"Is a private query fine?" -- yes, with one limit.** An escape sequence
+only SlateOS programs send, which other terminals simply do not answer, is
+exactly how terminals have always been extended (xterm's own queries began
+that way). The limit is that a query needs a terminal on the other end: `ls`
+choosing columns for a pipe or a file, or a program running over ssh from a
+machine with an older table, still has only its table. So the query
+supplements the table rather than replacing it.
+
+**The renderer and the font (the operator's concern).** In a terminal the
+cell grid is authoritative, not the font: every program on the screen, and
+the cursor, computes positions from the table, so the renderer has to fit
+each glyph into the cells the table gives it. A glyph narrower than its cells
+is placed inside them; a wider one is scaled or clipped to them, and never
+pushes the following characters out of place. The concern is real in one
+form: a font whose glyph for a one-cell character is drawn wide looks
+cramped. The remedy for that belongs to the font side -- a fallback font, or
+scaling -- and not to a table that varies by font, because then the layout
+of text would depend on which font is installed, which a program writing to
+a pipe or over ssh cannot know. Lane C has been asked to confirm the renderer
+fits glyphs to cells this way.
+
+**What follows:** `userspace/charwidth` takes gnulib's table; the `ls`
+harness's two permanently-deferred cases become agreeing ones; `osh`'s line
+editor stops matching bash on those 626 (recorded where it is measured).
+Request to lane C: the width query, and the fitting rule above.
+
+**Where:** `userspace/charwidth/src/lib.rs`; `known-issues.md` ->
+`TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT`.
+
+---
+
+## 1043. Genuine Oils becomes the default shell; our Rust OSH stays as a fallback
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q9; Claude set out (a) keep ours, (b)
+replace ours with genuine Oils, (c) not yet, without recommending one. The
+operator chose (b) for the default and rejected (b)'s deletion: the Rust
+shell stays). Relayed verbatim through lane F's session.
+
+**In short:** the shell a user gets will be the real Oils -- both of its
+languages, OSH (bash-compatible) and YSH (its newer one) -- built from
+upstream's C++ for SlateOS, instead of our Rust re-creation of OSH. Ours is
+kept as a discoverable alternative, because a small shell with no C++ runtime
+under it is what still works when little else does.
+
+**The operator's answer, verbatim:**
+
+> The OS has to eventually be able to run Python and C++ correctly anyway,
+> and Claude never did finish fully debugging the Rust implementation of
+> Oils after 27 days. And as for "our Rust shell is small, boots early, and
+> has no C++ runtime under it — which matters for a shell that has to work
+> when little else does," the Rust implementation can always be kept as a
+> discoverable option that can also be run when little else is working. And
+> as for "our copy will always chase upstream, and any behaviour we have not
+> re-created is a difference someone eventually trips over," I don't see how
+> simply not worrying about chasing upstream changes in Oils could possibly
+> be any worse than staying with our own Rust implementation which would
+> effectively be a stale snapshot of the Oils version it was reimplemented
+> aganist, only buggier. So, make the real Oils the default.
+
+**What follows:** a roadmap item in lane B's backlog -- cross-compile genuine
+Oils (its generated C++, `oils-for-unix`) with `zig c++` against SlateOS's C
+library, run its spec tests on SlateOS, then make it the default `sh` and
+login shell (which touches `init/` and lane D's rootfs recipe). This closes
+the fork §73 left open. It is also the first C++ program SlateOS will run,
+so it proves the C++ runtime that Mesa, Chromium and WINE need anyway.
+
+---
+
+## 1044. grep's proximity window: a match can belong to more than one group -- the manual is right
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q10 with option (b); Claude set out
+(a), (b) and (c) and said it would implement (a), the program's behaviour, if
+the question went unanswered). Relayed verbatim through lane F's session.
+
+**In short:** the operator's own `grep` has a proximity mode: print the lines
+where every pattern occurs within N lines of the others. Its manual says a
+window at least as large as the file is the same as the ordinary whole-file
+mode; the program disagreed, because a match used in one group could not be
+used again in the next. The operator ruled the manual right and the program
+wrong, and asked for both of their builds to be fixed as well as ours.
+
+**The operator's answer, verbatim:**
+
+> I think this is probably a bug in our grep. Please fix it, and make sure
+> you fix both the Python version and the C++ version.
+
+**The rule now, in all three places.** A window is any run of NUM consecutive
+lines; it is satisfied when every pattern matches somewhere in it; a matching
+line is shown when it lies in at least one satisfied window. Two faults broke
+the README's equivalence, not one: the record of live matches was *cleared*
+whenever a window was satisfied (so a match completed one window only), and a
+satisfied window's lines were taken from the earliest *live* match onward (so
+in `ALPHA`, `ALPHA`, `BETA` the first `ALPHA` was dropped). `-m` counts the
+matching lines shown, as the whole-file gate counts them, so the equivalence
+holds with `-m` as well.
+
+**Done the same day:**
+
+* The operator's project (`D:/visual studio projects/grep`, which stays on
+  D:): `grep.py` and `grep.cpp` fixed identically; the README's window example
+  moved its unpaired match from line 7 to line 9 (at line 7 it was two lines
+  from the `BETA`, so the old example depended on the bug); `test_grep.py`
+  gained fixtures for both failing shapes and runs the `-P 99 == no -P`
+  invariant on five files with eight option sets -- 85 passed, Python and C++
+  in parity. Committed locally there (a64f6c0), not pushed; `build.bat`
+  redeployed `d:\utils\grep.exe`.
+* Ours: `userspace/coreutils/src/bin/grep.rs`'s `near_eligible_lines`.
+
+§1008's reading of the operator's program as the rule is superseded by this
+entry for `--near`; the rest of §1008 stands.
+
+---
+
+## 1045. Names that live inside another program: case by case, and a kept name is installed as that program
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q11 with "Claude's recommendation":
+option D, with a default of B for any name kept). Relayed verbatim through
+lane F's session.
+
+**In short:** some programs answer to several names -- one file installed as
+both `useradd` and `userdel` does two jobs. 169 such extra names existed when
+this was asked (148 today) and nothing installed any of them, so their code
+was finished, tested and unrunnable. Each name is now decided on its own: a
+name for a subsystem SlateOS does not have is deleted (§1006); a name that is
+kept is installed as the same file under the extra name, as busybox does, and
+gets a program of its own only where separate permissions for it matter.
+
+**Why B is the default and A the exception.** SlateOS grants permissions per
+binary, so one file under six names holds the union of six jobs' permissions.
+For most sibling sets -- the `useradd` family all edit the same two files --
+that union is what each would be granted anyway. Where the jobs genuinely
+differ (`systemctl`'s fourteen), a name earns its own crate.
+
+**What follows:** the triage, name by name, in `known-issues.md` ->
+`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN`; the ledger
+`scripts/multicall-aliases-baseline.txt` shrinks as each is settled.
+Installing a file under extra names is the rootfs recipe's job (lane D), and
+is requested from them.
+
+---
+
+## 1046. Our Rust osh keeps bash's error text; no toggle
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q12; Claude recommended D. The operator
+leaned toward C, then judged it overkill once genuine Oils is the default
+(§1043), so osh is left as it is). Relayed verbatim through lane F's session.
+*Claude's reading of an answer that weighs C and then sets it aside; if C was
+meant, say so and it is a small change.*
+
+**In short:** our Rust shell prints error messages exactly as bash does,
+including names a user typed, unquoted -- so a name holding a newline can
+make one error look like two. The rest of the tree quotes such names. The
+operator decided the Rust shell need not grow a safer mode: genuine Oils
+becomes the default (§1043), and a user who switched to ours and hit this
+can switch back.
+
+**The operator's answer, verbatim:**
+
+> This reminds me, the proposed format for exporting passwords from the
+> password manager in plaintext was to do it in csv, but passwords can have
+> any characters, including any combination of characters used to delimit a
+> string or escape a character in csv, so make sure you don't mess that up.
+> Anyway, to answer the question, maybe C, but it seems like it may be
+> overkill since we're making the real Oils the default, and if the user has
+> switched theirs to our Rust Oils and runs into a problem, they can simply
+> temporarily use the real Oils instead.
+
+**What follows:** the 16 exemptions in `scripts/quote-names.py`'s IGNORE
+table now point here instead of at an open question. The password-manager
+remark is for the lane that owns the exporter, and has been passed to it:
+a CSV writer must quote every field that holds a comma, a quote, a CR or an
+LF, double every quote inside a quoted field, and be tested with passwords
+built from exactly those characters.
+
+---
+
+## 1047. Shaped random numbers belong in a userspace library, never beside cryptographic randomness; the effort rule stays in one file
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q13 with "Claude's recommendation" on
+both of its parts). Relayed verbatim through lane F's session.
+
+**In short:** two questions the operator had asked back. (1) Bell curves and
+other shaped random numbers: yes, as an ordinary library any program can
+use, seeded and reproducible -- and deliberately not reachable through the
+call that supplies keys and nonces, whose numbers must never be reproducible.
+(2) The rule "the best result, regardless of effort" is already in force for
+SlateOS through `E:\visual studio projects\CLAUDE.md`, which every lane
+reads; it is not copied into `os/CLAUDE.md`, because two statements of one
+rule drift.
+
+**What follows:** a roadmap item in lane B's backlog for the distributions
+library (normal, exponential, Poisson, weighted choice, over a caller-given
+uniform source). No `CLAUDE.md` changes.
+
+---
+
+## 1048. logger: util-linux's logger is the one that survives
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q14 with "Claude's recommendation",
+which was (c): keep the reviewed implementation, with `userspace/logger`'s
+destination). Relayed verbatim through lane F's session.
+
+**In short:** the question asked which of two `logger`s survives -- one that
+printed messages on the terminal, one that sent them to the system log. By
+the time it was answered, the tree had already arrived where the
+recommendation pointed: coreutils' printing applet was deleted (f98b0f95f,
+2026-09-16), and `userspace/logger` became a function-by-function port of
+util-linux 2.39.3's (413e56f1d, 2026-09-26), measured against the real one.
+So the survivor is both the reviewed implementation and the one with the
+right destination. Nothing remains to do; this records the decision behind
+it.
+
+---
+
+## 1049. sbctl keeps what can work or is one planned change away; the four signing commands are deleted
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q17 with option 2, which Claude
+recommended) for `sbctl`. Applying the same rule to the other commands the
+question listed is Claude's (operator-approved scope). Relayed verbatim
+through lane F's session.
+
+**In short:** `sbctl` manages Secure Boot keys. It used to report creating
+keys and signing kernels while writing nothing; since 2026-09-15 those
+commands refuse instead. Now the four that need cryptography this project
+does not have and has not planned -- `create-keys`, `sign`, `rotate-keys`,
+`bundle` -- are deleted, per §1006. `enroll-keys` and `reset` stay, refusing,
+because they wait only on a door into the kernel's key store that lane A has
+been asked for and has scheduled (A-Q21, §978 on lane A's branch).
+
+**The rule, as it applies beyond sbctl.** A command that does not work stays
+only while what it waits for is planned; otherwise it is deleted and added
+back when it is implemented (§1006). The other refusing commands the question
+named (`unshare`, `nsenter`, `dbus-daemon`, `dbus-send`, `dbus-monitor`, `lp`,
+`lprm`, `eject`) are judged by that rule one at a time, each against the
+roadmap, in the commit that settles it.
+
+---
+
+## 1050. Lane B's next large port is the fastpy compiler on SlateOS; the operator's further ports are recorded
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q18 with "Claude's recommendation":
+option B, the fastpy compiler, then the bug list as the standing default --
+and adding a list of ports). Relayed verbatim through lane F's session.
+
+**In short:** of the three large ports left in lane B's list, the fastpy
+compiler comes first: half of it already works, and it is what lets OS
+components be written in Python on SlateOS itself. The Rust toolchain and
+WINE wait. The operator also named programs they want ported that the
+roadmap did not carry; they are now recorded.
+
+**The operator's answer, verbatim:**
+
+> Claude's recommendation, though I noticed that Chromium is missing from
+> the list of large things to port. Have you ported that already? Oh, and
+> one thing I forgot to mention, I want Mono (dotnet support for Linux)
+> ported too, so record that. And record Chromium if it's somehow not
+> recorded anymore. Another thing I want ported is Xonsh, and another is
+> YSH, and another is Nushell. And QDirStat, or better, port my own fork of
+> WinDirStat that can be found at d:\visual studio projects\dirsize\windirstat.
+> Also, do we have a capable debugger, like cdb? We should port one or more
+> of those, too. And I want a reimplementation of `d:\visual studio
+> projects\backup` in a language we support, or if we get Mono ported, we
+> can just run it on that. Record all of these that aren't recorded.
+
+**Each item, checked against the roadmap:**
+
+| Port | Recorded before? | Now |
+|---|---|---|
+| Chromium | yes -- a joint task driven by lane E, blocked on POSIX, GPU and networking; it was absent from B-Q18 only because it is not lane B's | unchanged |
+| Mono (.NET on Linux) | no | added |
+| Xonsh | no | added |
+| YSH | yes, as the half of genuine Oils §73 deferred | it arrives with §1043 |
+| Nushell | marked `[x]`, but what was verified is a *Windows* build (`nu.exe` under msvc, 2026-06-03), not SlateOS | added as a SlateOS port, and the `[x]` annotated |
+| WinDirStat (the operator's fork), or QDirStat | a WinDirStat-*style* app exists (`apps/diskanalyzer`), written here, not a port | added |
+| A capable debugger | a hand-written `gdb` crate exists; no port of GDB or LLDB | added |
+| `d:\visual studio projects\backup` (LithicBackup) | no | added: reimplement, or run it on Mono once Mono runs |
+
+---
+
+## 1051. Two editing habits become a standing rule, in the CLAUDE.md of all three accounts -- pending the operator's word in this session
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q19: "Add it to claude.md of all three
+Claude accounts under c:\users\inhah" -- option A, both habits, which Claude
+recommended). Relayed verbatim through lane F's session.
+
+**In short:** six times in one day an edit script matched different text than
+intended, or more places than one, and the wrong edit landed silently. Two
+habits catch it: assert how many places matched before replacing, and never
+write the explanation of a trap and the code it describes in the same pass.
+The operator wants both in the user-level `CLAUDE.md` of each account.
+
+**Not yet applied, and why.** Lane B edits a `CLAUDE.md` only on the
+operator's own instruction in the session that makes the edit; this answer
+reached it through another session's relay, which is not that. The operator
+has been asked to confirm in lane B's session. The text to add, so it can be
+pasted as it stands once confirmed:
+
+> **Edits by search-and-replace.** Before replacing, check that the anchor
+> matched exactly as many places as you meant -- usually one -- and stop if
+> it did not. And do not write a comment explaining a trap in the same pass
+> as the code it describes: write it, run something (a test, a gate, a
+> build), then read it back as a reader rather than as its author.
+
+**Where:** `C:\Users\inhah\.claude\CLAUDE.md`,
+`C:\Users\inhah\.claude-account-b\CLAUDE.md`,
+`C:\Users\inhah\.claude-account-c\CLAUDE.md`.
+
+---
+
+## 1052. shred --random-source reads its source as GNU's does; the question's premise had gone
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q20), with Claude keeping GNU's
+behaviour for a source that is a regular file -- a divergence from the
+operator's proposal, made for the reason below and put back to the operator.
+Relayed verbatim through lane F's session.
+
+**In short:** `shred` overwrites a file several times to destroy it, and
+`--random-source` names where its random bytes come from. When this was
+asked, our `shred` refused the option, and supporting it seemed to mean
+changing the order of the overwrite. Since then `shred` was replaced by a
+port of GNU coreutils 9.4's, in which `--random-source` works exactly as
+GNU's does, byte for byte, checked by `scripts/shred-diff.sh`. That port
+already does what the operator asked for, in all but one detail.
+
+**The operator's answer, verbatim:**
+
+> I don't understand why the behavior of the random-and-complement passes
+> has to change just to support reading from a file or /dev/urandom, which
+> should be a completely separate path. And I think the failure mode in
+> which one full pass was done but not later passes is many times better
+> than the failure mode in which half a file was overwritten and the other
+> half not. But I'm having a lot of trouble understanding this particular
+> open question in general. But I'd say if the user specifies /dev/urandom,
+> just read from that as you pass over the file, as many times as they want.
+> If the user specifies a file to read from for the data to overwrite with,
+> read that file in chunks as it overwrites the deleted file, then on the
+> next pass, start reading the random-data file from the beginning again.
+> Fair?
+
+**Against the port:**
+
+| The operator asked for | The port |
+|---|---|
+| The random source as a separate path from the generator's passes | yes: with `--random-source`, every random byte comes from the source |
+| Whole passes, so an interruption leaves full passes done | yes: each pass sweeps the whole file, as GNU's does |
+| `/dev/urandom` read continuously, as many passes as asked | yes |
+| A file source re-read from its beginning at each pass | **no -- kept as GNU's**: the file is read on from where the last pass stopped, and a file that runs out ends the run with `shred: FILE: end of file` before the next write |
+
+**Why that one detail stays GNU's.** Restarting the file at every pass makes
+every random pass write the same bytes; the passes after the first then add
+no randomness, which is what multiple passes exist to add. It would also
+make `shred --random-source=F` write different bytes from GNU's on the same
+input, which is what the port's harness checks. If the operator wants the
+restart anyway -- to make a short source last -- it can be an explicit
+option rather than a change to GNU's; that is put back to them.
+
+---
+
+## 1053. Everything that builds goes on the image for now; a catalogue of every program, and the question of what the OS is for, follow
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q21: option A for now, and asking for a
+catalogue of the programs, options for "what this OS is for", and a rule
+that every program is recorded where everyone can find it). Relayed
+verbatim through lane F's session.
+
+**In short:** most programs we have written were built and tested but never
+put on the disk image that boots, because together they did not fit. The
+image is to grow and carry everything that builds. Then the operator wants a
+list of every program with a line on what it does, followed by options for
+what SlateOS is for -- each option with the programs it would drop -- so the
+choice of what ships can be made deliberately. And programs must stop being
+undiscoverable: a new program is recorded where every lane looks.
+
+**The operator's answer, verbatim:**
+
+> Go with A for now, but create a list of all the 276 programs along with a
+> short description for each, and at the end, give me options for your
+> question of "what this OS is for" and maybe with some implications as to
+> which option implies which programs would be removed. Also, were you
+> saying that these 276 programs are not even easily discoverable? We
+> should have a rule somewhere that if you make a program, record it
+> somewhere so everybody knows it exists.
+> As for the second question, I guess there's no point in having both a
+> fastpy and a Rust implementation of anything. Wait, yes there is. We may
+> determine that the Rust implementation is better and make that the stock
+> install, but the user may find Python much easier to edit. And vice
+> versa, they may prefer Rust for some reason even if we think the Python
+> version is better. Though another option is to keep the alternative
+> versions in the repo but not included in the OS distribution.
+
+**What follows:**
+1. The image: raising `IMG_SIZE` and staging every binary that builds is the
+   rootfs recipe's (lane D's), and is requested from them.
+2. The catalogue: a generated list of every program the workspace builds,
+   with a one-line description each, and at its end the options for what
+   SlateOS is for, each with what it would drop. The options go into
+   `open-questions.md` as a new question.
+3. The rule: the catalogue is the place a program is recorded, and a gate
+   checks every binary the workspace builds appears in it, so the rule
+   cannot be forgotten.
+4. On keeping both implementations: the operator's second paragraph is the
+   answer `deferred-questions.md` DQ1 was waiting for in part -- both may be
+   kept, the alternative possibly in the repository only -- and is copied
+   there.
 
 ## 834. Selection is a change of colour, not of weight
 

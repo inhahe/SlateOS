@@ -358,6 +358,68 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q30 — [C] The Open and Save windows are a plainer copy of the file explorer, not the explorer. How should they become it? — Status: OPEN (raised 2026-09-27)
+
+**In short:** when a program asks you to pick a file to open, or a place to
+save one, it shows a small window of its own: three columns, the letters "D"
+and "F" where icons should be, and no pictures of your photos. The file
+explorer beside it has thumbnails, about two dozen kinds of column (a song's
+length, the camera that took a photo) and three ways to lay out a folder. The
+design says the Open and Save windows should *be* the explorer. There are two
+real ways to get there -- every program carries a copy of the explorer inside
+it, or the explorer opens the window on the program's behalf -- and they
+differ in how much of your files a program can see.
+
+**Terms, once each:** *the dialog* -- the Open/Save window a program shows
+(`guitk::dialog`, part of the toolkit every program is built from); *the
+explorer* -- the file manager program (`apps/explorer`); *a powerbox* (the
+security name for option A) -- a trusted window that picks a file for a
+program and hands it only that file.
+
+| Option | What changes |
+|---|---|
+| **A. The explorer opens the dialog for every program** (recommended) | Every Open/Save window is the explorer itself: its columns, thumbnails and layouts, and any column it learns later. A program is handed the file you picked and never sees the rest of the folder. |
+| **B. Every program carries the explorer's view inside it** | The same look and features. Each of the 45 programs with a dialog grows by the explorer's file readers, and still needs permission to read every folder you might browse. |
+| **C. Keep two, and make the dialog look like the explorer** | They look alike. The dialog keeps its three columns and one layout, with no thumbnails. |
+
+**Why A.**
+- It is what the design describes: the explorer "used as a file save or
+  file(s) load dialog for applications" (`design.txt`, the file explorer
+  entry), and the detailed roadmap says the dialog "IS the file explorer
+  component".
+- It is the only option that fits the design's security rule, that a program
+  holds nothing it was not handed ("no ambient authority"). Today a program
+  lists folders itself to fill its dialog, so it must be able to read every
+  folder you might open. Under A it needs no access to your files at all
+  until you choose one. macOS does this for its sandboxed programs, and
+  Linux's Flatpak does it through what it calls a portal.
+- One program reads your files' insides. The explorer's readers (photo
+  details, song tags, video and archive headers) parse whatever is in your
+  folders; under B that code runs inside 45 programs instead of one, and a
+  file that crashes it takes the program you were saving from down with it.
+  Windows' Open and Save windows work like B, and add-ons crashing the
+  program that opened them is a long-standing Windows complaint.
+- Nothing is built twice: a column the explorer learns appears in every
+  dialog the same day.
+
+**What A costs.** The most work of the three, across four lanes: the
+explorer learns to open as a dialog (lane E); a program needs a way to ask
+for one and get the answer back (lanes C and E); the window system must keep
+the dialog above the program that asked (lane F); and "handed only that file"
+needs a way to pass an open file from one program to another (lanes A and D).
+Until that last part exists the dialog hands back the file's name, which is
+no weaker than today.
+
+**Why you are being asked:** it settles, for good, how every program opens
+and saves files and whether a program can see your folders, and it moves
+work between four lanes. B and C are much less work, and C could start today.
+
+**If this is never answered:** nothing breaks and nothing gets worse; the
+dialog keeps working, plainer than the explorer. What is at stake is effort:
+restyling the dialog (C) is thrown away under A or B, so until this is
+answered lane C leaves the dialog's layout alone and restyles only the
+toolkit parts the explorer already uses, such as the address bar.
+
 ## C-Q29 — [C] Copying in one program and pasting in another works nowhere. Should copy and paste travel through the window system? — Status: OPEN (raised 2026-09-26)
 
 **In short:** nothing you copy can be pasted into a *different* program. Each

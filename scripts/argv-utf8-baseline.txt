@@ -128,7 +128,6 @@ userspace/rfkill/src/main.rs:argv-as-string
 userspace/route/src/main.rs:argv-as-string
 userspace/rsync/src/main.rs:argv-as-string
 userspace/sanitize/src/main.rs:argv-as-string
-userspace/sbctl/src/main.rs:argv-as-string
 userspace/scp/src/main.rs:argv-as-string
 userspace/screen/src/main.rs:argv-as-string
 userspace/selinux/src/main.rs:argv-as-string

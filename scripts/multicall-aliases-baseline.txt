@@ -99,9 +99,6 @@ resolvectl:host
 resolvectl:resolvconf
 resolvectl:systemd-resolve
 rfkill:rfkill-event
-sbctl:sbkeysync
-sbctl:sbsign
-sbctl:sbverify
 selinux:audit2allow
 selinux:chcon
 selinux:getenforce

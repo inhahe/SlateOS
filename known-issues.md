@@ -145455,6 +145455,18 @@ security feature is the worst place for it. Filed as
 `status` is untouched and was always real: it reads the efivars `SecureBoot`
 and `SetupMode` variables.
 
+**Resolved 2026-09-27** (design-decisions §1049, the operator's answer to
+B-Q17). The four commands that need RSA, X.509 or Authenticode are deleted,
+and so is everything that reported work it never did: the files database
+(`verify FILE` printed "signature valid" for any file; `remove-file`
+removed nothing), and the `sbsign`, `sbverify` and `sbkeysync`
+personalities. `enroll-keys` and `reset` refuse until lane A's door lands.
+One correction to the line above: `status` was *not* all real -- it called a
+key "Enrolled" when a key directory was non-empty, printed a hard-coded
+"Owner: Slate OS", and reported "Setup Mode: Enabled" where no EFI
+variables existed at all. It now reads what the firmware and the kernel
+publish, and says "unknown" where it cannot.
+
 ### Three more found 2026-09-13, all in `userspace/wipefs`, all destructive
 
 Found by accident: a probe for a different class (an unknown option that does

@@ -144,7 +144,6 @@ userspace/rfkill  # bare deny(clippy::all)
 userspace/route
 userspace/rsync
 userspace/sanitize
-userspace/sbctl  # bare deny(clippy::all)
 userspace/scp  # bare deny(clippy::all)
 userspace/screen
 userspace/selinux  # bare deny(clippy::all)

@@ -72,9 +72,6 @@
 //! - **Formatted Messages**: `fmtmsg` (structured error/warning display)
 //! - **Message Catalogs**: `catopen`, `catgets`, `catclose` (stubs —
 //!   always falls back to default strings)
-//! - **Database Operations** (stubs): `dbm_open`, `dbm_close`,
-//!   `dbm_store`, `dbm_fetch`, `dbm_delete`, `dbm_firstkey`,
-//!   `dbm_nextkey`, `dbm_error`, `dbm_clearerr`
 //! - **Backtrace** (stubs): `backtrace`, `backtrace_symbols`,
 //!   `backtrace_symbols_fd`
 //! - **DNS Resolver** (stubs): `res_init`, `res_query`, `res_search`,
@@ -2528,7 +2525,6 @@ pub mod mman;
 pub mod mntent;
 pub mod monetary;
 pub mod mqueue;
-pub mod ndbm;
 pub mod net_ethernet;
 pub mod net_if;
 pub mod net_if_arp;

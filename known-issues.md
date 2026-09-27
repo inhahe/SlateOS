@@ -24423,6 +24423,18 @@ glibc 2.39's `getspnam_r`.
   the name; `EFAULT` comes at the first comparison. (`getpwnam_r`'s NULL
   stays first: glibc's nscd client reads the name before anything else.)
 
+**Forty-third pass, 2026-09-26 — `ndbm.rs` (1 site), lane D.** The module is
+gone. `<ndbm.h>` is not glibc's or musl's -- on Linux the `dbm_*` calls come
+from a library, gdbm's `gdbm_compat` or Berkeley DB -- and no header in this
+system's sysroot declares them. The module was validators in front of a
+`dbm_open` that always failed with `ENOSYS`, so the only thing it could do to
+a C program was shadow a ported `gdbm_compat`'s `dbm_open` with one that
+opens nothing: a static link takes whichever definition comes first. Nothing
+in the tree used it. As design-decisions.md §1114 took libaio's names out,
+this took the module out. (`scripts/check-libc-abi.py`'s `NO_ORACLE` entry
+for `Dbm` now names a type that is gone; it is harmless, and `scripts/**` is
+unassigned -- A-Q11 -- so it is left for whoever next edits that table.)
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24446,8 +24458,8 @@ finishes every file the sweep counted at four, three and two, the three the
 recount of 2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs`
 needed nothing at their NULLs -- `pwd.rs`'s database did
 (`B-D-PWD-KNEW-ONLY-ROOT`). Of the ten it counted at one, `pipe.rs`,
-`poll.rs` and `shadow.rs` are done (the fortieth to forty-second passes);
-next are `linux_bpf.rs`, `linux_perf_event.rs`, `malloc.rs`, `ndbm.rs`,
+`poll.rs`, `shadow.rs` and `ndbm.rs` are done (the fortieth to forty-third
+passes); next are `linux_bpf.rs`, `linux_perf_event.rs`, `malloc.rs`,
 `uio.rs` (new, and already right), `utmpx.rs` and `utsname.rs`. The thirty-ninth pass was across files,
 not at a count: the callbacks.
 

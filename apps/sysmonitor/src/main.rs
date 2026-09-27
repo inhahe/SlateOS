@@ -733,14 +733,14 @@ impl SysMonitorState {
     /// that reads as a measurement of zero.
     fn read_system(&mut self, fs: &procinfo::ProcFs) {
         if let Ok(Some(mem)) = fs.memory() {
-            let kib = |v: Option<u64>| v.unwrap_or(0).saturating_mul(1024);
-            self.system_info.total_memory = kib(mem.total_kib);
-            self.system_info.free_memory = kib(mem.free_kib);
-            self.system_info.cached_memory = kib(mem.cached_kib);
-            self.system_info.buffers = kib(mem.buffers_kib);
-            self.system_info.used_memory = mem.used_kib().unwrap_or(0).saturating_mul(1024);
-            self.system_info.swap_total = kib(mem.swap_total_kib);
-            self.system_info.swap_used = mem.swap_used_kib().unwrap_or(0).saturating_mul(1024);
+            let info = &mut self.system_info;
+            set_kib(&mut info.total_memory, mem.total_kib);
+            set_kib(&mut info.free_memory, mem.free_kib);
+            set_kib(&mut info.cached_memory, mem.cached_kib);
+            set_kib(&mut info.buffers, mem.buffers_kib);
+            set_kib(&mut info.used_memory, mem.used_kib());
+            set_kib(&mut info.swap_total, mem.swap_total_kib);
+            set_kib(&mut info.swap_used, mem.swap_used_kib());
         }
         if let Ok(Some(load)) = fs.load_average() {
             self.system_info.load_avg = [load.one as f32, load.five as f32, load.fifteen as f32];
@@ -3457,6 +3457,18 @@ fn make_demo_process(
     }
 }
 
+/// Set `field` to `kib` KiB in bytes, when the file carried it.
+///
+/// A figure `/proc/meminfo` does not carry leaves the value last read, which
+/// is what `read_system`'s doc has always said. The code said otherwise: every
+/// field went through `unwrap_or(0)`, so a figure missing from one read was
+/// drawn as none of that memory at all.
+fn set_kib(field: &mut u64, kib: Option<u64>) {
+    if let Some(kib) = kib {
+        *field = kib.saturating_mul(1024);
+    }
+}
+
 /// Format a byte count for human-readable display.
 fn format_bytes(bytes: u64) -> String {
     guitk::bytes::iec(bytes)
@@ -4370,6 +4382,47 @@ mod tests {
             p.cpu_percent, 0.0,
             "a percentage needs two samples; this is one"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A figure the file stops carrying keeps the value last read, as
+    /// `read_system` says, rather than being drawn as zero.
+    #[test]
+    fn a_figure_the_file_stops_carrying_keeps_its_last_value() {
+        let dir = std::env::temp_dir().join(format!(
+            "sysmonitor-keep-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meminfo"),
+            b"MemTotal:       2048 kB\nMemFree:         512 kB\nCached:          256 kB\n\
+              SwapTotal:      1024 kB\nSwapFree:        768 kB\n",
+        )
+        .unwrap();
+        let mut s = SysMonitorState::new();
+        s.read_system(&procinfo::ProcFs::at(&dir));
+        assert_eq!(s.system_info.cached_memory, 256 * 1024);
+
+        // The next read carries no Cached and no swap; the total moved, so
+        // the read did happen.
+        std::fs::write(
+            dir.join("meminfo"),
+            b"MemTotal:       4096 kB\nMemFree:        1024 kB\n",
+        )
+        .unwrap();
+        s.read_system(&procinfo::ProcFs::at(&dir));
+        assert_eq!(s.system_info.total_memory, 4096 * 1024, "the second read");
+        assert_eq!(s.system_info.cached_memory, 256 * 1024, "Cached was zeroed");
+        assert_eq!(
+            s.system_info.swap_total,
+            1024 * 1024,
+            "SwapTotal was zeroed"
+        );
+        assert_eq!(s.system_info.swap_used, 256 * 1024, "swap used was zeroed");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

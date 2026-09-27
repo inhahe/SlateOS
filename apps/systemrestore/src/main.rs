@@ -2006,9 +2006,6 @@ pub struct SystemRestoreUI {
     deletions: std::collections::VecDeque<u64>,
     /// What the status bar says about the last thing done in the background.
     pub status: String,
-    /// A test window's scratch folders, removed when it is dropped.
-    #[cfg(test)]
-    scratch: Option<scratchdir::ScratchDir>,
     /// How wide the window is, in pixels.
     ///
     /// Every layout in this file used the `WINDOW_WIDTH` constant directly, so
@@ -2084,8 +2081,6 @@ impl SystemRestoreUI {
             close_when_done: false,
             deletions: std::collections::VecDeque::new(),
             status: String::new(),
-            #[cfg(test)]
-            scratch: None,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
         };
@@ -2100,16 +2095,18 @@ impl SystemRestoreUI {
     /// points*, not specifically real ones, and none of which should touch
     /// the disk. This is the tree `new` used to open on; it has nothing in
     /// the store behind it, so restoring one of these says so.
+    ///
+    /// The window's folders are scratch folders of its own, so what a test
+    /// does is kept somewhere -- and nowhere a person keeps anything. They
+    /// are handed back with it: the test holds them for as long as it uses
+    /// the window, and they are removed when it drops them.
     #[cfg(test)]
-    pub fn with_sample_restore_points() -> Self {
-        // Scratch folders of its own, so what a test does is kept somewhere
-        // -- and nowhere a person keeps anything.
+    pub fn with_sample_restore_points() -> (scratchdir::ScratchDir, Self) {
         let scratch = scratchdir::ScratchDir::new("systemrestore_sample");
         let mut ui = Self::with_locations(Locations {
             settings: Some(scratch.dir().join("settings")),
             store: Some(scratch.dir().join("store")),
         });
-        ui.scratch = Some(scratch);
         let base_ts = 1_700_000_000u64;
         let manager = &mut ui.manager;
         let mut add =
@@ -2178,7 +2175,7 @@ impl SystemRestoreUI {
         );
         ui.selected_id = Some(root_id);
         ui.current_timestamp = base_ts + 86_400 * 25;
-        ui
+        (scratch, ui)
     }
 
     /// Get the list of visible snapshot IDs based on current filters.
@@ -6099,7 +6096,7 @@ mod tests {
         for (label, what) in SHORTCUTS {
             for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
                 let answered = [0, 1, 2].into_iter().any(|state| {
-                    let mut ui = SystemRestoreUI::with_sample_restore_points();
+                    let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
                     match state {
                         1 => ui.open_create_dialog(),
                         2 => ui.view_mode = ViewMode::Schedule,
@@ -6123,7 +6120,7 @@ mod tests {
     /// on an app that had lost `Ctrl+N` altogether.
     #[test]
     fn the_shortcut_list_reaches_the_window() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         assert!(
             !card_text(&ui).contains("F1 or ? closes this"),
             "the list is up before anybody asked for it"
@@ -6165,7 +6162,7 @@ mod tests {
     /// update.
     #[test]
     fn ctrl_f_narrows_the_list_by_snapshot_type() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let all = ui.visible_ids().len();
         assert!(all > 0, "control: the fixture has no snapshots");
         assert!(
@@ -6280,7 +6277,7 @@ working filter from a broken one"
     /// A tick that finds the clock where it left it has nothing to redraw.
     #[test]
     fn a_tick_at_the_same_second_asks_for_nothing() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let now = ui.current_timestamp;
         assert_eq!(ui.tick_to(now), EventResult::Ignored);
     }
@@ -6289,7 +6286,7 @@ working filter from a broken one"
 
     #[test]
     fn the_view_tabs_switch_views() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         for mode in ViewMode::all() {
             let rect = ui
                 .toolbar_controls()
@@ -6309,7 +6306,7 @@ working filter from a broken one"
             (ToolbarControl::Create, DialogKind::CreateSnapshot),
             (ToolbarControl::Export, DialogKind::ExportDialog),
         ] {
-            let mut ui = SystemRestoreUI::with_sample_restore_points();
+            let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
             let rect = ui
                 .toolbar_controls()
                 .into_iter()
@@ -6325,7 +6322,7 @@ working filter from a broken one"
     /// Restore and Delete act on the selection, so what they open names it.
     #[test]
     fn restore_and_delete_ask_about_the_selected_snapshot() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let selected = ui.selected_id.expect("the sample opens with a selection");
 
         for (control, expected) in [
@@ -6351,7 +6348,7 @@ working filter from a broken one"
     /// The toolbar band is the toolbar's, even between controls.
     #[test]
     fn a_click_on_the_empty_toolbar_does_not_reach_the_list() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let before = ui.selected_id;
         // Between the last tab and the first action button.
         assert_eq!(
@@ -6365,7 +6362,7 @@ working filter from a broken one"
 
     #[test]
     fn clicking_a_row_selects_that_snapshot() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let rows = ui.row_rects();
         assert!(rows.len() > 1, "the sample has several snapshots");
         let (rect, id) = rows[1];
@@ -6380,7 +6377,7 @@ working filter from a broken one"
     /// written again, so the view drew an empty frame for ever.
     #[test]
     fn clicking_the_selected_row_again_marks_it_for_comparison() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let (rect, id) = ui.row_rects()[1];
         let (x, y) = centre(rect);
 
@@ -6398,7 +6395,7 @@ working filter from a broken one"
 
     #[test]
     fn the_arrows_walk_the_list_and_stop_at_the_ends() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let rows = ui.visible_rows();
         assert!(rows.len() >= 3);
 
@@ -6429,7 +6426,7 @@ working filter from a broken one"
     /// which is why the selection is an id and not a row number.
     #[test]
     fn typing_filters_the_list_and_the_selection_stays_on_something_visible() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         for c in "Network".chars() {
             ui.handle_event(&types(c));
         }
@@ -6449,7 +6446,7 @@ working filter from a broken one"
 
     #[test]
     fn a_key_that_carries_no_text_is_not_typed_into_the_search_box() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         assert_eq!(ui.handle_event(&press(Key::F5)), EventResult::Ignored);
         assert_eq!(ui.search_query, "");
     }
@@ -6458,7 +6455,7 @@ working filter from a broken one"
 
     #[test]
     fn enter_confirms_a_delete_and_the_snapshot_is_gone() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         // A leaf, so the tree has no orphans to worry about.
         let id = *ui
             .visible_rows()
@@ -6482,7 +6479,7 @@ working filter from a broken one"
 
     #[test]
     fn escape_closes_a_dialog_without_doing_it() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let before = ui.manager.tree.count();
         ui.handle_event(&press(Key::Delete));
         ui.handle_event(&press(Key::Escape));
@@ -6495,7 +6492,7 @@ working filter from a broken one"
     /// promising.
     #[test]
     fn a_click_outside_a_dialog_closes_it_and_goes_no_further() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let before = ui.selected_id;
         ui.handle_event(&press(Key::Delete));
         assert_ne!(ui.dialog, DialogKind::None);
@@ -6507,7 +6504,7 @@ working filter from a broken one"
 
     #[test]
     fn the_dialog_buttons_can_be_clicked() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let before = ui.manager.tree.count();
         ui.handle_event(&press(Key::Delete));
 
@@ -6526,7 +6523,7 @@ working filter from a broken one"
     /// A locked snapshot cannot be deleted, which is what the padlock means.
     #[test]
     fn a_locked_snapshot_survives_a_confirmed_delete() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let id = ui.selected_id.expect("selected");
         ui.handle_event(&press_ctrl(Key::L));
         assert!(
@@ -6556,7 +6553,7 @@ working filter from a broken one"
     /// renderer drew.
     #[test]
     fn the_rows_are_laid_out_without_overlapping_and_inside_the_content_area() {
-        let ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, ui) = SystemRestoreUI::with_sample_restore_points();
         let rects = ui.row_rects();
         assert!(!rects.is_empty());
         let top = HEADER_HEIGHT + TOOLBAR_HEIGHT;
@@ -6579,7 +6576,7 @@ working filter from a broken one"
     /// the same size whatever window it was given.
     #[test]
     fn the_layout_follows_the_window_it_is_given() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let wide = ui
             .toolbar_controls()
             .into_iter()
@@ -6604,7 +6601,7 @@ working filter from a broken one"
     /// negative maximum is the one shape `clamp` panics on.
     #[test]
     fn a_list_shorter_than_the_window_does_not_scroll() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.handle_event(&Event::Mouse(MouseEvent {
             x: 200.0,
             y: 400.0,
@@ -6616,7 +6613,7 @@ working filter from a broken one"
     /// The title names the selected snapshot, and follows it.
     #[test]
     fn the_title_names_the_selected_snapshot() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let first = ui.title();
         assert!(first.ends_with("- System Restore"), "got {first:?}");
 
@@ -7648,21 +7645,21 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_new_has_demo_data() {
-        let ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, ui) = SystemRestoreUI::with_sample_restore_points();
         assert!(ui.manager.tree.count() >= 4);
         assert!(ui.selected_id.is_some());
     }
 
     #[test]
     fn test_ui_visible_ids_no_filter() {
-        let ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, ui) = SystemRestoreUI::with_sample_restore_points();
         let ids = ui.visible_ids();
         assert!(!ids.is_empty());
     }
 
     #[test]
     fn test_ui_visible_ids_with_type_filter() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.type_filter = Some(SnapshotType::Manual);
         let ids = ui.visible_ids();
         for id in &ids {
@@ -7673,7 +7670,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_visible_ids_with_search() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.search_query = "Update".to_string();
         let ids = ui.visible_ids();
         for id in &ids {
@@ -7686,7 +7683,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_form_selected_components() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.form_components = vec![
             true, false, true, false, false, false, false, false, false, false,
         ];
@@ -7698,7 +7695,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_produces_commands() {
-        let ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, ui) = SystemRestoreUI::with_sample_restore_points();
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
         // Should have a good number of render commands for the full UI.
@@ -7707,7 +7704,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_with_dialog() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.dialog = DialogKind::CreateSnapshot;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7715,7 +7712,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_timeline_view() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Timeline;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7723,7 +7720,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_compare_view_no_selection() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Compare;
         ui.compare_id = None;
         let rt = ui.render_tree();
@@ -7732,7 +7729,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_compare_view_with_selection() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Compare;
         let ids = ui.manager.tree.all_ids_by_timestamp();
         if ids.len() >= 2 {
@@ -7745,7 +7742,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_schedule_view() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Schedule;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7753,7 +7750,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_storage_view() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Storage;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7761,7 +7758,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_delete_dialog() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         if let Some(id) = ui.selected_id {
             ui.dialog = DialogKind::ConfirmDelete(id);
         }
@@ -7771,7 +7768,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_restore_dialog() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         if let Some(id) = ui.selected_id {
             ui.dialog = DialogKind::ConfirmRestore(id);
         }
@@ -7781,7 +7778,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_export_dialog() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.dialog = DialogKind::ExportDialog;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7789,7 +7786,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_import_dialog() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.dialog = DialogKind::ImportDialog;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7804,7 +7801,7 @@ working filter from a broken one"
     /// "nothing may be pushed past the panel's anchored bottom row" assertion
     /// for reasons that have nothing to do with the description.
     fn details_panel_with_description(description: &str) -> Vec<RenderCommand> {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let id = *ui
             .manager
             .tree
@@ -7835,7 +7832,7 @@ working filter from a broken one"
     /// The details panel for a snapshot `depth` links deep in its own root's
     /// history, every ancestor named too long to fit one link.
     fn details_panel_with_deep_ancestry(depth: usize) -> Vec<RenderCommand> {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let mut parent = None;
         let mut last = 0;
         for i in 0..depth {
@@ -8048,7 +8045,7 @@ working filter from a broken one"
 
     #[test]
     fn test_ui_render_no_selection_details() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.selected_id = None;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -8360,7 +8357,7 @@ working filter from a broken one"
                 .collect()
         }
 
-        let mut app = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut app) = SystemRestoreUI::with_sample_restore_points();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);
@@ -8910,7 +8907,7 @@ working filter from a broken one"
     /// The overlay draws what the work reports.
     #[test]
     fn the_overlay_draws_the_work() {
-        let mut ui = SystemRestoreUI::with_sample_restore_points();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let mut p = OperationProgress::new("Restoring");
         p.step("Putting back Program Settings and Data", 3, 12);
         ui.progress = Some(p);

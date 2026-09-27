@@ -328,7 +328,7 @@ impl Ignorable {
 /// and a joiner dropped early would stop making the ligature it exists to
 /// request — but to erase them once shaping is over, which is what
 /// [`SubGlyph::ignorable`](crate::gsub::SubGlyph) tracks and
-/// [`ScaledFont::shape`](crate::ScaledFont::shape) acts on.
+/// [`ScaledFont::shape`](crate::scaled::ScaledFont::shape) acts on.
 ///
 /// The `Hidden` set is HarfBuzz's `UPROPS_MASK_HIDDEN`, assigned in
 /// `_hb_glyph_info_set_unicode_props`. Note that U+180E, alone among the
@@ -657,7 +657,7 @@ pub(crate) fn nfc(text: &str) -> Vec<Piece> {
 /// concerned there is nothing here to decide and [`SaraAm::LeaveAlone`] is what
 /// NFC means. As far as a renderer is concerned there is: the character is
 /// drawn as two marks in two places, and one of them belongs in front of marks
-/// that were typed before it. [`thai::preprocess`](crate::thai::preprocess) is
+/// that were typed before it. [`thai::preprocess`] is
 /// that pass, and this is the switch that lets the drawing path run it without
 /// [`nfc`] ceasing to be NFC.
 ///

@@ -10073,9 +10073,11 @@ puts in it the listener, every client, and whatever the display adds through
 
 ### What SlateOS does not give it yet
 
-- **A listening socket is never reported ready.** The kernel asks the network
-  daemon (`OP_POLL` on the listener id), the daemon answers only for
-  connections, and `-1` becomes "nothing waiting". A server that trusted the
+- **A listening socket is never reported ready** -- *fixed 2026-09-26 by lane
+  A's `851d9165b`; the workaround below is gone, and the compositor waits on
+  its listener on SlateOS as everywhere.* The kernel asked the network
+  daemon (`OP_POLL` on the listener id), the daemon answered only for
+  connections, and `-1` became "nothing waiting". A server that trusted the
   wait would never accept anyone. So `guiremote::LISTENER_READINESS` is `false`
   on SlateOS, and there the loop asks its listener every tick and never waits
   longer than a frame — which keeps an idle SlateOS desktop waking at the frame
@@ -11340,7 +11342,11 @@ of TIFF are not read yet (listed below) and are refused by name.
    time. The two agree on every well-formed file; on some damaged ones they
    do not (`known-issues.md`), and the exact behaviour is asked of lane A
    (`requests/f-a-deflate-decode-into-a-fixed-buffer-as-libdeflate-does.md`)
-   rather than written a second time here.
+   rather than written a second time here. *2026-09-26:* answered (lane A's
+   4e0b7f205, §967) and in use: a request for the whole of a strip or tile
+   -- the strip's own rows, so the short last strip too -- goes through the
+   crate's libdeflate port, a request for less through its zlib port, as
+   `ZIPDecode` chooses; damaged strips now decode as libtiff decodes them.
 
 ### Not yet read
 
@@ -11398,8 +11404,9 @@ turned to 8- or 16-bit samples through tables libtiff builds with glibc
 grey and grey with alpha, each row's last sum spills into the next row's
 first pixel, and a tile's rows are the image's width -- and the predictor
 it installs run over the output. It inflates with zlib, whose stopping
-place the shared `deflate` crate cannot find, so on damaged strips the two
-can differ (`known-issues.md`; asked of lane A). 18 fixtures, 12,000
+place the shared `deflate` crate could not find, so on damaged strips the two
+could differ (`known-issues.md`; asked of lane A, and since 2026-09-26 done
+with the crate's port of zlib's inflate). 18 fixtures, 12,000
 mutants.) Only the first page of a multi-page TIFF is read -- as gdk-pixbuf
 reads it.
 
@@ -11932,10 +11939,12 @@ TrueType bytecode interpreter.
 **In short:** with hinting on (the setting's default), small text is now
 fitted to the pixel grid the way Linux desktops fit it: every glyph's
 horizontal lines -- baseline, x-height, cap height, the bars of an `e` or an
-`H` -- are moved up or down so they land cleanly on pixel rows, while nothing
-moves sideways and no stroke changes thickness. The code is a translation of
-FreeType's own auto-hinter rather than a new design, so it makes the same
-choices FreeType does, and a tool compares the two glyph by glyph.
+`H` -- are moved up or down so they land cleanly on pixel rows, and no
+stroke changes thickness. Letters move only up and down; Chinese, Japanese
+and Korean characters, and symbols no script claims, move a little sideways
+too, as FreeType moves them. The code is a translation of FreeType's own
+auto-hinter rather than a new design, so it makes the same choices FreeType
+does, and a tool compares the two glyph by glyph.
 
 **Decision.**
 
@@ -11949,11 +11958,13 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   does -- and there was no way to tell which of its hundreds of small choices
   were wrong. Hinting is a chain of rounding decisions: the only way to get
   FreeType's look is to make FreeType's decisions.
-* **Light mode only, vertical only.** Stems keep their designed width, thin
-  ones are centred on a pixel row, and the horizontal axis is untouched, so
-  advances and kerning are exactly the unhinted ones (fontconfig's
-  `hintslight`, most Linux desktops' default). The same for grey, LCD and
-  smoothing-off rendering.
+* **Light mode only.** Stems keep their designed width, and thin ones are
+  centred on a pixel row (fontconfig's `hintslight`, most Linux desktops'
+  default). For the Latin writing system that means the vertical axis only;
+  FreeType's CJK system hints both axes in light mode too, moving a stem by
+  at most 14/64 pixel, and so does the port. Advances and kerning are the
+  unhinted ones either way. The same for grey, LCD and smoothing-off
+  rendering.
 * **Every script FreeType's Latin writing system serves** -- most of them:
   Latin, Greek, Cyrillic, Arabic, Hebrew, Armenian, the Brahmic scripts, Thai
   and some fifty more, each measured from its own reference letters. Each
@@ -11966,15 +11977,51 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   (less what it also positions) and measure their zones from reference
   letters shaped with the feature on: the shaper has optional features for
   that, off for every ordinary run.
+* **And the other writing systems, added 2026-09-26.** `cjk.rs` ports
+  `afcjk.c` (and `afindic.c`, the same without zones) for ideographs, the
+  four Indic-stub scripts and the *fallback style* -- the glyphs no script
+  claims: a Latin font's arrows, mathematical signs and `.notdef`, and every
+  glyph of a face without a Unicode `cmap`. FreeType's dummy system is
+  ported too, for what it does to a glyph it will not hint (a Latin style
+  whose zones cannot be measured): each point still goes from whole font
+  units to 1/64 pixel. So every glyph FreeType draws, this draws the same.
+  Where FreeType's code does something other than what it says, the port
+  follows what it does: its CJK pass that judges segments round never runs
+  (it reads the segment count before the Latin pass fills the table), so
+  the Latin roundness stands. Found by building FreeType with its
+  auto-hinter's debug dumps (`FT_DEBUG_AUTOFIT`) and comparing edge tables;
+  that single difference moved Malgun Gothic's stems 3/64 pixel on 2,925
+  glyphs.
+* **A variable font's points are FreeType's too, added 2026-09-26.** At a
+  non-default instance the hinter reads each glyph as FreeType's TrueType
+  loader hands it to FreeType's hinter, not as this crate draws it: the
+  instance normalized in 16.16 as `ft_var_to_normalized` does (a
+  `Coords` now carries that beside HarfBuzz's `F2Dot14`), each `gvar` delta
+  summed in FreeType's fixed point and rounded to a whole unit per point
+  (`TT_Vary_Apply_Glyph_Deltas`), component offsets likewise, scaled
+  components through `FT_MulFix`, and the glyph moved by its left phantom
+  point -- which `gvar` moves only in a face without `HVAR`
+  (`Face::load_unscaled`, `Gvar::deltas_fixed`, `ftcalc`). Drawing keeps
+  its exact, HarfBuzz-following outlines; only the hinter's input changed.
+  Before, 31% of Noto Sans's glyphs at a bold condensed instance differed
+  from FreeType's, a few by a whole pixel; now none do, at fifteen
+  instances of eight variable fonts (Segoe UI Variable with `avar` and
+  `opsz`, Bahnschrift, Cascadia Code, Sitka, Reem Kufi, Noto Sans, Open
+  Sans, JetBrains Mono). The fixture gained a variable face, with `HVAR`
+  and without, whose weight-610 deltas all land on fractions; both halves
+  were mutation-checked (2.14 coordinates, and phantom moves under `HVAR`).
 * **Checked against FreeType.** `tools/hint_oracle.py` runs FreeType (from
   `freetype-py`) and this crate over every glyph of a face at eleven sizes
   and compares every hinted point, both coordinates, to the 64th of a pixel,
   after comparing the sorting itself against FreeType's own glyph-to-style
   map. On Noto Sans, Open Sans, JetBrains Mono,
-  Segoe UI, Arial, Times New Roman, Calibri, Verdana and Georgia every glyph
-  lands in FreeType's style and every hinted glyph agrees exactly --
-  and so does every glyph of the CFF fonts David CLM and Frank Ruehl CLM,
-  whose coordinates are fractions of a unit. That last took reading a glyph's
+  Segoe UI, Segoe UI Symbol, Arial, Times New Roman, Calibri, Consolas,
+  Verdana and Georgia every glyph lands in FreeType's style and every glyph
+  agrees exactly, the fallback style's symbols included -- and so does every
+  glyph of the CFF fonts David CLM and Frank Ruehl CLM, whose coordinates are
+  fractions of a unit, and of the CJK fonts Malgun Gothic, Microsoft YaHei,
+  MS Gothic, SimSun, SimSun-ExtG, Yu Gothic, Microsoft JhengHei and Noto
+  Sans JP (CID-keyed CFF): over a million glyph renderings, none different. That last took reading a glyph's
   points as FreeType's loaders read them, not as its outline draws: a CFF
   coordinate kept exact (16.16 needs more than `f32` has) and floored to a
   whole unit, a line of no length in 1024ths of a unit dropped, a contour
@@ -11982,8 +12029,8 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   composite placed by the component whose metrics it borrows. A generated
   fixture (`tools/gen_hint_fixture.py`: a synthetic face as TrueType and CFF,
   one glyph drawn in 16.16 fractions, small capitals and superscripts behind
-  `smcp` and `sups`, with FreeType's answers at eighteen sizes) keeps that in
-  `cargo test`.
+  `smcp` and `sups`, ideographs drawn for each rule of the CJK system, with
+  FreeType's answers at eighteen sizes) keeps that in `cargo test`.
 * **Robust before faithful.** Every index goes through `get` and a failure
   abandons the glyph to be drawn unhinted, coordinates beyond `i16` and
   absurd sizes are refused at the door (which is what makes the unchecked
@@ -11993,9 +12040,8 @@ choices FreeType does, and a tool compares the two glyph by glyph.
   licence and the credit are in `gui/font/licenses/`, and every ported file
   carries FreeType's copyright notice.
 
-**Not done** (each filed in `known-issues.md`): FreeType's CJK writing system
-(ideographs, and the fallback style unclaimed glyphs go to, are drawn
-unhinted); stem darkening (off by default in FreeType too). The oracle also
+**Not done:** stem darkening (off by default in FreeType too). The CJK
+writing system, first listed here, was ported the same day. The oracle also
 turned up a difference that was not hinting's: composites that borrow a
 component's metrics were placed a few units off FreeType horizontally, hinted
 or not -- fixed. The face-level analysis -- styles and zones, 2-9 ms on large
@@ -12014,6 +12060,228 @@ size of a face; sharing it is an optimisation for later.
 **How to reverse.** The setting off draws exactly as before; `Rendering`'s
 `hinting` defaults to off for any caller that does not ask. Removing the
 module is removing `ScaledFont`'s `hinter` field.
+
+## 1326. A variable font's coordinates are HarfBuzz 14.3.0's and FreeType 2.13.2's, each to the bit, malformed tables included
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous) -- within §448, which settled that the
+number an instance is chosen with is HarfBuzz's, and §1325, which put
+FreeType's beside it for the hinter.
+
+**In short:** asking a variable font for "weight 700" means turning 700 into
+the font's own scale, where every table is indexed, and that conversion
+rounds at several steps. HarfBuzz (which this crate's text layout follows)
+and FreeType (which its hinting follows) round at different steps, and the
+crate now reproduces each exactly, including the newer `avar` table format
+and fonts whose tables break the rules. Until now it followed an older
+HarfBuzz and was one step in 16384 off today's on one request in eight --
+Bold among them -- which moved an occasional glyph edge, mark or kern by a
+font unit.
+
+**Decision.**
+
+* **The HarfBuzz reading is HarfBuzz 14.3.0's pipeline** -- the version the
+  crate's oracle (uharfbuzz 0.56) runs -- step by step: the value normalized
+  in `f32`, rounded to 16.16, `avar`'s curve applied in `f32` by
+  `SegmentMaps::map_float` and rounded again, version 2's store read at
+  `roundf(c / 4)` and added at 16.16, then `(c + 2) >> 2`. Every rounding is
+  HarfBuzz's own `roundf`, `floorf(x + 0.5f)`, which sends a half up
+  (`hbcalc.rs`); the same rule now rounds `HVAR`, `MVAR` and `GDEF` deltas
+  and the varied glyph extents the mark fallback stacks by, where the crate
+  rounded halves away from zero or truncated. Store sums are unfused, a
+  region scores 0 at the default before its malformations are looked at, an
+  index map ignores its reserved bits, and `avar` version 2's rows go through
+  HarfBuzz's 2^-30 scalar cache (`varstore.rs`).
+* **The FreeType reading is `ft_var_to_normalized`'s**, in 16.16 integers,
+  with FreeType's own loaders for `avar` version 2's store and axis map
+  (`FtItemStore`), and the design coordinates FreeType is handed as the
+  `Fixed`s they are: an axis nobody names sits at the file's exact default,
+  a named instance at its record's exact values.
+* **Malformed tables get each library's own answer, not a sane one.** Where
+  HarfBuzz and FreeType disagree about damage -- an `avar` declaring another
+  axis count (HarfBuzz pairs curves with axes by position; FreeType ignores
+  the table), an unsorted or repeated curve (HarfBuzz's `CoreText`-compatible
+  rules; FreeType's first-segment-past walk), an axis whose default is
+  outside its range (HarfBuzz widens the range; FreeType pins it) -- each
+  reading does what its library does. Before, the crate discarded a
+  mismatched `avar` and treated an unsorted curve as the identity, for
+  both, as the "honest reading".
+* **Checked against the libraries, not against a reading of their source.**
+  `tools/gen_var_fixture.py` builds faces that reach every rule (fontTools,
+  with bytes written by hand where fontTools refuses) and records what
+  uharfbuzz and freetype-py answer at 588 instances; `tools/var_oracle.py`
+  asks both about thousands of instances of real faces (2,598 across 13, all
+  agreeing); and the host tests' tables for named instances, `HVAR` advances
+  and `MVAR` corrections now come from uharfbuzz itself instead of an
+  independent Python transcription -- which had shared the crate's old
+  rounding and so hidden it.
+
+**Why follow each library even where it is arguably wrong.** The two
+readings exist only so that this crate's answers can be compared, unit for
+unit, with the libraries every other desktop's text comes from; a "better"
+answer to a malformed table is a disagreement no comparison can tell from a
+bug (§448's reasoning). A font whose tables break the rules draws the way it
+draws under HarfBuzz and FreeType, which is what its designer saw.
+
+**Not reproduced**, deliberately: HarfBuzz keeps the `HVAR` scalar cache for
+the life of a font and the `GDEF` one for a shaping call, so which glyph
+reads a region first -- and gets its scalar unrounded -- depends on what was
+shaped before; there is no one answer to reproduce, and the two differ by at
+most 2^-31 of a scalar. An `F2Dot14` coordinate past what an `i16` holds --
+which only a curve mapping beyond ±2 reaches -- is clamped where HarfBuzz
+keeps an `int`. A `VarStore` whose region list names a different axis count
+from `fvar` is refused (HarfBuzz reads it with its own count).
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Keep HarfBuzz 8's pipeline | no change | disagrees with the oracle on one instance in eight, Bold among them |
+| One normalization for both | simpler | FreeType and HarfBuzz differ below 1/65536, enough to round a hinted stem the other way (§1325) |
+| Sane answers for malformed tables | defensible in isolation | indistinguishable from bugs in every differential test |
+
+**How to reverse.** `Variations::hb_coords` and `ft_coords` are the two
+pipelines; `hbcalc::roundf` is the rounding. Reverting the commit restores
+the old pipeline; the fixture would then report exactly which instances move.
+
+## 1327. A colour font paints from the palette it marks for the theme's background
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** a colour font -- emoji, mostly -- can carry several sets of
+colours ("palettes") and label which suit a light background and which a
+dark one. The desktop now uses the font's dark-background colours when the
+theme is dark and its light-background ones when it is light. Almost every
+font carries one palette and labels nothing, and those look exactly as
+before; the few that label a dark palette (a black outline drawn white, say)
+stay legible on a dark theme.
+
+**Decision.** `osfont::colr::ColourPalette` names the choice CSS's
+`font-palette` names -- `Normal`, `Light`, `Dark`, or an index -- resolved as
+browsers resolve it: `Light` and `Dark` take the first palette `CPAL` version
+1 marks usable on that background, and fall back to the first palette where
+none is marked (so a version-0 `CPAL` is always palette 0). The compositor,
+which draws every process's text, maps its resolved theme to `Light` or
+`Dark` in `font_rendering`; a caller that asks for nothing gets `Normal`.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Follow the theme (chosen) | what the font's own labels are for; a dark palette is legible where the default may not be | differs from a browser's default, which paints palette 0 unless a page asks otherwise |
+| Always palette 0 | what Chrome does by default | a font's dark palette is never used, on the one desktop that knows its background |
+| A user setting | the user decides | a setting for something almost no font has, whose right answer the theme already gives |
+
+**Why not the browser's default.** A web page chooses its own background
+and can say `font-palette: dark` when it wants the other one; a desktop's
+text sits on the theme's background, which the compositor knows, and there
+is no page author to say anything. A font that labels no palette -- nearly
+all of them -- is painted as a browser paints it either way.
+
+**How to reverse.** `font_rendering`'s `palette` line; `ColourPalette::Normal`
+restores palette 0 everywhere.
+
+## 1328. A `CFF2` glyph is blended twice, as HarfBuzz blends it and as FreeType does
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous) -- within §448 and §1325, which settled
+that drawing and measuring follow HarfBuzz and hinting follows FreeType.
+
+**In short:** a variable font with PostScript-style outlines (a `CFF2` table)
+stores each point as a default plus adjustments for each design direction,
+and the program drawing the glyph mixes them for the weight asked for. The
+two libraries this crate follows mix them with slightly different
+arithmetic, so the crate now does it both ways: HarfBuzz's for the shape it
+draws and the boxes it measures, FreeType's for the points its hinter
+adjusts. Fonts of this kind would not open at all before.
+
+**Decision.**
+
+* **One interpreter, three instances.** `cff::Instance` says how a glyph's
+  `blend`s are weighed: `Default` (every blend its default), `HarfBuzz`
+  (`f32` region scalars at the `F2Dot14` coordinates, deltas summed in `f64`
+  and then added to the default, as `cff2_cs_interp_env_t::blend_deltas`
+  does) or `FreeType` (the blend vector `cff_blend_build_vector` builds from
+  `FT_DivFix`ed factors multiplied by `FT_MulFix`, at the 16.16 coordinates,
+  each delta `FT_MulFix`ed into a wrapping 32-bit sum, as `cf2_doBlend` does).
+  `Face::outline_at` and the box use the first two; the hinter's points the
+  first and the third.
+* **Two readings of the store.** HarfBuzz's region scalars come from
+  `varstore::VarStore`, as for `HVAR`; FreeType's from a reading of its own
+  CFF loader (`cff_vstore_load`), since FreeType's CFF driver weighs regions
+  with different arithmetic and refuses different things from its TrueType
+  one.
+* **Malformed blends as each library has them.** A `vsindex` after a
+  `blend` fails the glyph in both; a `vsindex` or region the store lacks, or
+  coordinates for another number of axes, fails it in FreeType and weighs
+  nothing in HarfBuzz; an explicit `return` or `endchar`, which `CFF2`
+  removed, is ignored, as FreeType ignores it.
+* **Boxes in charstring units.** HarfBuzz reads no `FontMatrix`, and
+  measures a CFF glyph in `double`; the crate's CFF boxes -- CFF1's too --
+  now do the same (`Cff::bounds`), while the drawn outline keeps applying the
+  matrix, as FreeType does.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Both readings (chosen) | each consumer matches its library to the bit | two arithmetic paths in one interpreter |
+| HarfBuzz's for everything | one path | the hinter's points a 65536th off FreeType's, enough to move a hinted stem (§1325) |
+| FreeType's for everything | one path | shaping and mark placement a unit off HarfBuzz's on some glyphs |
+
+**How to reverse.** `Face::outline_at`, `cff_extents` and `tagged_outline_at`
+choose the instance; passing another there changes whose arithmetic applies.
+
+## 1329. A `glyf` glyph is drawn by HarfBuzz's own steps, its quirks included
+
+**Date:** 2026-09-26
+**Lane:** F
+**Decided by:** Claude (autonomous) -- within §448, which settled that
+drawing and measuring follow HarfBuzz.
+
+**In short:** to draw a TrueType letter, the program collects the letter's
+points, moves them for the weight asked for, and joins them into curves.
+HarfBuzz, the library this crate matches, does those steps in a particular
+order with particular rounding, and has a few oddities of its own. The crate
+now does the same steps in the same order with the same rounding -- oddities
+too, where the oddity depends only on the font -- so that its drawing can be
+checked against HarfBuzz's to the last bit.
+
+**Decision.**
+
+* **Points first** (`crate::glyf`): HarfBuzz's `Glyph::get_points`,
+  component placement, cycle detector and limits, then its `path_builder_t`
+  and draw session, pen call for pen call. One path for the default instance
+  and the varied ones.
+* **`gvar` as 14.3.0 applies it** (`gvar::Gvar::apply`): scalars in `f64`;
+  deltas scaled before interpolation; added straight in or in batches, as
+  HarfBuzz decides; its packed-data readers. FreeType's reading, for the
+  hinter, is untouched (§1325).
+* **The scalar cache in its steady state.** HarfBuzz draws through a cache
+  that rounds a shared tuple's scalar to 2^-30ths; the first glyph to reach a
+  tuple sees the exact value, every later one the rounded. Drawing reproduces
+  the later; measuring, which HarfBuzz does without the cache, the exact.
+* **Quirks reproduced when they depend only on the font:** the cubic
+  contour's control point leaking into the next contour, the parent point of
+  a point-matched component counted over the whole glyph, the cycle detector
+  that notices late. **Not reproduced when they depend on history:** the cache
+  answering an intermediate-region tuple with a plain tuple's 0 or 1.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| HarfBuzz's steps and quirks (chosen) | the oracle compares with `==`; any difference is a bug | reproduces what look like HarfBuzz bugs |
+| HarfBuzz's steps, quirks fixed | draws what the font means | the oracle then needs exceptions, which is where real bugs hide |
+| The old path, oracle with a tolerance | no rewrite | a tolerance hides exactly the last-bit bugs this found |
+
+**How to reverse.** A quirk is one branch in `glyf.rs` (`contour_end`'s
+reset, `Builder::place`'s anchor, `Decycler`); dropping it changes only the
+glyphs that meet it. The cache reading is `gvar::Scalars`.
 
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 
@@ -33317,6 +33585,35 @@ and `SpeedTestUI::apply` in `apps/speedtest/src/main.rs`.
 report "No server is selected" and contact nothing.
 
 ---
+
+## 1216. The Network Manager's Diagnose looks up and connects to example.com -- when asked, never on its own
+
+**Date:** 2026-09-26
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit
+
+**In short:** Diagnose used to invent a passing report, then refused to run.
+It now checks the machine: whether a network card is up, whether it has an
+address and a gateway (read from the kernel), and then -- off the window's
+thread -- whether a name can be looked up and a connection made. Those last
+two need somewhere to look up and connect to; it is `example.com`, port 80,
+and nothing is contacted until Diagnose is pressed.
+
+**Why `example.com`:** it is reserved by IANA for exactly this kind of
+illustrative use (RFC 2606), has answered HTTP on port 80 for decades, and
+belongs to no company whose logs would learn that a SlateOS machine exists.
+A large provider's host (a search engine's, an OS vendor's connectivity
+check) would be as reachable and would tell that provider on every click.
+
+**Alternatives:** the DNS server the kernel names (a lookup there proves
+little about the wider network, and a resolver need not answer TCP port 80);
+the gateway (gateways rarely listen on anything); a host the operator
+chooses (a setting nobody has yet, and the question can be reopened when
+one exists -- `open-questions.md` E-Q2 is where the related "which remote
+services" question already sits).
+
+**What it costs:** one DNS query and one TCP handshake to IANA per click.
+No request is sent over the connection; it is closed once made.
 
 ## §253 — `requeue` means "re-enqueue if still Running", so every parking call site passes `true`
 

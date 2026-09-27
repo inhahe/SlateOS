@@ -40,12 +40,28 @@
 //!   the local subroutines, per glyph.
 //! * A non-default `FontMatrix`, scaled into the `head` table's units per em so
 //!   that a caller cannot tell a CFF face from a TrueType one.
+//! * **`CFF2`**, the variable-font revision ([`Cff::parse2`]): the same
+//!   charstrings in a leaner container -- a header giving the Top DICT's
+//!   length, INDEXes counted in 32 bits, always an FDArray (FDSelect optional,
+//!   and with a format 4 of 32-bit ranges), no charset, no widths, no
+//!   `endchar` or `return` -- plus an item variation store and two operators,
+//!   `vsindex` and `blend`, by which a glyph varies.
+//!
+//! # `blend`, twice
+//!
+//! A `blend` turns `n` values into their defaults plus one delta per region
+//! of the variation subtable in force, each weighed at the instance -- and the
+//! two libraries this crate follows weigh them with different arithmetic, so
+//! a glyph is blended as the reader of it needs (`Instance`, design-decisions
+//! §1328): as HarfBuzz does for the outline drawn and the box measured (`f32`
+//! region scalars at its `F2Dot14` coordinates, the weighed deltas summed in
+//! `f64`), and as FreeType does for the points the auto-hinter is given (a
+//! blend vector of `FT_DivFix`ed factors multiplied by `FT_MulFix`, at its
+//! 16.16 coordinates, each delta `FT_MulFix`ed into a 32-bit 16.16 sum).
+//! Both are checked against the libraries on real `CFF2` fonts
+//! (`tools/outline_oracle.py`, `tools/hint_oracle.py --var`).
 //!
 //! # What is not
-//!
-//! * **CFF2** (`CFF2` table). That is the variable-font revision: no header
-//!   Name INDEX, blend operators, and an item-variation store. It is a
-//!   separate body of work and is reported as such rather than misparsed.
 //! * **The Type 2 arithmetic and storage operators** (`add`, `div`, `random`,
 //!   `put`/`get`, the conditionals). No shipping font uses them — they exist
 //!   for procedural outlines that no design tool emits — and guessing at them
@@ -63,9 +79,11 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use crate::ftcalc::{div_fix, f2dot14_to_fixed, mul_fix};
 use crate::sfnt::{
     CffPen, CffPoints, Exact, Outline, PathCmd, SfntError, TaggedOutline, Transform,
 };
+use crate::varstore::VarStore;
 
 /// Every structural complaint about this table reads the same way.
 const ERR: SfntError = SfntError::MalformedTable("CFF ");
@@ -76,6 +94,10 @@ const MAX_SUBR_DEPTH: u8 = 10;
 
 /// The Type 2 operand stack is 48 entries in the specification.
 const STACK_LIMIT: usize = 48;
+
+/// CFF2's operand stack, in charstrings and DICTs alike: 513 entries, the
+/// most a `maxstack` may declare -- enough for a `blend` over many regions.
+const CFF2_STACK_LIMIT: usize = 513;
 
 /// Ceiling on the drawing operations one charstring may perform -- per
 /// charstring, so a `seac` glyph, which runs three, may draw three times it.
@@ -145,21 +167,32 @@ struct Index {
 }
 
 impl Index {
+    /// A CFF INDEX, whose count is 16 bits.
     fn parse(d: &[u8], at: usize) -> Result<Self, SfntError> {
-        let count = usize::from(u16_at(d, at)?);
+        Self::parse_counted(d, at, 2)
+    }
+
+    /// A CFF2 INDEX: the same but for a 32-bit count.
+    fn parse2(d: &[u8], at: usize) -> Result<Self, SfntError> {
+        Self::parse_counted(d, at, 4)
+    }
+
+    /// An INDEX whose count is `count_size` bytes.
+    fn parse_counted(d: &[u8], at: usize, count_size: usize) -> Result<Self, SfntError> {
+        let count = usize::try_from(uint_at(d, at, count_size)?).map_err(|_| ERR)?;
         if count == 0 {
-            // An empty INDEX is exactly its two-byte count and nothing else —
-            // in particular it has no offSize byte to read.
+            // An empty INDEX is exactly its count and nothing else — in
+            // particular it has no offSize byte to read.
             return Ok(Self {
-                end: add(at, 2)?,
+                end: add(at, count_size)?,
                 ..Self::default()
             });
         }
-        let off_size = usize::from(u8_at(d, add(at, 2)?)?);
+        let off_size = usize::from(u8_at(d, add(at, count_size)?)?);
         if !(1..=4).contains(&off_size) {
             return Err(ERR);
         }
-        let offsets = add(at, 3)?;
+        let offsets = add(at, add(count_size, 1)?)?;
         // `count + 1` offsets, then the data they slice.
         let origin = add(offsets, mul(add(count, 1)?, off_size)?)?
             .checked_sub(1)
@@ -230,16 +263,33 @@ const fn esc(b: u8) -> u16 {
 /// a stream, and the operand list is only meaningful at the operator.
 fn parse_dict(
     d: &[u8],
+    f: impl FnMut(u16, &[f64]) -> Result<(), SfntError>,
+) -> Result<(), SfntError> {
+    parse_dict_as(false, d, f)
+}
+
+/// [`parse_dict`] for a CFF2 DICT (`cff2`), which adds four operators --
+/// `vsindex` (22), `blend` (23), `vstore` (24) and `maxstack` (25) -- and a
+/// deeper operand stack, room for a `blend`'s deltas.
+///
+/// A `blend` is handed to `f` like any other operator, ending its entry: the
+/// values it blends are ones this module never reads (a Private DICT's
+/// hinting zones), so the operator that follows sees no operands rather
+/// than blended ones.
+fn parse_dict_as(
+    cff2: bool,
+    d: &[u8],
     mut f: impl FnMut(u16, &[f64]) -> Result<(), SfntError>,
 ) -> Result<(), SfntError> {
-    let mut operands: [f64; 48] = [0.0; 48];
+    let limit = if cff2 { CFF2_STACK_LIMIT } else { STACK_LIMIT };
+    let mut operands: [f64; CFF2_STACK_LIMIT] = [0.0; CFF2_STACK_LIMIT];
     let mut n = 0usize;
     let mut i = 0usize;
     while i < d.len() {
         let b0 = u8_at(d, i)?;
         match b0 {
             // Operators.
-            0..=21 => {
+            0..=25 if b0 <= 21 || cff2 => {
                 let op = if b0 == 12 {
                     i = add(i, 1)?;
                     esc(u8_at(d, i)?)
@@ -253,14 +303,15 @@ fn parse_dict(
             // Operands.
             28 | 29 | 30 | 32..=254 => {
                 let (v, len) = dict_operand(d, i)?;
-                if n >= operands.len() {
+                if n >= limit {
                     return Err(ERR);
                 }
                 *operands.get_mut(n).ok_or(ERR)? = v;
                 n = add(n, 1)?;
                 i = add(i, len)?;
             }
-            // 22..=27, 31, 255 are reserved.
+            // 22..=27 (in a CFF DICT; 26 and 27 in a CFF2 one), 31 and 255
+            // are reserved.
             _ => return Err(ERR),
         }
     }
@@ -506,6 +557,219 @@ enum Locals {
     },
 }
 
+/// Where a CFF2 charstring's `blend` operators take their weights from --
+/// which instance of a variable face, read the way which library reads it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Instance<'c> {
+    /// The default instance: every blended value is its default.
+    Default,
+    /// HarfBuzz's reading (`cff2_cs_interp_env_t`), at its `F2Dot14`
+    /// coordinates: each region's scalar as [`VarStore`] evaluates it, an
+    /// `f32`, and a value's deltas weighed and summed in `f64` before its
+    /// default is added -- what a glyph is drawn and measured from.
+    HarfBuzz(&'c [i16]),
+    /// FreeType's reading (`cf2_doBlend`), at its 16.16 coordinates: a blend
+    /// vector of `FT_DivFix`ed axis factors multiplied by `FT_MulFix`
+    /// (`cff_blend_build_vector`), and each delta weighed by `FT_MulFix` and
+    /// added to its default in 32-bit 16.16 -- what the auto-hinter is given.
+    FreeType(&'c [i32]),
+}
+
+/// What a `CFF2` table's charstrings blend with.
+#[derive(Clone, Debug)]
+struct Cff2 {
+    /// Each Font DICT's `vsindex` (from its Private DICT; 0 without one), in
+    /// FDArray order: which variation subtable a glyph's blends start from.
+    fd_vsindex: Vec<u16>,
+    /// The item variation store, as HarfBuzz reads it.
+    store: Option<VarStore>,
+    /// The same store as FreeType's CFF driver keeps it.
+    ft_store: Option<CffVStore>,
+}
+
+/// An item variation store as FreeType's CFF driver loads one
+/// (`cff_vstore_load`): only what a blend needs, since a `CFF2` store's
+/// subtables have no delta rows -- the deltas are in the charstrings.
+#[derive(Clone, Debug, Default)]
+struct CffVStore {
+    axis_count: usize,
+    region_count: usize,
+    /// Region `r`'s axis `a` at `r * axis_count + a`: start, peak and end,
+    /// 16.16.
+    regions: Vec<[i64; 3]>,
+    /// Each subtable's region indices.
+    data: Vec<Vec<u16>>,
+}
+
+impl CffVStore {
+    /// The store at `at` -- past the length word `CFF2` puts in front of it
+    /// -- as FreeType loads it. `None` where FreeType's load fails: a format
+    /// other than 1, or any part not there.
+    fn parse(d: &[u8], at: usize) -> Option<Self> {
+        if u16_at(d, at).ok()? != 1 {
+            return None;
+        }
+        let regions_at = add(at, off_usize(uint_at(d, add(at, 2).ok()?, 4).ok()?).ok()?).ok()?;
+        let data_count = usize::from(u16_at(d, add(at, 6).ok()?).ok()?);
+        let mut offsets = Vec::with_capacity(data_count);
+        for i in 0..data_count {
+            let rec = add(at, add(8, mul(i, 4).ok()?).ok()?).ok()?;
+            offsets.push(off_usize(uint_at(d, rec, 4).ok()?).ok()?);
+        }
+        let axis_count = usize::from(u16_at(d, regions_at).ok()?);
+        let region_count = usize::from(u16_at(d, add(regions_at, 2).ok()?).ok()?);
+        let fields = mul(region_count, axis_count).ok()?;
+        // Every record must be there before any is kept, which also bounds
+        // the allocation by the table's length.
+        if add(add(regions_at, 4).ok()?, mul(fields, 6).ok()?).ok()? > d.len() {
+            return None;
+        }
+        let mut regions = Vec::with_capacity(fields);
+        for k in 0..fields {
+            let axis = add(add(regions_at, 4).ok()?, mul(k, 6).ok()?).ok()?;
+            let coord = |o: usize| -> Option<i64> {
+                let raw = u16_at(d, add(axis, o).ok()?).ok()?;
+                Some(f2dot14_to_fixed(i16::from_be_bytes(raw.to_be_bytes())))
+            };
+            regions.push([coord(0)?, coord(2)?, coord(4)?]);
+        }
+        let mut data = Vec::with_capacity(data_count);
+        for off in offsets {
+            // Past `itemCount` and `wordDeltaCount`, which a CFF2 subtable
+            // has no use for.
+            let sub = add(add(at, off).ok()?, 4).ok()?;
+            let count = usize::from(u16_at(d, sub).ok()?);
+            let mut indices = Vec::with_capacity(count.min(d.len()));
+            for i in 0..count {
+                indices.push(u16_at(d, add(sub, add(2, mul(i, 2).ok()?).ok()?).ok()?).ok()?);
+            }
+            data.push(indices);
+        }
+        Some(Self {
+            axis_count,
+            region_count,
+            regions,
+            data,
+        })
+    }
+
+    /// FreeType's blend vector for subtable `vsindex` at `ndv`, less its
+    /// leading 1.0 for the default (`cff_blend_build_vector`): one weight per
+    /// region the subtable names, 16.16.
+    ///
+    /// Each axis contributes a factor -- 1 where the region's range on it is
+    /// malformed or it peaks at 0 or `ndv` is at the peak, 0 outside the
+    /// range, `FT_DivFix` of the distances inside it -- and the factors are
+    /// multiplied by `FT_MulFix`, carrying on through a 0. `None` where
+    /// FreeType refuses the blend: a `vsindex` past the subtables, a region
+    /// past the regions, or coordinates for another number of axes.
+    fn weights(&self, vsindex: u16, ndv: &[i32]) -> Option<Vec<i64>> {
+        if !ndv.is_empty() && ndv.len() != self.axis_count {
+            return None;
+        }
+        let indices = self.data.get(usize::from(vsindex))?;
+        indices
+            .iter()
+            .map(|&r| {
+                let r = usize::from(r);
+                if r >= self.region_count {
+                    return None;
+                }
+                if ndv.is_empty() {
+                    return Some(0);
+                }
+                let start = mul(r, self.axis_count).ok()?;
+                let region = self.regions.get(start..add(start, self.axis_count).ok()?)?;
+                let mut weight: i64 = 0x1_0000;
+                for (&[s, p, e], &c) in region.iter().zip(ndv) {
+                    let c = i64::from(c);
+                    // FreeType's straddle test also asks for a non-zero
+                    // peak, which the zero-peak test makes redundant.
+                    let factor = if s > p || p > e || p == 0 || (s < 0 && e > 0) {
+                        0x1_0000
+                    } else if c < s || c > e {
+                        0
+                    } else if c == p {
+                        0x1_0000
+                    } else if c < p {
+                        div_fix(c.saturating_sub(s), p.saturating_sub(s))
+                    } else {
+                        div_fix(e.saturating_sub(c), e.saturating_sub(p))
+                    };
+                    weight = mul_fix(weight, factor);
+                }
+                Some(weight)
+            })
+            .collect()
+    }
+}
+
+/// A `CFF2` blend's weights for the `vsindex` in force, as an [`Instance`]
+/// reads them.
+#[derive(Clone, Debug)]
+enum Weights {
+    /// The default instance: this many regions' deltas, weighed at nothing.
+    Default(usize),
+    /// HarfBuzz's region scalars.
+    HarfBuzz(Vec<f32>),
+    /// FreeType's blend vector, 16.16.
+    FreeType(Vec<i64>),
+}
+
+impl Weights {
+    /// How many deltas each blended value carries.
+    fn len(&self) -> usize {
+        match self {
+            Self::Default(k) => *k,
+            Self::HarfBuzz(s) => s.len(),
+            Self::FreeType(bv) => bv.len(),
+        }
+    }
+
+    /// `default` with `deltas` blended in, as the reading this is does it.
+    fn apply(&self, default: f64, deltas: &[f64]) -> f64 {
+        match self {
+            Self::Default(_) => default,
+            // `blend_deltas` sums the weighed deltas first, from zero, and
+            // adds the default after.
+            Self::HarfBuzz(scalars) => {
+                let sum = deltas
+                    .iter()
+                    .zip(scalars)
+                    .fold(0.0_f64, |v, (&d, &s)| v + f64::from(s) * d);
+                default + sum
+            }
+            // `cf2_doBlend`: the default, then each `FT_MulFix`ed delta added
+            // in turn, in a 32-bit 16.16 accumulator that wraps.
+            Self::FreeType(bv) => {
+                let mut sum = fixed32(default);
+                for (&d, &w) in deltas.iter().zip(bv) {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "FreeType's `CF2_Fixed` is 32 bits; `ADD_INT32` wraps"
+                    )]
+                    let term = mul_fix(w, i64::from(fixed32(d))) as i32;
+                    sum = sum.wrapping_add(term);
+                }
+                f64::from(sum) / 65536.0
+            }
+        }
+    }
+}
+
+/// `v`, a whole number of 65536ths, as FreeType's 32-bit 16.16 `CF2_Fixed`
+/// holds it.
+fn fixed32(v: f64) -> i32 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a charstring operand is 16.16 by format; a larger one wraps as \
+                  FreeType's 32-bit arithmetic does, and `as` saturates the rest"
+    )]
+    {
+        (v * 65536.0).round() as i64 as i32
+    }
+}
+
 /// A parsed `CFF ` table.
 ///
 /// Every offset inside a CFF table is measured from the table's own start, so
@@ -526,6 +790,8 @@ pub struct Cff {
     /// Set only when `FontMatrix` disagrees with the `head` table's units per
     /// em, which is rare enough that the common path should not pay for it.
     matrix: Option<Transform>,
+    /// `Some` for a `CFF2` table: what its charstrings blend with.
+    cff2: Option<Cff2>,
 }
 
 impl Cff {
@@ -653,7 +919,122 @@ impl Cff {
             locals,
             charset,
             matrix: font_matrix.and_then(|m| em_transform(m, units_per_em)),
+            cff2: None,
         })
+    }
+
+    /// Parse the `CFF2` table occupying `base..base + len` of `data` -- the
+    /// variable-font revision of CFF.
+    ///
+    /// The same charstrings in a leaner container: a header giving the Top
+    /// DICT's length rather than a Name, Top DICT and String INDEX; INDEXes
+    /// counted in 32 bits; always an FDArray of Font DICTs, each with a
+    /// Private DICT that may name a default `vsindex`; FDSelect optional (one
+    /// Font DICT without it) and in a third format; no charset, no widths in
+    /// the charstrings, no `endchar`; and an item variation store whose
+    /// regions the charstrings' `blend` operators weigh their deltas by.
+    ///
+    /// # Errors
+    ///
+    /// As [`parse`](Self::parse).
+    pub fn parse2(
+        data: &[u8],
+        base: usize,
+        len: usize,
+        units_per_em: u16,
+    ) -> Result<Self, SfntError> {
+        let d = data.get(base..add(base, len)?).ok_or(ERR)?;
+        // Header: major, minor, headerSize, topDictLength.
+        if u8_at(d, 0)? != 2 {
+            return Err(SfntError::CffUnsupported("CFF2 major version"));
+        }
+        let hdr_size = usize::from(u8_at(d, 2)?);
+        let top_len = usize::from(u16_at(d, 3)?);
+        let top = d.get(hdr_size..add(hdr_size, top_len)?).ok_or(ERR)?;
+        let global_subrs = Index::parse2(d, add(hdr_size, top_len)?)?;
+
+        let mut char_strings_off = None;
+        let mut font_matrix: Option<[f64; 6]> = None;
+        let mut fd_array_off = None;
+        let mut fd_select_off = None;
+        let mut vstore_off = None;
+        parse_dict_as(true, top, |op, args| {
+            match op {
+                17 => char_strings_off = Some(dict_u32(args.first())?),
+                24 => vstore_off = Some(dict_u32(args.first())?),
+                esc if esc == self::esc(7) => {
+                    let mut m = [0.0; 6];
+                    for (slot, v) in m.iter_mut().zip(args.iter()) {
+                        *slot = *v;
+                    }
+                    font_matrix = Some(m);
+                }
+                esc if esc == self::esc(36) => fd_array_off = Some(dict_u32(args.first())?),
+                esc if esc == self::esc(37) => fd_select_off = Some(dict_u32(args.first())?),
+                _ => {}
+            }
+            Ok(())
+        })?;
+
+        let char_strings = Index::parse2(d, off_usize(char_strings_off.ok_or(ERR)?)?)?;
+        if char_strings.count == 0 {
+            return Err(ERR);
+        }
+        let fd_array = Index::parse2(d, off_usize(fd_array_off.ok_or(ERR)?)?)?;
+        let mut fds = Vec::with_capacity(fd_array.count);
+        let mut fd_vsindex = Vec::with_capacity(fd_array.count);
+        for i in 0..fd_array.count {
+            let (subrs, vsindex) = cff2_private_of(d, fd_array.get(d, i)?)?;
+            fds.push(subrs);
+            fd_vsindex.push(vsindex);
+        }
+        let locals = match fd_select_off {
+            Some(off) => Locals::Cid {
+                fd_select: off_usize(off)?,
+                fds,
+            },
+            // One Font DICT, and no FDSelect to choose among them.
+            None => Locals::Single(fds.first().copied().flatten()),
+        };
+
+        // The store is preceded by a length word, and its own offsets are
+        // measured from itself. Read with the axis count its region list
+        // declares: HarfBuzz evaluates regions over that many axes whatever
+        // `fvar` says, and FreeType refuses a blend at coordinates for
+        // another number.
+        let (store, ft_store) = match vstore_off {
+            Some(off) if off != 0 => {
+                let at = add(off_usize(off)?, 2)?;
+                let axes = uint_at(d, at.saturating_add(2), 4)
+                    .ok()
+                    .and_then(|rel| usize::try_from(rel).ok())
+                    .and_then(|rel| u16_at(d, at.checked_add(rel)?).ok())
+                    .map_or(0, usize::from);
+                (VarStore::parse(d, at, axes), CffVStore::parse(d, at))
+            }
+            _ => (None, None),
+        };
+
+        Ok(Self {
+            base,
+            len,
+            char_strings,
+            global_subrs,
+            locals,
+            charset: Charset::Predefined,
+            matrix: font_matrix.and_then(|m| em_transform(m, units_per_em)),
+            cff2: Some(Cff2 {
+                fd_vsindex,
+                store,
+                ft_store,
+            }),
+        })
+    }
+
+    /// Whether this is a `CFF2` table, whose glyphs vary with the instance.
+    #[must_use]
+    pub(crate) fn is_cff2(&self) -> bool {
+        self.cff2.is_some()
     }
 
     /// How many glyphs the CharStrings INDEX holds.
@@ -671,9 +1052,24 @@ impl Cff {
     /// reaches are inconsistent, and [`SfntError::CffUnsupported`] when it
     /// uses an operator this module does not implement.
     pub fn outline(&self, data: &[u8], gid: u16) -> Result<Outline, SfntError> {
+        self.outline_at(data, gid, Instance::Default)
+    }
+
+    /// [`outline`](Self::outline) at a variable face's instance -- which only
+    /// a `CFF2` glyph's `blend`s read.
+    ///
+    /// # Errors
+    ///
+    /// As [`outline`](Self::outline).
+    pub(crate) fn outline_at(
+        &self,
+        data: &[u8],
+        gid: u16,
+        instance: Instance<'_>,
+    ) -> Result<Outline, SfntError> {
         let d = self.table(data)?;
         let mut out = Outline::default();
-        self.draw(d, gid, &mut out, Exact::default(), false)?;
+        self.draw(d, gid, &mut out, Exact::default(), false, instance)?;
         if let Some(t) = self.matrix {
             let mut scaled = Outline::default();
             scaled.commands.reserve(out.commands.len());
@@ -693,6 +1089,25 @@ impl Cff {
         Ok(out)
     }
 
+    /// The box HarfBuzz measures `gid` by, at `instance`: `[min_x, min_y,
+    /// max_x, max_y]` in charstring units, or `None` for a glyph that draws
+    /// nothing. See [`Bounds`].
+    ///
+    /// # Errors
+    ///
+    /// As [`outline`](Self::outline).
+    pub(crate) fn bounds(
+        &self,
+        data: &[u8],
+        gid: u16,
+        instance: Instance<'_>,
+    ) -> Result<Option<[f64; 4]>, SfntError> {
+        let d = self.table(data)?;
+        let mut bounds = Bounds::default();
+        self.draw(d, gid, &mut bounds, Exact::default(), false, instance)?;
+        Ok(bounds.finish())
+    }
+
     /// A glyph's points as FreeType's CFF loader stores them, for the
     /// auto-hinter: exact, where [`outline`](Self::outline)'s are narrowed to
     /// `f32`, and without the points FreeType drops (see [`CffPoints`]).
@@ -700,10 +1115,15 @@ impl Cff {
     /// # Errors
     ///
     /// As [`outline`](Self::outline).
-    pub(crate) fn tagged_outline(&self, data: &[u8], gid: u16) -> Result<TaggedOutline, SfntError> {
+    pub(crate) fn tagged_outline(
+        &self,
+        data: &[u8],
+        gid: u16,
+        instance: Instance<'_>,
+    ) -> Result<TaggedOutline, SfntError> {
         let d = self.table(data)?;
         let mut points = CffPoints::default();
-        self.draw(d, gid, &mut points, Exact::default(), false)?;
+        self.draw(d, gid, &mut points, Exact::default(), false, instance)?;
         let mut out = points.finish();
         if let Some(t) = self.matrix {
             out.transform(&t);
@@ -720,12 +1140,27 @@ impl Cff {
         pen: &mut P,
         origin: Exact,
         component: bool,
+        instance: Instance<'_>,
     ) -> Result<(), SfntError> {
         if usize::from(gid) >= self.char_strings.count {
             return Err(SfntError::GlyphOutOfRange);
         }
         let local = self.local_subrs(d, gid)?;
-        let mut interp = Interp::new(self, d, local, pen, origin);
+        let blend = match &self.cff2 {
+            Some(cff2) => Some(BlendState {
+                cff2,
+                instance,
+                vsindex: cff2
+                    .fd_vsindex
+                    .get(self.fd_index(d, gid)?)
+                    .copied()
+                    .unwrap_or(0),
+                weights: None,
+                blended: false,
+            }),
+            None => None,
+        };
+        let mut interp = Interp::new(self, d, local, pen, origin, blend);
         interp.run(self.char_strings.get(d, usize::from(gid))?, 0)?;
         interp.close_contour();
         let Some([adx, ady, bchar, achar]) = interp.seac else {
@@ -743,8 +1178,8 @@ impl Cff {
         }
         let base = self.seac_gid(d, bchar)?;
         let accent = self.seac_gid(d, achar)?;
-        self.draw(d, base, pen, Exact::default(), true)?;
-        self.draw(d, accent, pen, Exact::new(adx, ady), true)
+        self.draw(d, base, pen, Exact::default(), true, instance)?;
+        self.draw(d, accent, pen, Exact::new(adx, ady), true, instance)
     }
 
     /// Resolve a `seac` StandardEncoding code to a glyph id.
@@ -776,11 +1211,38 @@ impl Cff {
         }
     }
 
+    /// Which Font DICT `gid` uses: its FDArray index.
+    fn fd_index(&self, d: &[u8], gid: u16) -> Result<usize, SfntError> {
+        match &self.locals {
+            Locals::Single(_) => Ok(0),
+            Locals::Cid { fd_select, .. } => Ok(usize::from(Self::fd_for_gid(d, *fd_select, gid)?)),
+        }
+    }
+
     /// FDSelect: which entry of the FDArray glyph `gid` uses.
-    fn fd_for_gid(d: &[u8], at: usize, gid: u16) -> Result<u8, SfntError> {
+    fn fd_for_gid(d: &[u8], at: usize, gid: u16) -> Result<u16, SfntError> {
         match u8_at(d, at)? {
             // Format 0: one byte per glyph, in glyph order.
-            0 => u8_at(d, add(at, add(1, usize::from(gid))?)?),
+            0 => u8_at(d, add(at, add(1, usize::from(gid))?)?).map(u16::from),
+            // Format 4 (`CFF2`): as format 3, with 32-bit glyph ids and
+            // 16-bit Font DICT numbers.
+            4 => {
+                let n_ranges = off_usize(uint_at(d, add(at, 1)?, 4)?)?;
+                let sentinel = uint_at(d, add(at, add(5, mul(n_ranges, 6)?)?)?, 4)?;
+                let gid = u32::from(gid);
+                if gid >= sentinel {
+                    return Err(ERR);
+                }
+                for i in 0..n_ranges {
+                    let rec = add(at, add(5, mul(i, 6)?)?)?;
+                    let first = uint_at(d, rec, 4)?;
+                    let next = uint_at(d, add(rec, 6)?, 4)?;
+                    if gid >= first && gid < next {
+                        return u16_at(d, add(rec, 4)?);
+                    }
+                }
+                Err(ERR)
+            }
             // Format 3: ranges. A binary search would be possible but the
             // array is short (one entry per *font*, not per glyph) and this
             // runs once per glyph outline, not per pixel.
@@ -795,7 +1257,7 @@ impl Cff {
                     let first = u16_at(d, rec)?;
                     let next = u16_at(d, add(rec, 3)?)?;
                     if gid >= first && gid < next {
-                        return u8_at(d, add(rec, 2)?);
+                        return u8_at(d, add(rec, 2)?).map(u16::from);
                     }
                 }
                 Err(ERR)
@@ -855,6 +1317,42 @@ fn local_subrs_of(d: &[u8], font_dict: &[u8]) -> Result<Option<Index>, SfntError
     }
 }
 
+/// A `CFF2` Font DICT's local subroutines and default `vsindex`, from its
+/// Private DICT.
+///
+/// The Subrs INDEX is a `CFF2` one (32-bit count), and like CFF's is placed
+/// relative to the Private DICT. A Font DICT with no Private DICT has
+/// neither.
+fn cff2_private_of(d: &[u8], font_dict: &[u8]) -> Result<(Option<Index>, u16), SfntError> {
+    let mut private = None;
+    parse_dict_as(true, font_dict, |op, args| {
+        if op == 18 {
+            private = Some((dict_u32(args.first())?, dict_u32(args.get(1))?));
+        }
+        Ok(())
+    })?;
+    let Some((size, off)) = private else {
+        return Ok((None, 0));
+    };
+    let off = off_usize(off)?;
+    let dict = d.get(off..add(off, off_usize(size)?)?).ok_or(ERR)?;
+    let mut subrs_rel = None;
+    let mut vsindex = 0u16;
+    parse_dict_as(true, dict, |op, args| {
+        match op {
+            19 => subrs_rel = Some(dict_u32(args.first())?),
+            22 => vsindex = u16::try_from(dict_u32(args.first())?).map_err(|_| ERR)?,
+            _ => {}
+        }
+        Ok(())
+    })?;
+    let subrs = match subrs_rel {
+        Some(rel) => Some(Index::parse2(d, add(off, off_usize(rel)?)?)?),
+        None => None,
+    };
+    Ok((subrs, vsindex))
+}
+
 /// The transform that takes charstring units to `units_per_em` font units,
 /// or `None` when that is the identity.
 ///
@@ -901,6 +1399,109 @@ fn em_transform(m: [f64; 6], units_per_em: u16) -> Option<Transform> {
 // The Type 2 charstring interpreter
 // ---------------------------------------------------------------------------
 
+/// The box HarfBuzz measures a CFF or `CFF2` glyph by
+/// (`cff1_extents_param_t`, `cff2_extents_param_t`): every point a line or
+/// curve is drawn through, a curve's control points included, and a
+/// contour's starting point once something is drawn from it -- in `f64`, as
+/// HarfBuzz's charstring numbers are, and in charstring units, because
+/// HarfBuzz reads no `FontMatrix`.
+#[derive(Debug, Default)]
+struct Bounds {
+    current: Exact,
+    /// Whether something has been drawn since the last `moveto`.
+    open: bool,
+    /// `[min_x, min_y, max_x, max_y]`, once any point is in.
+    b: Option<[f64; 4]>,
+}
+
+impl Bounds {
+    fn add(&mut self, p: Exact) {
+        self.b = Some(match self.b {
+            None => [p.x, p.y, p.x, p.y],
+            Some([x0, y0, x1, y1]) => [x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)],
+        });
+    }
+
+    /// Something is drawn: the contour's start counts, the first time.
+    fn draw_from_current(&mut self) {
+        if !self.open {
+            self.open = true;
+            self.add(self.current);
+        }
+    }
+
+    fn finish(self) -> Option<[f64; 4]> {
+        self.b
+    }
+}
+
+impl CffPen for Bounds {
+    fn start(&mut self, at: Exact) {
+        self.current = at;
+    }
+
+    fn move_to(&mut self, p: Exact) {
+        self.open = false;
+        self.current = p;
+    }
+
+    fn line_to(&mut self, p: Exact) {
+        self.draw_from_current();
+        self.add(p);
+        self.current = p;
+    }
+
+    fn curve_to(&mut self, c1: Exact, c2: Exact, p: Exact) {
+        self.draw_from_current();
+        self.add(c1);
+        self.add(c2);
+        self.add(p);
+        self.current = p;
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+    }
+}
+
+/// A `CFF2` glyph's blending: the instance, the `vsindex` in force, and --
+/// once the first `blend` has asked -- that subtable's weights.
+struct BlendState<'a> {
+    cff2: &'a Cff2,
+    instance: Instance<'a>,
+    vsindex: u16,
+    weights: Option<Weights>,
+    /// Whether a `blend` has run, after which `vsindex` is malformed.
+    blended: bool,
+}
+
+impl BlendState<'_> {
+    /// The weights of the subtable in force, at the instance, as the
+    /// instance's library computes them.
+    fn weights(&self) -> Result<Weights, SfntError> {
+        let store = self.cff2.store.as_ref();
+        Ok(match self.instance {
+            Instance::Default => {
+                Weights::Default(store.map_or(0, |s| s.region_index_count(self.vsindex)))
+            }
+            Instance::HarfBuzz(coords) => Weights::HarfBuzz(
+                store
+                    .map(|s| s.region_scalars(self.vsindex, coords))
+                    .unwrap_or_default(),
+            ),
+            // FreeType refuses a blend in a face with no store, as it does a
+            // `vsindex` or region the store does not have.
+            Instance::FreeType(ndv) => Weights::FreeType(
+                self.cff2
+                    .ft_store
+                    .as_ref()
+                    .and_then(|s| s.weights(self.vsindex, ndv))
+                    .ok_or(ERR)?,
+            ),
+        })
+    }
+}
+
 /// A charstring's arithmetic is done in `f64`, and only the pen narrows a
 /// finished point to an outline's `f32` -- or, drawing the hinter's points,
 /// does not (see [`CffPen`]).
@@ -917,8 +1518,13 @@ struct Interp<'a, P: CffPen> {
     cff: &'a Cff,
     data: &'a [u8],
     local: Option<Index>,
-    stack: [f64; STACK_LIMIT],
+    stack: [f64; CFF2_STACK_LIMIT],
     sp: usize,
+    /// How deep the stack may go: 48 for CFF, 513 for `CFF2`.
+    limit: usize,
+    /// A `CFF2` glyph's blending; `None` for CFF, where `vsindex` and
+    /// `blend` are not operators.
+    blend: Option<BlendState<'a>>,
     /// Stem count, kept only so that `hintmask` skips the right number of
     /// mask bytes — one bit per stem, rounded up to a byte.
     n_stems: usize,
@@ -937,21 +1543,29 @@ struct Interp<'a, P: CffPen> {
 }
 
 impl<'a, P: CffPen> Interp<'a, P> {
-    /// An interpreter for one charstring, drawing on `pen` from `origin`.
+    /// An interpreter for one charstring, drawing on `pen` from `origin`,
+    /// blending as `blend` says for a `CFF2` glyph.
     fn new(
         cff: &'a Cff,
         data: &'a [u8],
         local: Option<Index>,
         pen: &'a mut P,
         origin: Exact,
+        blend: Option<BlendState<'a>>,
     ) -> Self {
         pen.start(origin);
         Self {
             cff,
             data,
             local,
-            stack: [0.0; STACK_LIMIT],
+            stack: [0.0; CFF2_STACK_LIMIT],
             sp: 0,
+            limit: if blend.is_some() {
+                CFF2_STACK_LIMIT
+            } else {
+                STACK_LIMIT
+            },
+            blend,
             n_stems: 0,
             x: origin.x,
             y: origin.y,
@@ -965,7 +1579,7 @@ impl<'a, P: CffPen> Interp<'a, P> {
 
 impl<P: CffPen> Interp<'_, P> {
     fn push(&mut self, v: f64) -> Result<(), SfntError> {
-        if self.sp >= STACK_LIMIT {
+        if self.sp >= self.limit {
             return Err(ERR);
         }
         *self.stack.get_mut(self.sp).ok_or(ERR)? = v;
@@ -1079,6 +1693,69 @@ impl<P: CffPen> Interp<'_, P> {
     fn count_stems(&mut self) {
         self.n_stems = self.n_stems.saturating_add(self.sp / 2);
         self.sp = 0;
+    }
+
+    /// `vsindex`: the variation subtable this glyph's blends use. Only
+    /// before the first `blend`, which both libraries hold to; a negative
+    /// one is left unused, as FreeType leaves it.
+    fn vsindex(&mut self) -> Result<(), SfntError> {
+        let [v] = self.last()?;
+        self.sp = 0;
+        let blend = self.blend.as_mut().ok_or(ERR)?;
+        if blend.blended {
+            return Err(ERR);
+        }
+        if v >= 0.0 {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "an integer operand, and non-negative here; one past \
+                          u16 names no subtable and saturates to one that \
+                          is refused as surely"
+            )]
+            {
+                blend.vsindex = v.trunc() as u16;
+            }
+        }
+        blend.weights = None;
+        Ok(())
+    }
+
+    /// `blend`: `n` values, each followed further up the stack by one delta
+    /// per region of the subtable in force, become `n` values blended at the
+    /// instance -- the deltas popped, the results left where the defaults
+    /// were for the operator that follows.
+    fn blend(&mut self) -> Result<(), SfntError> {
+        let [n] = self.last()?;
+        self.sp = self.sp.checked_sub(1).ok_or(ERR)?;
+        if !(0.0..=f64::from(u16::MAX)).contains(&n) {
+            return Err(ERR);
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "range-checked on the line above"
+        )]
+        let n = n.trunc() as usize;
+        let blend = self.blend.as_mut().ok_or(ERR)?;
+        if blend.weights.is_none() {
+            blend.weights = Some(blend.weights()?);
+        }
+        blend.blended = true;
+        let weights = blend.weights.as_ref().ok_or(ERR)?;
+        let k = weights.len();
+        let total = mul(n, add(k, 1)?)?;
+        let base = self.sp.checked_sub(total).ok_or(ERR)?;
+        for i in 0..n {
+            let at = add(base, i)?;
+            let from = add(add(base, n)?, mul(i, k)?)?;
+            let default = *self.stack.get(at).ok_or(ERR)?;
+            let deltas = self.stack.get(from..add(from, k)?).ok_or(ERR)?;
+            let blended = weights.apply(default, deltas);
+            *self.stack.get_mut(at).ok_or(ERR)? = blended;
+        }
+        self.sp = add(base, n)?;
+        Ok(())
     }
 
     fn run(&mut self, code: &[u8], depth: u8) -> Result<(), SfntError> {
@@ -1275,6 +1952,14 @@ impl<P: CffPen> Interp<'_, P> {
                     self.sp = 0;
                 }
 
+                // --- CFF2 variations ----------------------------------------
+                15 if self.blend.is_some() => self.vsindex()?,
+                16 if self.blend.is_some() => self.blend()?,
+                // CFF2 has no `return` and no `endchar`: a subroutine and a
+                // glyph end where their charstrings do. An explicit one is
+                // ignored and clears the stack, as FreeType treats it.
+                11 | 14 if self.blend.is_some() => self.sp = 0,
+
                 // --- control ----------------------------------------------
                 10 | 29 => {
                     let subrs = if b0 == 10 {
@@ -1396,9 +2081,12 @@ impl<P: CffPen> Interp<'_, P> {
     clippy::indexing_slicing,
     clippy::panic,
     clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation
+    clippy::cast_possible_truncation,
+    // A blended coordinate is compared exactly: which library's arithmetic
+    // made it is decided in the last bit.
+    clippy::float_cmp
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sfnt::Point;
 
@@ -1429,9 +2117,10 @@ mod tests {
             locals: Locals::Single(None),
             charset: Charset::Predefined,
             matrix: None,
+            cff2: None,
         };
         let mut out = Outline::default();
-        let mut interp = Interp::new(&cff, &[], None, &mut out, Exact::default());
+        let mut interp = Interp::new(&cff, &[], None, &mut out, Exact::default(), None);
         interp.run(code, 0).unwrap();
         interp.close_contour();
         out
@@ -1501,9 +2190,10 @@ mod tests {
             locals: Locals::Single(None),
             charset: Charset::Predefined,
             matrix: None,
+            cff2: None,
         };
         let mut points = CffPoints::default();
-        let mut interp = Interp::new(&cff, &[], None, &mut points, Exact::default());
+        let mut interp = Interp::new(&cff, &[], None, &mut points, Exact::default(), None);
         interp.run(code, 0).unwrap();
         interp.close_contour();
         points.finish()
@@ -1546,6 +2236,386 @@ mod tests {
         );
     }
 
+    // --- CFF2 -------------------------------------------------------------
+
+    /// A `CFF2` INDEX: a four-byte count, then as a CFF one.
+    fn index2(entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = (entries.len() as u32).to_be_bytes().to_vec();
+        if entries.is_empty() {
+            return out;
+        }
+        out.push(4);
+        let mut off = 1u32;
+        out.extend_from_slice(&off.to_be_bytes());
+        for e in entries {
+            off += e.len() as u32;
+            out.extend_from_slice(&off.to_be_bytes());
+        }
+        for e in entries {
+            out.extend_from_slice(e);
+        }
+        out
+    }
+
+    /// An item variation store as a `CFF2` table carries one (no delta rows):
+    /// one axis, `regions` as (start, peak, end), and each subtable's region
+    /// indices.
+    fn store2(regions: &[(i16, i16, i16)], subtables: &[&[u16]]) -> Vec<u8> {
+        let mut regions_part = Vec::new();
+        regions_part.extend_from_slice(&1u16.to_be_bytes());
+        regions_part.extend_from_slice(&(regions.len() as u16).to_be_bytes());
+        for &(a, b, c) in regions {
+            for v in [a, b, c] {
+                regions_part.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+        let header = 8 + 4 * subtables.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&(header as u32).to_be_bytes());
+        out.extend_from_slice(&(subtables.len() as u16).to_be_bytes());
+        let mut at = header + regions_part.len();
+        let bodies: Vec<Vec<u8>> = subtables
+            .iter()
+            .map(|indices| {
+                let mut b = vec![0, 0, 0, 0];
+                b.extend_from_slice(&(indices.len() as u16).to_be_bytes());
+                for &r in *indices {
+                    b.extend_from_slice(&r.to_be_bytes());
+                }
+                b
+            })
+            .collect();
+        for b in &bodies {
+            out.extend_from_slice(&(at as u32).to_be_bytes());
+            at += b.len();
+        }
+        out.extend(regions_part);
+        for b in bodies {
+            out.extend(b);
+        }
+        out
+    }
+
+    /// A DICT integer in its fixed five-byte form, so a DICT's length does
+    /// not depend on the offsets it holds.
+    fn int5(v: usize) -> Vec<u8> {
+        let mut out = vec![29u8];
+        out.extend_from_slice(&(v as i32).to_be_bytes());
+        out
+    }
+
+    /// A whole `CFF2` table: `glyphs` as its charstrings, one Font DICT whose
+    /// Private DICT names `vsindex`, and `store` (after its length word).
+    fn table2(glyphs: &[Vec<u8>], vsindex: u16, store: &[u8]) -> Vec<u8> {
+        // Header (5) + Top DICT (3 offsets of 5 bytes + 1-byte ops, plus the
+        // two-byte FDArray op) + empty global subroutines (4).
+        let top_len = 3 * 5 + 1 + 1 + 2;
+        let mut at = 5 + top_len + 4;
+        let char_strings = index2(glyphs);
+        let char_strings_at = at;
+        at += char_strings.len();
+        // The Private DICT: `vsindex` as a one-byte-or-more integer, op 22.
+        let private = {
+            let mut p = int(i32::from(vsindex));
+            p.push(22);
+            p
+        };
+        let private_at = at;
+        at += private.len();
+        let mut font_dict = int5(private.len());
+        font_dict.extend(int5(private_at));
+        font_dict.push(18);
+        let fd_array = index2(&[font_dict]);
+        let fd_array_at = at;
+        at += fd_array.len();
+        let vstore_at = at;
+        let mut top = int5(char_strings_at);
+        top.push(17);
+        top.extend(int5(fd_array_at));
+        top.extend_from_slice(&[12, 36]);
+        top.extend(int5(vstore_at));
+        top.push(24);
+        assert_eq!(top.len(), top_len);
+        let mut out = vec![2u8, 0, 5];
+        out.extend_from_slice(&(top_len as u16).to_be_bytes());
+        out.extend(top);
+        out.extend(index2(&[]));
+        out.extend(char_strings);
+        out.extend(private);
+        out.extend(fd_array);
+        out.extend_from_slice(&(store.len() as u16).to_be_bytes());
+        out.extend_from_slice(store);
+        out
+    }
+
+    /// One glyph of a `table2` of `glyphs` over `store` with `vsindex`, drawn
+    /// at `instance`.
+    fn draw2(
+        glyph: &[u8],
+        vsindex: u16,
+        store: &[u8],
+        instance: Instance<'_>,
+    ) -> Result<Outline, SfntError> {
+        let t = table2(&[glyph.to_vec()], vsindex, store);
+        let cff = Cff::parse2(&t, 0, t.len(), 1000)?;
+        assert!(cff.is_cff2());
+        cff.outline_at(&t, 0, instance)
+    }
+
+    /// A glyph whose one point is `blend`ed: `moveto` to x = 100 with deltas
+    /// `deltas`, y = 0, then a line of 10 so something is drawn.
+    fn blended_move(deltas: &[i32]) -> Vec<u8> {
+        let mut parts = vec![int(100)];
+        parts.extend(deltas.iter().map(|&d| int(d)));
+        parts.push(int(1));
+        cs(&[&parts.concat(), &[16], &int(0), &[21], &int(10), &[6]])
+    }
+
+    fn first_point(outline: &Outline) -> Point {
+        match outline.commands[0] {
+            PathCmd::MoveTo(p) => p,
+            ref other => panic!("not a move: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cff2_index_counts_its_entries_in_four_bytes() {
+        let d = index2(&[b"ab".to_vec(), b"c".to_vec()]);
+        let idx = Index::parse2(&d, 0).unwrap();
+        assert_eq!(idx.count, 2);
+        assert_eq!(idx.get(&d, 1).unwrap(), b"c");
+        assert_eq!(idx.end, d.len());
+        // Empty, it is the count alone -- four bytes, not two.
+        let empty = Index::parse2(&[0, 0, 0, 0, 9], 0).unwrap();
+        assert_eq!((empty.count, empty.end), (0, 4));
+    }
+
+    #[test]
+    fn fdselect_format_4_maps_ranges_to_sixteen_bit_font_dicts() {
+        // Glyphs 0-9 use Font DICT 3, 10-19 Font DICT 300; sentinel 20.
+        let mut d = vec![4u8];
+        d.extend_from_slice(&2u32.to_be_bytes());
+        for (first, fd) in [(0u32, 3u16), (10, 300)] {
+            d.extend_from_slice(&first.to_be_bytes());
+            d.extend_from_slice(&fd.to_be_bytes());
+        }
+        d.extend_from_slice(&20u32.to_be_bytes());
+        assert_eq!(Cff::fd_for_gid(&d, 0, 9).unwrap(), 3);
+        assert_eq!(Cff::fd_for_gid(&d, 0, 10).unwrap(), 300);
+        assert!(Cff::fd_for_gid(&d, 0, 20).is_err());
+    }
+
+    #[test]
+    fn a_blend_is_its_default_at_the_default_instance() {
+        let store = store2(&[(0, 16384, 16384)], &[&[0]]);
+        let out = draw2(&blended_move(&[50]), 0, &store, Instance::Default).unwrap();
+        assert_eq!(first_point(&out), pt(100.0, 0.0));
+    }
+
+    #[test]
+    fn each_library_blends_at_its_own_coordinates_and_precision() {
+        // One region peaking at +1; the instance a third of the way there.
+        let store = store2(&[(0, 16384, 16384)], &[&[0]]);
+        let glyph = blended_move(&[1]);
+        // HarfBuzz: 5461/16384 as an f32 scalar, times 1, in f64.
+        let hb = draw2(&glyph, 0, &store, Instance::HarfBuzz(&[5461])).unwrap();
+        let scalar = 5461.0_f32 / 16384.0;
+        assert_eq!(first_point(&hb).x, (100.0 + f64::from(scalar)) as f32);
+        // FreeType: FT_DivFix(21845, 65536) = 21845, FT_MulFix'ed by 1.0 --
+        // 100 + 21845/65536.
+        let ft = draw2(&glyph, 0, &store, Instance::FreeType(&[21845])).unwrap();
+        assert_eq!(first_point(&ft).x, (100.0 + 21845.0 / 65536.0) as f32);
+        assert_ne!(first_point(&hb).x, first_point(&ft).x);
+    }
+
+    #[test]
+    fn vsindex_chooses_the_subtable_and_a_private_dict_its_default() {
+        // Subtable 0 weighs region 0 (peak at +1); subtable 1 region 1 (peak
+        // at -1), which is nothing at +1.
+        let store = store2(&[(0, 16384, 16384), (-16384, -16384, 0)], &[&[0], &[1]]);
+        let at_top = Instance::HarfBuzz(&[16384]);
+        assert_eq!(
+            first_point(&draw2(&blended_move(&[50]), 0, &store, at_top).unwrap()).x,
+            150.0
+        );
+        // The Private DICT's `vsindex` 1: region 1, which does not apply.
+        assert_eq!(
+            first_point(&draw2(&blended_move(&[50]), 1, &store, at_top).unwrap()).x,
+            100.0
+        );
+        // And the charstring's own `vsindex`, before the blend.
+        let chosen = cs(&[&int(1), &[15], &blended_move(&[50])]);
+        assert_eq!(
+            first_point(&draw2(&chosen, 0, &store, at_top).unwrap()).x,
+            100.0
+        );
+        // After a blend, a `vsindex` is malformed.
+        let late = cs(&[
+            &int(100),
+            &int(50),
+            &int(1),
+            &[16],
+            &int(0),
+            &int(1),
+            &[15],
+            &[21],
+        ]);
+        assert!(draw2(&late, 0, &store, at_top).is_err());
+    }
+
+    #[test]
+    fn freetype_refuses_a_blend_its_store_cannot_weigh() {
+        // A `vsindex` past the subtables: FreeType fails the glyph; HarfBuzz
+        // weighs no regions and keeps the default.
+        let store = store2(&[(0, 16384, 16384)], &[&[0]]);
+        let glyph = cs(&[
+            &int(5),
+            &[15],
+            &int(100),
+            &int(1),
+            &[16],
+            &int(0),
+            &[21],
+            &int(10),
+            &[6],
+        ]);
+        assert!(draw2(&glyph, 0, &store, Instance::FreeType(&[0x1_0000])).is_err());
+        let hb = draw2(&glyph, 0, &store, Instance::HarfBuzz(&[16384])).unwrap();
+        assert_eq!(first_point(&hb).x, 100.0);
+        // Coordinates for two axes against a one-axis store.
+        let two = draw2(&blended_move(&[50]), 0, &store, Instance::FreeType(&[1, 2]));
+        assert!(two.is_err());
+    }
+
+    #[test]
+    fn cff2_has_no_return_or_endchar_and_ignores_one() {
+        // An `endchar` mid-glyph does not end it: the line after it is drawn.
+        let store = store2(&[(0, 16384, 16384)], &[&[0]]);
+        let glyph = cs(&[
+            &int(0),
+            &int(0),
+            &[21],
+            &int(10),
+            &[6],
+            &[14],
+            &int(20),
+            &[7],
+        ]);
+        let out = draw2(&glyph, 0, &store, Instance::Default).unwrap();
+        assert!(out.commands.contains(&PathCmd::LineTo(pt(10.0, 20.0))));
+    }
+
+    #[test]
+    fn a_cff2_stack_holds_far_more_than_a_cff_one() {
+        // Sixty blended values -- 120 operands and a count -- which CFF's 48
+        // could not hold.
+        let store = store2(&[(0, 16384, 16384)], &[&[0]]);
+        let mut parts: Vec<Vec<u8>> = (0..60).map(|_| int(1)).collect();
+        parts.extend((0..60).map(|_| int(2)));
+        parts.push(int(60));
+        let mut glyph = parts.concat();
+        glyph.push(16);
+        // 60 values of 1 + 2 at +1 = 3 each: an rlineto of 30 pairs.
+        glyph.push(5);
+        let full = cs(&[&int(0), &int(0), &[21], &glyph]);
+        let out = draw2(&full, 0, &store, Instance::HarfBuzz(&[16384])).unwrap();
+        assert!(out.commands.contains(&PathCmd::LineTo(pt(90.0, 90.0))));
+    }
+
+    #[test]
+    fn freetype_weighs_a_region_by_div_fix_and_mul_fix_through_a_zero() {
+        let store = store2(&[(0, 8192, 16384), (-16384, -8192, 0)], &[&[0, 1]]);
+        let vs = CffVStore::parse(&store, 0).unwrap();
+        // At +0.25: region 0 is FT_DivFix(0.25, 0.5) = 0.5; region 1 is out.
+        assert_eq!(vs.weights(0, &[0x4000]).unwrap(), vec![0x8000, 0]);
+        // At its peak a region is 1, at the default neither applies.
+        assert_eq!(vs.weights(0, &[0x8000]).unwrap(), vec![0x1_0000, 0]);
+        assert_eq!(vs.weights(0, &[0]).unwrap(), vec![0, 0]);
+        // A subtable it does not have, and coordinates for no axes (the
+        // default, weighed at nothing).
+        assert!(vs.weights(1, &[0]).is_none());
+        assert_eq!(vs.weights(0, &[]).unwrap(), vec![0, 0]);
+    }
+
+    #[test]
+    fn a_cff2_face_is_drawn_and_measured_as_harfbuzz_draws_it() {
+        use crate::hint::fixture::{VAR_CFF2, VAR_CFF2_DRAWN};
+        let face = crate::sfnt::Face::parse(VAR_CFF2.to_vec()).unwrap();
+        let coords = face
+            .variation_axes()
+            .unwrap()
+            .normalize_tags(&[(*b"wght", 610.0)]);
+        let mut wrong = Vec::new();
+        for &(gid, name, extents, ops, points) in &VAR_CFF2_DRAWN {
+            let got = face.glyph_extents_at(gid, &coords).unwrap();
+            if got != extents {
+                wrong.push(alloc::format!("{name}: box {got:?}, HarfBuzz {extents:?}"));
+            }
+            let outline = face.outline_at(gid, &coords).unwrap();
+            let (got_ops, got_points) = spelled(&outline.commands);
+            if got_ops != ops || got_points != points {
+                wrong.push(alloc::format!(
+                    "{name}: path {got_ops} {got_points:?}, HarfBuzz {ops} {points:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// An outline as the fixture spells HarfBuzz's drawing: `M`, `L`, `C`,
+    /// `Q` and `Z`, with the points' x and y in turn -- a contour with
+    /// nothing drawn left out, and a closing line back to its start dropped.
+    pub(crate) fn spelled(commands: &[PathCmd]) -> (String, Vec<f32>) {
+        let mut contours: Vec<(Point, Vec<PathCmd>)> = Vec::new();
+        let mut open: Option<(Point, Vec<PathCmd>)> = None;
+        for cmd in commands {
+            match *cmd {
+                PathCmd::MoveTo(p) => {
+                    contours.extend(open.take());
+                    open = Some((p, Vec::new()));
+                }
+                PathCmd::Close => contours.extend(open.take()),
+                other => {
+                    if let Some((_, segs)) = open.as_mut() {
+                        segs.push(other);
+                    }
+                }
+            }
+        }
+        contours.extend(open.take());
+        let (mut ops, mut points) = (String::new(), Vec::new());
+        for (start, mut segs) in contours {
+            if segs.last() == Some(&PathCmd::LineTo(start)) {
+                segs.pop();
+            }
+            if segs.is_empty() {
+                continue;
+            }
+            ops.push('M');
+            points.extend([start.x, start.y]);
+            for seg in segs {
+                match seg {
+                    PathCmd::LineTo(p) => {
+                        ops.push('L');
+                        points.extend([p.x, p.y]);
+                    }
+                    PathCmd::QuadTo(c, p) => {
+                        ops.push('Q');
+                        points.extend([c.x, c.y, p.x, p.y]);
+                    }
+                    PathCmd::CurveTo(a, b, p) => {
+                        ops.push('C');
+                        points.extend([a.x, a.y, b.x, b.y, p.x, p.y]);
+                    }
+                    PathCmd::MoveTo(_) | PathCmd::Close => {}
+                }
+            }
+            ops.push('Z');
+        }
+        (ops, points)
+    }
+
     #[test]
     fn a_seac_accent_is_drawn_from_its_offset() {
         // StandardEncoding's `A` (65) is SID 34 and `acute` (194) SID 125,
@@ -1571,7 +2641,7 @@ mod tests {
         glyphs[1] = cs(&[&fixed(50.5), &int(200), &int(65), &int(194), &[14]]);
         let d = table(&glyphs);
         let cff = Cff::parse(&d, 0, d.len(), 1000).unwrap();
-        let t = cff.tagged_outline(&d, 1).unwrap();
+        let t = cff.tagged_outline(&d, 1, Instance::Default).unwrap();
         assert_eq!(t.ends, [3, 6]);
         assert_eq!(
             &t.points[3..],
@@ -1593,7 +2663,10 @@ mod tests {
         let d = table(&glyphs);
         let cff = Cff::parse(&d, 0, d.len(), 1000).unwrap();
         assert_eq!(cff.outline(&d, 1).unwrap_err(), ERR);
-        assert_eq!(cff.tagged_outline(&d, 1).unwrap_err(), ERR);
+        assert_eq!(
+            cff.tagged_outline(&d, 1, Instance::Default).unwrap_err(),
+            ERR
+        );
     }
 
     #[test]
@@ -1829,9 +2902,10 @@ mod tests {
             locals: Locals::Single(None),
             charset: Charset::Predefined,
             matrix: None,
+            cff2: None,
         };
         let mut out = Outline::default();
-        let mut interp = Interp::new(&cff, &[], None, &mut out, Exact::default());
+        let mut interp = Interp::new(&cff, &[], None, &mut out, Exact::default(), None);
         // 12 10 is `add`, which this module deliberately does not implement.
         let err = interp.run(&[12, 10], 0).unwrap_err();
         assert_eq!(err, SfntError::CffUnsupported("Type 2 arithmetic operator"));
@@ -1946,9 +3020,10 @@ mod tests {
             locals: Locals::Single(None),
             charset: Charset::Predefined,
             matrix: None,
+            cff2: None,
         };
         let mut out = Outline::default();
-        let mut interp = Interp::new(&cff, &[], None, &mut out, Exact::default());
+        let mut interp = Interp::new(&cff, &[], None, &mut out, Exact::default(), None);
         assert_eq!(interp.run(&prog, 0).unwrap_err(), ERR);
         assert!(out.commands.len() <= MAX_COMMANDS + 1);
     }

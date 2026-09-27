@@ -29,7 +29,7 @@
 //! So [`Plan::old_spec`] is read off the tag the *face* registered, not off the
 //! run: a face that files Devanagari under `deva` is asking for the older
 //! behaviour whatever the text is. That is what
-//! [`ByScript::chosen_script`](crate::otl::ByScript::chosen_script) exists to
+//! [`Face::gsub_chosen_script`](crate::sfnt::Face::gsub_chosen_script) exists to
 //! answer.
 //!
 //! # Zero context
@@ -893,7 +893,7 @@ fn reverse(glyphs: &mut [SubGlyph], order: &mut [u8], from: usize, to: usize) {
 /// a left matra is brought back towards the base — so merging them now would
 /// join a cluster to one it is about to leave. Final reordering merges up to
 /// the base for the same reason, and the two interlock.
-/// https://github.com/harfbuzz/harfbuzz/issues/2272
+/// <https://github.com/harfbuzz/harfbuzz/issues/2272>
 fn merge_reordered(plan: &Plan, glyphs: &mut [SubGlyph], order: &mut [u8], base: usize) {
     let end = glyphs.len();
     // In old-spec mode halants were moved around above, so nothing after the

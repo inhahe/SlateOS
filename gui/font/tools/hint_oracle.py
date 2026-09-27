@@ -3,6 +3,10 @@ r"""Check the auto-hinter in `gui/font/src/hint/` against FreeType's own.
     python gui/font/tools/hint_oracle.py FONT [--sizes 9,10,...] [--gids 1,2,...]
                                               [--show N] [--no-build]
                                               [--freetype DIR]
+                                              [--var wght=700,...]
+
+`--var` compares a variable font at another instance than its default one,
+given in user-space axis values; both sides measure the face there.
 
 Needs `freetype-py` (`pip install freetype-py`), whose wheels bundle FreeType
 2.13.2 built with HarfBuzz -- the release and configuration the port follows.
@@ -25,25 +29,26 @@ FreeType with `FT_LOAD_FORCE_AUTOHINT | FT_LOAD_TARGET_LIGHT`, and compares:
 * **the points themselves** -- how many, and which are on the curve -- which
   catch a glyph read into different points: a composite assembled
   differently, a CFF contour closed differently, a line of no length kept.
-* **y, exactly**, in 1/64 pixel. Light hinting moves nothing else, and a
-  single-unit difference is a different rounding decision somewhere -- the
-  thing a port gets wrong.
-* **x, exactly**, in 1/64 pixel. Light hinting does not move it, but FreeType
-  scales it from whole font units with `FT_MulFix`, and so does this crate: a
-  difference is a coordinate read differently (a CFF fraction floored
-  differently) or a glyph placed differently (a composite's metrics).
+* **y, exactly**, in 1/64 pixel. A single-unit difference is a different
+  rounding decision somewhere -- the thing a port gets wrong.
+* **x, exactly**, in 1/64 pixel. Light hinting moves it only for the CJK and
+  Indic writing systems (ideographs and the fallback style); elsewhere
+  FreeType scales it from whole font units with `FT_MulFix`, and so does this
+  crate, so a difference there is a coordinate read differently (a CFF
+  fraction floored differently) or a glyph placed differently (a composite's
+  metrics).
 
-A glyph this crate leaves unhinted is counted apart rather than as a
-mismatch: FreeType hints every glyph, including the ideographs and the
-fallback style, whose CJK hinting is not ported (see `src/hint/mod.rs`).
+A glyph this crate leaves unhinted where FreeType hints it is counted apart
+rather than as a mismatch: since the CJK system was ported, only a style
+FreeType would not hint either should leave any.
 
 Output
 ------
 
 Per size, how many glyphs agree and what differs in the rest -- the points,
 a y, or only an x; then, per style, the same totals, since most gaps are a
-style at a time (a script whose hinting is not ported, a feature style); and
-the first `--show` disagreements with their points side by side.
+style at a time (a writing system's rule, a feature style); and the first
+`--show` disagreements with their points side by side.
 """
 
 import argparse
@@ -86,11 +91,12 @@ def exe(target):
     sys.exit(f"hint_dump not found in {examples}")
 
 
-def mine(path, sizes, gids, target):
+def mine(path, sizes, gids, target, var=None):
     """This crate's points for `gids` (every glyph when `None`, which
     `hint_dump` does itself: a large font's ids would overflow a Windows
-    command line)."""
-    cmd = [exe(target), path, ",".join(str(s) for s in sizes)] + [str(g) for g in gids or []]
+    command line), at the variable instance `var` names if any."""
+    cmd = [exe(target)] + (["--var", var] if var else [])
+    cmd += [path, ",".join(str(s) for s in sizes)] + [str(g) for g in gids or []]
     out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
     table = {}
     for line in out.splitlines():
@@ -168,13 +174,23 @@ def main():
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--target", default=TARGET)
     ap.add_argument("--freetype", help="directory holding FreeType's autofit sources")
+    ap.add_argument("--var", help="a variable font's instance, as tag=value,... in user-space units")
     args = ap.parse_args()
     if not args.no_build:
         build(args.target)
     sizes = [float(s) for s in args.sizes.split(",")]
     face = freetype.Face(args.font)
+    if args.var:
+        # The same instance in FreeType, set before anything is loaded so its
+        # auto-hinter measures the face there.
+        wanted = {tag: float(value) for tag, value in (p.split("=") for p in args.var.split(","))}
+        axes = face.get_variation_info().axes
+        unknown = set(wanted) - {a.tag for a in axes}
+        if unknown:
+            sys.exit(f"--var: the face has no axis {sorted(unknown)}")
+        face.set_var_design_coords([wanted.get(a.tag, a.default) for a in axes])
     asked = [int(g) for g in args.gids.split(",")] if args.gids else None
-    table = mine(args.font, sizes, asked, args.target)
+    table = mine(args.font, sizes, asked, args.target, args.var)
     gids = asked if asked is not None else list(range(face.num_glyphs))
 
     # The sorting first: a glyph in the wrong style is hinted to the wrong

@@ -144,7 +144,7 @@ pub mod socket;
 pub use socket::{DEFAULT_DISPLAY, DISPLAY_VAR, Listener, Socket, display_addr};
 
 pub mod wait;
-pub use wait::{AsWaitHandle, LISTENER_READINESS, WaitHandle, WaitSet};
+pub use wait::{AsWaitHandle, WaitHandle, WaitSet};
 
 // Private: the decode cursor is an implementation detail of this crate's
 // decoders, and a *private module* is what makes its fields unreachable from

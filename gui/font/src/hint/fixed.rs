@@ -30,39 +30,9 @@
 /// range.
 pub(super) const MAX_SCALE: i64 = 1 << 26;
 
-/// `a * b` for a 16.16 `b`, rounded half away from zero: `FT_MulFix`.
-pub(super) fn mul_fix(a: i64, b: i64) -> i64 {
-    let ab = a * b;
-    (ab + 0x8000 - i64::from(ab < 0)) >> 16
-}
-
-/// `a / b` as 16.16, rounded half away from zero: `FT_DivFix`. A zero `b`
-/// gives FreeType's answer, the largest 32-bit value with the sign of `a`.
-pub(super) fn div_fix(a: i64, b: i64) -> i64 {
-    let negative = (a < 0) != (b < 0);
-    let (a, b) = (a.unsigned_abs(), b.unsigned_abs());
-    let q = if b > 0 {
-        ((a << 16) + (b >> 1)) / b
-    } else {
-        0x7FFF_FFFF
-    };
-    let q = i64::try_from(q).unwrap_or(i64::MAX);
-    if negative { -q } else { q }
-}
-
-/// `a * b / c`, rounded half away from zero: `FT_MulDiv`. A zero `c` gives
-/// FreeType's answer, as [`div_fix`] does.
-pub(super) fn mul_div(a: i64, b: i64, c: i64) -> i64 {
-    let negative = ((a < 0) != (b < 0)) != (c < 0);
-    let (a, b, c) = (a.unsigned_abs(), b.unsigned_abs(), c.unsigned_abs());
-    let d = if c > 0 {
-        (a * b + (c >> 1)) / c
-    } else {
-        0x7FFF_FFFF
-    };
-    let d = i64::try_from(d).unwrap_or(i64::MAX);
-    if negative { -d } else { d }
-}
+// `FT_MulFix`, `FT_DivFix` and `FT_MulDiv`, shared with the loader code that
+// reproduces FreeType's variable-font points for the hinter.
+pub(super) use crate::ftcalc::{div_fix, mul_div, mul_fix};
 
 /// The pixel boundary at or below `x` (26.6): `FT_PIX_FLOOR`.
 pub(super) const fn pix_floor(x: i64) -> i64 {
@@ -98,29 +68,6 @@ pub(super) fn corner_is_flat(in_x: i64, in_y: i64, out_x: i64, out_y: i64) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mul_fix_rounds_half_away_from_zero() {
-        // 1.5 * 0.5 = 0.75 exactly; 3 * 0.5 = 1.5 rounds to 2, and -3 * 0.5
-        // to -2, not -1.
-        assert_eq!(mul_fix(3, 0x8000), 2);
-        assert_eq!(mul_fix(-3, 0x8000), -2);
-        assert_eq!(mul_fix(64, 0x10000), 64);
-        // 1000 units at 16 px on a 2048 em: FreeType's y_scale is 32768.
-        assert_eq!(mul_fix(1000, div_fix(16 * 64, 2048)), 500);
-    }
-
-    #[test]
-    fn div_fix_and_mul_div_round_the_magnitude_and_keep_the_sign() {
-        assert_eq!(div_fix(1, 3), 21845);
-        assert_eq!(div_fix(-1, 3), -21845);
-        assert_eq!(div_fix(2, 3), 43691);
-        assert_eq!(div_fix(5, 0), 0x7FFF_FFFF);
-        assert_eq!(div_fix(-5, 0), -0x7FFF_FFFF);
-        assert_eq!(mul_div(7, 3, 2), 11);
-        assert_eq!(mul_div(-7, 3, 2), -11);
-        assert_eq!(mul_div(7, -3, -2), 11);
-    }
 
     #[test]
     fn pixel_rounding_floors_toward_minus_infinity() {

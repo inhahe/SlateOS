@@ -1,25 +1,27 @@
-//! Light auto-hinting: glyph outlines nudged vertically onto the pixel grid.
+//! Light auto-hinting: glyph outlines nudged onto the pixel grid.
 //!
 //! An outline is drawn exactly where its designer put it, which at text sizes
 //! means the top of an `x` lands a third of the way into a pixel row and the
 //! crossbar of an `e` straddles two: both rows come out half-grey, and small
-//! text looks soft. Hinting moves the outline -- vertically only, which is
-//! FreeType's "light" mode (fontconfig's `hintslight`, the default on most
-//! Linux desktops) -- so that the heights letters share land on pixel
-//! boundaries and every stroke keeps its designed thickness.
+//! text looks soft. Hinting moves the outline -- FreeType's "light" mode
+//! (fontconfig's `hintslight`, the default on most Linux desktops) -- so that
+//! the heights letters share land on pixel boundaries and every stroke keeps
+//! its designed thickness. Letters move vertically only; ideographs, whose
+//! strokes run both ways, and the symbols no script claims move horizontally
+//! too, as light mode moves them.
 //!
 //! # A port, not a reimplementation
 //!
 //! This module is FreeType 2.13.2's auto-hinter (`src/autofit`), ported:
 //! the data tables generated from its sources ([`tables`]), the algorithm
 //! translated function by function ([`glyph`] from `afhints.c`, [`latin`]
-//! from `aflatin.c`), and its fixed-point arithmetic kept to the bit
-//! ([`fixed`]). Hinting is a long chain of rounding decisions, and a
-//! reimplementation that makes different ones produces different text; this
-//! makes the same ones, and so draws what fontconfig-configured Linux
-//! desktops draw -- which is the look people compare against -- and can be
-//! checked against FreeType itself glyph by glyph (see
-//! `gui/font/tools/hint_oracle.py`). The alternative, running each font's
+//! from `aflatin.c`, [`cjk`] from `afcjk.c` and `afindic.c`), and its
+//! fixed-point arithmetic kept to the bit ([`fixed`]). Hinting is a long
+//! chain of rounding decisions, and a reimplementation that makes different
+//! ones produces different text; this makes the same ones, and so draws what
+//! fontconfig-configured Linux desktops draw -- which is the look people
+//! compare against -- and can be checked against FreeType itself glyph by
+//! glyph (see `gui/font/tools/hint_oracle.py`). The alternative, running each font's
 //! own TrueType instructions, is a bytecode interpreter executing
 //! attacker-supplied programs (design-decisions §86c) and does nothing for
 //! CFF fonts or the many fonts shipped without instructions.
@@ -34,44 +36,56 @@
 //!    feature substitutes in, less those the feature also positions. Then the
 //!    glyphs only `GSUB` reaches -- ligatures, positional forms -- go to the
 //!    script whose features produce them, and the rest to the fallback style.
-//! 2. **Each style in use is measured** ([`latin::Metrics::new`]): its
-//!    standard stem width and its blue zones, from its script's reference
-//!    letters -- shaped with its feature on, for a feature style.
+//!    A face without a Unicode `cmap` has every glyph in the fallback style.
+//! 2. **Each style in use is measured** ([`latin::Metrics::new`],
+//!    [`cjk::Metrics::new`]): its standard stem widths and its blue zones,
+//!    from its script's reference letters -- shaped with its feature on, for
+//!    a feature style.
 //! 3. **At each size** ([`Hinter::new`]) the zones are fitted to the pixel
-//!    grid, after nudging the vertical scale so the x-height lands on a pixel.
+//!    grid -- for a Latin-system style after nudging the vertical scale so
+//!    the x-height lands on a pixel.
 //! 4. **Each glyph** ([`Hinter::hint`]) is cut into segments and edges, its
 //!    edges placed, and its points moved to follow them.
 //!
-//! # What is not hinted
+//! # The writing systems
 //!
-//! Only FreeType's Latin writing system is ported, which serves nearly every
-//! script -- Latin, Greek, Cyrillic, Arabic, Hebrew, Devanagari and the other
-//! Brahmic scripts, Thai, Ethiopic, and some fifty more, each with its own
-//! reference letters. Its CJK system (Chinese, Japanese and Korean
-//! ideographs, and the fallback style every glyph no script claims goes to)
-//! and its Indic stub (four scripts) are not ported: their glyphs are drawn
-//! unhinted, exactly as before. See known-issues.md, "Ideographs and the
-//! fallback style are drawn unhinted".
+//! Each of FreeType's styles belongs to one of its writing systems, and all
+//! three that hint are ported:
+//!
+//! * **Latin** ([`latin`]) serves nearly every script -- Latin, Greek,
+//!   Cyrillic, Arabic, Hebrew, Devanagari and the other Brahmic scripts,
+//!   Thai, Ethiopic, and some fifty more, each with its own reference letters
+//!   -- vertically only, in light mode.
+//! * **CJK** ([`cjk`]) serves Chinese, Japanese and Korean ideographs and the
+//!   fallback style, in both dimensions.
+//! * **Indic** is CJK without blue zones, for Limbu, Oriya, Syloti Nagri and
+//!   Tibetan.
+//!
+//! The fourth, FreeType's dummy system, hints nothing, though it still
+//! scales each point from whole font units to 1/64 pixel, and so does this;
+//! a Latin-system style with not one measurable zone is handed to it, as
+//! FreeType hands it.
 //!
 //! Portions of this module are copyright (C) 2003-2023 by David Turner,
 //! Robert Wilhelm and Werner Lemberg, from The FreeType Project
 //! (www.freetype.org). Used under the FreeType License: see
 //! `gui/font/licenses/FTL.TXT`.
 
+mod cjk;
 mod fixed;
 mod glyph;
 mod latin;
 mod tables;
 
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
 
 use alloc::vec::Vec;
 
 use crate::sfnt::{Exact, Face, Outline, TaggedOutline};
 use crate::var::Coords;
 
-use fixed::{MAX_SCALE, div_fix, mul_fix};
+use fixed::{MAX_SCALE, div_fix};
 use glyph::Hints;
 use tables::{RANGES, SCRIPTS, STYLES};
 
@@ -99,11 +113,11 @@ pub(super) struct Script {
 pub(super) enum System {
     /// No hinting.
     Dummy,
-    /// The Latin writing system, which is ported.
+    /// The Latin writing system ([`latin`]).
     Latin,
-    /// The CJK writing system, which is not.
+    /// The CJK writing system ([`cjk`]).
     Cjk,
-    /// The Indic writing system, which is not.
+    /// The Indic writing system: [`cjk`]'s, without blue zones.
     Indic,
 }
 
@@ -152,6 +166,25 @@ fn fallback_style() -> Option<u8> {
         .and_then(|i| u8::try_from(i).ok())
 }
 
+/// A style's measurements, by its writing system.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StyleMetrics {
+    /// FreeType's dummy system, which measures nothing and hints nothing:
+    /// its glyphs' points are only scaled, from whole font units to 1/64
+    /// pixel (`af_dummy_hints_apply`, which reloads and saves).
+    Dummy,
+    Latin(latin::Metrics),
+    Cjk(cjk::Metrics),
+}
+
+/// A style's measurements fitted to one size.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StyleScaled {
+    Dummy,
+    Latin(latin::Scaled),
+    Cjk(cjk::Scaled),
+}
+
 /// What the hinter knows about one face at one instance, whatever the size:
 /// every glyph's style, and each style's measurements.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,9 +193,9 @@ pub(crate) struct FaceHints {
     styles: Vec<u8>,
     /// Per glyph: whether it is a non-base glyph, never snapped to a zone.
     nonbase: Vec<bool>,
-    /// Per style: its Latin metrics, where it is a Latin-system style some
-    /// glyph uses and at least one of its zones could be measured.
-    metrics: Vec<Option<latin::Metrics>>,
+    /// Per style some glyph uses: its metrics -- the dummy system's for a
+    /// Latin-system style none of whose zones could be measured.
+    metrics: Vec<Option<StyleMetrics>>,
     units_per_em: i64,
     /// How the face's coordinates become whole font units.
     units: glyph::Units,
@@ -177,7 +210,8 @@ impl FaceHints {
     /// text -- with one feature on besides, when it names one -- and answers
     /// nothing for a cluster that feature leaves as it was; FreeType uses
     /// HarfBuzz for the same (`af_shaper_get_cluster`). A face with no Unicode
-    /// `cmap` has every glyph in the fallback style, and is drawn unhinted.
+    /// `cmap` has every glyph in the fallback style, hinted with nothing
+    /// measured, as FreeType hints it.
     pub(crate) fn new(
         face: &Face,
         coords: &Coords,
@@ -187,86 +221,92 @@ impl FaceHints {
         let count = usize::from(face.num_glyphs());
         let mut styles = alloc::vec![UNASSIGNED; count];
         let mut nonbase = alloc::vec![false; count];
+        // Without a Unicode `cmap`, FreeType sorts nothing: steps 1 and 2 are
+        // skipped, and every glyph falls to step 3.
+        let unicode = face.has_unicode_cmap();
 
-        // 1. The characters that reach each glyph: the earliest style of any
-        //    of them wins, which is FreeType's style-by-style,
-        //    first-come-first-served order.
-        let mut mappings: Vec<(u32, u16)> = Vec::new();
-        face.for_each_unicode_mapping(|cp, gid| mappings.push((cp, gid)));
-        for &(cp, gid) in &mappings {
-            if let (Some(style), Some(slot)) = (style_of(cp), styles.get_mut(usize::from(gid))) {
-                *slot = (*slot).min(style);
-            }
-        }
-        //    ... and, in the same pass and the same order, the glyphs each
-        //    feature style's feature produces. A feature style comes just
-        //    before its script's default style, so a small capital claimed
-        //    here stays the feature's even where a character also maps to it,
-        //    and one script's feature can claim glyphs of another's letters
-        //    when the font shares the lookup between scripts.
-        for (i, style) in STYLES.iter().enumerate() {
-            let (Some(feature), Some(script), Ok(index)) =
-                (style.feature, SCRIPTS.get(style.script), u8::try_from(i))
-            else {
-                continue;
-            };
-            // Every character of the style's zones, the spaces between them
-            // included, as FreeType walks the strings.
-            let probes: Vec<u16> = style
-                .blues
-                .iter()
-                .flat_map(|blue| blue.chars.chars())
-                .map(|ch| face.glyph_index(ch).unwrap_or(0))
-                .collect();
-            for gid in face.feature_style_glyphs(script.ot, feature, &probes) {
-                if let Some(slot) = styles.get_mut(usize::from(gid)) {
-                    *slot = (*slot).min(index);
-                }
-            }
-        }
-        // A glyph is non-base if any character reaching it is in its own
-        // style's non-base list.
-        for &(cp, gid) in &mappings {
-            let Some(&style) = styles.get(usize::from(gid)) else {
-                continue;
-            };
-            let listed = STYLES
-                .get(usize::from(style))
-                .is_some_and(|s| s.nonbase.iter().any(|&(a, b)| (a..=b).contains(&cp)));
-            if listed && let Some(slot) = nonbase.get_mut(usize::from(gid)) {
-                *slot = true;
-            }
-        }
-        drop(mappings);
-
-        // 2. The glyphs only `GSUB` reaches, for the script whose features
-        //    produce them -- every feature, for each script's default style --
-        //    and then for Latin again with `DFLT`'s, FreeType's default
-        //    script.
-        let assign = |styles: &mut Vec<u8>, style: usize, glyphs: Vec<u16>| {
-            let Ok(style) = u8::try_from(style) else {
-                return;
-            };
-            for gid in glyphs {
-                if let Some(slot) = styles.get_mut(usize::from(gid))
-                    && *slot == UNASSIGNED
+        if unicode {
+            // 1. The characters that reach each glyph: the earliest style of any
+            //    of them wins, which is FreeType's style-by-style,
+            //    first-come-first-served order.
+            let mut mappings: Vec<(u32, u16)> = Vec::new();
+            face.for_each_unicode_mapping(|cp, gid| mappings.push((cp, gid)));
+            for &(cp, gid) in &mappings {
+                if let (Some(style), Some(slot)) = (style_of(cp), styles.get_mut(usize::from(gid)))
                 {
-                    *slot = style;
+                    *slot = (*slot).min(style);
                 }
             }
-        };
-        for (i, style) in STYLES.iter().enumerate() {
-            let Some(script) = SCRIPTS.get(style.script) else {
-                continue;
-            };
-            if style.feature.is_none() && !script.ot.is_empty() {
-                assign(&mut styles, i, face.gsub_outputs(script.ot));
+            //    ... and, in the same pass and the same order, the glyphs each
+            //    feature style's feature produces. A feature style comes just
+            //    before its script's default style, so a small capital claimed
+            //    here stays the feature's even where a character also maps to it,
+            //    and one script's feature can claim glyphs of another's letters
+            //    when the font shares the lookup between scripts.
+            for (i, style) in STYLES.iter().enumerate() {
+                let (Some(feature), Some(script), Ok(index)) =
+                    (style.feature, SCRIPTS.get(style.script), u8::try_from(i))
+                else {
+                    continue;
+                };
+                // Every character of the style's zones, the spaces between them
+                // included, as FreeType walks the strings.
+                let probes: Vec<u16> = style
+                    .blues
+                    .iter()
+                    .flat_map(|blue| blue.chars.chars())
+                    .map(|ch| face.glyph_index(ch).unwrap_or(0))
+                    .collect();
+                for gid in face.feature_style_glyphs(script.ot, feature, &probes) {
+                    if let Some(slot) = styles.get_mut(usize::from(gid)) {
+                        *slot = (*slot).min(index);
+                    }
+                }
             }
-        }
-        if let Some(latin) = STYLES.iter().position(|s| {
-            s.feature.is_none() && SCRIPTS.get(s.script).is_some_and(|sc| sc.name == "latn")
-        }) {
-            assign(&mut styles, latin, face.gsub_outputs(&[*b"latn", *b"DFLT"]));
+            // A glyph is non-base if any character reaching it is in its own
+            // style's non-base list.
+            for &(cp, gid) in &mappings {
+                let Some(&style) = styles.get(usize::from(gid)) else {
+                    continue;
+                };
+                let listed = STYLES
+                    .get(usize::from(style))
+                    .is_some_and(|s| s.nonbase.iter().any(|&(a, b)| (a..=b).contains(&cp)));
+                if listed && let Some(slot) = nonbase.get_mut(usize::from(gid)) {
+                    *slot = true;
+                }
+            }
+            drop(mappings);
+
+            // 2. The glyphs only `GSUB` reaches, for the script whose features
+            //    produce them -- every feature, for each script's default style --
+            //    and then for Latin again with `DFLT`'s, FreeType's default
+            //    script.
+            let assign = |styles: &mut Vec<u8>, style: usize, glyphs: Vec<u16>| {
+                let Ok(style) = u8::try_from(style) else {
+                    return;
+                };
+                for gid in glyphs {
+                    if let Some(slot) = styles.get_mut(usize::from(gid))
+                        && *slot == UNASSIGNED
+                    {
+                        *slot = style;
+                    }
+                }
+            };
+            for (i, style) in STYLES.iter().enumerate() {
+                let Some(script) = SCRIPTS.get(style.script) else {
+                    continue;
+                };
+                if style.feature.is_none() && !script.ot.is_empty() {
+                    assign(&mut styles, i, face.gsub_outputs(script.ot));
+                }
+            }
+            if let Some(latin) = STYLES.iter().position(|s| {
+                s.feature.is_none() && SCRIPTS.get(s.script).is_some_and(|sc| sc.name == "latn")
+            }) {
+                assign(&mut styles, latin, face.gsub_outputs(&[*b"latn", *b"DFLT"]));
+            }
         }
 
         // 3. The rest.
@@ -277,7 +317,7 @@ impl FaceHints {
             }
         }
 
-        // Measure every Latin-system style some glyph uses.
+        // Measure every style some glyph uses whose writing system hints.
         let outline = |gid: u16| face.tagged_outline_at(gid, coords).ok();
         let units = if face.has_cff_outlines() {
             glyph::Units::Floored
@@ -294,7 +334,7 @@ impl FaceHints {
             .iter()
             .zip(&used)
             .map(|(style, &used)| {
-                if !used || style.system != System::Latin {
+                if !used {
                     return None;
                 }
                 let script = SCRIPTS.get(style.script)?;
@@ -306,13 +346,29 @@ impl FaceHints {
                     outline: &outline,
                     units,
                 };
-                latin::Metrics::new(
-                    units_per_em,
-                    script.standard,
-                    style.blues,
-                    script.top_to_bottom,
-                    &source,
-                )
+                match style.system {
+                    System::Dummy => Some(StyleMetrics::Dummy),
+                    // Without one measurable zone, FreeType hands the style's
+                    // glyphs to its dummy style (`af_latin_metrics_init_blues`).
+                    System::Latin => Some(
+                        latin::Metrics::new(
+                            units_per_em,
+                            script.standard,
+                            style.blues,
+                            script.top_to_bottom,
+                            &source,
+                        )
+                        .map_or(StyleMetrics::Dummy, StyleMetrics::Latin),
+                    ),
+                    System::Cjk | System::Indic => cjk::Metrics::new(
+                        units_per_em,
+                        script.standard,
+                        style.blues,
+                        unicode,
+                        &source,
+                    )
+                    .map(StyleMetrics::Cjk),
+                }
             })
             .collect();
         Self {
@@ -330,10 +386,10 @@ impl FaceHints {
 pub(crate) struct Hinter {
     face: FaceHints,
     /// Per style, as [`FaceHints::metrics`]: the zones fitted to this size.
-    scaled: Vec<Option<latin::Scaled>>,
-    /// The size's own scale, 16.16 (FreeType's `x_scale`), for the
-    /// horizontal coordinates light hinting leaves alone: only the vertical
-    /// one is fitted to a style's x-height.
+    scaled: Vec<Option<StyleScaled>>,
+    /// The size's own scale, 16.16 (FreeType's `x_scale`), which only a
+    /// Latin-system style's vertical one departs from, fitted to its
+    /// x-height.
     x_scale: i64,
 }
 
@@ -354,7 +410,14 @@ impl Hinter {
         let scaled = face
             .metrics
             .iter()
-            .map(|m| m.as_ref().map(|m| m.scale(y_scale)))
+            .map(|m| {
+                m.as_ref().map(|m| match m {
+                    StyleMetrics::Dummy => StyleScaled::Dummy,
+                    StyleMetrics::Latin(m) => StyleScaled::Latin(m.scale(y_scale)),
+                    // Square pixels: both dimensions at the size's scale.
+                    StyleMetrics::Cjk(m) => StyleScaled::Cjk(m.scale(y_scale, y_scale)),
+                })
+            })
             .collect();
         Some(Self {
             x_scale: y_scale,
@@ -364,8 +427,8 @@ impl Hinter {
     }
 
     /// `gid` hinted, as a path in *pixels* (y up, origin on the baseline), or
-    /// `None` when this glyph is drawn unhinted: its style is not a ported
-    /// one, it has no outline, or it is beyond what the hinter takes on.
+    /// `None` when this glyph is drawn as designed: it has no outline, or it
+    /// is beyond what the hinter takes on.
     pub(crate) fn hint(&self, face: &Face, coords: &Coords, gid: u16) -> Option<Outline> {
         self.hint_points(face, coords, gid)
             .map(|points| points.to_path())
@@ -382,20 +445,38 @@ impl Hinter {
         let style = usize::from(*self.face.styles.get(usize::from(gid))?);
         let metrics = self.face.metrics.get(style)?.as_ref()?;
         let scaled = self.scaled.get(style)?.as_ref()?;
-        let nonbase = self
-            .face
-            .nonbase
-            .get(usize::from(gid))
-            .copied()
-            .unwrap_or(false);
         let outline = face.tagged_outline_at(gid, coords).ok()?;
-        let mut hints = Hints::load(
-            &outline,
-            self.face.units,
-            scaled.y_scale,
-            self.face.units_per_em,
-        )?;
-        latin::hint(&mut hints, metrics, scaled, nonbase)?;
+        let load = |x_scale, y_scale| {
+            Hints::load(
+                &outline,
+                self.face.units,
+                x_scale,
+                y_scale,
+                self.face.units_per_em,
+            )
+        };
+        let hints = match (metrics, scaled) {
+            (StyleMetrics::Latin(metrics), StyleScaled::Latin(scaled)) => {
+                let nonbase = self
+                    .face
+                    .nonbase
+                    .get(usize::from(gid))
+                    .copied()
+                    .unwrap_or(false);
+                let mut hints = load(self.x_scale, scaled.y_scale)?;
+                latin::hint(&mut hints, metrics, scaled, nonbase)?;
+                hints
+            }
+            // The CJK system snaps no zone differently for a non-base glyph.
+            (StyleMetrics::Cjk(metrics), StyleScaled::Cjk(scaled)) => {
+                let mut hints = load(scaled.x_scale, scaled.y_scale)?;
+                cjk::hint(&mut hints, metrics, scaled)?;
+                hints
+            }
+            // Scaled, nothing more, at the size's own scale both ways.
+            (StyleMetrics::Dummy, StyleScaled::Dummy) => load(self.x_scale, self.x_scale)?,
+            _ => return None,
+        };
         Some(self.to_pixels(&outline, &hints))
     }
 
@@ -412,13 +493,13 @@ impl Hinter {
         STYLES.get(usize::from(style)).map(|s| (s.name, nonbase))
     }
 
-    /// The hinted points in pixels: horizontal positions as the size scales
-    /// them, vertical ones as hinting placed them.
+    /// The hinted points in pixels, as hinting placed them.
     ///
-    /// Horizontal positions are scaled as FreeType scales them, from the
-    /// whole font units the hinter read (`af_glyph_hints_reload`), not from
-    /// the exact coordinates: a CFF glyph's fractional ones are floored
-    /// first, which moves a point by up to a unit.
+    /// A coordinate no hinting moved -- every `x`, in light mode's Latin --
+    /// is where FreeType scales it (`af_glyph_hints_reload`), from the whole
+    /// font units the hinter read rather than the exact coordinates: a CFF
+    /// glyph's fractional ones are floored first, which moves a point by up to
+    /// a unit.
     #[allow(
         clippy::cast_precision_loss,
         reason = "26.6 positions are far inside f64's exact range"
@@ -427,7 +508,7 @@ impl Hinter {
         let points = hints
             .points
             .iter()
-            .map(|h| Exact::new(mul_fix(h.fx, self.x_scale) as f64 / 64.0, h.y as f64 / 64.0))
+            .map(|h| Exact::new(h.x as f64 / 64.0, h.y as f64 / 64.0))
             .collect();
         TaggedOutline {
             points,
@@ -441,6 +522,7 @@ impl Hinter {
 #[allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
     reason = "test fixtures"
 )]
 mod tests {
@@ -495,9 +577,21 @@ mod tests {
     /// Every point of every glyph of `font`, hinted at each size in
     /// `expected`, against where FreeType put it.
     fn matches_freetype(font: &[u8], expected: &[(f32, u16, &str, &[i32])]) {
+        matches_freetype_at(font, &[], expected);
+    }
+
+    /// [`matches_freetype`] at the variable instance `variations` names, in
+    /// user-space axis values.
+    fn matches_freetype_at(
+        font: &[u8],
+        variations: &[([u8; 4], f32)],
+        expected: &[(f32, u16, &str, &[i32])],
+    ) {
         use crate::raster::Rendering;
         use crate::scaled::ScaledFont;
         let face = alloc::sync::Arc::new(Face::parse(font.to_vec()).unwrap());
+        let coords = (!variations.is_empty())
+            .then(|| face.variation_axes().unwrap().normalize_tags(variations));
         let mut failures = Vec::new();
         let mut current: Option<(f32, ScaledFont)> = None;
         for &(px, gid, name, want) in expected {
@@ -506,6 +600,9 @@ mod tests {
                 .is_none_or(|(p, _)| p.to_bits() != px.to_bits())
             {
                 let mut font = ScaledFont::shared(face.clone(), px).unwrap();
+                if let Some(coords) = &coords {
+                    font.set_variations(coords.clone());
+                }
                 font.set_rendering(Rendering {
                     hinting: true,
                     ..Rendering::default()
@@ -545,6 +642,38 @@ mod tests {
         matches_freetype(&fixture::OTF, &fixture::OTF_EXPECTED);
     }
 
+    /// At weight 610 every `gvar` delta of the fixture lands on a fraction,
+    /// which FreeType's loader rounds point by point and offset by offset in
+    /// its own 16.16 -- the accent's offset by 10.4999 units, to 10 -- and a
+    /// scaled component goes through `FT_MulFix`.
+    #[test]
+    fn a_variable_face_is_hinted_exactly_as_freetype_hints_it_at_an_instance() {
+        matches_freetype_at(&fixture::VAR, &[(*b"wght", 610.0)], &fixture::VAR_EXPECTED);
+    }
+
+    /// A `CFF2` face at an instance: its points come from charstrings whose
+    /// `blend`s FreeType weighs in 16.16 (`cf2_doBlend`), fractional deltas
+    /// included, and the hinter must see exactly those.
+    #[test]
+    fn a_cff2_face_is_hinted_exactly_as_freetype_hints_it_at_an_instance() {
+        matches_freetype_at(
+            &fixture::VAR_CFF2,
+            &[(*b"wght", 610.0)],
+            &fixture::VAR_CFF2_EXPECTED,
+        );
+    }
+
+    /// And without `HVAR`, where `gvar` moves each glyph's origin by its left
+    /// phantom point's delta (4.9 units, to 5), which with `HVAR` it does not.
+    #[test]
+    fn without_hvar_a_glyph_moves_with_its_left_phantom_point() {
+        matches_freetype_at(
+            &fixture::VAR_NOHVAR,
+            &[(*b"wght", 610.0)],
+            &fixture::VAR_NOHVAR_EXPECTED,
+        );
+    }
+
     #[test]
     fn the_fixture_is_sorted_into_the_styles_freetype_uses() {
         use crate::raster::Rendering;
@@ -552,6 +681,7 @@ mod tests {
         let face = Face::parse(fixture::TTF.to_vec()).unwrap();
         let gid = |ch: char| face.glyph_index(ch).unwrap();
         let (x, h, e_acute, comb) = (gid('x'), gid('h'), gid('\u{E9}'), gid('\u{301}'));
+        let (ideograph, arrow) = (gid('\u{7530}'), gid('\u{2192}'));
         let mut font = ScaledFont::new(face, 13.0).unwrap();
         font.set_rendering(Rendering {
             hinting: true,
@@ -581,9 +711,62 @@ mod tests {
         assert_eq!(font.hint_style(e_acute), Some(("latn_dflt", false)));
         // A combining mark is never snapped to a zone.
         assert_eq!(font.hint_style(comb), Some(("latn_dflt", true)));
-        // Glyph 0 is reached by no character: the fallback style, whose CJK
-        // hinting is not ported, so it is drawn as designed.
+        // Ideographs are the CJK system's; so is glyph 0, reached by no
+        // character, and the arrow, whose block no script claims: the
+        // fallback style.
+        assert_eq!(font.hint_style(ideograph), Some(("hani_dflt", false)));
         assert_eq!(font.hint_style(0), Some(("hani_dflt", false)));
+        assert_eq!(font.hint_style(arrow), Some(("hani_dflt", false)));
+        // And hinted, where they used to be drawn as designed; where their
+        // points go is the fixture's to check, as FreeType put them.
+        assert!(font.hinted_points(arrow).is_some());
+        assert!(font.hinted_points(ideograph).is_some());
+    }
+
+    #[test]
+    fn a_face_without_a_unicode_cmap_puts_every_glyph_in_the_fallback_style() {
+        use crate::raster::Rendering;
+        use crate::scaled::ScaledFont;
+        // The fixture with its `cmap` subtables relabelled as a symbol one
+        // (platform 3, encoding 0), which FreeType's auto-hinter does not
+        // accept as Unicode.
+        let mut data = fixture::TTF.to_vec();
+        let cmap = symbol_cmap(&mut data);
+        assert!(cmap > 0, "the fixture has a cmap");
+        let face = Face::parse(data).unwrap();
+        assert!(!face.has_unicode_cmap());
+        let mut font = ScaledFont::new(face, 13.0).unwrap();
+        font.set_rendering(Rendering {
+            hinting: true,
+            ..Rendering::default()
+        });
+        for gid in [0, 5, 45, 55] {
+            assert_eq!(font.hint_style(gid), Some(("hani_dflt", false)), "{gid}");
+        }
+        // Hinted all the same, with nothing measured, as FreeType hints them.
+        assert!(font.hinted_points(45).is_some());
+    }
+
+    /// Relabel every `cmap` subtable of the sfnt in `data` as Windows symbol
+    /// (3, 0); the number relabelled.
+    fn symbol_cmap(data: &mut [u8]) -> usize {
+        let be16 = |d: &[u8], at: usize| u16::from_be_bytes([d[at], d[at + 1]]);
+        let be32 =
+            |d: &[u8], at: usize| u32::from_be_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]]);
+        let tables = usize::from(be16(data, 4));
+        let Some(record) = (0..tables)
+            .map(|i| 12 + 16 * i)
+            .find(|&r| &data[r..r + 4] == b"cmap")
+        else {
+            return 0;
+        };
+        let cmap = be32(data, record + 8) as usize;
+        let count = usize::from(be16(data, cmap + 2));
+        for i in 0..count {
+            let rec = cmap + 4 + 8 * i;
+            data[rec..rec + 4].copy_from_slice(&[0, 3, 0, 0]);
+        }
+        count
     }
 
     #[test]

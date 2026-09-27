@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Network Manager — interfaces, IP, DNS, WiFi, VPN and diagnostics"
 [dependencies]
+# The machine's interfaces, read as System Information reads them.
+hwquery = { path = "../hwquery" }
+# Diagnose's network checks, off the window's thread.
+offloop = { path = "../offloop" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -12,6 +16,12 @@ guitk = { path = "../../gui/toolkit" }
 # keyboard, and eight tabs' worth of buttons existed only for the tests to
 # call. There was not even a `handle_event` for a loop to have called.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# Its fixture-tree provider, for the tests that fake /proc.
+hwquery = { path = "../hwquery", features = ["testing"] }
+# A directory to fake a machine's /proc in.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]
 workspace = true

@@ -33,6 +33,7 @@ NAMELESS = "a_pci_function_with_no_name_is_named_by_its_ids"
 CLASSES = "a_pci_class_decides_the_branch"
 REGISTERED = "what_the_kernel_registered_is_listed_as_working"
 CPU = "the_processor_is_one_row_named_by_its_brand"
+LINK = "an_interface_row_says_its_link_and_address"
 # main.rs
 EMPTY = "an_empty_tree_says_nothing_was_read_and_why"
 SCAN = "a_scan_lists_the_devices_the_kernel_publishes"
@@ -170,6 +171,30 @@ INVENTORY = [
         '        .map_or_else(|| String::from("Processor"), |b| b.trim().to_owned());',
         '        .map_or_else(|| String::from("Processor"), |b| b);',
         [CPU],
+    ),
+    (
+        "a link that is down is not a warning",
+        "    let status = if n.up == Some(false) {",
+        "    let status = if n.up == Some(true) {",
+        [LINK],
+    ),
+    (
+        "a link that is down is not said",
+        '        Some(false) => detail.push_str("; link down"),',
+        "        Some(false) => {}",
+        [LINK],
+    ),
+    (
+        "an interface with no address does not say so",
+        '        Address::Unassigned => detail.push_str("; no address assigned"),',
+        "        Address::Unassigned => {}",
+        [LINK],
+    ),
+    (
+        "an interface's address is not said",
+        '        Address::Is(ip) => detail.push_str(&format!("; address {ip}")),',
+        "        Address::Is(_) => {}",
+        [LINK],
     ),
 ]
 

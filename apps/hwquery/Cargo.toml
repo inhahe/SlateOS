@@ -7,6 +7,12 @@ description = "What the machine's hardware is, as the kernel publishes it: read 
 [dependencies]
 # /proc/meminfo, /proc/net/dev, /proc/monitors and the rest, parsed once.
 procinfo = { path = "../../procinfo" }
+# The one renderer for a name the kernel hands over, which may hold any byte.
+quoting = { path = "../../userspace/quoting" }
+
+[dev-dependencies]
+# A directory to fake a machine's /proc in.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [features]
 # `SyscallProvider::at`, for a program's tests to read a fixture tree. Only a

@@ -13,8 +13,30 @@
 //! - Adapter enable/disable
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha dark theme.
-//! Network I/O is performed through Slate OS syscalls; simulated with
-//! representative data for initial development.
+//!
+//! **The interfaces are the machine's** (2026-09-26): read through `hwquery`
+//! -- the reader System Information and the Device Manager use -- from what
+//! the kernel publishes, which on SlateOS is `/proc/net`: each interface's
+//! link state, MAC, address, netmask, gateway and DNS server. Read on opening
+//! and on Refresh. What nothing publishes reads "Not reported" (the link
+//! speed, the traffic counters, whether the address came from DHCP), and an
+//! address the kernel says there is none of reads "None assigned".
+//!
+//! **Apply, Enable and Disable reach the kernel**: a static address, netmask,
+//! gateway and DNS server, and the interface's up/down state, go through
+//! `SYS_NET_IF_CONFIG` -- the call `ifconfig` makes -- and the list is read
+//! again afterwards, so what is shown is what the kernel then says, never
+//! what was asked for. The kernel allows it to an administrator only, and a
+//! refusal says so and changes nothing.
+//!
+//! **Diagnose checks the machine**: whether a card is up, whether it has an
+//! address and a gateway (from what was read), and then, off the window's
+//! thread, whether a name can be looked up and a connection made -- to
+//! `example.com`, only when asked (design-decisions §1216).
+//!
+//! Still refused in words: switching to DHCP (`dhcpcd` does that), scanning
+//! for Wi-Fi and reaching a VPN. Each refusal says so
+//! where it happens, and no list is ever filled with an example.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -56,25 +78,25 @@ const TITLE_BAR_HEIGHT: f32 = 40.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
-/// Height of the banner that says this program cannot see the network.
+/// Height of the banner shown while there is no interface list to show.
 const CANNOT_SEE_BANNER_HEIGHT: f32 = 58.0;
 
-/// The status-bar form of "this program cannot see the network".
-const CANNOT_SEE_NETWORK: &str =
-    "Cannot see the network -- no interface list, no scan, no connection";
+/// What a value nothing published reads as.
+const NOT_REPORTED: &str = "Not reported";
 
-/// The banner, one line per element.
-///
-/// Three lines, and the third is the one that does the work. Emptying the
-/// lists is only half a fix: an empty interface list claims the machine has no
-/// network hardware, an empty Wi-Fi list claims there is nothing in range, and
-/// an empty VPN list claims none is configured. Those are findings, and this
-/// program has not looked at anything, so it has earned none of them.
-const CANNOT_SEE_LINES: [&str; 3] = [
-    "This program cannot see the network.",
-    "It has no way to list interfaces, scan for Wi-Fi, read a VPN configuration or measure traffic.",
-    "Every list below is empty because nothing was examined -- not because nothing is there.",
-];
+/// What an address the kernel says there is none of reads as: its `0.0.0.0`,
+/// a card DHCP has not configured. A fact about the machine, not a gap in
+/// what is known, so it must not read as [`NOT_REPORTED`].
+const NOT_ASSIGNED: &str = "None assigned";
+
+/// Why a wireless network cannot be joined, for the status bar.
+const CANNOT_REACH_A_RADIO: &str = "nothing here can scan for or join a wireless network";
+
+/// The banner's last line while no interface has been read. It does the
+/// work: an empty interface list claims the machine has no network
+/// hardware, which is a finding this program has not made.
+const NOT_READ_LINE: &str =
+    "The list is empty because nothing was read -- not because nothing is there.";
 const SIDEBAR_ITEM_HEIGHT: f32 = 52.0;
 const SECTION_PADDING: f32 = 16.0;
 const FIELD_HEIGHT: f32 = 28.0;
@@ -129,6 +151,8 @@ pub enum InterfaceType {
     Bridge,
     Loopback,
     Virtual,
+    /// Nothing says what kind of interface it is.
+    Unknown,
 }
 
 impl InterfaceType {
@@ -141,6 +165,7 @@ impl InterfaceType {
             Self::Bridge => "Bridge",
             Self::Loopback => "Loopback",
             Self::Virtual => "Virtual",
+            Self::Unknown => NOT_REPORTED,
         }
     }
 
@@ -152,7 +177,7 @@ impl InterfaceType {
             Self::VPN => pal.peach,
             Self::Bridge => pal.yellow,
             Self::Loopback => pal.overlay0,
-            Self::Virtual => pal.subtext0,
+            Self::Virtual | Self::Unknown => pal.subtext0,
         }
     }
 }
@@ -164,6 +189,8 @@ pub enum ConnectionState {
     Disconnected,
     Connecting,
     Error(String),
+    /// Nothing says whether the link is up.
+    Unknown,
 }
 
 impl ConnectionState {
@@ -173,13 +200,14 @@ impl ConnectionState {
             Self::Disconnected => "Disconnected",
             Self::Connecting => "Connecting...",
             Self::Error(_) => "Error",
+            Self::Unknown => NOT_REPORTED,
         }
     }
 
     fn color(&self, pal: &Palette) -> Color {
         match self {
             Self::Connected => pal.green,
-            Self::Disconnected => pal.overlay0,
+            Self::Disconnected | Self::Unknown => pal.overlay0,
             Self::Connecting => pal.yellow,
             Self::Error(_) => pal.red,
         }
@@ -280,9 +308,27 @@ pub struct NetworkInterface {
     pub ip_config: IpConfig,
     pub state: ConnectionState,
     pub speed_mbps: Option<u32>,
-    pub rx_bytes: u64,
-    pub tx_bytes: u64,
+    /// The traffic counters, when published -- `None` is not zero traffic.
+    pub rx_bytes: Option<u64>,
+    pub tx_bytes: Option<u64>,
     pub enabled: bool,
+    /// Whether the address came from DHCP, when anything says. The kernel's
+    /// `/proc/net` does not, and "DHCP: Enabled" would be a guess.
+    pub dhcp: Option<bool>,
+    /// The summary's text for an interface that was read rather than typed:
+    /// each address as the kernel reported it, or which of the two absences
+    /// it is. `ip_config` holds only real addresses, as the editor's
+    /// starting point; `None` shows `ip_config` as it stands.
+    pub reported: Option<ReportedAddresses>,
+}
+
+/// An interface's addresses as the IP summary shows them: the address,
+/// [`NOT_ASSIGNED`] or [`NOT_REPORTED`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReportedAddresses {
+    pub ip_address: String,
+    pub subnet_mask: String,
+    pub gateway: String,
 }
 
 impl NetworkInterface {
@@ -293,8 +339,15 @@ impl NetworkInterface {
     /// one counter must not disagree about what it says. See
     /// design-decisions.md §489 -- bytes moved over a link are SI, bytes
     /// occupying storage are IEC.
-    fn format_bytes(bytes: u64) -> String {
-        guitk::bytes::si(bytes)
+    fn format_bytes(bytes: Option<u64>) -> String {
+        bytes.map_or_else(|| String::from(NOT_REPORTED), guitk::bytes::si)
+    }
+
+    /// The address the summary and the status bar show.
+    fn shown_ip_address(&self) -> &str {
+        self.reported
+            .as_ref()
+            .map_or(&self.ip_config.ip_address, |r| &r.ip_address)
     }
 
     /// Summary status line for the status bar.
@@ -303,7 +356,7 @@ impl NetworkInterface {
             format!(
                 "{}: {} ({})",
                 self.name,
-                self.ip_config.ip_address,
+                self.shown_ip_address(),
                 self.state.label(),
             )
         } else {
@@ -547,6 +600,349 @@ pub struct NetManagerApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether `interfaces` is the machine's, and if not, why not.
+    pub listing: Listing,
+    /// What carries a change to the kernel: [`kernel_configure`], or a
+    /// test's stand-in.
+    pub configure: fn(&ConfigChange) -> Result<(), i64>,
+    /// Where Diagnose looks up and connects; a test points it at its own
+    /// listener.
+    pub probe: (String, u16),
+    /// The worker running the network checks, once one has been asked for.
+    diagnoser: Option<offloop::Latest<(String, u16), Vec<DiagnosticResult>>>,
+    /// Wakes the window when the network checks are done.
+    waker: Option<std::task::Waker>,
+    /// Under test, the root the interfaces are read under: a scratch tree,
+    /// or (by default) a directory that does not exist, so that no test's
+    /// outcome depends on the computer it runs on.
+    #[cfg(test)]
+    machine_root: String,
+}
+
+/// `SYS_NET_IF_CONFIG` (`kernel/src/syscall/number.rs`): sets the address,
+/// netmask, gateway, DNS server and up/down state of the kernel's network
+/// interface. Administrator only. `userspace/ifconfig` is its other caller.
+#[cfg(target_vendor = "slateos")]
+const SYS_NET_IF_CONFIG: i64 = 856;
+
+/// What a native SlateOS call returns when the caller may not make it
+/// (`KernelError::PermissionDenied`). Not Linux's `-1`: a native call returns
+/// the kernel's own codes.
+const KERNEL_PERMISSION_DENIED: i64 = -400;
+/// `KernelError::InvalidArgument`.
+const KERNEL_INVALID_ARGUMENT: i64 = -3;
+/// `KernelError::NotSupported` -- and what this program answers itself off
+/// SlateOS, where there is no kernel to ask.
+const KERNEL_NOT_SUPPORTED: i64 = -2;
+
+/// Which fields of the record the kernel applies (its byte 17); a clear bit
+/// leaves that field as it is.
+mod config_mask {
+    pub const IP: u8 = 1 << 0;
+    pub const MASK: u8 = 1 << 1;
+    pub const GATEWAY: u8 = 1 << 2;
+    pub const DNS: u8 = 1 << 3;
+    pub const UP: u8 = 1 << 4;
+}
+
+/// A change to the kernel's interface configuration; a `None` field is left
+/// as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConfigChange {
+    pub ip: Option<[u8; 4]>,
+    pub mask: Option<[u8; 4]>,
+    pub gateway: Option<[u8; 4]>,
+    pub dns: Option<[u8; 4]>,
+    pub up: Option<bool>,
+}
+
+impl ConfigChange {
+    /// `SYS_NET_IF_CONFIG`'s 18-byte record: bytes 0-3 the address, 4-7 the
+    /// netmask, 8-11 the gateway, 12-15 the DNS server, 16 up (1) or down
+    /// (0), and 17 which of them to apply.
+    #[must_use]
+    pub fn record(&self) -> [u8; 18] {
+        let quad = |v: Option<[u8; 4]>| v.unwrap_or([0; 4]);
+        let [a0, a1, a2, a3] = quad(self.ip);
+        let [m0, m1, m2, m3] = quad(self.mask);
+        let [g0, g1, g2, g3] = quad(self.gateway);
+        let [d0, d1, d2, d3] = quad(self.dns);
+        let bit = |set: bool, bit: u8| if set { bit } else { 0 };
+        let fields = bit(self.ip.is_some(), config_mask::IP)
+            | bit(self.mask.is_some(), config_mask::MASK)
+            | bit(self.gateway.is_some(), config_mask::GATEWAY)
+            | bit(self.dns.is_some(), config_mask::DNS)
+            | bit(self.up.is_some(), config_mask::UP);
+        [
+            a0,
+            a1,
+            a2,
+            a3,
+            m0,
+            m1,
+            m2,
+            m3,
+            g0,
+            g1,
+            g2,
+            g3,
+            d0,
+            d1,
+            d2,
+            d3,
+            u8::from(self.up == Some(true)),
+            fields,
+        ]
+    }
+}
+
+/// Hand `change` to the kernel: `Err` with its (negative) code when it
+/// refuses.
+///
+/// # Errors
+///
+/// The kernel's refusal, as the code it returned.
+pub fn kernel_configure(change: &ConfigChange) -> Result<(), i64> {
+    let ret = config_call(&change.record());
+    if ret < 0 { Err(ret) } else { Ok(()) }
+}
+
+/// The raw call.
+#[cfg(target_vendor = "slateos")]
+fn config_call(record: &[u8; 18]) -> i64 {
+    let ret: i64;
+    // SAFETY: SYS_NET_IF_CONFIG reads `rsi` (18) bytes from `rdi` and writes
+    // none; `record` is a live 18-byte array for the whole call. The
+    // `syscall` instruction clobbers rcx and r11, which are declared, and
+    // touches no stack.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") SYS_NET_IF_CONFIG => ret,
+            in("rdi") record.as_ptr(),
+            in("rsi") 18_u64,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Off SlateOS there is no kernel to ask, and a raw `syscall` would be some
+/// other kernel's call with this number -- so the answer is "not supported",
+/// as `ifconfig`'s host arm answers.
+#[cfg(not(target_vendor = "slateos"))]
+fn config_call(_record: &[u8; 18]) -> i64 {
+    KERNEL_NOT_SUPPORTED
+}
+
+/// Why the kernel refused a change, in words, from its code. `what` is the
+/// act, as "apply the configuration to eth0".
+fn refusal(code: i64, what: &str) -> String {
+    match code {
+        KERNEL_PERMISSION_DENIED => format!(
+            "Cannot {what}: changing the network needs administrator rights. Nothing was changed"
+        ),
+        KERNEL_NOT_SUPPORTED => format!(
+            "Cannot {what}: this system has no way to configure an interface. Nothing was changed"
+        ),
+        KERNEL_INVALID_ARGUMENT => {
+            format!("Cannot {what}: the kernel refused it as invalid. Nothing was changed")
+        }
+        other => {
+            format!("Cannot {what}: the kernel refused it (code {other}). Nothing was changed")
+        }
+    }
+}
+
+/// An address typed in dotted form, as the kernel's four bytes.
+fn octets(text: &str) -> Option<[u8; 4]> {
+    text.parse::<std::net::Ipv4Addr>().ok().map(|a| a.octets())
+}
+
+/// Where Diagnose looks a name up and connects: design-decisions §1216.
+#[cfg(not(test))]
+const PROBE_HOST: &str = "example.com";
+/// Under test, loopback: nothing any test does leaves the machine.
+#[cfg(test)]
+const PROBE_HOST: &str = "127.0.0.1";
+/// The port Diagnose connects to.
+#[cfg(not(test))]
+const PROBE_PORT: u16 = 80;
+/// Under test, the discard port, which nothing on a test host listens on.
+#[cfg(test)]
+const PROBE_PORT: u16 = 9;
+/// How long the connection check waits.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The checks that need the network: look `host` up, then connect to it.
+/// Run off the window's thread; each is timed. No request is sent -- the
+/// connection is closed once made.
+fn probe_network((host, port): (String, u16)) -> Vec<DiagnosticResult> {
+    use std::net::ToSocketAddrs;
+    let check = |name: &str, status, details: String| DiagnosticResult {
+        name: name.to_owned(),
+        status,
+        details,
+    };
+    let started = std::time::Instant::now();
+    let addrs: Vec<std::net::SocketAddr> = match (host.as_str(), port).to_socket_addrs() {
+        Ok(found) => found.collect(),
+        Err(e) => {
+            return vec![
+                check(
+                    "Name lookup",
+                    DiagnosticStatus::Failed,
+                    format!("{host} could not be looked up: {e}"),
+                ),
+                check(
+                    "Connection",
+                    DiagnosticStatus::Failed,
+                    String::from("Not tried: the name was not found"),
+                ),
+            ];
+        }
+    };
+    let Some(first) = addrs.first() else {
+        return vec![
+            check(
+                "Name lookup",
+                DiagnosticStatus::Failed,
+                format!("{host} has no address"),
+            ),
+            check(
+                "Connection",
+                DiagnosticStatus::Failed,
+                String::from("Not tried: the name has no address"),
+            ),
+        ];
+    };
+    let lookup = check(
+        "Name lookup",
+        DiagnosticStatus::Passed,
+        format!(
+            "{host} is {} ({} ms)",
+            first.ip(),
+            started.elapsed().as_millis()
+        ),
+    );
+    let started = std::time::Instant::now();
+    let mut why = String::new();
+    for addr in &addrs {
+        match std::net::TcpStream::connect_timeout(addr, PROBE_TIMEOUT) {
+            Ok(_) => {
+                return vec![
+                    lookup,
+                    check(
+                        "Connection",
+                        DiagnosticStatus::Passed,
+                        format!(
+                            "Connected to {addr} in {} ms",
+                            started.elapsed().as_millis()
+                        ),
+                    ),
+                ];
+            }
+            Err(e) => why = e.to_string(),
+        }
+    }
+    vec![
+        lookup,
+        check(
+            "Connection",
+            DiagnosticStatus::Failed,
+            format!("Could not connect to {host} port {port}: {why}"),
+        ),
+    ]
+}
+
+/// Whether the interface list is the machine's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Listing {
+    /// Nothing has been read yet.
+    NotRead,
+    /// The list is what the kernel published at the last read -- an empty
+    /// one included, which is then a finding: no card was found.
+    Read,
+    /// The last read failed, for this reason; the list is empty.
+    Unreadable(String),
+}
+
+/// An address as the summary shows it.
+fn address_text(address: &hwquery::Address) -> String {
+    match address {
+        hwquery::Address::Is(text) => text.clone(),
+        hwquery::Address::Unassigned => String::from(NOT_ASSIGNED),
+        hwquery::Address::NotReported => String::from(NOT_REPORTED),
+    }
+}
+
+/// An address as the editor starts from: only a real one.
+fn address_value(address: &hwquery::Address) -> String {
+    match address {
+        hwquery::Address::Is(text) => text.clone(),
+        hwquery::Address::Unassigned | hwquery::Address::NotReported => String::new(),
+    }
+}
+
+/// The window's form of an interface the kernel published.
+///
+/// The kind is read from the name, as the kernel names it (`eth`, `en` for
+/// Ethernet, `wl` for wireless, `lo` for loopback); a name that says nothing
+/// is "Not reported", not a guess. The link state is the kernel's `UP` or
+/// `DOWN`. Whether the address came from DHCP is published by nothing, so it
+/// is "Not reported" too -- the editor still starts from DHCP, the way a new
+/// configuration does, because that is its own starting point and not a
+/// statement about the machine.
+fn interface_of(a: &hwquery::NetworkAdapterInfo, id: u32) -> NetworkInterface {
+    let interface_type = if a.name.starts_with("eth") || a.name.starts_with("en") {
+        InterfaceType::Ethernet
+    } else if a.name.starts_with("wl") {
+        InterfaceType::WiFi
+    } else if a.name == "lo" {
+        InterfaceType::Loopback
+    } else {
+        InterfaceType::Unknown
+    };
+    let dns_servers = match &a.dns {
+        hwquery::Address::Is(text) => text
+            .split([',', ' '])
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        hwquery::Address::Unassigned | hwquery::Address::NotReported => Vec::new(),
+    };
+    NetworkInterface {
+        id,
+        name: a.name.clone(),
+        interface_type,
+        mac_address: a.mac_address.clone(),
+        ip_config: IpConfig {
+            ip_address: address_value(&a.ipv4),
+            subnet_mask: address_value(&a.subnet),
+            gateway: address_value(&a.gateway),
+            dns_servers,
+            dhcp_enabled: true,
+        },
+        state: match a.up {
+            Some(true) => ConnectionState::Connected,
+            Some(false) => ConnectionState::Disconnected,
+            None => ConnectionState::Unknown,
+        },
+        speed_mbps: a.speed_mbps,
+        rx_bytes: a.bytes_received,
+        tx_bytes: a.bytes_sent,
+        // The switch is the kernel's up/down state; with no word on it, the
+        // interface is listed as enabled, as it is listed at all.
+        enabled: a.up != Some(false),
+        dhcp: None,
+        reported: Some(ReportedAddresses {
+            ip_address: address_text(&a.ipv4),
+            subnet_mask: address_text(&a.subnet),
+            gateway: address_text(&a.gateway),
+        }),
+    }
 }
 
 impl NetManagerApp {
@@ -580,7 +976,7 @@ impl NetManagerApp {
 
         // Not "No interfaces", which is a statement about the machine.
         let status_message = interfaces.first().map_or_else(
-            || CANNOT_SEE_NETWORK.to_string(),
+            || String::from("The interfaces have not been read yet"),
             NetworkInterface::status_summary,
         );
 
@@ -608,7 +1004,73 @@ impl NetManagerApp {
             focus: None,
             wheel: wheel::Accumulator::default(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            listing: Listing::NotRead,
+            configure: kernel_configure,
+            probe: (String::from(PROBE_HOST), PROBE_PORT),
+            diagnoser: None,
+            waker: None,
+            #[cfg(test)]
+            machine_root: String::from("no-machine-under-test"),
         }
+    }
+
+    /// Where the interfaces are read from: the machine.
+    #[cfg(not(test))]
+    #[expect(clippy::unused_self, reason = "the test build reads a field")]
+    fn machine(&self) -> hwquery::SyscallProvider {
+        hwquery::SyscallProvider::new()
+    }
+
+    /// Under test, [`Self::machine_root`].
+    #[cfg(test)]
+    fn machine(&self) -> hwquery::SyscallProvider {
+        hwquery::SyscallProvider::at(&self.machine_root)
+    }
+
+    /// Read the machine's interfaces, replacing whatever the list held.
+    /// Opening and Refresh.
+    pub fn read_interfaces(&mut self) {
+        let machine = self.machine();
+        self.read_interfaces_from(&machine);
+    }
+
+    /// [`read_interfaces`](Self::read_interfaces), from `provider` -- the
+    /// machine, or a test's fixture tree.
+    ///
+    /// A failed read empties the list rather than keeping the last one: rows
+    /// that stay after a read that could not see them would be shown as
+    /// current when nothing says they are.
+    pub fn read_interfaces_from(&mut self, provider: &dyn hwquery::HardwareProvider) {
+        match provider.query_network() {
+            Ok(adapters) => {
+                self.interfaces = adapters
+                    .iter()
+                    .zip(1_u32..)
+                    .map(|(a, id)| interface_of(a, id))
+                    .collect();
+                self.listing = Listing::Read;
+            }
+            Err(why) => {
+                self.interfaces.clear();
+                self.listing = Listing::Unreadable(why.to_string());
+            }
+        }
+        self.selected_interface = self
+            .selected_interface
+            .min(self.interfaces.len().saturating_sub(1));
+        self.edit_ip_config = self
+            .interfaces
+            .get(self.selected_interface)
+            .map(|iface| iface.ip_config.clone())
+            .unwrap_or_default();
+        self.status_message = self.interfaces.get(self.selected_interface).map_or_else(
+            || match &self.listing {
+                Listing::Unreadable(why) => format!("Could not read the interfaces: {why}"),
+                Listing::Read => String::from("No network card was found"),
+                Listing::NotRead => String::from("The interfaces have not been read yet"),
+            },
+            NetworkInterface::status_summary,
+        );
     }
 
     /// Scroll the sidebar's interface list by `delta` rows.
@@ -674,15 +1136,44 @@ impl NetManagerApp {
         }
     }
 
-    /// Toggle enabled/disabled state for the selected interface.
+    /// Bring the selected interface up if it is down, or down if it is up,
+    /// through the kernel.
+    ///
+    /// The switch moves only when the kernel says it did: after the change
+    /// the list is read again, so what is shown is `/proc/net`'s word, and a
+    /// refusal leaves everything where it was, with the reason. (Until
+    /// 2026-09-15 it flipped `enabled` and reported success while nothing
+    /// left the struct; until 2026-09-26 it refused outright.)
     pub fn toggle_selected_enabled(&mut self) {
-        // It used to flip `enabled` and set the state to Connecting or
-        // Disconnected, then report the interface's new summary -- bringing a
-        // network interface up or down is about as consequential as this app
-        // gets, and none of it left the struct.
-        if self.interfaces.get(self.selected_interface).is_some() {
-            self.status_message =
-                String::from("Cannot bring an interface up or down: nothing here can reach it");
+        let Some(iface) = self.interfaces.get(self.selected_interface) else {
+            return;
+        };
+        let name = iface.name.clone();
+        let bring_up = match iface.state {
+            ConnectionState::Connected => false,
+            ConnectionState::Disconnected => true,
+            ConnectionState::Connecting | ConnectionState::Error(_) | ConnectionState::Unknown => {
+                self.status_message = format!(
+                    "Cannot bring {name} up or down: the kernel does not say which it is now"
+                );
+                return;
+            }
+        };
+        let (act, done) = if bring_up {
+            (format!("bring {name} up"), format!("Brought {name} up"))
+        } else {
+            (format!("take {name} down"), format!("Took {name} down"))
+        };
+        let change = ConfigChange {
+            up: Some(bring_up),
+            ..ConfigChange::default()
+        };
+        match (self.configure)(&change) {
+            Ok(()) => {
+                self.read_interfaces();
+                self.status_message = done;
+            }
+            Err(code) => self.status_message = refusal(code, &act),
         }
     }
 
@@ -694,24 +1185,83 @@ impl NetManagerApp {
         }
     }
 
-    /// Apply the edited IP configuration to the selected interface.
+    /// Apply the edited IP configuration to the selected interface, through
+    /// the kernel.
     ///
-    /// Validates, then refuses. It used to assign `iface.ip_config` and report
-    /// "IP configuration updated for eth0" -- a write to an in-memory struct
-    /// that nothing reads, described to the user as a change to their machine's
-    /// networking. Somebody fixing a bad address would have believed it took.
+    /// Validates first, and reports a malformed address whether or not the
+    /// change could have been made. A static configuration goes to the
+    /// kernel whole: an empty gateway, or no DNS server, is sent as `0.0.0.0`
+    /// -- none -- rather than left out, which would keep the old one while
+    /// the editor shows it gone. The kernel keeps one DNS server; with
+    /// several listed, the first is the one sent, and the status says so.
     ///
-    /// The validation still runs first, and still reports its own errors,
-    /// because a malformed address is worth telling the user about whether or
-    /// not it could have been applied.
+    /// On success the editor closes and the list is read again, so what is
+    /// shown is what the kernel then says. (Until 2026-09-15 it wrote the
+    /// struct and said "IP configuration updated"; until 2026-09-26 it
+    /// refused outright.) A refusal keeps the editor open with the typed
+    /// text in it, and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// A field that is not an address, no interface selected, DHCP (which
+    /// this cannot switch on), or the kernel's refusal, in words.
     pub fn apply_ip_config(&mut self) -> Result<(), String> {
         self.edit_ip_config.validate()?;
-        if self.interfaces.get(self.selected_interface).is_some() {
-            self.status_message = String::from(CANNOT_SEE_NETWORK);
-            Err("Cannot apply an IP configuration: nothing here can reach the interface".into())
-        } else {
-            Err("No interface selected".into())
+        let Some(iface) = self.interfaces.get(self.selected_interface) else {
+            return Err("No interface selected".into());
+        };
+        let name = iface.name.clone();
+        let config = &self.edit_ip_config;
+        if config.dhcp_enabled {
+            return Err(format!(
+                "Cannot switch {name} to DHCP from here: the dhcpcd command does that, run as an administrator"
+            ));
         }
+        let field = |label: &str, text: &str| {
+            octets(text).ok_or_else(|| format!("Not an address: {label} {text}"))
+        };
+        let none = [0_u8; 4];
+        let change = ConfigChange {
+            ip: Some(field("IP", &config.ip_address)?),
+            mask: Some(field("subnet mask", &config.subnet_mask)?),
+            gateway: Some(if config.gateway.is_empty() {
+                none
+            } else {
+                field("gateway", &config.gateway)?
+            }),
+            dns: Some(match config.dns_servers.first() {
+                Some(server) => field("DNS server", server)?,
+                None => none,
+            }),
+            up: None,
+        };
+        let dropped = config.dns_servers.len().saturating_sub(1);
+        let summary = format!(
+            "{} mask {} gateway {} DNS {}",
+            config.ip_address,
+            config.subnet_mask,
+            if config.gateway.is_empty() {
+                "none"
+            } else {
+                &config.gateway
+            },
+            config.dns_servers.first().map_or("none", String::as_str),
+        );
+        if let Err(code) = (self.configure)(&change) {
+            let why = refusal(code, &format!("apply the configuration to {name}"));
+            self.status_message.clone_from(&why);
+            return Err(why);
+        }
+        self.editing_ip = false;
+        self.read_interfaces();
+        self.status_message = if dropped == 0 {
+            format!("Applied to {name}: {summary}")
+        } else {
+            format!(
+                "Applied to {name}: {summary} -- the kernel keeps one DNS server, so the other {dropped} were not sent"
+            )
+        };
+        Ok(())
     }
 
     /// Cancel IP configuration editing.
@@ -801,7 +1351,7 @@ impl NetManagerApp {
         // "Connecting to HomeNetwork..." -- a join attempt against a network
         // invented by `sample_wifi_networks`, reported as though it had begun.
         // Nothing here can reach a radio.
-        self.status_message = format!("Cannot connect to {ssid}: {CANNOT_SEE_NETWORK}");
+        self.status_message = format!("Cannot connect to {ssid}: {CANNOT_REACH_A_RADIO}");
         Err(format!(
             "Cannot connect to {ssid}: nothing here can reach a radio"
         ))
@@ -842,10 +1392,159 @@ impl NetManagerApp {
     /// is what somebody consults *while troubleshooting*, and this one told
     /// them to look elsewhere for a fault that may well have been here.
     pub fn run_diagnostics(&mut self) {
+        let (host, port) = self.probe.clone();
+        let mut report = self.local_checks();
+        report.push(DiagnosticResult {
+            name: String::from("Name lookup"),
+            status: DiagnosticStatus::Running,
+            details: format!("Looking up {host}"),
+        });
+        report.push(DiagnosticResult {
+            name: String::from("Connection"),
+            status: DiagnosticStatus::Running,
+            details: format!("Connecting to {host} port {port}"),
+        });
+        self.diagnostics = report;
+        self.diagnostics_running = true;
+        self.status_message = format!("Diagnosing: the interface, then {host}");
+        if self.diagnoser.is_none() {
+            // Without the window's waker (a test), the result is collected
+            // by asking for it; nothing needs waking.
+            let waker = self
+                .waker
+                .clone()
+                .unwrap_or_else(|| offloop::channel_waker().0);
+            match offloop::Latest::start("netmanager-diagnose", waker, probe_network) {
+                Ok(worker) => self.diagnoser = Some(worker),
+                Err(e) => {
+                    return self.finish_diagnosis(Self::not_run(&format!("cannot start: {e}")));
+                }
+            }
+        }
+        let asked = self.diagnoser.as_mut().map(|w| w.ask((host, port)).is_ok());
+        if asked != Some(true) {
+            self.finish_diagnosis(Self::not_run("the worker has stopped"));
+        }
+    }
+
+    /// The network checks' results, when they could not be run at all.
+    fn not_run(why: &str) -> Vec<DiagnosticResult> {
+        ["Name lookup", "Connection"]
+            .iter()
+            .map(|name| DiagnosticResult {
+                name: (*name).to_owned(),
+                status: DiagnosticStatus::Failed,
+                details: format!("Not run: {why}"),
+            })
+            .collect()
+    }
+
+    /// Take the network checks' results, if they have arrived.
+    pub fn collect_diagnosis(&mut self) {
+        if let Some(results) = self.diagnoser.as_mut().and_then(offloop::Latest::take) {
+            self.finish_diagnosis(results);
+        }
+    }
+
+    /// Put the network checks' results in place of their Running rows, and
+    /// say how it went.
+    fn finish_diagnosis(&mut self, results: Vec<DiagnosticResult>) {
+        self.diagnostics
+            .retain(|d| d.status != DiagnosticStatus::Running);
+        self.diagnostics.extend(results);
         self.diagnostics_running = false;
-        self.diagnostics = Vec::new();
-        self.status_message =
-            String::from("Cannot run diagnostics: nothing here can send a packet");
+        let failed = self
+            .diagnostics
+            .iter()
+            .filter(|d| d.status == DiagnosticStatus::Failed)
+            .count();
+        self.status_message = if failed == 0 {
+            String::from("Diagnosis finished: nothing failed")
+        } else {
+            format!("Diagnosis finished: {failed} check(s) failed")
+        };
+    }
+
+    /// The checks read from the machine, at once: the card, its address,
+    /// its gateway.
+    fn local_checks(&self) -> Vec<DiagnosticResult> {
+        let check = |name: &str, status, details: String| DiagnosticResult {
+            name: name.to_owned(),
+            status,
+            details,
+        };
+        let iface = self.interfaces.get(self.selected_interface);
+        let card = match (&self.listing, iface) {
+            (_, Some(i)) => match i.state {
+                ConnectionState::Connected => check(
+                    "Network card",
+                    DiagnosticStatus::Passed,
+                    format!("{} is up", i.name),
+                ),
+                ConnectionState::Disconnected => check(
+                    "Network card",
+                    DiagnosticStatus::Failed,
+                    format!("{} is down", i.name),
+                ),
+                _ => check(
+                    "Network card",
+                    DiagnosticStatus::Warning,
+                    format!("The kernel does not say whether {} is up", i.name),
+                ),
+            },
+            (Listing::Read, None) => check(
+                "Network card",
+                DiagnosticStatus::Failed,
+                String::from("The kernel found no network card it has a driver for"),
+            ),
+            (Listing::Unreadable(why), None) => check(
+                "Network card",
+                DiagnosticStatus::Failed,
+                format!("Could not read the interfaces: {why}"),
+            ),
+            (Listing::NotRead, None) => check(
+                "Network card",
+                DiagnosticStatus::Warning,
+                String::from("The interfaces have not been read; press Refresh"),
+            ),
+        };
+        let Some(i) = iface else {
+            return vec![card];
+        };
+        let (ip, gateway) = i.reported.as_ref().map_or(
+            (
+                i.ip_config.ip_address.as_str(),
+                i.ip_config.gateway.as_str(),
+            ),
+            |r| (r.ip_address.as_str(), r.gateway.as_str()),
+        );
+        let address = match ip {
+            NOT_ASSIGNED => check(
+                "Address",
+                DiagnosticStatus::Failed,
+                format!("No address assigned: DHCP has not configured {}", i.name),
+            ),
+            NOT_REPORTED | "" => check(
+                "Address",
+                DiagnosticStatus::Warning,
+                String::from("Not reported"),
+            ),
+            ip => check("Address", DiagnosticStatus::Passed, ip.to_owned()),
+        };
+        let gateway = match gateway {
+            NOT_ASSIGNED => check(
+                "Gateway",
+                DiagnosticStatus::Warning,
+                String::from("None assigned: only the local network can be reached"),
+            ),
+            NOT_REPORTED | "" => check(
+                "Gateway",
+                DiagnosticStatus::Warning,
+                String::from("Not reported"),
+            ),
+            gw => check("Gateway", DiagnosticStatus::Passed, gw.to_owned()),
+        };
+        vec![card, address, gateway]
     }
 
     /// The report `run_diagnostics` used to invent, kept as a fixture.
@@ -1051,12 +1750,43 @@ pub fn render_app(app: &NetManagerApp) -> RenderTree {
     render_frame(app, WINDOW_WIDTH, WINDOW_HEIGHT).into_tree()
 }
 
-/// Say, in the window, that this program cannot see the network.
+/// The banner's lines while there is no interface to show: why the list is
+/// empty. `None` once there is a list, which the banner would cover.
+fn banner_lines(app: &NetManagerApp) -> Option<[String; 3]> {
+    if !app.interfaces.is_empty() {
+        return None;
+    }
+    Some(match &app.listing {
+        Listing::NotRead => [
+            String::from("No network interface has been read."),
+            String::from("Press F5 to read them."),
+            String::from(NOT_READ_LINE),
+        ],
+        Listing::Unreadable(why) => [
+            String::from("No network interface was read."),
+            format!("Could not read the interfaces: {why}."),
+            String::from(NOT_READ_LINE),
+        ],
+        Listing::Read => [
+            String::from("No network card was found."),
+            String::from(
+                "The kernel runs no network interface: it found no card it has a driver for.",
+            ),
+            String::from(
+                "Wi-Fi, VPNs and changing the configuration are not available here either.",
+            ),
+        ],
+    })
+}
+
+/// Say why the interface list is empty, while it is.
 ///
-/// Drawn unconditionally: there is no state in which this app *can* see the
-/// network, so a condition here would be a condition that is always true and
-/// would rot the moment one stopped being.
+/// Drawn last and over the panels' tops, which are empty while it shows; once
+/// there is an interface it is not drawn at all, so it never covers one.
 fn render_cannot_see_banner(frame: &mut Frame, app: &NetManagerApp) {
+    let Some(lines) = banner_lines(app) else {
+        return;
+    };
     let y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
     frame.push(RenderCommand::FillRect {
         x: 0.0,
@@ -1066,7 +1796,7 @@ fn render_cannot_see_banner(frame: &mut Frame, app: &NetManagerApp) {
         color: app.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
-    for (i, line) in CANNOT_SEE_LINES.iter().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         let (size, color, weight) = if i == 0 {
             (
                 13.0,
@@ -1080,7 +1810,7 @@ fn render_cannot_see_banner(frame: &mut Frame, app: &NetManagerApp) {
             x: 12.0,
             #[expect(clippy::cast_precision_loss, reason = "three lines; the index is 0..3")]
             y: y + 6.0 + i as f32 * 16.0,
-            text: (*line).to_string(),
+            text: line.clone(),
             color,
             font_size: size,
             font_weight: weight,
@@ -1471,7 +2201,7 @@ fn render_tab_properties(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f3
             "Speed:",
             iface
                 .speed_mbps
-                .map_or("N/A".to_string(), |s| format!("{s} Mbps")),
+                .map_or(NOT_REPORTED.to_string(), |s| format!("{s} Mbps")),
         ),
         (
             "Enabled:",
@@ -1506,18 +2236,24 @@ fn render_tab_properties(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f3
     y = render_section_title(frame, &app.palette, "IP Configuration Summary", lx, y);
 
     let ip = &iface.ip_config;
+    let (mask, gateway) = iface
+        .reported
+        .as_ref()
+        .map_or((ip.subnet_mask.as_str(), ip.gateway.as_str()), |r| {
+            (r.subnet_mask.as_str(), r.gateway.as_str())
+        });
     let ip_fields: &[(&str, &str)] = &[
         (
             "DHCP:",
-            if ip.dhcp_enabled {
-                "Enabled"
-            } else {
-                "Disabled"
+            match iface.dhcp {
+                Some(true) => "Enabled",
+                Some(false) => "Disabled",
+                None => NOT_REPORTED,
             },
         ),
-        ("IP Address:", &ip.ip_address),
-        ("Subnet Mask:", &ip.subnet_mask),
-        ("Gateway:", &ip.gateway),
+        ("IP Address:", iface.shown_ip_address()),
+        ("Subnet Mask:", mask),
+        ("Gateway:", gateway),
     ];
 
     for (label, value) in ip_fields {
@@ -1816,7 +2552,7 @@ fn render_tab_wifi(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw:
         frame.push(RenderCommand::Text {
             x: lx,
             y,
-            text: "No WiFi networks found. Click Refresh to scan.".into(),
+            text: "No Wi-Fi network is listed: nothing here can scan for one.".into(),
             color: app.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -1930,7 +2666,7 @@ fn render_tab_vpn(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         frame.push(RenderCommand::Text {
             x: lx,
             y,
-            text: "No VPN connections configured".into(),
+            text: "No VPN connection is listed: nothing here can read one.".into(),
             color: app.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -2437,10 +3173,12 @@ fn render_status_bar(frame: &mut Frame, app: &NetManagerApp) {
     });
 
     // Interface count on right
-    let iface_count = if app.interfaces.is_empty() {
-        String::from("interfaces unknown")
-    } else {
-        format!("{} interfaces", app.interfaces.len())
+    // A count is a finding only after a read that worked.
+    let iface_count = match (&app.listing, app.interfaces.len()) {
+        (Listing::Read, 0) => String::from("no interfaces"),
+        (Listing::Read, 1) => String::from("1 interface"),
+        (Listing::Read, n) => format!("{n} interfaces"),
+        (Listing::NotRead | Listing::Unreadable(_), _) => String::from("interfaces unknown"),
     };
     frame.push(RenderCommand::Text {
         x: frame.width - 120.0,
@@ -2837,7 +3575,12 @@ impl NetManagerApp {
     pub fn activate(&mut self, target: Target) -> Action {
         match target {
             Target::Refresh => {
+                // Both halves said: what the interfaces are, and that Wi-Fi
+                // was not scanned.
+                self.read_interfaces();
+                let interfaces = std::mem::take(&mut self.status_message);
                 self.refresh();
+                self.status_message = format!("{interfaces}. {}", self.status_message);
                 Action::Redraw
             }
             Target::Diagnose | Target::RunDiagnostics => {
@@ -3197,8 +3940,10 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(1000),
-            rx_bytes: 2_457_600_000,
-            tx_bytes: 384_000_000,
+            rx_bytes: Some(2_457_600_000),
+            tx_bytes: Some(384_000_000),
+            dhcp: Some(true),
+            reported: None,
             enabled: true,
         },
         NetworkInterface {
@@ -3215,8 +3960,10 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(300),
-            rx_bytes: 1_024_000_000,
-            tx_bytes: 128_000_000,
+            rx_bytes: Some(1_024_000_000),
+            tx_bytes: Some(128_000_000),
+            dhcp: Some(true),
+            reported: None,
             enabled: true,
         },
         NetworkInterface {
@@ -3233,8 +3980,10 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
             },
             state: ConnectionState::Disconnected,
             speed_mbps: None,
-            rx_bytes: 0,
-            tx_bytes: 0,
+            rx_bytes: Some(0),
+            tx_bytes: Some(0),
+            dhcp: Some(false),
+            reported: None,
             enabled: true,
         },
         NetworkInterface {
@@ -3251,8 +4000,10 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(10000),
-            rx_bytes: 50_000_000,
-            tx_bytes: 50_000_000,
+            rx_bytes: Some(50_000_000),
+            tx_bytes: Some(50_000_000),
+            dhcp: Some(false),
+            reported: None,
             enabled: true,
         },
         NetworkInterface {
@@ -3269,8 +4020,10 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
             },
             state: ConnectionState::Connected,
             speed_mbps: None,
-            rx_bytes: 10_000_000,
-            tx_bytes: 10_000_000,
+            rx_bytes: Some(10_000_000),
+            tx_bytes: Some(10_000_000),
+            dhcp: Some(false),
+            reported: None,
             enabled: true,
         },
         NetworkInterface {
@@ -3287,8 +4040,10 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
             },
             state: ConnectionState::Disconnected,
             speed_mbps: None,
-            rx_bytes: 0,
-            tx_bytes: 0,
+            rx_bytes: Some(0),
+            tx_bytes: Some(0),
+            dhcp: Some(false),
+            reported: None,
             enabled: false,
         },
     ]
@@ -3405,6 +4160,20 @@ impl App for NetManagerApp {
         self.palette = *palette;
     }
 
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.waker = Some(waker);
+    }
+
+    /// The network checks are done.
+    fn on_wake(&mut self) -> Response {
+        self.collect_diagnosis();
+        Response::Redraw
+    }
+
     fn title(&self) -> String {
         "Network Manager".to_string()
     }
@@ -3465,6 +4234,8 @@ impl Probe for NetManagerApp {
 
 fn main() -> ExitCode {
     let mut app = NetManagerApp::new();
+    // Looked at once on opening; Refresh looks again.
+    app.read_interfaces();
     app::launch("netmanager", &mut app)
 }
 
@@ -3706,24 +4477,32 @@ mod tests {
 
     #[test]
     fn test_format_bytes_small() {
-        assert_eq!(NetworkInterface::format_bytes(0), "0 B");
-        assert_eq!(NetworkInterface::format_bytes(512), "512 B");
+        assert_eq!(NetworkInterface::format_bytes(Some(0)), "0 B");
+        assert_eq!(
+            NetworkInterface::format_bytes(None),
+            NOT_REPORTED,
+            "a counter nothing publishes read as zero traffic"
+        );
+        assert_eq!(NetworkInterface::format_bytes(Some(512)), "512 B");
     }
 
     #[test]
     fn test_format_bytes_kb() {
-        assert_eq!(NetworkInterface::format_bytes(1024), "1.0 kB");
-        assert_eq!(NetworkInterface::format_bytes(2048), "2.0 kB");
+        assert_eq!(NetworkInterface::format_bytes(Some(1024)), "1.0 kB");
+        assert_eq!(NetworkInterface::format_bytes(Some(2048)), "2.0 kB");
     }
 
     #[test]
     fn test_format_bytes_mb() {
-        assert_eq!(NetworkInterface::format_bytes(1_048_576), "1.0 MB");
+        assert_eq!(NetworkInterface::format_bytes(Some(1_048_576)), "1.0 MB");
     }
 
     #[test]
     fn test_format_bytes_gb() {
-        assert_eq!(NetworkInterface::format_bytes(1_073_741_824), "1.1 GB");
+        assert_eq!(
+            NetworkInterface::format_bytes(Some(1_073_741_824)),
+            "1.1 GB"
+        );
     }
 
     #[test]
@@ -3739,9 +4518,11 @@ mod tests {
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(100),
-            rx_bytes: 0,
-            tx_bytes: 0,
+            rx_bytes: Some(0),
+            tx_bytes: Some(0),
             enabled: true,
+            dhcp: None,
+            reported: None,
         };
         let summary = iface.status_summary();
         assert!(summary.contains("eth0"));
@@ -3758,9 +4539,11 @@ mod tests {
             ip_config: IpConfig::default(),
             state: ConnectionState::Disconnected,
             speed_mbps: None,
-            rx_bytes: 0,
-            tx_bytes: 0,
+            rx_bytes: Some(0),
+            tx_bytes: Some(0),
             enabled: true,
+            dhcp: None,
+            reported: None,
         };
         let summary = iface.status_summary();
         assert!(summary.contains("wlan0"));
@@ -3877,6 +4660,8 @@ mod tests {
         assert_eq!(app.selected_interface, 0);
     }
 
+    /// Off SlateOS the kernel cannot be asked, so the switch stays where it
+    /// was and the status says why -- in the words for "not supported".
     #[test]
     fn test_toggle_enabled() {
         let mut app = NetManagerApp::with_sample_data();
@@ -3886,7 +4671,15 @@ mod tests {
             app.interfaces[0].enabled, was_enabled,
             "the interface switch moved for a change that never reached the interface",
         );
-        assert!(app.status_message.contains("Cannot bring an interface"));
+        assert!(
+            app.status_message
+                .starts_with("Cannot take Ethernet 1 down")
+                && app
+                    .status_message
+                    .contains("no way to configure an interface"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
@@ -4124,18 +4917,108 @@ mod tests {
         // packet loss over 100 pings, MTU 1500 confirmed -- none of which
         // happened. A passing diagnostic is consulted *while troubleshooting*,
         // so it sent people to look elsewhere for a fault that may be here.
+        //
+        // Now it checks: under test the probe is loopback's discard port,
+        // which nothing listens on -- so the connection check must fail, and
+        // say so, rather than pass.
         assert!(app.diagnostics.is_empty());
         app.run_diagnostics();
         assert!(
-            app.diagnostics.is_empty(),
-            "diagnostics appeared from nowhere"
+            app.diagnostics_running,
+            "the network checks were not started"
         );
-        assert!(!app.diagnostics_running);
         assert!(
-            app.status_message.contains("Cannot run diagnostics"),
-            "nothing said why there is no report: {}",
-            app.status_message,
+            app.diagnostics
+                .iter()
+                .any(|d| d.status == DiagnosticStatus::Running),
+            "nothing shows the checks under way"
         );
+        finish(&mut app);
+        let connection = app
+            .diagnostics
+            .iter()
+            .find(|d| d.name == "Connection")
+            .expect("a connection check");
+        assert_eq!(
+            connection.status,
+            DiagnosticStatus::Failed,
+            "{connection:?}"
+        );
+        assert!(
+            app.status_message.contains("failed"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// Collect the network checks, waiting up to ten seconds.
+    fn finish(app: &mut NetManagerApp) {
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.diagnostics_running {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "the checks never finished"
+            );
+            app.collect_diagnosis();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// **Diagnose checks the machine and the network**: a card that is up,
+    /// its address and gateway from what the kernel published, the name
+    /// looked up, and a connection made -- here to a listener on loopback.
+    #[test]
+    fn diagnose_checks_the_card_and_reaches_a_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("its address").port();
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.probe = (String::from("127.0.0.1"), port);
+        app.run_diagnostics();
+        finish(&mut app);
+        let status = |name: &str| {
+            app.diagnostics
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| (d.status, d.details.clone()))
+                .unwrap_or_else(|| panic!("no {name} check: {:?}", app.diagnostics))
+        };
+        assert_eq!(status("Network card").0, DiagnosticStatus::Passed);
+        assert_eq!(
+            status("Address"),
+            (DiagnosticStatus::Passed, String::from("10.0.2.15"))
+        );
+        assert_eq!(
+            status("Gateway"),
+            (DiagnosticStatus::Passed, String::from("10.0.2.2"))
+        );
+        assert_eq!(status("Name lookup").0, DiagnosticStatus::Passed);
+        let (connected, how) = status("Connection");
+        assert_eq!(connected, DiagnosticStatus::Passed, "{how}");
+        assert!(how.contains(&port.to_string()), "{how}");
+        assert_eq!(app.status_message, "Diagnosis finished: nothing failed");
+    }
+
+    /// A card with no address is a failed check that says why -- the
+    /// answer to "why can nothing be reached?".
+    #[test]
+    fn diagnose_names_a_card_with_no_address() {
+        let (_dir, mut app) = app_on(
+            "Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        );
+        app.run_diagnostics();
+        let card = &app.diagnostics[0];
+        assert_eq!(
+            (card.name.as_str(), card.status),
+            ("Network card", DiagnosticStatus::Failed)
+        );
+        let address = &app.diagnostics[1];
+        assert_eq!(address.status, DiagnosticStatus::Failed);
+        assert!(
+            address.details.contains("DHCP has not configured eth0"),
+            "{}",
+            address.details
+        );
+        finish(&mut app);
     }
 
     #[test]
@@ -4910,10 +5793,12 @@ mod tests {
 
         app.diagnostics.clear();
         click(&mut app, Target::Diagnose);
-        assert!(
-            app.diagnostics.is_empty(),
-            "Diagnose produced a report from nowhere"
+        assert_eq!(
+            app.diagnostics.first().map(|d| d.name.as_str()),
+            Some("Network card"),
+            "Diagnose did not check the machine"
         );
+        finish(&mut app);
         assert_eq!(
             app.active_tab,
             DetailTab::Diagnostics,
@@ -4928,40 +5813,473 @@ mod tests {
         );
     }
 
-    /// The window says it cannot see the network, in words, unconditionally.
-    ///
-    /// The point of the 2026-09-15 change. Emptying the lists was only half of
-    /// it: an empty interface list claims the machine has no network hardware,
-    /// an empty Wi-Fi list claims nothing is in range, and an empty VPN list
-    /// claims none is configured. All three are findings this program has not
-    /// looked hard enough to earn -- it has not looked at all.
-    #[test]
-    fn the_window_says_it_cannot_see_the_network() {
-        let app = NetManagerApp::new();
-        let tree = render_app(&app);
-        let texts: Vec<&str> = tree
+    /// Every text the window draws.
+    fn drawn(app: &NetManagerApp) -> Vec<String> {
+        render_app(app)
             .commands
             .iter()
             .filter_map(|cmd| match cmd {
-                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                RenderCommand::Text { text, .. } => Some(text.clone()),
                 _ => None,
             })
-            .collect();
+            .collect()
+    }
 
-        for line in CANNOT_SEE_LINES {
-            assert!(texts.contains(&line), "the window never said {line:?}");
-        }
+    /// Before anything is read the window says so, in words. An empty
+    /// interface list claims the machine has no network hardware; that is a
+    /// finding this program has not made, and the banner's last line says
+    /// the list is empty for want of looking.
+    #[test]
+    fn before_a_read_the_window_says_nothing_was_read() {
+        let app = NetManagerApp::new();
+        let texts = drawn(&app);
         assert!(
-            CANNOT_SEE_LINES
+            texts
                 .iter()
-                .any(|l| l.contains("not because nothing is there")),
-            "nothing forecloses reading the empty lists as findings",
+                .any(|t| t == "No network interface has been read."),
+            "{texts:?}"
         );
+        assert!(texts.iter().any(|t| t == NOT_READ_LINE), "{texts:?}");
         // And the count in the status bar is not "0 interfaces", which is a
         // claim about the machine rather than about this program.
+        assert!(texts.iter().any(|t| t == "interfaces unknown"), "{texts:?}");
         assert!(
-            !texts.iter().any(|t| t.starts_with("0 interfaces")),
+            !texts
+                .iter()
+                .any(|t| t.starts_with("0 interfaces") || t == "no interfaces"),
             "the status bar reported a count it could not have taken",
+        );
+    }
+
+    /// A machine for a test: SlateOS's `/proc/net` as the kernel writes it
+    /// (`kernel/src/fs/procfs.rs::gen_net`), in a scratch directory.
+    fn slate_machine(net: &str) -> (scratchdir::ScratchDir, hwquery::SyscallProvider) {
+        let dir = scratchdir::ScratchDir::new("netmanager_machine");
+        std::fs::create_dir_all(dir.dir().join("proc")).expect("fixture");
+        std::fs::write(dir.dir().join("proc/net"), net).expect("fixture");
+        let provider =
+            hwquery::SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+        (dir, provider)
+    }
+
+    const ETH0_UP: &str = "Interface: eth0  (UP)\n  MAC:     52:54:00:12:34:56\n  IPv4:    10.0.2.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.2.2\n  DNS:     10.0.2.3\n";
+
+    /// **The machine's interface is listed**, as the kernel publishes it: its
+    /// name, link, MAC and addresses -- and what nothing publishes (the
+    /// speed, the counters, whether DHCP gave the address) reads "Not
+    /// reported", where it read "N/A", zero bytes, and "DHCP: Enabled".
+    #[test]
+    fn the_kernels_interface_is_listed_as_it_is_published() {
+        let (_dir, provider) = slate_machine(ETH0_UP);
+        let mut app = NetManagerApp::new();
+        app.read_interfaces_from(&provider);
+
+        assert_eq!(app.listing, Listing::Read);
+        assert_eq!(app.interfaces.len(), 1);
+        let eth0 = &app.interfaces[0];
+        assert_eq!(eth0.name, "eth0");
+        assert_eq!(eth0.interface_type, InterfaceType::Ethernet);
+        assert_eq!(eth0.state, ConnectionState::Connected);
+        assert_eq!(eth0.mac_address, "52:54:00:12:34:56");
+        assert_eq!(eth0.ip_config.ip_address, "10.0.2.15");
+        assert_eq!(eth0.ip_config.subnet_mask, "255.255.255.0");
+        assert_eq!(eth0.ip_config.gateway, "10.0.2.2");
+        assert_eq!(eth0.ip_config.dns_servers, ["10.0.2.3"]);
+        assert_eq!(
+            (eth0.rx_bytes, eth0.tx_bytes, eth0.speed_mbps),
+            (None, None, None)
+        );
+        assert_eq!(eth0.dhcp, None, "DHCP was guessed");
+        assert_eq!(app.status_message, "eth0: 10.0.2.15 (Connected)");
+        assert_eq!(
+            app.edit_ip_config, eth0.ip_config,
+            "the editor did not start from it"
+        );
+
+        let texts = drawn(&app);
+        assert!(
+            texts.iter().any(|t| t == "10.0.2.15"),
+            "the address is not drawn"
+        );
+        assert!(
+            texts.iter().any(|t| t == NOT_REPORTED),
+            "nothing reads Not reported"
+        );
+        assert!(texts.iter().any(|t| t == "1 interface"), "{texts:?}");
+        assert_eq!(
+            banner_lines(&app),
+            None,
+            "the banner stayed over a listed interface"
+        );
+    }
+
+    /// A card DHCP has not configured, with its link down: shown down, and
+    /// its addresses "None assigned" -- the kernel's word, not "Not
+    /// reported" -- while the editor starts from blanks, not from 0.0.0.0.
+    #[test]
+    fn an_unconfigured_card_says_it_has_no_address() {
+        let (_dir, provider) = slate_machine(
+            "Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        );
+        let mut app = NetManagerApp::new();
+        app.read_interfaces_from(&provider);
+        let eth0 = &app.interfaces[0];
+        assert_eq!(eth0.state, ConnectionState::Disconnected);
+        assert_eq!(
+            eth0.ip_config.ip_address, "",
+            "0.0.0.0 went into the editor"
+        );
+        assert!(eth0.ip_config.dns_servers.is_empty());
+        assert_eq!(
+            eth0.reported,
+            Some(ReportedAddresses {
+                ip_address: String::from(NOT_ASSIGNED),
+                subnet_mask: String::from(NOT_ASSIGNED),
+                gateway: String::from(NOT_ASSIGNED),
+            })
+        );
+        assert_eq!(
+            eth0.shown_ip_address(),
+            NOT_ASSIGNED,
+            "the summary shows a blank"
+        );
+        let texts = drawn(&app);
+        assert!(texts.iter().any(|t| t == NOT_ASSIGNED), "{texts:?}");
+    }
+
+    /// A machine with no card: the kernel's placeholder is not an interface,
+    /// and the window says what was found -- no card -- rather than that
+    /// nothing was read.
+    #[test]
+    fn a_machine_with_no_card_says_none_was_found() {
+        let (_dir, provider) = slate_machine(
+            "Interface: eth0  (DOWN)\n  MAC:     00:00:00:00:00:00\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        );
+        let mut app = NetManagerApp::new();
+        app.read_interfaces_from(&provider);
+        assert!(app.interfaces.is_empty());
+        assert_eq!(app.listing, Listing::Read);
+        assert_eq!(app.status_message, "No network card was found");
+        let texts = drawn(&app);
+        assert!(
+            texts.iter().any(|t| t == "No network card was found."),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|t| t == "no interfaces"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t == NOT_READ_LINE),
+            "a finding called unread"
+        );
+    }
+
+    /// Nothing to read is said, with why -- never an empty list that reads
+    /// as a machine with no network hardware -- and the rows that were there
+    /// go: kept, they would be shown as current when nothing says they are.
+    #[test]
+    fn nothing_readable_is_said_with_why() {
+        let mut app = NetManagerApp::with_sample_data();
+        app.read_interfaces(); // under test, a root with nothing in it
+        assert!(
+            app.interfaces.is_empty(),
+            "rows survived a read that found none"
+        );
+        let Listing::Unreadable(why) = app.listing.clone() else {
+            panic!("the failure was not kept: {:?}", app.listing);
+        };
+        assert!(app.status_message.contains(&why), "{}", app.status_message);
+        let texts = drawn(&app);
+        let reason = format!("Could not read the interfaces: {why}.");
+        assert!(
+            texts.contains(&reason),
+            "the banner lost the reason: {texts:?}"
+        );
+        assert!(texts.iter().any(|t| t == NOT_READ_LINE), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "interfaces unknown"), "{texts:?}");
+    }
+
+    /// Refresh reads the interfaces again, and says both halves: what it
+    /// read, and that Wi-Fi was not scanned.
+    #[test]
+    fn refresh_reads_the_interfaces_again() {
+        let mut app = NetManagerApp::with_sample_data();
+        assert!(
+            !app.interfaces.is_empty(),
+            "control: the fixture has interfaces"
+        );
+        click(&mut app, Target::Refresh);
+        assert!(
+            app.interfaces.is_empty(),
+            "Refresh kept the old list instead of reading the machine"
+        );
+        assert!(
+            app.status_message
+                .starts_with("Could not read the interfaces"),
+            "{}",
+            app.status_message
+        );
+        assert!(
+            app.status_message.contains("Cannot scan"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// The Wi-Fi and VPN tabs, empty, say why -- not "none found" or "none
+    /// configured", which are findings nothing here made. The banner that
+    /// used to say so for every tab is gone once interfaces are listed.
+    #[test]
+    fn the_empty_tabs_say_nothing_was_examined() {
+        let (_dir, provider) = slate_machine(ETH0_UP);
+        let mut app = NetManagerApp::new();
+        app.read_interfaces_from(&provider);
+        app.active_tab = DetailTab::WiFi;
+        let texts = drawn(&app);
+        assert!(
+            texts.iter().any(|t| t.contains("nothing here can scan")),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t.contains("found")), "{texts:?}");
+        app.active_tab = DetailTab::Vpn;
+        let texts = drawn(&app);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("nothing here can read one")),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t.contains("configured")), "{texts:?}");
+    }
+
+    // What a test's kernel was asked, one list per test thread.
+    thread_local! {
+        static ASKED: std::cell::RefCell<Vec<ConfigChange>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A kernel that does what it is asked.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "it stands in for kernel_configure"
+    )]
+    fn obliging(change: &ConfigChange) -> Result<(), i64> {
+        ASKED.with(|asked| asked.borrow_mut().push(*change));
+        Ok(())
+    }
+
+    /// A kernel that refuses a caller who is not an administrator, with the
+    /// code the kernel uses (`KernelError::PermissionDenied`), written out
+    /// rather than borrowed from the constant it is checking.
+    fn refusing(change: &ConfigChange) -> Result<(), i64> {
+        ASKED.with(|asked| asked.borrow_mut().push(*change));
+        Err(-400)
+    }
+
+    /// Stand in for the kernel's change: `/proc/net` under `dir` now says
+    /// `net`.
+    fn the_kernel_now_says(dir: &scratchdir::ScratchDir, net: &str) {
+        std::fs::write(dir.dir().join("proc/net"), net).expect("fixture");
+    }
+
+    fn asked() -> Vec<ConfigChange> {
+        ASKED.with(|asked| asked.borrow().clone())
+    }
+
+    /// An app reading `net` as its machine's `/proc/net`, the tree kept
+    /// alive by the returned directory.
+    fn app_on(net: &str) -> (scratchdir::ScratchDir, NetManagerApp) {
+        let dir = scratchdir::ScratchDir::new("netmanager_apply");
+        std::fs::create_dir_all(dir.dir().join("proc")).expect("fixture");
+        std::fs::write(dir.dir().join("proc/net"), net).expect("fixture");
+        let mut app = NetManagerApp::new();
+        app.machine_root = dir
+            .dir()
+            .to_str()
+            .expect("a scratch path in text")
+            .to_owned();
+        app.read_interfaces();
+        (dir, app)
+    }
+
+    /// The record is the kernel's layout, byte for byte: four addresses, the
+    /// up byte, and a mask naming only the fields that are set.
+    #[test]
+    fn a_change_is_the_kernels_record() {
+        let change = ConfigChange {
+            ip: Some([10, 0, 2, 99]),
+            mask: Some([255, 255, 255, 0]),
+            gateway: None,
+            dns: Some([1, 1, 1, 1]),
+            up: Some(true),
+        };
+        assert_eq!(
+            change.record(),
+            [
+                10, 0, 2, 99, 255, 255, 255, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0b1_1011
+            ]
+        );
+        let down = ConfigChange {
+            up: Some(false),
+            ..ConfigChange::default()
+        };
+        assert_eq!(
+            down.record()[16..],
+            [0, 0b1_0000],
+            "down, and only the up bit"
+        );
+        assert_eq!(
+            ConfigChange::default().record(),
+            [0; 18],
+            "an empty change applies nothing"
+        );
+    }
+
+    /// **Apply reaches the kernel**: the typed address, mask, a cleared
+    /// gateway sent as none, and the first DNS server -- the kernel keeps
+    /// one, and the status says the rest were not sent. The editor closes
+    /// and the list is read again: what shows is the kernel's word.
+    #[test]
+    fn apply_sends_the_configuration_to_the_kernel() {
+        let (dir, mut app) = app_on(ETH0_UP);
+        app.configure = obliging;
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+        app.edit_ip_config.gateway = String::new();
+        app.edit_ip_config.dns_servers = vec![String::from("1.1.1.1"), String::from("9.9.9.9")];
+        the_kernel_now_says(&dir, &ETH0_UP.replace("10.0.2.15", "10.0.2.99"));
+
+        assert_eq!(app.apply_ip_config(), Ok(()));
+        assert_eq!(
+            asked(),
+            [ConfigChange {
+                ip: Some([10, 0, 2, 99]),
+                mask: Some([255, 255, 255, 0]),
+                gateway: Some([0, 0, 0, 0]),
+                dns: Some([1, 1, 1, 1]),
+                up: None,
+            }]
+        );
+        assert!(
+            !app.editing_ip,
+            "the editor stayed open after the change took"
+        );
+        assert!(
+            app.status_message.starts_with(
+                "Applied to eth0: 10.0.2.99 mask 255.255.255.0 gateway none DNS 1.1.1.1"
+            ),
+            "{}",
+            app.status_message
+        );
+        assert!(
+            app.status_message.contains("the other 1 were not sent"),
+            "{}",
+            app.status_message
+        );
+        // Read again: what shows is what the kernel says after the change.
+        assert_eq!(app.interfaces[0].shown_ip_address(), "10.0.2.99");
+    }
+
+    /// A refusal changes nothing and says why in the kernel's terms: the
+    /// editor stays open with the typed address in it.
+    #[test]
+    fn a_refused_apply_says_it_needs_an_administrator() {
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.configure = refusing;
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+        let why = app.apply_ip_config().expect_err("the kernel refused");
+        assert!(why.contains("administrator rights"), "{why}");
+        assert!(why.ends_with("Nothing was changed"), "{why}");
+        assert!(app.editing_ip, "a refused Apply closed the editor");
+        assert_eq!(
+            app.edit_ip_config.ip_address, "10.0.2.99",
+            "the typed text was lost"
+        );
+    }
+
+    /// DHCP cannot be switched on from here, and nothing is sent.
+    #[test]
+    fn apply_does_not_pretend_to_switch_on_dhcp() {
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.configure = obliging;
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = true;
+        let why = app.apply_ip_config().expect_err("DHCP is refused");
+        assert!(why.contains("dhcpcd"), "{why}");
+        assert!(asked().is_empty(), "something was sent for DHCP");
+    }
+
+    /// **Enable and Disable reach the kernel**: an interface that is up is
+    /// taken down, one that is down brought up, and the switch shows what
+    /// the kernel says after the change.
+    #[test]
+    fn the_switch_asks_the_kernel_and_shows_its_answer() {
+        let (dir, mut app) = app_on(ETH0_UP);
+        assert!(
+            app.interfaces[0].enabled,
+            "an interface that is up is enabled"
+        );
+        app.configure = obliging;
+        the_kernel_now_says(&dir, &ETH0_UP.replace("(UP)", "(DOWN)"));
+        app.toggle_selected_enabled();
+        assert_eq!(
+            asked(),
+            [ConfigChange {
+                up: Some(false),
+                ..ConfigChange::default()
+            }]
+        );
+        assert_eq!(app.status_message, "Took eth0 down");
+        assert!(
+            !app.interfaces[0].enabled,
+            "the switch did not follow the kernel's word"
+        );
+
+        let (_down_dir, mut down) =
+            app_on("Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    10.0.2.15\n");
+        assert!(
+            !down.interfaces[0].enabled,
+            "an interface that is down is enabled"
+        );
+        down.configure = obliging;
+        down.toggle_selected_enabled();
+        assert_eq!(asked().last().and_then(|c| c.up), Some(true));
+        assert_eq!(down.status_message, "Brought eth0 up");
+    }
+
+    /// Refused, the switch does not move, and the reason is the kernel's.
+    #[test]
+    fn a_refused_switch_stays_put() {
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.configure = refusing;
+        app.toggle_selected_enabled();
+        assert!(
+            app.interfaces[0].enabled,
+            "the switch moved for a refused change"
+        );
+        assert_eq!(app.interfaces[0].state, ConnectionState::Connected);
+        assert!(
+            app.status_message.starts_with(
+                "Cannot take eth0 down: changing the network needs administrator rights"
+            ),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// With no word from the kernel on whether it is up, there is nothing to
+    /// switch from, and nothing is sent.
+    #[test]
+    fn an_interface_of_unknown_state_is_not_switched() {
+        let (_dir, mut app) = app_on("Interface: eth0\n  MAC:     52:54:00:12:34:56\n");
+        assert_eq!(app.interfaces[0].state, ConnectionState::Unknown);
+        app.configure = obliging;
+        app.toggle_selected_enabled();
+        assert!(asked().is_empty(), "a guess was sent to the kernel");
+        assert!(
+            app.status_message.contains("does not say which it is"),
+            "{}",
+            app.status_message
         );
     }
 
@@ -5514,10 +6832,13 @@ mod tests {
 
         assert!(rect_of(&app, Target::RunDiagnostics).is_some());
         click(&mut app, Target::RunDiagnostics);
+        assert!(!app.diagnostics.is_empty(), "Run checked nothing");
         assert!(
-            app.diagnostics.is_empty(),
-            "Run produced a report from nowhere"
+            rect_of(&app, Target::RunDiagnostics).is_none(),
+            "the Run button stayed over a report"
         );
+        finish(&mut app);
+        app.diagnostics.clear();
 
         // The hiding rule itself is still right and still worth pinning, so it
         // is checked against a report placed there rather than produced.

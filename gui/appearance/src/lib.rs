@@ -54,8 +54,8 @@
 pub mod palette_check;
 
 pub mod icons;
-/// Themes: the installed colour sets a user can choose between, and the one
-/// in use ([`AppearanceSettings::color_theme`]).
+// Documented inside the module only: a doc comment here as well made rustdoc
+// resolve the module's own links from this scope, where its items are not.
 pub mod themes;
 
 /// Where settings files live and how they are replaced.
@@ -1444,7 +1444,7 @@ pub struct AppearanceSettings {
     /// [`SurfaceStyle::Borders`] (§829), with `Cards` the optional theme.
     pub surface_style: SurfaceStyle,
     /// Whether a toolbar or status bar is a band or a hairline. See
-    /// [`StripStyle`]; defaults to `Filled` (§835).
+    /// [`guitk::palette::StripStyle`]; defaults to `Filled` (§835).
     pub strip_style: StripStyle,
     /// The colour-vision filter applied to the whole screen.
     ///

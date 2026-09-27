@@ -1,5 +1,6 @@
 //! Themes: the colour sets a user can choose between, read from files anyone
-//! can write.
+//! can write -- and the one in use
+//! ([`AppearanceSettings::color_theme`](crate::AppearanceSettings::color_theme)).
 //!
 //! `design.txt` asks for "desktop theme - light, dark, anything else" and
 //! "individual desktop colors? (make your own theme)" (lines 1249-1250), and
@@ -80,7 +81,8 @@
 //!
 //! # When it is read
 //!
-//! When `appearance.yaml` is: [`AppearanceSettings::read_from`] loads the
+//! When `appearance.yaml` is:
+//! [`AppearanceSettings::read_from`](crate::AppearanceSettings::read_from) loads the
 //! chosen theme into a [`ColorTheme`], so every reader of the settings -- the
 //! shell, the compositor, and every application through `oswindow` -- gets the
 //! theme's colours with them, and none has a second step to forget. Never per

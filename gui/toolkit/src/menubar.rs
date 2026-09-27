@@ -83,8 +83,10 @@ const MIN_DROPDOWN_WIDTH: f32 = 160.0;
 /// **Nothing is placed against this.** Both placement rules take the viewport
 /// from the event that triggered them, because a caller building a mouse
 /// event already knows how big its window is and a stored copy would be one
-/// forgotten resize away from stale. This exists so that
-/// [`MenuBar::handle_mouse_event_on`] has something to default to.
+/// forgotten resize away from stale. This is only what a new bar holds until
+/// its first event brings the real size ([`MenuBar::new`]); the method it was
+/// once the default for, `handle_mouse_event_on`, took the size as an
+/// argument and is gone -- every event carries the size now.
 ///
 /// The two constants this replaces said "Matches `menu.rs`" -- and they did,
 /// including the defect. `menu.rs` capped and flipped against a hard

@@ -34,7 +34,7 @@
 //! Text chosen for a coloured fill is a function of that fill's brightness
 //! rather than a role, so it is not a palette member and has to be allowed
 //! somehow. This module used to allow it *unconditionally*: the two values
-//! [`readable_on`](crate::readable_on) can return, `0x11111B` and
+//! [`readable_on`](guitk::palette::readable_on) can return, `0x11111B` and
 //! `0xEFF1F5`, passed the sweep in any module and in either mode.
 //!
 //! That was a hole big enough to drive the whole conversion through, because
@@ -68,7 +68,7 @@
 //!
 //! # Why `derived` is a parameter and not a blanket allowance
 //!
-//! [`emphasized`](crate::emphasized) and `Color::lerp` produce colours
+//! [`emphasized`](guitk::palette::emphasized) and `Color::lerp` produce colours
 //! that are genuinely in no palette. Allowing "anything near a role" to cover
 //! them would gut the check. Instead each module names its own derivations at
 //! the call site, so a colour that is not a role has to be *claimed* by

@@ -1859,14 +1859,24 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
-- `[C]` **The default shortcuts become the operator's set** -- open (C-Q24,
-  `design-decisions.md` §1416). In `gui/desktop/src/hotkeys.rs`
-  `register_defaults`: keep Alt+F4, Alt+Tab/Alt+Shift+Tab, Super, Super+R, the
-  volume keys and Print Screen; move everything else to available-but-unbound;
-  drop Super+Tab and add a setting for whether Alt+Tab shows the switcher or the
-  overview; add Alt+Print Screen (the window), Ctrl+ and Ctrl+Alt+Print Screen
-  (save the screen or the window to a file, asking where), and a "put the
-  monitor to sleep" action.
+- `[C]` **The default shortcuts become the operator's set** -- done 2026-09-27
+  (C-Q24, `design-decisions.md` §1416). `register_defaults` keeps Alt+F4,
+  Alt+Tab/Alt+Shift+Tab, Super, Super+R, Escape, the volume keys and four Print
+  Screens (the screen; Alt+ the window; Ctrl+ and Ctrl+Alt+ the same two saved
+  to a file) -- fourteen bindings, down from thirty-one; every other action is
+  unbound and one binding away on the shortcut card, which the start menu now
+  opens (a Keyboard Shortcuts place). Waiting on others: Alt+Print Screen's
+  scancode (lane A), `--save` in the screenshot tool (lane E).
+
+- `[C]` **Alt+Tab can show the overview instead of the switcher** -- open
+  (§1416: Super+Tab is gone, and what it opened becomes a choice of what
+  Alt+Tab shows). A setting, and the overview learning Alt+Tab's manners: hold
+  Alt, Tab and Shift+Tab move through the windows, letting go of Alt picks one.
+
+- `[C]` **A shortcut that puts the monitor to sleep** -- blocked by lane F
+  (`requests/c-f-a-way-for-the-shell-to-put-the-display-to-sleep.md`: no
+  compositor verb exists). `design.txt` line 1321 names it; §1416 makes it
+  available, unbound by default. Then "Sleep the display" in the power menu too.
 
 - `[C]` **A redo tree in the toolkit** -- open (§1416, the operator's
   addition). One undo/redo history that keeps the branches a user undid away

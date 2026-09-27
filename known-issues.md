@@ -98421,6 +98421,14 @@ placed after test 8 so the exact `count == 4` that test asserts stays meaningful
 
 ## `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` (lane C, 2026-08-26) — **RESOLVED 2026-08-26**
 
+**2026-09-27: the door moved.** The operator turned the card's chord off by
+default (`design-decisions.md` §1416, answering C-Q24), which would have
+reopened this entry: a card only a shortcut opens is one nobody can reach to
+bind the shortcut. The start menu's places column has a **Keyboard Shortcuts**
+place now (`StartShortcut::KeyboardShortcuts`), which opens the card; Super+/
+still works for a user who binds it. What follows is the record as of
+2026-08-26.
+
 **Resolution.** Piece 1 below is done. `HotkeyAction::ToggleShortcutCard` exists,
 `Super+/` is its default binding (and is listed on the card, so the card teaches
 its own chord), `DesktopShell::shortcut_card_open` holds the state,

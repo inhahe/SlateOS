@@ -38,6 +38,15 @@ fn shell() -> DesktopShell {
     DesktopShell::new(1000, 800)
 }
 
+/// A shell with the chords that were on by default until §1416 bound --
+/// Super+Z, Super+D and the rest, which a user now binds on the shortcut card
+/// -- for the tests that press them to see what they *do*.
+fn bound_shell() -> DesktopShell {
+    let mut shell = shell();
+    crate::hotkeys::optional_chords::bind(&mut shell.hotkeys);
+    shell
+}
+
 /// A shell whose start menu lists more programs than it can show, so that
 /// scrolling has somewhere to go.
 ///
@@ -1885,7 +1894,7 @@ fn show_desktop_does_not_ask_an_already_minimized_window_to_minimize() {
     // green, because the test was no longer reading the code it was named for.
     // A test that re-derives the answer is worse than no test, because it looks
     // like coverage. So it presses the chord and reads what the shell asked for.
-    let mut shell = shell();
+    let mut shell = bound_shell();
     let away = open(&mut shell, "Editor");
     let still_here = open(&mut shell, "Terminal");
     minimize(&mut shell, away);
@@ -3290,7 +3299,7 @@ fn zone_key() -> KeyEvent {
 /// A 1000x800 shell with one focused window, the chooser open over it, and
 /// `preset` selected.
 fn chooser(preset: snap::SnapLayoutPreset) -> (DesktopShell, WindowId) {
-    let mut shell = shell();
+    let mut shell = bound_shell();
     let id = open(&mut shell, "Editor");
     assert!(shell.handle_hotkey(&zone_key()).consumed);
     assert!(shell.snap.is_overlay_visible(), "Super+Z did not open it");
@@ -3387,7 +3396,7 @@ fn the_tiled_window_is_whichever_one_is_focused_now() {
 /// sometimes does nothing.
 #[test]
 fn the_chooser_does_not_open_over_an_empty_desktop() {
-    let mut shell = shell();
+    let mut shell = bound_shell();
     assert_eq!(shell.focused_window, None);
     assert!(shell.handle_hotkey(&zone_key()).consumed);
     assert!(!shell.snap.is_overlay_visible());
@@ -3426,7 +3435,7 @@ fn the_chooser_closes_the_ways_a_popup_closes() {
 /// layout the picker has selected.
 #[test]
 fn the_chooser_draws_the_layout_it_will_place_into() {
-    let mut shell = shell();
+    let mut shell = bound_shell();
     open(&mut shell, "Editor");
     assert!(shell.render_zone_overlay().is_none(), "drawn while closed");
 
@@ -3966,7 +3975,8 @@ fn a_full_bar_with_a_divider_still_stops_short_of_the_tray() {
 /// `design.txt` line 721: the start menu contains a "settings icon" and a
 /// "terminal"; the Aero reference's places column lists the user's folders
 /// above them. Each place starts what it names and closes the menu: the
-/// file manager on a folder, or the program.
+/// file manager on a folder, or the program -- or, for Keyboard Shortcuts,
+/// the shell's own card of shortcuts, which no chord opens by default (§1416).
 #[test]
 fn the_start_menus_places_open_folders_and_start_settings_and_the_terminal() {
     for which in crate::StartShortcut::ALL {
@@ -3975,12 +3985,31 @@ fn the_start_menus_places_open_folders_and_start_settings_and_the_terminal() {
         let rect = shell.start_shortcut_rect(*which);
         let (x, y) = centre(rect);
         assert_eq!(shell.hit_test(x, y), Hit::StartMenuShortcut(*which));
-        let ShellAction::Launch(launch) = click_at(&mut shell, rect) else {
+        let action = click_at(&mut shell, rect);
+        assert!(!shell.start_menu_open, "{which:?} left the menu open");
+        let Some(program) = which.program() else {
+            assert_eq!(*which, crate::StartShortcut::KeyboardShortcuts);
+            assert!(
+                matches!(action, ShellAction::Consumed),
+                "{which:?} did something besides open the card: {action:?}"
+            );
+            assert!(shell.shortcut_card_open, "{which:?} did not open the card");
+            assert!(
+                shell.render_shortcut_card().is_some(),
+                "the card is open and draws nothing"
+            );
+            continue;
+        };
+        assert!(
+            !shell.shortcut_card_open,
+            "{which:?} opened the card of shortcuts"
+        );
+        let ShellAction::Launch(launch) = action else {
             panic!("{which:?} started nothing");
         };
         assert_eq!(
             launch.program,
-            std::path::PathBuf::from(which.program()),
+            std::path::PathBuf::from(program),
             "{which:?}"
         );
         // Whatever the home is here -- the variable is the process's -- a
@@ -3992,16 +4021,35 @@ fn the_start_menus_places_open_folders_and_start_settings_and_the_terminal() {
                 "{which:?} opened {launch:?}"
             ),
         }
-        assert!(!shell.start_menu_open, "{which:?} left the menu open");
     }
     assert_eq!(
         crate::StartShortcut::Settings.program(),
-        "/usr/bin/settings"
+        Some("/usr/bin/settings")
     );
     assert_eq!(
         crate::StartShortcut::Terminal.program(),
-        "/usr/bin/terminal"
+        Some("/usr/bin/terminal")
     );
+}
+
+/// Choosing Keyboard Shortcuts while the card is somehow already open leaves
+/// it open: the place asks for the card, it does not toggle it. (Opening the
+/// menu closes the card, so this is reached only by a state the shell is not
+/// meant to get into -- which is exactly when "toggle" would do the opposite
+/// of what the user clicked.)
+#[test]
+fn the_keyboard_shortcuts_place_opens_the_card_and_never_closes_it() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let rect = shell.start_shortcut_rect(crate::StartShortcut::KeyboardShortcuts);
+    assert!(rect.w > 0.0, "the place has no room on a 1000x800 display");
+    shell.shortcut_card_open = true;
+    assert!(matches!(click_at(&mut shell, rect), ShellAction::Consumed));
+    assert!(
+        shell.shortcut_card_open,
+        "the click shut the card it asked for"
+    );
+    assert!(!shell.start_menu_open);
 }
 
 /// A folder is found under the home it is given; with no home, the file
@@ -4011,7 +4059,12 @@ fn a_place_opens_its_folder_under_the_home() {
     use crate::StartShortcut as Place;
     use std::ffi::OsString;
     let home = std::path::Path::new("/home/ann");
-    let arg = |place: Place| place.launch(Some(home)).args;
+    let arg = |place: Place| {
+        place
+            .launch(Some(home))
+            .unwrap_or_else(|| panic!("{place:?} starts nothing"))
+            .args
+    };
     assert_eq!(arg(Place::Home), [OsString::from("/home/ann")]);
     assert_eq!(
         arg(Place::Documents),
@@ -4022,11 +4075,17 @@ fn a_place_opens_its_folder_under_the_home() {
         [home.join("Downloads").into_os_string()]
     );
     assert!(arg(Place::Settings).is_empty());
-    assert!(Place::Pictures.launch(None).args.is_empty());
+    let homeless = Place::Pictures
+        .launch(None)
+        .expect("a folder starts the file manager");
+    assert!(homeless.args.is_empty());
     assert_eq!(
-        Place::Pictures.launch(None).program,
+        homeless.program,
         std::path::PathBuf::from(crate::launcher::FILE_MANAGER)
     );
+    // The card of shortcuts is the shell's own: no program, home or not.
+    assert!(Place::KeyboardShortcuts.launch(Some(home)).is_none());
+    assert!(Place::KeyboardShortcuts.launch(None).is_none());
 }
 
 /// Every place fits the places column at every scale -- below the user,

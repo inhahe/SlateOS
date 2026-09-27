@@ -55,6 +55,18 @@ fn session() -> (Session, Desktop, settingsfile::testing::ConfigTurn) {
     (session, desktop, turn)
 }
 
+/// A started session with the chords that were on by default until §1416
+/// bound -- Super+Tab, Super+N, Super+D, Super+L and the rest, which a user now
+/// binds on the shortcut card -- for the tests that press them.
+///
+/// Bound after `start`, as a rebind on the card is: the session grabs whatever
+/// the registry holds on its next pump (`reconcile_global_grabs`).
+fn bound_session() -> (Session, Desktop, settingsfile::testing::ConfigTurn) {
+    let (mut session, desktop, turn) = session();
+    crate::hotkeys::optional_chords::bind(&mut session.shell_mut().hotkeys);
+    (session, desktop, turn)
+}
+
 /// **What the user left behind comes back when the shell starts.**
 ///
 /// Both halves go through `ShellSession::start`, because the bug this is about
@@ -1190,7 +1202,7 @@ fn alt_f4_asks_the_compositor_to_close_the_focused_window() {
 /// outcome carries a list rather than one request.
 #[test]
 fn super_d_asks_for_every_window_to_be_minimised() {
-    let (mut session, desktop, _turn) = session();
+    let (mut session, desktop, _turn) = bound_session();
     desktop.borrow_mut().send_window_list(&[
         app(1, "Terminal"),
         app(2, "notes.txt"),
@@ -1225,7 +1237,7 @@ fn super_d_asks_for_every_window_to_be_minimised() {
 /// click is, and — for Super+D — must not stop the rest of the batch.
 #[test]
 fn a_refused_shortcut_does_not_swallow_the_rest_of_the_batch() {
-    let (mut session, desktop, _turn) = session();
+    let (mut session, desktop, _turn) = bound_session();
     desktop
         .borrow_mut()
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
@@ -1258,7 +1270,7 @@ fn a_refused_shortcut_does_not_swallow_the_rest_of_the_batch() {
 /// guessed would disagree with it the moment a monitor changed.
 #[test]
 fn super_right_asks_for_a_tile_and_computes_no_geometry() {
-    let (mut session, desktop, _turn) = session();
+    let (mut session, desktop, _turn) = bound_session();
     let mut focused = app(1, "Terminal");
     focused.focused = true;
     desktop.borrow_mut().send_window_list(&[focused]);
@@ -2991,7 +3003,7 @@ fn an_idle_desktop_asks_for_no_frames() {
 
 #[test]
 fn opening_the_overview_asks_for_a_frame() {
-    let (mut session, _desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = bound_session();
     let panel = session.panel().window();
     deliver(&mut session, panel, super_tab());
 
@@ -3013,7 +3025,7 @@ fn an_overview_whose_fade_never_runs_is_still_drawn_and_still_clickable() {
     // every draw path on progress, so an overlay whose clock never ran was
     // blank *and* took every click. Nothing here may depend on a frame having
     // arrived — the fade is begun below and deliberately never advanced.
-    let (mut session, desktop, _turn) = session();
+    let (mut session, desktop, _turn) = bound_session();
     let panel = session.panel().window();
     let popups = session.popups().window();
     desktop
@@ -3063,7 +3075,7 @@ fn an_overview_whose_fade_never_runs_is_still_drawn_and_still_clickable() {
 
 #[test]
 fn a_frame_advances_the_fade_and_the_last_one_stops_asking_for_more() {
-    let (mut session, _desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = bound_session();
     let panel = session.panel().window();
     let fade_ms = session.shell().overview_config.fade_ms;
     assert!(fade_ms > 0, "the default overview has no fade to advance");
@@ -3103,7 +3115,7 @@ fn the_frame_that_finishes_the_fade_is_still_painted() {
     // last animation, so a shell that decided whether to repaint by asking
     // afterwards would drop precisely the frame that puts the overlay at its
     // final opacity, and the fade would visibly stop one frame short.
-    let (mut session, desktop, _turn) = session();
+    let (mut session, desktop, _turn) = bound_session();
     let panel = session.panel().window();
     let fade_ms = session.shell().overview_config.fade_ms;
     deliver(&mut session, panel, super_tab());
@@ -3144,7 +3156,7 @@ fn reduced_motion_opens_the_overview_without_a_fade_and_without_a_clock() {
     // Reduced motion is not "the same animation, faster". An animation that
     // still runs but is invisible costs the same wake-ups and is the same
     // motion sickness; the setting has to reach the clock, not just the paint.
-    let (mut session, desktop, _turn) = session();
+    let (mut session, desktop, _turn) = bound_session();
     let panel = session.panel().window();
     session.set_reduced_motion(true);
     desktop
@@ -3167,7 +3179,7 @@ fn reduced_motion_opens_the_overview_without_a_fade_and_without_a_clock() {
 
 #[test]
 fn turning_reduced_motion_on_mid_fade_lands_on_fully_open() {
-    let (mut session, _desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = bound_session();
     let panel = session.panel().window();
     deliver(&mut session, panel, super_tab());
     assert!(session.shell().overview.is_fading());
@@ -3182,7 +3194,7 @@ fn closing_the_overview_takes_its_fade_with_it() {
     // Otherwise the next `show` inherits a part-finished fade, and — worse —
     // the shell keeps asking for frames to advance an overlay that is not on
     // screen.
-    let (mut session, desktop, _turn) = session();
+    let (mut session, desktop, _turn) = bound_session();
     let panel = session.panel().window();
     deliver(&mut session, panel, super_tab());
     assert!(session.shell().overview.is_fading());
@@ -4533,7 +4545,7 @@ fn opening_the_pane_from_a_key_rewinds_it_into_a_slide() {
     // The session is the caller that owns a clock, so it puts the pane back
     // where it started and lets the frame clock carry it. Every other caller
     // gets the pane fully open. See design-decisions.md 520 and 562.
-    let (mut session, _desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = bound_session();
     let panel = session.panel().window();
     deliver(&mut session, panel, super_n());
 
@@ -4552,7 +4564,7 @@ fn the_slide_finishes_and_then_the_desktop_goes_quiet() {
     // The condition that keeps an idle desktop idle: once nothing is moving,
     // no wake-up is registered and the loop parks with no bound at all. A pane
     // missing from `anything_moving` is a pane that stops mid-slide.
-    let (mut session, desktop, _turn) = session();
+    let (mut session, desktop, _turn) = bound_session();
     let panel = session.panel().window();
     desktop
         .borrow_mut()
@@ -4574,7 +4586,7 @@ fn the_slide_finishes_and_then_the_desktop_goes_quiet() {
 
 #[test]
 fn closing_the_pane_slides_it_out_and_it_stays_out() {
-    let (mut session, _desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = bound_session();
     let panel = session.panel().window();
     deliver(&mut session, panel, super_n());
     for _ in 0..200 {
@@ -4631,7 +4643,7 @@ fn closing_the_pane_slides_it_out_and_it_stays_out() {
 /// saw the pane `Hidden` straight after the close.
 #[test]
 fn a_late_pump_moves_an_animation_on_by_the_time_that_passed() {
-    let (mut session, _desktop, _turn) = session();
+    let (mut session, _desktop, _turn) = bound_session();
     let panel = session.panel().window();
     deliver(&mut session, panel, super_n());
     assert!(
@@ -4656,7 +4668,7 @@ fn a_frame_tick_does_not_restart_the_slide_it_just_finished() {
     // The slide *ends* by changing the same open flag the session watches to
     // decide a gesture happened. Watching a tick as well would read the end of
     // the slide as a fresh gesture and start it over, for ever.
-    let (mut session, desktop, _turn) = session();
+    let (mut session, desktop, _turn) = bound_session();
     let panel = session.panel().window();
     desktop
         .borrow_mut()
@@ -5673,7 +5685,13 @@ fn a_session_with_a_password_still_locks() {
 /// caller, and the *session* is what decides whether a launch in it is queued.
 /// A test that called the shell directly would be testing the half that has
 /// never been in question.
+///
+/// Binds Super+L first, as a user would: it is not on by default since §1416,
+/// and both tests that press it -- the no-password one included -- mean the
+/// lock shortcut, not a chord that does nothing. Unbound, the no-password test
+/// passed on a press that could never have locked anything.
 fn press_lock_shortcut(desktop: &Desktop, session: &mut Session) {
+    crate::hotkeys::optional_chords::bind(&mut session.shell_mut().hotkeys);
     let window = session.panel().window();
     desktop.borrow_mut().send_input(&[InputEvent::new(
         window,

@@ -593,8 +593,9 @@ const TRAY_RESERVE_GAP: f32 = 20.0;
 //
 // Two columns, as the Aero reference draws them (`Aero Desktop (offline).html`,
 // `.aero-start-menu`): the programs on the left -- the list, and the search
-// field at its foot -- and on the right the user, their places, Settings, a
-// terminal and the power button. `design-decisions.md` §879.
+// field at its foot -- and on the right the user, their places, Settings, the
+// card of keyboard shortcuts, a terminal and the power button.
+// `design-decisions.md` §879.
 
 const START_MENU_WIDTH: f32 = 524.0;
 const START_MENU_HEIGHT: f32 = 566.0;
@@ -691,8 +692,13 @@ const START_MENU_SCROLLBAR_WIDTH: f32 = 4.0;
 const START_MENU_USER_HEIGHT: f32 = 72.0;
 /// The picture's diameter.
 const START_MENU_AVATAR: f32 = 44.0;
-/// One place in the places column.
+/// One place in the places column, when the column has the room.
 const START_LINK_HEIGHT: f32 = 32.0;
+/// The tightest a place gets before the lowest is left out instead: the
+/// 18-unit icon with four units of air above and below it. A column a little
+/// short of room -- eight places at 200% on a small display -- keeps every place
+/// a little closer together rather than losing the last one.
+const START_LINK_MIN_HEIGHT: f32 = 26.0;
 /// The band at the foot of the places column that holds the power button.
 const START_MENU_POWER_BAND: f32 = 52.0;
 /// The side of a place's icon, and of the power button's.
@@ -899,9 +905,15 @@ enum StartLit {
 }
 
 /// A place in the start menu's places column: the user's own folders, as the
-/// Aero reference's places column lists them, and the two programs the start
+/// Aero reference's places column lists them, the two programs the start
 /// menu is asked to keep at hand (`design.txt` line 721: "start menu, contains
-/// applications tree, settings icon, terminal, power off, ...").
+/// applications tree, settings icon, terminal, power off, ..."), and the card
+/// of keyboard shortcuts.
+///
+/// The card is here because no chord opens it by default any more
+/// (`design-decisions.md` §1416): the operator left Super+/ unbound, and a card
+/// that only a shortcut could open would be one nobody could reach to bind the
+/// shortcut in the first place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartShortcut {
     /// The user's home folder.
@@ -916,6 +928,9 @@ pub enum StartShortcut {
     Downloads,
     /// The settings application.
     Settings,
+    /// The card listing every keyboard shortcut, where one is bound, changed or
+    /// taken away. The shell's own surface, so choosing it starts no program.
+    KeyboardShortcuts,
     /// A terminal.
     Terminal,
 }
@@ -929,23 +944,26 @@ impl StartShortcut {
         Self::Music,
         Self::Downloads,
         Self::Settings,
+        Self::KeyboardShortcuts,
         Self::Terminal,
     ];
 
-    /// The program choosing it starts: the file manager for a folder.
+    /// The program choosing it starts: the file manager for a folder, and
+    /// `None` for the card of shortcuts, which is the shell's own.
     #[must_use]
-    pub const fn program(self) -> &'static str {
+    pub const fn program(self) -> Option<&'static str> {
         match self {
-            Self::Settings => launcher::SETTINGS,
-            Self::Terminal => launcher::TERMINAL,
+            Self::Settings => Some(launcher::SETTINGS),
+            Self::Terminal => Some(launcher::TERMINAL),
             Self::Home | Self::Documents | Self::Pictures | Self::Music | Self::Downloads => {
-                launcher::FILE_MANAGER
+                Some(launcher::FILE_MANAGER)
             }
+            Self::KeyboardShortcuts => None,
         }
     }
 
     /// The folder a place opens, under the user's home -- `""` for the home
-    /// itself -- or `None` for the two that start a program. The names the
+    /// itself -- or `None` for the places that are not folders. The names the
     /// desktop's own Documents icon uses, so the two open the same folder.
     #[must_use]
     pub const fn folder(self) -> Option<&'static str> {
@@ -955,21 +973,23 @@ impl StartShortcut {
             Self::Pictures => Some("Pictures"),
             Self::Music => Some("Music"),
             Self::Downloads => Some("Downloads"),
-            Self::Settings | Self::Terminal => None,
+            Self::Settings | Self::KeyboardShortcuts | Self::Terminal => None,
         }
     }
 
     /// What choosing it starts: the file manager on the folder, in the home
-    /// `home` names, or the program. With no home to find the folder in, the
-    /// file manager opens where it opens by itself, which beats a place that
-    /// does nothing.
+    /// `home` names, or the program -- and `None` for the one place that starts
+    /// no program, the card of shortcuts. With no home to find the folder in,
+    /// the file manager opens where it opens by itself, which beats a place
+    /// that does nothing.
     #[must_use]
-    pub fn launch(self, home: Option<&std::path::Path>) -> hotkeys::Launch {
-        match (self.folder(), home) {
-            (Some(""), Some(home)) => hotkeys::Launch::opening(self.program(), home),
-            (Some(sub), Some(home)) => hotkeys::Launch::opening(self.program(), &home.join(sub)),
-            _ => hotkeys::Launch::program(self.program()),
-        }
+    pub fn launch(self, home: Option<&std::path::Path>) -> Option<hotkeys::Launch> {
+        let program = self.program()?;
+        Some(match (self.folder(), home) {
+            (Some(""), Some(home)) => hotkeys::Launch::opening(program, home),
+            (Some(sub), Some(home)) => hotkeys::Launch::opening(program, &home.join(sub)),
+            _ => hotkeys::Launch::program(program),
+        })
     }
 
     /// The icon beside it, by its freedesktop name.
@@ -982,6 +1002,7 @@ impl StartShortcut {
             Self::Music => "folder-music",
             Self::Downloads => "folder-download",
             Self::Settings => "preferences-system",
+            Self::KeyboardShortcuts => "input-keyboard",
             Self::Terminal => "utilities-terminal",
         }
     }
@@ -997,6 +1018,7 @@ impl StartShortcut {
             Self::Music => "Music",
             Self::Downloads => "Downloads",
             Self::Settings => "Settings",
+            Self::KeyboardShortcuts => "Keyboard Shortcuts",
             Self::Terminal => "Terminal",
         }
     }
@@ -3636,7 +3658,8 @@ impl DesktopShell {
     }
 
     /// The places column, the rest of the menu to the programs' right: the
-    /// user, their folders, Settings, a terminal, and the power button.
+    /// user, their folders, Settings, the card of keyboard shortcuts, a
+    /// terminal, and the power button.
     #[must_use]
     pub fn start_menu_right_rect(&self) -> Rect {
         let menu = self.start_menu_rect();
@@ -3733,21 +3756,32 @@ impl DesktopShell {
     /// A place in the places column, below the user and above the power
     /// button, in [`StartShortcut::ALL`]'s order.
     ///
-    /// A place that would reach the power button's band -- a menu clamped
-    /// short at a large scale -- has no room and is an empty rectangle, which
-    /// nothing draws and no press lands in: a place drawn over the power
-    /// button would take the press meant for it.
+    /// A column short of room tightens its places first, from
+    /// `START_LINK_HEIGHT` down to `START_LINK_MIN_HEIGHT`, all by the same
+    /// amount. Past that, a place that would reach the power button's band --
+    /// a menu clamped very short at a large scale -- has no room and is an
+    /// empty rectangle, which nothing draws and no press lands in: a place
+    /// drawn over the power button would take the press meant for it.
     #[must_use]
     pub fn start_shortcut_rect(&self, which: StartShortcut) -> Rect {
         let right = self.start_menu_right_rect();
         let inset = self.scale(POWER_BUTTON_INSET);
-        let height = self.scale(START_LINK_HEIGHT);
+        let user = self.start_user_rect();
+        let top = user.y + user.h;
+        let floor = self.power_button_rect().y - inset;
+        let count = StartShortcut::ALL.len() as f32;
+        // Shared out evenly, then held between the two heights: never taller
+        // than a place is meant to be, and never so tight the icon touches the
+        // next place -- `max` before `min` so a column with no room at all (a
+        // negative share) lands on the floor rather than past it.
+        let height = ((floor - top) / count)
+            .max(self.scale(START_LINK_MIN_HEIGHT))
+            .min(self.scale(START_LINK_HEIGHT));
         let index = StartShortcut::ALL
             .iter()
             .position(|w| *w == which)
             .unwrap_or(0);
-        let y = self.start_user_rect().y + self.start_user_rect().h + index as f32 * height;
-        let floor = self.power_button_rect().y - inset;
+        let y = top + index as f32 * height;
         let w = (right.w - inset * 2.0).max(0.0);
         if y + height > floor {
             return Rect::new(right.x + inset, y, 0.0, 0.0);
@@ -5481,11 +5515,24 @@ impl DesktopShell {
                 ShellAction::Consumed
             }
             // Starts its program, as a row does, and the menu gets out of the
-            // way of the window it is about to open.
+            // way of the window it is about to open. The card of shortcuts is
+            // the shell's own and starts nothing: it opens where the menu was.
             Hit::StartMenuShortcut(which) => {
                 self.close_start_menu();
                 let home = std::env::var_os("HOME").map(PathBuf::from);
-                ShellAction::Launch(which.launch(home.as_deref()))
+                match which.launch(home.as_deref()) {
+                    Some(launch) => ShellAction::Launch(launch),
+                    None => {
+                        // Opened, never toggled shut: the menu that was just
+                        // clicked closes the card as it opens, so the card is
+                        // shut here -- but a click that asks for the card must
+                        // not depend on that to avoid closing it.
+                        if !self.shortcut_card_open {
+                            self.toggle_shortcut_card();
+                        }
+                        ShellAction::Consumed
+                    }
+                }
             }
             // A power action starts a program like a menu entry does: the shell
             // has no more business shutting the machine down itself than it has
@@ -7111,7 +7158,7 @@ impl DesktopShell {
                 self.toggle_run_dialog();
                 HotkeyOutcome::consumed()
             }
-            // The six that start a program instead of touching a window. The
+            // The ones that start a program instead of touching a window. The
             // command is the action's own — see [`HotkeyAction::command`] — and
             // it is reported rather than run, because the shell has no
             // connection to the process server.
@@ -7120,7 +7167,10 @@ impl DesktopShell {
             | HotkeyAction::SystemSettings
             | HotkeyAction::ScreenLock
             | HotkeyAction::Screenshot
-            | HotkeyAction::ScreenshotRegion => {
+            | HotkeyAction::ScreenshotRegion
+            | HotkeyAction::ScreenshotWindow
+            | HotkeyAction::ScreenshotToFile
+            | HotkeyAction::ScreenshotWindowToFile => {
                 HotkeyOutcome::start(action.launch().into_iter().collect())
             }
             // Nothing can carry these out: there is no backlight channel out of
@@ -13107,8 +13157,14 @@ mod window_manager_tests {
         with_alpha,
     };
 
+    /// A shell with the chords that were on by default until §1416 bound --
+    /// Super+D, Super+Tab, Super+Left and the rest, which a user now binds on
+    /// the shortcut card -- because what these tests press is what those
+    /// chords *do* once bound. What is bound by default is `hotkeys`' to pin.
     fn shell() -> DesktopShell {
-        DesktopShell::new(1920, 1080)
+        let mut shell = DesktopShell::new(1920, 1080);
+        hotkeys::optional_chords::bind(&mut shell.hotkeys);
+        shell
     }
 
     /// One window turned back into the description it arrived as.
@@ -13406,6 +13462,8 @@ mod window_manager_tests {
         );
     }
 
+    /// Super+/, bound by the fixture as a user would bind it (§1416 left the
+    /// card without a default chord; the start menu opens it).
     #[test]
     fn the_shortcut_card_opens_and_closes_on_its_own_chord() {
         let mut shell = shell();
@@ -15662,8 +15720,14 @@ mod overview_wiring_tests {
     };
     use guitk::render::RenderCommand;
 
+    /// A shell with the chords that were on by default until §1416 bound --
+    /// Super+D, Super+Tab, Super+Left and the rest, which a user now binds on
+    /// the shortcut card -- because what these tests press is what those
+    /// chords *do* once bound. What is bound by default is `hotkeys`' to pin.
     fn shell() -> DesktopShell {
-        DesktopShell::new(1920, 1080)
+        let mut shell = DesktopShell::new(1920, 1080);
+        crate::hotkeys::optional_chords::bind(&mut shell.hotkeys);
+        shell
     }
 
     /// One window, placed, on desktop `workspace`.
@@ -17903,8 +17967,14 @@ mod run_box_wiring_tests {
     };
     use guitk::render::RenderCommand;
 
+    /// A shell with the chords that were on by default until §1416 bound --
+    /// Super+D, Super+Tab, Super+Left and the rest, which a user now binds on
+    /// the shortcut card -- because what these tests press is what those
+    /// chords *do* once bound. What is bound by default is `hotkeys`' to pin.
     fn shell() -> DesktopShell {
-        DesktopShell::new(1920, 1080)
+        let mut shell = DesktopShell::new(1920, 1080);
+        crate::hotkeys::optional_chords::bind(&mut shell.hotkeys);
+        shell
     }
 
     fn chord(k: Key, modifiers: Modifiers) -> KeyEvent {
@@ -19580,9 +19650,10 @@ mod run_box_wiring_tests {
             let mut shell = DesktopShell::new(1920, 1080);
             let before = shell.hotkeys.len();
 
-            // A file mentioning exactly one binding.
+            // A file mentioning exactly one binding, moving a default one: the
+            // Run box, off Super+R.
             let mut doc = appearance::config::load(DesktopShell::SHORTCUTS_CONFIG_NAME);
-            doc.set_seq(&["shortcuts"], &["Ctrl+F12=show_desktop"]);
+            doc.set_seq(&["shortcuts"], &["Ctrl+F12=toggle_run_dialog"]);
             appearance::config::store(DesktopShell::SHORTCUTS_CONFIG_NAME, &doc).expect("store");
 
             shell.load_shortcuts();
@@ -19598,6 +19669,11 @@ mod run_box_wiring_tests {
                     .conflicts_with(&crate::hotkeys::Hotkey::new(Key::F12, Modifiers::ctrl()))
                     .is_some(),
                 "and the one it named must have moved"
+            );
+            assert_eq!(
+                shell.hotkeys.lookup(Key::R, &Modifiers::super_key()),
+                None,
+                "moved, not copied: Super+R still opens the box"
             );
         });
     }
@@ -25674,9 +25750,14 @@ mod start_search_tests {
     /// Super+E with the menu up -- which is how it arrives, since the Super key
     /// opens the menu as it goes down -- puts the menu away and opens the file
     /// manager, and types no "e".
+    ///
+    /// Super+E is a chord the user binds since §1416; it is the one used here
+    /// because it *starts* something, and so does not close the menu itself
+    /// the way Super+R's run box does -- the closing has to be the menu's.
     #[test]
     fn a_super_chord_closes_the_menu_and_does_what_it_is_bound_to() {
         let mut shell = shell();
+        crate::hotkeys::optional_chords::bind(&mut shell.hotkeys);
         let key = KeyEvent {
             key: Key::E,
             pressed: true,

@@ -82349,7 +82349,36 @@ opened becomes a choice of what Alt+Tab shows.
 
 **Judgment calls inside the operator's answer**, easy to change: the exact
 save-to-file keys (Ctrl+ and Ctrl+Alt+Print Screen), and treating the editing
-keys as each program's own rather than the desktop's.
+keys as each program's own rather than the desktop's. And which Print Screen is
+which: the operator wrote "Alt+PrtScrn for the entire screen and Ctrl+PrtScrn
+for the current window, like on Windows?" -- but Windows has it the other way
+round (Print Screen the screen, Alt+Print Screen the focused window). The
+defaults follow Windows, as the "like on Windows" asked, which is also what
+frees Ctrl+ for the save-to-file pair.
+
+**As built, 2026-09-27 (lane C):**
+- `hotkeys::register_defaults` holds the operator's set and nothing else --
+  fourteen bindings, down from thirty-one -- pinned whole by
+  `the_defaults_are_the_operators_set_and_nothing_else`. Three actions are new:
+  `ScreenshotWindow`, `ScreenshotToFile` and `ScreenshotWindowToFile`.
+- **The shortcut card lost its chord, so it gained a door:** a Keyboard
+  Shortcuts place in the start menu's places column, which opens it. A card
+  only a shortcut could open would be one nobody could reach to bind the
+  shortcut. The places tighten a little (32 units each down to 26) before the
+  lowest is left out, so an eighth place costs nothing on a small screen.
+- **Switching keyboard layouts still works out of the box:** Alt+Shift is the
+  layout switcher's own setting (`keyboard.layout_switch` in `input.yaml`),
+  never a hotkey-table entry, so taking Super+Space out removed a second way,
+  not the only one.
+- **Waiting on other lanes:** Alt+Print Screen arrives as an unknown key on
+  PS/2 keyboards and in QEMU, which send a different scancode while Alt is held
+  (lane A, `requests/c-a-keys-that-never-reach-the-desktop.md`, which also
+  records that a USB keyboard reaches no window at all); the screenshot tool
+  does not read `--save` yet (lane E, `requests/c-e-print-screen-can-save-to-a-file.md`);
+  putting the monitor to sleep needs a compositor verb that does not exist
+  (lane F, `requests/c-f-a-way-for-the-shell-to-put-the-display-to-sleep.md`).
+- **Still lane C's to do:** the setting for what Alt+Tab shows (the switcher
+  or the overview), and the monitor-sleep action once lane F's verb lands.
 
 ## 1417. Passwords leave the password manager two ways, and a program can ask for one -- only with a key for it, and your say-so
 

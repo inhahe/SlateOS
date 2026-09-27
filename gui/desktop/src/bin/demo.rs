@@ -20,6 +20,7 @@
 //! manager whose edits the next list from the compositor threw away; the demo
 //! showed a snapped window at a rectangle no user would ever have seen.
 
+use desktop::hotkeys::{Hotkey, HotkeyAction};
 use desktop::{DesktopShell, ShellAction, WindowInfo, WindowList, calendar, click};
 use guitk::event::{Key, KeyEvent, Modifiers};
 
@@ -223,13 +224,23 @@ fn main() {
     // Tiling. The shortcut names an *edge*; which pixels that edge turns into is
     // worked out by the compositor from its own bounds, and this demo has no
     // rectangle to print because the shell never computes one.
+    //
+    // Super+Left is not bound by default (design-decisions.md §1416), so the
+    // demo binds it first, as a user would on the shortcut card.
+    let super_only = Modifiers {
+        super_key: true,
+        ..Modifiers::NONE
+    };
+    if let Err(e) = desktop
+        .hotkeys
+        .register(Hotkey::new(Key::Left, super_only), HotkeyAction::SnapLeft)
+    {
+        println!("Super+Left could not be bound: {e}");
+    }
     let snap_left = KeyEvent {
         key: Key::Left,
         pressed: true,
-        modifiers: Modifiers {
-            super_key: true,
-            ..Modifiers::NONE
-        },
+        modifiers: super_only,
         text: String::new(),
     };
     println!(

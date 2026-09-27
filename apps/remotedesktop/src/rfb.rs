@@ -11,11 +11,14 @@
 //! proven by a challenge rather than sent, but everything on screen and every
 //! key typed crosses the network readable. The window says so.
 //!
-//! **Encodings.** Raw and CopyRect, which every server speaks, and the
-//! DesktopSize pseudo-encoding so a resized remote desktop is followed. The
-//! compressed encodings (Tight, ZRLE, Hextile) are faster on a slow link and
-//! are not asked for; a server must fall back to Raw for a client that does
-//! not name them (RFC 6143 section 7.7).
+//! **Encodings.** Hextile first -- 16x16 tiles, each a background with
+//! rectangles of colour over it, which is most of any desktop and a fraction
+//! of Raw's bytes -- then CopyRect and Raw, which every server speaks, and
+//! the DesktopSize pseudo-encoding so a resized remote desktop is followed.
+//! ZRLE and Tight compress further but need one zlib stream carried across
+//! every rectangle, which the tree's `deflate` crate does not resume; they
+//! are not asked for, and a server falls back for a client that does not
+//! name them (RFC 6143 section 7.7).
 //!
 //! **Pixels.** The client asks for 32 bits a pixel, true colour, little
 //! endian, red at bit 16, green at 8, blue at 0 -- so a pixel read as a
@@ -47,6 +50,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// RFB's encoding numbers.
 const RAW: i32 = 0;
 const COPY_RECT: i32 = 1;
+const HEXTILE: i32 = 5;
 const DESKTOP_SIZE: i32 = -223;
 
 /// What the session tells the window.
@@ -360,13 +364,91 @@ impl Conn<'_> {
         self.write(&[
             0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0,
         ])?;
-        // SetEncodings: Raw, CopyRect, DesktopSize.
-        let mut encodings = vec![2, 0, 0, 3];
-        for e in [COPY_RECT, RAW, DESKTOP_SIZE] {
+        // SetEncodings, most wanted first: Hextile, CopyRect, Raw, and the
+        // DesktopSize pseudo-encoding.
+        let mut encodings = vec![2, 0, 0, 4];
+        for e in [HEXTILE, COPY_RECT, RAW, DESKTOP_SIZE] {
             encodings.extend_from_slice(&e.to_be_bytes());
         }
         self.write(&encodings)?;
         Ok((width, height, name))
+    }
+
+    /// One pixel as the client asked for them: four bytes, little endian.
+    fn pixel(&mut self) -> Result<u32, String> {
+        let mut p = [0_u8; 4];
+        self.read_exact(&mut p)?;
+        let [b, g, r, _] = p;
+        Ok(u32::from_le_bytes([b, g, r, 0]))
+    }
+
+    /// A Hextile rectangle (RFC 6143 section 7.7.4), `w` by `h`: 16x16 tiles
+    /// left to right, top to bottom, each either raw or a background with
+    /// rectangles of colour over it. The background and foreground carry over
+    /// from the last tile that named them; a raw tile names neither. A
+    /// subrectangle reaching past its tile is clipped to it.
+    fn hextile(&mut self, w: u16, h: u16, area: u64) -> Result<Vec<u32>, String> {
+        const RAW_TILE: u8 = 1;
+        const BACKGROUND: u8 = 2;
+        const FOREGROUND: u8 = 4;
+        const ANY_SUBRECTS: u8 = 8;
+        const COLOURED: u8 = 16;
+        let width = usize::from(w);
+        let mut out = vec![0_u32; usize::try_from(area).unwrap_or(0)];
+        let (mut bg, mut fg) = (0_u32, 0_u32);
+        for ty in (0..h).step_by(16) {
+            for tx in (0..w).step_by(16) {
+                let tw = w.saturating_sub(tx).min(16);
+                let th = h.saturating_sub(ty).min(16);
+                let kind = self.u8()?;
+                if kind & RAW_TILE != 0 {
+                    for row in 0..th {
+                        for col in 0..tw {
+                            let p = self.pixel()?;
+                            fill(
+                                &mut out,
+                                width,
+                                (tx.saturating_add(col), ty.saturating_add(row)),
+                                (1, 1),
+                                p,
+                            );
+                        }
+                    }
+                    continue;
+                }
+                if kind & BACKGROUND != 0 {
+                    bg = self.pixel()?;
+                }
+                if kind & FOREGROUND != 0 {
+                    fg = self.pixel()?;
+                }
+                fill(&mut out, width, (tx, ty), (tw, th), bg);
+                if kind & ANY_SUBRECTS == 0 {
+                    continue;
+                }
+                for _ in 0..self.u8()? {
+                    let colour = if kind & COLOURED != 0 {
+                        self.pixel()?
+                    } else {
+                        fg
+                    };
+                    let (xy, wh) = (self.u8()?, self.u8()?);
+                    let (sx, sy) = (u16::from(xy >> 4), u16::from(xy & 0xF));
+                    let (sw, sh) = (
+                        u16::from(wh >> 4).saturating_add(1),
+                        u16::from(wh & 0xF).saturating_add(1),
+                    );
+                    fill(
+                        &mut out,
+                        width,
+                        (tx.saturating_add(sx), ty.saturating_add(sy)),
+                        (sw.min(tw.saturating_sub(sx)), sh.min(th.saturating_sub(sy))),
+                        colour,
+                    );
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Ask for the screen: all of it, or what changed since the last frame.
@@ -419,16 +501,13 @@ impl Conn<'_> {
             let h = self.u16()?;
             let encoding = i32::from_be_bytes(self.u32()?.to_be_bytes());
             match encoding {
+                HEXTILE => {
+                    let area = inside((x, y, w, h), (*width, *height))?;
+                    let pixels = self.hextile(w, h, area)?;
+                    tell(Update::Pixels { x, y, w, h, pixels });
+                }
                 RAW => {
-                    let area = u64::from(w).saturating_mul(u64::from(h));
-                    if area > MAX_PIXELS
-                        || u32::from(x).saturating_add(u32::from(w)) > u32::from(*width)
-                        || u32::from(y).saturating_add(u32::from(h)) > u32::from(*height)
-                    {
-                        return Err(format!(
-                            "the server sent a {w}x{h} rectangle at {x},{y}, outside its own {width}x{height} desktop"
-                        ));
-                    }
+                    let area = inside((x, y, w, h), (*width, *height))?;
                     let mut raw = vec![0_u8; usize::try_from(area.saturating_mul(4)).unwrap_or(0)];
                     self.read_exact(&mut raw)?;
                     let pixels = raw
@@ -513,6 +592,35 @@ pub fn keysym_of_char(c: char) -> u32 {
     }
 }
 
+/// The area of a rectangle a server sent, once it is known to lie inside
+/// its own desktop and to be no larger than this client holds.
+fn inside((x, y, w, h): (u16, u16, u16, u16), (width, height): (u16, u16)) -> Result<u64, String> {
+    let area = u64::from(w).saturating_mul(u64::from(h));
+    if area > MAX_PIXELS
+        || u32::from(x).saturating_add(u32::from(w)) > u32::from(width)
+        || u32::from(y).saturating_add(u32::from(h)) > u32::from(height)
+    {
+        return Err(format!(
+            "the server sent a {w}x{h} rectangle at {x},{y}, outside its own {width}x{height} desktop"
+        ));
+    }
+    Ok(area)
+}
+
+/// Paint `size` pixels of `colour` at `at` into a rectangle `width` wide;
+/// what falls outside it is not painted.
+fn fill(out: &mut [u32], width: usize, at: (u16, u16), size: (u16, u16), colour: u32) {
+    for row in 0..size.1 {
+        let start = usize::from(at.1.saturating_add(row))
+            .saturating_mul(width)
+            .saturating_add(usize::from(at.0));
+        let end = start.saturating_add(usize::from(size.0));
+        if let Some(span) = out.get_mut(start..end) {
+            span.fill(colour);
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod fake {
     //! A VNC server on a loopback port, for the tests: it plays a script of
@@ -568,7 +676,13 @@ pub(crate) mod fake {
     /// The server's side of a handshake with no password, a 4x2 desktop
     /// named "desk".
     pub fn handshake_none() -> Vec<Step> {
-        let mut init = vec![0, 4, 0, 2];
+        handshake_sized(4, 2)
+    }
+
+    /// As [`handshake_none`], for a `w` by `h` desktop.
+    pub fn handshake_sized(w: u16, h: u16) -> Vec<Step> {
+        let mut init = w.to_be_bytes().to_vec();
+        init.extend_from_slice(&h.to_be_bytes());
         init.extend_from_slice(&[32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0]);
         init.extend_from_slice(&4_u32.to_be_bytes());
         init.extend_from_slice(b"desk");
@@ -581,7 +695,7 @@ pub(crate) mod fake {
             Step::Hear(1),
             Step::Say(init),
             Step::Hear(20), // SetPixelFormat
-            Step::Hear(16), // SetEncodings, three of them
+            Step::Hear(20), // SetEncodings, four of them
             Step::Hear(10), // the first FramebufferUpdateRequest
         ]
     }
@@ -668,7 +782,11 @@ mod tests {
             "not 32-bit little-endian true colour"
         );
         let encodings = heard.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(&encodings[..4], &[2, 0, 0, 3]);
+        assert_eq!(
+            &encodings[..8],
+            &[2, 0, 0, 4, 0, 0, 0, 5],
+            "Hextile is not asked for first"
+        );
         let first = heard.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(
             first,
@@ -701,7 +819,7 @@ mod tests {
             Step::Hear(1),
             Step::Say(init),
             Step::Hear(20),
-            Step::Hear(16),
+            Step::Hear(20),
             Step::Hear(10),
         ];
         let (port, heard) = server(script);
@@ -828,6 +946,70 @@ mod tests {
             [3, 0, 0, 0, 0, 0, 0, 8, 0, 6],
             "after a resize the whole new screen was not asked for"
         );
+    }
+
+    /// **Hextile tiles are drawn**: a tile of background with a rectangle of
+    /// foreground over it, a raw tile, and a tile naming nothing, which takes
+    /// the last background named -- across the raw tile between.
+    #[test]
+    fn hextile_tiles_are_drawn() {
+        use super::fake::handshake_sized;
+        let mut script = handshake_sized(36, 2);
+        let mut update = vec![0, 0, 0, 1, 0, 0, 0, 0, 0, 36, 0, 2];
+        update.extend_from_slice(&HEXTILE.to_be_bytes());
+        // Tile 1, 16x2: background, foreground, one subrectangle at (1,0) 2x1.
+        update.extend_from_slice(&[
+            2 | 4 | 8,
+            0x33,
+            0x22,
+            0x11,
+            0,
+            0x66,
+            0x55,
+            0x44,
+            0,
+            1,
+            0x10,
+            0x10,
+        ]);
+        // Tile 2, 16x2: raw, 32 pixels numbered.
+        update.push(1);
+        for n in 0..32_u8 {
+            update.extend_from_slice(&[n, 0, 0, 0]);
+        }
+        // Tile 3, 4x2: nothing named -- the background carries over.
+        update.push(0);
+        script.push(Step::Say(update));
+        script.push(Step::Hear(10));
+        let (port, _heard) = server(script);
+        let session = Session::open("127.0.0.1", port, "", None).unwrap();
+        let updates = collect(&session, |u| {
+            u.iter().any(|x| matches!(x, Update::Pixels { .. }))
+        });
+        let Some(Update::Pixels {
+            w: 36,
+            h: 2,
+            pixels,
+            ..
+        }) = updates.iter().find(|u| matches!(u, Update::Pixels { .. }))
+        else {
+            panic!("{updates:?}");
+        };
+        let (bg, fg) = (0x0011_2233, 0x0044_5566);
+        assert_eq!(
+            pixels[..4],
+            [bg, fg, fg, bg],
+            "the subrectangle is not where it was put"
+        );
+        assert_eq!(
+            pixels[36 + 1],
+            bg,
+            "the subrectangle reached the second row"
+        );
+        assert_eq!(pixels[16..20], [0, 1, 2, 3], "the raw tile's first row");
+        assert_eq!(pixels[36 + 16], 16, "the raw tile's second row");
+        assert_eq!(pixels[32..36], [bg; 4], "the background did not carry over");
+        assert_eq!(pixels[36 + 35], bg);
     }
 
     /// Keys and the pointer go out in RFB's shape.

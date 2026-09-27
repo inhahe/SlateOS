@@ -6428,7 +6428,7 @@ mod tests {
             Step::Say(vec![1, 2]),
             Step::Hear(1),
             Step::Say(vec![0; 16]),
-            Step::Hear(16),
+            Step::Hear(16), // the challenge's answer
             Step::Say(failed),
         ];
         let (port, _heard) = server(script);

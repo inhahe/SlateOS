@@ -40,6 +40,7 @@ PASSWORD = "a_password_is_proven_by_the_challenge"
 OUTSIDE = "a_rectangle_outside_the_desktop_is_refused"
 OTHERS = "every_other_message_arrives"
 RFB_KEYS = "keys_and_the_pointer_are_sent_as_rfb_says"
+HEXTILE_TEST = "hextile_tiles_are_drawn"
 
 MAIN = [
     (
@@ -124,9 +125,39 @@ MAIN = [
 
 RFB = [
     (
+        "Hextile is not asked for first",
+        "        for e in [HEXTILE, COPY_RECT, RAW, DESKTOP_SIZE] {",
+        "        for e in [COPY_RECT, RAW, DESKTOP_SIZE, HEXTILE] {",
+        [HANDSHAKE],
+    ),
+    (
+        "a tile's background is read and dropped",
+        "                    bg = self.pixel()?;",
+        "                    let _ = self.pixel()?;",
+        [HEXTILE_TEST],
+    ),
+    (
+        "a subrectangle is put at its tile's corner",
+        "                        (tx.saturating_add(sx), ty.saturating_add(sy)),",
+        "                        (tx, ty),",
+        [HEXTILE_TEST],
+    ),
+    (
+        "a raw tile is read column by column",
+        "                                (tx.saturating_add(col), ty.saturating_add(row)),",
+        "                                (tx.saturating_add(row), ty.saturating_add(col)),",
+        [HEXTILE_TEST],
+    ),
+    (
+        "subrectangles are never read",
+        "                if kind & ANY_SUBRECTS == 0 {",
+        "                if true {",
+        [HEXTILE_TEST],
+    ),
+    (
         "a rectangle past the desktop's edge is read",
-        "                        || u32::from(x).saturating_add(u32::from(w)) > u32::from(*width)",
-        "                        || false",
+        "        || u32::from(x).saturating_add(u32::from(w)) > u32::from(width)",
+        "        || false",
         [OUTSIDE],
     ),
     (

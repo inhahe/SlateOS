@@ -3963,7 +3963,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pthread mutex attributes: pthread_mutexattr_init/destroy/settype/gettype (NORMAL/RECURSIVE/ERRORCHECK types accepted)
   - [x] sem_timedwait: semaphore decrement with absolute timeout (clock_gettime + spin-yield)
   - [x] POSIX timers: timer_create/settime/gettime/delete/getoverrun stubs (timer IDs allocated, never fire — no signal delivery)
-  - [x] iconv: character encoding conversion (iconv_open/iconv/iconv_close) — UTF-8/ASCII pairs only, lossy UTF-8→ASCII replaces non-ASCII with '?'
+  - [x] iconv: character encoding conversion (iconv_open/iconv/iconv_close) — glibc 2.39's conversion steps and answers for UTF-8, ASCII, ISO-8859-1, CP1252, UTF-16/UTF-32 (and LE/BE), UCS-2/UCS-4, UNICODE and WCHAR_T, with glibc's //TRANSLIT (its C-locale table) and //IGNORE (known-issues.md → B-D-ICONV-WAS-NOT-GLIBCS, B-D-ICONV-HAD-THREE-CHARSETS; design-decisions.md §1116). glibc's other character sets: todo.txt, lane D
   - [x] wordexp: word expansion (wordexp/wordfree) — field splitting, quote removal, $VAR expansion, command substitution detection (WRDE_NOCMD)
   - [x] strlcpy/strlcat: BSD safe string functions — copy/append with NUL termination guarantee, truncation detection via return value
   - [x] mkdtemp: create unique temporary directory (modeled after mkstemp with mkdir)

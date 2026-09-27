@@ -169996,6 +169996,10 @@ UCS-2/UCS-4, `WCHAR_T` and CP1252; `todo.txt` (lane D) records what Ubuntu
 answered for each, byte orders and BOMs included. They are refused with
 `EINVAL` from `iconv_open`, as before.
 
+**Addendum (2026-09-26):** those five convert now, and the three here were
+found to disagree with glibc in a few more places once glibc's source was
+read beside the probes -- `B-D-ICONV-HAD-THREE-CHARSETS`.
+
 ### [D] B-D-IO-URING-WAS-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
 
 **Where:** `posix/src/linux_io_uring.rs` -- `io_uring_setup`,
@@ -170894,3 +170898,55 @@ flag), `glyf_shift`, and the phantom-point handling in `outline_into_at`.
 
 **How to see it.** `python gui/font/tools/hint_oracle.py C:\Windows\Fonts\arial.ttf
 --gids 100,118`: every y agrees, every x is off by the same amount.
+
+### [D] B-D-ICONV-HAD-THREE-CHARSETS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/iconv.rs` (rewritten as glibc's conversion steps);
+`posix/src/linux_iconv_types.rs` (deleted).
+
+**In short:** `iconv` converted only UTF-8, ASCII and Latin-1, so a program
+that reads or writes UTF-16 -- Windows text files, much of what Java and
+JavaScript exchange -- or converts to and from `wchar_t`, or reads Windows'
+Latin-1, was told the character set does not exist. It now converts the sets
+programs reach for first, as glibc 2.39 does; and the three it had answered
+glibc differently in five places, fixed with them.
+
+**What converts now,** by every name glibc gives it, read as glibc reads a
+name: UTF-16 and UTF-32 (a byte-order mark written and read -- FF FE,
+little-endian, on x86-64 -- as glibc's), `UTF-16LE`/`BE` and `UTF-32LE`/`BE`
+(no mark), UCS-2 and `UCS-2BE`, `UNICODE` (UCS-2 behind the mark), UCS-4
+(big-endian) and `UCS-4LE`, `WCHAR_T`, and CP1252.
+
+**How:** as glibc does it. Each character set is a step to or from glibc's
+internal UCS-4; a conversion is two steps through an 8160-character buffer,
+or one to or from `WCHAR_T`; each step's loop checks what glibc's checks, in
+its order; the rounds are glibc's `iconv/skeleton.c`'s. That is where a
+simpler converter goes wrong: which error a full buffer next to bad input
+gives, where the input stops, when `//IGNORE` reports a skip, when the mark
+goes out. All of it was probed on Ubuntu 24.04 and pinned in the module's
+tests (design-decisions.md §1116).
+
+**What the three got wrong, and now do not:**
+
+| | was | glibc, and now |
+|---|---|---|
+| a full buffer, then input cut off or invalid (`"ab\xc3"` into 2 bytes) | `E2BIG` | `EINVAL` (`EILSEQ`): glibc decodes ahead of the output |
+| `//IGNORE`, a full buffer, then a byte to skip at the end | `E2BIG`, the byte left | skipped; `EILSEQ` |
+| a Unicode tag character (U+E0000-U+E007F) into ASCII or Latin-1 | `EILSEQ` | dropped without a word |
+| names | `-` and `_` ignored: `UTF_8` and `LATIN-1` opened; `8859_1` and `" UTF-8"` did not | glibc's names, read as glibc reads them: the first two refused, the last two open |
+| a conversion with `*outbuf` NULL and no room | went ahead | `EFAULT`, where glibc's assertion ends the program |
+
+**Deliberately not glibc** (§1116): three glibc bugs. Its reset keeps the
+byte order a mark gave, so a second stream after a big-endian one is misread;
+its `//TRANSLIT` into `UTF-16`, `UTF-32` or `UNICODE` writes an extra mark
+before each substitute; and a mark read by a call that then runs out of room
+is read again from the next two bytes, losing a leading U+FEFF.
+
+**Beside it:** `posix/src/linux_iconv_types.rs` defined `ICONV_ENC_*`
+"encoding IDs as used by glibc internals" and `ICONV_FLAG_*` flags. glibc has
+neither -- `<iconv.h>` declares `iconv_t` and three functions -- and nothing
+used them. Deleted.
+
+**Still missing:** glibc's other character sets: UTF-7, the ISO-8859 family
+beyond Latin-1, the other Windows and IBM code pages, KOI8, and the East Asian
+multibyte sets -- `todo.txt` (lane D).

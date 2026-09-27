@@ -1208,7 +1208,6 @@ pub mod linux_icmp_types;
 pub mod linux_icmp_user_types;
 pub mod linux_icmpv6_types;
 pub mod linux_icmpv6_user_types;
-pub mod linux_iconv_types;
 pub mod linux_idle_inject_types;
 pub mod linux_idxd_types;
 pub mod linux_idxd_user_types;

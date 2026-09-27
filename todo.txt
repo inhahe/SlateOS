@@ -58798,14 +58798,22 @@ is already waiting, not whether the setter exists.
   ported, not written.  (Replaces the DES follow-up of the 2026-05-29
   crypt entry, deleted as done.)
 
-- **iconv: the character sets beside UTF-8, ASCII and ISO-8859-1**
-  (posix/src/iconv.rs).  The decode/encode core takes a new one as a pair of
-  functions.  What Ubuntu 24.04's glibc answered, 2026-09-26: "UTF-16" writes
-  a BOM, FF FE, then little-endian, and reads a BOM if there is one and
-  little-endian if not; "UTF-16LE"/"UTF-16BE" neither write nor read one;
-  "UTF-32" writes FF FE 00 00 then little-endian; "UCS-2" is little-endian
-  with no BOM, "UCS-4" big-endian with none, "WCHAR_T" little-endian UTF-32.
-  UTF-16 input: a lone low surrogate is EILSEQ, a high one at the end
-  EINVAL; a surrogate in UTF-8 input is EILSEQ before any target sees it.
-  "CP1252" exists (the euro sign is 0x80).  None of these writes anything on
-  the reset call.
+- **iconv: glibc's other character sets** (posix/src/iconv.rs).  UTF-8,
+  ASCII, ISO-8859-1, CP1252, UTF-16, UTF-32, UCS-2, UCS-4, UNICODE and
+  WCHAR_T convert as glibc 2.39's (B-D-ICONV-HAD-THREE-CHARSETS); every other
+  name is refused with EINVAL.  Next, by how often programs ask: UTF-7 and
+  UTF-7-IMAP (mail clients' folder names; glibc's iconvdata/utf-7.c -- a
+  stateful step, and the first here whose reset writes something); the 8-bit
+  sets glibc builds with 8bit-gap.c and 8bit-generic.c from
+  localedata/charmaps -- the ISO-8859 family, CP1250-1258, KOI8-R/U, the IBM
+  code pages -- a generated table each, as posix/tools/gen_iconv_translit.py
+  generates the translit table; then the East Asian multibyte sets (EUC-JP,
+  SHIFT_JIS, EUC-KR, GBK/GB18030, BIG5, ISO-2022-JP), whose tables run to
+  megabytes.  A new set is a Charset variant, a decoder and an encoder in
+  its glibc module's check order (glibc 2.39's source is in
+  D:\refsrc\glibc-2.39), and its names from iconvdata/gconv-modules --
+  each probed against Ubuntu before it is trusted, as the module docs say.
+  The `iconv` program (userspace/iconv, lane B) converts with tables of its
+  own, and has ISO-8859-15 and KOI8-R, which the libc does not yet; once the
+  libc has the 8-bit sets, the program can be glibc's iconv_prog over the
+  libc's iconv, with glibc's answers -- ask lane B then.

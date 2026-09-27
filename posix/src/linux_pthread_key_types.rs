@@ -61,10 +61,6 @@ pub const PTHREAD_CANCELED: usize = usize::MAX; // (void*)-1
 
 /// Minimum thread stack size (bytes, PTHREAD_STACK_MIN on Linux).
 pub const PTHREAD_STACK_MIN: u32 = 16384;
-/// Default thread stack size (bytes, glibc default).
-pub const PTHREAD_STACK_DEFAULT: u32 = 8388608; // 8 MiB
-/// Default thread guard page size (bytes).
-pub const PTHREAD_GUARD_DEFAULT: u32 = 4096;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -122,15 +118,5 @@ mod tests {
     #[test]
     fn test_stack_min() {
         assert_eq!(PTHREAD_STACK_MIN, 16384);
-    }
-
-    #[test]
-    fn test_stack_default_gt_min() {
-        assert!(PTHREAD_STACK_DEFAULT > PTHREAD_STACK_MIN);
-    }
-
-    #[test]
-    fn test_guard_default() {
-        assert_eq!(PTHREAD_GUARD_DEFAULT, 4096);
     }
 }

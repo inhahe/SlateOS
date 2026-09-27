@@ -58819,3 +58819,18 @@ is already waiting, not whether the setter exists.
   lane B) converts with tables of its own; the libc now has every set it
   knows, so it can be glibc's iconv_prog over the libc's iconv -- asked in
   requests/d-b-the-iconv-program-can-run-on-the-libc.md.
+
+- **posix/src: some 460 modules nothing the library exports reaches**
+  (the sequel to TD-D-1700-CONSTANT-MODULES-NOTHING-USED).  A scan of
+  2026-09-26 -- comments stripped, the roots the 94 modules that export C
+  symbols (no_mangle) and what lib.rs names -- reached 147 of 615 modules;
+  468 (about 73,800 lines) are reached from no root.  Not all are dead: the
+  scan does not see other crates that `use posix::...` -- 49 files in
+  userspace/, services/ and the rest name 34 posix modules, crypt (109 times)
+  and ed25519 (35, and on the scan's unreached list) above all; count those
+  as roots, and the modules whose global_asm! exports symbols (setjmp.rs) --
+  and some are facades (grp.rs re-exports pwd.rs's calls).  Among them are
+  the linux_virtio_* constant modules and linux_virtio_types, the one kept
+  types module they use.  Method: for each family, grep the whole tree for
+  `posix::<name>`, read what it is, and delete it (design-decisions.md
+  §1118, after §851) or wire it; say which, and why, in the commit.

@@ -1573,9 +1573,9 @@ mod tests {
         }
 
         /// Exclude_kernel bit does not collide with exclusive
-        /// (bit 3, in the canonical Linux layout) — this is the bug
-        /// observed in `linux_perf_types.rs`.  Documents the
-        /// expected non-overlap.
+        /// (bit 3, in the canonical Linux layout) — the bug a copy of these
+        /// constants once had (`linux_perf_types.rs`, since deleted).
+        /// Documents the expected non-overlap.
         #[test]
         fn test_perf_phase181_exclude_kernel_distinct_from_exclusive() {
             const PERF_ATTR_FLAG_EXCLUSIVE: u64 = 1 << 3;

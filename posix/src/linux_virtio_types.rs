@@ -36,10 +36,11 @@ pub const VIRTIO_ID_SOUND: u32 = 25;
 pub const VIRTIO_ID_FS: u32 = 26;
 /// PMEM device.
 pub const VIRTIO_ID_PMEM: u32 = 27;
-/// Bluetooth device.
-pub const VIRTIO_ID_BT: u32 = 28;
-/// GPIO device.
-pub const VIRTIO_ID_GPIO: u32 = 29;
+/// Bluetooth device.  (28 until 2026-09-26: `<linux/virtio_ids.h>`'s 0x28
+/// read as decimal.  It is 40.)
+pub const VIRTIO_ID_BT: u32 = 40;
+/// GPIO device.  (29 until 2026-09-26, likewise; it is 41.)
+pub const VIRTIO_ID_GPIO: u32 = 41;
 
 // ---------------------------------------------------------------------------
 // Virtio device status bits
@@ -158,6 +159,34 @@ mod tests {
                 assert_ne!(ids[i], ids[j]);
             }
         }
+    }
+
+    /// Linux 6.6's `include/uapi/linux/virtio_ids.h`, value for value --
+    /// the check that distinctness alone missed (`BT` and `GPIO` were 28
+    /// and 29).
+    #[test]
+    fn test_device_ids_are_linuxs() {
+        assert_eq!(
+            [
+                VIRTIO_ID_NET,
+                VIRTIO_ID_BLOCK,
+                VIRTIO_ID_CONSOLE,
+                VIRTIO_ID_RNG,
+                VIRTIO_ID_BALLOON,
+                VIRTIO_ID_SCSI,
+                VIRTIO_ID_9P,
+                VIRTIO_ID_GPU,
+                VIRTIO_ID_INPUT,
+                VIRTIO_ID_VSOCK,
+                VIRTIO_ID_CRYPTO,
+                VIRTIO_ID_SOUND,
+                VIRTIO_ID_FS,
+                VIRTIO_ID_PMEM,
+                VIRTIO_ID_BT,
+                VIRTIO_ID_GPIO,
+            ],
+            [1, 2, 3, 4, 5, 8, 9, 16, 18, 19, 20, 25, 26, 27, 40, 41]
+        );
     }
 
     #[test]

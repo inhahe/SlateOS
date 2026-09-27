@@ -611,8 +611,8 @@ pub extern "C" fn ntp_adjtime(tx: *mut Timex) -> i32 {
 // hoisting the null-tx check above the clock-id dispatch.
 
 /// Standard POSIX clock ids recognised by `clock_adjtime`.  These
-/// mirror `linux_clock2_types::CLOCK_*` but kept as `i32` because the
-/// syscall takes a signed `clockid_t`.
+/// mirror [`crate::time::CLOCK_REALTIME`] and the rest but kept as `i32`
+/// because the syscall takes a signed `clockid_t`.
 const CLOCK_REALTIME_ID: i32 = 0;
 const CLOCK_MONOTONIC_ID: i32 = 1;
 const CLOCK_PROCESS_CPUTIME_ID_ID: i32 = 2;

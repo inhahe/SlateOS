@@ -4175,6 +4175,24 @@ mod tests {
             assert_eq!((&raw const tm.tm_gmtoff).cast::<u8>().offset_from(base), 40);
             assert_eq!((&raw const tm.tm_zone).cast::<u8>().offset_from(base), 48);
         }
+        // Every field, in glibc's order: the nine `int`s four bytes apart.
+        // (Until 2026-09-26 this half lived in linux_clock_user_types.rs,
+        // deleted with the other unused constant modules.)
+        use core::mem::offset_of;
+        let ints = [
+            offset_of!(Tm, tm_sec),
+            offset_of!(Tm, tm_min),
+            offset_of!(Tm, tm_hour),
+            offset_of!(Tm, tm_mday),
+            offset_of!(Tm, tm_mon),
+            offset_of!(Tm, tm_year),
+            offset_of!(Tm, tm_wday),
+            offset_of!(Tm, tm_yday),
+            offset_of!(Tm, tm_isdst),
+        ];
+        assert_eq!(ints, [0, 4, 8, 12, 16, 20, 24, 28, 32]);
+        assert_eq!(offset_of!(Tm, tm_gmtoff), 40);
+        assert_eq!(offset_of!(Tm, tm_zone), 48);
     }
 
     #[test]

@@ -3087,9 +3087,8 @@ const MEMBARRIER_SUPPORTED: i32 = MEMBARRIER_CMD_GLOBAL
 /// Linux 5.10+ extended the rseq variant to accept this flag plus a
 /// `cpu_id` argument so userspace can restart only the rseq on one
 /// CPU rather than every CPU in the process.  Every other command
-/// rejects non-zero `flags` with EINVAL.  Mirrors the constant in
-/// [`linux_membarrier_types`](crate::linux_membarrier_types) but lives
-/// here as `u32` so it can be compared directly against the syscall
+/// rejects non-zero `flags` with EINVAL.  `<linux/membarrier.h>`'s
+/// value, as a `u32` so it can be compared directly against the syscall
 /// `flags` argument.
 pub const MEMBARRIER_CMD_FLAG_CPU: u32 = 1 << 0;
 

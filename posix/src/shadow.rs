@@ -195,6 +195,13 @@ process_global! {
 /// Look up a user's shadow entry (reentrant): as `getpwnam_r` -- 0 with
 /// `*result` set or NULL, `ERANGE`, `EFAULT`, or the error reading
 /// `/etc/shadow` (`EACCES` without the privilege).
+///
+/// A NULL `name` is `EFAULT` only where glibc's lookup first touches it:
+/// comparing it with the file's first entry.  glibc opens `/etc/shadow` and
+/// reads that entry before it looks at the name (nss_files' `DB_LOOKUP`;
+/// nscd, whose client reads the name first for `getpwnam_r`, does not serve
+/// shadow), so a file it cannot read answers with its own error, and one
+/// with no entries is "not found".  Until 2026-09-26 the NULL came first.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getspnam_r(
     name: *const u8,
@@ -203,18 +210,24 @@ pub unsafe extern "C" fn getspnam_r(
     buflen: usize,
     result: *mut *const Spwd,
 ) -> i32 {
-    if name.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return errno::EFAULT;
-    }
-    // SAFETY: `name` is non-null and the caller's NUL-terminated string.
-    let name = unsafe { c_bytes(name) };
-    // SAFETY: the other pointers are the caller's, as documented.
+    // SAFETY: the pointers are the caller's, as documented; `name` is read
+    // only once it is known not to be NULL.
     unsafe {
         reentrant(spwd, buf, buflen, result, |room| {
             with_text(Which::Shadow, ROOT_SHADOW_TEXT, |text| {
-                lines(text, 0)
+                let mut entries = lines(text, 0)
                     .filter_map(|(line, _)| parse_sp(line))
+                    .peekable();
+                if name.is_null() {
+                    return if entries.peek().is_some() {
+                        Err(errno::EFAULT)
+                    } else {
+                        Ok(None)
+                    };
+                }
+                // SAFETY: non-null, and the caller's NUL-terminated string.
+                let name = c_bytes(name);
+                entries
                     .find(|e| !is_compat(e.namp) && e.namp == name)
                     .map(|e| fill_sp(&e, room))
                     .transpose()
@@ -639,5 +652,35 @@ short:x:1:2
         // SAFETY: NULL is what is being tested.
         assert!(unsafe { getspnam(core::ptr::null()) }.is_null());
         assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// glibc reads the file before the name: an unreadable file is its own
+    /// error and an empty one is "not found", a NULL name notwithstanding.
+    /// Both were EFAULT until 2026-09-26.
+    #[test]
+    fn a_null_name_comes_after_the_file() {
+        let mut sp = Spwd::EMPTY;
+        let mut buf = [0u8; 64];
+        let mut result: *const Spwd = core::ptr::null();
+        let mut ask = || {
+            // SAFETY: the caller's objects; NULL is what is being tested.
+            unsafe {
+                getspnam_r(
+                    core::ptr::null(),
+                    &mut sp,
+                    buf.as_mut_ptr(),
+                    64,
+                    &mut result,
+                )
+            }
+        };
+        crate::nss_files::set_test_error(Which::Shadow, errno::EACCES);
+        assert_eq!(ask(), errno::EACCES);
+        crate::nss_files::set_test_text(Which::Shadow, Some(b""));
+        assert_eq!(ask(), 0, "no entry to compare the name with");
+        crate::nss_files::set_test_text(Which::Shadow, Some(b"alice:!:19500::::::\n"));
+        assert_eq!(ask(), errno::EFAULT, "the first comparison");
+        crate::nss_files::set_test_text(Which::Shadow, None);
+        assert!(result.is_null());
     }
 }

@@ -24413,6 +24413,16 @@ glibc 2.39's `select`, `pselect` and `ppoll` and Linux 6.6's fs/select.c.
   in an order of its own, or not at all --
   `B-D-SELECT-AND-PPOLL-TIMEOUTS-WERE-NOT-LINUXS` (new, fixed with it).
 
+**Forty-second pass, 2026-09-26 — `shadow.rs` (1 site), lane D.** Against
+glibc 2.39's `getspnam_r`.
+
+- **`getspnam_r(NULL, …)`** was `EFAULT` first. glibc has no nscd path for
+  shadow, so nss_files opens `/etc/shadow` and reads its first entry before
+  the name is touched -- comparing it with that entry. An unreadable file
+  is its own `EACCES` now, and a file with no entries "not found", whatever
+  the name; `EFAULT` comes at the first comparison. (`getpwnam_r`'s NULL
+  stays first: glibc's nscd client reads the name before anything else.)
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24435,9 +24445,9 @@ thirty-eight swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 finishes every file the sweep counted at four, three and two, the three the
 recount of 2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs`
 needed nothing at their NULLs -- `pwd.rs`'s database did
-(`B-D-PWD-KNEW-ONLY-ROOT`). Of the ten it counted at one, `pipe.rs` and
-`poll.rs` are done (the fortieth and forty-first passes); next are
-`linux_bpf.rs`, `linux_perf_event.rs`, `malloc.rs`, `ndbm.rs`, `shadow.rs`,
+(`B-D-PWD-KNEW-ONLY-ROOT`). Of the ten it counted at one, `pipe.rs`,
+`poll.rs` and `shadow.rs` are done (the fortieth to forty-second passes);
+next are `linux_bpf.rs`, `linux_perf_event.rs`, `malloc.rs`, `ndbm.rs`,
 `uio.rs` (new, and already right), `utmpx.rs` and `utsname.rs`. The thirty-ninth pass was across files,
 not at a count: the callbacks.
 

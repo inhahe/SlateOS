@@ -87,8 +87,54 @@ pub enum ConflictPolicy {
     OverwriteIfNewer,
     /// Rename the destination with a numeric suffix, e.g. `file (2).txt`.
     Rename,
-    /// Emit a [`FileOpEvent::Conflict`] and wait for the caller to decide.
+    /// Stop at the taken name -- emit a [`FileOpEvent::Conflict`] and wait,
+    /// doing nothing more, until the caller answers with
+    /// [`OperationExecutor::answer`].
+    ///
+    /// Until 2026-09-27 this emitted the event and then *skipped the file*
+    /// ("In a real async implementation the caller would respond. For now,
+    /// skip."), and a link skipped without even the event -- so a caller that
+    /// chose `Ask` got `Skip` and a notice it could no longer act on.
     Ask,
+}
+
+/// A taken name the operation has stopped at, under [`ConflictPolicy::Ask`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictQuestion {
+    /// The planned action it stopped at.
+    pub action: u32,
+    /// What is being copied, moved or linked there.
+    pub src: PathBuf,
+    /// The name that is taken.
+    pub dest: PathBuf,
+}
+
+/// What to do with a taken name the operation has asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictAnswer {
+    /// Put the new one beside it, numbered: `name (2).txt`.
+    KeepBoth,
+    /// Leave the one there, and do not copy this one.
+    Skip,
+    /// Put the new one in its place.
+    Replace,
+    /// Stop the whole operation here. What is done stays done -- see
+    /// [`OperationExecutor::cancel`].
+    Stop,
+}
+
+impl ConflictAnswer {
+    /// The policy that carries the answer out. `Stop` has none: it is not a
+    /// way of dealing with a file.
+    #[must_use]
+    pub fn policy(self) -> Option<ConflictPolicy> {
+        match self {
+            Self::KeepBoth => Some(ConflictPolicy::Rename),
+            Self::Skip => Some(ConflictPolicy::Skip),
+            Self::Replace => Some(ConflictPolicy::Overwrite),
+            Self::Stop => None,
+        }
+    }
 }
 
 /// What to do when a per-file error occurs.
@@ -786,6 +832,18 @@ pub struct OperationExecutor {
     stopped: bool,
     /// A file copy part-way through, held between steps.
     cursor: Option<CopyCursor>,
+    /// The taken name the operation has stopped at, under
+    /// [`ConflictPolicy::Ask`]. While it is here nothing moves; see
+    /// [`waiting_on`](Self::waiting_on).
+    question: Option<ConflictQuestion>,
+    /// How to deal with the taken name of one action, by the action's index:
+    /// the answer to its question. Held for as long as that action takes,
+    /// because a file copied in pieces meets its taken name again on every
+    /// step until the last piece lands.
+    answered: Option<(u32, ConflictPolicy)>,
+    /// "The same for the rest": the answer given for every later taken name,
+    /// in place of the plan's policy.
+    policy_for_the_rest: Option<ConflictPolicy>,
 }
 
 impl OperationExecutor {
@@ -804,6 +862,9 @@ impl OperationExecutor {
             next: 0,
             stopped: false,
             cursor: None,
+            question: None,
+            answered: None,
+            policy_for_the_rest: None,
         }
     }
 
@@ -815,11 +876,18 @@ impl OperationExecutor {
     /// window should drive `begin`/`step`/`finish` itself -- see `step`.
     ///
     /// Returns the events emitted during execution.
+    ///
+    /// A plan under [`ConflictPolicy::Ask`] cannot be run this way: there is
+    /// nobody to answer, so the first taken name stops it as though it had
+    /// been told to stop there.
     pub fn execute(&mut self) -> Vec<FileOpEvent> {
         if !self.begin() {
             return std::mem::take(&mut self.events);
         }
         while !self.is_done() {
+            if self.question.is_some() {
+                self.answer(ConflictAnswer::Stop, false);
+            }
             self.step();
         }
         self.finish();
@@ -840,8 +908,53 @@ impl OperationExecutor {
     /// it was stopped half way; every individual file is wholly moved or
     /// wholly not. The journal is kept -- it is only removed on `Completed` --
     /// so the operation can be resumed instead.
+    ///
+    /// An operation waiting on an answer is stopped too: its question is
+    /// withdrawn, or `step` -- which does nothing while one is up -- would
+    /// never reach the check that ends it.
     pub fn cancel(&mut self) {
+        self.question = None;
         self.progress.state = OperationState::Cancelled;
+    }
+
+    /// The taken name the operation has stopped at, if it has.
+    ///
+    /// While there is one, [`step`](Self::step) does nothing and
+    /// [`is_done`](Self::is_done) answers false: the operation is neither
+    /// finished nor moving, and a caller stepping it in a loop must stop
+    /// asking until it has been answered.
+    #[must_use]
+    pub fn waiting_on(&self) -> Option<&ConflictQuestion> {
+        self.question.as_ref()
+    }
+
+    /// Answer the question the operation stopped at, and let it go on.
+    ///
+    /// `for_the_rest` makes the same answer for every later taken name in
+    /// this operation, which then stops at none of them. Nothing happens when
+    /// there is no question.
+    pub fn answer(&mut self, answer: ConflictAnswer, for_the_rest: bool) {
+        let Some(question) = self.question.take() else {
+            return;
+        };
+        match answer.policy() {
+            None => self.cancel(),
+            Some(policy) => {
+                self.answered = Some((question.action, policy));
+                if for_the_rest {
+                    self.policy_for_the_rest = Some(policy);
+                }
+                self.progress.state = OperationState::Running;
+            }
+        }
+    }
+
+    /// Which plan this is carrying out, for a caller that has to find the
+    /// operation again -- the answer to a question comes back to the
+    /// operation that asked it.
+    #[must_use]
+    pub fn plan_id(&self) -> u64 {
+        self.plan.id()
     }
 
     /// Take the events emitted since this was last called.
@@ -935,8 +1048,12 @@ impl OperationExecutor {
     /// journal already records, so it is also the unit an interrupted
     /// operation resumes from.
     ///
-    /// No-op once [`is_done`](Self::is_done) answers true.
+    /// No-op once [`is_done`](Self::is_done) answers true, and while the
+    /// operation is waiting on an answer ([`waiting_on`](Self::waiting_on)).
     pub fn step(&mut self) {
+        if self.question.is_some() {
+            return;
+        }
         // Taken and put back rather than borrowed: the body below calls
         // `self.execute_*_action`, which borrows `self` mutably, so a live
         // `&mut self.journal` across it would not compile. Restoring it is the
@@ -960,7 +1077,14 @@ impl OperationExecutor {
         self.next = self.next.saturating_add(1);
         let action = &action;
         let operation = self.plan.operation.clone();
-        let conflict_policy = self.plan.conflict_policy;
+        // The answer to this action's own question first, then "the same for
+        // the rest", then what the plan was made with.
+        let conflict_policy = match self.answered {
+            Some((index, policy)) if index == action.index => policy,
+            _ => self
+                .policy_for_the_rest
+                .unwrap_or(self.plan.conflict_policy),
+        };
         let error_policy = self.plan.error_policy;
 
         if self.progress.state == OperationState::Cancelled {
@@ -1000,6 +1124,13 @@ impl OperationExecutor {
             // least one byte until the file ends.
             Ok(ActionOutcome::Partial) => {
                 self.next = self.next.saturating_sub(1);
+            }
+            // Stopped at a taken name: back to the same action, as for
+            // `Partial`, and nothing more until the question is answered --
+            // not journalled, not counted, nothing to undo.
+            Ok(ActionOutcome::Waiting) => {
+                self.next = self.next.saturating_sub(1);
+                self.progress.state = OperationState::Paused;
             }
             Ok(ActionOutcome::Done) => {
                 // A journal write that fails only costs redone work on a
@@ -1062,7 +1193,13 @@ impl OperationExecutor {
                                 // A retry that came back part-way is not a
                                 // success to record: leave the retry loop and
                                 // let the next step carry the same action on.
-                                if outcome == ActionOutcome::Partial {
+                                if matches!(
+                                    outcome,
+                                    ActionOutcome::Partial | ActionOutcome::Waiting
+                                ) {
+                                    if outcome == ActionOutcome::Waiting {
+                                        self.progress.state = OperationState::Paused;
+                                    }
                                     self.next = self.next.saturating_sub(1);
                                     retried = true;
                                     break;
@@ -1295,7 +1432,7 @@ impl OperationExecutor {
                     dest.clone()
                 }
                 ConflictPolicy::Rename => resolve_rename(dest),
-                ConflictPolicy::Ask => return Ok(ActionOutcome::Skipped),
+                ConflictPolicy::Ask => return Ok(self.ask(action, dest)),
             }
         } else {
             dest.clone()
@@ -1348,16 +1485,7 @@ impl OperationExecutor {
                         .push((action.src.clone(), UndoTarget::Path(renamed)));
                     return Ok(ActionOutcome::Done);
                 }
-                ConflictPolicy::Ask => {
-                    self.events.push(FileOpEvent::Conflict {
-                        src: action.src.clone(),
-                        dest: dest.clone(),
-                        policy: conflict,
-                    });
-                    // In a real async implementation the caller would respond.
-                    // For now, skip.
-                    return Ok(ActionOutcome::Skipped);
-                }
+                ConflictPolicy::Ask => return Ok(self.ask(action, dest)),
             }
         }
 
@@ -1370,6 +1498,23 @@ impl OperationExecutor {
                 .push((action.src.clone(), UndoTarget::Path(dest.clone())));
         }
         Ok(outcome)
+    }
+
+    /// Stop at `dest`, taken, and say so: the question for
+    /// [`waiting_on`](Self::waiting_on), and the event for a caller reading
+    /// the event stream.
+    fn ask(&mut self, action: &PlannedAction, dest: &Path) -> ActionOutcome {
+        self.events.push(FileOpEvent::Conflict {
+            src: action.src.clone(),
+            dest: dest.to_path_buf(),
+            policy: ConflictPolicy::Ask,
+        });
+        self.question = Some(ConflictQuestion {
+            action: action.index,
+            src: action.src.clone(),
+            dest: dest.to_path_buf(),
+        });
+        ActionOutcome::Waiting
     }
 
     fn execute_delete_action(&mut self, action: &PlannedAction) -> io::Result<ActionOutcome> {
@@ -1625,6 +1770,9 @@ enum ActionOutcome {
     /// turn. The action is *not* finished: it is not journalled, it is not
     /// counted, and the executor steps back to it.
     Partial,
+    /// Stopped at a taken name under [`ConflictPolicy::Ask`]: nothing was
+    /// done, and the executor steps back to the action once it is answered.
+    Waiting,
 }
 
 /// How much of one file a single step copies.
@@ -3351,5 +3499,310 @@ mod tests {
             OperationExecutor::temp_name(&b),
             "two distinct names share one scratch name, so a copy can land holding the wrong file"
         );
+    }
+
+    // ---- asking about a taken name (2026-09-27) ----------------------------
+    //
+    // `Ask` used to emit its event and skip the file, and a link skipped
+    // without the event, so nobody asked could ever answer.
+
+    /// Two files to copy onto a folder that already has the first.
+    fn a_copy_onto_a_taken_name(
+        label: &str,
+        policy: ConflictPolicy,
+    ) -> (ScratchDir, PathBuf, OperationExecutor) {
+        let scratch = temp_dir(label);
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("src").join("a.txt"), "new a");
+        write_file(&root.join("src").join("b.txt"), "new b");
+        write_file(&root.join("dst").join("a.txt"), "old a");
+        let plan = OperationPlan::plan_copy(
+            &[
+                root.join("src").join("a.txt"),
+                root.join("src").join("b.txt"),
+            ],
+            &root.join("dst"),
+            policy,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        (scratch, root, executor)
+    }
+
+    /// Step until the operation finishes or stops to ask, bounded.
+    fn run_until_it_asks(executor: &mut OperationExecutor) {
+        for _ in 0..1000 {
+            if executor.is_done() || executor.waiting_on().is_some() {
+                return;
+            }
+            executor.step();
+        }
+        panic!("the operation neither finished nor asked");
+    }
+
+    #[test]
+    fn ask_stops_at_the_taken_name_and_waits() {
+        let (_scratch, root, mut executor) =
+            a_copy_onto_a_taken_name("ask_waits", ConflictPolicy::Ask);
+        run_until_it_asks(&mut executor);
+        let question = executor.waiting_on().cloned().expect("it did not ask");
+        assert_eq!(question.dest, root.join("dst").join("a.txt"));
+        assert_eq!(question.src, root.join("src").join("a.txt"));
+        assert!(
+            !executor.is_done(),
+            "an operation waiting on an answer is not done"
+        );
+        assert_eq!(executor.progress().state, OperationState::Paused);
+        // Stepping a waiting operation does nothing at all.
+        for _ in 0..10 {
+            executor.step();
+        }
+        assert!(executor.waiting_on().is_some());
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+        assert!(
+            !root.join("dst").join("b.txt").exists(),
+            "it went on past the question"
+        );
+        assert!(
+            executor
+                .take_events()
+                .iter()
+                .any(|e| matches!(e, FileOpEvent::Conflict { .. })),
+            "the question was not in the event stream"
+        );
+    }
+
+    #[test]
+    fn each_answer_does_what_it_says_to_the_file_it_was_asked_about() {
+        for (answer, check) in [
+            (ConflictAnswer::Replace, "replace"),
+            (ConflictAnswer::Skip, "skip"),
+            (ConflictAnswer::KeepBoth, "keep both"),
+        ] {
+            let (_scratch, root, mut executor) = a_copy_onto_a_taken_name(
+                &format!("ask_{check}").replace(' ', "_"),
+                ConflictPolicy::Ask,
+            );
+            run_until_it_asks(&mut executor);
+            executor.answer(answer, false);
+            assert_eq!(executor.progress().state, OperationState::Running);
+            run_until_it_asks(&mut executor);
+            assert!(
+                executor.is_done(),
+                "{check}: it asked again about a free name"
+            );
+            executor.finish();
+            let dst = root.join("dst");
+            match answer {
+                ConflictAnswer::Replace => {
+                    assert_eq!(read_file(&dst.join("a.txt")), "new a", "{check}");
+                }
+                ConflictAnswer::Skip => {
+                    assert_eq!(read_file(&dst.join("a.txt")), "old a", "{check}");
+                }
+                ConflictAnswer::KeepBoth => {
+                    assert_eq!(read_file(&dst.join("a.txt")), "old a", "{check}");
+                    assert_eq!(read_file(&dst.join("a (2).txt")), "new a", "{check}");
+                }
+                ConflictAnswer::Stop => unreachable!(),
+            }
+            assert_eq!(
+                read_file(&dst.join("b.txt")),
+                "new b",
+                "{check}: the free name was not copied"
+            );
+        }
+    }
+
+    #[test]
+    fn stop_ends_the_operation_where_it_is() {
+        let (_scratch, root, mut executor) =
+            a_copy_onto_a_taken_name("ask_stop", ConflictPolicy::Ask);
+        run_until_it_asks(&mut executor);
+        executor.answer(ConflictAnswer::Stop, false);
+        run_until_it_asks(&mut executor);
+        assert!(executor.is_done());
+        executor.finish();
+        assert_eq!(executor.progress().state, OperationState::Cancelled);
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+        assert!(
+            !root.join("dst").join("b.txt").exists(),
+            "it went on after Stop"
+        );
+    }
+
+    #[test]
+    fn the_same_for_the_rest_asks_no_more() {
+        let scratch = temp_dir("ask_rest");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write_file(&root.join("src").join(name), &format!("new {name}"));
+            write_file(&root.join("dst").join(name), &format!("old {name}"));
+        }
+        let plan = OperationPlan::plan_copy(
+            &[
+                root.join("src").join("a.txt"),
+                root.join("src").join("b.txt"),
+                root.join("src").join("c.txt"),
+            ],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        run_until_it_asks(&mut executor);
+        executor.answer(ConflictAnswer::Replace, true);
+        run_until_it_asks(&mut executor);
+        assert!(
+            executor.is_done(),
+            "it asked again after \"the same for the rest\""
+        );
+        executor.finish();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            assert_eq!(
+                read_file(&root.join("dst").join(name)),
+                format!("new {name}")
+            );
+        }
+    }
+
+    #[test]
+    fn an_answer_for_one_file_is_not_an_answer_for_the_next() {
+        let scratch = temp_dir("ask_each");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt"] {
+            write_file(&root.join("src").join(name), &format!("new {name}"));
+            write_file(&root.join("dst").join(name), &format!("old {name}"));
+        }
+        let plan = OperationPlan::plan_copy(
+            &[
+                root.join("src").join("a.txt"),
+                root.join("src").join("b.txt"),
+            ],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        run_until_it_asks(&mut executor);
+        executor.answer(ConflictAnswer::Replace, false);
+        run_until_it_asks(&mut executor);
+        let second = executor
+            .waiting_on()
+            .cloned()
+            .expect("the second taken name was not asked about");
+        assert_eq!(second.dest, root.join("dst").join("b.txt"));
+        executor.answer(ConflictAnswer::Skip, false);
+        run_until_it_asks(&mut executor);
+        executor.finish();
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "new a.txt");
+        assert_eq!(read_file(&root.join("dst").join("b.txt")), "old b.txt");
+    }
+
+    #[test]
+    fn a_file_copied_in_pieces_keeps_its_answer_to_the_last_piece() {
+        let scratch = temp_dir("ask_chunks");
+        let root = scratch.dir().to_path_buf();
+        let big = "x".repeat(COPY_CHUNK * 2 + 17);
+        write_file(&root.join("src").join("big.bin"), &big);
+        write_file(&root.join("dst").join("big.bin"), "old");
+        let plan = OperationPlan::plan_copy(
+            &[root.join("src").join("big.bin")],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        run_until_it_asks(&mut executor);
+        executor.answer(ConflictAnswer::Replace, false);
+        run_until_it_asks(&mut executor);
+        assert!(
+            executor.is_done(),
+            "a later piece of the same file asked again"
+        );
+        executor.finish();
+        assert_eq!(read_file(&root.join("dst").join("big.bin")), big);
+    }
+
+    #[test]
+    fn a_move_answered_skip_keeps_its_source() {
+        let scratch = temp_dir("ask_move");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("src").join("a.txt"), "new a");
+        write_file(&root.join("dst").join("a.txt"), "old a");
+        let plan = OperationPlan::plan_move(
+            &[root.join("src").join("a.txt")],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        run_until_it_asks(&mut executor);
+        assert!(
+            executor.waiting_on().is_some(),
+            "a move onto a taken name did not ask"
+        );
+        executor.answer(ConflictAnswer::Skip, false);
+        run_until_it_asks(&mut executor);
+        executor.finish();
+        assert_eq!(
+            read_file(&root.join("src").join("a.txt")),
+            "new a",
+            "a skipped move lost its source"
+        );
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+    }
+
+    #[test]
+    fn execute_cannot_ask_so_the_first_taken_name_stops_it() {
+        let scratch = temp_dir("ask_blocking");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("src").join("a.txt"), "new a");
+        write_file(&root.join("src").join("b.txt"), "new b");
+        write_file(&root.join("dst").join("a.txt"), "old a");
+        let plan = OperationPlan::plan_copy(
+            &[
+                root.join("src").join("a.txt"),
+                root.join("src").join("b.txt"),
+            ],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(executor.progress().state, OperationState::Cancelled);
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+    }
+
+    #[test]
+    fn cancelling_an_operation_that_is_asking_ends_it() {
+        let (_scratch, root, mut executor) =
+            a_copy_onto_a_taken_name("ask_cancel", ConflictPolicy::Ask);
+        run_until_it_asks(&mut executor);
+        executor.cancel();
+        assert!(
+            executor.waiting_on().is_none(),
+            "the question outlived the cancel"
+        );
+        run_until_it_asks(&mut executor);
+        assert!(
+            executor.is_done(),
+            "a cancelled operation that was asking never ended"
+        );
+        executor.finish();
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+        assert!(!root.join("dst").join("b.txt").exists());
     }
 }

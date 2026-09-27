@@ -483,21 +483,33 @@ fn failure_token(setting: Option<&[u8]>) -> [u8; 3] {
     }
 }
 
+/// Why [`do_crypt`] refused -- libxcrypt's two failures, named here rather
+/// than as `errno` values so that the Rust-native API, which other crates may
+/// link directly, touches nothing of `errno`'s
+/// (`scripts/check-one-libc-per-process.py`).  [`crypt_r`] turns them into
+/// `errno`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// `ERANGE`: a passphrase too long, or a hash that did not fit.
+    Range,
+    /// `EINVAL`: a setting with a character no method allows, or no method.
+    Invalid,
+}
+
 /// libxcrypt's `do_crypt` after its NULL test: the passphrase's length, the
-/// setting's characters, the method, then the hash -- the `errno` of the
-/// first that fails.
-fn do_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), i32> {
+/// setting's characters, the method, then the hash -- the first that fails.
+fn do_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), Refusal> {
     if key.len() >= CRYPT_MAX_PASSPHRASE_SIZE {
-        return Err(errno::ERANGE);
+        return Err(Refusal::Range);
     }
     if has_bad_setting_chars(setting) {
-        return Err(errno::EINVAL);
+        return Err(Refusal::Invalid);
     }
     if !compute_crypt(key, setting, out) {
-        return Err(errno::EINVAL);
+        return Err(Refusal::Invalid);
     }
     if out.overflow {
-        return Err(errno::ERANGE);
+        return Err(Refusal::Range);
     }
     Ok(())
 }
@@ -567,8 +579,11 @@ pub extern "C" fn crypt_r(key: *const u8, salt: *const u8, data: *mut u8) -> *mu
     let key_s = unsafe { cstr_slice(key) };
 
     let mut out = OutBuf::new();
-    if let Err(e) = do_crypt(key_s, setting, &mut out) {
-        errno::set_errno(e);
+    if let Err(refusal) = do_crypt(key_s, setting, &mut out) {
+        errno::set_errno(match refusal {
+            Refusal::Range => errno::ERANGE,
+            Refusal::Invalid => errno::EINVAL,
+        });
         return data;
     }
     // SAFETY: `data` holds at least `CRYPT_OUTPUT_LEN` bytes, and `out.len`

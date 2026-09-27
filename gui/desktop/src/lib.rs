@@ -7353,6 +7353,43 @@ impl DesktopShell {
         dialog.set_entries(entries);
     }
 
+    /// Answer [`run_browser_wants`](Self::run_browser_wants) with "there is no
+    /// folder there".
+    ///
+    /// The chooser goes back to where it was (`FileDialog::refuse_navigation`)
+    /// -- a path typed into its address bar stays there to be corrected -- so
+    /// it stops wanting anything. The folder it opened on has nowhere to go
+    /// back to, and is shown empty, once, rather than asked about again on
+    /// every paint.
+    pub fn refuse_run_browser_path(&mut self) {
+        let Some(dialog) = self.run_browser.as_mut() else {
+            return;
+        };
+        let refused = dialog.current_path().to_path_buf();
+        dialog.refuse_navigation();
+        if dialog.current_path() == refused {
+            self.run_browser_listed = Some(refused);
+            dialog.set_entries(Vec::new());
+        }
+    }
+
+    /// The folder whose names the chooser's address bar wants, if it has
+    /// asked since the last call.
+    ///
+    /// The filesystem half is the session's, as the listing's is; answered
+    /// with [`set_run_browser_completions`](Self::set_run_browser_completions).
+    pub fn take_run_browser_completion_request(&mut self) -> Option<String> {
+        self.run_browser.as_mut()?.take_completion_request()
+    }
+
+    /// Answer [`take_run_browser_completion_request`](Self::take_run_browser_completion_request)
+    /// with the names in that folder. Ignored when no chooser is up.
+    pub fn set_run_browser_completions(&mut self, items: Vec<guitk::pathbar::CompletionItem>) {
+        if let Some(dialog) = self.run_browser.as_mut() {
+            dialog.set_completions(items);
+        }
+    }
+
     /// Where the chooser is drawn, as `(x, y, width, height)`.
     ///
     /// Computed on demand from the screen size rather than stored, for the
@@ -18430,6 +18467,72 @@ mod run_box_wiring_tests {
             Some(Path::new("/usr/bin")),
             "the chooser opened somewhere other than where the command points"
         );
+    }
+
+    /// **A path typed into the chooser's address bar is answered by the
+    /// session**: the names in the folder it asks about, and "no" to a folder
+    /// that is not there -- which takes the chooser back where it was, with
+    /// the typed text still there to correct, and stops it asking.
+    #[test]
+    fn the_session_answers_the_choosers_address_bar() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        browse_showing(&mut s, std::ffi::OsString::from("hello"));
+
+        assert!(s.handle_hotkey(&chord(Key::L, Modifiers::ctrl())).consumed);
+        for ch in "no".chars() {
+            assert!(s.handle_hotkey(&typed(ch)).consumed);
+        }
+        assert_eq!(
+            s.take_run_browser_completion_request().as_deref(),
+            Some("/")
+        );
+        s.set_run_browser_completions(vec![guitk::pathbar::CompletionItem {
+            name: "notes".to_string(),
+            is_directory: true,
+        }]);
+        let dialog = s.run_browser.as_ref().expect("the chooser is up");
+        assert_eq!(
+            dialog.address().completions().len(),
+            1,
+            "the answer was not shown"
+        );
+
+        assert!(
+            s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+                .consumed
+        );
+        assert_eq!(s.run_browser_wants(), Some(Path::new("/no")));
+        s.refuse_run_browser_path();
+        assert_eq!(
+            s.run_browser_wants(),
+            None,
+            "a refused folder is asked about again"
+        );
+        let dialog = s.run_browser.as_ref().expect("refusing closed the chooser");
+        assert_eq!(dialog.current_path(), Path::new("/"));
+        assert_eq!(dialog.address().typed_text(), Some("/no"));
+        assert_eq!(
+            dialog.entries().len(),
+            1,
+            "the listing it went back to is gone"
+        );
+    }
+
+    /// A chooser opened on a folder that is not there has nowhere to go back
+    /// to: it shows the folder empty, once, rather than being asked about on
+    /// every paint.
+    #[test]
+    fn a_chooser_opened_on_a_missing_folder_asks_once() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "/nowhere/term");
+        let (x, y) = button_centre(&s, "Browse...");
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert_eq!(s.run_browser_wants(), Some(Path::new("/nowhere")));
+        s.refuse_run_browser_path();
+        assert_eq!(s.run_browser_wants(), None);
+        assert!(s.run_browser_open());
     }
 
     /// Dismissing the box takes the chooser with it. A chooser standing over a

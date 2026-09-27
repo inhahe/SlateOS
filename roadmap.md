@@ -1859,6 +1859,18 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **A path can be typed into every Open and Save window** -- done
+  2026-09-27 (`design-decisions.md` §1412). The toolkit's dialog showed its
+  folder as text nobody could edit; its address bar is now `guitk::pathbar`:
+  crumbs to click, or a path to type (Ctrl+L, a click past the crumbs, or `/`
+  outside a Save name) with the folder's names offered as you type, narrowed
+  in any case. The host still reads the disk -- `FilePicker` answers the
+  bar's requests and refuses a typed folder that is not there, which leaves
+  everything where it was. Found on the way and fixed: the bar's completions
+  ignored what was typed, and could not be clicked. The explorer draws them
+  under its listing -- lane E's
+  (`requests/c-e-the-explorers-address-completions-are-drawn-under-its-listing.md`).
+
 - `[C]` **The address bar is the reference's crumbs** -- done 2026-09-27
   (`design-decisions.md` §1411). `guitk::pathbar`, which the explorer and
   the file-types program use, draws the path as plain names in an input's

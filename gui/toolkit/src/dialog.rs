@@ -42,6 +42,20 @@
 //! them the size of the most recent `render`, or clicks will be tested against
 //! a layout the user is not looking at.
 //!
+//! ## The address bar
+//!
+//! The path at the top is a [`PathBar`]: the folder's crumbs to click, or --
+//! after a click on it, Ctrl+L, or a `/` typed where there is no name field --
+//! a path to type, with completions. What it needs from the filesystem it asks
+//! the host for, as the listing does: [`FileDialog::take_completion_request`]
+//! names the folder whose names it wants, answered with
+//! [`FileDialog::set_completions`]; and a typed path is navigated to like any
+//! other folder, a [`DialogAction::NavigatedTo`] answered with
+//! [`FileDialog::set_entries`] when there is a folder there to list, or with
+//! [`FileDialog::refuse_navigation`] when there is not. [`FilePicker`] does
+//! all of it; a host driving a bare dialog that answers neither still gets
+//! crumbs and typing, with no completions and no refusals.
+//!
 //! ## Hit-testing
 //!
 //! [`FileDialog::frame`] is the single walk that both draws the dialog and
@@ -53,9 +67,10 @@
 //! layout, and the bug then lives in whichever copy you are not reading.
 
 use crate::date::Date;
-use crate::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::{Frame, Rect};
 use crate::palette::Palette;
+use crate::pathbar::{CompletionItem, PathBar, PathBarEvent};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::scroll_window;
 use crate::scrollbar;
@@ -88,6 +103,12 @@ const FONT_SIZE_SMALL: f32 = 11.0;
 const BUTTON_WIDTH: f32 = 80.0;
 const BUTTON_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 4.0;
+/// The Back and Forward buttons' slots in the toolbar.
+const NAV_BUTTON_WIDTH: f32 = 24.0;
+/// The Up button's slot.
+const UP_BUTTON_WIDTH: f32 = 28.0;
+/// The address bar's height, centred in the toolbar.
+const ADDRESS_HEIGHT: f32 = 24.0;
 /// Width of the file list's scrollbar, when the list is long enough to have one.
 const SCROLLBAR_WIDTH: f32 = scrollbar::WIDTH;
 
@@ -182,13 +203,16 @@ pub enum DialogTarget {
     Forward,
     /// The `^` button: to the parent directory.
     Up,
-    /// The path display in the toolbar.
-    ///
-    /// Recorded, but clicking it does nothing yet: editing a path by hand needs
-    /// a text field with a caret, and the dialog has none. Recording it anyway
-    /// means a click there is *swallowed* rather than falling through to the
-    /// list behind, which is what the user expects of a control they can see.
+    /// The address bar: a crumb to go to, or anywhere else in it to type a
+    /// path.
     AddressBar,
+    /// The list of completions the address bar hangs below itself while a
+    /// path is being typed.
+    ///
+    /// Its own target because it lies outside the bar, over the file list --
+    /// and is recorded after the list's rows, so a click on a completion
+    /// reaches the bar rather than the file drawn under it.
+    AddressCompletions,
     /// A quick-access shortcut in the sidebar, by position in the sidebar list.
     Shortcut(usize),
     /// A column header in the file list, which sorts by that column.
@@ -292,6 +316,41 @@ pub struct FileDialog {
     /// [`Tz`] to everything that shows a time, so the dialog and the taskbar
     /// clock cannot disagree.
     timezone: Tz,
+    /// The address bar.
+    ///
+    /// Kept showing `current_path` by every navigation, except the one it
+    /// proposes itself while a typed path waits for the host's answer
+    /// (`address_proposed`).
+    address: PathBar,
+    /// Whether the navigation last reported came from a path typed into the
+    /// address bar, still shown there as typed until the host answers:
+    /// [`set_entries`](Self::set_entries) turns it into crumbs,
+    /// [`refuse_navigation`](Self::refuse_navigation) leaves it to be
+    /// corrected.
+    address_proposed: bool,
+    /// The folder whose names the address bar asked for, not yet handed to the
+    /// host ([`take_completion_request`](Self::take_completion_request)).
+    completion_request: Option<String>,
+    /// Where the dialog was before the navigation it last reported, until the
+    /// host answers it: [`refuse_navigation`](Self::refuse_navigation) goes
+    /// back here, [`set_entries`](Self::set_entries) lets it go.
+    before_navigating: Option<NavigationUndo>,
+}
+
+/// Where a [`FileDialog`] was before a navigation, to go back to if the host
+/// refuses it.
+///
+/// Everything the navigation changed: the path, both histories (going
+/// somewhere new clears the forward one), and the selection and scroll into
+/// the listing still on screen -- which is still the old folder's, since a
+/// refused navigation was never listed.
+#[derive(Clone, Debug)]
+struct NavigationUndo {
+    path: PathBuf,
+    back: Vec<PathBuf>,
+    forward: Vec<PathBuf>,
+    selected: Option<usize>,
+    scroll_top: usize,
 }
 
 impl FileDialog {
@@ -327,6 +386,7 @@ impl FileDialog {
     #[must_use]
     pub fn with_initial_path(mut self, path: impl AsRef<Path>) -> Self {
         self.current_path = path.as_ref().to_path_buf();
+        self.address.set_path(&self.current_path);
         self
     }
 
@@ -379,6 +439,18 @@ impl FileDialog {
         if path == self.current_path {
             return;
         }
+        self.move_to(path);
+        self.address.set_path(&self.current_path);
+    }
+
+    /// Go to `path` without touching the address bar.
+    ///
+    /// For the bar's own navigations, which it already shows -- a crumb -- or
+    /// is still waiting to show -- a typed path the host has not answered.
+    fn move_to(&mut self, path: &Path) {
+        if path == self.current_path {
+            return;
+        }
         self.history_back.push(self.current_path.clone());
         self.history_forward.clear();
         self.current_path = path.to_path_buf();
@@ -399,6 +471,7 @@ impl FileDialog {
             self.history_forward.push(self.current_path.clone());
             self.current_path = prev;
             self.rewind();
+            self.address.set_path(&self.current_path);
         }
     }
 
@@ -408,6 +481,7 @@ impl FileDialog {
             self.history_back.push(self.current_path.clone());
             self.current_path = next;
             self.rewind();
+            self.address.set_path(&self.current_path);
         }
     }
 
@@ -459,7 +533,9 @@ impl FileDialog {
             if self.mode == DialogMode::SelectFolder {
                 return DialogAction::Selected(full);
             }
+            let before = self.snapshot();
             self.navigate_to(full);
+            self.before_navigating = Some(before);
             DialogAction::NavigatedTo(self.current_path.clone())
         } else {
             match self.mode {
@@ -563,6 +639,22 @@ impl FileDialog {
     pub fn handle_event(&mut self, event: &KeyEvent, height: f32) -> DialogAction {
         if !event.pressed {
             return DialogAction::None;
+        }
+
+        // The address bar first while a path is being typed into it; and for
+        // Ctrl+L, which starts that, as in every file manager; and for a `/`
+        // typed where there is no name field to take it, which starts a path
+        // from the root. A key the bar has no use for falls through -- Page
+        // Down still pages the list.
+        let for_address = self.address.is_editing()
+            || (event.modifiers.ctrl && event.key == Key::L)
+            || (self.mode != DialogMode::Save && event.text == "/");
+        if for_address {
+            let taken = self.address.handle_key_event(event);
+            let action = self.after_address();
+            if taken == EventResult::Consumed {
+                return action;
+            }
         }
 
         match event.key {
@@ -711,6 +803,12 @@ impl FileDialog {
         let bottom_y = height - BOTTOM_BAR_HEIGHT;
         self.draw_bottom_bar(palette, &mut frame, bottom_y, width);
 
+        // The address bar last: the completions it hangs below itself are
+        // drawn over the file list rather than under it, and recorded after
+        // the list's rows, so a click on one reaches the bar -- `hit_test`
+        // answers with the last box recorded.
+        self.draw_address(palette, &mut frame, width);
+
         frame
     }
 
@@ -737,8 +835,27 @@ impl FileDialog {
         let frame = self.frame(&Palette::for_mode(false), width, height);
         let target = frame.hit_test(event.x, event.y);
 
+        if matches!(event.kind, MouseEventKind::Press(_))
+            && self.address.is_editing()
+            && !matches!(
+                target,
+                Some(DialogTarget::AddressBar | DialogTarget::AddressCompletions)
+            )
+        {
+            // A press anywhere else ends the typing, as leaving any text field
+            // does: the bar goes back to the crumbs of the folder on show, and
+            // the press goes on to whatever it landed on.
+            self.address.set_path(&self.current_path);
+            self.address_proposed = false;
+            // Its only event now is that exit, which asks nothing of the
+            // dialog.
+            drop(self.address.drain_events());
+        }
+
         match event.kind {
-            MouseEventKind::Press(MouseButton::Left) => self.press(&frame, target, event.y, height),
+            MouseEventKind::Press(MouseButton::Left) => {
+                self.press(&frame, target, event.x, event.y, height)
+            }
             MouseEventKind::Release(MouseButton::Left) => {
                 self.thumb_grab = None;
                 DialogAction::None
@@ -777,10 +894,14 @@ impl FileDialog {
         &mut self,
         frame: &Frame<DialogTarget>,
         target: Option<DialogTarget>,
+        x: f32,
         y: f32,
         height: f32,
     ) -> DialogAction {
         match target {
+            Some(DialogTarget::AddressBar | DialogTarget::AddressCompletions) => {
+                self.press_address(frame, x, y)
+            }
             Some(DialogTarget::Back) => self.navigated(Self::navigate_back),
             Some(DialogTarget::Forward) => self.navigated(Self::navigate_forward),
             Some(DialogTarget::Up) => self.navigated(Self::navigate_up),
@@ -922,6 +1043,65 @@ impl FileDialog {
         // A new listing is a new set of rows, so a scroll position or a
         // selection into the old one means nothing.
         self.rewind();
+        // The host has listed where the dialog went, which is its answer: the
+        // navigation stands, and a path typed into the address bar becomes
+        // that folder's crumbs.
+        self.before_navigating = None;
+        if core::mem::take(&mut self.address_proposed) {
+            self.address.set_path(&self.current_path);
+        }
+    }
+
+    /// Take back the navigation the last [`DialogAction::NavigatedTo`]
+    /// reported, because the host found no folder there to list.
+    ///
+    /// The other answer to a `NavigatedTo` -- [`set_entries`](Self::set_entries)
+    /// is the first. The dialog goes back to where it was, both histories, the
+    /// selection and the scroll included, still showing that folder's listing,
+    /// which was never replaced. A path typed into the address bar stays
+    /// there as typed, in a red edge, to be corrected rather than retyped.
+    ///
+    /// Without it a host could only list nothing under the name of a folder
+    /// that is not there -- which reads as a folder that is there and empty.
+    /// Does nothing when there is no navigation to take back.
+    pub fn refuse_navigation(&mut self) {
+        let Some(before) = self.before_navigating.take() else {
+            return;
+        };
+        self.current_path = before.path;
+        self.history_back = before.back;
+        self.history_forward = before.forward;
+        self.selected_index = before.selected;
+        self.scroll_top = before.scroll_top;
+        if core::mem::take(&mut self.address_proposed) {
+            self.address.set_path_valid(false);
+        } else {
+            self.address.set_path(&self.current_path);
+        }
+    }
+
+    /// The folder whose names the address bar wants to complete from, if it
+    /// has asked since this was last called.
+    ///
+    /// Everything typed up to and including the last `/`. The dialog does no
+    /// I/O of its own, so the host lists that folder -- [`path_completions`]
+    /// does -- and answers with [`set_completions`](Self::set_completions).
+    #[must_use]
+    pub fn take_completion_request(&mut self) -> Option<String> {
+        self.completion_request.take()
+    }
+
+    /// Offer the names in the folder the address bar asked about.
+    ///
+    /// The whole folder: the bar narrows it to what has been typed.
+    pub fn set_completions(&mut self, items: Vec<CompletionItem>) {
+        self.address.set_completions(items);
+    }
+
+    /// The address bar, for a host or a test that wants to ask it something.
+    #[must_use]
+    pub fn address(&self) -> &PathBar {
+        &self.address
     }
 
     /// Toggle sort column. If already sorting by this column, flip direction.
@@ -1002,6 +1182,10 @@ impl FileDialog {
             wheel: wheel::Accumulator::default(),
             thumb_grab: None,
             timezone: Tz::UTC,
+            address: PathBar::new("/"),
+            address_proposed: false,
+            completion_request: None,
+            before_navigating: None,
         }
     }
 
@@ -1164,13 +1348,101 @@ impl FileDialog {
     /// session empties the history, so the one navigation that always happens
     /// was the one always reported as not having happened.
     fn navigated(&mut self, nav: impl FnOnce(&mut Self)) -> DialogAction {
-        let before = self.current_path.clone();
+        let before = self.snapshot();
         nav(self);
-        if self.current_path == before {
+        if self.current_path == before.path {
             DialogAction::None
         } else {
+            self.before_navigating = Some(before);
             DialogAction::NavigatedTo(self.current_path.clone())
         }
+    }
+
+    /// Where the dialog is, to come back to if the host refuses where it goes
+    /// next.
+    fn snapshot(&self) -> NavigationUndo {
+        NavigationUndo {
+            path: self.current_path.clone(),
+            back: self.history_back.clone(),
+            forward: self.history_forward.clone(),
+            selected: self.selected_index,
+            scroll_top: self.scroll_top,
+        }
+    }
+
+    /// Act on what the address bar says after it was handed an event.
+    fn after_address(&mut self) -> DialogAction {
+        let mut action = DialogAction::None;
+        for event in self.address.drain_events() {
+            match event {
+                PathBarEvent::Navigate(path) => action = self.follow_address(path),
+                PathBarEvent::RequestAutoComplete { prefix } => {
+                    self.completion_request = Some(prefix);
+                }
+                // Nothing in the dialog depends on which mode the bar is in.
+                PathBarEvent::EditModeEntered | PathBarEvent::EditModeExited => {}
+            }
+        }
+        action
+    }
+
+    /// Go where the address bar asks: a crumb, which it already shows, or a
+    /// typed path, which it keeps showing as typed until the host answers.
+    fn follow_address(&mut self, path: PathBuf) -> DialogAction {
+        if path == self.current_path {
+            return DialogAction::None;
+        }
+        let proposed = self.address.is_editing();
+        let before = self.snapshot();
+        self.move_to(&path);
+        self.before_navigating = Some(before);
+        self.address_proposed = proposed;
+        DialogAction::NavigatedTo(self.current_path.clone())
+    }
+
+    /// A press on the address bar or on its completions, at `(x, y)`.
+    fn press_address(&mut self, frame: &Frame<DialogTarget>, x: f32, y: f32) -> DialogAction {
+        let Some(field) = frame.rect_of(|t| *t == DialogTarget::AddressBar) else {
+            return DialogAction::None;
+        };
+        // The bar answers a click from where it last laid itself out, and
+        // `frame` drew it from a shared borrow -- so it is laid out again
+        // here, at the size it was just drawn at, and handed the click in its
+        // own space. The completions hang below the bar in that same space.
+        self.address.lay_out(field.w, field.h);
+        let _taken = self.address.handle_mouse_event(&MouseEvent {
+            x: x - field.x,
+            y: y - field.y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        // Taken or not, the press was on the bar, and is not passed on.
+        self.after_address()
+    }
+
+    /// Where the address bar sits: after the three navigation buttons, across
+    /// the rest of the toolbar.
+    ///
+    /// One answer for the toolbar, which records the bar's target, and for the
+    /// bar's drawing at the end of the frame.
+    fn address_rect(width: f32) -> Rect {
+        let x = PADDING + NAV_BUTTON_WIDTH * 2.0 + UP_BUTTON_WIDTH;
+        Rect::new(
+            x,
+            (TOOLBAR_HEIGHT - ADDRESS_HEIGHT) / 2.0,
+            (width - x - PADDING).max(0.0),
+            ADDRESS_HEIGHT,
+        )
+    }
+
+    /// Draw the address bar, and its completions if it is showing any.
+    fn draw_address(&self, palette: &Palette, frame: &mut Frame<DialogTarget>, width: f32) {
+        let field = Self::address_rect(width);
+        frame.translate(field.x, field.y);
+        frame.extend(self.address.draw(palette, field.w, field.h));
+        if let Some((x, y, w, h)) = self.address.completions_rect(field.w, field.h) {
+            frame.hit(DialogTarget::AddressCompletions, Rect::new(x, y, w, h));
+        }
+        frame.untranslate();
     }
 
     // --- Render sub-methods ---
@@ -1220,8 +1492,11 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        frame.hit(DialogTarget::Back, Rect::new(x, 0.0, 24.0, TOOLBAR_HEIGHT));
-        x += 24.0;
+        frame.hit(
+            DialogTarget::Back,
+            Rect::new(x, 0.0, NAV_BUTTON_WIDTH, TOOLBAR_HEIGHT),
+        );
+        x += NAV_BUTTON_WIDTH;
 
         // Forward button
         let fwd_color = if self.history_forward.is_empty() {
@@ -1241,9 +1516,9 @@ impl FileDialog {
         });
         frame.hit(
             DialogTarget::Forward,
-            Rect::new(x, 0.0, 24.0, TOOLBAR_HEIGHT),
+            Rect::new(x, 0.0, NAV_BUTTON_WIDTH, TOOLBAR_HEIGHT),
         );
-        x += 24.0;
+        x += NAV_BUTTON_WIDTH;
 
         // Up button
         frame.push(RenderCommand::Text {
@@ -1256,29 +1531,15 @@ impl FileDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        frame.hit(DialogTarget::Up, Rect::new(x, 0.0, 28.0, TOOLBAR_HEIGHT));
-        x += 28.0;
-
-        // Address bar
-        let addr_width = width - x - PADDING;
-        palette.push_surface(frame, x, btn_y, addr_width, 24.0, 3.0, Surface::Card);
-        frame.push(RenderCommand::Text {
-            x: x + 6.0,
-            y: btn_y + 5.0,
-            // One of the two places a path becomes text, and it is producing
-            // glyphs rather than a key to look anything up with. See
-            // `DirEntry::name`, and `pathcodec::display_os` for the spelling.
-            text: pathcodec::display_path(&self.current_path),
-            color: palette.text,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(addr_width - 12.0),
-            overflow: TextOverflow::Ellipsis,
-        });
         frame.hit(
-            DialogTarget::AddressBar,
-            Rect::new(x, btn_y, addr_width, 24.0),
+            DialogTarget::Up,
+            Rect::new(x, 0.0, UP_BUTTON_WIDTH, TOOLBAR_HEIGHT),
         );
+
+        // The address bar's target. It is drawn at the end of the frame
+        // (`draw_address`), so the completions it hangs below itself are drawn
+        // over the file list rather than under it.
+        frame.hit(DialogTarget::AddressBar, Self::address_rect(width));
     }
 
     fn draw_sidebar(
@@ -2172,6 +2433,11 @@ impl FilePicker {
             // A tick or a resize: the application still needs these.
             _ => return Picked::Ignored,
         };
+        // The address bar may have asked for a folder's names, which this
+        // reads for it: the dialog does no I/O of its own.
+        if let Some(prefix) = dialog.take_completion_request() {
+            dialog.set_completions(path_completions(&prefix));
+        }
         match action {
             DialogAction::None => Picked::Handled,
             DialogAction::Cancelled => {
@@ -2180,7 +2446,15 @@ impl FilePicker {
             }
             DialogAction::NavigatedTo(path) => {
                 if let Some(dialog) = self.dialog.as_mut() {
-                    dialog.set_entries(list_directory(&path));
+                    // Listed only if there is a folder there to list. A path
+                    // typed into the address bar can name anything, and a
+                    // listing of nothing under the name of a folder that is not
+                    // there would read as one that is there and empty.
+                    if path.is_dir() {
+                        dialog.set_entries(list_directory(&path));
+                    } else {
+                        dialog.refuse_navigation();
+                    }
                 }
                 Picked::Handled
             }
@@ -2200,6 +2474,59 @@ impl FilePicker {
             .as_ref()
             .map_or_else(Vec::new, |d| d.render(palette, width, height))
     }
+}
+
+/// The names that could complete a path being typed into a dialog's address
+/// bar: everything in the folder `prefix` names, read from the filesystem.
+///
+/// `prefix` is what [`FileDialog::take_completion_request`] hands over --
+/// everything typed up to and including the last `/` -- so it *is* the
+/// folder; an empty one is the working directory. The whole folder, in the
+/// dialog's order, because the bar narrows it to what has been typed.
+///
+/// A name that is not text is left out rather than rendered. The bar is a
+/// text field, so the only completion it could make of one is a rendering,
+/// and a rendering names a file that does not exist -- the explorer's
+/// completion makes the same call. A folder that cannot be read offers
+/// nothing, which is what an empty one offers.
+#[must_use]
+pub fn path_completions(prefix: &str) -> Vec<CompletionItem> {
+    let folder = if prefix.is_empty() { "." } else { prefix };
+    let Ok(listing) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    completion_items(
+        listing
+            // An entry that cannot be read is one there is nothing to complete
+            // to; the rest of the folder still can be.
+            .filter_map(Result::ok)
+            .map(|entry| {
+                let is_directory = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                (entry.file_name(), is_directory)
+            }),
+    )
+}
+
+/// A folder's names, as `(name, is it a folder)`, made into completions: the
+/// ones that are text, in the dialog's order.
+///
+/// Apart from [`path_completions`] so that what it decides -- which names are
+/// left out, and the order -- can be tested without a disk, whose own order
+/// on this host's filesystem happens to be the one wanted.
+fn completion_items(names: impl IntoIterator<Item = (OsString, bool)>) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = names
+        .into_iter()
+        .filter_map(|(name, is_directory)| {
+            // `into_string` fails exactly for a name that is not text -- see
+            // `path_completions` for why such a name is left out.
+            Some(CompletionItem {
+                name: name.into_string().ok()?,
+                is_directory,
+            })
+        })
+        .collect();
+    items.sort_by_cached_key(|item| (sort_key(OsStr::new(&item.name)), item.name.clone()));
+    items
 }
 
 pub fn list_directory(path: impl AsRef<Path>) -> Vec<DirEntry> {
@@ -3845,18 +4172,443 @@ mod tests {
         assert!(frame.is_balanced(), "every clip has to be closed");
     }
 
-    #[test]
-    fn the_address_bar_swallows_its_click_without_acting() {
-        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+    // ---- the address bar ----
 
+    /// A keystroke that types `ch`.
+    fn typing(ch: char) -> KeyEvent {
+        KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: ch.to_string(),
+        }
+    }
+
+    /// A key pressed with Ctrl held.
+    fn ctrl(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers {
+                ctrl: true,
+                ..crate::event::Modifiers::NONE
+            },
+            text: String::new(),
+        }
+    }
+
+    /// A key pressed on its own.
+    fn bare(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// Type `text` into the dialog, returning what the last keystroke did.
+    fn type_into(dialog: &mut FileDialog, text: &str) -> DialogAction {
+        let mut last = DialogAction::None;
+        for ch in text.chars() {
+            last = dialog.handle_event(&typing(ch), H);
+        }
+        last
+    }
+
+    /// Ctrl+L, then replace the whole path with `path`, as a user selecting it
+    /// and typing over it would.
+    fn retype_address(dialog: &mut FileDialog, path: &str) {
+        dialog.handle_event(&ctrl(Key::L), H);
+        dialog.handle_event(&ctrl(Key::A), H);
+        type_into(dialog, path);
+    }
+
+    /// The colour the address bar's edge is drawn in.
+    fn address_edge(dialog: &FileDialog, palette: &Palette) -> crate::color::Color {
+        let field = FileDialog::address_rect(W);
+        let tree = dialog.frame(palette, W, H).into_tree();
+        // The bar's edge is the first outline after the translation into the
+        // bar's own space: it is stroked at the bar's origin.
+        let start = tree
+            .commands
+            .iter()
+            .position(|cmd| {
+                matches!(cmd, RenderCommand::PushTranslate { dx, dy } if (*dx, *dy) == (field.x, field.y))
+            })
+            .expect("the address bar was not drawn");
+        tree.commands[start..]
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .expect("the address bar has no edge")
+    }
+
+    /// **The address bar shows where the dialog is, however it got there** --
+    /// the starting folder, a folder the host navigated to, Back, Forward, Up,
+    /// a shortcut and a folder opened from the list.
+    #[test]
+    fn the_address_bar_follows_every_way_of_moving() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+        let shown = |dialog: &FileDialog| dialog.address().current_path().to_path_buf();
+        assert_eq!(shown(&dialog), Path::new("/home/user"));
+
+        dialog.navigate_to("/tmp");
+        assert_eq!(shown(&dialog), Path::new("/tmp"));
+        click(&mut dialog, DialogTarget::Back);
+        assert_eq!(shown(&dialog), Path::new("/home/user"));
+        click(&mut dialog, DialogTarget::Forward);
+        assert_eq!(shown(&dialog), Path::new("/tmp"));
+        click(&mut dialog, DialogTarget::Up);
+        assert_eq!(shown(&dialog), Path::new("/"));
+        click(&mut dialog, DialogTarget::Shortcut(0));
+        assert_eq!(shown(&dialog), dialog.current_path());
+
+        dialog.set_entries(vec![dir("projects")]);
+        dialog.activate_entry(0);
+        assert_eq!(shown(&dialog), dialog.current_path());
+        assert!(dialog.current_path().ends_with("projects"));
+    }
+
+    /// **A typed path is gone to when the host lists it**, and only then
+    /// shown as crumbs: until the host answers, the bar keeps what was typed.
+    #[test]
+    fn a_typed_path_is_gone_to_once_the_host_lists_it() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+        retype_address(&mut dialog, "/etc");
+        assert_eq!(dialog.address().typed_text(), Some("/etc"));
+
+        let action = dialog.handle_event(&bare(Key::Enter), H);
+        assert_eq!(action, DialogAction::NavigatedTo(PathBuf::from("/etc")));
+        assert_eq!(dialog.current_path(), Path::new("/etc"));
+        assert!(
+            dialog.address().is_editing(),
+            "shown as crumbs before the host answered"
+        );
+
+        dialog.set_entries(vec![file("passwd")]);
+        assert!(!dialog.address().is_editing());
+        assert_eq!(dialog.address().current_path(), Path::new("/etc"));
+    }
+
+    /// **A typed path the host refuses leaves everything where it was** --
+    /// the folder, both histories, the selection -- and the typed text stays
+    /// in the bar, edged in red, to be corrected.
+    #[test]
+    fn a_refused_path_leaves_everything_where_it_was() {
+        let palette = Palette::for_mode(false);
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+        dialog.navigate_to("/home/user/docs");
+        dialog.set_entries(vec![file("a.txt"), file("b.txt")]);
+        dialog.select_entry(1);
+        let back_before = dialog.history_back.clone();
+
+        retype_address(&mut dialog, "/home/user/dcos");
+        let action = dialog.handle_event(&bare(Key::Enter), H);
+        assert_eq!(
+            action,
+            DialogAction::NavigatedTo(PathBuf::from("/home/user/dcos"))
+        );
+        dialog.refuse_navigation();
+
+        assert_eq!(dialog.current_path(), Path::new("/home/user/docs"));
+        assert_eq!(dialog.history_back, back_before);
+        assert_eq!(dialog.selected_index(), Some(1), "the selection was lost");
+        assert_eq!(dialog.entries().len(), 2, "the listing was replaced");
+        assert_eq!(dialog.address().typed_text(), Some("/home/user/dcos"));
+        assert_eq!(address_edge(&dialog, &palette), palette.red);
+
+        // Back still goes where it went before the refused attempt.
+        click(&mut dialog, DialogTarget::Back);
+        assert_eq!(dialog.current_path(), Path::new("/home/user"));
+    }
+
+    /// A folder opened from the list that the host cannot list is taken back
+    /// the same way, with the bar on the folder the dialog stayed in.
+    #[test]
+    fn a_refused_folder_from_the_list_is_taken_back() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+        dialog.set_entries(vec![dir("gone")]);
+        assert_eq!(
+            dialog.activate_entry(0),
+            DialogAction::NavigatedTo(PathBuf::from("/home/user/gone"))
+        );
+        dialog.refuse_navigation();
+        assert_eq!(dialog.current_path(), Path::new("/home/user"));
+        assert_eq!(dialog.address().current_path(), Path::new("/home/user"));
+        assert!(!dialog.address().is_editing());
+        assert!(
+            dialog.history_back.is_empty(),
+            "a refused move stays in the history"
+        );
+    }
+
+    /// **Ctrl+L starts a path, and so does a `/` where no name is being
+    /// typed** -- but in a Save dialog a `/` goes to the name field, where it
+    /// always has.
+    #[test]
+    fn ctrl_l_and_a_slash_start_a_path() {
+        let mut open = FileDialog::open().with_initial_path("/home/user");
+        open.handle_event(&ctrl(Key::L), H);
+        assert_eq!(open.address().typed_text(), Some("/home/user"));
+
+        let mut open = FileDialog::open().with_initial_path("/home/user");
+        type_into(&mut open, "/");
+        assert_eq!(open.address().typed_text(), Some("/"));
+
+        let mut save = FileDialog::save().with_initial_path("/home/user");
+        type_into(&mut save, "a/");
+        assert!(!save.address().is_editing());
+        assert_eq!(save.filename_input, "a/");
+    }
+
+    /// **Escape while typing a path stops the typing, not the dialog.**
+    #[test]
+    fn escape_while_typing_a_path_keeps_the_dialog_up() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+        retype_address(&mut dialog, "/et");
+        assert_eq!(
+            dialog.handle_event(&bare(Key::Escape), H),
+            DialogAction::None
+        );
+        assert!(!dialog.is_cancelled());
+        assert!(!dialog.address().is_editing());
+        assert_eq!(dialog.current_path(), Path::new("/home/user"));
+        // A second Escape, with nothing being typed, is the dialog's.
+        assert_eq!(
+            dialog.handle_event(&bare(Key::Escape), H),
+            DialogAction::Cancelled
+        );
+    }
+
+    /// **Pressing elsewhere ends the typing**, and the press still does what
+    /// it was aimed at.
+    #[test]
+    fn a_press_elsewhere_ends_the_typing() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+        dialog.set_entries(vec![file("a.txt"), file("b.txt")]);
+        retype_address(&mut dialog, "/zz");
+        click(&mut dialog, DialogTarget::Entry(1));
+        assert!(!dialog.address().is_editing());
+        assert_eq!(dialog.address().current_path(), Path::new("/home/user"));
+        assert_eq!(dialog.selected_index(), Some(1));
+    }
+
+    /// **Clicking the bar past its crumbs starts typing there**, and clicking
+    /// a crumb goes to that folder -- and neither falls through to the list.
+    #[test]
+    fn clicking_the_address_bar_types_or_goes_up_the_path() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
         assert_eq!(
             click(&mut dialog, DialogTarget::AddressBar),
             DialogAction::None
         );
+        assert!(
+            dialog.address().is_editing(),
+            "the empty end of the bar did not start typing"
+        );
+        assert_eq!(dialog.current_path(), Path::new("/home/user"));
+
+        // The first crumb, "/": just inside the bar's left edge.
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+        let field = FileDialog::address_rect(W);
+        let action = click_at(&mut dialog, field.x + 12.0, field.y + field.h / 2.0);
+        assert_eq!(action, DialogAction::NavigatedTo(PathBuf::from("/")));
+        assert_eq!(dialog.current_path(), Path::new("/"));
+        assert!(!dialog.address().is_editing());
+    }
+
+    /// **Completions are asked of the host, and hang over the file list**,
+    /// where a click takes one rather than the file under it.
+    #[test]
+    fn completions_are_asked_for_and_hang_over_the_list() {
+        let mut dialog = FileDialog::open().with_initial_path("/home/user");
+        dialog.set_entries((0..20).map(|i| file(&format!("f{i:02}.txt"))).collect());
+        dialog.handle_event(&ctrl(Key::L), H);
         assert_eq!(
-            dialog.current_path(),
-            "/home/user",
-            "it is not editable yet, but it must not fall through to the list"
+            dialog.take_completion_request(),
+            None,
+            "Ctrl+L alone asked for names"
+        );
+        type_into(&mut dialog, "/");
+        assert_eq!(
+            dialog.take_completion_request().as_deref(),
+            Some("/home/user/")
+        );
+        assert_eq!(
+            dialog.take_completion_request(),
+            None,
+            "asked twice for one keystroke"
+        );
+
+        dialog.set_completions(vec![CompletionItem {
+            name: "docs".to_string(),
+            is_directory: true,
+        }]);
+        let frame = dialog.frame(&Palette::for_mode(false), W, H);
+        let list = frame
+            .rect_of(|t| *t == DialogTarget::AddressCompletions)
+            .expect("the completions were not drawn");
+        let (x, y) = list.centre();
+        assert_eq!(
+            frame.hit_test(x, y),
+            Some(DialogTarget::AddressCompletions),
+            "a file row, not the completion, answers for the click"
+        );
+        assert!(y > TOOLBAR_HEIGHT, "the list does not hang over the files");
+
+        click_at(&mut dialog, x, y);
+        assert_eq!(dialog.address().typed_text(), Some("/home/user/docs/"));
+        assert_eq!(
+            dialog.selected_index(),
+            None,
+            "the file under the list was picked"
+        );
+    }
+
+    /// A scratch folder on the real disk, removed when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "guitk-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            // A leftover from an earlier run that died before its drop.
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create the scratch folder");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // Best effort: a scratch folder left behind costs nothing but
+            // space, and failing a passed test over it would be wrong.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Hand the picker a keystroke, as the host would.
+    fn key_to(picker: &mut FilePicker, key: KeyEvent) -> Picked {
+        picker.handle(&Event::Key(key), W, H)
+    }
+
+    /// **The picker answers the address bar from the disk**: the names in the
+    /// folder typed, narrowed to what follows; a typed folder that is there is
+    /// gone to and listed; one that is not is refused, and nothing moves.
+    #[test]
+    fn a_picker_answers_the_address_bar_from_the_disk() {
+        let scratch = Scratch::new("picker-address");
+        let root = scratch.0.clone();
+        std::fs::create_dir(root.join("alpha")).expect("mkdir");
+        std::fs::create_dir(root.join("beta")).expect("mkdir");
+        std::fs::write(root.join("gamma.txt"), b"g").expect("write");
+        std::fs::write(root.join("alpha").join("inside.txt"), b"i").expect("write");
+
+        let mut picker = FilePicker::new();
+        picker.put_up(FileDialog::open().with_initial_path(&root), false);
+        let names = |picker: &FilePicker| -> Vec<String> {
+            picker
+                .dialog()
+                .expect("up")
+                .address()
+                .completions()
+                .iter()
+                .map(|item| item.name.clone())
+                .collect()
+        };
+
+        // Every keystroke is the picker's while it is up, and none closes it.
+        for key in [ctrl(Key::L), typing('/')] {
+            assert_eq!(key_to(&mut picker, key), Picked::Handled);
+        }
+        assert_eq!(names(&picker), ["alpha", "beta", "gamma.txt"]);
+        assert_eq!(key_to(&mut picker, typing('A')), Picked::Handled);
+        assert_eq!(names(&picker), ["alpha"], "the case typed narrows nothing");
+        assert_eq!(key_to(&mut picker, bare(Key::Tab)), Picked::Handled);
+        assert_eq!(key_to(&mut picker, bare(Key::Enter)), Picked::Handled);
+        let dialog = picker.dialog().expect("up");
+        assert!(
+            dialog.current_path().ends_with("alpha"),
+            "{:?}",
+            dialog.current_path()
+        );
+        assert!(!dialog.address().is_editing());
+        assert_eq!(dialog.entries().len(), 1, "the typed folder was not listed");
+
+        // A folder that is not there.
+        for key in [ctrl(Key::L), typing('x'), bare(Key::Enter)] {
+            assert_eq!(key_to(&mut picker, key), Picked::Handled);
+        }
+        let dialog = picker.dialog().expect("up");
+        assert!(
+            dialog.current_path().ends_with("alpha"),
+            "it went nowhere: {:?}",
+            dialog.current_path()
+        );
+        assert!(
+            dialog.address().is_editing(),
+            "the typed text was thrown away"
+        );
+        assert_eq!(
+            dialog.entries().len(),
+            1,
+            "the listing was replaced by nothing"
+        );
+    }
+
+    /// Completions are the names that are text, in the dialog's order --
+    /// case set aside, then the exact bytes -- whatever order they came in.
+    #[test]
+    fn completions_are_the_text_names_in_the_dialogs_order() {
+        let names = [
+            (OsString::from("beta"), false),
+            (unmappable_name(), false),
+            (OsString::from("Alpha"), true),
+            (OsString::from("README"), false),
+            (OsString::from("alpha"), false),
+            (OsString::from("readme"), false),
+        ];
+        let items = completion_items(names);
+        let listed: Vec<(&str, bool)> = items
+            .iter()
+            .map(|item| (item.name.as_str(), item.is_directory))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("Alpha", true),
+                ("alpha", false),
+                ("beta", false),
+                ("README", false),
+                ("readme", false),
+            ]
+        );
+    }
+
+    /// `path_completions` offers a folder's names in the dialog's order, and
+    /// nothing for a folder that cannot be read.
+    #[test]
+    fn path_completions_lists_the_folder_in_the_dialogs_order() {
+        let scratch = Scratch::new("path-completions");
+        let root = scratch.0.clone();
+        std::fs::create_dir(root.join("Zeta")).expect("mkdir");
+        std::fs::write(root.join("alpha.txt"), b"a").expect("write");
+        let prefix = format!("{}/", root.display());
+        let items = path_completions(&prefix);
+        let listed: Vec<(&str, bool)> = items
+            .iter()
+            .map(|item| (item.name.as_str(), item.is_directory))
+            .collect();
+        assert_eq!(listed, [("alpha.txt", false), ("Zeta", true)]);
+        assert_eq!(
+            path_completions(&format!("{prefix}no-such-folder/")),
+            Vec::new()
         );
     }
 }

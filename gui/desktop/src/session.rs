@@ -1697,8 +1697,18 @@ impl<T: Transport> ShellSession<T> {
     /// An unreadable directory yields an empty listing rather than an error —
     /// see `guitk::dialog::list_directory`. A user who wandered into a folder
     /// they cannot read has not broken anything, and a modal error over a modal
-    /// chooser would be two dialogs deep for a normal thing to find.
+    /// chooser would be two dialogs deep for a normal thing to find. A path
+    /// with no folder at all -- one typed into the chooser's address bar, say
+    /// -- is refused instead, which takes the chooser back to where it was.
+    ///
+    /// The address bar's completions are answered here too, from the same
+    /// disk, for the same reason.
     fn refresh_run_browser(&mut self) {
+        if let Some(prefix) = self.shell.take_run_browser_completion_request() {
+            self.shell
+                .set_run_browser_completions(guitk::dialog::path_completions(&prefix));
+            self.dirty = true;
+        }
         let Some(path) = self
             .shell
             .run_browser_wants()
@@ -1706,8 +1716,12 @@ impl<T: Transport> ShellSession<T> {
         else {
             return;
         };
-        let entries = guitk::dialog::list_directory(&path);
-        self.shell.set_run_browser_entries(entries);
+        if path.is_dir() {
+            let entries = guitk::dialog::list_directory(&path);
+            self.shell.set_run_browser_entries(entries);
+        } else {
+            self.shell.refuse_run_browser_path();
+        }
         // The listing changed what the chooser draws, and nothing else in this
         // paint knows that: the event that caused the navigation was handled
         // before the read happened.

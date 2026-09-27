@@ -872,6 +872,8 @@ struct SettingsSnapshot {
     appearance: appearance::AppearanceSettings,
     input: inputsettings::InputSettings,
     notif: notifsettings::NotifSettings,
+    /// The lock screen's clock: (seconds, date) -- `lockscreen.yaml`.
+    lock_clock: (bool, bool),
 }
 
 /// Which of them an event changed.
@@ -883,6 +885,7 @@ struct ChangedDocuments {
     appearance: bool,
     input: bool,
     notif: bool,
+    lock_clock: bool,
 }
 
 impl Default for SettingsState {
@@ -1304,6 +1307,14 @@ impl SettingsState {
     /// `SettingsGroup` and control verb, not a missing write, and the shell
     /// end is already built -- `DesktopShell::poll_notification_rules` exists
     /// and answers correctly; nothing tells it to run.
+    /// Write the lock screen's clock to `lockscreen.yaml`, which the lock
+    /// screen reads when it starts -- so nothing needs telling.
+    fn save_lock_clock(&mut self) {
+        if let Err(err) = lockscreen::store_clock(self.lock_clock_seconds, self.lock_clock_date) {
+            eprintln!("settings: could not save lockscreen.yaml: {err}");
+        }
+    }
+
     fn save_notifications(&mut self) {
         if let Err(err) = self.notif.save() {
             eprintln!("settings: could not save notifications.yaml: {err}");
@@ -5422,6 +5433,9 @@ impl SettingsState {
         if changed.notif {
             self.save_notifications();
         }
+        if changed.lock_clock {
+            self.save_lock_clock();
+        }
         result
     }
 
@@ -5437,6 +5451,7 @@ impl SettingsState {
             appearance: self.appearance.settings.clone(),
             input: self.input.settings.clone(),
             notif: self.notif.settings.clone(),
+            lock_clock: (self.lock_clock_seconds, self.lock_clock_date),
         }
     }
 
@@ -5451,6 +5466,7 @@ impl SettingsState {
             appearance: self.appearance.settings != before.appearance,
             input: self.input.settings != before.input,
             notif: self.notif.settings != before.notif,
+            lock_clock: (self.lock_clock_seconds, self.lock_clock_date) != before.lock_clock,
         }
     }
 
@@ -5844,16 +5860,13 @@ impl SettingsState {
                 self.drag_slider_to(id, mx);
             }
             RowHit::Toggle(id) => {
+                // Saved, where it is one of the lock screen's two, by the
+                // whole-snapshot comparison in `handle_event`, as every other
+                // setting is: a click that wrote for itself was a second way
+                // to persist, and it wrote the developer's own lockscreen.yaml
+                // from a test that clicks every switch.
                 if let Some(flag) = self.toggle_mut(id) {
                     *flag = !*flag;
-                }
-                // The lock screen's clock is its own file, written as it is
-                // changed: nothing else on this page would carry it there.
-                if matches!(id, ToggleId::LockClockSeconds | ToggleId::LockClockDate)
-                    && let Err(err) =
-                        lockscreen::store_clock(self.lock_clock_seconds, self.lock_clock_date)
-                {
-                    eprintln!("settings: could not save lockscreen.yaml: {err}");
                 }
             }
             RowHit::Pill(PillId::QuietDays, idx) => {
@@ -10825,6 +10838,43 @@ mod tests {
             contrasted.overlay0, contrasted.text,
             "and the faint role must stop being faint"
         );
+    }
+
+    /// The lock screen's clock is saved by `handle_event`, like everything
+    /// else here, and a click through `dispatch_event` alone writes nothing.
+    #[test]
+    fn the_lock_screen_clock_is_saved_by_the_event_not_the_click() {
+        settingsfile::testing::with_scratch_config("settings-lock-clock-event", |_root| {
+            let Some(mut state) = state_showing(RowHit::Toggle(ToggleId::LockClockSeconds)) else {
+                panic!("no page shows the lock screen's seconds switch");
+            };
+            let (x, y) = center_of(&state, RowHit::Toggle(ToggleId::LockClockSeconds))
+                .expect("just found it");
+            let press = Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            // Pinned: the page fixture turns every switch on, and a start
+            // equal to the file's defaults could not tell a save from none.
+            state.lock_clock_seconds = false;
+            state.lock_clock_date = true;
+            state.dispatch_event(&press);
+            assert!(state.lock_clock_seconds, "the switch did not move");
+            assert_eq!(
+                lockscreen::stored_clock(),
+                (false, true),
+                "a click wrote for itself"
+            );
+            state.handle_event(&press);
+            assert!(!state.lock_clock_seconds);
+            state.handle_event(&press);
+            assert_eq!(
+                lockscreen::stored_clock(),
+                (true, true),
+                "the event did not save it"
+            );
+        });
     }
 }
 

@@ -47,7 +47,14 @@ letter of the lane that filed it, and whoever owns its code *now*
 
 ---
 
-## B-DIFF-REPORTS-IDENTICAL-FOR-FILES-THAT-DIFFER (lane B, 2026-09-11)
+## B-DIFF-REPORTS-IDENTICAL-FOR-FILES-THAT-DIFFER (lane B, 2026-09-11) — ✅ FIXED (lane B; confirmed 2026-09-27)
+
+**Status (2026-09-27):** fixed by the rebuilt `coreutils` `diff`, whose
+reader keeps each line's terminator (B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL,
+2026-09-14, and the diffutils 3.10 work after it). `scripts/diff-diff.sh`
+carries this entry's own case -- `nonl.txt` and `nonl2.txt`, files without a
+final newline -- among its 200 cases, and all 200 agree with GNU diffutils.
+The entry below is kept as the record of the defect.
 
 **Both halves of the `diff` pair say two files are the same when one of them
 lacks a trailing newline.** Not a formatting difference — the wrong answer, with
@@ -1872,7 +1879,12 @@ because each would recur in any future harness for a program that mutates state:
    (shellcheck SC1011), which showed up as one "differ on purpose" instead of
    two. The same bug as in `diff-diff.sh`, written an hour earlier.
 
-## TD-B-DIFF-IS-THE-FIRST-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11)
+## TD-B-DIFF-IS-THE-FIRST-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11) — ✅ RESOLVED (lane B; confirmed 2026-09-27)
+
+**Status (2026-09-27):** resolved the way this entry said it should be: the
+standalone crate is gone, and `userspace/coreutils/src/bin/diff.rs` is the one
+`diff`, rebuilt on diffutils 3.10's command line and measured at 200 cases
+agreeing, none differing (`scripts/diff-diff.sh`). Kept below as the record.
 
 **Sixteen pairs have now been measured against a harness and fifteen went to
 `coreutils`. `diff` is the first that does not**, and it is the pair §1005

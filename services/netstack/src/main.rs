@@ -39,6 +39,7 @@
 
 const SYS_EXIT: u64 = 1;
 const SYS_CLOCK_MONOTONIC: u64 = 10;
+const SYS_GETRANDOM: u64 = 90;
 const SYS_SLEEP: u64 = 11;
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_CHANNEL_SEND: u64 = 201;
@@ -197,6 +198,101 @@ fn sleep_ns(ns: u64) {
 /// timers still -- a resend comes late, never early.
 fn now_ns() -> u64 {
     u64::try_from(syscall0(SYS_CLOCK_MONOTONIC)).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// A new connection's local port (RFC 6056) and initial sequence number (RFC 6528)
+// ---------------------------------------------------------------------------
+
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// The secret that ports and ISNs are keyed with: a 128-bit SipHash key, as two
+/// 64-bit halves, drawn once at start-up by [`init_tcp_key`] and never changed.
+static TCP_KEY: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+/// RFC 6056's `next_ephemeral`. One counter for the whole daemon, so a port
+/// is not reused until the range has been walked, whichever ring session asked.
+///
+/// Until 2026-09-27 each connection's port and ISN came from a 16-bit seed that
+/// every new ring session restarted from its control-request count. Two sessions
+/// a multiple of 16 requests apart gave their first connections the same port
+/// *and* the same ISN: a byte-identical SYN for a connection that had just
+/// closed, which a peer or NAT still holding that pair may answer with the old
+/// connection's reset (known-issues `A-NONBLOCK-CONNECT-GAVE-UP-AFTER-FIVE-POLLS`).
+static NEXT_EPHEMERAL: AtomicU32 = AtomicU32::new(0);
+
+/// Draw [`TCP_KEY`] from the kernel's CSPRNG.
+///
+/// If the kernel refuses, falls back to the clock and our MAC, and says so. The
+/// ports and ISNs are then predictable to an attacker who can guess the boot
+/// time, but still differ between connections, which is what correctness needs.
+fn init_tcp_key(me: &IfInfo) {
+    let mut key = [0u8; 16];
+    let got = syscall3(SYS_GETRANDOM, key.as_mut_ptr() as u64, key.len() as u64, 0);
+    if got != key.len() as i64 {
+        print("[netstack] WARN: getrandom refused; TCP ports and ISNs keyed from the clock\n");
+        let t = now_ns().to_le_bytes();
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = t[i % 8] ^ me.mac[i % 6] ^ (i as u8).wrapping_mul(0x9d);
+        }
+    }
+    let (lo, hi) = key.split_at(8);
+    let mut half = [0u8; 8];
+    half.copy_from_slice(lo);
+    TCP_KEY[0].store(u64::from_le_bytes(half), Ordering::Relaxed);
+    half.copy_from_slice(hi);
+    TCP_KEY[1].store(u64::from_le_bytes(half), Ordering::Relaxed);
+}
+
+/// [`TCP_KEY`] as the 16 bytes `netproto::tcp_ids` takes.
+fn tcp_key() -> [u8; 16] {
+    let mut key = [0u8; 16];
+    let (lo, hi) = key.split_at_mut(8);
+    lo.copy_from_slice(&TCP_KEY[0].load(Ordering::Relaxed).to_le_bytes());
+    hi.copy_from_slice(&TCP_KEY[1].load(Ordering::Relaxed).to_le_bytes());
+    key
+}
+
+/// A local port for a new connection from `local_ip` to `remote_ip`:`remote_port`,
+/// skipping any `in_use` says is taken. `None` when the whole ephemeral range is.
+fn pick_local_port(
+    local_ip: &[u8],
+    remote_ip: &[u8],
+    remote_port: u16,
+    in_use: impl FnMut(u16) -> bool,
+) -> Option<u16> {
+    let tuple = netproto::tcp_ids::Tuple {
+        local_ip,
+        local_port: 0,
+        remote_ip,
+        remote_port,
+    };
+    let mut ports =
+        netproto::tcp_ids::EphemeralPorts::from_counter(NEXT_EPHEMERAL.load(Ordering::Relaxed));
+    let port = ports.pick(&tcp_key(), &tuple, in_use);
+    NEXT_EPHEMERAL.store(ports.counter(), Ordering::Relaxed);
+    port
+}
+
+/// The initial sequence number for a new connection with this 4-tuple.
+fn new_isn(local_ip: &[u8], local_port: u16, remote_ip: &[u8], remote_port: u16) -> u32 {
+    let tuple = netproto::tcp_ids::Tuple {
+        local_ip,
+        local_port,
+        remote_ip,
+        remote_port,
+    };
+    netproto::tcp_ids::isn(now_ns(), &tcp_key(), &tuple)
+}
+
+/// Whether a reset received during our SYN-SENT refuses the connect.
+///
+/// RFC 793 (SYN-SENT, "first check the ACK bit"): only a reset that
+/// acknowledges our SYN is acceptable. Any other belongs to an earlier
+/// connection on the same port pair and is dropped, or a stale reset could
+/// refuse a connection that the peer is in fact accepting.
+fn rst_refuses_syn(rx: &TcpRx, isn: u32) -> bool {
+    rx.flags & tcp::FLAG_RST != 0 && rx.flags & tcp::FLAG_ACK != 0 && rx.ack == isn.wrapping_add(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,13 +1360,11 @@ struct TcpConn {
     /// `connect` returns already-established; a non-blocking connect starts in
     /// `SYN_SENT` (`false`) and flips to `true` when the SYN-ACK is processed.
     established: bool,
-    /// `true` if the connect attempt failed after `connect_start` (a RST, or the
-    /// SYN retransmit budget was exhausted with no SYN-ACK). Surfaced to the kernel
-    /// as a `POLL_ERR` readiness bit → `getsockopt(SO_ERROR) = ECONNREFUSED`.
+    /// `true` if the connect attempt failed after `connect_start`: a reset that
+    /// acknowledged our SYN, or a SYN that went unanswered through every
+    /// retransmission `rtx` allows. Surfaced to the kernel as a `POLL_ERR`
+    /// readiness bit → `getsockopt(SO_ERROR) = ECONNREFUSED`.
     connect_failed: bool,
-    /// Number of SYNs transmitted so far (non-blocking handshake). Bounds the
-    /// per-poll SYN retransmit at [`TCP_SYN_ATTEMPTS`].
-    syn_sends: u32,
     /// Set once the peer's FIN (or an RST) has ended the receive stream.
     peer_fin: bool,
     /// The most recently sent segment, retained for retransmission.
@@ -1360,24 +1454,23 @@ impl TcpConn {
         }
     }
 
-    /// Open a connection to `dst_ip:dst_port` via `mac`, seeding the IPv4 ident
-    /// counter from `seed_ipid`. Performs the SYN / SYN-ACK / ACK handshake.
-    /// Returns `None` if the peer refused (RST) or never answered.
+    /// Open a connection from `local_port` to `dst_ip:dst_port` via `mac`, seeding
+    /// the IPv4 ident counter from `seed_ipid`. Performs the SYN / SYN-ACK / ACK
+    /// handshake. Returns `None` if the peer refused (a reset acknowledging our
+    /// SYN) or never answered.
+    ///
+    /// `local_port` comes from [`pick_local_port`] and the ISN from [`new_isn`], so
+    /// successive connections to the *same* server do not reuse a 4-tuple and
+    /// sequence space a server may still hold in TIME_WAIT.
     fn connect(
         me: &IfInfo,
         dst_ip: [u8; 4],
         dst_port: u16,
         mac: [u8; 6],
         seed_ipid: u16,
+        local_port: u16,
     ) -> Option<Self> {
-        // Rotate the ephemeral local port (and initial sequence number) per
-        // connection so successive connections to the *same* server do not reuse
-        // an identical 4-tuple. A server that still holds the prior 4-tuple in
-        // TIME_WAIT would otherwise treat the new SYN as a stale duplicate and
-        // drop/challenge it — which silently broke back-to-back fetches. Keep the
-        // port in the ephemeral range 0xC000..=0xFFFF.
-        let local_port = EPHEMERAL_PORT | (seed_ipid & 0x3FFF);
-        let isn: u32 = 0x0001_0000u32.wrapping_add((seed_ipid as u32) << 8);
+        let isn = new_isn(&me.ip, local_port, &dst_ip, dst_port);
         let mut ipid = seed_ipid;
 
         let mut frame = [0u8; MAX_FRAME];
@@ -1407,7 +1500,10 @@ impl TcpConn {
                     recv_tcp_seg(me, &dst_ip, local_port, dst_port, &mut frame, &mut pl)
                 {
                     if rx.flags & tcp::FLAG_RST != 0 {
-                        return None; // Connection refused.
+                        if rst_refuses_syn(&rx, isn) {
+                            return None; // Connection refused.
+                        }
+                        continue; // An earlier connection's reset: not ours.
                     }
                     if rx.flags & tcp::FLAG_SYN != 0
                         && rx.flags & tcp::FLAG_ACK != 0
@@ -1455,7 +1551,6 @@ impl TcpConn {
             isn,
             established: true,
             connect_failed: false,
-            syn_sends: 0,
             peer_fin: false,
             snd_buf: [0u8; TCP_SND_BUF],
             snd_buf_len: 0,
@@ -1482,12 +1577,11 @@ impl TcpConn {
         dst_port: u16,
         mac: [u8; 6],
         seed_ipid: u16,
+        local_port: u16,
     ) -> Option<Self> {
-        // Same ephemeral-port / ISN derivation as the synchronous path so a
-        // non-blocking connect to a server recently torn down still avoids a
-        // TIME_WAIT 4-tuple clash.
-        let local_port = EPHEMERAL_PORT | (seed_ipid & 0x3FFF);
-        let isn: u32 = 0x0001_0000u32.wrapping_add((seed_ipid as u32) << 8);
+        // The same port / ISN choice as the synchronous path, so a non-blocking
+        // connect to a server recently torn down still avoids a TIME_WAIT clash.
+        let isn = new_isn(&me.ip, local_port, &dst_ip, dst_port);
         let ipid = seed_ipid.wrapping_add(1);
         if !send_tcp(
             me,
@@ -1503,7 +1597,7 @@ impl TcpConn {
         ) {
             return None;
         }
-        Some(TcpConn {
+        let mut conn = TcpConn {
             dst_ip,
             dst6: None,
             dst_port,
@@ -1516,7 +1610,6 @@ impl TcpConn {
             isn,
             established: false,
             connect_failed: false,
-            syn_sends: 1,
             peer_fin: false,
             snd_buf: [0u8; TCP_SND_BUF],
             snd_buf_len: 0,
@@ -1527,7 +1620,11 @@ impl TcpConn {
             read_shut: false,
             rtx: netproto::tcp_rtx::Retransmit::new(),
             timed_out: false,
-        })
+        };
+        // The SYN is the segment in flight until the SYN-ACK acknowledges it:
+        // `poll_connect` resends it on this clock, and gives up when it does.
+        conn.rtx.sent(now_ns());
+        Some(conn)
     }
 
     /// Passively open a connection from an inbound SYN to a [`Listener`]: choose our
@@ -1549,7 +1646,7 @@ impl TcpConn {
         mac: [u8; 6],
         seed_ipid: u16,
     ) -> Option<Self> {
-        let isn: u32 = 0x0002_0000u32.wrapping_add((seed_ipid as u32) << 8);
+        let isn = new_isn(&me.ip, local_port, &peer_ip, peer_port);
         let mut ipid = seed_ipid;
         let rcv_nxt = peer_isn.wrapping_add(1); // Their SYN consumes one seq.
         // Transmit SYN-ACK (seq = our ISN, ack = peer_isn + 1).
@@ -1580,7 +1677,6 @@ impl TcpConn {
             isn,
             established: false, // SYN_RCVD until the peer ACKs our SYN-ACK.
             connect_failed: false,
-            syn_sends: 1,
             peer_fin: false,
             snd_buf: [0u8; TCP_SND_BUF],
             snd_buf_len: 0,
@@ -1611,9 +1707,9 @@ impl TcpConn {
         dst_port: u16,
         mac: [u8; 6],
         seed_ipid: u16,
+        local_port: u16,
     ) -> Option<Self> {
-        let local_port = EPHEMERAL_PORT | (seed_ipid & 0x3FFF);
-        let isn: u32 = 0x0001_0000u32.wrapping_add((seed_ipid as u32) << 8);
+        let isn = new_isn(&me.ip6, local_port, &dst_ip6, dst_port);
 
         let mut frame = [0u8; MAX_FRAME];
         let mut pl = [0u8; MAX_FRAME];
@@ -1639,7 +1735,10 @@ impl TcpConn {
                     recv_tcp_seg6(me, &dst_ip6, local_port, dst_port, &mut frame, &mut pl)
                 {
                     if rx.flags & tcp::FLAG_RST != 0 {
-                        return None; // Connection refused.
+                        if rst_refuses_syn(&rx, isn) {
+                            return None; // Connection refused.
+                        }
+                        continue; // An earlier connection's reset: not ours.
                     }
                     if rx.flags & tcp::FLAG_SYN != 0
                         && rx.flags & tcp::FLAG_ACK != 0
@@ -1683,7 +1782,6 @@ impl TcpConn {
             isn,
             established: true,
             connect_failed: false,
-            syn_sends: 0,
             peer_fin: false,
             snd_buf: [0u8; TCP_SND_BUF],
             snd_buf_len: 0,
@@ -1705,9 +1803,9 @@ impl TcpConn {
         dst_port: u16,
         mac: [u8; 6],
         seed_ipid: u16,
+        local_port: u16,
     ) -> Option<Self> {
-        let local_port = EPHEMERAL_PORT | (seed_ipid & 0x3FFF);
-        let isn: u32 = 0x0001_0000u32.wrapping_add((seed_ipid as u32) << 8);
+        let isn = new_isn(&me.ip6, local_port, &dst_ip6, dst_port);
         if !send_tcp6(
             me,
             &mac,
@@ -1733,7 +1831,6 @@ impl TcpConn {
             isn,
             established: false,
             connect_failed: false,
-            syn_sends: 1,
             peer_fin: false,
             snd_buf: [0u8; TCP_SND_BUF],
             snd_buf_len: 0,
@@ -1759,7 +1856,7 @@ impl TcpConn {
         mac: [u8; 6],
         seed_ipid: u16,
     ) -> Option<Self> {
-        let isn: u32 = 0x0002_0000u32.wrapping_add((seed_ipid as u32) << 8);
+        let isn = new_isn(&me.ip6, local_port, &peer_ip6, peer_port);
         let rcv_nxt = peer_isn.wrapping_add(1); // Their SYN consumes one seq.
         if !send_tcp6(
             me,
@@ -1786,7 +1883,6 @@ impl TcpConn {
             isn,
             established: false,
             connect_failed: false,
-            syn_sends: 1,
             peer_fin: false,
             snd_buf: [0u8; TCP_SND_BUF],
             snd_buf_len: 0,
@@ -1800,25 +1896,32 @@ impl TcpConn {
         })
     }
 
-    /// Advance a non-blocking connect's handshake: if still `SYN_SENT` and the SYN
-    /// retransmit budget ([`TCP_SYN_ATTEMPTS`]) is not yet spent, retransmit the
-    /// SYN (in case it or the SYN-ACK was lost); if the budget is exhausted without
-    /// a SYN-ACK, mark the attempt failed. The actual handshake *completion* (on a
-    /// received SYN-ACK) happens in [`ingest_seg`](Self::ingest_seg); this is only
-    /// the retransmit/timeout driver, called once per `OP_POLL`. No-op once the
+    /// Advance a non-blocking connect's handshake: while still `SYN_SENT`, resend
+    /// the SYN when `rtx`'s timeout for it expires (in case it or the SYN-ACK was
+    /// lost), and mark the attempt failed when `rtx` gives up. The actual
+    /// handshake *completion* (on a received SYN-ACK) happens in
+    /// [`ingest_seg`](Self::ingest_seg); this is only the retransmit/timeout
+    /// driver, called on every `OP_POLL`, however often. No-op once the
     /// connection is established or already failed.
     fn poll_connect(&mut self, me: &IfInfo) {
         if self.established || self.connect_failed {
             return;
         }
-        if self.syn_sends >= TCP_SYN_ATTEMPTS {
-            // Exhausted the SYN budget with no SYN-ACK → treat as refused/timed out.
-            self.connect_failed = true;
-            return;
+        // On `rtx`'s clock, not per call. This used to resend the SYN on every
+        // OP_POLL and fail the connect after five, so how *often* a caller
+        // polled decided whether a connect to a live server survived: five polls
+        // inside one round trip -- a tight loop, or a far server -- refused it
+        // (known-issues `A-NONBLOCK-CONNECT-GAVE-UP-AFTER-FIVE-POLLS`).
+        match self.rtx.poll(now_ns()) {
+            netproto::tcp_rtx::RtxAction::Wait => {}
+            netproto::tcp_rtx::RtxAction::Resend => {
+                self.ipid = self.ipid.wrapping_add(1);
+                self.emit(me, self.isn, 0, tcp::FLAG_SYN, &[]);
+            }
+            netproto::tcp_rtx::RtxAction::GiveUp => {
+                self.connect_failed = true; // The SYN went unanswered.
+            }
         }
-        self.ipid = self.ipid.wrapping_add(1);
-        self.syn_sends = self.syn_sends.saturating_add(1);
-        self.emit(me, self.isn, 0, tcp::FLAG_SYN, &[]);
     }
 
     /// True when the send window has no room: a previously-sent segment is still
@@ -1878,7 +1981,12 @@ impl TcpConn {
                 return;
             }
             if rx.flags & tcp::FLAG_RST != 0 {
-                self.connect_failed = true; // Refused → surfaces as POLL_ERR.
+                // SYN-RECEIVED (passive): a reset aborts the half-open connection.
+                // SYN-SENT: only one acknowledging our SYN refuses it; any other
+                // belongs to an earlier connection on this port pair (RFC 793).
+                if self.passive || rst_refuses_syn(rx, self.isn) {
+                    self.connect_failed = true; // Refused → surfaces as POLL_ERR.
+                }
                 return;
             }
             if self.passive {
@@ -1917,6 +2025,7 @@ impl TcpConn {
                     self.ipid = self.ipid.wrapping_add(1);
                     self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_ACK, &[]);
                     self.established = true;
+                    self.rtx.acked(); // The SYN was the segment in flight.
                 }
                 return; // While SYN_SENT we never buffer data.
             }
@@ -2153,7 +2262,9 @@ fn tcp_fetch(
     payload: &[u8],
     out: &mut [u8],
 ) -> Option<usize> {
-    let mut conn = TcpConn::connect(me, *dst_ip, dst_port, *next_hop_mac, id)?;
+    // No connection table here: the one-shot path holds a single connection.
+    let local_port = pick_local_port(&me.ip, dst_ip, dst_port, |_| false)?;
+    let mut conn = TcpConn::connect(me, *dst_ip, dst_port, *next_hop_mac, id, local_port)?;
     conn.send(me, payload)?;
     let written = conn.recv(me, out);
     conn.close(me);
@@ -2719,6 +2830,14 @@ impl RingConns {
         }
     }
 
+    /// Whether a live connection in this table has local port `port`.
+    fn port_in_use(&self, port: u16) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|(_, c)| c.local_port == port)
+    }
+
     /// Borrow the live connection registered under `id`, if any.
     fn get_mut(&mut self, id: u32) -> Option<&mut TcpConn> {
         self.slots
@@ -3267,6 +3386,11 @@ impl Listeners {
             .map(|(_, l)| l)
     }
 
+    /// Whether a listener is bound to `port`.
+    fn port_in_use(&self, port: u16) -> bool {
+        self.slots.iter().flatten().any(|(_, l)| l.port == port)
+    }
+
     /// Borrow the listener bound to `port`, if any (inbound-SYN demux).
     fn find_by_port(&mut self, port: u16) -> Option<&mut Listener> {
         self.slots
@@ -3488,17 +3612,21 @@ fn ring_tcp_process(
                 stop = true;
                 0
             }
-            netipc::ring::OP_CONNECT => {
+            netipc::ring::OP_CONNECT => 'connect: {
                 let (ip, port) = netipc::ring::Sqe::unpack_endpoint(sqe.aux);
-                // Advance the ident seed well past the handshake's own increments
-                // so each connection gets a distinct ephemeral port + ISN.
+                // Advance the IPv4 ident seed past the handshake's own increments.
                 *ipid = ipid.wrapping_add(0x10);
+                let Some(local_port) = pick_local_port(&me.ip, &ip, port, |p| {
+                    conns.port_in_use(p) || listeners.port_in_use(p)
+                }) else {
+                    break 'connect -1; // every ephemeral port is taken
+                };
                 if sqe.aux & netipc::ring::CONNECT_NONBLOCK != 0 {
                     // Non-blocking connect: transmit the SYN and install the conn in
                     // SYN_SENT without waiting for the SYN-ACK. Pump once so a SYN-ACK
                     // that has already arrived can complete the handshake immediately
                     // (a loopback/fast peer), letting us report success synchronously.
-                    match TcpConn::connect_start(me, ip, port, *next_hop_mac, *ipid) {
+                    match TcpConn::connect_start(me, ip, port, *next_hop_mac, *ipid, local_port) {
                         Some(c) => match conns.reserve(sqe.conn_id) {
                             Some(slot) => {
                                 *slot = Some((sqe.conn_id, c));
@@ -3518,7 +3646,7 @@ fn ring_tcp_process(
                         None => -1,
                     }
                 } else {
-                    match TcpConn::connect(me, ip, port, *next_hop_mac, *ipid) {
+                    match TcpConn::connect(me, ip, port, *next_hop_mac, *ipid, local_port) {
                         Some(mut c) => match conns.reserve(sqe.conn_id) {
                             Some(slot) => {
                                 *slot = Some((sqe.conn_id, c));
@@ -3559,9 +3687,16 @@ fn ring_tcp_process(
                     };
                     match mac {
                         None => -1, // next-hop unresolved → report failure
-                        Some(mac) => {
+                        Some(mac) => 'connect6: {
+                            let Some(local_port) = pick_local_port(&me.ip6, &addr, port, |p| {
+                                conns.port_in_use(p) || listeners.port_in_use(p)
+                            }) else {
+                                break 'connect6 -1; // every ephemeral port is taken
+                            };
                             if sqe.aux & netipc::ring::CONNECT_NONBLOCK != 0 {
-                                match TcpConn::connect_start6(me, addr, port, mac, *ipid) {
+                                match TcpConn::connect_start6(
+                                    me, addr, port, mac, *ipid, local_port,
+                                ) {
                                     Some(c) => match conns.reserve(sqe.conn_id) {
                                         Some(slot) => {
                                             *slot = Some((sqe.conn_id, c));
@@ -3577,7 +3712,7 @@ fn ring_tcp_process(
                                     None => -1,
                                 }
                             } else {
-                                match TcpConn::connect6(me, addr, port, mac, *ipid) {
+                                match TcpConn::connect6(me, addr, port, mac, *ipid, local_port) {
                                     Some(mut c) => match conns.reserve(sqe.conn_id) {
                                         Some(slot) => {
                                             *slot = Some((sqe.conn_id, c));
@@ -4352,6 +4487,9 @@ pub extern "C" fn _start() -> ! {
     // Same for the daemon's link-local IPv6 identity, so IPv6 self-connections
     // (the OP_CONNECT6 loopback self-test) circulate internally too.
     loopback::set_my_ip6(me.ip6);
+
+    // Key TCP's port and ISN choices before any mode can open a connection.
+    init_tcp_key(&me);
 
     if !raw_open() {
         print("[netstack] FAIL: could not claim raw NIC (SYS_NET_RAW_OPEN)\n");

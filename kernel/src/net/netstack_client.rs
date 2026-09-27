@@ -1867,10 +1867,12 @@ pub fn self_test_poll_ready(ip: &[u8; 4], port: u16) -> KernelResult<Option<()>>
 /// Sequence: open a client, issue a non-blocking [`connect`](NetstackConn::connect)
 /// (which returns `0` if the handshake already completed within the daemon's single
 /// post-SYN pump, or [`netipc::ring::ERR_IN_PROGRESS`] if it is still pending), then
-/// drive [`poll_ready`](NetstackConn::poll_ready) in a bounded loop until the socket
-/// reports **writable** (the connect resolved) — checking that it never reports the
-/// error bit for a good endpoint. A writable, error-free result is the parity
-/// property: a `poll(POLLOUT)` waiter is woken exactly when the connect completes.
+/// drive [`poll_ready`](NetstackConn::poll_ready) -- [`NONBLOCK_CONNECT_BURST`]
+/// times back to back, then every 10 ms up to [`NONBLOCK_CONNECT_DEADLINE_MS`] --
+/// until the socket reports **writable** (the connect resolved), checking that it
+/// never reports the error bit for a good endpoint. A writable, error-free result
+/// is the parity property: a `poll(POLLOUT)` waiter is woken exactly when the
+/// connect completes, however often it asked before then.
 ///
 /// Returns `Ok(Some(()))` if the non-blocking-connect readiness path was exercised
 /// (connect started and the socket became writable without error), `Ok(None)` if
@@ -1903,14 +1905,30 @@ pub fn self_test_nonblock_connect(ip: &[u8; 4], port: u16) -> KernelResult<Optio
         );
     }
 
-    // Poll for writable (POLLOUT), exactly as a userspace non-blocking connect would.
+    // Poll for writable (POLLOUT), as a userspace non-blocking connect would:
+    // first a burst of back-to-back polls, then on a clock.
+    //
+    // The burst is the regression test for known-issues
+    // `A-NONBLOCK-CONNECT-GAVE-UP-AFTER-FIVE-POLLS`. The daemon used to resend
+    // the SYN on every poll and refuse the connect after five, so five polls
+    // inside the server's round trip refused a connect to a live server -- this
+    // test's own endpoint, which the blocking tests just before it reached. A
+    // pending connect must survive any number of polls; only time may end it.
+    let start = crate::hrtimer::now_ns();
+    let mut polls = 0u32;
     let mut writable = false;
-    for _ in 0..64u32 {
+    let mut waited_ms;
+    loop {
         let (_readable, w, error) = conn.poll_ready()?;
+        polls = polls.saturating_add(1);
+        waited_ms = crate::hrtimer::now_ns().saturating_sub(start) / 1_000_000;
         if error {
             conn.close()?;
             crate::serial_println!(
-                "[netstack-client]   non-blocking connect reported POLL_ERR against a good endpoint"
+                "[netstack-client]   non-blocking connect reported POLL_ERR against a good \
+                 endpoint after {} poll(s) and {} ms",
+                polls,
+                waited_ms
             );
             return Err(KernelError::InternalError);
         }
@@ -1918,19 +1936,46 @@ pub fn self_test_nonblock_connect(ip: &[u8; 4], port: u16) -> KernelResult<Optio
             writable = true;
             break;
         }
+        if waited_ms >= NONBLOCK_CONNECT_DEADLINE_MS {
+            break;
+        }
+        if polls >= NONBLOCK_CONNECT_BURST {
+            crate::sched::sleep_ms(10);
+        }
     }
     conn.close()?;
 
     if writable {
         crate::serial_println!(
-            "[netstack-client]   non-blocking connect resolved to writable (POLLOUT) — connect parity ok"
+            "[netstack-client]   non-blocking connect resolved to writable (POLLOUT) after {} \
+             poll(s), the first {} back to back, in {} ms — connect parity ok",
+            polls,
+            polls.min(NONBLOCK_CONNECT_BURST),
+            waited_ms
         );
         Ok(Some(()))
     } else {
-        // Handshake never completed in-window (slirp variance); path still ran.
+        // Neither connected nor refused inside the deadline (slirp variance);
+        // the path still ran.
+        crate::serial_println!(
+            "[netstack-client]   non-blocking connect: no answer from the server in {} ms \
+             ({} polls) -- not refused, not connected",
+            waited_ms,
+            polls
+        );
         Ok(None)
     }
 }
+
+/// Back-to-back polls [`self_test_nonblock_connect`] makes before it starts
+/// pausing between them: well past the five that used to refuse a pending
+/// connect.
+const NONBLOCK_CONNECT_BURST: u32 = 16;
+
+/// How long [`self_test_nonblock_connect`] waits for the handshake, in ms: past
+/// the daemon's 12.6 s give-up (`netproto::tcp_rtx`), so a server that never
+/// answers is seen as refused rather than as a test that stopped looking.
+const NONBLOCK_CONNECT_DEADLINE_MS: u64 = 15_000;
 
 /// Boot self-test: prove the **non-blocking send** path (`send`/`write` with
 /// `O_NONBLOCK`), mirroring Linux (`D-NETSOCK-SYNC`).

@@ -2510,10 +2510,16 @@ lane C's `guitk`.
   GPU stack exists. The encoder films buffer-backed windows for the
   compositor's capture stream; the decoder serves SlateOS's remote viewer.
 
-- `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
+- `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
   and gets thumbnails wherever a picture does. HEIC waits on
   `open-questions.md` F-Q1 (a patent question), and would reuse the container.
+  - `[x]` The container, as libavif 1.3.0 reads it (`src/avif/`): items, grids,
+    alpha, gain maps, sequences; `dimensions` and `pixel_format` match
+    Pillow's libavif on all 224 files of the AOM and libavif corpora.
+  - `[ ]` Decoding: rav1d vendored, YUV to RGB as libavif with libyuv
+    converts it, grids, alpha, crops and turns as Chrome applies them, and
+    sequences as an `Animation`.
 
 - `[F]` Port FreeRDP (line ~5058)
 

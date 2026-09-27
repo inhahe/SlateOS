@@ -108,6 +108,13 @@
 //! JPEG (old style too), NeXT, ThunderScan, SGI LogLuv or PixarLog. See
 //! [`tiff`].
 //!
+//! AVIF, as libavif reads it -- the reader behind Pillow, and the one Chrome's
+//! is ported from: the container with its items, grids, alpha planes, HDR gain
+//! maps and image sequences, accepted or refused by a port of libavif's own
+//! parser, and a picture's size, depth, alpha and turn read from it. Decoding
+//! the AV1 frames themselves is not built yet, and [`decode`] refuses an AVIF
+//! by name until it is. See [`avif`].
+//!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],
 //! [`decode_scaled`] and [`dimensions`] all describe the picture as it is shown.
@@ -128,6 +135,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod avif;
 pub mod bmp;
 mod encode;
 pub mod gif;
@@ -350,6 +358,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if tiff::is_tiff(bytes) {
         return tiff::decode(bytes, limits);
     }
+    if avif::is_avif(bytes) {
+        return avif::decode(bytes, limits);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -396,6 +407,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     if tiff::is_tiff(bytes) {
         return tiff::decode_scaled(bytes, limits, max_w, max_h);
     }
+    if avif::is_avif(bytes) {
+        return avif::decode_scaled(bytes, limits, max_w, max_h);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -430,6 +444,9 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     }
     if tiff::is_tiff(bytes) {
         return tiff::dimensions(bytes);
+    }
+    if avif::is_avif(bytes) {
+        return avif::dimensions(bytes);
     }
     Err(ImageError::UnknownFormat)
 }
@@ -524,6 +541,9 @@ pub fn pixel_format(bytes: &[u8]) -> ImageResult<PixelFormat> {
     if tiff::is_tiff(bytes) {
         return tiff::pixel_format(bytes);
     }
+    if avif::is_avif(bytes) {
+        return avif::pixel_format(bytes);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -563,10 +583,16 @@ mod tests {
             decode(&[], Limits::default()),
             Err(ImageError::UnknownFormat)
         );
-        // A format this crate does not read yet: AVIF's `ftyp` box.
+        // A format this crate does not read: HEIC's `ftyp` box.
+        assert_eq!(
+            dimensions(b"\0\0\0\x1cftypheic\0\0\0\0heicmif1miaf"),
+            Err(ImageError::UnknownFormat)
+        );
+        // AVIF it does: an `ftyp` box that promises a `meta` box and has
+        // none after it is a truncated AVIF.
         assert_eq!(
             dimensions(b"\0\0\0\x1cftypavif\0\0\0\0avifmif1miaf"),
-            Err(ImageError::UnknownFormat)
+            Err(ImageError::Truncated)
         );
         // TIFF it does: a header whose directory is past the end is a
         // truncated TIFF.

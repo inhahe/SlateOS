@@ -4,10 +4,18 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Network Scanner — IP/port scanning, host discovery, service detection, topology visualization"
 [dependencies]
+# This machine's network, for the target the window opens on.
+hwquery = { path = "../hwquery" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# Its fixture-tree provider, for the tests that fake /proc.
+hwquery = { path = "../hwquery", features = ["testing"] }
+# A directory to fake a machine's /proc in.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]
 workspace = true

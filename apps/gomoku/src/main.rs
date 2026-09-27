@@ -1518,8 +1518,12 @@ impl App for GomokuApp {
     /// The opponent's search runs on this tick rather than inside the event
     /// handler. Without an interval here the game would enter
     /// [`GamePhase::Thinking`] after Black's first stone and stay there.
+    ///
+    /// Only then: a board waiting for Black has nothing to advance, and a
+    /// clock asked for anyway woke the machine sixteen times a second for as
+    /// long as the window was open.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(Duration::from_millis(60))
+        (self.phase == GamePhase::Thinking).then_some(Duration::from_millis(60))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -3179,7 +3183,18 @@ mod tests {
     /// nothing would ever run.
     #[test]
     fn the_app_asks_for_the_tick_that_makes_white_move() {
-        let app = GomokuApp::new();
+        let mut app = GomokuApp::new();
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a board waiting for Black asked for a clock"
+        );
+        app.place_stone(7, 7);
+        assert_eq!(
+            app.phase,
+            GamePhase::Thinking,
+            "control: Black's stone hands the move to White"
+        );
         let interval = app.tick_interval().expect("a tick interval");
         assert!(
             interval <= Duration::from_millis(250) && interval > Duration::ZERO,

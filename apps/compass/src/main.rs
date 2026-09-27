@@ -2,9 +2,9 @@
 //!
 //! Features:
 //! - Compass rose with cardinal/intercardinal labels and degree tick marks
-//! - Heading display in degrees and cardinal direction (keyboard-adjustable)
+//! - Heading display in degrees and cardinal direction, turned by hand
 //! - Red north needle that rotates with heading
-//! - Simulated lat/lon coordinates
+//! - Your position, set by hand -- nothing here can locate the machine
 //! - Waypoint system (up to 10 waypoints) with bearing/distance to selected
 //! - Great-circle distance via the Haversine formula
 //! - Multiple views: Compass, Waypoint list, Coordinate entry
@@ -12,6 +12,12 @@
 //! - km/miles unit toggle
 //!
 //! # The window
+//!
+//! **Nothing here senses anything** (2026-09-27): SlateOS publishes no
+//! magnetometer and no location, so the heading is a dial the user turns and
+//! the position is what the user sets in Coordinates. Until that date the
+//! window opened on New York City as "POSITION", marked waypoints there and
+//! measured every distance from it -- a place invented for the machine.
 //!
 //! Everything above is drawn into a real window through [`oswindow`]. It was
 //! not, until this was written: `main` built a `CompassApp` and dropped it,
@@ -161,6 +167,8 @@ enum Target {
     Field(CoordField),
     /// The button that turns the entry fields into a waypoint.
     AddWaypoint,
+    /// The button that makes the entry fields the position, by hand.
+    SetPosition,
 }
 
 /// A geographic coordinate.
@@ -447,6 +455,10 @@ impl Layout {
     }
 }
 
+/// What the window says where a position is needed and none is set.
+const SET_POSITION_FIRST: &str =
+    "No position: set yours in Coordinates -- nothing here can locate the machine";
+
 // ── Application state ──────────────────────────────────────────────
 
 struct CompassApp {
@@ -455,8 +467,9 @@ struct CompassApp {
     heading: f64,
     /// Magnetic declination offset in degrees (-30 to +30).
     declination: f64,
-    /// Current simulated position.
-    position: Coordinate,
+    /// The position the user set by hand, if they have: nothing on this
+    /// system can locate the machine.
+    position: Option<Coordinate>,
     /// Active view.
     view: View,
     /// Distance display unit.
@@ -497,7 +510,7 @@ impl CompassApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             heading: 0.0,
             declination: 0.0,
-            position: Coordinate::new(40.7128, -74.0060), // New York City
+            position: None,
             view: View::Compass,
             distance_unit: DistanceUnit::Kilometers,
             waypoints: Vec::new(),
@@ -529,10 +542,49 @@ impl CompassApp {
         self.declination = (self.declination + delta).clamp(-30.0, 30.0);
     }
 
-    /// Move the simulated position by a small delta in degrees.
+    /// Nudge the hand-set position by a small delta in degrees; with none
+    /// set, say where to set one.
     fn move_position(&mut self, d_lat: f64, d_lon: f64) {
-        self.position.lat = (self.position.lat + d_lat).clamp(-90.0, 90.0);
-        self.position.lon = (self.position.lon + d_lon).clamp(-180.0, 180.0);
+        let Some(position) = self.position.as_mut() else {
+            self.status = String::from(SET_POSITION_FIRST);
+            return;
+        };
+        position.lat = (position.lat + d_lat).clamp(-90.0, 90.0);
+        position.lon = (position.lon + d_lon).clamp(-180.0, 180.0);
+    }
+
+    /// Set the position by hand from the entry fields. Returns `true` on
+    /// success; the fields are kept, as the user may want the same numbers
+    /// for a waypoint too.
+    fn set_position_from_entry(&mut self) -> bool {
+        let Some((lat, lon)) = self.entry_coordinate() else {
+            return false;
+        };
+        self.position = Some(Coordinate::new(lat, lon));
+        self.status = String::from("Position set by hand");
+        true
+    }
+
+    /// The entry fields as a coordinate, or `None` with the reason in the
+    /// status line.
+    fn entry_coordinate(&mut self) -> Option<(f64, f64)> {
+        let Ok(lat) = self.entry_lat_buf.trim().parse::<f64>() else {
+            self.status = String::from("Invalid latitude value");
+            return None;
+        };
+        let Ok(lon) = self.entry_lon_buf.trim().parse::<f64>() else {
+            self.status = String::from("Invalid longitude value");
+            return None;
+        };
+        if !(-90.0..=90.0).contains(&lat) {
+            self.status = String::from("Latitude must be between -90 and 90");
+            return None;
+        }
+        if !(-180.0..=180.0).contains(&lon) {
+            self.status = String::from("Longitude must be between -180 and 180");
+            return None;
+        }
+        Some((lat, lon))
     }
 
     /// Add a waypoint from the entry buffers. Returns `true` on success.
@@ -541,28 +593,9 @@ impl CompassApp {
             self.status = String::from("Maximum 10 waypoints reached");
             return false;
         }
-        let lat: f64 = match self.entry_lat_buf.trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                self.status = String::from("Invalid latitude value");
-                return false;
-            }
-        };
-        let lon: f64 = match self.entry_lon_buf.trim().parse() {
-            Ok(v) => v,
-            Err(_) => {
-                self.status = String::from("Invalid longitude value");
-                return false;
-            }
-        };
-        if !(-90.0..=90.0).contains(&lat) {
-            self.status = String::from("Latitude must be between -90 and 90");
+        let Some((lat, lon)) = self.entry_coordinate() else {
             return false;
-        }
-        if !(-180.0..=180.0).contains(&lon) {
-            self.status = String::from("Longitude must be between -180 and 180");
-            return false;
-        }
+        };
         let name = if self.entry_name_buf.trim().is_empty() {
             format!("WP{}", self.waypoints.len().saturating_add(1))
         } else {
@@ -580,17 +613,19 @@ impl CompassApp {
         true
     }
 
-    /// Add a waypoint at the current position.
+    /// Add a waypoint at the hand-set position; with none set, say where to
+    /// set one.
     fn add_waypoint_at_current_position(&mut self) -> bool {
         if self.waypoints.len() >= MAX_WAYPOINTS {
             self.status = String::from("Maximum 10 waypoints reached");
             return false;
         }
+        let Some(here) = self.position.clone() else {
+            self.status = String::from(SET_POSITION_FIRST);
+            return false;
+        };
         let name = format!("WP{}", self.waypoints.len().saturating_add(1));
-        self.waypoints.push(Waypoint {
-            name,
-            coord: Coordinate::new(self.position.lat, self.position.lon),
-        });
+        self.waypoints.push(Waypoint { name, coord: here });
         self.selected_waypoint = Some(self.waypoints.len().saturating_sub(1));
         self.status = String::from("Waypoint added at current position");
         true
@@ -611,12 +646,14 @@ impl CompassApp {
         }
     }
 
-    /// Bearing and distance from the current position to the selected waypoint.
+    /// Bearing and distance from the hand-set position to the selected
+    /// waypoint; `None` with no position or no selection.
     fn waypoint_bearing_distance(&self) -> Option<(f64, f64)> {
         let idx = self.selected_waypoint?;
         let wp = self.waypoints.get(idx)?;
-        let dist_km = haversine_distance(&self.position, &wp.coord);
-        let brg = bearing_to(&self.position, &wp.coord);
+        let here = self.position.as_ref()?;
+        let dist_km = haversine_distance(here, &wp.coord);
+        let brg = bearing_to(here, &wp.coord);
         Some((brg, dist_km))
     }
 
@@ -681,6 +718,9 @@ impl CompassApp {
             Target::Field(f) => self.active_coord_field = f,
             Target::AddWaypoint => {
                 self.add_waypoint_from_entry();
+            }
+            Target::SetPosition => {
+                self.set_position_from_entry();
             }
         }
     }
@@ -1192,7 +1232,7 @@ impl CompassApp {
             l,
             area,
             &mut y,
-            "HEADING",
+            "HEADING (TURNED BY HAND)",
             l.heading * 1.3,
         ) {
             let h = self.true_heading();
@@ -1215,21 +1255,37 @@ impl CompassApp {
             );
         }
 
-        if let Some(b) = card(f, &self.palette, l, area, &mut y, "POSITION", l.font * 2.8) {
+        if let Some(b) = card(
+            f,
+            &self.palette,
+            l,
+            area,
+            &mut y,
+            "POSITION (SET BY HAND)",
+            l.font * 2.8,
+        ) {
             let line = b.h * 0.5;
+            let (first, second, colour) = self.position.as_ref().map_or(
+                (
+                    String::from("Not known"),
+                    String::from("Nothing here can locate the machine: set it in Coordinates"),
+                    self.palette.subtext0,
+                ),
+                |here| (here.format_lat(), here.format_lon(), self.palette.text),
+            );
             bounded(
                 f,
                 Rect::new(b.x, b.y, b.w, line),
-                self.position.format_lat(),
-                self.palette.text,
+                first,
+                colour,
                 l.font,
                 FontWeightHint::Regular,
             );
             bounded(
                 f,
                 Rect::new(b.x, b.y + line, b.w, line),
-                self.position.format_lon(),
-                self.palette.text,
+                second,
+                colour,
                 l.font,
                 FontWeightHint::Regular,
             );
@@ -1446,18 +1502,30 @@ impl CompassApp {
             } else {
                 FontWeightHint::Regular
             };
-            let dist = convert_distance(
-                haversine_distance(&self.position, &wp.coord),
-                self.distance_unit,
-            );
-            let brg = bearing_to(&self.position, &wp.coord);
+            // From a position the user set; with none, nothing to measure from.
+            let (brg, dist) =
+                self.position
+                    .as_ref()
+                    .map_or((String::from("-"), String::from("-")), |here| {
+                        (
+                            format!("{:.0}", bearing_to(here, &wp.coord)),
+                            format!(
+                                "{:.1} {}",
+                                convert_distance(
+                                    haversine_distance(here, &wp.coord),
+                                    self.distance_unit
+                                ),
+                                unit_label(self.distance_unit)
+                            ),
+                        )
+                    });
             let cells = [
                 format!("{}", i.saturating_add(1)),
                 wp.name.clone(),
                 wp.coord.format_lat(),
                 wp.coord.format_lon(),
-                format!("{brg:.0}"),
-                format!("{dist:.1} {}", unit_label(self.distance_unit)),
+                brg,
+                dist,
             ];
             let text_row = Rect::new(row.x, row.y, row.w, (row.h - WP_ROW_GAP).max(0.0));
             for (c, cell) in wp_columns(text_row, l.pad * 0.4).iter().zip(cells) {
@@ -1597,6 +1665,26 @@ impl CompassApp {
                 FontWeightHint::Bold,
             );
             f.hit(Target::AddWaypoint, btn);
+            // Beside it: the same numbers as the position, since nothing
+            // here can find it.
+            let here = Rect::new(
+                btn.right() + l.pad,
+                btn.y,
+                (l.font * 11.0).min(area.w),
+                l.row,
+            );
+            if here.right() <= area.right() {
+                f.push(fill(here, self.palette.blue, 6.0));
+                centred(
+                    f,
+                    here,
+                    "Set as my position",
+                    self.palette.crust,
+                    l.small,
+                    FontWeightHint::Bold,
+                );
+                f.hit(Target::SetPosition, here);
+            }
             y = btn.bottom() + l.pad * 0.6;
         }
 
@@ -1949,6 +2037,74 @@ mod tests {
     )]
 
     use super::*;
+
+    /// An app whose user has set New York City as their position by hand --
+    /// the tests' fixture, where it used to be every window's invention.
+    fn at_new_york() -> CompassApp {
+        let mut app = CompassApp::new();
+        app.position = Some(Coordinate::new(40.7128, -74.0060));
+        app
+    }
+
+    /// **A fresh window invents no position**: the card says it is not
+    /// known and where to set it, Mark and the nudge keys refuse, and the
+    /// waypoint list measures nothing.
+    #[test]
+    fn a_fresh_window_knows_no_position() {
+        let mut app = CompassApp::new();
+        assert!(app.position.is_none(), "a position was invented");
+        assert!(
+            !app.add_waypoint_at_current_position(),
+            "a waypoint was marked at nowhere"
+        );
+        assert_eq!(app.status, SET_POSITION_FIRST);
+        app.move_position(0.01, 0.0);
+        assert!(app.position.is_none(), "a nudge invented a position");
+        app.entry_lat_buf = String::from("48.8566");
+        app.entry_lon_buf = String::from("2.3522");
+        app.entry_name_buf = String::from("Paris");
+        assert!(app.add_waypoint_from_entry());
+        app.selected_waypoint = Some(0);
+        assert_eq!(
+            app.waypoint_bearing_distance(),
+            None,
+            "measured from nowhere"
+        );
+    }
+
+    /// The button beside Add sets the position from the fields.
+    #[test]
+    fn the_set_position_button_sets_it() {
+        let mut app = CompassApp::new();
+        app.set_view(View::CoordinateEntry);
+        app.entry_lat_buf = String::from("35.6762");
+        app.entry_lon_buf = String::from("139.6503");
+        let at = point(&app, SIZE, "Set as my position");
+        press(&mut app, at, SIZE);
+        assert!(
+            app.position.is_some(),
+            "the button did not set the position"
+        );
+    }
+
+    /// The position is set by hand from the entry fields, and then marks
+    /// and measures from there.
+    #[test]
+    fn the_position_is_set_by_hand() {
+        let mut app = CompassApp::new();
+        app.entry_lat_buf = String::from("51.5074");
+        app.entry_lon_buf = String::from("-0.1278");
+        assert!(app.set_position_from_entry());
+        let here = app.position.clone().expect("set");
+        assert!((here.lat - 51.5074).abs() < 1e-9 && (here.lon + 0.1278).abs() < 1e-9);
+        assert_eq!(app.status, "Position set by hand");
+        assert!(app.add_waypoint_at_current_position());
+        app.entry_lat_buf = String::from("91");
+        assert!(
+            !app.set_position_from_entry(),
+            "an impossible latitude was taken"
+        );
+    }
     use guitk::event::Modifiers;
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -1962,7 +2118,7 @@ mod tests {
     const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
 
     fn default_app() -> CompassApp {
-        CompassApp::new()
+        at_new_york()
     }
 
     fn make_key_event(key: Key, shift: bool, ctrl: bool) -> KeyEvent {
@@ -2592,19 +2748,19 @@ mod tests {
     #[test]
     fn test_key_move_position_up() {
         let mut app = default_app();
-        let original_lat = app.position.lat;
+        let original_lat = app.position.as_ref().expect("set by hand").lat;
         let event = Event::Key(make_key_event(Key::Up, false, false));
         app.handle_event(&event, SIZE);
-        assert!(app.position.lat > original_lat);
+        assert!(app.position.as_ref().expect("set by hand").lat > original_lat);
     }
 
     #[test]
     fn test_key_move_position_down() {
         let mut app = default_app();
-        let original_lat = app.position.lat;
+        let original_lat = app.position.as_ref().expect("set by hand").lat;
         let event = Event::Key(make_key_event(Key::Down, false, false));
         app.handle_event(&event, SIZE);
-        assert!(app.position.lat < original_lat);
+        assert!(app.position.as_ref().expect("set by hand").lat < original_lat);
     }
 
     #[test]
@@ -2743,17 +2899,17 @@ mod tests {
     #[test]
     fn test_move_position_clamps_lat() {
         let mut app = default_app();
-        app.position = Coordinate::new(89.99, 0.0);
+        app.position = Some(Coordinate::new(89.99, 0.0));
         app.move_position(1.0, 0.0);
-        assert!((app.position.lat - 90.0).abs() < f64::EPSILON);
+        assert!((app.position.as_ref().expect("set by hand").lat - 90.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_move_position_clamps_lon() {
         let mut app = default_app();
-        app.position = Coordinate::new(0.0, 179.99);
+        app.position = Some(Coordinate::new(0.0, 179.99));
         app.move_position(0.0, 1.0);
-        assert!((app.position.lon - 180.0).abs() < f64::EPSILON);
+        assert!((app.position.as_ref().expect("set by hand").lon - 180.0).abs() < f64::EPSILON);
     }
 
     // ── View state tests ────────────────────────────────────────────
@@ -2773,8 +2929,8 @@ mod tests {
     #[test]
     fn test_initial_position_is_nyc() {
         let app = default_app();
-        assert!((app.position.lat - 40.7128).abs() < 0.001);
-        assert!((app.position.lon - -74.0060).abs() < 0.001);
+        assert!((app.position.as_ref().expect("set by hand").lat - 40.7128).abs() < 0.001);
+        assert!((app.position.as_ref().expect("set by hand").lon - -74.0060).abs() < 0.001);
     }
 
     #[test]
@@ -3300,7 +3456,7 @@ mod tests {
                     "No waypoints. Press C to add one, or Esc to go back.",
                 ),
                 ("Add waypoint", View::CoordinateEntry, "Add (Enter)"),
-                ("Compass", View::Compass, "HEADING"),
+                ("Compass", View::Compass, "HEADING (TURNED BY HAND)"),
             ] {
                 let mut app = default_app();
                 app.set_view(start);
@@ -3625,12 +3781,16 @@ mod tests {
 
         assert_eq!(app.waypoints.len(), 1, "the button added nothing");
         let wp = &app.waypoints[0];
-        assert!((wp.coord.lat - app.position.lat).abs() < 1e-9);
-        assert!((wp.coord.lon - app.position.lon).abs() < 1e-9);
+        assert!((wp.coord.lat - app.position.as_ref().expect("set by hand").lat).abs() < 1e-9);
+        assert!((wp.coord.lon - app.position.as_ref().expect("set by hand").lon).abs() < 1e-9);
         // The readouts agree, which is what a user checks it against.
         assert!(shows(&app, SIZE, "WP1"), "the new waypoint is not shown");
         assert!(
-            shows(&app, SIZE, &app.position.format_lat()),
+            shows(
+                &app,
+                SIZE,
+                &app.position.as_ref().expect("set by hand").format_lat()
+            ),
             "the position it was taken from is not on screen"
         );
     }
@@ -3884,7 +4044,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = CompassApp::new();
+        let mut app = at_new_york();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

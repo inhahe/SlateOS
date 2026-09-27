@@ -2024,8 +2024,12 @@ impl App for PacmanApp {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
+    /// While something moves: the game, or the pac-man walking under the
+    /// menu's title. A paused or finished game has nothing to advance, and a
+    /// clock asked for anyway woke the machine every frame for as long as the
+    /// window stayed open.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(TICK)
+        matches!(self.state, GameState::Menu | GameState::Playing).then_some(TICK)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -3994,6 +3998,13 @@ mod tests {
     fn the_window_asks_to_be_woken_often_enough_to_animate() {
         // The game moves on its own clock; the tick only has to be fine enough
         // that a 140 ms player step is not visibly late.
+        for still in [GameState::Paused, GameState::GameOver] {
+            assert_eq!(
+                app_in(still).tick_interval(),
+                None,
+                "{still:?} asked for a clock"
+            );
+        }
         let app = app_in(GameState::Menu);
         let tick = app.tick_interval().expect("a game needs a clock");
         assert!(

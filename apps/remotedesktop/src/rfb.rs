@@ -11,14 +11,14 @@
 //! proven by a challenge rather than sent, but everything on screen and every
 //! key typed crosses the network readable. The window says so.
 //!
-//! **Encodings.** Hextile first -- 16x16 tiles, each a background with
-//! rectangles of colour over it, which is most of any desktop and a fraction
-//! of Raw's bytes -- then CopyRect and Raw, which every server speaks, and
-//! the DesktopSize pseudo-encoding so a resized remote desktop is followed.
-//! ZRLE and Tight compress further but need one zlib stream carried across
-//! every rectangle, which the tree's `deflate` crate does not resume; they
-//! are not asked for, and a server falls back for a client that does not
-//! name them (RFC 6143 section 7.7).
+//! **Encodings.** ZRLE first -- 64x64 tiles of palettes and runs, through one
+//! zlib stream that lasts the whole session (`deflate::PiecewiseInflater`
+//! inflates each rectangle's piece as it comes) -- then Hextile, 16x16 tiles
+//! of a background with rectangles of colour over it, then CopyRect and Raw,
+//! which every server speaks, and the DesktopSize pseudo-encoding so a
+//! resized remote desktop is followed. Tight is not asked for (it wants
+//! JPEG too), and a server falls back for a client that does not name an
+//! encoding (RFC 6143 section 7.7).
 //!
 //! **Pixels.** The client asks for 32 bits a pixel, true colour, little
 //! endian, red at bit 16, green at 8, blue at 0 -- so a pixel read as a
@@ -51,6 +51,12 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const RAW: i32 = 0;
 const COPY_RECT: i32 = 1;
 const HEXTILE: i32 = 5;
+const ZRLE: i32 = 16;
+
+/// The most a ZRLE rectangle's compressed data may be, read before it is
+/// inflated: a raw 64x64 tile costs 12 KiB, so a desktop's worth is far
+/// under this.
+const MAX_ZRLE_BYTES: u32 = 64 << 20;
 const DESKTOP_SIZE: i32 = -223;
 
 /// What the session tells the window.
@@ -205,7 +211,11 @@ fn run(
     if let Ok(mut w) = writer.lock() {
         *w = Some(for_writing);
     }
-    let mut conn = Conn { stream, writer };
+    let mut conn = Conn {
+        stream,
+        writer,
+        zrle: deflate::PiecewiseInflater::zlib(),
+    };
     match conn.handshake(password) {
         Ok((width, height, name)) => {
             tell(Update::Ready {
@@ -248,6 +258,8 @@ fn text_of(bytes: Vec<u8>) -> String {
 struct Conn<'a> {
     stream: TcpStream,
     writer: &'a Mutex<Option<TcpStream>>,
+    /// ZRLE's zlib stream, which lasts the whole session.
+    zrle: deflate::PiecewiseInflater,
 }
 
 impl Conn<'_> {
@@ -364,10 +376,10 @@ impl Conn<'_> {
         self.write(&[
             0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0,
         ])?;
-        // SetEncodings, most wanted first: Hextile, CopyRect, Raw, and the
-        // DesktopSize pseudo-encoding.
-        let mut encodings = vec![2, 0, 0, 4];
-        for e in [HEXTILE, COPY_RECT, RAW, DESKTOP_SIZE] {
+        // SetEncodings, most wanted first: ZRLE, Hextile, CopyRect, Raw, and
+        // the DesktopSize pseudo-encoding.
+        let mut encodings = vec![2, 0, 0, 5];
+        for e in [ZRLE, HEXTILE, COPY_RECT, RAW, DESKTOP_SIZE] {
             encodings.extend_from_slice(&e.to_be_bytes());
         }
         self.write(&encodings)?;
@@ -501,6 +513,30 @@ impl Conn<'_> {
             let h = self.u16()?;
             let encoding = i32::from_be_bytes(self.u32()?.to_be_bytes());
             match encoding {
+                ZRLE => {
+                    let area = inside((x, y, w, h), (*width, *height))?;
+                    let len = self.u32()?;
+                    if len > MAX_ZRLE_BYTES {
+                        return Err(format!(
+                            "the server sent {len} bytes of ZRLE for one rectangle"
+                        ));
+                    }
+                    let mut data = vec![0_u8; usize::try_from(len).unwrap_or(0)];
+                    self.read_exact(&mut data)?;
+                    // The most a rectangle's tiles can take: every pixel raw
+                    // at three bytes, and a subencoding byte and a full
+                    // palette for each tile.
+                    let tiles = u64::from(w.div_ceil(64)).saturating_mul(u64::from(h.div_ceil(64)));
+                    let most = area
+                        .saturating_mul(3)
+                        .saturating_add(tiles.saturating_mul(1 + 127 * 3));
+                    let raw = self
+                        .zrle
+                        .inflate_piece(&data, usize::try_from(most).unwrap_or(usize::MAX))
+                        .map_err(|e| format!("the server's ZRLE stream is broken: {e}"))?;
+                    let pixels = zrle_tiles(&raw, w, h)?;
+                    tell(Update::Pixels { x, y, w, h, pixels });
+                }
                 HEXTILE => {
                     let area = inside((x, y, w, h), (*width, *height))?;
                     let pixels = self.hextile(w, h, area)?;
@@ -607,6 +643,144 @@ fn inside((x, y, w, h): (u16, u16, u16, u16), (width, height): (u16, u16)) -> Re
     Ok(area)
 }
 
+/// Bytes read in order, for ZRLE's inflated tiles.
+struct Cursor<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl Cursor<'_> {
+    fn u8(&mut self) -> Result<u8, String> {
+        let b = self
+            .data
+            .get(self.at)
+            .copied()
+            .ok_or_else(|| String::from("the server's ZRLE tile ended early"))?;
+        self.at = self.at.saturating_add(1);
+        Ok(b)
+    }
+
+    /// A compact pixel: the three bytes of the four that carry colour, for
+    /// the 32-bit, 24-deep true colour this client asks for.
+    fn cpixel(&mut self) -> Result<u32, String> {
+        let (b, g, r) = (self.u8()?, self.u8()?, self.u8()?);
+        Ok(u32::from_le_bytes([b, g, r, 0]))
+    }
+
+    /// A run length: bytes added up while they are 255, plus one.
+    fn run(&mut self) -> Result<usize, String> {
+        let mut run = 1_usize;
+        loop {
+            let b = self.u8()?;
+            run = run.saturating_add(usize::from(b));
+            if b != 255 {
+                return Ok(run);
+            }
+        }
+    }
+
+    fn palette(&mut self, n: u8) -> Result<Vec<u32>, String> {
+        (0..n).map(|_| self.cpixel()).collect()
+    }
+}
+
+/// A ZRLE rectangle's inflated data (RFC 6143 section 7.7.6), `w` by `h`:
+/// 64x64 tiles left to right, top to bottom, each raw, one colour, a packed
+/// palette, or runs of colour or of palette entries. A run past its tile, a
+/// palette index past its palette, or a subencoding RFB does not define ends
+/// the session in words, never a read out of bounds.
+fn zrle_tiles(data: &[u8], w: u16, h: u16) -> Result<Vec<u32>, String> {
+    let mut at = Cursor { data, at: 0 };
+    let width = usize::from(w);
+    let mut out = vec![0_u32; width.saturating_mul(usize::from(h))];
+    for ty in (0..h).step_by(64) {
+        for tx in (0..w).step_by(64) {
+            let tw = w.saturating_sub(tx).min(64);
+            let th = h.saturating_sub(ty).min(64);
+            let area = usize::from(tw).saturating_mul(usize::from(th));
+            // The tile's pixels in order, then painted in: a run can cross
+            // rows, which a per-pixel `fill` would make awkward.
+            let mut tile: Vec<u32> = Vec::with_capacity(area);
+            match at.u8()? {
+                0 => {
+                    for _ in 0..area {
+                        tile.push(at.cpixel()?);
+                    }
+                }
+                1 => tile.resize(area, at.cpixel()?),
+                n @ 2..=16 => {
+                    let palette = at.palette(n)?;
+                    // Bits per index, and the mask that keeps them.
+                    let (bits, mask): (usize, u8) = match n {
+                        2 => (1, 0b1),
+                        3 | 4 => (2, 0b11),
+                        _ => (4, 0b1111),
+                    };
+                    for _ in 0..th {
+                        let mut byte = 0_u8;
+                        let mut left = 0_usize;
+                        for _ in 0..tw {
+                            if left == 0 {
+                                byte = at.u8()?;
+                                left = 8;
+                            }
+                            left = left.saturating_sub(bits);
+                            let index = usize::from((byte >> left) & mask);
+                            let colour = palette.get(index).copied().ok_or_else(|| {
+                                format!("a ZRLE tile names colour {index} of a palette of {n}")
+                            })?;
+                            tile.push(colour);
+                        }
+                    }
+                }
+                128 => {
+                    while tile.len() < area {
+                        let colour = at.cpixel()?;
+                        let run = at.run()?;
+                        if run > area.saturating_sub(tile.len()) {
+                            return Err(String::from("a ZRLE run reaches past its tile"));
+                        }
+                        tile.resize(tile.len().saturating_add(run), colour);
+                    }
+                }
+                n @ 130..=255 => {
+                    let palette = at.palette(n.saturating_sub(128))?;
+                    while tile.len() < area {
+                        let index = at.u8()?;
+                        let run = if index & 128 != 0 { at.run()? } else { 1 };
+                        let colour =
+                            palette
+                                .get(usize::from(index & 127))
+                                .copied()
+                                .ok_or_else(|| {
+                                    String::from("a ZRLE run names a colour past its palette")
+                                })?;
+                        if run > area.saturating_sub(tile.len()) {
+                            return Err(String::from("a ZRLE run reaches past its tile"));
+                        }
+                        tile.resize(tile.len().saturating_add(run), colour);
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "the server sent ZRLE subencoding {other}, which RFB does not define"
+                    ));
+                }
+            }
+            for (row, line) in tile.chunks(usize::from(tw).max(1)).enumerate() {
+                let start = usize::from(ty)
+                    .saturating_add(row)
+                    .saturating_mul(width)
+                    .saturating_add(usize::from(tx));
+                if let Some(span) = out.get_mut(start..start.saturating_add(line.len())) {
+                    span.copy_from_slice(line);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Paint `size` pixels of `colour` at `at` into a rectangle `width` wide;
 /// what falls outside it is not painted.
 fn fill(out: &mut [u32], width: usize, at: (u16, u16), size: (u16, u16), colour: u32) {
@@ -695,7 +869,7 @@ pub(crate) mod fake {
             Step::Hear(1),
             Step::Say(init),
             Step::Hear(20), // SetPixelFormat
-            Step::Hear(20), // SetEncodings, four of them
+            Step::Hear(24), // SetEncodings, five of them
             Step::Hear(10), // the first FramebufferUpdateRequest
         ]
     }
@@ -783,9 +957,9 @@ mod tests {
         );
         let encodings = heard.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(
-            &encodings[..8],
-            &[2, 0, 0, 4, 0, 0, 0, 5],
-            "Hextile is not asked for first"
+            &encodings[..12],
+            &[2, 0, 0, 5, 0, 0, 0, 16, 0, 0, 0, 5],
+            "ZRLE and then Hextile are not asked for first"
         );
         let first = heard.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(
@@ -819,7 +993,7 @@ mod tests {
             Step::Hear(1),
             Step::Say(init),
             Step::Hear(20),
-            Step::Hear(20),
+            Step::Hear(24),
             Step::Hear(10),
         ];
         let (port, heard) = server(script);
@@ -1010,6 +1184,79 @@ mod tests {
         assert_eq!(pixels[36 + 16], 16, "the raw tile's second row");
         assert_eq!(pixels[32..36], [bg; 4], "the background did not carry over");
         assert_eq!(pixels[36 + 35], bg);
+    }
+
+    /// **ZRLE rectangles are drawn**, each a piece of one zlib stream (real
+    /// zlib 1.3 output, sync-flushed per rectangle, so the later pieces
+    /// reach back into the earlier): a packed palette, a plain run, runs of
+    /// palette entries, one colour, and raw pixels.
+    #[test]
+    fn zrle_rectangles_are_drawn_through_one_stream() {
+        const PIECES: [&[u8]; 5] = [
+            &[
+                0x78, 0xda, 0x62, 0x32, 0x56, 0x12, 0x4c, 0x0b, 0x75, 0x49, 0xf8, 0x00, 0x00, 0x00,
+                0x00, 0xff, 0xff,
+            ],
+            &[
+                0x6a, 0x98, 0xd9, 0x51, 0xce, 0x0e, 0x00, 0x00, 0x00, 0xff, 0xff,
+            ],
+            &[
+                0x6a, 0x62, 0x64, 0x60, 0x60, 0x62, 0x60, 0x68, 0x60, 0x62, 0x6c, 0x64, 0x06, 0x00,
+                0x00, 0x00, 0xff, 0xff,
+            ],
+            &[0x62, 0x5c, 0xb5, 0xfb, 0x0c, 0x00, 0x00, 0x00, 0xff, 0xff],
+            &[
+                0x62, 0x00, 0x02, 0x88, 0x10, 0x33, 0x03, 0x03, 0x0b, 0x03, 0x03, 0x2b, 0x03, 0x03,
+                0x1b, 0x03, 0x03, 0x3b, 0x03, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff,
+            ],
+        ];
+        let mut script = handshake_none();
+        let mut update = vec![0, 0, 0, 5];
+        for piece in PIECES {
+            update.extend_from_slice(&[0, 0, 0, 0, 0, 4, 0, 2]);
+            update.extend_from_slice(&ZRLE.to_be_bytes());
+            update.extend_from_slice(&u32::try_from(piece.len()).unwrap().to_be_bytes());
+            update.extend_from_slice(piece);
+        }
+        script.push(Step::Say(update));
+        script.push(Step::Hear(10));
+        let (port, _heard) = server(script);
+        let session = Session::open("127.0.0.1", port, "", None).unwrap();
+        let updates = collect(&session, |u| {
+            u.iter()
+                .filter(|x| matches!(x, Update::Pixels { .. }))
+                .count()
+                == 5
+        });
+        let frames: Vec<&Vec<u32>> = updates
+            .iter()
+            .filter_map(|u| match u {
+                Update::Pixels { pixels, .. } => Some(pixels),
+                _ => None,
+            })
+            .collect();
+        let (c0, c1) = (0x0011_2233, 0x0044_5566);
+        assert_eq!(
+            *frames[0],
+            [c0, c1, c1, c0, c1, c1, c1, c1],
+            "the packed palette"
+        );
+        assert_eq!(*frames[1], [0x0077_8899; 8], "the plain run");
+        assert_eq!(*frames[2], [1, 1, 1, 2, 2, 2, 2, 2], "the palette runs");
+        assert_eq!(*frames[3], [0x00CC_BBAA; 8], "the solid tile");
+        assert_eq!(*frames[4], [0, 1, 2, 3, 4, 5, 6, 7], "the raw tile");
+    }
+
+    /// A ZRLE run past its tile ends the session instead of writing on.
+    #[test]
+    fn a_zrle_run_past_its_tile_is_refused() {
+        // Plain RLE: one colour for a run of nine in a 4x2 tile.
+        let refused = zrle_tiles(&[128, 1, 2, 3, 8], 4, 2).unwrap_err();
+        assert!(refused.contains("past its tile"), "{refused}");
+        let unknown = zrle_tiles(&[17], 4, 2).unwrap_err();
+        assert!(unknown.contains("does not define"), "{unknown}");
+        let short = zrle_tiles(&[0, 1, 2], 4, 2).unwrap_err();
+        assert!(short.contains("ended early"), "{short}");
     }
 
     /// Keys and the pointer go out in RFB's shape.

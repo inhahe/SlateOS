@@ -2747,10 +2747,13 @@ impl App for DiskAnalyzerUI {
     /// window would sit on "Scanning…" forever over a finished scan. The
     /// interval is the progress readout's refresh rate, not the scan's — the
     /// walk runs at its own speed on its own thread — so it is chosen to be
-    /// fast enough that the byte counter looks live and slow enough that an
-    /// idle window is not repainting for nothing.
+    /// fast enough that the byte counter looks live.
+    ///
+    /// Only while a scan runs: an idle window has nothing to collect, and a
+    /// clock asked for anyway woke the machine ten times a second for as long
+    /// as the window stayed open, whether or not it repainted.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(Duration::from_millis(100))
+        self.scanning().then_some(Duration::from_millis(100))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -4773,9 +4776,19 @@ mod tests {
     fn the_window_asks_to_be_ticked_or_no_scan_would_ever_finish() {
         // Without a tick interval the app receives no `Event::Tick`, the
         // finished walk is never collected, and the window sits on "Scanning…"
-        // over a scan that ended minutes ago.
-        let ui = DiskAnalyzerUI::new();
-        assert!(App::tick_interval(&ui).is_some());
+        // over a scan that ended minutes ago. And only then: an idle window
+        // has nothing to collect.
+        let mut ui = DiskAnalyzerUI::new();
+        assert_eq!(
+            App::tick_interval(&ui),
+            None,
+            "an idle window asked for a clock"
+        );
+        ui.start_scan(PathBuf::from("/definitely/not/a/real/path/67890"));
+        assert!(
+            App::tick_interval(&ui).is_some(),
+            "a scan was given no clock"
+        );
     }
 
     #[test]
@@ -4786,8 +4799,13 @@ mod tests {
         std::fs::write(dir.dir().join("sub").join("b.bin"), vec![0u8; 1000]).unwrap();
 
         let mut ui = DiskAnalyzerUI::new();
+        assert_eq!(ui.tick_interval(), None, "an idle window asked for a clock");
         ui.start_scan(dir.dir().to_path_buf());
         assert!(ui.scanning());
+        assert!(
+            ui.tick_interval().is_some(),
+            "a running scan was given no clock"
+        );
         assert_eq!(ui.status_text().split(':').next(), Some("Scanning"));
 
         // Poll the way the event loop does, with a bound so a wedged scan fails
@@ -4799,6 +4817,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
 
+        assert_eq!(ui.tick_interval(), None, "the clock outlived the scan");
         let tree = ui.dir_tree.as_ref().expect("a finished scan has a tree");
         assert_eq!(tree.total_size, 4000);
         assert!(ui.complete);

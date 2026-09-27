@@ -2,8 +2,18 @@
 //!
 //! Full-featured camera application with live viewfinder, photo capture,
 //! video recording, camera settings, multiple camera support, photo gallery,
-//! timer mode, and image filters. Uses simulated frame data for the video
-//! capture pipeline.
+//! timer mode, and image filters.
+//!
+//! **No camera can be reached yet** (2026-09-27). SlateOS has no video
+//! driver: the kernel's `fs::webcam` registry is filled only from kshell, and
+//! `/proc/webcam` publishes counts, not devices or frames. So a real build
+//! lists no camera and says why, in the viewfinder, and Take Photo and
+//! Record refuse in words. Until that date it listed three invented cameras
+//! -- a Logitech C920, a Microsoft LifeCam and a Razer Kiyo, all
+//! "Connected" -- streamed a generated test pattern as their video, and
+//! filed each "photo" of it in the gallery. Those devices are the tests'
+//! fixture now ([`CameraApp::with_sample_devices`]); the pipeline they drive
+//! is the one a real device will.
 //!
 //! The window is real: a [`Layout`] is solved from the live window size every
 //! frame, the drawing pass records the hit box of everything it paints, and a
@@ -492,7 +502,17 @@ impl CameraDevice {
     }
 }
 
-/// Create default simulated camera devices.
+/// What the viewfinder says with no camera: the first line what is so, the
+/// second why -- an empty device list is not a finding about the hardware.
+const NO_CAMERA_LINES: [&str; 2] = [
+    "No camera can be reached.",
+    "Nothing on this system reads a camera yet -- there is no video driver -- so none is listed, not because none is plugged in.",
+];
+
+/// Invented devices, for the tests: the interaction tests need *some*
+/// cameras to switch between, not specifically these. A real build lists
+/// none -- see the module doc.
+#[cfg(test)]
 fn default_cameras() -> Vec<CameraDevice> {
     vec![
         {
@@ -1372,13 +1392,23 @@ pub struct CameraApp {
 }
 
 impl CameraApp {
+    /// An app with the invented devices, for the tests.
+    #[cfg(test)]
+    pub fn with_sample_devices(width: f32, height: f32) -> Self {
+        let mut app = Self::new(width, height);
+        app.cameras = default_cameras();
+        app
+    }
+}
+
+impl CameraApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             show_help: false,
             width,
             height,
-            cameras: default_cameras(),
+            cameras: Vec::new(),
             active_camera_idx: 0,
             capture_mode: CaptureMode::Photo,
             settings: CameraSettings::default(),
@@ -1519,8 +1549,18 @@ impl CameraApp {
     // Photo capture
     // ------------------------------------------------------------------
 
+    /// Whether a camera is producing a picture: what a photo or a recording
+    /// is taken from.
+    fn has_live_camera(&self) -> bool {
+        self.active_camera().is_some_and(|c| c.status.is_active())
+    }
+
     /// Take a photo (or start timer countdown).
     pub fn take_photo(&mut self) {
+        if !self.has_live_camera() {
+            self.set_status("Cannot take a photo: no camera");
+            return;
+        }
         if self.timer_mode != TimerMode::Off && !self.timer_countdown.active {
             let duration = self.timer_mode.duration_ms();
             self.timer_countdown.start(duration);
@@ -1532,6 +1572,11 @@ impl CameraApp {
 
     /// Actually capture the photo (called directly or after timer).
     fn do_capture(&mut self) {
+        // A timer that outlived its camera takes nothing.
+        if !self.has_live_camera() {
+            self.set_status("Cannot take a photo: no camera");
+            return;
+        }
         let resolution = self
             .cameras
             .get(self.active_camera_idx)
@@ -1561,6 +1606,10 @@ impl CameraApp {
     // ------------------------------------------------------------------
 
     pub fn start_recording(&mut self) {
+        if !self.has_live_camera() {
+            self.set_status("Cannot record: no camera");
+            return;
+        }
         let id = self.next_recording_id;
         self.next_recording_id = self.next_recording_id.saturating_add(1);
         self.recording.start(id);
@@ -2018,10 +2067,38 @@ impl CameraApp {
         fill(f, v, self.palette.crust, CornerRadii::ZERO);
         f.hit(Target::Viewfinder, v);
 
-        // The picture itself. There is no camera, so what is drawn is the
-        // frame's own test pattern -- but it is drawn at the frame's aspect
-        // ratio inside the pane, letterboxed, because that is what a real
-        // preview does and a stretched preview is a lie about the sensor.
+        // No camera at all: the reason, in words, and nothing that could be
+        // taken for a picture.
+        if self.active_camera().is_none() {
+            let rows = f32::from(u8::try_from(NO_CAMERA_LINES.len()).unwrap_or(2));
+            let top = v.y + (v.h - l.row * rows) / 2.0;
+            for (i, line) in NO_CAMERA_LINES.iter().enumerate() {
+                let row = f32::from(u8::try_from(i).unwrap_or(0));
+                centred(
+                    f,
+                    Rect::new(v.x, top + l.row * row, v.w, l.row),
+                    line,
+                    if i == 0 {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext0
+                    },
+                    if i == 0 { l.font } else { l.small },
+                    if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                );
+            }
+            return;
+        }
+
+        // The picture itself: a device's frame -- today only the tests'
+        // devices, whose frames are a generated pattern -- drawn at the
+        // frame's aspect ratio inside the pane, letterboxed, because that is
+        // what a real preview does and a stretched preview is a lie about the
+        // sensor.
         let cam_res = self.active_camera().map_or(
             Resolution::new(1920, 1080),
             CameraDevice::current_resolution,
@@ -4291,7 +4368,7 @@ mod tests {
 
     #[test]
     fn test_app_new() {
-        let app = CameraApp::new(800.0, 600.0);
+        let app = CameraApp::with_sample_devices(800.0, 600.0);
         assert_eq!(app.camera_count(), 3);
         assert_eq!(app.active_camera_idx, 0);
         assert_eq!(app.capture_mode, CaptureMode::Photo);
@@ -4299,14 +4376,14 @@ mod tests {
 
     #[test]
     fn test_app_switch_camera() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         app.switch_camera(1);
         assert_eq!(app.active_camera_idx, 1);
     }
 
     #[test]
     fn test_app_next_camera_wraps() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         app.next_camera();
         assert_eq!(app.active_camera_idx, 1);
         app.next_camera();
@@ -4317,7 +4394,7 @@ mod tests {
 
     #[test]
     fn test_app_take_photo() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         app.tick(33);
         app.take_photo();
         assert_eq!(app.gallery.count(), 1);
@@ -4326,7 +4403,7 @@ mod tests {
 
     #[test]
     fn test_app_take_photo_with_timer() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         app.timer_mode = TimerMode::ThreeSeconds;
         app.take_photo();
         assert!(app.timer_countdown.active);
@@ -4340,7 +4417,7 @@ mod tests {
 
     #[test]
     fn test_app_cancel_timer() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         app.timer_mode = TimerMode::FiveSeconds;
         app.take_photo();
         assert!(app.timer_countdown.active);
@@ -4350,7 +4427,7 @@ mod tests {
 
     #[test]
     fn test_app_recording() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         app.start_recording();
         assert!(app.is_recording());
         assert_eq!(
@@ -4367,7 +4444,7 @@ mod tests {
 
     #[test]
     fn test_app_toggle_recording() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         app.toggle_recording();
         assert!(app.is_recording());
         app.toggle_recording();
@@ -4376,7 +4453,7 @@ mod tests {
 
     #[test]
     fn test_app_toggle_capture_mode() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         assert_eq!(app.capture_mode, CaptureMode::Photo);
         app.toggle_capture_mode();
         assert_eq!(app.capture_mode, CaptureMode::Video);
@@ -4386,7 +4463,7 @@ mod tests {
 
     #[test]
     fn test_app_toggle_sidebar() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         assert!(app.sidebar_visible);
         app.toggle_sidebar();
         assert!(!app.sidebar_visible);
@@ -4394,7 +4471,7 @@ mod tests {
 
     #[test]
     fn test_app_toggle_grid_overlay() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         assert!(!app.show_grid_overlay);
         app.toggle_grid_overlay();
         assert!(app.show_grid_overlay);
@@ -4402,7 +4479,7 @@ mod tests {
 
     #[test]
     fn test_app_cycle_timer() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         assert_eq!(app.timer_mode, TimerMode::Off);
         app.cycle_timer();
         assert_eq!(app.timer_mode, TimerMode::ThreeSeconds);
@@ -4444,7 +4521,7 @@ mod tests {
         );
 
         // And the key really reaches it.
-        let mut app = CameraApp::new(w, h);
+        let mut app = CameraApp::with_sample_devices(w, h);
         let before = app.frame(w, h).commands().len();
         let mut typed_f = KeyEvent {
             key: Key::F,
@@ -4517,7 +4594,7 @@ mod tests {
         for (label, what) in &rows {
             for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
                 let answered = [0_u8, 1, 2].into_iter().any(|state| {
-                    let mut app = CameraApp::new(800.0, 600.0);
+                    let mut app = CameraApp::with_sample_devices(800.0, 600.0);
                     if state == 1 {
                         app.toggle_recording();
                     }
@@ -4552,6 +4629,57 @@ mod tests {
         }
     }
 
+    /// **A real build lists no camera, and says why** -- where it listed
+    /// three invented ones, all "Connected", streaming a generated pattern.
+    /// The words say the list is empty for want of a driver, not for want of
+    /// a camera; nothing that could be taken for a picture is drawn.
+    #[test]
+    fn a_real_build_lists_no_camera_and_says_why() {
+        let app = CameraApp::new(800.0, 600.0);
+        assert_eq!(app.camera_count(), 0, "a camera was invented");
+        let texts: Vec<String> = app
+            .frame(800.0, 600.0)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for line in NO_CAMERA_LINES {
+            assert!(
+                texts.iter().any(|t| t == line),
+                "never said {line:?}: {texts:?}"
+            );
+        }
+        assert!(
+            !texts.iter().any(|t| t == "Camera error"),
+            "no camera was drawn as a camera in error"
+        );
+    }
+
+    /// Without a camera nothing is taken: no photo in the gallery, no
+    /// recording running -- each refusal said.
+    #[test]
+    fn without_a_camera_nothing_is_taken() {
+        let mut app = CameraApp::new(800.0, 600.0);
+        app.timer_mode = TimerMode::ThreeSeconds;
+        app.take_photo();
+        assert!(
+            !app.timer_countdown.active,
+            "a countdown began to a photo of nothing"
+        );
+        app.timer_mode = TimerMode::Off;
+        app.take_photo();
+        assert_eq!(app.gallery.photos.len(), 0, "a photo of nothing was filed");
+        let said = app.status_message.clone().unwrap_or_default();
+        assert!(said.contains("no camera"), "{said}");
+        app.start_recording();
+        assert!(!app.is_recording(), "a recording of nothing started");
+        let said = app.status_message.clone().unwrap_or_default();
+        assert!(said.contains("Cannot record"), "{said}");
+    }
+
     /// **The card is drawn when it is asked for, and nothing acts behind it.**
     #[test]
     fn the_shortcut_list_reaches_the_window() {
@@ -4572,7 +4700,7 @@ mod tests {
             text: String::new(),
         };
 
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         assert!(
             !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
             "the card is up before anybody asked for it"
@@ -4640,7 +4768,7 @@ mod tests {
 
     #[test]
     fn test_app_switch_camera_stops_recording() {
-        let mut app = CameraApp::new(800.0, 600.0);
+        let mut app = CameraApp::with_sample_devices(800.0, 600.0);
         app.start_recording();
         assert!(app.is_recording());
         app.switch_camera(1);
@@ -4833,7 +4961,7 @@ mod tests {
 
     /// An app with `n` photographs behind it, the last one selected.
     fn with_photos(n: usize) -> CameraApp {
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         for i in 0..n {
             app.gallery.add_photo(
                 Resolution::new(1920, 1080),
@@ -4853,47 +4981,47 @@ mod tests {
     /// counting one paints an overlay over everything else, and a gallery of
     /// forty photographs paints a scrolled window onto a strip that holds six.
     fn states() -> Vec<(&'static str, CameraApp)> {
-        let mut none = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut none = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         none.cameras.clear();
 
-        let mut dead = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut dead = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         if let Some(cam) = dead.active_camera_mut() {
             cam.status = CameraStatus::Disconnected;
         }
 
-        let mut video = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut video = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         video.set_capture_mode(CaptureMode::Video);
 
-        let mut recording = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut recording = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         recording.set_capture_mode(CaptureMode::Video);
         recording.start_recording();
         recording.tick(5_000);
 
-        let mut paused = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut paused = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         paused.set_capture_mode(CaptureMode::Video);
         paused.start_recording();
         paused.pause_recording();
 
-        let mut counting = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut counting = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         counting.timer_mode = TimerMode::TenSeconds;
         counting.take_photo();
 
-        let mut flashing = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut flashing = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         flashing.take_photo();
 
-        let mut overlaid = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut overlaid = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         overlaid.toggle_grid_overlay();
         overlaid.toggle_histogram();
         overlaid.tick(TICK_MS);
 
-        let mut bare = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut bare = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         bare.toggle_sidebar();
         bare.toggle_photo_strip();
 
-        let mut device = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut device = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         device.set_sidebar_panel(SidebarPanel::DeviceInfo);
 
-        let mut filters = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut filters = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         filters.set_sidebar_panel(SidebarPanel::Filters);
         filters.settings.active_filter = ImageFilter::Sepia;
 
@@ -4901,7 +5029,7 @@ mod tests {
         gallery.set_sidebar_panel(SidebarPanel::Gallery);
         gallery.gallery.selected_idx = Some(20);
 
-        let mut empty_gallery = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut empty_gallery = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         empty_gallery.set_sidebar_panel(SidebarPanel::Gallery);
 
         let mut wordy = with_photos(3);
@@ -4914,15 +5042,18 @@ mod tests {
             cam.model_name = "a model name of the same unreasonable length".to_string();
         }
 
-        let mut zoomed = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut zoomed = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         zoomed.settings.set_zoom(7.5);
         zoomed.settings.active_filter = ImageFilter::Negative;
 
-        let mut full = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut full = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         full.toggle_fullscreen_preview();
 
         vec![
-            ("default", CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT)),
+            (
+                "default",
+                CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT),
+            ),
             ("no camera at all", none),
             ("disconnected camera", dead),
             ("video mode", video),
@@ -5139,10 +5270,10 @@ mod tests {
         // something different from the same control reached any other way.
         // Before the rewrite the mouse reached nothing at all, so the two
         // could not be compared.
-        let mut clicked = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut clicked = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         probe::click(&mut clicked, Target::Shutter);
 
-        let mut typed = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut typed = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         probe::key(&mut typed, &press(Key::Space));
 
         assert_eq!(clicked.gallery.count(), 1, "the shutter took no photograph");
@@ -5158,11 +5289,11 @@ mod tests {
         // A camera's screen is its shutter. In video mode the same click has
         // to start the recording instead, which is the half a test of the
         // photo path alone would miss.
-        let mut photo = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut photo = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         probe::click(&mut photo, Target::Viewfinder);
         assert_eq!(photo.gallery.count(), 1);
 
-        let mut video = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut video = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         video.set_capture_mode(CaptureMode::Video);
         probe::click(&mut video, Target::Viewfinder);
         assert!(
@@ -5191,7 +5322,7 @@ mod tests {
             (Target::Sidebar, 2),
             (Target::Strip, 3),
         ] {
-            let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
             let before = switches(&app);
             probe::click(&mut app, target);
             let after = switches(&app);
@@ -5223,7 +5354,7 @@ mod tests {
         // right. Reading the label is the only question the picture cannot
         // answer with its own mistake.
         for filter in ImageFilter::all().iter().copied() {
-            let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
             app.set_sidebar_panel(SidebarPanel::Filters);
             let (x, y) = text_point(&app, filter.label())
                 .unwrap_or_else(|| panic!("no row reads {}", filter.label()));
@@ -5281,7 +5412,7 @@ mod tests {
     fn a_right_click_is_not_a_left_one() {
         // The shutter on the right button would take a photograph on the
         // gesture that opens a context menu everywhere else.
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         let outcome = probe::click_with(&mut app, Target::Shutter, MouseButton::Right);
         assert_eq!(outcome, EventResult::Ignored);
         assert_eq!(app.gallery.count(), 0, "the right button took a photograph");
@@ -5292,7 +5423,7 @@ mod tests {
         // Both halves of every keystroke are delivered. Acting on both fires
         // every shortcut twice, which for the shutter is two photographs of
         // one moment.
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         probe::key(&mut app, &press(Key::Space));
         let outcome = probe::key(&mut app, &release(Key::Space));
         assert_eq!(outcome, EventResult::Ignored, "a release was consumed");
@@ -5309,7 +5440,7 @@ mod tests {
         // `Key::H` is *where H sits on a QWERTY board*; on a Dvorak one that
         // position types J. A program that switched on the key code would
         // flip the picture for a Dvorak user pressing J.
-        let mut by_text = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut by_text = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         let mut event = ctrl(Key::Unknown(0));
         event.text = "h".to_string();
         let outcome = probe::key(&mut by_text, &event);
@@ -5321,7 +5452,7 @@ mod tests {
 
         // And the converse: the code without the letter must do nothing, since
         // that is a keyboard on which this position does not type an H.
-        let mut by_code = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut by_code = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         let mut bare = ctrl(Key::H);
         bare.text = String::new();
         probe::key(&mut by_code, &bare);
@@ -5337,7 +5468,7 @@ mod tests {
         // list that had to be kept in step with the first by hand.
         for (i, filter) in ImageFilter::all().iter().enumerate() {
             let digit = char::from_digit(i.saturating_add(1) as u32, 10).unwrap_or('x');
-            let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
             probe::key(&mut app, &typing(&digit.to_string()));
             assert_eq!(
                 app.settings.active_filter,
@@ -5361,7 +5492,7 @@ mod tests {
         // pressed on a fresh camera correctly moves nothing, and a test that
         // demanded movement there would be demanding a bug.
         for setting in Setting::all().iter().copied() {
-            let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
             let start = app.setting_value(setting);
 
             probe::click(&mut app, Target::Setting(setting, Nudge::Up));
@@ -5393,7 +5524,7 @@ mod tests {
             // And nothing else moved with it. Only the settings can be
             // compared against a fresh camera -- the status line is *supposed*
             // to have changed, and says which setting moved.
-            let fresh = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let fresh = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
             for other in Setting::all().iter().copied() {
                 if other == setting {
                     continue;
@@ -5448,7 +5579,7 @@ mod tests {
     #[test]
     fn the_device_panel_chooses_the_resolution_and_rate_it_names() {
         for idx in 0..RESOLUTIONS.len() {
-            let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
             app.set_sidebar_panel(SidebarPanel::DeviceInfo);
             let wanted = app
                 .active_camera()
@@ -5468,7 +5599,7 @@ mod tests {
             );
         }
         for fps in FRAME_RATES.iter().copied() {
-            let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
             app.set_sidebar_panel(SidebarPanel::DeviceInfo);
             let label = format!("{fps} fps");
             let Some((x, y)) = text_point(&app, &label) else {
@@ -5556,7 +5687,7 @@ mod tests {
         // program never advanced its own clock at all, and a suite that called
         // `tick` directly proved only that the arithmetic worked. See
         // known-issues.md lesson 102.
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         let before = app.frame_counter;
         let response = app.on_event(&Event::Tick { elapsed_ms: 100 });
         assert_eq!(app.elapsed_ms, 100, "the tick did not reach the clock");
@@ -5577,7 +5708,7 @@ mod tests {
 
     #[test]
     fn the_recording_clock_and_the_self_timer_age_on_the_tick() {
-        let mut rec = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut rec = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         rec.set_capture_mode(CaptureMode::Video);
         rec.start_recording();
         for _ in 0..30 {
@@ -5589,7 +5720,7 @@ mod tests {
             rec.recording.duration_ms
         );
 
-        let mut timed = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut timed = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         timed.timer_mode = TimerMode::ThreeSeconds;
         timed.take_photo();
         assert!(timed.timer_countdown.active, "the timer did not start");
@@ -5610,7 +5741,7 @@ mod tests {
         // A camera with no live device produces no new frame, and a window
         // that repaints thirty times a second to draw the same picture is
         // thirty wakeups a second of somebody's battery.
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         if let Some(cam) = app.active_camera_mut() {
             cam.status = CameraStatus::Disconnected;
         }
@@ -5637,7 +5768,7 @@ mod tests {
         // Asks the picture rather than the flag: a flash that is set, cleared
         // and never painted passes a test of `flash_remaining_ms` and shows
         // the user nothing. See known-issues.md lesson 103.
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         let quiet = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT).commands().len();
 
         probe::click(&mut app, Target::Shutter);
@@ -5667,7 +5798,7 @@ mod tests {
         // The same question of the picture rather than of the flag, for the
         // two toggles that draw nothing of their own furniture: a grid that is
         // "on" and paints no lines is a switch with nothing behind it.
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         let plain = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT).commands().len();
 
         probe::click(&mut app, Target::Grid);
@@ -5692,7 +5823,7 @@ mod tests {
         // The click is answered against a freshly drawn frame, so a stale
         // remembered size means the user clicks the shutter and the program
         // tests the point against a picture nobody is looking at.
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         let big = probe::rect_of(&app, Target::Shutter).unwrap_or(Rect::EMPTY);
 
         app.on_event(&Event::Resize {
@@ -5727,7 +5858,7 @@ mod tests {
         // `render` is handed the surface size by the compositor and must lay
         // out from *that*, not from whatever the last `Resize` happened to
         // say. The two disagree on the first frame after a resize.
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         let tree = app.render(500.0, 380.0);
         assert!(!tree.commands.is_empty(), "render drew nothing");
         for c in &tree.commands {
@@ -5749,7 +5880,7 @@ mod tests {
     fn the_close_button_closes_the_window() {
         // Every other event must not, or a program that answered `Exit` to the
         // wrong one would vanish under the user's hand.
-        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = CameraApp::with_sample_devices(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
         for event in [
             Event::Tick { elapsed_ms: 1 },
@@ -5823,7 +5954,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = CameraApp::new(1000.0, 700.0);
+        let mut app = CameraApp::with_sample_devices(1000.0, 700.0);
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);

@@ -1543,10 +1543,16 @@ const MAX_CODE_BITS: u8 = 15;
 
 /// Build canonical Huffman code lengths from symbol frequencies.
 ///
-/// Uses a simplified package-merge / length-limited Huffman algorithm:
 /// 1. Sort symbols by frequency (non-zero only).
 /// 2. Build a standard Huffman tree.
-/// 3. Limit code lengths to `max_bits` by pushing overflow down.
+/// 3. Limit code lengths to `max_bits` ([`limit_lengths`]), keeping the code
+///    complete.
+///
+/// The code is always **complete** -- its lengths' Kraft sum is exactly 1 --
+/// because zlib refuses a code-length code that is not, even one of a single
+/// symbol (`inftrees.c`: "incomplete set" for `CODES`), and every stream it
+/// cannot read is one no other system can. A lone symbol is paired with the
+/// lowest other symbol, both at length 1.
 ///
 /// Returns a vector of code lengths indexed by symbol (0 = unused).
 #[allow(clippy::arithmetic_side_effects)]
@@ -1567,11 +1573,16 @@ fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
     }
 
     if let [(_, only)] = symbols.as_slice() {
-        // Single symbol — assign length 1. Matched as a one-element slice
+        // Single symbol: it and a partner at length 1, a complete code of
+        // two. The partner is the lowest other symbol, so that it does not
+        // lengthen the header's HLIT or HDIST. Matched as a one-element slice
         // rather than tested with `len() == 1` and then indexed, so the
         // element is produced by the same step that establishes it exists.
-        if let Some(slot) = lengths.get_mut(*only) {
-            *slot = 1;
+        let partner = usize::from(*only == 0);
+        for sym in [*only, partner] {
+            if let Some(slot) = lengths.get_mut(sym) {
+                *slot = 1;
+            }
         }
         return lengths;
     }
@@ -1690,49 +1701,84 @@ fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
         }
     }
 
-    // Limit to max_bits.  If any code exceeds max_bits, redistribute
-    // by a simple heuristic: increment the shortest code and decrement
-    // the longest until all fit.
-    for _ in 0..64 {
-        // Safety iteration limit.
-        let overflow = lengths.iter().any(|l| *l > max_bits);
-        if !overflow {
+    limit_lengths(&mut lengths, freqs, max_bits);
+    lengths
+}
+
+/// Limit a complete code's `lengths` to `max_bits` and keep it complete.
+///
+/// Counting codes by length and working in units of `2^-max_bits`, where a
+/// complete code's Kraft sum is `2^max_bits`: every code longer than the
+/// limit is cut to it, which over-subscribes the code; codes are lengthened,
+/// the longest shorter than the limit first (each costs the least), until it
+/// is not; and any room that leaves is filled by shortening the longest codes
+/// that fit it. The lengths are then handed out by frequency, shortest to the
+/// most frequent -- zlib's `gen_bitlen` does the same.
+///
+/// (Until 2026-09-27 this cut the longest code and lengthened the shortest,
+/// which unbalanced the Kraft sum: the codes it made were incomplete, and zlib
+/// refuses an incomplete code-length code. A 30x40 RGBA PNG's rows were
+/// enough to meet it.)
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "`count` has `max_bits + 1` slots and every index is a length \
+              in `1..=max_bits`; the Kraft sum is at most the number of \
+              symbols times `2^max_bits`, far inside `u64` for `max_bits` of 15"
+)]
+fn limit_lengths(lengths: &mut [u8], freqs: &[u32], max_bits: u8) {
+    if lengths.iter().all(|&l| l <= max_bits) {
+        return;
+    }
+    let max = usize::from(max_bits);
+    let mut count = vec![0u64; max + 1];
+    for &l in lengths.iter() {
+        if l > 0 {
+            count[usize::from(l).min(max)] += 1;
+        }
+    }
+    let full: u64 = 1 << max;
+    let mut kraft: u64 = (1..=max).map(|l| count[l] << (max - l)).sum();
+    // Over-subscribed: lengthen the longest code short of the limit. One is
+    // always there -- all `n` codes at the limit sum to `n`, and an alphabet
+    // has no more symbols than its longest code can tell apart.
+    while kraft > full {
+        let Some(l) = (1..max).rev().find(|&l| count[l] > 0) else {
             break;
-        }
-
-        // Find the longest code and the shortest code > 1.
-        let mut longest_sym = 0usize;
-        let mut longest_len = 0u8;
-        let mut shortest_sym = 0usize;
-        let mut shortest_len = u8::MAX;
-
-        for (i, &l) in lengths.iter().enumerate() {
-            if l > longest_len {
-                longest_len = l;
-                longest_sym = i;
-            }
-            if l > 0 && l < shortest_len {
-                shortest_len = l;
-                shortest_sym = i;
-            }
-        }
-
-        if longest_len <= max_bits {
+        };
+        count[l] -= 1;
+        count[l + 1] += 1;
+        kraft -= 1 << (max - l - 1);
+    }
+    // Room left: shorten the longest code whose shortening fits in it. The
+    // room is a multiple of the longest code present's share, so one of
+    // them always fits.
+    while kraft < full {
+        let room = full - kraft;
+        let Some(l) = (2..=max)
+            .rev()
+            .find(|&l| count[l] > 0 && (1u64 << (max - l)) <= room)
+        else {
             break;
-        }
-
-        // Push down: shorten the longest, lengthen the shortest.
-        if let Some(slot) = lengths.get_mut(longest_sym) {
-            *slot = slot.saturating_sub(1);
-        }
-        if shortest_sym != longest_sym {
-            if let Some(slot) = lengths.get_mut(shortest_sym) {
-                *slot = slot.saturating_add(1);
+        };
+        count[l] -= 1;
+        count[l - 1] += 1;
+        kraft += 1 << (max - l);
+    }
+    // The shortest lengths to the most frequent symbols; ties by symbol.
+    let mut order: Vec<usize> = (0..lengths.len()).filter(|&s| lengths[s] > 0).collect();
+    order.sort_by(|&a, &b| {
+        let (fa, fb) = (freqs.get(a).copied(), freqs.get(b).copied());
+        fb.cmp(&fa).then(a.cmp(&b))
+    });
+    let mut symbols = order.into_iter();
+    for (l, &n) in count.iter().enumerate().skip(1) {
+        for _ in 0..n {
+            if let Some(sym) = symbols.next() {
+                lengths[sym] = u8::try_from(l).unwrap_or(max_bits);
             }
         }
     }
-
-    lengths
 }
 
 /// Build canonical Huffman codes from code lengths.
@@ -3494,5 +3540,191 @@ mod tests {
             got.extend_from_slice(&buf[..n]);
         }
         assert_eq!(got, expected, "large streaming output must match one-shot");
+    }
+}
+
+/// The codes the encoder builds must be ones zlib reads: complete, within
+/// their length limits. The inflater here accepts an incomplete code (and must
+/// keep doing so, for streams this encoder wrote before 2026-09-27), so these
+/// tests check the codes themselves, as zlib's `inftrees.c` does.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "a failed test should fail at the line that did it; the generators \
+              narrow their own counters on purpose"
+)]
+mod complete_codes {
+    use super::{BitReader, CL_ORDER, HuffmanTable, build_code_lengths, deflate_level};
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// `lengths`' Kraft sum in units of 2^-15: 2^15 is a complete code.
+    fn kraft(lengths: &[u8]) -> u64 {
+        lengths
+            .iter()
+            .filter(|&&l| l > 0)
+            .map(|&l| 1u64 << (15 - u32::from(l)))
+            .sum()
+    }
+
+    /// Whether zlib reads a code of these lengths as `inftrees.c` judges one:
+    /// not over-subscribed, and complete -- unless it is not the code-length
+    /// code and holds one code of length 1, or (for distances) none.
+    fn zlib_accepts(lengths: &[u8], code_lengths_code: bool) -> bool {
+        let used: Vec<u8> = lengths.iter().copied().filter(|&l| l > 0).collect();
+        let sum = kraft(lengths);
+        if sum > 1 << 15 {
+            return false;
+        }
+        if sum == 1 << 15 {
+            return true;
+        }
+        !code_lengths_code && (used.is_empty() || used == [1])
+    }
+
+    /// A small deterministic generator (xorshift).
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[test]
+    fn every_code_it_builds_is_complete_and_within_its_limit() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for (size, max) in [(19usize, 7u8), (30, 15), (286, 15)] {
+            for round in 0..500 {
+                let mut freqs = vec![0u32; size];
+                if round % 5 == 0 {
+                    // Fibonacci counts: the deepest tree a count can make,
+                    // far past any limit.
+                    let (mut a, mut b) = (1u32, 1u32);
+                    for f in &mut freqs {
+                        *f = a;
+                        (a, b) = (b, a.saturating_add(b));
+                    }
+                } else {
+                    let used = 2 + (rng.next() as usize) % (size - 1);
+                    for _ in 0..used {
+                        let sym = (rng.next() as usize) % size;
+                        let shift = (rng.next() % 26) as u32;
+                        freqs[sym] = freqs[sym].saturating_add(1 << shift);
+                    }
+                }
+                let lengths = build_code_lengths(&freqs, max);
+                assert!(
+                    lengths.iter().all(|&l| l <= max),
+                    "{size}/{max}: {lengths:?}"
+                );
+                assert_eq!(
+                    kraft(&lengths),
+                    1 << 15,
+                    "{size}/{max}: {lengths:?} from {freqs:?}"
+                );
+                for (f, l) in freqs.iter().zip(&lengths) {
+                    assert!(*f == 0 || *l > 0, "a used symbol with no code");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_lone_symbol_is_paired_into_a_complete_code() {
+        assert_eq!(build_code_lengths(&[0, 0, 5, 0], 7), [1, 0, 1, 0]);
+        assert_eq!(build_code_lengths(&[9, 0, 0], 7), [1, 1, 0]);
+        assert_eq!(build_code_lengths(&[0, 0, 0], 7), [0, 0, 0]);
+    }
+
+    /// The three codes of the first block of `stream`, if it is dynamic:
+    /// literal/length, distance and code-length lengths, read with the
+    /// inflater's own reader.
+    fn first_dynamic_codes(stream: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+        let mut r = BitReader::new(stream);
+        let _final = r.read_bits(1).ok()?;
+        if r.read_bits(2).ok()? != 2 {
+            return None;
+        }
+        let hlit = r.read_bits(5).ok()? as usize + 257;
+        let hdist = r.read_bits(5).ok()? as usize + 1;
+        let hclen = r.read_bits(4).ok()? as usize + 4;
+        let mut cl = vec![0u8; 19];
+        for &order in CL_ORDER.iter().take(hclen) {
+            cl[order as usize] = r.read_bits(3).ok()? as u8;
+        }
+        let table = HuffmanTable::build(&cl).ok()?;
+        let mut all: Vec<u8> = Vec::new();
+        while all.len() < hlit + hdist {
+            match table.decode(&mut r).ok()? {
+                sym @ 0..=15 => all.push(sym as u8),
+                16 => {
+                    let prev = *all.last()?;
+                    let n = r.read_bits(2).ok()? as usize + 3;
+                    all.extend(core::iter::repeat_n(prev, n));
+                }
+                17 => {
+                    let n = r.read_bits(3).ok()? as usize + 3;
+                    all.extend(core::iter::repeat_n(0, n));
+                }
+                _ => {
+                    let n = r.read_bits(7).ok()? as usize + 11;
+                    all.extend(core::iter::repeat_n(0, n));
+                }
+            }
+        }
+        let dist = all.split_off(hlit);
+        Some((all, dist, cl))
+    }
+
+    #[test]
+    fn a_stream_it_writes_has_only_codes_zlib_reads() {
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        let mut checked = 0usize;
+        for case in 0..60u32 {
+            // Filtered-image-like bytes: runs, small differences, noise --
+            // the kind that skews the code-length alphabet's counts.
+            let len = 500 + (rng.next() % 4000) as usize;
+            let data: Vec<u8> = (0..len)
+                .map(|i| match case % 4 {
+                    0 => (rng.next() % 3) as u8,
+                    1 => ((i / 7) % 256) as u8,
+                    2 => {
+                        if rng.next().is_multiple_of(9) {
+                            rng.next() as u8
+                        } else {
+                            0
+                        }
+                    }
+                    _ => rng.next() as u8,
+                })
+                .collect();
+            for level in [1u8, 6, 9] {
+                let stream = deflate_level(&data, level);
+                let Some((lit, dist, cl)) = first_dynamic_codes(&stream) else {
+                    continue;
+                };
+                assert!(
+                    zlib_accepts(&cl, true),
+                    "case {case} level {level}: code-length code {cl:?}"
+                );
+                assert!(
+                    zlib_accepts(&lit, false),
+                    "case {case} level {level}: literal code"
+                );
+                assert!(
+                    zlib_accepts(&dist, false),
+                    "case {case} level {level}: distance code"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 20, "only {checked} dynamic blocks to check");
     }
 }

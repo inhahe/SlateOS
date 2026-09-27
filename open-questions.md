@@ -358,6 +358,54 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q29 — [C] Copying in one program and pasting in another works nowhere. Should copy and paste travel through the window system? — Status: OPEN (raised 2026-09-26)
+
+**In short:** nothing you copy can be pasted into a *different* program. Each
+program keeps a private clipboard of its own, and the system's clipboard
+program exists but nothing can reach it (`known-issues.md`
+`TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO`). Building the
+missing link means choosing *how* a program talks to the clipboard, and there
+are two ways. One is through the connection every program with a window
+already has to the window system -- the way Linux's Wayland and macOS do it.
+The other is a second, separate connection to the clipboard program, which
+cannot work until A-Q15 is fixed. The first also carries dragging things
+between programs, which the design asks for.
+
+**Terms, once each:** *the window system* -- the compositor, the program that
+draws every window and passes each its mouse and keyboard; *the clipboard
+program* -- `gui/clipboard`, which keeps what was copied, with a history;
+*A-Q15* -- the open question above: a program can hold only one network
+connection at a time, and on SlateOS the window system's connection is that
+one, so a second connection kills the program's window.
+
+| Option | What changes |
+|---|---|
+| **A. Through the window system** (recommended) | Copy, paste and dragging between programs can all be built now. The window system carries a program's offer of data -- as text, formatted text, a picture or a file -- and the clipboard program keeps the history. |
+| **B. A second connection to the clipboard program** | Copy and paste waits on A-Q15. Dragging between programs still has to go through the window system, so there are two ways of moving data between programs instead of one. |
+| **C. Leave it** | Copy and paste keeps working within each program and never between two. |
+
+**Why A.**
+- It does not wait on A-Q15.
+- Dragging needs the window system whatever is chosen. Only the window system
+  knows which window is under the pointer when you let go, so A is one
+  mechanism for both. `design.txt` line 735 asks for exactly that: "a
+  clipboard/drag-and-drop system that supports multiple data formats per
+  operation".
+- The window system knows which window you are using, so it can refuse a
+  program in the background that reads the clipboard behind your back. Under B
+  the clipboard program would have to ask the window system anyway.
+
+**Why you are being asked:** whichever way is chosen is how every program will
+copy, paste and drag, for good -- a program written for one cannot use the
+other without being changed -- and it splits work between two lanes. A needs
+lane F to add the offer and the transfer to the window connection, and lane C
+to make the clipboard program the keeper of the history, with a small client
+for programs.
+
+**If this is never answered:** nothing gets worse. Copy and paste keeps
+working inside each program and never between two, and the emoji picker still
+has no way to give you the emoji you pick.
+
 ## C-Q28 — [C] The start button should be the XOR logo, but the logo is not in the repository. Can you add it? — Status: OPEN (raised 2026-09-26)
 
 **In short:** the design says the start button is "a round, shrunken version

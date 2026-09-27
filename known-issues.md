@@ -147562,6 +147562,11 @@ features.
 
 **Date:** 2026-09-14. **Lane:** C. **OPEN.**
 
+**2026-09-26: the way through is put to the operator** as `open-questions.md`
+C-Q29 -- carry copy, paste and drag on the connection every program already
+has to the window system, which does not wait on A-Q15 (point 2 below), or on
+a second connection to the clipboard program, which does.
+
 **In short:** copying something in one program and pasting it into another does
 not work anywhere in this system, and the reason is not a bug in the copying.
 **Fifteen** programs each keep a private clipboard of their own, and the one

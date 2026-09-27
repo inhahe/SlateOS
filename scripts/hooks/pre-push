@@ -6191,6 +6191,10 @@ if [ "$skip_uaccess" != "1" ]; then
 fi
 note_gate check-user-access-sites "$skip_uaccess"
 if [ "$skip_uaccess" != "1" ]; then
+    if ! run_checker check-user-access-sites-selftest "$py" "$uaccess" --self-test; then
+        moved_gate_refuses 57 "user-access sites" ALLOW_USER_ACCESS_SITES \
+            "check-user-access-sites.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
     if ! run_checker check-user-access-sites "$py" "$uaccess"; then
         moved_gate_refuses 57 "user-access sites" ALLOW_USER_ACCESS_SITES "Kernel writes to user memory must stay inside the audited copy helpers. A
 new site elsewhere is a write the fault handling was never reviewed for."
@@ -6299,12 +6303,17 @@ if [ "${ALLOW_USAGE_STATUS:-0}" = "1" ]; then
     skip_usagestat=1
 fi
 [ -f "$usagestat" ] || skip_usagestat=1
-touches kernel/ scripts/check-usage-status.py || skip_usagestat=1
+# The scanner it runs is check-recursive-locks.py's, loaded through srcload.py,
+# so a change to either can change this gate's verdict.
+touches kernel/ scripts/check-usage-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_usagestat=1
 if [ "$skip_usagestat" != "1" ]; then
-    tree_is_push "gate 61 (usage messages report failure)" kernel/ scripts/check-usage-status.py || skip_usagestat=1
+    tree_is_push "gate 61 (usage messages report failure)" kernel/ scripts/check-usage-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_usagestat=1
 fi
 note_gate check-usage-status "$skip_usagestat"
 if [ "$skip_usagestat" != "1" ]; then
+    if ! run_checker check-usage-status-selftest "$py" "$usagestat" --self-test; then
+        moved_gate_refuses 61 "usage messages report failure" ALLOW_USAGE_STATUS             "check-usage-status.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
     if ! run_checker check-usage-status "$py" "$usagestat"; then
         moved_gate_refuses 61 "usage messages report failure" ALLOW_USAGE_STATUS "A kshell usage message must report failure. A command that prints its usage
 and says it succeeded tells a script it did what it was asked."
@@ -6324,12 +6333,17 @@ if [ "${ALLOW_QUERY_STATUS:-0}" = "1" ]; then
     skip_querystat=1
 fi
 [ -f "$querystat" ] || skip_querystat=1
-touches kernel/ scripts/check-query-status.py || skip_querystat=1
+# The scanner it runs is check-recursive-locks.py's, loaded through srcload.py,
+# so a change to either can change this gate's verdict.
+touches kernel/ scripts/check-query-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_querystat=1
 if [ "$skip_querystat" != "1" ]; then
-    tree_is_push "gate 62 (queries report success)" kernel/ scripts/check-query-status.py || skip_querystat=1
+    tree_is_push "gate 62 (queries report success)" kernel/ scripts/check-query-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_querystat=1
 fi
 note_gate check-query-status "$skip_querystat"
 if [ "$skip_querystat" != "1" ]; then
+    if ! run_checker check-query-status-selftest "$py" "$querystat" --self-test; then
+        moved_gate_refuses 62 "queries report success" ALLOW_QUERY_STATUS             "check-query-status.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
     if ! run_checker check-query-status "$py" "$querystat"; then
         moved_gate_refuses 62 "queries report success" ALLOW_QUERY_STATUS "A kshell command that answers the question it was asked must report success."
     fi

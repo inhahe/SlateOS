@@ -4995,6 +4995,14 @@ check_user_access_sites() {
         return 0
     fi
 
+    if ! run_checker check-user-access-sites-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-user-access-sites.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-user-access-sites.py fails its" >&2
+        echo "own cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
     echo "=== Checking kernel writes to user memory ==="
     if run_checker check-user-access-sites "$py" "$PROJECT_ROOT/scripts/check-user-access-sites.py"; then
         return 0
@@ -5428,6 +5436,14 @@ check_usage_status() {
         return 0
     fi
 
+    if ! run_checker check-usage-status-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-usage-status.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-usage-status.py fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
     echo "=== Checking that usage messages report failure ==="
     if run_checker check-usage-status "$py" "$PROJECT_ROOT/scripts/check-usage-status.py"; then
         return 0
@@ -5470,6 +5486,14 @@ check_query_status() {
     else
         echo "=== query-status check: skipped (no python) ===" >&2
         return 0
+    fi
+
+    if ! run_checker check-query-status-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-query-status.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-query-status.py fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        return 1
     fi
 
     echo "=== Checking that answering a query reports success ==="

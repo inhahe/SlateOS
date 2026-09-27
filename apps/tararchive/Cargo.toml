@@ -1,0 +1,10 @@
+[package]
+name = "tararchive"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS TAR archives for applications: ustar, GNU and PAX headers read, with every member's name, kind, size and place."
+
+[dependencies]
+
+[lints]
+workspace = true

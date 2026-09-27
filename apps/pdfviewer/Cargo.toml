@@ -3,6 +3,7 @@ name = "pdfviewer"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 # The print job format, not a printing library: design-decisions.md 540 says

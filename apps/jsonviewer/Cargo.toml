@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -11,6 +12,13 @@ guitk = { path = "../../gui/toolkit" }
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
+
+# Saving: a file is replaced whole or not at all, never left half written.
+safeio = { path = "../safeio" }
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
+# The raw view's text, edited as it is: its caret, selection and keys.
+textarea = { path = "../textarea" }
 
 [lints]
 workspace = true

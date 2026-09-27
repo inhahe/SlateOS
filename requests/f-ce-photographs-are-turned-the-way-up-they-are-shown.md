@@ -3,7 +3,7 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`,
 `gui/desktop`), Lane E (`apps/imageviewer`, `apps/photomanager`,
 `apps/explorer`). **Filed:** 2026-09-25.
-**Status:** OPEN — the change is on `lane-f`; the follow-ups below are yours.
+**Status:** OPEN for lane C only -- lane E's half is DONE (2026-09-26; see the end). the change is on `lane-f`; the follow-ups below are yours.
 
 **In short:** a photograph from a phone stores its pixels as the sensor saw
 them and notes, in its EXIF, which way up it belongs. Nothing read that note,
@@ -53,3 +53,16 @@ Orientation (EXIF 1..8) and Width/Height. `imagecodec::jpeg::orientation` and
 `png::orientation` read the first as Chrome does, from the headers alone, and
 `imagecodec::dimensions` gives the second as the picture is shown -- one
 reading, so a column cannot disagree with the thumbnail beside it.
+
+**Lane E, 2026-09-26: done.** `apps/imageviewer`'s info panel takes the size
+from `imagecodec::dimensions` for every format (it had its own readers for
+BMP, JPEG and GIF), so a sideways photograph's panel says what is shown even
+when it will not decode. No lane E program writes a photograph back -- the
+photo manager's rotation is an adjustment kept in its library, not a rewrite
+of the file -- so the twice-turned save has no site. `apps/explorer`'s
+Orientation column now reads the turn as `imagecodec` does
+(`jpeg::orientation`, `png::orientation`, `tiff::orientation`), so it cannot
+disagree with the thumbnail beside it: it had read the EXIF itself, and said
+"Turned right" beside a WebP whose EXIF asks for that but which `imagecodec`
+shows as stored. It is blank only when nothing is turned and the file records
+nothing. Its Dimensions column already used `imagecodec::dimensions`.

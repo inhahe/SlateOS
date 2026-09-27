@@ -59,8 +59,12 @@ name = "archivemanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "deflate",
  "guitk",
  "oswindow",
+ "pathtext",
+ "quoting",
+ "tararchive",
  "ziparchive",
 ]
 
@@ -101,6 +105,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "audiotags"
+version = "0.1.0"
+
+[[package]]
 name = "audit"
 version = "0.1.0"
 dependencies = [
@@ -124,6 +132,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
 ]
 
@@ -139,6 +148,8 @@ name = "backup-app"
 version = "0.1.0"
 dependencies = [
  "pathcodec",
+ "pathtext",
+ "quoting",
  "safeio",
  "scratchdir",
  "sha2",
@@ -169,6 +180,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
 ]
 
@@ -245,7 +257,12 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "textline",
+ "unsaved",
 ]
 
 [[package]]
@@ -352,6 +369,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
 ]
 
@@ -408,7 +426,11 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "unsaved",
 ]
 
 [[package]]
@@ -537,6 +559,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
 ]
 
@@ -594,7 +617,11 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "hwquery",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "scratchdir",
 ]
 
 [[package]]
@@ -612,7 +639,10 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "unsaved",
+ "yamldoc",
 ]
 
 [[package]]
@@ -622,6 +652,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
 ]
 
@@ -647,6 +678,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "scratchdir",
 ]
 
@@ -657,6 +689,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
 ]
 
 [[package]]
@@ -667,6 +700,8 @@ dependencies = [
  "guitk",
  "md5",
  "oswindow",
+ "pathtext",
+ "quoting",
  "scratchdir",
  "sha1",
  "sha2",
@@ -742,8 +777,10 @@ dependencies = [
  "diffcore",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
  "scratchdir",
+ "unsaved",
 ]
 
 [[package]]
@@ -769,6 +806,12 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathcodec",
+ "pathtext",
+ "safeio",
+ "settingsfile",
+ "textarea",
+ "textline",
 ]
 
 [[package]]
@@ -794,21 +837,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "exif"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+]
+
+[[package]]
 name = "explorer"
 version = "0.1.0"
 dependencies = [
  "appearance",
  "associations",
+ "audiotags",
  "byteread",
+ "deflate",
+ "exif",
  "guitk",
  "imagecodec",
+ "mediaprobe",
+ "offloop",
  "oswindow",
- "pathcodec",
+ "pathtext",
+ "recyclebin",
  "scratchdir",
  "settingsfile",
+ "tararchive",
  "textfind",
  "thumbs",
  "yamldoc",
+ "ziparchive",
 ]
 
 [[package]]
@@ -827,6 +885,7 @@ dependencies = [
  "associations",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
  "scratchdir",
  "settingsfile",
@@ -841,6 +900,7 @@ dependencies = [
  "diffcore",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
 ]
 
@@ -849,9 +909,13 @@ name = "filesearch"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "globmatch",
  "guitk",
  "oswindow",
+ "pathtext",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -861,6 +925,12 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "settingsfile",
+ "textfmt",
+ "textline",
+ "tzrules",
 ]
 
 [[package]]
@@ -903,7 +973,10 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "settingsfile",
+ "textline",
  "tzrules",
 ]
 
@@ -1087,6 +1160,10 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "settingsfile",
+ "tzrules",
+ "yamldoc",
 ]
 
 [[package]]
@@ -1125,6 +1202,9 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "unsaved",
 ]
 
 [[package]]
@@ -1175,6 +1255,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwquery"
+version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
+
+[[package]]
 name = "iconv"
 version = "0.1.0"
 dependencies = [
@@ -1202,9 +1289,13 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "byteread",
+ "exif",
  "guitk",
  "imagecodec",
+ "offloop",
  "oswindow",
+ "pathtext",
+ "recyclebin",
  "safeio",
  "scratchdir",
 ]
@@ -1218,6 +1309,8 @@ name = "indexer-app"
 version = "0.1.0"
 dependencies = [
  "globmatch",
+ "pathtext",
+ "quoting",
  "scratchdir",
  "textfmt",
 ]
@@ -1260,6 +1353,7 @@ name = "installer"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "pathtext",
  "safeio",
  "textfmt",
 ]
@@ -1327,6 +1421,10 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "textarea",
+ "unsaved",
 ]
 
 [[package]]
@@ -1336,7 +1434,11 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "unsaved",
 ]
 
 [[package]]
@@ -1572,8 +1674,12 @@ name = "logviewer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "ere",
  "guitk",
+ "journalrec",
  "oswindow",
+ "pathtext",
+ "safeio",
 ]
 
 [[package]]
@@ -1715,8 +1821,10 @@ dependencies = [
  "diffcore",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
  "scratchdir",
+ "unsaved",
 ]
 
 [[package]]
@@ -1748,8 +1856,16 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "imagecodec",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "wavpcm",
 ]
+
+[[package]]
+name = "mediaprobe"
+version = "0.1.0"
 
 [[package]]
 name = "memchr"
@@ -1789,7 +1905,10 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "unsaved",
+ "yamldoc",
 ]
 
 [[package]]
@@ -1861,8 +1980,11 @@ name = "musicplayer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "audiotags",
  "guitk",
  "oswindow",
+ "pathtext",
+ "quoting",
  "safeio",
 ]
 
@@ -1979,7 +2101,12 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "tzrules",
+ "unsaved",
 ]
 
 [[package]]
@@ -2045,6 +2172,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "offloop"
+version = "0.1.0"
+
+[[package]]
 name = "oils"
 version = "0.1.0"
 dependencies = [
@@ -2093,11 +2224,14 @@ name = "paint"
 version = "0.1.0"
 dependencies = [
  "appearance",
- "byteread",
  "guitk",
+ "imagecodec",
  "oswindow",
+ "pathtext",
+ "pngwrite",
  "safeio",
  "scratchdir",
+ "unsaved",
 ]
 
 [[package]]
@@ -2128,6 +2262,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
  "scratchdir",
 ]
@@ -2137,6 +2272,13 @@ name = "pathcodec"
 version = "0.1.0"
 
 [[package]]
+name = "pathtext"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+]
+
+[[package]]
 name = "pdfviewer"
 version = "0.1.0"
 dependencies = [
@@ -2144,6 +2286,7 @@ dependencies = [
  "deflate",
  "guitk",
  "oswindow",
+ "pathtext",
  "printjob",
  "safeio",
 ]
@@ -2170,10 +2313,13 @@ name = "photomanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "exif",
  "guitk",
  "imagecodec",
+ "offloop",
  "oswindow",
  "pathcodec",
+ "pathtext",
  "safeio",
  "scratchdir",
  "settingsfile",
@@ -2184,9 +2330,13 @@ dependencies = [
 name = "pinball"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "randrange",
+ "safeio",
+ "settingsfile",
 ]
 
 [[package]]
@@ -2223,12 +2373,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pngwrite"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "deflate",
+ "imagecodec",
+]
+
+[[package]]
 name = "podcast"
 version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
 ]
 
@@ -2302,7 +2462,10 @@ dependencies = [
  "guitk",
  "libcall",
  "oswindow",
+ "pathtext",
  "procinfo",
+ "quoting",
+ "textline",
 ]
 
 [[package]]
@@ -2343,6 +2506,9 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -2390,12 +2556,25 @@ name = "readpass"
 version = "0.1.0"
 
 [[package]]
+name = "recyclebin"
+version = "0.1.0"
+dependencies = [
+ "pathcodec",
+ "pathtext",
+ "scratchdir",
+]
+
+[[package]]
 name = "regextester"
 version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "settingsfile",
+ "textarea",
+ "textline",
+ "yamldoc",
 ]
 
 [[package]]
@@ -2405,8 +2584,13 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "textline",
  "tzrules",
+ "unsaved",
 ]
 
 [[package]]
@@ -2423,8 +2607,11 @@ name = "renamer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "ere",
  "guitk",
  "oswindow",
+ "pathtext",
+ "quoting",
 ]
 
 [[package]]
@@ -2463,7 +2650,11 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "settingsfile",
+ "textfmt",
+ "unsaved",
 ]
 
 [[package]]
@@ -2486,6 +2677,7 @@ dependencies = [
 name = "safeio"
 version = "0.1.0"
 dependencies = [
+ "pathtext",
  "scratchdir",
 ]
 
@@ -2530,6 +2722,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "quoting",
 ]
 
 [[package]]
@@ -2538,7 +2731,10 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "imagecodec",
  "oswindow",
+ "pathtext",
+ "pngwrite",
  "safeio",
  "scratchdir",
 ]
@@ -2596,6 +2792,8 @@ dependencies = [
  "loginusers",
  "notifsettings",
  "oswindow",
+ "pathtext",
+ "quoting",
  "settingsfile",
  "yamldoc",
 ]
@@ -2659,7 +2857,10 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "unsaved",
+ "yamldoc",
 ]
 
 [[package]]
@@ -2687,6 +2888,13 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "settingsfile",
+ "textarea",
+ "textfmt",
+ "textline",
+ "unsaved",
 ]
 
 [[package]]
@@ -2713,6 +2921,10 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "textline",
+ "wavpcm",
 ]
 
 [[package]]
@@ -2745,7 +2957,10 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "textfmt",
+ "unsaved",
 ]
 
 [[package]]
@@ -2827,6 +3042,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
  "scratchdir",
  "settingsfile",
@@ -2926,7 +3142,9 @@ dependencies = [
  "appearance",
  "civildate",
  "guitk",
+ "hwquery",
  "oswindow",
+ "pathtext",
  "procinfo",
  "safeio",
 ]
@@ -2948,7 +3166,9 @@ dependencies = [
  "guitk",
  "libcall",
  "oswindow",
+ "pathtext",
  "procinfo",
+ "quoting",
 ]
 
 [[package]]
@@ -2992,6 +3212,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tararchive"
+version = "0.1.0"
+
+[[package]]
 name = "taskscheduler"
 version = "0.1.0"
 dependencies = [
@@ -3012,13 +3236,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "termchild"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "pathtext",
+]
+
+[[package]]
 name = "terminal"
 version = "0.1.0"
 dependencies = [
  "appearance",
  "charwidth",
  "guitk",
+ "libcall",
  "oswindow",
+ "termchild",
 ]
 
 [[package]]
@@ -3030,12 +3264,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "textarea"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
 name = "textfind"
 version = "0.1.0"
 
 [[package]]
 name = "textfmt"
 version = "0.1.0"
+
+[[package]]
+name = "textline"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
 
 [[package]]
 name = "thermald"
@@ -3075,7 +3323,11 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "libcall",
  "oswindow",
+ "termchild",
+ "terminal",
+ "tzrules",
 ]
 
 [[package]]
@@ -3093,7 +3345,11 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "randrange",
  "safeio",
+ "sha1",
+ "textline",
 ]
 
 [[package]]
@@ -3185,6 +3441,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "unsaved"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
 name = "unshare"
 version = "0.1.0"
 
@@ -3266,7 +3529,9 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "mediaprobe",
  "oswindow",
+ "pathtext",
 ]
 
 [[package]]
@@ -3288,6 +3553,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
  "scratchdir",
 ]
@@ -3310,12 +3576,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wavpcm"
+version = "0.1.0"
+
+[[package]]
 name = "weather"
 version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -3332,7 +3604,10 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
  "safeio",
+ "unsaved",
+ "yamldoc",
 ]
 
 [[package]]

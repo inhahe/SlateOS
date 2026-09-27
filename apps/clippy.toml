@@ -1,0 +1,37 @@
+# Clippy configuration for every crate under `apps/` (lane E).
+#
+# Clippy reads the NEAREST clippy.toml, searching up from the crate's own
+# directory, and does not merge it with the ones further up. So for the crates
+# under `apps/` this file REPLACES the workspace's `clippy.toml` -- whatever is
+# set there must be repeated here. `doc-valid-idents` below is that copy.
+#
+# ---------------------------------------------------------------------------
+# From the workspace's clippy.toml (keep in step with it).
+# ---------------------------------------------------------------------------
+doc-valid-idents = [
+    "SlateOS",
+    "HarfBuzz",
+    "FreeType",
+    "DejaVu",
+    "OpenType",
+    "TrueType",
+    "PostScript",
+    "OpenGL",
+    "..",
+]
+
+# ---------------------------------------------------------------------------
+# Applications only.
+# ---------------------------------------------------------------------------
+#
+# A name on this system may hold any byte but `/` and NUL. `display()` shows a
+# byte that is not part of a character as U+FFFD, so two names that differ
+# only there look the same on screen. An application shows a name through
+# `pathtext::ShowPath::shown`, which escapes such a byte instead (`caf\351`).
+# The workspace denies `clippy::all`, which includes `disallowed_methods`, so
+# a new `.display()` under `apps/` fails the boot test's clippy gate.
+# known-issues: "[E] Applications show paths through `Path::display`".
+disallowed-methods = [
+    { path = "std::path::Path::display", reason = "shows a name that is not text as U+FFFD; use `pathtext::ShowPath::shown`" },
+    { path = "std::ffi::OsStr::display", reason = "shows a name that is not text as U+FFFD; use `pathtext::ShowPath::shown`" },
+]

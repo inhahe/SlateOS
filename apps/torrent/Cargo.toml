@@ -4,15 +4,28 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
+
+# The keys a one-line field answers, shared rather than copied.
+textline = { path = "../textline" }
 oswindow = { path = "../../gui/window" }
 
 # Ctrl+O reads through `safeio::read_capped`, the byte-oriented one: a
 # `.torrent` is bencode, and the text reader would refuse it at the first byte
 # that is not UTF-8.
 safeio = { path = "../safeio" }
+
+# SHA-1, which BitTorrent specifies for the info hash and for every piece:
+# the tree's one implementation, checked against the FIPS vectors, rather
+# than a copy of it here.
+sha1 = { path = "../../sha1" }
+
+# Transaction numbers for UDP trackers and this client's peer id: seeded
+# from the system, so a forged reply cannot guess them.
+randrange = { path = "../../randrange" }
 
 [lints]
 workspace = true

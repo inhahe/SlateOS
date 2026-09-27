@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS file association manager — which program opens which file type"
 [dependencies]
+pathtext = { path = "../pathtext" }
 
 # The one model of the file this program edits. Before it existed, this crate,
 # apps/explorer and apps/settings each spelled the group name themselves. See

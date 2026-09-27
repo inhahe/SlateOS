@@ -4,13 +4,35 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 
+# The keys a one-line field answers, shared rather than copied.
+textline = { path = "../textline" }
+
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
+
+# Today's date, in the zone the rest of the desktop uses.
+tzrules = { path = "../../tzrules" }
+
+# The ledger is kept in the user's settings directory (`settingsfile::config_dir`)
+# and written through `safeio::write_str_atomically`, so a crash mid-save
+# leaves the last ledger whole rather than half of a new one.
+safeio = { path = "../safeio" }
+settingsfile = { path = "../../gui/settingsfile" }
+
+# The ledger's text fields are escaped with `textfmt::tsv`, the record files'
+# four escapes, which the spreadsheet's workbook and the notes library share.
+textfmt = { path = "../../textfmt" }
+
+[dev-dependencies]
+# `with_scratch_config`, so the tests that keep a ledger keep it in a scratch
+# directory and never in the developer's own.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

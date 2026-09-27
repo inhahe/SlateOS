@@ -22,10 +22,30 @@
 //! | Provider | Extensions | Columns |
 //! |---|---|---|
 //! | [`StandardColumns`] | *(all files)* | Name, Size, Date Modified, Type, Date Created, Attributes |
-//! | [`ImageColumns`] | png, jpg, gif, bmp, svg | Dimensions, Color Depth, Aspect Ratio |
+//! | [`ImageColumns`] | png, jpg, gif, bmp, webp, ico, tiff, svg | Dimensions, Color Depth, Aspect Ratio |
 //! | [`AudioColumns`] | mp3, wav, flac, ogg | Duration, Bitrate, Sample Rate, Artist, Album, Title |
+//! | [`VideoColumns`] | mp4, m4v, mov, mkv, webm, avi | Duration, Bitrate, Dimensions (shared), Frame Rate |
 //! | [`CodeColumns`] | rs, c, cpp, py, js, ts, ... | Line Count, Language |
 //! | [`ArchiveColumns`] | zip, tar, gz | Compressed Size, Compression Ratio, File Count Inside |
+//!
+//! ## Nothing made up
+//!
+//! Until 2026-09-25 three of the four file-type providers invented their
+//! cells: every picture was "1920 x 1080", "24-bit", "16:9"; every song was
+//! 3:42 at 320 kbps by "Unknown Artist"; every source file had 0 lines and
+//! every archive 0 files. A column a user turned on showed the same numbers
+//! for every row. A cell now holds what was read from the file, or nothing:
+//! pictures are measured by `imagecodec`, source files counted, zip archives
+//! read through `ziparchive` and TAR archives through `tararchive`, audio
+//! files through `audiotags`. What nothing here reads yet -- a picture's
+//! colour depth, the inside of a 7z or a rar, how many files a `.tar.gz`
+//! holds -- is blank rather than a guess (known-issues.md,
+//! `[E] The explorer's file-type columns showed the same invented values for
+//! every file`).
+//!
+//! A provider is asked for every visible row in every frame, so what it reads
+//! is kept per file while the file's size and modification time are unchanged
+//! ([`FactCache`]): a stat per cell, and a read per version of a file.
 
 use appearance::Palette;
 use guitk::color::Color;
@@ -33,8 +53,11 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 
+use imagecodec::orientation::Orientation;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::SystemTime;
 
 // ============================================================================
 // Column identity
@@ -65,6 +88,9 @@ impl ColumnId {
     pub const DIMENSIONS: Self = Self(100);
     pub const COLOR_DEPTH: Self = Self(101);
     pub const ASPECT_RATIO: Self = Self(102);
+    pub const CAMERA: Self = Self(103);
+    pub const DATE_TAKEN: Self = Self(104);
+    pub const ORIENTATION: Self = Self(105);
 
     // Audio
     pub const DURATION: Self = Self(200);
@@ -82,6 +108,11 @@ impl ColumnId {
     pub const COMPRESSED_SIZE: Self = Self(400);
     pub const COMPRESSION_RATIO: Self = Self(401);
     pub const FILE_COUNT_INSIDE: Self = Self(402);
+
+    // Video. Its length, bitrate and picture size are the Duration, Bitrate
+    // and Dimensions columns music and pictures use: one "Duration" column
+    // for everything that plays, not one per kind of file.
+    pub const FRAME_RATE: Self = Self(500);
 }
 
 // ============================================================================
@@ -221,8 +252,24 @@ pub enum ColumnValue {
     Duration(u64),
     /// Fraction 0.0..1.0 formatted as "85%".
     Percentage(f32),
+    /// A count of a unit, formatted by the unit -- "320 kbps", "44.1 kHz" --
+    /// and sorted by the count, where the same words as text would put
+    /// "96 kbps" after "320 kbps".
+    Measure(u64, Unit),
     /// No value for this cell.
     Empty,
+}
+
+/// What a [`ColumnValue::Measure`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Unit {
+    /// Kilobits a second: a bitrate.
+    Kbps,
+    /// Hertz, shown in kilohertz: a sample rate.
+    Hz,
+    /// Thousandths of a frame a second, shown in frames: 23976 is
+    /// "23.976 fps", the rate NTSC film runs at.
+    MilliFps,
 }
 
 impl ColumnValue {
@@ -235,6 +282,9 @@ impl ColumnValue {
             Self::DateTime(epoch) => format_datetime(*epoch),
             Self::Duration(secs) => format_duration(*secs),
             Self::Percentage(frac) => format_percentage(*frac),
+            Self::Measure(n, Unit::Kbps) => format!("{} kbps", format_count(*n)),
+            Self::Measure(n, Unit::Hz) => format_hz(*n),
+            Self::Measure(n, Unit::MilliFps) => format!("{} fps", format_thousandths(*n)),
             Self::Empty => String::new(),
         }
     }
@@ -251,6 +301,7 @@ impl ColumnValue {
             Self::DateTime(_) => 3,
             Self::Duration(_) => 4,
             Self::Percentage(_) => 5,
+            Self::Measure(..) => 6,
             Self::Empty => 255,
         }
     }
@@ -297,6 +348,9 @@ impl Ord for ColumnValue {
             (Self::DateTime(a), Self::DateTime(b)) => a.cmp(b),
             (Self::Duration(a), Self::Duration(b)) => a.cmp(b),
             (Self::Percentage(a), Self::Percentage(b)) => a.total_cmp(b),
+            // One column holds one unit; the unit first keeps the order total
+            // if two ever meet.
+            (Self::Measure(a, ua), Self::Measure(b, ub)) => ua.cmp(ub).then_with(|| a.cmp(b)),
             (Self::Empty, Self::Empty) => Ordering::Equal,
             _ => self.kind_rank().cmp(&other.kind_rank()),
         }
@@ -380,6 +434,7 @@ impl ColumnManager {
         mgr.register_provider(Box::new(StandardColumns));
         mgr.register_provider(Box::new(ImageColumns));
         mgr.register_provider(Box::new(AudioColumns));
+        mgr.register_provider(Box::new(VideoColumns));
         mgr.register_provider(Box::new(CodeColumns));
         mgr.register_provider(Box::new(ArchiveColumns));
 
@@ -874,6 +929,40 @@ impl ImageColumns {
                 visible: false,
                 category: ColumnCategory::Image,
             },
+            ColumnDef {
+                id: ColumnId::CAMERA,
+                key: "camera",
+                label: "Camera".to_string(),
+                width: ColumnWidth::Fixed(140.0),
+                alignment: Alignment::Left,
+                sortable: true,
+                sort_order: SortOrder::None,
+                visible: false,
+                category: ColumnCategory::Image,
+            },
+            // Written `2025-06-15 14:30:22`, so text order is time order.
+            ColumnDef {
+                id: ColumnId::DATE_TAKEN,
+                key: "date_taken",
+                label: "Date Taken".to_string(),
+                width: ColumnWidth::Fixed(140.0),
+                alignment: Alignment::Left,
+                sortable: true,
+                sort_order: SortOrder::None,
+                visible: false,
+                category: ColumnCategory::Image,
+            },
+            ColumnDef {
+                id: ColumnId::ORIENTATION,
+                key: "orientation",
+                label: "Orientation".to_string(),
+                width: ColumnWidth::Fixed(130.0),
+                alignment: Alignment::Left,
+                sortable: true,
+                sort_order: SortOrder::None,
+                visible: false,
+                category: ColumnCategory::Image,
+            },
         ]
     }
 }
@@ -884,22 +973,59 @@ impl ColumnProvider for ImageColumns {
         COLS.get_or_init(ImageColumns::make_defs)
     }
 
+    /// The picture's size as `imagecodec` reads its header, and the ratio
+    /// of the two. Colour depth is blank: `imagecodec` does not report one,
+    /// and the cell said "24-bit" for every picture.
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
-        // Stub: in a real implementation, read image headers for metadata.
-        let _ = path;
+        static SIZES: OnceLock<FactCache<Option<(u32, u32)>>> = OnceLock::new();
+        static EXIFS: OnceLock<FactCache<Option<exif::ExifData>>> = OnceLock::new();
+        static TURNS: OnceLock<FactCache<Orientation>> = OnceLock::new();
+        let size = || {
+            SIZES
+                .get_or_init(FactCache::new)
+                .get(path, image_size)
+                .flatten()
+        };
+        let exif = || {
+            EXIFS
+                .get_or_init(FactCache::new)
+                .get(path, image_exif)
+                .flatten()
+        };
+        let text = |t: Option<String>| t.map_or(ColumnValue::Empty, ColumnValue::Text);
         match column_id {
-            ColumnId::DIMENSIONS => {
-                // Placeholder — would parse image header.
-                ColumnValue::Text("1920 \u{00d7} 1080".to_string())
+            ColumnId::CAMERA => text(exif().and_then(|e| e.camera())),
+            ColumnId::DATE_TAKEN => text(exif().and_then(|e| e.date_taken).map(|d| exif_date(&d))),
+            // The turn the thumbnail beside it gets, read as `imagecodec`
+            // reads it, so the two cannot disagree: a WebP whose EXIF says
+            // "turned right" is shown as stored, and said so. Blank only when
+            // nothing is turned and the file records nothing.
+            ColumnId::ORIENTATION => {
+                let turn = TURNS.get_or_init(FactCache::new).get(path, image_turn);
+                let recorded = exif().is_some_and(|e| e.orientation.is_some());
+                match turn {
+                    Some(turn) if turn != Orientation::TopLeft || recorded => {
+                        text(orientation_words(exif_value(turn)).map(str::to_owned))
+                    }
+                    _ => ColumnValue::Empty,
+                }
             }
-            ColumnId::COLOR_DEPTH => ColumnValue::Text("24-bit".to_string()),
-            ColumnId::ASPECT_RATIO => ColumnValue::Text("16:9".to_string()),
+            ColumnId::DIMENSIONS => size().map_or(ColumnValue::Empty, |(w, h)| {
+                ColumnValue::Text(format!("{w} \u{00d7} {h}"))
+            }),
+            ColumnId::ASPECT_RATIO => size()
+                .and_then(|(w, h)| aspect_ratio(w, h))
+                .map_or(ColumnValue::Empty, ColumnValue::Text),
             _ => ColumnValue::Empty,
         }
     }
 
+    /// Every format `imagecodec` measures, and SVG, whose cells stay blank:
+    /// nothing here reads an SVG's size.
     fn supported_extensions(&self) -> &[&str] {
-        &["png", "jpg", "jpeg", "gif", "bmp", "svg"]
+        &[
+            "png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "cur", "tif", "tiff", "svg",
+        ]
     }
 }
 
@@ -999,27 +1125,132 @@ impl ColumnProvider for AudioColumns {
         COLS.get_or_init(AudioColumns::make_defs)
     }
 
+    /// What `audiotags` reads from the file's headers and tags -- the
+    /// readers the music player uses: how long it plays, its bitrate and
+    /// sample rate, and the artist, album and title its tags give. A cell the
+    /// file does not say is blank. Every cell was invented until 2026-09-26
+    /// -- 3:42, 320 kbps, 44.1 kHz, "Unknown Artist" for every song -- and
+    /// the title was the file name cut at its *first* dot.
+    ///
+    /// The length is whole seconds, cut rather than rounded: the player
+    /// counts a track's length the same way, and the two should not
+    /// disagree about one file.
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
-        // Stub: would read ID3/Vorbis/FLAC tags.
-        let _ = path;
+        static FACTS: OnceLock<FactCache<Option<AudioFacts>>> = OnceLock::new();
+        let Some((info, tags)) = FACTS
+            .get_or_init(FactCache::new)
+            .get(path, audio_facts)
+            .flatten()
+        else {
+            return ColumnValue::Empty;
+        };
+        let text = |field: Option<String>| field.map_or(ColumnValue::Empty, ColumnValue::Text);
         match column_id {
-            ColumnId::DURATION => ColumnValue::Duration(222), // 3:42
-            ColumnId::BITRATE => ColumnValue::Text("320 kbps".to_string()),
-            ColumnId::SAMPLE_RATE => ColumnValue::Text("44.1 kHz".to_string()),
-            ColumnId::ARTIST => ColumnValue::Text("Unknown Artist".to_string()),
-            ColumnId::ALBUM => ColumnValue::Text("Unknown Album".to_string()),
-            ColumnId::TITLE => {
-                // Derive title from filename as a fallback.
-                let name = path.rsplit('/').next().unwrap_or(path);
-                let title = name.rsplit('.').next_back().unwrap_or(name);
-                ColumnValue::Text(title.to_string())
-            }
+            ColumnId::DURATION => info
+                .duration_secs
+                .and_then(whole_seconds)
+                .map_or(ColumnValue::Empty, ColumnValue::Duration),
+            ColumnId::BITRATE => info.bitrate_kbps.map_or(ColumnValue::Empty, |kbps| {
+                ColumnValue::Measure(u64::from(kbps), Unit::Kbps)
+            }),
+            ColumnId::SAMPLE_RATE => info.sample_rate.map_or(ColumnValue::Empty, |hz| {
+                ColumnValue::Measure(u64::from(hz), Unit::Hz)
+            }),
+            ColumnId::ARTIST => text(tags.artist),
+            ColumnId::ALBUM => text(tags.album),
+            ColumnId::TITLE => text(tags.title),
             _ => ColumnValue::Empty,
         }
     }
 
     fn supported_extensions(&self) -> &[&str] {
         &["mp3", "wav", "flac", "ogg"]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Video columns
+// ---------------------------------------------------------------------------
+
+/// Provider for video columns: how long a video plays, its bitrate and its
+/// picture's size -- the Duration, Bitrate and Dimensions columns music and
+/// pictures have -- and its frame rate. Video files had no columns at all.
+pub struct VideoColumns;
+
+impl VideoColumns {
+    /// The shared columns as their own providers define them -- one
+    /// definition each, so a width or a sort set on "Duration" is the same
+    /// column whichever kind of file is in the row -- and Frame Rate.
+    fn make_defs() -> Vec<ColumnDef> {
+        let shared = [ColumnId::DURATION, ColumnId::BITRATE, ColumnId::DIMENSIONS];
+        AudioColumns::make_defs()
+            .into_iter()
+            .chain(ImageColumns::make_defs())
+            .filter(|d| shared.contains(&d.id))
+            .chain(std::iter::once(ColumnDef {
+                id: ColumnId::FRAME_RATE,
+                key: "frame_rate",
+                label: "Frame Rate".to_string(),
+                width: ColumnWidth::Fixed(80.0),
+                alignment: Alignment::Right,
+                sortable: true,
+                sort_order: SortOrder::None,
+                visible: false,
+                category: ColumnCategory::Video,
+            }))
+            .collect()
+    }
+}
+
+impl ColumnProvider for VideoColumns {
+    fn columns(&self) -> &[ColumnDef] {
+        static COLS: std::sync::OnceLock<Vec<ColumnDef>> = std::sync::OnceLock::new();
+        COLS.get_or_init(VideoColumns::make_defs)
+    }
+
+    /// What `mediaprobe` reads from the file's headers -- the readers the
+    /// video player uses: the length in whole seconds, cut as the audio
+    /// column cuts it; the picture's size and frame rate; and the bitrate
+    /// the whole file averages, its size over its length. A cell the file
+    /// does not say is blank.
+    fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
+        static FACTS: OnceLock<FactCache<Option<VideoFacts>>> = OnceLock::new();
+        let Some((probe, size)) = FACTS
+            .get_or_init(FactCache::new)
+            .get(path, video_facts)
+            .flatten()
+        else {
+            return ColumnValue::Empty;
+        };
+        let picture = probe.preferred(mediaprobe::Kind::Video);
+        match column_id {
+            ColumnId::DURATION => probe
+                .duration_secs
+                .and_then(whole_seconds)
+                .map_or(ColumnValue::Empty, ColumnValue::Duration),
+            ColumnId::BITRATE => probe
+                .duration_secs
+                .and_then(|secs| average_kbps(size, secs))
+                .map_or(ColumnValue::Empty, |kbps| {
+                    ColumnValue::Measure(kbps, Unit::Kbps)
+                }),
+            ColumnId::DIMENSIONS => picture
+                .and_then(|t| Some((t.width?, t.height?)))
+                .map_or(ColumnValue::Empty, |(w, h)| {
+                    ColumnValue::Text(format!("{w} \u{00d7} {h}"))
+                }),
+            ColumnId::FRAME_RATE => picture
+                .and_then(|t| t.frame_rate)
+                .and_then(milli)
+                .map_or(ColumnValue::Empty, |n| {
+                    ColumnValue::Measure(n, Unit::MilliFps)
+                }),
+            _ => ColumnValue::Empty,
+        }
+    }
+
+    fn supported_extensions(&self) -> &[&str] {
+        &["mp4", "m4v", "mov", "mkv", "webm", "avi"]
     }
 }
 
@@ -1091,9 +1322,14 @@ impl ColumnProvider for CodeColumns {
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
         let ext = path_extension(path);
         match column_id {
+            // Counted, once per version of the file. It was 0 for every file.
             ColumnId::LINE_COUNT => {
-                // Stub: would read and count newlines. Return placeholder.
-                ColumnValue::Number(0)
+                static LINES: OnceLock<FactCache<Option<i64>>> = OnceLock::new();
+                LINES
+                    .get_or_init(FactCache::new)
+                    .get(path, line_count)
+                    .flatten()
+                    .map_or(ColumnValue::Empty, ColumnValue::Number)
             }
             ColumnId::LANGUAGE => ColumnValue::Text(Self::language_for_ext(&ext).to_string()),
             _ => ColumnValue::Empty,
@@ -1161,20 +1397,461 @@ impl ColumnProvider for ArchiveColumns {
         COLS.get_or_init(ArchiveColumns::make_defs)
     }
 
+    /// A zip archive's own directory, read through `ziparchive`: how many
+    /// files it holds, what they take up compressed, and how much of their
+    /// size that saves. Every cell was 0 for every archive.
+    ///
+    /// A TAR's headers, read through `tararchive`: a TAR compresses nothing,
+    /// so it saves nothing, and says so. A gzip file's own trailer gives the
+    /// size it inflates to, so its ratio is read without inflating it; a
+    /// `.tar.gz`'s count of files would need the whole archive inflated while
+    /// the window waits, and is blank. 7z and rar are blank: nothing here
+    /// reads them.
     fn value(&self, path: &str, column_id: ColumnId) -> ColumnValue {
-        // Stub: would parse archive headers for real metadata.
-        let _ = path;
+        static FACTS: OnceLock<FactCache<Option<ArchiveFacts>>> = OnceLock::new();
+        let read: fn(&str) -> Option<ArchiveFacts> = match path_extension(path).as_str() {
+            "zip" => zip_facts,
+            "tar" => tar_facts,
+            "gz" | "tgz" => gzip_facts,
+            _ => return ColumnValue::Empty,
+        };
+        let Some(facts) = FACTS.get_or_init(FactCache::new).get(path, read).flatten() else {
+            return ColumnValue::Empty;
+        };
         match column_id {
-            ColumnId::COMPRESSED_SIZE => ColumnValue::Size(0),
-            ColumnId::COMPRESSION_RATIO => ColumnValue::Percentage(0.0),
-            ColumnId::FILE_COUNT_INSIDE => ColumnValue::Number(0),
+            ColumnId::COMPRESSED_SIZE => ColumnValue::Size(facts.compressed),
+            ColumnId::COMPRESSION_RATIO => facts
+                .saved()
+                .map_or(ColumnValue::Empty, ColumnValue::Percentage),
+            ColumnId::FILE_COUNT_INSIDE => facts
+                .files
+                .and_then(|n| i64::try_from(n).ok())
+                .map_or(ColumnValue::Empty, ColumnValue::Number),
             _ => ColumnValue::Empty,
         }
     }
 
     fn supported_extensions(&self) -> &[&str] {
-        &["zip", "tar", "gz", "7z", "rar"]
+        &["zip", "tar", "gz", "tgz", "7z", "rar"]
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reading files for the providers
+// ---------------------------------------------------------------------------
+
+/// A file's length and modification time: what says it is the version a
+/// cached fact was read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl FileStamp {
+    /// The stamp of the regular file at `path`, or `None` if there is none.
+    fn of(path: &str) -> Option<Self> {
+        let md = std::fs::metadata(path).ok()?;
+        md.is_file().then(|| Self {
+            len: md.len(),
+            modified: md.modified().ok(),
+        })
+    }
+}
+
+/// The most files a provider remembers facts about. Past it the cache is
+/// emptied and refilled by whatever is on screen: a bound, not an eviction
+/// policy, since what matters is that a long browse cannot grow it forever.
+const MAX_CACHED_FILES: usize = 4096;
+
+/// Facts a provider read from files, kept while each file is unchanged.
+///
+/// A provider's `value` is asked for every visible row in every frame, so
+/// reading the file each time would read a folder of photographs many times a
+/// second. A stat is cheap; the read happens once per version of a file.
+struct FactCache<T> {
+    entries: Mutex<HashMap<String, (FileStamp, T)>>,
+}
+
+impl<T: Clone> FactCache<T> {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// `read(path)`, or what it said last time if the file has not changed
+    /// since. `None` for a path that is not a regular file.
+    fn get(&self, path: &str, read: impl FnOnce(&str) -> T) -> Option<T> {
+        let stamp = FileStamp::of(path)?;
+        // A poisoned lock holds a map that is still a map; nothing to recover.
+        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((kept, facts)) = entries.get(path)
+            && *kept == stamp
+        {
+            return Some(facts.clone());
+        }
+        // Not held while the file is read: another window's frame can use the
+        // cache meanwhile.
+        drop(entries);
+        let facts = read(path);
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if entries.len() >= MAX_CACHED_FILES {
+            entries.clear();
+        }
+        entries.insert(path.to_owned(), (stamp, facts.clone()));
+        Some(facts)
+    }
+}
+
+/// Up to `max` bytes from the start of the file at `path`.
+fn read_prefix(path: &str, max: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(u64::try_from(max).ok()?)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
+}
+
+/// How much of a picture is read for its size at first. Every format keeps its
+/// size near the start except TIFF, whose directory may be anywhere, and a
+/// JPEG with a large thumbnail ahead of its frame.
+const IMAGE_HEAD_BYTES: usize = 64 * 1024;
+
+/// How much is read when the size is not in the first [`IMAGE_HEAD_BYTES`].
+/// A picture larger than this whose size lies past it is left blank.
+const IMAGE_WHOLE_BYTES: usize = 64 * 1024 * 1024;
+
+/// A picture's EXIF, or `None` if it is not a file that can hold one.
+///
+/// Read from the head of the file first, where a JPEG's and a PNG's are; a
+/// TIFF may keep its directories, and a WebP its EXIF chunk, anywhere -- a
+/// WebP's is usually after the picture -- so those are read whole when the
+/// head held none.
+fn image_exif(path: &str) -> Option<exif::ExifData> {
+    let head = read_prefix(path, IMAGE_HEAD_BYTES)?;
+    let found = exif::read(&head);
+    let anywhere = head.starts_with(b"II*\0")
+        || head.starts_with(b"MM\0*")
+        || (head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP"));
+    if !found.is_empty() || !anywhere || head.len() < IMAGE_HEAD_BYTES {
+        return Some(found);
+    }
+    read_prefix(path, IMAGE_WHOLE_BYTES).map(|whole| exif::read(&whole))
+}
+
+/// An EXIF date, `2025:06:15 14:30:22`, as the rest of the desktop writes one:
+/// `2025-06-15 14:30:22` -- which also sorts as text in time order. Anything
+/// else is shown as the file has it.
+fn exif_date(when: &str) -> String {
+    let b = when.as_bytes();
+    if b.len() >= 10 && b.get(4) == Some(&b':') && b.get(7) == Some(&b':') {
+        let (date, rest) = when.split_at(10);
+        format!("{}{rest}", date.replace(':', "-"))
+    } else {
+        when.to_owned()
+    }
+}
+
+/// What an EXIF orientation asks of a viewer, in the words the image viewer's
+/// info panel uses for its own turns.
+fn orientation_words(value: u16) -> Option<&'static str> {
+    Some(match value {
+        1 => "As stored",
+        2 => "Mirrored",
+        3 => "Upside down",
+        4 => "Flipped top to bottom",
+        5 => "Mirrored, turned left",
+        6 => "Turned right",
+        7 => "Mirrored, turned right",
+        8 => "Turned left",
+        _ => return None,
+    })
+}
+
+/// Which way up `imagecodec` shows the picture: the turn its thumbnail and the
+/// image viewer apply. It turns a JPEG, a PNG and a TIFF by what they record,
+/// and shows any other picture as stored.
+///
+/// Read from the head of the file, as [`image_exif`] reads a JPEG's and a
+/// PNG's -- where their EXIF is -- and whole for a TIFF, whose directory may
+/// be anywhere. A JPEG whose EXIF comes after more than the head's worth of
+/// other segments is read as unturned here and turned by the decoder: rare,
+/// and cheaper than reading every large photograph whole for one column.
+fn image_turn(path: &str) -> Orientation {
+    let turn = |bytes: &[u8]| {
+        if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            imagecodec::jpeg::orientation(bytes)
+        } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            imagecodec::png::orientation(bytes)
+        } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+            imagecodec::tiff::orientation(bytes)
+        } else {
+            Orientation::TopLeft
+        }
+    };
+    let Some(head) = read_prefix(path, IMAGE_HEAD_BYTES) else {
+        return Orientation::TopLeft;
+    };
+    let tiff = head.starts_with(b"II*\0") || head.starts_with(b"MM\0*");
+    if tiff && head.len() == IMAGE_HEAD_BYTES {
+        return read_prefix(path, IMAGE_WHOLE_BYTES)
+            .map_or(Orientation::TopLeft, |whole| turn(&whole));
+    }
+    turn(&head)
+}
+
+/// The EXIF value (1 to 8) of a turn, for [`orientation_words`].
+fn exif_value(turn: Orientation) -> u16 {
+    match turn {
+        Orientation::TopLeft => 1,
+        Orientation::TopRight => 2,
+        Orientation::BottomRight => 3,
+        Orientation::BottomLeft => 4,
+        Orientation::LeftTop => 5,
+        Orientation::RightTop => 6,
+        Orientation::RightBottom => 7,
+        Orientation::LeftBottom => 8,
+    }
+}
+
+/// A picture's size, as shown -- `imagecodec` turns it by the orientation the
+/// file records -- or `None` if it is not a picture `imagecodec` measures.
+fn image_size(path: &str) -> Option<(u32, u32)> {
+    let head = read_prefix(path, IMAGE_HEAD_BYTES)?;
+    match imagecodec::dimensions(&head) {
+        Ok(size) => Some(size),
+        // The start did not hold it, and there is more of the file.
+        Err(_) if head.len() == IMAGE_HEAD_BYTES => {
+            imagecodec::dimensions(&read_prefix(path, IMAGE_WHOLE_BYTES)?).ok()
+        }
+        Err(_) => None,
+    }
+}
+
+/// What an audio file says about itself: how it plays, and its tags.
+type AudioFacts = (audiotags::AudioInfo, audiotags::Tags);
+
+/// What a video file says about itself, and its size in bytes.
+type VideoFacts = (mediaprobe::Probe, u64);
+
+/// A video's facts, or `None` when it cannot be read -- a blank row, as for
+/// [`audio_facts`].
+fn video_facts(path: &str) -> Option<VideoFacts> {
+    let path = std::path::Path::new(path);
+    let size = std::fs::metadata(path).ok()?.len();
+    Some((mediaprobe::probe_path(path).ok()?, size))
+}
+
+/// `bytes` over `secs` in kilobits a second, to the nearest.
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a file's size in bits over its length is a small positive number, checked finite"
+)]
+fn average_kbps(bytes: u64, secs: f64) -> Option<u64> {
+    let kbps = bytes as f64 * 8.0 / secs / 1000.0;
+    (kbps.is_finite() && kbps >= 0.0).then_some(kbps.round() as u64)
+}
+
+/// A rate in thousandths, to the nearest: 23.976 is 23976.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "checked finite and positive first, and `as` saturates"
+)]
+fn milli(rate: f64) -> Option<u64> {
+    (rate.is_finite() && rate > 0.0).then_some((rate * 1000.0).round() as u64)
+}
+
+/// The file's facts, or `None` when it cannot be read. A file that cannot be
+/// opened is a row whose audio cells are blank -- the same as one whose
+/// headers say nothing -- and the list shows the file either way, so there
+/// is nothing a cell could usefully say about why.
+fn audio_facts(path: &str) -> Option<AudioFacts> {
+    audiotags::read_path(std::path::Path::new(path)).ok()
+}
+
+/// `secs` as whole seconds, cut: `None` for a length that is not a number
+/// of seconds at all.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "cut to whole seconds on purpose; checked finite and non-negative, and `as` saturates"
+)]
+fn whole_seconds(secs: f64) -> Option<u64> {
+    // `as` is total on any f64 (NaN is 0), so casting before the check is sound.
+    (secs.is_finite() && secs >= 0.0).then_some(secs as u64)
+}
+
+/// `w:h` in lowest terms when those are small -- `16:9`, `4:3`, `1:1` --
+/// otherwise as a decimal to one, as `1.78:1`. `None` for a zero side.
+fn aspect_ratio(w: u32, h: u32) -> Option<String> {
+    let divisor = greatest_common_divisor(w, h);
+    let (a, b) = (w.checked_div(divisor)?, h.checked_div(divisor)?);
+    if a == 0 || b == 0 {
+        return None;
+    }
+    Some(if a <= 32 && b <= 32 {
+        format!("{a}:{b}")
+    } else {
+        format!("{:.2}:1", f64::from(w) / f64::from(h))
+    })
+}
+
+fn greatest_common_divisor(mut a: u32, mut b: u32) -> u32 {
+    while let Some(rest) = a.checked_rem(b) {
+        a = b;
+        b = rest;
+    }
+    a
+}
+
+/// The largest file whose lines are counted. A larger one is left blank rather
+/// than read whole into memory for one cell.
+const MAX_COUNTED_BYTES: usize = 16 * 1024 * 1024;
+
+/// How many lines the file at `path` has: its line feeds, and one more if it
+/// does not end with one. An empty file has none.
+#[allow(
+    clippy::naive_bytecount,
+    reason = "one pass per version of a file, for one cell; not worth a dependency"
+)]
+fn line_count(path: &str) -> Option<i64> {
+    let bytes = read_prefix(path, MAX_COUNTED_BYTES.saturating_add(1))?;
+    if bytes.len() > MAX_COUNTED_BYTES {
+        return None;
+    }
+    let feeds = bytes.iter().filter(|&&b| b == b'\n').count();
+    let unfinished = usize::from(bytes.last().is_some_and(|&b| b != b'\n'));
+    i64::try_from(feeds.saturating_add(unfinished)).ok()
+}
+
+/// What a zip archive's directory says about what it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ArchiveFacts {
+    /// Its files, not counting directories; `None` where counting them
+    /// would mean inflating the whole archive -- a `.tar.gz`.
+    files: Option<u64>,
+    /// What they take up in the archive.
+    compressed: u64,
+    /// What they take up taken out of it.
+    uncompressed: u64,
+}
+
+impl ArchiveFacts {
+    /// The share of the files' size the archive saves, or `None` for
+    /// archives of empty files, where there is nothing to save.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a ratio for a percentage cell; a u64 byte count's last bits are below what it shows"
+    )]
+    fn saved(self) -> Option<f32> {
+        if self.uncompressed == 0 {
+            return None;
+        }
+        let kept = self.compressed as f64 / self.uncompressed as f64;
+        #[allow(clippy::cast_possible_truncation, reason = "clamped to 0..=1 first")]
+        Some((1.0 - kept).clamp(0.0, 1.0) as f32)
+    }
+}
+
+/// A file read at any offset, for `ziparchive`, which reads a zip's directory
+/// from its end without reading the rest.
+struct FileSource(std::fs::File);
+
+impl ziparchive::ReadAt for FileSource {
+    type Error = std::io::Error;
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::{Read, Seek, SeekFrom};
+        self.0.seek(SeekFrom::Start(offset))?;
+        let mut filled = 0_usize;
+        while let Some(rest) = buf.get_mut(filled..) {
+            if rest.is_empty() {
+                break;
+            }
+            match self.0.read(rest)? {
+                0 => break,
+                got => filled = filled.saturating_add(got),
+            }
+        }
+        Ok(filled)
+    }
+
+    fn len(&mut self) -> std::io::Result<u64> {
+        self.0.metadata().map(|md| md.len())
+    }
+}
+
+/// A zip archive's directory, or `None` if the file is not a zip archive
+/// `ziparchive` can read.
+fn zip_facts(path: &str) -> Option<ArchiveFacts> {
+    let mut source = FileSource(std::fs::File::open(path).ok()?);
+    let entries = ziparchive::parse_at(&mut source).ok()?;
+    let files = entries.iter().filter(|e| !e.is_dir);
+    Some(files.fold(
+        ArchiveFacts {
+            files: Some(0),
+            compressed: 0,
+            uncompressed: 0,
+        },
+        |facts, e| ArchiveFacts {
+            files: facts.files.map(|n| n.saturating_add(1)),
+            compressed: facts.compressed.saturating_add(e.compressed_size),
+            uncompressed: facts.uncompressed.saturating_add(e.uncompressed_size),
+        },
+    ))
+}
+
+/// A TAR's headers: its files, and what they take up -- the same in the
+/// archive as out of it, since a TAR stores and does not compress. `None` if
+/// the file's first block is not a TAR header.
+fn tar_facts(path: &str) -> Option<ArchiveFacts> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let listing = tararchive::list(&mut file).ok()?;
+    if let tararchive::End::Damaged { at: 0, .. } = listing.end {
+        return None;
+    }
+    let (files, bytes) = listing
+        .entries
+        .iter()
+        .filter(|e| e.kind == tararchive::Kind::File)
+        .fold((0_u64, 0_u64), |(n, b), e| {
+            (n.saturating_add(1), b.saturating_add(e.size))
+        });
+    Some(ArchiveFacts {
+        files: Some(files),
+        compressed: bytes,
+        uncompressed: bytes,
+    })
+}
+
+/// A gzip file's size and the size its trailer says it inflates to (modulo
+/// 4 GiB, as the format keeps it). One file inside, for a plain `.gz`; not
+/// counted for a `.tar.gz`. `None` if the file is not gzip.
+fn gzip_facts(path: &str) -> Option<ArchiveFacts> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut magic = [0_u8; 2];
+    file.read_exact(&mut magic).ok()?;
+    if magic != [0x1F, 0x8B] || len < 18 {
+        return None;
+    }
+    file.seek(SeekFrom::End(-4)).ok()?;
+    let mut isize = [0_u8; 4];
+    file.read_exact(&mut isize).ok()?;
+    let lower = path.to_ascii_lowercase();
+    let is_tar = lower.ends_with(".tar.gz") || lower.ends_with(".tgz");
+    Some(ArchiveFacts {
+        files: (!is_tar).then_some(1),
+        compressed: len,
+        uncompressed: u64::from(u32::from_le_bytes(isize)),
+    })
 }
 
 // ============================================================================
@@ -1379,9 +2056,10 @@ pub fn render_column_values_from(
                 (ColumnId::NAME, Some(c)) => c,
                 _ => match value {
                     ColumnValue::Empty => c.cell_dim,
-                    ColumnValue::Size(_) | ColumnValue::Number(_) | ColumnValue::Percentage(_) => {
-                        c.cell_dim
-                    }
+                    ColumnValue::Size(_)
+                    | ColumnValue::Number(_)
+                    | ColumnValue::Percentage(_)
+                    | ColumnValue::Measure(..) => c.cell_dim,
                     _ => c.cell_text,
                 },
             };
@@ -1508,6 +2186,32 @@ fn format_number(n: i64) -> String {
         result.push('-');
     }
     result.chars().rev().collect()
+}
+
+/// An unsigned count with thousands separators, as [`format_number`].
+fn format_count(n: u64) -> String {
+    i64::try_from(n).map_or_else(|_| n.to_string(), format_number)
+}
+
+/// Hertz as kilohertz, exactly: 44100 is "44.1 kHz", 8000 "8 kHz", 11025
+/// "11.025 kHz". Below a kilohertz, hertz.
+fn format_hz(hz: u64) -> String {
+    if hz < 1000 {
+        return format!("{hz} Hz");
+    }
+    format!("{} kHz", format_thousandths(hz))
+}
+
+/// Thousandths as the whole they make, exactly: 44100 is "44.1", 25000 "25",
+/// 23976 "23.976".
+fn format_thousandths(n: u64) -> String {
+    let (whole, part) = (n / 1000, n % 1000);
+    if part == 0 {
+        format_count(whole)
+    } else {
+        let digits = format!("{part:03}");
+        format!("{}.{}", format_count(whole), digits.trim_end_matches('0'))
+    }
 }
 
 /// Format a Unix-epoch timestamp as "YYYY-MM-DD HH:MM", in UTC.
@@ -1970,13 +2674,6 @@ mod tests {
         assert_eq!(val, ColumnValue::Text("Rust".to_string()));
     }
 
-    #[test]
-    fn test_audio_duration_value() {
-        let prov = AudioColumns;
-        let val = prov.value("/music/song.mp3", ColumnId::DURATION);
-        assert_eq!(val, ColumnValue::Duration(222));
-    }
-
     // ------------------------------------------------------------------
     // Sort
     // ------------------------------------------------------------------
@@ -2237,9 +2934,10 @@ mod tests {
     #[test]
     fn test_manager_get_value_matching_extension() {
         let mgr = ColumnManager::with_defaults();
+        // A picture that is not there has no size: the cell is blank. It was
+        // "1920 x 1080", whatever the file.
         let val = mgr.get_value("/photos/sunset.png", ColumnId::DIMENSIONS);
-        // ImageColumns returns the stub "1920 x 1080".
-        assert!(matches!(val, ColumnValue::Text(_)));
+        assert_eq!(val, ColumnValue::Empty);
     }
 
     // ------------------------------------------------------------------
@@ -2563,5 +3261,587 @@ mod tests {
             seen.push(def.key);
         }
         assert!(seen.len() >= 20, "only {} columns have keys", seen.len());
+    }
+
+    // ------------------------------------------------------------------
+    // What the file-type columns read
+    //
+    // Every cell was invented: "1920 x 1080" for every picture, 0 lines for
+    // every source file, 0 files in every archive, 3:42 for every song.
+    // ------------------------------------------------------------------
+
+    /// A scratch directory of the test's own, removed when dropped.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "slateos-explorer-columns-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            drop(std::fs::remove_dir_all(&dir));
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+
+        fn file(&self, name: &str, bytes: &[u8]) -> String {
+            let path = self.0.join(name);
+            std::fs::write(&path, bytes).expect("write");
+            path.to_str().expect("a text path").to_owned()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.0));
+        }
+    }
+
+    /// A 2x1 grey TIFF libtiff opens -- uncompressed, one strip -- recording
+    /// `orientation`. (An EXIF block alone is a TIFF structure with no
+    /// picture in it, which libtiff refuses, and so shows no turn.)
+    fn grey_tiff(orientation: u16) -> Vec<u8> {
+        const ENTRIES: u32 = 10;
+        let data_at = 8 + 2 + 12 * ENTRIES + 4;
+        let entries: [(u16, u16, u32); 10] = [
+            (256, 3, 2),                      // ImageWidth
+            (257, 3, 1),                      // ImageLength
+            (258, 3, 8),                      // BitsPerSample
+            (259, 3, 1),                      // Compression: none
+            (262, 3, 1),                      // Photometric: black is zero
+            (273, 4, data_at),                // StripOffsets
+            (274, 3, u32::from(orientation)), // Orientation
+            (277, 3, 1),                      // SamplesPerPixel
+            (278, 3, 1),                      // RowsPerStrip
+            (279, 4, 2),                      // StripByteCounts
+        ];
+        let mut t = b"II*\0".to_vec();
+        t.extend_from_slice(&8_u32.to_le_bytes());
+        t.extend_from_slice(&u16::try_from(ENTRIES).unwrap().to_le_bytes());
+        for (tag, kind, value) in entries {
+            t.extend_from_slice(&tag.to_le_bytes());
+            t.extend_from_slice(&kind.to_le_bytes());
+            t.extend_from_slice(&1_u32.to_le_bytes());
+            if kind == 3 {
+                // A SHORT sits at the start of the value field.
+                t.extend_from_slice(&u16::try_from(value).unwrap().to_le_bytes());
+                t.extend_from_slice(&[0, 0]);
+            } else {
+                t.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        t.extend_from_slice(&0_u32.to_le_bytes());
+        t.extend_from_slice(&[0x20, 0xE0]);
+        t
+    }
+
+    /// **A photograph's camera, date and turn are columns**, read from its
+    /// EXIF; a picture with none leaves them blank.
+    #[test]
+    fn a_photographs_exif_is_three_columns() {
+        let dir = Scratch::new("exif");
+        let photo = dir.file(
+            "photo.jpg",
+            &exif::testing::with_exif(
+                imagecodec::testing::SMALL_JPEG,
+                &exif::testing::camera_tiff(),
+            ),
+        );
+        let plain = dir.file("plain.png", &imagecodec::testing::png_gradient(4, 4));
+        let mgr = ColumnManager::with_defaults();
+        let text = |t: &str| ColumnValue::Text(String::from(t));
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::CAMERA),
+            text("Canon EOS R5")
+        );
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::DATE_TAKEN),
+            text("2025-06-15 14:30:22")
+        );
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::ORIENTATION),
+            text("Turned right")
+        );
+        // A TIFF's own orientation tag turns it too.
+        let scan = dir.file("scan.tif", &grey_tiff(6));
+        assert_eq!(
+            mgr.get_value(&scan, ColumnId::ORIENTATION),
+            text("Turned right")
+        );
+        for column in [
+            ColumnId::CAMERA,
+            ColumnId::DATE_TAKEN,
+            ColumnId::ORIENTATION,
+        ] {
+            assert_eq!(mgr.get_value(&plain, column), ColumnValue::Empty);
+        }
+        assert_eq!(orientation_words(9), None);
+        assert_eq!(exif_date("sometime"), "sometime");
+    }
+
+    /// A WebP keeps its EXIF after the picture, past the head of the file
+    /// that is read first: the rest is read for it.
+    #[test]
+    fn exif_past_the_head_of_a_webp_is_found() {
+        let dir = Scratch::new("exif-webp");
+        let tiff = exif::testing::camera_tiff();
+        let picture = vec![0x55_u8; IMAGE_HEAD_BYTES + 1000];
+        let mut data = b"RIFF\0\0\0\0WEBP".to_vec();
+        data.extend_from_slice(b"VP8L");
+        data.extend_from_slice(&u32::try_from(picture.len()).unwrap().to_le_bytes());
+        data.extend_from_slice(&picture);
+        data.extend_from_slice(b"EXIF");
+        data.extend_from_slice(&u32::try_from(tiff.len()).unwrap().to_le_bytes());
+        data.extend_from_slice(&tiff);
+        let photo = dir.file("late.webp", &data);
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::CAMERA),
+            ColumnValue::Text(String::from("Canon EOS R5"))
+        );
+        // Its EXIF says "turned right", but `imagecodec` shows a WebP as
+        // stored -- the thumbnail beside it is not turned -- so the column
+        // says that, where it said "Turned right" beside an unturned picture.
+        assert_eq!(
+            mgr.get_value(&photo, ColumnId::ORIENTATION),
+            ColumnValue::Text(String::from("As stored"))
+        );
+    }
+
+    #[test]
+    fn a_picture_is_measured_and_its_ratio_is_worked_out() {
+        let dir = Scratch::new("pictures");
+        let wide = dir.file("wide.png", &imagecodec::testing::png_gradient(160, 90));
+        let square = dir.file("square.png", &imagecodec::testing::png_gradient(33, 33));
+        let odd = dir.file("odd.png", &imagecodec::testing::png_gradient(137, 100));
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.get_value(&wide, ColumnId::DIMENSIONS),
+            ColumnValue::Text(String::from("160 \u{00d7} 90"))
+        );
+        assert_eq!(
+            mgr.get_value(&wide, ColumnId::ASPECT_RATIO),
+            ColumnValue::Text(String::from("16:9"))
+        );
+        assert_eq!(
+            mgr.get_value(&square, ColumnId::ASPECT_RATIO),
+            ColumnValue::Text(String::from("1:1"))
+        );
+        assert_eq!(
+            mgr.get_value(&odd, ColumnId::ASPECT_RATIO),
+            ColumnValue::Text(String::from("1.37:1"))
+        );
+        // Not a picture, or not one this system measures: blank, not a guess.
+        let fake = dir.file("fake.png", b"not a picture at all");
+        assert_eq!(
+            mgr.get_value(&fake, ColumnId::DIMENSIONS),
+            ColumnValue::Empty
+        );
+        assert_eq!(
+            mgr.get_value(&wide, ColumnId::COLOR_DEPTH),
+            ColumnValue::Empty
+        );
+    }
+
+    #[test]
+    fn a_changed_file_is_read_again() {
+        let dir = Scratch::new("changed");
+        let path = dir.file("grows.png", &imagecodec::testing::png_gradient(10, 10));
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.get_value(&path, ColumnId::DIMENSIONS),
+            ColumnValue::Text(String::from("10 \u{00d7} 10"))
+        );
+        // A different size of file, so the stamp moves even where the clock's
+        // resolution would not.
+        dir.file("grows.png", &imagecodec::testing::png_gradient(300, 20));
+        assert_eq!(
+            mgr.get_value(&path, ColumnId::DIMENSIONS),
+            ColumnValue::Text(String::from("300 \u{00d7} 20")),
+            "the size of the file that was there before was shown"
+        );
+    }
+
+    #[test]
+    fn a_source_file_is_counted() {
+        let dir = Scratch::new("lines");
+        let mgr = ColumnManager::with_defaults();
+        let cases: [(&str, &[u8], i64); 5] = [
+            ("empty.rs", b"", 0),
+            ("one.rs", b"fn main() {}\n", 1),
+            ("unfinished.rs", b"a\nb\nc", 3),
+            ("finished.rs", b"a\nb\nc\n", 3),
+            ("crlf.rs", b"a\r\nb\r\n", 2),
+        ];
+        for (name, text, lines) in cases {
+            let path = dir.file(name, text);
+            assert_eq!(
+                mgr.get_value(&path, ColumnId::LINE_COUNT),
+                ColumnValue::Number(lines),
+                "{name}"
+            );
+        }
+        // A file that is not there has no count, where it had 0.
+        assert_eq!(
+            mgr.get_value("/nowhere/missing.rs", ColumnId::LINE_COUNT),
+            ColumnValue::Empty
+        );
+    }
+
+    #[test]
+    fn a_zip_archive_says_what_it_holds() {
+        let dir = Scratch::new("zips");
+        let entry = |name: &str, data: Vec<u8>, store_only: bool| ziparchive::ZipWriteEntry {
+            name: name.as_bytes().to_vec(),
+            data,
+            store_only,
+            dos_datetime: 0,
+        };
+        let bytes = ziparchive::create(&[
+            entry("folder/", Vec::new(), true),
+            entry("folder/repeats.txt", vec![b'a'; 10_000], false),
+            entry("stored.bin", vec![7; 1_000], true),
+        ]);
+        let path = dir.file("two.zip", &bytes);
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.get_value(&path, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Number(2),
+            "the folder was counted as a file, or the files were not"
+        );
+        let ColumnValue::Size(compressed) = mgr.get_value(&path, ColumnId::COMPRESSED_SIZE) else {
+            panic!("no compressed size");
+        };
+        assert!(
+            compressed > 1_000 && compressed < 2_000,
+            "10,000 repeats deflate to almost nothing, 1,000 stored stay: {compressed}"
+        );
+        let ColumnValue::Percentage(saved) = mgr.get_value(&path, ColumnId::COMPRESSION_RATIO)
+        else {
+            panic!("no ratio");
+        };
+        assert!(saved > 0.8 && saved < 1.0, "{saved}");
+        // Not a zip, or another kind of archive: blank.
+        let fake = dir.file("fake.zip", b"PK not really");
+        assert_eq!(
+            mgr.get_value(&fake, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Empty
+        );
+        // An empty TAR holds nothing, which is not the same as blank.
+        let tar = dir.file("one.tar", &[0; 1024]);
+        assert_eq!(
+            mgr.get_value(&tar, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Number(0)
+        );
+    }
+
+    /// A TAR's cells are its headers', a gzip's its trailer's: both were
+    /// blank, as every archive but a zip was.
+    #[test]
+    fn a_tar_and_a_gzip_say_what_they_hold() {
+        let dir = Scratch::new("tars");
+        let mgr = ColumnManager::with_defaults();
+        let tar = tararchive::testing::archive(&[
+            tararchive::testing::dir("folder/"),
+            tararchive::testing::file("folder/a.txt", &[b'a'; 3000]),
+            tararchive::testing::file("b.bin", &[1; 100]),
+        ]);
+        let plain = dir.file("two.tar", &tar);
+        assert_eq!(
+            mgr.get_value(&plain, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Number(2)
+        );
+        assert_eq!(
+            mgr.get_value(&plain, ColumnId::COMPRESSED_SIZE),
+            ColumnValue::Size(3100)
+        );
+        assert_eq!(
+            mgr.get_value(&plain, ColumnId::COMPRESSION_RATIO),
+            ColumnValue::Percentage(0.0),
+            "a TAR saves nothing, and says so"
+        );
+        let gz = deflate::gzip(&tar);
+        let tgz = dir.file("two.tar.gz", &gz);
+        assert_eq!(
+            mgr.get_value(&tgz, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Empty,
+            "counting would inflate the whole archive"
+        );
+        assert_eq!(
+            mgr.get_value(&tgz, ColumnId::COMPRESSED_SIZE),
+            ColumnValue::Size(gz.len() as u64)
+        );
+        let ColumnValue::Percentage(saved) = mgr.get_value(&tgz, ColumnId::COMPRESSION_RATIO)
+        else {
+            panic!("no ratio");
+        };
+        let want = 1.0 - gz.len() as f64 / tar.len() as f64;
+        assert!((f64::from(saved) - want).abs() < 0.01, "{saved} vs {want}");
+        let single = dir.file("notes.txt.gz", &deflate::gzip(b"some notes"));
+        assert_eq!(
+            mgr.get_value(&single, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Number(1)
+        );
+        let fake = dir.file("fake.gz", b"not gzip at all, not even close");
+        assert_eq!(
+            mgr.get_value(&fake, ColumnId::COMPRESSED_SIZE),
+            ColumnValue::Empty
+        );
+        let not_tar = dir.file("fake.tar", b"words, not headers");
+        assert_eq!(
+            mgr.get_value(&not_tar, ColumnId::FILE_COUNT_INSIDE),
+            ColumnValue::Empty
+        );
+    }
+
+    const AUDIO_COLUMNS: [ColumnId; 6] = [
+        ColumnId::DURATION,
+        ColumnId::BITRATE,
+        ColumnId::SAMPLE_RATE,
+        ColumnId::ARTIST,
+        ColumnId::ALBUM,
+        ColumnId::TITLE,
+    ];
+
+    /// An audio file's cells are what its headers and tags say: every one
+    /// was invented -- 3:42, 320 kbps, "Unknown Artist" -- for every song.
+    #[test]
+    fn an_audio_file_shows_what_it_says_about_itself() {
+        let dir = Scratch::new("audio");
+        let mgr = ColumnManager::with_defaults();
+        let song = dir.file(
+            "my.song.mp3",
+            &audiotags::testing::mp3(
+                2303,
+                &[
+                    (b"TIT2", "Caf\u{e9} Song"),
+                    (b"TPE1", "The Band"),
+                    (b"TALB", "Songs"),
+                ],
+            ),
+        );
+        // 2303 frames of 417 bytes at 128 kbps: 60.02 seconds.
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::DURATION),
+            ColumnValue::Duration(60)
+        );
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::BITRATE),
+            ColumnValue::Measure(128, Unit::Kbps)
+        );
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::SAMPLE_RATE),
+            ColumnValue::Measure(44_100, Unit::Hz)
+        );
+        assert_eq!(mgr.get_value(&song, ColumnId::ARTIST), text("The Band"));
+        assert_eq!(mgr.get_value(&song, ColumnId::ALBUM), text("Songs"));
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::TITLE),
+            text("Caf\u{e9} Song"),
+            "the title is the tag's, not the name cut at its first dot"
+        );
+
+        let wav = dir.file(
+            "take.wav",
+            &audiotags::testing::wav(48_000, 2, 16, 2, &[(b"INAM", "Take Two")]),
+        );
+        assert_eq!(
+            mgr.get_value(&wav, ColumnId::DURATION),
+            ColumnValue::Duration(2)
+        );
+        assert_eq!(
+            mgr.get_value(&wav, ColumnId::BITRATE),
+            ColumnValue::Measure(1536, Unit::Kbps)
+        );
+        assert_eq!(
+            mgr.get_value(&wav, ColumnId::SAMPLE_RATE),
+            ColumnValue::Measure(48_000, Unit::Hz)
+        );
+        assert_eq!(mgr.get_value(&wav, ColumnId::TITLE), text("Take Two"));
+        // What the file does not say is blank, not a guess.
+        assert_eq!(mgr.get_value(&wav, ColumnId::ARTIST), ColumnValue::Empty);
+        assert_eq!(mgr.get_value(&wav, ColumnId::ALBUM), ColumnValue::Empty);
+    }
+
+    /// A length is cut to whole seconds, as the player counts it: a file of
+    /// 2.9 seconds is 0:02 in both.
+    #[test]
+    fn an_audio_files_length_is_cut_to_whole_seconds() {
+        let dir = Scratch::new("audio-cut");
+        let mgr = ColumnManager::with_defaults();
+        // 111 frames: 2.89 seconds, which rounding would make 3.
+        let song = dir.file("short.mp3", &audiotags::testing::mp3(111, &[]));
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::DURATION),
+            ColumnValue::Duration(2)
+        );
+        assert_eq!(whole_seconds(2.999), Some(2));
+        assert_eq!(whole_seconds(0.0), Some(0));
+        assert_eq!(whole_seconds(-1.0), None);
+        assert_eq!(whole_seconds(f64::NAN), None);
+        assert_eq!(whole_seconds(f64::INFINITY), None);
+    }
+
+    #[test]
+    fn nothing_is_invented_for_a_file_that_is_not_audio() {
+        let dir = Scratch::new("audio-not");
+        let mgr = ColumnManager::with_defaults();
+        let fake = dir.file("fake.mp3", b"ID3");
+        let words = dir.file("words.flac", b"these are words, not a FLAC stream");
+        let gone = dir
+            .0
+            .join("gone.ogg")
+            .to_str()
+            .expect("a text path")
+            .to_owned();
+        for path in [&fake, &words, &gone] {
+            for id in AUDIO_COLUMNS {
+                assert_eq!(mgr.get_value(path, id), ColumnValue::Empty, "{path} {id:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_changed_audio_file_is_read_again() {
+        let dir = Scratch::new("audio-changed");
+        let mgr = ColumnManager::with_defaults();
+        let path = dir.file(
+            "song.mp3",
+            &audiotags::testing::mp3(10, &[(b"TIT2", "Before")]),
+        );
+        assert_eq!(mgr.get_value(&path, ColumnId::TITLE), text("Before"));
+        dir.file(
+            "song.mp3",
+            &audiotags::testing::mp3(20, &[(b"TIT2", "After, retagged")]),
+        );
+        assert_eq!(
+            mgr.get_value(&path, ColumnId::TITLE),
+            text("After, retagged"),
+            "the tags of the file that was there before were shown"
+        );
+    }
+
+    /// A video's cells are what its headers say, in the columns music and
+    /// pictures already have; video files had no columns at all.
+    #[test]
+    fn a_video_shows_its_length_size_rate_and_bitrate() {
+        let dir = Scratch::new("video");
+        let mgr = ColumnManager::with_defaults();
+        let bytes = mediaprobe::testing::mp4(1920, 1080, 90, 25);
+        let film = dir.file("film.mp4", &bytes);
+        assert_eq!(
+            mgr.get_value(&film, ColumnId::DURATION),
+            ColumnValue::Duration(90)
+        );
+        assert_eq!(
+            mgr.get_value(&film, ColumnId::DIMENSIONS),
+            text("1920 \u{00d7} 1080")
+        );
+        assert_eq!(
+            mgr.get_value(&film, ColumnId::FRAME_RATE),
+            ColumnValue::Measure(25_000, Unit::MilliFps)
+        );
+        let kbps = (bytes.len() as f64 * 8.0 / 90.0 / 1000.0).round() as u64;
+        assert_eq!(
+            mgr.get_value(&film, ColumnId::BITRATE),
+            ColumnValue::Measure(kbps, Unit::Kbps)
+        );
+        let clip = dir.file("clip.webm", &mediaprobe::testing::webm(640, 360, 12, 30));
+        assert_eq!(
+            mgr.get_value(&clip, ColumnId::DURATION),
+            ColumnValue::Duration(12)
+        );
+        assert_eq!(
+            mgr.get_value(&clip, ColumnId::DIMENSIONS),
+            text("640 \u{00d7} 360")
+        );
+        let old = dir.file("old.avi", &mediaprobe::testing::avi(320, 240, 3, 15));
+        assert_eq!(
+            mgr.get_value(&old, ColumnId::FRAME_RATE),
+            ColumnValue::Measure(15_000, Unit::MilliFps)
+        );
+        // Not a video: blank, not a guess -- and the audio columns a song has
+        // are still the song's.
+        let fake = dir.file("fake.mkv", b"not a video");
+        for id in [
+            ColumnId::DURATION,
+            ColumnId::DIMENSIONS,
+            ColumnId::FRAME_RATE,
+        ] {
+            assert_eq!(mgr.get_value(&fake, id), ColumnValue::Empty, "{id:?}");
+        }
+        let song = dir.file("song.mp3", &audiotags::testing::mp3(2303, &[]));
+        assert_eq!(
+            mgr.get_value(&song, ColumnId::DURATION),
+            ColumnValue::Duration(60)
+        );
+        // One Duration column, whatever plays.
+        let durations = mgr
+            .all_column_defs()
+            .into_iter()
+            .filter(|d| d.label == "Duration")
+            .count();
+        assert_eq!(durations, 1);
+        assert_eq!(
+            ColumnValue::Measure(23_976, Unit::MilliFps).display(),
+            "23.976 fps"
+        );
+        assert_eq!(
+            ColumnValue::Measure(30_000, Unit::MilliFps).display(),
+            "30 fps"
+        );
+        assert_eq!(milli(29.97), Some(29_970));
+        assert_eq!(milli(f64::NAN), None);
+        assert_eq!(average_kbps(1_000_000, 8.0), Some(1000));
+        assert_eq!(average_kbps(1, 0.0), None, "no length, no rate");
+    }
+
+    #[test]
+    fn a_measure_reads_in_its_unit_and_sorts_by_its_count() {
+        assert_eq!(ColumnValue::Measure(320, Unit::Kbps).display(), "320 kbps");
+        assert_eq!(
+            ColumnValue::Measure(1536, Unit::Kbps).display(),
+            "1,536 kbps"
+        );
+        assert_eq!(ColumnValue::Measure(44_100, Unit::Hz).display(), "44.1 kHz");
+        assert_eq!(ColumnValue::Measure(48_000, Unit::Hz).display(), "48 kHz");
+        assert_eq!(
+            ColumnValue::Measure(22_050, Unit::Hz).display(),
+            "22.05 kHz"
+        );
+        assert_eq!(
+            ColumnValue::Measure(11_025, Unit::Hz).display(),
+            "11.025 kHz"
+        );
+        assert_eq!(ColumnValue::Measure(500, Unit::Hz).display(), "500 Hz");
+        assert_eq!(ColumnValue::Measure(1000, Unit::Hz).display(), "1 kHz");
+        // As text, "96 kbps" sorts after "320 kbps"; as a count it is less.
+        assert!(ColumnValue::Measure(96, Unit::Kbps) < ColumnValue::Measure(320, Unit::Kbps));
+        assert!(ColumnValue::Measure(8_000, Unit::Hz) < ColumnValue::Measure(44_100, Unit::Hz));
+        assert_eq!(
+            ColumnValue::Measure(128, Unit::Kbps),
+            ColumnValue::Measure(128, Unit::Kbps)
+        );
+        assert_ne!(
+            ColumnValue::Measure(128, Unit::Kbps),
+            ColumnValue::Measure(128, Unit::Hz)
+        );
+        // A blank cell sorts after every value, as in every other column.
+        assert!(ColumnValue::Measure(u64::MAX, Unit::Hz) < ColumnValue::Empty);
+    }
+
+    #[test]
+    fn a_ratio_is_in_lowest_terms_or_a_decimal() {
+        assert_eq!(aspect_ratio(1920, 1080).as_deref(), Some("16:9"));
+        assert_eq!(aspect_ratio(4000, 3000).as_deref(), Some("4:3"));
+        assert_eq!(aspect_ratio(1080, 1920).as_deref(), Some("9:16"));
+        assert_eq!(aspect_ratio(1366, 768).as_deref(), Some("1.78:1"));
+        assert_eq!(aspect_ratio(0, 10), None);
+        assert_eq!(aspect_ratio(10, 0), None);
+        assert_eq!(greatest_common_divisor(12, 18), 6);
+        assert_eq!(greatest_common_divisor(7, 0), 7);
     }
 }

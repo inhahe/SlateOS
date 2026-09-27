@@ -68,6 +68,7 @@
 //! that establishes correctness, and treating one as the other is how a
 //! measured number becomes as trustworthy-looking as a fabricated one.
 
+use pathtext::ShowPath;
 use std::collections::VecDeque;
 use std::process::ExitCode;
 
@@ -2184,8 +2185,8 @@ impl BenchmarkApp {
     pub fn write_report(&mut self, path: &std::path::Path) -> String {
         let text = self.export_report();
         match safeio::write_str_atomically(path, &text) {
-            Ok(()) => format!("Wrote {} bytes to {}", text.len(), path.display()),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Ok(()) => format!("Wrote {} bytes to {}", text.len(), path.shown()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 

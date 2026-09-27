@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
+
+# The keys a one-line field answers, shared rather than copied.
+textline = { path = "../textline" }
 
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
@@ -19,6 +23,13 @@ safeio = { path = "../safeio" }
 # The zone rules, so "due today" is judged against the user's midnight
 # rather than UTC's.
 tzrules = { path = "../../tzrules" }
+
+# Where the decks are kept: a directory of deck files under the user's
+# settings (`settingsfile::config_dir`).
+settingsfile = { path = "../../gui/settingsfile" }
+
+[dev-dependencies]
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

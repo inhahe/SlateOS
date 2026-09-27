@@ -56410,26 +56410,22 @@ own `arg0` call, whose comment shows the author knew and had no way to check.
 Worth a gate; not built here because one command in a hook needs to be right
 about which crates have unix-only code, and that is its own piece of work.
 
-## ircclient: no transport, and no clock a message can be stamped with
+## ircclient: no clock a message can be stamped with (the transport is DONE)
 
-`apps/ircclient` parses IRC and renders it, and has no socket. Two consequences
-are visible in the code and both are deliberate:
+**2026-09-26, lane E: the transport half is done.** `apps/ircclient/src/net.rs`
+connects (`/connect server [port]`, plain text), registers, answers PING, and
+`run_command` sends the line and lets `handle_message` pick up the server's
+echo, exactly as planned below; `tick_interval` is `Some` while connected,
+beside a waker. What is left is the second bullet.
 
-* **Slash commands are applied locally and logged, not sent.** `parse_command`
-  builds the wire line; `run_command` applies the effect of the ones that have
-  a local meaning (`/join`, `/part`, `/nick`, `/me`, `/msg`) and pushes
-  `-> <line>` into the server buffer for the rest, so what would have gone out
-  is visible rather than dropped. When there is a TCP socket, `run_command`
-  sends the line instead and `handle_message` picks the server's echo back up
-  -- which is already written and already tested.
+* ~~**Slash commands are applied locally and logged, not sent.**~~ Done: sent.
 * **`IrcClientApp::timestamp` reuses the stamp of the previous message.** This
   tree has no wall clock a userspace program can read, and inventing a time
   would be wrong in a way nobody could see. Replace it with the real clock when
   one exists; every `ChatMessage` already carries a `timestamp` string.
 
-`tick_interval` returns `None` for the same reason: nothing arrives on a timer.
-It becomes `Some(...)` -- or better, a wakeup on the socket -- when there is a
-connection to read from.
+~~`tick_interval` returns `None` for the same reason.~~ Done: a waker on the
+connection, and a 500 ms clock beside it while connected.
 
 ## radio: two player states with no way into them
 
@@ -56617,7 +56613,24 @@ the blanket `#![allow(dead_code)]` that used to cover the file.
 The sink available today is the clipboard, which is what `apps/credmanager`'s
 export wants too -- worth doing both the same way when either is done.
 
-## regextester: the pattern library and the history have no UI
+## ~~regextester: the pattern library and the history have no UI~~ -- DONE 2026-09-25 (lane E)
+
+**Resolved.** The library is wired: a row's Use button, a double press or
+Enter puts its pattern in the tester; Save… (Ctrl+S) asks for a name in a
+dialog -- the "modal to ask in" below -- and keeps the pattern *with its
+flags* in the user's settings (`regextester.yaml`, `library: <name>:
+{pattern, flags}`), so it outlives the window; a saved pattern has a Delete
+button. `MAX_LIBRARY_ENTRIES` is enforced and says so when reached.
+
+**The history was removed rather than wired** (judgment call, lane E): nothing
+the program advertises promises one -- the module doc lists a library, not a
+history -- and the question below about *when* a pattern counts as tried had
+no answer that was not noise (every prefix) or guesswork (an idle clock the
+app does not otherwise need). Saving is the explicit act of keeping a
+pattern. If a history is wanted, it is a feature to design, with that
+question answered first.
+
+The original entry, for the record:
 
 `App::save_to_library`, `load_library_entry` and `add_to_history` have no
 callers, so the library the module doc advertises ("Regex library (save/load
@@ -58624,6 +58637,136 @@ where a `ScanResult` is appended, and its test has to push entries *through
 that path* rather than through a call that refuses. The shape to avoid is the
 one just removed: a bound asserted over a collection that nothing fills is a
 test of the fixture, not of the bound.
+
+## Lane E — applications (apps/**, randrange/**)
+
+### Judgment Calls
+
+- **A terminal whose shell exits cleanly closes its window; any other ending
+  leaves the window open with the reason on it.** (2026-09-24,
+  `apps/terminal/src/main.rs` -> `TerminalState::drain_child`, the
+  `exit.is_clean()` branch, and `close_requested` in `App::on_event`.)
+  `exit` at a prompt is how a user closes a terminal, and a window left open
+  over a finished shell has to be closed a second time; a shell that crashed
+  or was killed is the case the user most needs to read about, so that window
+  stays and says "the shell was killed by SIGKILL (signal 9)". This is the
+  policy Windows Terminal calls "graceful" and macOS Terminal "close if the
+  shell exited cleanly". The alternatives: always close (xterm, the GNOME and
+  KDE defaults -- loses the crash message), or never close (every `exit` needs
+  a second close). Reversing it is one branch. User-visible, so the operator
+  may want it the other way; nothing else depends on it.
+
+- **Text a program marks blinking (SGR 5) blinks.** (2026-09-25,
+  `apps/terminal/src/lib.rs` -> `TerminalState::tick`, `text_blink_on`, the
+  guard in `draw_cells`.) Half a second lit, half a second not, on a clock
+  of its own that runs only while blinking text is on screen. It was recorded
+  and drawn steady, and the write-only-field gate's baseline said whether to
+  blink at all was "a taste question". Blinking is what VT100, xterm, VTE and
+  Windows Terminal do; the alternatives are drawing it bold or bright (xterm's
+  `showBlinkAsBold`) or ignoring it. Blinking can trouble some readers, so a
+  setting to turn it off would be the next step if anyone asks; reversing it
+  is the one guard in `draw_cells`.
+
+- **The habit tracker keeps its record in the settings directory.**
+  (2026-09-25, `apps/habits/src/main.rs` -> `CONFIG_NAME`, `store_habit`,
+  `load_habits`.) Check-ins are a record of the user's days -- data, not
+  configuration -- and the XDG layout puts data under `$XDG_DATA_HOME`
+  (`~/.local/share`), not `~/.config`. They go through `settingsfile`
+  (`~/.config/slateos/habits.yaml`) because it is the tree's one
+  comment-preserving, atomically written YAML store and it has no
+  data-directory twin; the regex tester's library and the file search's saved
+  searches already live there on the same reasoning. The cost: anything that
+  treats `~/.config` as "preferences" -- a reset, a selective backup -- treats
+  the record the same way. If the operator wants the split, the fix is a
+  data-directory twin of `settingsfile` (lane C's crate) and a one-time move
+  of those three files; `CONFIG_NAME`'s load and store are the only call
+  sites here. The same goes for `apps/flashcards`, whose decks and review
+  history are a directory of deck files under the settings directory
+  (`library_dir`) -- a record of study, not a preference -- and for
+  `apps/finance`, whose ledger is `finance/ledger.txt` there (`ledger_path`;
+  its format is `design-decisions.md` §1202) -- a record of money, and the
+  one of the three a careless "reset my settings" would cost most.
+
+- **A slide deck is a YAML file named `.slides`.** (2026-09-25,
+  `apps/slides/src/main.rs` -> `deck_document`, `deck_from_document`,
+  `DECK_FORMAT`.) YAML because it is the tree's format for anything a person
+  might open in an editor and `yamldoc` already reads and writes it
+  faithfully; versioned under `slateos-slides: 1` so a later format is refused
+  rather than half-read. The alternative -- reading back our own HTML export --
+  would tie the editor to a presentation format. The extension is new and no
+  file association names it yet (`apps/fileassoc`).
+
+- **Tab walks a slide's elements; it no longer switches views.** (2026-09-25,
+  `apps/slides/src/main.rs` -> `handle_command_key`.) Nothing else reached an
+  element a layout had made, and Tab is how every slide editor selects the
+  next object. Views keep `1` and `2` (and the toolbar). Reversing it is one
+  arm, but then something else must select elements by key.
+
+- **Slides opens on one title slide, not the six-slide sample.** (2026-09-25,
+  `apps/slides/src/main.rs` -> `main`.) The sample existed because it was the
+  only way five of the six layouts could appear; Ctrl+M reaches them all now,
+  and an editor that opens on someone else's deck makes every new deck start
+  with five deletions.
+
+- **A diagram is a YAML file named `.diagram`, a whiteboard one named
+  `.whiteboard`.** (2026-09-25, `apps/diagram/src/main.rs` ->
+  `diagram_document`, `diagram_from_document`; `apps/whiteboard/src/main.rs`
+  -> `board_document`, `board_from_document`.) The same reasoning as the
+  slide deck's `.slides` above: YAML is the tree's format for anything a
+  person might open in an editor, `yamldoc` reads and writes it faithfully,
+  and a version key (`slateos-diagram: 1`, `slateos-whiteboard: 1`) makes a
+  later format a refusal rather than a half-reading. Neither extension has a
+  file association yet (`apps/fileassoc`). What each wrote before -- an SVG,
+  or the diagram's shape-only JSON -- stays as an export, Ctrl+E. A file
+  holding a shape of a kind this version does not know is read with that
+  shape left out, as slides leaves out an unknown element; the alternative,
+  refusing the whole file as the finance ledger does (design-decisions §1202),
+  is safer against a save deleting what was not understood, and is the one to
+  switch to if the operator prefers it. Meanwhile the opening says how many
+  things it left out ("Opened ..., leaving out 2 thing(s) this version cannot
+  read"), because a save after it writes the file without them; each reader
+  counts them in `left_out`, which is also where a refusal would go.
+
+- **The JSON viewer saves the document's text, not the raw view's
+  formatting.** (2026-09-25, `apps/jsonviewer/src/main.rs` ->
+  `save_to_own_file`, `save_to`, `Document::regenerate_input`.) What is
+  written is `input` -- the file as read, or as a tree edit left it -- never
+  the raw view's re-indented or minified rendering, so the `I` and `M` keys
+  stay view settings and saving an unedited file changes nothing. A tree edit
+  regenerates the text from the parsed value (it cannot do otherwise), and
+  does so in the text's own layout: one line stays one line, an indented file
+  keeps its indent, a final newline is kept or left off. The spacing inside a
+  line is not remembered. The alternative -- "save what the raw view shows" --
+  would make M-then-Ctrl+S a way to minify a file, and would also silently
+  reformat every file saved after a glance at the raw view. If the operator
+  wants reformatting, it belongs in an explicit "Format document" command;
+  reversing this is the one `as_bytes()` in each save function.
+
+### Deferred, each with the condition that un-defers it
+
+- **The terminal polls for its shell's output** -- 16 ms while the shell is
+  talking, 50 ms once it has been quiet for 2 s -- because `oswindow`'s loop
+  can wake an application only for compositor events and a clock. A terminal
+  at a prompt therefore wakes twenty times a second for nothing, and the first
+  keystroke after a pause waits up to 50 ms for its echo. The proper fix is a
+  waker in the loop: `requests/e-f-wake-an-application-for-its-own-descriptor.md`.
+  **Trigger:** that request lands. Then the reader thread in
+  `apps/terminal/src/child.rs` wakes the loop per chunk, and `ACTIVE_POLL_MS`,
+  `IDLE_POLL_MS`, `ACTIVE_WINDOW_MS` and their test go. Tracked as
+  `known-issues.md` -> `[E] The terminal polls for its shell's output`.
+
+- **The terminal has never run on SlateOS.** Its real child -- `forkpty` plus
+  `execve` through `libcall::pty` -- is tested only on a Linux host against
+  glibc, because no graphical application runs on SlateOS yet (nothing puts a
+  compositor or an app on the rootfs). **Trigger:** the first GUI application
+  runs on SlateOS. Then check, on the real kernel: the prompt appears (the
+  shell sees a terminal); `stty size` follows a window resize (our
+  `TIOCSWINSZ` -> `SYS_PTY_SET_WINSIZE` -> `SIGWINCH`); `^C` interrupts
+  `sleep 30`; `exit 3` is reported as status 3; and closing the window ends
+  the shell. The one behaviour most likely to differ from Linux: what a read
+  of the master returns once the slave is closed (Linux says `EIO`; the reader
+  thread treats `EIO`, any other error and end-of-file alike, so any of them
+  ends the stream).
 
 ## Brightness has a designed syscall and no implementation (lane A, 2026-09-21)
 

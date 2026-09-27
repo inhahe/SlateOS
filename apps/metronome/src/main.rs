@@ -3,6 +3,17 @@
 //! A musical metronome with BPM control, time signature selection,
 //! visual beat indicator, tap tempo, accent patterns, and subdivisions.
 //!
+//! **It is silent, and says so.** No application can play sound here yet
+//! (`known-issues.md` -> `[E] Applications can neither record nor play
+//! sound`), so the beat is shown -- a light per beat, accents in their own
+//! colour -- and the window says it is not heard, before anybody starts it
+//! and goes looking for a muted speaker.
+//!
+//! Every control answers the pointer as well as its key: the tempo steps and
+//! turns under the wheel, a press on a beat accents it (all twelve of a 12/8
+//! measure, where the digits reach nine), and the practice settings are rows
+//! that Up and Down walk and Left and Right change.
+//!
 //! The window, the connection and the event loop are `oswindow::app`'s; this
 //! file supplies only what is actually a metronome's own — what to do with an
 //! event, what to draw, and how often it needs the clock. See
@@ -29,9 +40,11 @@ use appearance::Surface;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use guitk::event::{Event, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::wheel;
 use oswindow::app::{App, Response};
 
 // ---------------------------------------------------------------------------
@@ -191,6 +204,100 @@ fn tempo_name(bpm: u32) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// What the window says, and the keys it answers
+// ---------------------------------------------------------------------------
+
+/// What the window says under its title: this metronome is seen, not heard.
+///
+/// A metronome is a sound. One that flashes in silence is still worth
+/// watching, but a user who hears nothing would otherwise go looking for a
+/// muted speaker.
+const SILENT_LINE: &str =
+    "Silent: no application can play sound here yet, so the beat is shown, not heard.";
+
+/// The keys this window answers, raised by F1 or `?`.
+///
+/// The main screen drew six lines of key hints and no list of its own; the
+/// practice settings named theirs in their labels. One list now, and one
+/// test that every key on it is answered.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Space", "Start or stop"),
+    ("Up / Down", "One beat a minute faster or slower"),
+    ("Shift+Up / Shift+Down", "Ten faster or slower"),
+    ("T", "Tap the tempo"),
+    ("Backspace", "Forget the taps"),
+    ("G", "Next time signature"),
+    ("S", "Next subdivision"),
+    ("1-9", "Accent a beat, or stop accenting it"),
+    ("P", "Practice mode on or off"),
+    ("R", "Stop, and count from the top"),
+    (
+        "Enter",
+        "Practice settings: Up / Down choose, Left / Right change",
+    ),
+    ("F1 / ?", "This list"),
+];
+
+/// A row of the practice settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingRow {
+    Practice,
+    Start,
+    Target,
+    Increment,
+    Measures,
+}
+
+/// The rows, in the order Up and Down walk them.
+const SETTING_ROWS: [SettingRow; 5] = [
+    SettingRow::Practice,
+    SettingRow::Start,
+    SettingRow::Target,
+    SettingRow::Increment,
+    SettingRow::Measures,
+];
+
+impl SettingRow {
+    /// What the row is called.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Practice => "Practice mode",
+            Self::Start => "Start at",
+            Self::Target => "Speed up to",
+            Self::Increment => "Speed up by",
+            Self::Measures => "Every",
+        }
+    }
+}
+
+/// What a press can land on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Help,
+    HelpCard,
+    Play,
+    Reset,
+    Tap,
+    ForgetTaps,
+    Slower10,
+    Slower,
+    Faster,
+    Faster10,
+    /// The tempo itself: the wheel turns it.
+    Bpm,
+    TimeSignature,
+    Subdivision,
+    /// A beat of the measure, from 0: a press accents it.
+    Beat(usize),
+    Practice,
+    Settings,
+    Back,
+    Row(SettingRow),
+    StepBack(SettingRow),
+    StepForward(SettingRow),
+}
+
+// ---------------------------------------------------------------------------
 // Main app
 // ---------------------------------------------------------------------------
 
@@ -232,6 +339,16 @@ struct MetronomeApp {
 
     // View
     show_settings: bool,
+    /// The practice setting the arrows are on.
+    setting_row: SettingRow,
+    /// Whether the list of keys is up.
+    show_help: bool,
+    hover: Option<Target>,
+    last_hits: Vec<(Target, Rect)>,
+    wheel: wheel::Accumulator,
+    /// The window's size, as last drawn.
+    width: f32,
+    height: f32,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -275,6 +392,13 @@ impl MetronomeApp {
             practice_measures: 4,
             practice_measure_count: 0,
             show_settings: false,
+            setting_row: SettingRow::Practice,
+            show_help: false,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
+            width: 560.0,
+            height: 740.0,
         }
     }
 
@@ -481,14 +605,24 @@ impl MetronomeApp {
         }
     }
 
-    fn handle_key(&mut self, event: &KeyEvent) {
+    /// Handle a key; answers whether the window has anything new to show.
+    fn handle_key(&mut self, event: &KeyEvent) -> EventResult {
         if !event.pressed {
-            return;
+            return EventResult::Ignored;
         }
-
+        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal: Space would start the beat from behind the card.
+            if matches!(event.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         if self.show_settings {
-            self.handle_settings(event);
-            return;
+            return self.handle_settings(event);
         }
 
         match event.key {
@@ -520,16 +654,9 @@ impl MetronomeApp {
                 self.practice_mode = !self.practice_mode;
             }
             Key::Enter => {
-                self.show_settings = !self.show_settings;
+                self.show_settings = true;
             }
-            Key::R => {
-                self.playing = false;
-                self.current_beat = 0;
-                self.current_sub = 0;
-                self.total_beats = 0;
-                self.practice_measure_count = 0;
-                self.beat_flash_ms = 0;
-            }
+            Key::R => self.reset(),
             Key::Num1
             | Key::Num2
             | Key::Num3
@@ -539,53 +666,52 @@ impl MetronomeApp {
             | Key::Num7
             | Key::Num8
             | Key::Num9 => {
-                let beat_num = match event.key {
-                    Key::Num1 => 0,
-                    Key::Num2 => 1,
-                    Key::Num3 => 2,
-                    Key::Num4 => 3,
-                    Key::Num5 => 4,
-                    Key::Num6 => 5,
-                    Key::Num7 => 6,
-                    Key::Num8 => 7,
-                    Key::Num9 => 8,
-                    _ => 0,
-                };
-                self.toggle_accent(beat_num);
+                let beat =
+                    usize::try_from(digit(event.key).saturating_sub(1)).unwrap_or(usize::MAX);
+                if beat >= self.accents.len() {
+                    return EventResult::Ignored;
+                }
+                self.toggle_accent(beat);
             }
-            _ => {}
+            _ => return EventResult::Ignored,
         }
+        EventResult::Consumed
     }
 
-    fn handle_settings(&mut self, event: &KeyEvent) {
+    /// Stop, and count from the top.
+    fn reset(&mut self) {
+        self.playing = false;
+        self.current_beat = 0;
+        self.current_sub = 0;
+        self.total_beats = 0;
+        self.practice_measure_count = 0;
+        self.beat_flash_ms = 0;
+    }
+
+    /// Keys on the practice settings: Up and Down choose a setting, Left and
+    /// Right change it, a digit names the measures outright.
+    fn handle_settings(&mut self, event: &KeyEvent) -> EventResult {
         match event.key {
             Key::Escape | Key::Enter => {
                 self.show_settings = false;
             }
-            Key::Up if self.practice_mode => {
-                self.practice_target_bpm = self.practice_target_bpm.saturating_add(10).min(MAX_BPM);
+            Key::Up | Key::Down => {
+                let at = SETTING_ROWS
+                    .iter()
+                    .position(|r| *r == self.setting_row)
+                    .unwrap_or(0);
+                let next = if event.key == Key::Down {
+                    at.saturating_add(1)
+                        .min(SETTING_ROWS.len().saturating_sub(1))
+                } else {
+                    at.saturating_sub(1)
+                };
+                self.setting_row = SETTING_ROWS
+                    .get(next)
+                    .copied()
+                    .unwrap_or(SettingRow::Practice);
             }
-            Key::Down if self.practice_mode => {
-                self.practice_target_bpm = self.practice_target_bpm.saturating_sub(10).max(MIN_BPM);
-            }
-            // How much faster, and how often. Both were drawn in this panel --
-            // "Practice Increment: +10 BPM", "Practice Measures: 4" -- directly
-            // under a line that advertises its own keys, and neither had a
-            // writer anywhere: practice mode always sped up by ten every four
-            // measures. Being laid out as a group with the adjustable target
-            // is what made them read as settings rather than as a description.
-            Key::Right if self.practice_mode => {
-                self.practice_increment = self
-                    .practice_increment
-                    .saturating_add(1)
-                    .min(MAX_PRACTICE_INCREMENT);
-            }
-            Key::Left if self.practice_mode => {
-                self.practice_increment = self
-                    .practice_increment
-                    .saturating_sub(1)
-                    .max(MIN_PRACTICE_INCREMENT);
-            }
+            Key::Left | Key::Right => self.step_setting(self.setting_row, event.key == Key::Right),
             Key::Num1
             | Key::Num2
             | Key::Num3
@@ -594,45 +720,199 @@ impl MetronomeApp {
             | Key::Num6
             | Key::Num7
             | Key::Num8
-            | Key::Num9
-                if self.practice_mode =>
-            {
+            | Key::Num9 => {
                 // A digit names the count outright. Stepping to nine with an
                 // arrow is eight keypresses for a number the user already
                 // knows.
-                let n = match event.key {
-                    Key::Num1 => 1,
-                    Key::Num2 => 2,
-                    Key::Num3 => 3,
-                    Key::Num4 => 4,
-                    Key::Num5 => 5,
-                    Key::Num6 => 6,
-                    Key::Num7 => 7,
-                    Key::Num8 => 8,
-                    _ => 9,
-                };
-                self.practice_measures = n.clamp(MIN_PRACTICE_MEASURES, MAX_PRACTICE_MEASURES);
+                self.practice_measures =
+                    digit(event.key).clamp(MIN_PRACTICE_MEASURES, MAX_PRACTICE_MEASURES);
+                self.setting_row = SettingRow::Measures;
             }
-            _ => {}
+            _ => return EventResult::Ignored,
         }
+        EventResult::Consumed
+    }
+
+    /// Change one practice setting a step.
+    ///
+    /// The start tempo had no writer anywhere: practice mode always began at
+    /// 80, drawn as "Practice: 80 -> 160 BPM" beside settings that could be
+    /// changed. A start above the target pulls the target up with it, and a
+    /// target below the start pulls the start down, so the pair always
+    /// describes a climb.
+    fn step_setting(&mut self, row: SettingRow, forward: bool) {
+        let step = |value: u32, by: u32, low: u32, high: u32| {
+            if forward {
+                value.saturating_add(by).min(high)
+            } else {
+                value.saturating_sub(by).max(low)
+            }
+        };
+        match row {
+            SettingRow::Practice => self.practice_mode = !self.practice_mode,
+            SettingRow::Start => {
+                self.practice_start_bpm = step(self.practice_start_bpm, 5, MIN_BPM, MAX_BPM);
+                self.practice_target_bpm = self.practice_target_bpm.max(self.practice_start_bpm);
+            }
+            SettingRow::Target => {
+                self.practice_target_bpm = step(self.practice_target_bpm, 5, MIN_BPM, MAX_BPM);
+                self.practice_start_bpm = self.practice_start_bpm.min(self.practice_target_bpm);
+            }
+            SettingRow::Increment => {
+                self.practice_increment = step(
+                    self.practice_increment,
+                    1,
+                    MIN_PRACTICE_INCREMENT,
+                    MAX_PRACTICE_INCREMENT,
+                );
+            }
+            SettingRow::Measures => {
+                self.practice_measures = step(
+                    self.practice_measures,
+                    1,
+                    MIN_PRACTICE_MEASURES,
+                    MAX_PRACTICE_MEASURES,
+                );
+            }
+        }
+    }
+
+    /// A setting's value, as its row shows it.
+    fn setting_value(&self, row: SettingRow) -> String {
+        match row {
+            SettingRow::Practice => String::from(if self.practice_mode { "On" } else { "Off" }),
+            SettingRow::Start => format!("{} BPM", self.practice_start_bpm),
+            SettingRow::Target => format!("{} BPM", self.practice_target_bpm),
+            SettingRow::Increment => format!("+{} BPM", self.practice_increment),
+            SettingRow::Measures => format!(
+                "{} measure{}",
+                self.practice_measures,
+                if self.practice_measures == 1 { "" } else { "s" }
+            ),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The pointer
+    // -----------------------------------------------------------------------
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame(self.width, self.height).hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                match self
+                    .frame(self.width, self.height)
+                    .hit_test(event.x, event.y)
+                {
+                    Some(target) => self.press(target),
+                    None => EventResult::Ignored,
+                }
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // The wheel over the tempo turns it, a beat a minute a notch.
+            MouseEventKind::Scroll { dy, .. } => {
+                if self.target_at(event.x, event.y) != Some(Target::Bpm) {
+                    return EventResult::Ignored;
+                }
+                // One a notch, whatever the rows a notch scrolls a list:
+                // that setting is about lists, and a tempo is not one.
+                let notches = self.wheel.rows_at(dy, 1.0);
+                if notches == 0 {
+                    return EventResult::Ignored;
+                }
+                // A notch away from the user is `dy > 0`, which `rows`
+                // answers as a negative count: that is faster.
+                let by = u32::try_from(notches.unsigned_abs()).unwrap_or(u32::MAX);
+                if notches < 0 {
+                    self.increase_bpm(by);
+                } else {
+                    self.decrease_bpm(by);
+                }
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A press on `target`.
+    fn press(&mut self, target: Target) -> EventResult {
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::Play => self.toggle_play(),
+            Target::Reset => self.reset(),
+            Target::Tap => self.tap_tempo(self.now_ms),
+            Target::ForgetTaps => self.clear_tap(),
+            Target::Slower10 => self.decrease_bpm(10),
+            Target::Slower => self.decrease_bpm(1),
+            Target::Faster => self.increase_bpm(1),
+            Target::Faster10 => self.increase_bpm(10),
+            Target::Bpm => return EventResult::Ignored,
+            Target::TimeSignature => self.cycle_time_signature(),
+            Target::Subdivision => self.subdivision = self.subdivision.cycle(),
+            Target::Beat(i) => self.toggle_accent(i),
+            Target::Practice => self.practice_mode = !self.practice_mode,
+            Target::Settings => self.show_settings = true,
+            Target::Back => self.show_settings = false,
+            Target::Row(row) => {
+                if self.setting_row == row {
+                    return EventResult::Ignored;
+                }
+                self.setting_row = row;
+            }
+            Target::StepBack(row) | Target::StepForward(row) => {
+                self.setting_row = row;
+                self.step_setting(row, matches!(target, Target::StepForward(_)));
+            }
+        }
+        EventResult::Consumed
     }
 
     // -----------------------------------------------------------------------
     // Rendering
     // -----------------------------------------------------------------------
 
-    /// The drawing itself, as a flat command list.
+    /// The drawing itself, as a flat command list, for the tests that read
+    /// what was drawn.
     ///
-    /// Kept separate from `App::render` — which wraps this in a `RenderTree` —
-    /// because the tests assert over the commands, and because an inherent
-    /// `render` alongside the trait's would silently win the method lookup:
-    /// every existing `app.render(600.0, 800.0)` would keep compiling while
-    /// testing the wrong function.
+    /// Not named `render`: an inherent `render` beside the trait's would
+    /// silently win the method lookup, and every `app.render(600.0, 800.0)`
+    /// would keep compiling while testing the wrong function.
+    #[cfg(test)]
     fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+        self.frame(width, height).into_tree().commands
+    }
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    /// The whole window at `width` by `height`, and where every control in it
+    /// is.
+    fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -640,19 +920,76 @@ impl MetronomeApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
         if self.show_settings {
-            self.render_settings(&mut cmds, width);
+            self.render_settings(&mut f, width);
         } else {
-            self.render_main(&mut cmds, width);
+            self.render_main(&mut f, width);
         }
-
-        cmds
+        self.button(
+            &mut f,
+            Rect::new(width - 48.0, 16.0, 32.0, 28.0),
+            "?",
+            Target::Help,
+            true,
+        );
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, width, height));
+        }
+        f
     }
 
-    fn render_main(&self, cmds: &mut Vec<RenderCommand>, _width: f32) {
-        // Title
-        cmds.push(RenderCommand::Text {
+    /// A button: a press on it does `target`; a disabled one takes no press.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
+            corner_radii: CornerRadii::all(6.0),
+        });
+        f.push(RenderCommand::Text {
+            x: guitk::text::center_x(label, rect.x + rect.w / 2.0, 13.0, FontWeightHint::Regular)
+                .max(rect.x + 4.0),
+            y: rect.y + (rect.h - 13.0) / 2.0,
+            text: label.to_string(),
+            font_size: 13.0,
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 8.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
+    }
+
+    fn render_main(&self, f: &mut Frame<Target>, width: f32) {
+        f.push(RenderCommand::Text {
             x: 30.0,
             y: 15.0,
             text: String::from("Metronome"),
@@ -662,14 +999,12 @@ impl MetronomeApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-
-        // Playing indicator
         let (status_text, status_color) = if self.playing {
             ("● PLAYING", self.palette.green)
         } else {
             ("○ STOPPED", self.palette.overlay0)
         };
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 250.0,
             y: 22.0,
             text: String::from(status_text),
@@ -679,13 +1014,25 @@ impl MetronomeApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        // That it is silent, before anybody starts it and hears nothing.
+        f.push(RenderCommand::Text {
+            x: 30.0,
+            y: 54.0,
+            text: String::from(SILENT_LINE),
+            color: self.palette.ink(self.palette.yellow),
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((width - 60.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
 
-        // BPM display
+        // The tempo, which the wheel turns, and the buttons that step it.
+        let card = Rect::new(30.0, 78.0, 250.0, 90.0);
         self.palette
-            .push_surface(cmds, 30.0, 55.0, 250.0, 90.0, 12.0, Surface::Card);
-        cmds.push(RenderCommand::Text {
+            .push_surface(f, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
+        f.push(RenderCommand::Text {
             x: 60.0,
-            y: 65.0,
+            y: 88.0,
             text: self.bpm.to_string(),
             color: self.palette.text,
             font_size: 56.0,
@@ -693,9 +1040,9 @@ impl MetronomeApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 200.0,
-            y: 95.0,
+            y: 118.0,
             text: String::from("BPM"),
             color: self.palette.subtext0,
             font_size: 18.0,
@@ -703,11 +1050,42 @@ impl MetronomeApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        f.hit(Target::Bpm, card);
+        for (i, (label, target, enabled)) in [
+            ("\u{2212}10", Target::Slower10, self.bpm > MIN_BPM),
+            ("\u{2212}1", Target::Slower, self.bpm > MIN_BPM),
+            ("+1", Target::Faster, self.bpm < MAX_BPM),
+            ("+10", Target::Faster10, self.bpm < MAX_BPM),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.button(
+                f,
+                Rect::new(296.0 + i as f32 * 60.0, 86.0, 54.0, 30.0),
+                label,
+                target,
+                enabled,
+            );
+        }
+        self.button(
+            f,
+            Rect::new(296.0, 126.0, 114.0, 30.0),
+            "Tap",
+            Target::Tap,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(416.0, 126.0, 114.0, 30.0),
+            "Forget taps",
+            Target::ForgetTaps,
+            !self.tap_times_ms.is_empty(),
+        );
 
-        // Tempo name
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 30.0,
-            y: 150.0,
+            y: 176.0,
             text: String::from(tempo_name(self.bpm)),
             color: self.palette.ink(self.palette.mauve),
             font_size: 18.0,
@@ -716,35 +1094,45 @@ impl MetronomeApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Time signature & subdivision
-        let info_y = 175.0;
-        cmds.push(RenderCommand::Text {
+        // What is counted: a press steps each on, as G and S do.
+        self.button(
+            f,
+            Rect::new(30.0, 206.0, 170.0, 30.0),
+            &format!("Time: {}  \u{25B8}", self.time_signature.display()),
+            Target::TimeSignature,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(206.0, 206.0, 170.0, 30.0),
+            &format!("Subdivision: {}  \u{25B8}", self.subdivision.name()),
+            Target::Subdivision,
+            true,
+        );
+        f.push(RenderCommand::Text {
             x: 30.0,
-            y: info_y,
+            y: 246.0,
             text: format!(
-                "Time: {}  |  Sub: {}  |  Interval: {}ms",
-                self.time_signature.display(),
-                self.subdivision.name(),
+                "A tick every {} ms  \u{00B7}  a press on a beat accents it",
                 self.beat_interval_ms()
             ),
             color: self.palette.subtext0,
-            font_size: 14.0,
+            font_size: 13.0,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((width - 60.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
 
-        // Beat indicator (circles for each beat in the measure)
-        let beat_y = 215.0;
+        // The beats of the measure; a press accents one, or stops accenting it
+        // -- every beat, where the digits reach only the first nine.
+        let beat_y = 272.0;
         let beats = self.time_signature.beats_per_measure;
         let circle_size = 36.0_f32.min(400.0 / beats as f32 - 8.0);
         let start_x = 30.0;
-
         for i in 0..beats {
             let cx = start_x + i as f32 * (circle_size + 8.0);
             let is_current = self.playing && i == self.current_beat && self.current_sub == 0;
             let is_accented = self.accents.get(i as usize).copied().unwrap_or(false);
-
             let color = if is_current && self.beat_flash_ms > 0 {
                 if is_accented {
                     self.palette.red
@@ -756,8 +1144,7 @@ impl MetronomeApp {
             } else {
                 self.palette.surface0
             };
-
-            cmds.push(RenderCommand::FillRect {
+            f.push(RenderCommand::FillRect {
                 x: cx,
                 y: beat_y,
                 width: circle_size,
@@ -765,9 +1152,7 @@ impl MetronomeApp {
                 color,
                 corner_radii: CornerRadii::all(circle_size / 2.0),
             });
-
-            // Beat number
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: cx + circle_size / 2.0 - 5.0,
                 y: beat_y + circle_size / 2.0 - 8.0,
                 text: i.saturating_add(1).to_string(),
@@ -781,16 +1166,19 @@ impl MetronomeApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
+            f.hit(
+                Target::Beat(i as usize),
+                Rect::new(cx, beat_y, circle_size, circle_size),
+            );
         }
 
-        // Subdivision indicators
         if self.subdivision != Subdivision::None && self.playing {
             let sub_y = beat_y + circle_size + 10.0;
             let subs = self.subdivision.subdivisions_per_beat();
             for s in 0..subs {
                 let sx = start_x + s as f32 * 14.0;
                 let is_current_sub = s == self.current_sub;
-                cmds.push(RenderCommand::FillRect {
+                f.push(RenderCommand::FillRect {
                     x: sx,
                     y: sub_y,
                     width: 10.0,
@@ -805,7 +1193,6 @@ impl MetronomeApp {
             }
         }
 
-        // Stats
         let stats_y = beat_y + circle_size + 40.0;
         if self.playing {
             let measure = self
@@ -813,7 +1200,7 @@ impl MetronomeApp {
                 .checked_div(u64::from(self.time_signature.beats_per_measure))
                 .unwrap_or(0)
                 .saturating_add(1);
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: 30.0,
                 y: stats_y,
                 text: format!(
@@ -831,11 +1218,10 @@ impl MetronomeApp {
             });
         }
 
-        // Practice mode indicator
         if self.practice_mode {
             self.palette
-                .push_surface(cmds, 30.0, stats_y + 25.0, 400.0, 30.0, 6.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
+                .push_surface(f, 30.0, stats_y + 25.0, 400.0, 30.0, 6.0, Surface::Card);
+            f.push(RenderCommand::Text {
                 x: 40.0,
                 y: stats_y + 30.0,
                 text: format!(
@@ -853,32 +1239,57 @@ impl MetronomeApp {
             });
         }
 
-        // Controls
-        let ctrl_y = stats_y + 65.0;
-        let controls = [
-            "Space: Play/Stop",
-            "↑/↓: BPM ±1 (Shift: ±10)",
-            "S: Subdivision  |  G: Time Sig",
-            "1-9: Toggle accent  |  P: Practice",
-            "T: Tap tempo  |  Backspace: Clear taps",
-            "R: Reset  |  Enter: Settings",
-        ];
-        for (i, line) in controls.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: 30.0,
-                y: ctrl_y + i as f32 * 18.0,
-                text: String::from(*line),
-                color: self.palette.subtext0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
+        let ctrl_y = stats_y + 70.0;
+        self.button(
+            f,
+            Rect::new(30.0, ctrl_y, 120.0, 34.0),
+            if self.playing {
+                "\u{25A0} Stop"
+            } else {
+                "\u{25B6} Start"
+            },
+            Target::Play,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(156.0, ctrl_y, 90.0, 34.0),
+            "Reset",
+            Target::Reset,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(252.0, ctrl_y, 140.0, 34.0),
+            if self.practice_mode {
+                "Practice: On"
+            } else {
+                "Practice: Off"
+            },
+            Target::Practice,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(398.0, ctrl_y, 120.0, 34.0),
+            "Settings\u{2026}",
+            Target::Settings,
+            true,
+        );
+        f.push(RenderCommand::Text {
+            x: 30.0,
+            y: ctrl_y + 48.0,
+            text: String::from("F1 or ? lists every key"),
+            color: self.palette.subtext0,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
     }
 
-    fn render_settings(&self, cmds: &mut Vec<RenderCommand>, _width: f32) {
-        cmds.push(RenderCommand::Text {
+    fn render_settings(&self, f: &mut Frame<Target>, width: f32) {
+        f.push(RenderCommand::Text {
             x: 30.0,
             y: 20.0,
             text: String::from("Metronome Settings"),
@@ -888,80 +1299,113 @@ impl MetronomeApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-
-        cmds.push(RenderCommand::Text {
-            x: 30.0,
-            y: 55.0,
-            text: String::from("Esc/Enter: Back"),
+        self.button(
+            f,
+            Rect::new(30.0, 58.0, 80.0, 28.0),
+            "Back",
+            Target::Back,
+            true,
+        );
+        f.push(RenderCommand::Text {
+            x: 122.0,
+            y: 64.0,
+            text: String::from(
+                "Up / Down choose a setting, Left / Right change it, 1-9 set the measures",
+            ),
             color: self.palette.subtext0,
-            font_size: 13.0,
+            font_size: 12.0,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((width - 152.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
 
-        let settings = [
-            (format!("BPM: {}", self.bpm), self.palette.text),
-            (
-                format!("Time Signature: {}", self.time_signature.display()),
-                self.palette.text,
-            ),
-            (
-                format!("Subdivision: {}", self.subdivision.name()),
-                self.palette.text,
-            ),
-            (
-                format!("Tempo: {}", tempo_name(self.bpm)),
-                self.palette.mauve,
-            ),
-            (
-                format!(
-                    "Practice Mode: {}",
-                    if self.practice_mode { "ON" } else { "OFF" }
-                ),
-                self.palette.yellow,
-            ),
-            (
-                format!(
-                    "Practice Target: {} BPM (↑/↓ to adjust)",
-                    self.practice_target_bpm
-                ),
-                self.palette.teal,
-            ),
-            (
-                format!(
-                    "Practice Increment: +{} BPM (left/right)",
-                    self.practice_increment
-                ),
-                self.palette.teal,
-            ),
-            (
-                format!("Practice Measures: {} (1-9)", self.practice_measures),
-                self.palette.teal,
-            ),
-        ];
-
-        for (i, (text, col)) in settings.iter().enumerate() {
+        for (i, row) in SETTING_ROWS.iter().enumerate() {
+            let y = 100.0 + i as f32 * 46.0;
+            let rect = Rect::new(30.0, y, (width - 60.0).min(470.0), 38.0);
+            let chosen = self.setting_row == *row;
             self.palette.push_surface(
-                cmds,
-                30.0,
-                80.0 + i as f32 * 38.0,
-                450.0,
-                32.0,
+                f,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
                 6.0,
-                Surface::Card,
+                if chosen {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
             );
-            cmds.push(RenderCommand::Text {
-                x: 45.0,
-                y: 86.0 + i as f32 * 38.0,
-                text: text.clone(),
-                color: *col,
+            f.hit(Target::Row(*row), rect);
+            f.push(RenderCommand::Text {
+                x: rect.x + 14.0,
+                y: y + 11.0,
+                text: String::from(row.label()),
+                color: self.palette.text,
                 font_size: 15.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(190.0),
+                overflow: TextOverflow::Ellipsis,
             });
+            let right = rect.x + rect.w;
+            self.button(
+                f,
+                Rect::new(right - 190.0, y + 5.0, 28.0, 28.0),
+                "\u{25C0}",
+                Target::StepBack(*row),
+                true,
+            );
+            f.push(RenderCommand::Text {
+                x: guitk::text::center_x(
+                    &self.setting_value(*row),
+                    right - 101.0,
+                    15.0,
+                    FontWeightHint::Bold,
+                ),
+                y: y + 11.0,
+                text: self.setting_value(*row),
+                color: self.palette.text,
+                font_size: 15.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(110.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            self.button(
+                f,
+                Rect::new(right - 40.0, y + 5.0, 28.0, 28.0),
+                "\u{25B6}",
+                Target::StepForward(*row),
+                true,
+            );
         }
+        f.push(RenderCommand::Text {
+            x: 30.0,
+            y: 100.0 + SETTING_ROWS.len() as f32 * 46.0 + 8.0,
+            text: String::from(
+                "Practice starts at the start tempo, and speeds up by the increase every so many measures until it reaches the target.",
+            ),
+            color: self.palette.subtext0,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((width - 60.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+}
+
+/// The number a digit key names.
+fn digit(key: Key) -> u32 {
+    match key {
+        Key::Num1 => 1,
+        Key::Num2 => 2,
+        Key::Num3 => 3,
+        Key::Num4 => 4,
+        Key::Num5 => 5,
+        Key::Num6 => 6,
+        Key::Num7 => 7,
+        Key::Num8 => 8,
+        Key::Num9 => 9,
+        _ => 0,
     }
 }
 
@@ -975,7 +1419,7 @@ impl App for MetronomeApp {
     }
 
     fn initial_size(&self) -> (u32, u32) {
-        (520, 720)
+        (560, 740)
     }
 
     /// The clock is asked for only while something is actually moving.
@@ -1007,16 +1451,9 @@ impl App for MetronomeApp {
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
-        match event {
-            // Redraw unconditionally on a key, without working out whether
-            // this particular key changed anything. A keystroke is one event
-            // at human speed, so an occasional wasted frame costs nothing; a
-            // tick is 60 a second, which is why that arm below does the work
-            // to answer honestly.
-            Event::Key(ke) => {
-                self.handle_key(ke);
-                Response::Redraw
-            }
+        let result = match event {
+            Event::Key(ke) => self.handle_key(ke),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             // Without this the metronome never beat: `tick` was correct and
             // tested, and nothing called it. known-issues.md lesson 45, and
             // lesson 47 for the shape it takes in a GUI app — the window still
@@ -1024,23 +1461,29 @@ impl App for MetronomeApp {
             // showing a beat counter frozen at one.
             Event::Tick { elapsed_ms } => {
                 if self.tick(*elapsed_ms) {
-                    Response::Redraw
+                    EventResult::Consumed
                 } else {
-                    Response::Idle
+                    EventResult::Ignored
                 }
             }
             // `Resize` and `ScaleChanged` are absent on purpose: the harness
             // redraws for those itself, because the frame on screen was drawn
             // at the old geometry whatever the app thinks. See
             // `oswindow::app::drive`.
-            _ => Response::Idle,
+            _ => EventResult::Ignored,
+        };
+        match result {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
         }
     }
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
-        RenderTree {
-            commands: self.render_commands(width, height),
-        }
+        self.width = width;
+        self.height = height;
+        let frame = self.frame(width, height);
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 }
 
@@ -1106,6 +1549,10 @@ mod tests {
     #[test]
     fn right_raises_the_practice_increment() {
         let mut app = practising();
+        for _ in 0..3 {
+            app.handle_key(&make_key(Key::Down));
+        }
+        assert_eq!(app.setting_row, SettingRow::Increment);
         let before = app.practice_increment;
 
         app.handle_key(&make_key(Key::Right));
@@ -1121,6 +1568,9 @@ mod tests {
     #[test]
     fn left_lowers_the_increment_and_stops_at_the_bottom() {
         let mut app = practising();
+        for _ in 0..3 {
+            app.handle_key(&make_key(Key::Down));
+        }
 
         for _ in 0..40 {
             app.handle_key(&make_key(Key::Left));
@@ -1146,20 +1596,69 @@ mod tests {
         assert_eq!(app.practice_measures, 7, "the digit did not set the count");
     }
 
-    /// Outside practice mode these keys are not taken.
+    /// The settings are set before practice mode is on -- they are what it
+    /// will do -- and practice mode is itself the first row.
+    ///
+    /// The keys used to do nothing with practice mode off, which left the
+    /// panel's values unchangeable until the mode they configure was already
+    /// running.
     #[test]
-    fn the_practice_keys_do_nothing_when_practice_mode_is_off() {
+    fn the_settings_can_be_set_before_practice_is_on() {
         let mut app = MetronomeApp::new();
         app.handle_key(&make_key(Key::Enter));
-        assert!(app.show_settings, "control: the panel is open");
         assert!(!app.practice_mode, "control: practice mode is off");
+        for _ in 0..3 {
+            app.handle_key(&make_key(Key::Down));
+        }
         let before = app.practice_increment;
-
         app.handle_key(&make_key(Key::Right));
+        assert_eq!(app.practice_increment, before + 1);
+        assert!(!app.practice_mode, "setting a value turned practice on");
+        for _ in 0..3 {
+            app.handle_key(&make_key(Key::Up));
+        }
+        assert_eq!(app.setting_row, SettingRow::Practice);
+        app.handle_key(&make_key(Key::Right));
+        assert!(app.practice_mode, "the first row turns practice on");
+    }
 
+    /// The start tempo can be set, and practice starts there.
+    ///
+    /// It had no writer: practice always began at 80 BPM, drawn as
+    /// "Practice: 80 -> 160 BPM" beside settings that could be changed.
+    #[test]
+    fn practice_starts_at_the_start_tempo_that_was_set() {
+        let mut app = MetronomeApp::new();
+        app.handle_key(&make_key(Key::Enter));
+        app.handle_key(&make_key(Key::Down));
+        assert_eq!(app.setting_row, SettingRow::Start);
+        for _ in 0..4 {
+            app.handle_key(&make_key(Key::Right));
+        }
+        assert_eq!(app.practice_start_bpm, 100);
+        app.handle_key(&make_key(Key::Escape));
+        app.handle_key(&make_key(Key::P));
+        app.handle_key(&make_key(Key::Space));
+        assert_eq!(app.bpm, 100, "practice did not start at the start tempo");
+    }
+
+    /// A start above the target pulls the target up, and a target below the
+    /// start pulls the start down: the pair always describes a climb.
+    #[test]
+    fn the_start_and_the_target_stay_in_order() {
+        let mut app = MetronomeApp::new();
+        app.practice_start_bpm = 150;
+        app.practice_target_bpm = 150;
+        app.step_setting(SettingRow::Start, true);
         assert_eq!(
-            app.practice_increment, before,
-            "the increment changed with practice mode off"
+            (app.practice_start_bpm, app.practice_target_bpm),
+            (155, 155)
+        );
+        app.step_setting(SettingRow::Target, false);
+        app.step_setting(SettingRow::Target, false);
+        assert_eq!(
+            (app.practice_start_bpm, app.practice_target_bpm),
+            (145, 145)
         );
     }
 
@@ -1176,7 +1675,7 @@ mod tests {
             })
             .collect();
 
-        for hint in ["(left/right)", "(1-9)"] {
+        for hint in ["Left / Right", "1-9"] {
             assert!(
                 text.iter().any(|t| t.contains(hint)),
                 "the panel never says {hint}: {text:?}"
@@ -1860,8 +2359,10 @@ mod tests {
         app.show_settings = true;
         app.practice_mode = true;
         let old_target = app.practice_target_bpm;
-        app.handle_key(&make_key(Key::Up));
-        assert_eq!(app.practice_target_bpm, old_target + 10);
+        app.handle_key(&make_key(Key::Down));
+        app.handle_key(&make_key(Key::Down));
+        app.handle_key(&make_key(Key::Right));
+        assert_eq!(app.practice_target_bpm, old_target + 5);
     }
 
     // --- Event handling ---
@@ -1952,6 +2453,192 @@ mod tests {
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Practice:")));
         assert!(has_practice);
+    }
+
+    // -- The pointer, the card and the silence -------------------------------------
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for MetronomeApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (560.0, 740.0);
+
+        fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+            self.frame(size.0, size.1)
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_mouse(&MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            })
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_key(key)
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_mouse(&MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            }))
+        }
+    }
+
+    fn texts(app: &MetronomeApp) -> Vec<String> {
+        app.render_commands(560.0, 740.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// It says it is silent, before anybody starts it and hears nothing.
+    #[test]
+    fn the_window_says_the_beat_is_not_heard() {
+        let app = MetronomeApp::new();
+        assert!(texts(&app).iter().any(|t| t == SILENT_LINE));
+        assert!(SILENT_LINE.contains("no application can play sound"));
+    }
+
+    /// **Every key the card advertises is answered**, on the main screen or
+    /// on the practice settings.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|settings| {
+                    let mut app = MetronomeApp::new();
+                    app.show_settings = settings;
+                    app.handle_key(&stroke) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// The card reaches the window, and nothing starts behind it.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = MetronomeApp::new();
+        app.handle_key(&make_key(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&texts(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        app.handle_key(&make_key(Key::Space));
+        assert!(!app.playing, "Space started the beat through the card");
+        app.handle_key(&make_key(Key::F1));
+        app.handle_key(&make_key(Key::Space));
+        assert!(app.playing, "control: Space starts it with the card down");
+    }
+
+    /// Every control answers the pointer.
+    #[test]
+    fn every_control_answers_the_pointer() {
+        let mut app = MetronomeApp::new();
+        probe::click(&mut app, Target::Faster);
+        assert_eq!(app.bpm, 121);
+        probe::click(&mut app, Target::Faster10);
+        assert_eq!(app.bpm, 131);
+        probe::click(&mut app, Target::Slower10);
+        probe::click(&mut app, Target::Slower);
+        assert_eq!(app.bpm, 120);
+        probe::click(&mut app, Target::Tap);
+        assert_eq!(app.tap_times_ms.len(), 1);
+        probe::click(&mut app, Target::ForgetTaps);
+        assert!(app.tap_times_ms.is_empty());
+        assert!(
+            probe::rect_of(&app, Target::ForgetTaps).is_none(),
+            "nothing to forget"
+        );
+        probe::click(&mut app, Target::TimeSignature);
+        assert_eq!(app.time_signature.display(), "5/4");
+        probe::click(&mut app, Target::Subdivision);
+        assert_eq!(app.subdivision, Subdivision::Eighth);
+        probe::click(&mut app, Target::Beat(1));
+        assert!(app.accents[1]);
+        probe::click(&mut app, Target::Play);
+        assert!(app.playing);
+        probe::click(&mut app, Target::Reset);
+        assert!(!app.playing);
+        probe::click(&mut app, Target::Practice);
+        assert!(app.practice_mode);
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help);
+        probe::click(&mut app, Target::HelpCard);
+        assert!(!app.show_help);
+        probe::click(&mut app, Target::Settings);
+        assert!(app.show_settings);
+        probe::click(&mut app, Target::Row(SettingRow::Measures));
+        assert_eq!(app.setting_row, SettingRow::Measures);
+        probe::click(&mut app, Target::StepForward(SettingRow::Start));
+        assert_eq!(
+            (app.practice_start_bpm, app.setting_row),
+            (85, SettingRow::Start)
+        );
+        probe::click(&mut app, Target::StepBack(SettingRow::Measures));
+        assert_eq!(app.practice_measures, 3);
+        probe::click(&mut app, Target::Back);
+        assert!(!app.show_settings);
+    }
+
+    /// A press accents any beat of the measure -- the twelfth of a 12/8 too,
+    /// which no digit reaches.
+    #[test]
+    fn a_press_accents_the_twelfth_beat() {
+        let mut app = MetronomeApp::new();
+        let twelve = COMMON_SIGNATURES
+            .iter()
+            .position(|s| s.beats_per_measure == 12)
+            .unwrap();
+        app.set_time_signature(twelve);
+        assert!(!app.accents[11]);
+        probe::click(&mut app, Target::Beat(11));
+        assert!(app.accents[11]);
+        assert_eq!(
+            app.handle_key(&make_key(Key::Num9)),
+            EventResult::Consumed,
+            "control: the ninth beat has a digit"
+        );
+        let mut four = MetronomeApp::new();
+        assert_eq!(
+            four.handle_key(&make_key(Key::Num9)),
+            EventResult::Ignored,
+            "a digit past the measure claimed to do something"
+        );
+    }
+
+    /// The wheel over the tempo turns it: away is faster.
+    #[test]
+    fn the_wheel_turns_the_tempo() {
+        let mut app = MetronomeApp::new();
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::Bpm, 1.0),
+            EventResult::Consumed
+        );
+        assert_eq!(app.bpm, 121);
+        probe::scroll_at_point(&mut app, Target::Bpm, -3.0);
+        assert_eq!(app.bpm, 118);
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::Play, 1.0),
+            EventResult::Ignored,
+            "the wheel turned the tempo from somewhere else"
+        );
     }
 
     // -- Following the user's theme -------------------------------------------

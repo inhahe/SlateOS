@@ -13,6 +13,7 @@
 //!   indexer config set <KEY> <VALUE>  Set a config option
 
 use globmatch::glob_match;
+use pathtext::ShowPath;
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
@@ -55,13 +56,14 @@ const INDEX_MAGIC: &[u8; 4] = b"OIDX";
 const INDEX_VERSION: u32 = 3;
 /// Bytes before the first entry: magic(4) + version(4) + count(8) +
 /// last_indexed(8) + dirs_scanned(8).
+/// The index file's header: magic, version and the scan counts. The loader
+/// reads it a field at a time; the tests cut files short against it.
+#[cfg(test)]
 const INDEX_HEADER_LEN: usize = 32;
 const DEFAULT_MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
 const DEFAULT_SCAN_INTERVAL: u64 = 3600; // 1 hour
 const DEFAULT_RESULT_LIMIT: usize = 50;
 const TRIGRAM_SIZE: usize = 3;
-const SCAN_BATCH_SIZE: usize = 500;
-const SCAN_BATCH_PAUSE_MS: u64 = 10;
 const FUZZY_MAX_DISTANCE: u32 = 2;
 
 // ============================================================================
@@ -417,9 +419,17 @@ impl FileType {
 ///
 /// One function so the scanner and the index loader cannot disagree about what
 /// a given path's key is — they did not, but nothing stopped them.
+///
+/// A name that is not text is keyed by its bytes, as escapes: a lossy decode
+/// gave two such names the same key, and a search found both or neither.
 fn filename_key(path: &Path) -> String {
     path.file_name()
-        .map(|f| f.to_string_lossy().into_owned())
+        .map(|f| {
+            f.to_str().map_or_else(
+                || quoting::escape_unprintable(f.as_encoded_bytes()),
+                str::to_owned,
+            )
+        })
         .unwrap_or_default()
 }
 
@@ -896,7 +906,7 @@ impl fmt::Display for SearchResult {
             "{} {:>10}  {}",
             type_char,
             format_size(self.entry.size),
-            self.entry.path.display()
+            self.entry.path.shown()
         )
     }
 }
@@ -1200,8 +1210,13 @@ fn scan(config: &Config) -> (FileIndex, ScanStats) {
 /// depth. (The previous `ends_with(excl) || contains(excl)` was the same test
 /// written twice — `contains` is true whenever `ends_with` is.)
 fn is_excluded_dir(dir: &Path, config: &Config) -> bool {
-    let dir_str = dir.to_string_lossy();
-    config.exclude_paths.iter().any(|e| dir_str.contains(e))
+    // A substring of the path's own bytes: nothing decoded, so a byte that is
+    // not text is one no exclusion names.
+    let dir = dir.as_os_str().as_encoded_bytes();
+    config
+        .exclude_paths
+        .iter()
+        .any(|e| !e.is_empty() && dir.windows(e.len()).any(|w| w == e.as_bytes()))
 }
 
 /// Recursively scan a directory.
@@ -1260,8 +1275,11 @@ fn scan_directory(
 
         // Check extension filters.
         if file_type == FileType::Regular {
-            if let Some(ext) = path.extension() {
-                let ext_str = format!(".{}", ext.to_string_lossy());
+            // An extension that is not text matches none of the filters,
+            // which are text: it is simply not filtered, where a lossy decode
+            // could have matched a filter holding U+FFFD.
+            if let Some(ext) = path.extension().and_then(std::ffi::OsStr::to_str) {
+                let ext_str = format!(".{ext}");
                 let ext_lower = ext_str.to_ascii_lowercase();
 
                 // Check exclude extensions.
@@ -1430,7 +1448,8 @@ struct ServiceControl {
 struct ServiceGuard {
     control: ServiceControl,
     /// Held solely for its lock; closing the handle is what releases it.
-    lock: fs::File,
+    /// Never read, hence the underscore -- holding it is the whole job.
+    _lock: fs::File,
 }
 
 impl ServiceControl {
@@ -1501,7 +1520,7 @@ impl ServiceControl {
 
         let guard = ServiceGuard {
             control: Self::new(self.dir.clone()),
-            lock,
+            _lock: lock,
         };
         // A stop request that outlived the service it was meant for would stop
         // this one before its first scan finished.
@@ -1566,7 +1585,7 @@ impl ServiceControl {
             if let Err(e) = fs::remove_file(&path)
                 && e.kind() != io::ErrorKind::NotFound
             {
-                eprintln!("warning: could not remove {}: {}", path.display(), e);
+                eprintln!("warning: could not remove {}: {}", path.shown(), e);
             }
         }
     }
@@ -2038,6 +2057,49 @@ mod tests {
     use scratchdir::ScratchDir;
 
     // ---- Configuration Tests ----
+
+    /// An exclusion is a substring of the directory's own bytes; an empty
+    /// one names nothing (it excluded everything, a contains("") that was
+    /// always true).
+    #[test]
+    fn an_excluded_directory_is_found_in_the_paths_bytes() {
+        let mut config = Config {
+            exclude_paths: vec![String::from("node_modules")],
+            ..Config::default()
+        };
+        assert!(is_excluded_dir(Path::new("/p/node_modules/x"), &config));
+        assert!(!is_excluded_dir(Path::new("/p/src"), &config));
+        config.exclude_paths = vec![String::new()];
+        assert!(
+            !is_excluded_dir(Path::new("/p/src"), &config),
+            "an empty exclusion excluded everything"
+        );
+    }
+
+    /// A name that is not text keys by its bytes: two such names are two keys.
+    #[test]
+    fn a_name_that_is_not_text_keys_by_its_bytes() {
+        assert_eq!(filename_key(Path::new("/d/notes.txt")), "notes.txt");
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_wide(&[0x0066, 0xD800]),
+                std::ffi::OsString::from_wide(&[0x0066, 0xD801]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_vec(vec![b'f', 0xFE]),
+                std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
+            )
+        };
+        let (ka, kb) = (filename_key(Path::new(&a)), filename_key(Path::new(&b)));
+        assert!(!ka.contains('\u{FFFD}'), "{ka:?}");
+        assert_ne!(ka, kb, "two names became one key");
+    }
 
     #[test]
     fn test_config_default() {

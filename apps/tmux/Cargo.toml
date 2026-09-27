@@ -8,6 +8,19 @@ edition = "2024"
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# Every pane is one of these: the terminal app's emulator, its link to a shell
+# on a kernel pseudo-terminal, its drawing. The multiplexer had an emulator of
+# its own, a fraction of this one, for as long as its panes ran nothing.
+terminal = { path = "../terminal" }
+# `WinSize`, the shape of a pane's size as its shell is told it.
+libcall = { path = "../../libcall" }
+# The status bar's clock goes through the zone rules, UTC until there is a
+# per-process zone to read, as every clock in the tree does.
+tzrules = { path = "../../tzrules" }
+
+[dev-dependencies]
+# `script::ScriptLink`, a shell made of a script, for the tests.
+termchild = { path = "../termchild", features = ["testing"] }
 
 [lints]
 workspace = true

@@ -23,6 +23,7 @@ use guitk::text;
 use guitk::theme::with_alpha;
 #[allow(unused_imports)]
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -65,17 +66,41 @@ const ANNOTATION_BLUE: Color = Color::rgb(50, 100, 220);
 // decision reviewable.
 const CROSSHAIR_COLOR: Color = Color::rgba(255, 255, 255, 150);
 
-/// Default save directory path.
-const DEFAULT_SAVE_DIR: &str = "~/Pictures/Screenshots/";
+/// Where captures are saved unless the user says otherwise: `Pictures/
+/// Screenshots` in the home directory (the temporary directory when there is
+/// no home), made on the first save.
+///
+/// It was the path `~/Pictures/Screenshots/`, taken literally: nothing
+/// expands a `~` but a shell, so the first save went to a folder called `~`
+/// under wherever the program was started -- or failed, that folder not
+/// existing.
+fn default_save_directory() -> PathBuf {
+    std::env::var_os("HOME")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+        .join("Pictures")
+        .join("Screenshots")
+}
 
-/// BMP file header size (BITMAPFILEHEADER).
-const BMP_FILE_HEADER_SIZE: u32 = 14;
-
-/// BMP info header size (BITMAPINFOHEADER).
-const BMP_INFO_HEADER_SIZE: u32 = 40;
-
-/// Bytes per pixel in our 32-bit BMP output.
-const BMP_BYTES_PER_PIXEL: u32 = 4;
+/// The time now, as `(year, month, day, hour, minute, second)` in UTC -- the
+/// zone every clock in this desktop reads until the system has one of its own
+/// (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`).
+fn now_utc() -> (u16, u8, u8, u8, u8, u8) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let secs = i64::try_from(secs).unwrap_or(i64::MAX);
+    let (year, month, day) = guitk::tzrules::civil_from_days(secs.div_euclid(86_400));
+    let into_day = secs.rem_euclid(86_400);
+    let part = |n: i64| u8::try_from(n).unwrap_or(0);
+    (
+        u16::try_from(year).unwrap_or(u16::MAX),
+        u8::try_from(month).unwrap_or(1),
+        u8::try_from(day).unwrap_or(1),
+        part(into_day / 3_600),
+        part(into_day % 3_600 / 60),
+        part(into_day % 60),
+    )
+}
 
 // ============================================================================
 // Capture mode
@@ -299,8 +324,9 @@ impl Capture {
             width,
             height,
             pixels,
-            // Placeholder timestamp; real implementation reads from system clock.
-            timestamp: (2026, 1, 1, 0, 0, 0),
+            // The moment it was taken. It was a fixed placeholder, 2026-01-01
+            // 00:00:00, so every capture had the same name.
+            timestamp: now_utc(),
         }
     }
 
@@ -322,7 +348,7 @@ impl Capture {
     pub fn default_filename(&self) -> String {
         let (year, month, day, hour, min, sec) = self.timestamp;
         format!(
-            "screenshot_{:04}{:02}{:02}_{:02}{:02}{:02}.bmp",
+            "screenshot_{:04}{:02}{:02}_{:02}{:02}{:02}.png",
             year, month, day, hour, min, sec
         )
     }
@@ -341,41 +367,42 @@ impl Capture {
 }
 
 // ============================================================================
-// BMP encoder
+// Saving a capture
 // ============================================================================
 
-/// Errors that can occur during BMP encoding.
+/// Why a capture could not be written.
 #[derive(Debug)]
-pub enum BmpError {
-    /// The pixel buffer size does not match width * height.
-    PixelCountMismatch { expected: usize, actual: usize },
-    /// I/O error writing the file.
+pub enum WriteError {
+    /// The pixels could not be made a PNG.
+    Encode(pngwrite::EncodeError),
+    /// The file could not be written.
     Io(std::io::Error),
-    /// Dimensions overflow the BMP format limits.
-    DimensionOverflow,
 }
 
-impl From<std::io::Error> for BmpError {
+impl From<std::io::Error> for WriteError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
     }
 }
 
-impl core::fmt::Display for BmpError {
+impl From<pngwrite::EncodeError> for WriteError {
+    fn from(err: pngwrite::EncodeError) -> Self {
+        Self::Encode(err)
+    }
+}
+
+impl core::fmt::Display for WriteError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::PixelCountMismatch { expected, actual } => {
-                write!(f, "pixel count mismatch: expected {expected}, got {actual}")
-            }
-            Self::Io(err) => write!(f, "I/O error: {err}"),
-            Self::DimensionOverflow => write!(f, "image dimensions overflow BMP format limits"),
+            Self::Encode(err) => write!(f, "{err}"),
+            Self::Io(err) => write!(f, "{err}"),
         }
     }
 }
 
 /// Why a save did not happen.
 ///
-/// Distinct from [`BmpError`] because "there is nothing captured to save" is
+/// Distinct from [`WriteError`] because "there is nothing captured to save" is
 /// not an encoding failure, and reporting it as one — which this used to do,
 /// as a `PixelCountMismatch` of 1-expected-0-actual — produced a message about
 /// pixel counts for a user who had simply not taken a screenshot yet.
@@ -383,13 +410,13 @@ impl core::fmt::Display for BmpError {
 pub enum SaveError {
     /// No capture is loaded, so there is nothing to write.
     NoCapture,
-    /// Encoding or writing the BMP failed.
-    Bmp(BmpError),
+    /// Encoding or writing the picture failed.
+    Write(WriteError),
 }
 
-impl From<BmpError> for SaveError {
-    fn from(err: BmpError) -> Self {
-        Self::Bmp(err)
+impl From<WriteError> for SaveError {
+    fn from(err: WriteError) -> Self {
+        Self::Write(err)
     }
 }
 
@@ -397,178 +424,128 @@ impl core::fmt::Display for SaveError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NoCapture => write!(f, "no screenshot to save"),
-            Self::Bmp(err) => write!(f, "{err}"),
+            Self::Write(err) => write!(f, "{err}"),
         }
     }
 }
 
-/// Encode pixel data as a 32-bit BMP file and write to `path`.
+/// Write a capture's pixels -- `0xAARRGGBB`, row by row -- to `path` as a
+/// PNG (`pngwrite`).
 ///
-/// Pixel data is in ARGB format (u32 per pixel), row-major, top-down.
-/// BMP stores rows bottom-up with BGRA byte order.
+/// It wrote an uncompressed 32-bit BMP: eight megabytes for one full-HD
+/// screen, where a PNG of the same pixels is a fraction of that and opens
+/// everywhere.
 ///
 /// Written through [`safeio::write_atomically`], not `fs::write`. `fs::write`
 /// truncates the target *before* writing it, so re-saving an annotated capture
 /// over its own file and running out of space part-way would leave the user
 /// with neither the new image nor the one they already had. A screenshot is
-/// large enough — a 4K capture is ~33 MB — that a short write is a realistic
-/// failure rather than a theoretical one.
-pub fn write_bmp(path: &Path, width: u32, height: u32, pixels: &[u32]) -> Result<(), BmpError> {
-    let expected = (width as usize).saturating_mul(height as usize);
-    if pixels.len() != expected {
-        return Err(BmpError::PixelCountMismatch {
-            expected,
-            actual: pixels.len(),
-        });
-    }
-
-    let row_bytes = width
-        .checked_mul(BMP_BYTES_PER_PIXEL)
-        .ok_or(BmpError::DimensionOverflow)?;
-    let pixel_data_size = row_bytes
-        .checked_mul(height)
-        .ok_or(BmpError::DimensionOverflow)?;
-    let header_size = BMP_FILE_HEADER_SIZE + BMP_INFO_HEADER_SIZE;
-    let file_size = header_size
-        .checked_add(pixel_data_size)
-        .ok_or(BmpError::DimensionOverflow)?;
-
-    let data = encode_bmp_bytes(
-        width,
-        height,
-        pixels,
-        file_size,
-        header_size,
-        pixel_data_size,
-    );
+/// large enough -- a 4K capture runs to megabytes even compressed -- that a
+/// short write is a realistic failure rather than a theoretical one.
+///
+/// This *replaces* whatever is at `path`, which is right for saving a capture
+/// again over the file it already made. A new capture is saved by
+/// [`write_new_png`], which never replaces anything.
+pub fn write_png(path: &Path, width: u32, height: u32, pixels: &[u32]) -> Result<(), WriteError> {
+    let data = pngwrite::encode(width, height, pixels)?;
     safeio::write_atomically(path, &data)?;
     Ok(())
 }
 
-/// A path in `dir` for `filename` that no file already occupies.
-///
-/// Every save target is chosen through this, because
-/// [`Capture::default_filename`] is derived from the capture's timestamp and
-/// so is *not* unique: two captures taken in the same second produce the same
-/// name, and `Capture::new`'s placeholder timestamp makes every capture
-/// produce the same name. Writing to the name as given therefore destroys the
-/// earlier screenshot and reports "saved" for both.
-///
-/// The suffix goes before the extension (`screenshot_… (2).bmp`) so the file
-/// stays a `.bmp` to anything that dispatches on extension.
-fn unused_save_path(dir: &Path, filename: &str) -> PathBuf {
-    let candidate = dir.join(filename);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let (stem, ext) = match filename.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
-        _ => (filename, String::new()),
-    };
-    // Bounded: an unbounded search would spin forever on a directory that
-    // cannot be read. Falling back to the plain name after the bound is the
-    // same behaviour as before this function existed, and by then something is
-    // wrong that renaming cannot fix.
-    for n in 2..10_000u32 {
-        let candidate = dir.join(format!("{stem} ({n}){ext}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    dir.join(filename)
-}
-
-/// Encode pixel data to an in-memory BMP byte buffer.
-///
-/// Returns the complete BMP file as a `Vec<u8>`.
-pub fn encode_bmp(width: u32, height: u32, pixels: &[u32]) -> Result<Vec<u8>, BmpError> {
-    let expected = (width as usize).saturating_mul(height as usize);
-    if pixels.len() != expected {
-        return Err(BmpError::PixelCountMismatch {
-            expected,
-            actual: pixels.len(),
-        });
-    }
-
-    let row_bytes = width
-        .checked_mul(BMP_BYTES_PER_PIXEL)
-        .ok_or(BmpError::DimensionOverflow)?;
-    let pixel_data_size = row_bytes
-        .checked_mul(height)
-        .ok_or(BmpError::DimensionOverflow)?;
-    let header_size = BMP_FILE_HEADER_SIZE + BMP_INFO_HEADER_SIZE;
-    let file_size = header_size
-        .checked_add(pixel_data_size)
-        .ok_or(BmpError::DimensionOverflow)?;
-
-    Ok(encode_bmp_bytes(
-        width,
-        height,
-        pixels,
-        file_size,
-        header_size,
-        pixel_data_size,
-    ))
-}
-
-/// Internal helper: builds the complete BMP byte buffer.
-///
-/// Returns the bytes, not a `Result`: every way this encoding can fail — an
-/// overflowing file size, a pixel buffer that does not match the dimensions —
-/// is checked by the callers before they get here, so a `Result` that is always
-/// `Ok` made both of them write `?` for nothing and hid which of their steps
-/// can really fail.
-fn encode_bmp_bytes(
+/// [`write_png`] for a new capture: written as a new file under `filename` in
+/// `dir` -- made first if it is not there, as the default folder is not on a
+/// new system -- or under the first free name after it (see
+/// [`write_new_file`]), never over a file already there. Returns the name it
+/// took.
+fn write_new_png(
+    dir: &Path,
+    filename: &str,
     width: u32,
     height: u32,
     pixels: &[u32],
-    file_size: u32,
-    header_offset: u32,
-    pixel_data_size: u32,
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(file_size as usize);
+) -> Result<PathBuf, WriteError> {
+    let data = pngwrite::encode(width, height, pixels)?;
+    std::fs::create_dir_all(dir)?;
+    Ok(write_new_file(dir, filename, &data)?)
+}
 
-    // --- BITMAPFILEHEADER (14 bytes) ---
-    buf.extend_from_slice(b"BM"); // magic
-    buf.extend_from_slice(&file_size.to_le_bytes()); // file size
-    buf.extend_from_slice(&0u16.to_le_bytes()); // reserved1
-    buf.extend_from_slice(&0u16.to_le_bytes()); // reserved2
-    buf.extend_from_slice(&header_offset.to_le_bytes()); // offset to pixel data
+/// How many names a new capture tries: its own, then `(2)` to `(9999)`.
+const SAVE_NAME_TRIES: u32 = 10_000;
 
-    // --- BITMAPINFOHEADER (40 bytes) ---
-    buf.extend_from_slice(&BMP_INFO_HEADER_SIZE.to_le_bytes()); // header size
-    buf.extend_from_slice(&(width as i32).to_le_bytes()); // width
-    // Positive height = bottom-up row order (standard BMP)
-    buf.extend_from_slice(&(height as i32).to_le_bytes()); // height
-    buf.extend_from_slice(&1u16.to_le_bytes()); // planes
-    buf.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
-    buf.extend_from_slice(&0u32.to_le_bytes()); // compression (BI_RGB)
-    buf.extend_from_slice(&pixel_data_size.to_le_bytes()); // image data size
-    buf.extend_from_slice(&2835i32.to_le_bytes()); // X pixels per meter (~72 DPI)
-    buf.extend_from_slice(&2835i32.to_le_bytes()); // Y pixels per meter (~72 DPI)
-    buf.extend_from_slice(&0u32.to_le_bytes()); // colors used
-    buf.extend_from_slice(&0u32.to_le_bytes()); // important colors
+/// The names a new capture called `filename` may take in `dir`, in the order
+/// they are tried: the name itself, then `stem (2).ext`, `stem (3).ext` and on.
+///
+/// A new capture needs more than its own name because
+/// [`Capture::default_filename`] is derived from the capture's timestamp and
+/// so is *not* unique: two captures taken in the same second produce the same
+/// name, and `Capture::new`'s placeholder timestamp makes every capture
+/// produce the same name.
+///
+/// The suffix goes before the extension (`screenshot_… (2).png`) so the file
+/// stays a `.png` to anything that dispatches on extension. Bounded, so that
+/// a folder in which every name reads as taken cannot hold a save forever.
+fn save_names(dir: &Path, filename: &str) -> impl Iterator<Item = PathBuf> {
+    let (stem, ext) = match filename.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
+        _ => (filename.to_string(), String::new()),
+    };
+    let first = dir.join(filename);
+    let dir = dir.to_path_buf();
+    std::iter::once(first)
+        .chain((2..SAVE_NAME_TRIES).map(move |n| dir.join(format!("{stem} ({n}){ext}"))))
+}
 
-    // --- Pixel data (bottom-up rows, BGRA byte order) ---
-    // BMP stores rows from bottom to top. Our input is top-down ARGB.
-    for y in (0..height).rev() {
-        let row_start = (y as usize).saturating_mul(width as usize);
-        for x in 0..width as usize {
-            let idx = row_start.saturating_add(x);
-            let argb = pixels.get(idx).copied().unwrap_or(0);
-            // ARGB → BGRA byte order
-            let a = ((argb >> 24) & 0xFF) as u8;
-            let r = ((argb >> 16) & 0xFF) as u8;
-            let g_val = ((argb >> 8) & 0xFF) as u8;
-            let b = (argb & 0xFF) as u8;
-            buf.push(b);
-            buf.push(g_val);
-            buf.push(r);
-            buf.push(a);
+/// Write `data` as a new file in `dir` under `filename`, or under the first
+/// of [`save_names`] that nothing holds, and say which name it took.
+///
+/// Each name is claimed by [`safeio::write_new_atomically`], which refuses a
+/// name in use in the same step as it takes it. Finding a free name and then
+/// writing it -- what this used to do -- left a moment between the two in
+/// which another program's new file could arrive under the name and be
+/// replaced, since an atomic write renames over whatever is there; and once
+/// ten thousand names were taken it wrote over the first on purpose. Now a
+/// name found taken at the claim is passed over like one found taken by the
+/// look, and when every name is taken the save fails.
+///
+/// # Errors
+///
+/// [`std::io::ErrorKind::AlreadyExists`] when every name is taken. Any other
+/// error comes from the first name the write could not claim for another
+/// reason: a folder that is gone or read-only fails at once, with its own
+/// reason, not ten thousand times over.
+fn write_new_file(dir: &Path, filename: &str, data: &[u8]) -> std::io::Result<PathBuf> {
+    write_first_free(save_names(dir, filename), data, |name| {
+        std::fs::symlink_metadata(name).is_ok()
+    })
+}
+
+/// [`write_new_file`] over any list of names, with the look given, so that a
+/// test can stage a name taken after the look and before the claim.
+fn write_first_free(
+    names: impl IntoIterator<Item = PathBuf>,
+    data: &[u8],
+    taken: impl Fn(&Path) -> bool,
+) -> std::io::Result<PathBuf> {
+    let mut last = None;
+    for name in names {
+        // A name seen to be taken is passed over without writing anything:
+        // the claim would refuse it too, but only after writing the whole
+        // picture -- tens of megabytes -- to a temporary.
+        if !taken(&name) {
+            match safeio::write_new_atomically(&name, data) {
+                Ok(()) => return Ok(name),
+                // Taken since the look: on to the next name.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
         }
+        last = Some(name);
     }
-
-    buf
+    let why = match last {
+        Some(last) => format!("every name up to {} is in use", last.shown()),
+        None => String::from("there is no name to save under"),
+    };
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, why))
 }
 
 // ============================================================================
@@ -782,7 +759,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            save_directory: PathBuf::from(DEFAULT_SAVE_DIR),
+            save_directory: default_save_directory(),
             default_action: PostCaptureAction::SaveToFile,
             play_sound: true,
             show_notification: true,
@@ -991,7 +968,7 @@ impl ScreenshotApp {
             Ok(path) => {
                 if self.settings.show_notification {
                     self.notification = Some(Notification {
-                        message: format!("Screenshot saved to {}", path.display()),
+                        message: format!("Screenshot saved to {}", path.shown()),
                         file_path: Some(path.clone()),
                         remaining_ms: 4000,
                     });
@@ -1038,13 +1015,16 @@ impl ScreenshotApp {
 
         // Save to file if that is the default action.
         if self.settings.default_action == PostCaptureAction::SaveToFile {
-            let filename = capture.default_filename();
-            let save_path = unused_save_path(&self.settings.save_directory, &filename);
-            let outcome = write_bmp(&save_path, capture.width, capture.height, &capture.pixels)
-                .map(|()| save_path.clone())
-                .map_err(SaveError::Bmp);
-            if outcome.is_ok() {
-                self.current_saved_path = Some(save_path);
+            let outcome = write_new_png(
+                &self.settings.save_directory,
+                &capture.default_filename(),
+                capture.width,
+                capture.height,
+                &capture.pixels,
+            )
+            .map_err(SaveError::Write);
+            if let Ok(path) = &outcome {
+                self.current_saved_path = Some(path.clone());
             }
             self.notify_save(&outcome);
         }
@@ -1072,21 +1052,31 @@ impl ScreenshotApp {
     /// arrow does not stack the first one twice.
     ///
     /// Saving the same capture again rewrites the file this capture already
-    /// produced. Saving a capture for the first time picks a name no file
-    /// holds — see [`unused_save_path`] for why the timestamp-derived name
-    /// cannot be trusted to be free.
+    /// produced. Saving a capture for the first time writes a new file under
+    /// a name no file holds, and never over one — see [`write_new_file`] for
+    /// how, and [`save_names`] for why the timestamp-derived name cannot be
+    /// trusted to be free.
     pub fn save_current(&mut self) -> Result<PathBuf, SaveError> {
         let capture = match &self.current_capture {
             Some(c) => c,
             None => return Err(SaveError::NoCapture),
         };
 
-        let save_path = match &self.current_saved_path {
-            Some(existing) => existing.clone(),
-            None => unused_save_path(&self.settings.save_directory, &capture.default_filename()),
-        };
         let pixels = flatten_annotations(capture, &self.annotations);
-        write_bmp(&save_path, capture.width, capture.height, &pixels)?;
+        let save_path = match &self.current_saved_path {
+            // Its own file: replaced, which is what saving again means.
+            Some(existing) => {
+                write_png(existing, capture.width, capture.height, &pixels)?;
+                existing.clone()
+            }
+            None => write_new_png(
+                &self.settings.save_directory,
+                &capture.default_filename(),
+                capture.width,
+                capture.height,
+                &pixels,
+            )?,
+        };
         // Recorded only on success: a failed first save must not claim a name
         // it did not manage to create, or the retry would rewrite a file that
         // is not there while a *different* capture keeps the name it wanted.
@@ -1699,7 +1689,7 @@ impl ScreenshotApp {
         let status_text = format!(
             "Mode: {}  |  Save to: {}",
             self.mode.label(),
-            self.settings.save_directory.display()
+            self.settings.save_directory.shown()
         );
         tree.text(
             10.0,
@@ -1923,7 +1913,7 @@ impl ScreenshotApp {
         tree.text(nx + 12.0, ny + 8.0, &notif.message, self.palette.text, 12.0);
 
         if let Some(ref path) = notif.file_path {
-            let path_str = format!("{}", path.display());
+            let path_str = format!("{}", path.shown());
             tree.text(nx + 12.0, ny + 26.0, &path_str, self.palette.subtext0, 11.0);
         }
     }
@@ -2829,10 +2819,12 @@ mod tests {
     /// A directory that does not exist and whose parent does not either, so
     /// `fs::write` into it fails on every platform without touching
     /// permissions.
+    /// A folder no save can make or write: its parent is a file. (A missing
+    /// folder will not do -- a new capture makes its folder.)
     fn unwritable_dir(tag: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("slateos-screenshot-missing-{tag}"))
-            .join("nor-this")
+        let blocker = std::env::temp_dir().join(format!("slateos-screenshot-blocked-{tag}"));
+        std::fs::write(&blocker, b"a file where a folder would be").expect("write the blocker");
+        blocker.join("nor-this")
     }
 
     fn ctrl(key: Key) -> KeyEvent {
@@ -2907,14 +2899,123 @@ mod tests {
         let scratch = temp_dir("ext");
         let dir = scratch.dir().to_path_buf();
         std::fs::write(dir.join("shot.bmp"), b"taken").expect("occupy");
-        let picked = unused_save_path(&dir, "shot.bmp");
+        let picked = write_new_file(&dir, "shot.bmp", b"one").expect("save");
         assert_eq!(picked, dir.join("shot (2).bmp"));
-
-        std::fs::write(dir.join("shot (2).bmp"), b"taken too").expect("occupy");
-        assert_eq!(unused_save_path(&dir, "shot.bmp"), dir.join("shot (3).bmp"));
+        let next = write_new_file(&dir, "shot.bmp", b"two").expect("save");
+        assert_eq!(next, dir.join("shot (3).bmp"));
 
         // A free name is used as-is -- no suffix on the common case.
-        assert_eq!(unused_save_path(&dir, "fresh.bmp"), dir.join("fresh.bmp"));
+        let fresh = write_new_file(&dir, "fresh.bmp", b"three").expect("save");
+        assert_eq!(fresh, dir.join("fresh.bmp"));
+
+        for (name, held) in [
+            ("shot.bmp", &b"taken"[..]),
+            ("shot (2).bmp", b"one"),
+            ("shot (3).bmp", b"two"),
+            ("fresh.bmp", b"three"),
+        ] {
+            assert_eq!(std::fs::read(dir.join(name)).expect("read"), held, "{name}");
+        }
+    }
+
+    /// The names a new capture tries, in order and how many: the bound is
+    /// what stops a folder in which every name reads as taken from holding a
+    /// save forever.
+    #[test]
+    fn a_new_capture_tries_its_name_then_numbered_ones() {
+        let dir = Path::new("pictures");
+        let names: Vec<PathBuf> = save_names(dir, "shot.bmp").collect();
+        assert_eq!(names.first(), Some(&dir.join("shot.bmp")));
+        assert_eq!(names.get(1), Some(&dir.join("shot (2).bmp")));
+        assert_eq!(names.last(), Some(&dir.join("shot (9999).bmp")));
+        assert_eq!(names.len(), 9_999);
+        // No extension, or nothing before the dot: the number goes last.
+        assert_eq!(save_names(dir, "shot").nth(1), Some(dir.join("shot (2)")));
+        assert_eq!(save_names(dir, ".bmp").nth(1), Some(dir.join(".bmp (2)")));
+        // Only the last dot starts the extension.
+        assert_eq!(
+            save_names(dir, "a.b.bmp").nth(1),
+            Some(dir.join("a.b (2).bmp"))
+        );
+    }
+
+    /// A name another program takes after the look and before the write
+    /// keeps that program's file: the save goes on to the next name.
+    #[test]
+    fn a_name_taken_after_the_look_is_not_written_over() {
+        let scratch = temp_dir("race");
+        let dir = scratch.dir().to_path_buf();
+        std::fs::write(dir.join("shot.bmp"), b"theirs").expect("occupy");
+        // A look that sees nothing: as if their file arrived just after it.
+        let names = [dir.join("shot.bmp"), dir.join("shot (2).bmp")];
+        let picked = write_first_free(names, b"ours", |_| false).expect("save");
+        assert_eq!(picked, dir.join("shot (2).bmp"));
+        assert_eq!(
+            std::fs::read(dir.join("shot.bmp")).expect("read"),
+            b"theirs"
+        );
+        assert_eq!(std::fs::read(&picked).expect("read"), b"ours");
+    }
+
+    /// When every name is taken the save fails, and says why; it does not
+    /// fall back to replacing one of them.
+    #[test]
+    fn every_name_taken_fails_rather_than_replace_one() {
+        let scratch = temp_dir("full");
+        let dir = scratch.dir().to_path_buf();
+        let names = [dir.join("a.bmp"), dir.join("a (2).bmp")];
+        for name in &names {
+            std::fs::write(name, b"theirs").expect("occupy");
+        }
+        // Seen to be taken, and taken since the look.
+        for seen in [true, false] {
+            let err = write_first_free(names.clone(), b"ours", |_| seen)
+                .expect_err("every name is taken");
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
+            assert!(err.to_string().contains("a (2).bmp"), "{err}");
+        }
+        for name in &names {
+            assert_eq!(std::fs::read(name).expect("read"), b"theirs");
+        }
+        let left = std::fs::read_dir(&dir).expect("list").count();
+        assert_eq!(left, 2, "a temporary was left behind");
+
+        let none =
+            write_first_free(Vec::<PathBuf>::new(), b"ours", |_| false).expect_err("no names");
+        assert_eq!(none.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    /// A folder that cannot be written fails at the first name with its own
+    /// reason -- not as "every name is taken", ten thousand tries later.
+    #[test]
+    fn an_unwritable_folder_fails_at_once_with_its_reason() {
+        let dir = unwritable_dir("at-once");
+        let looked = std::cell::Cell::new(0u32);
+        let err = write_first_free(save_names(&dir, "shot.bmp"), b"ours", |_| {
+            looked.set(looked.get() + 1);
+            false
+        })
+        .expect_err("no folder to write in");
+        assert_ne!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(
+            looked.get(),
+            1,
+            "went on after a failure that was not a name in use"
+        );
+    }
+
+    /// The look is only a shortcut past names seen to be taken: a name it
+    /// sees as taken is never written, not even to find out.
+    #[test]
+    fn a_name_seen_taken_is_passed_over_unwritten() {
+        let scratch = temp_dir("seen");
+        let dir = scratch.dir().to_path_buf();
+        let names = [dir.join("a.bmp"), dir.join("a (2).bmp")];
+        let first = names[0].clone();
+        let picked =
+            write_first_free(names, b"ours", |name| name == first.as_path()).expect("save");
+        assert_eq!(picked, dir.join("a (2).bmp"));
+        assert!(!first.exists(), "a name seen as taken was written");
     }
 
     /// Re-saving the *same* capture updates the file it already made, rather
@@ -2994,7 +3095,7 @@ mod tests {
         let path = dir.join("shot.bmp");
         std::fs::write(&path, b"the screenshot the user already had").expect("seed");
 
-        assert!(write_bmp(&path, 100, 100, &[0u32; 4]).is_err());
+        assert!(write_png(&path, 100, 100, &[0u32; 4]).is_err());
         assert_eq!(
             std::fs::read(&path).expect("read back"),
             b"the screenshot the user already had",
@@ -3007,7 +3108,7 @@ mod tests {
     /// accumulates litter is how a user's screenshots folder fills with files
     /// no program will open.
     ///
-    /// This does **not** verify that `write_bmp` routes through `safeio`:
+    /// This does **not** verify that `write_png` routes through `safeio`:
     /// `fs::write` leaves no litter either, so this test passes with the
     /// non-atomic write restored (checked by injection). That is
     /// `a_save_goes_through_safeio`'s job.
@@ -3016,7 +3117,7 @@ mod tests {
         let scratch = temp_dir("litter");
         let dir = scratch.dir().to_path_buf();
         let path = dir.join("shot.bmp");
-        write_bmp(&path, 4, 4, &[0xFF00_00FFu32; 16]).expect("save");
+        write_png(&path, 4, 4, &[0xFF00_00FFu32; 16]).expect("save");
         let names: Vec<String> = std::fs::read_dir(&dir)
             .expect("list")
             .filter_map(Result::ok)
@@ -3025,7 +3126,7 @@ mod tests {
         assert_eq!(names, vec!["shot.bmp".to_string()]);
 
         // And on the failure path, where the temporary has already been created.
-        assert!(write_bmp(&dir, 4, 4, &[0xFF00_00FFu32; 16]).is_err());
+        assert!(write_png(&dir, 4, 4, &[0xFF00_00FFu32; 16]).is_err());
         let after: Vec<String> = std::fs::read_dir(&dir)
             .expect("list")
             .filter_map(Result::ok)
@@ -3040,7 +3141,7 @@ mod tests {
     /// at the same path — and only shows up when the write is interrupted,
     /// which no portable test can stage. So the routing itself is what gets
     /// asserted, via `safeio`'s `audit` counters. Without this, swapping
-    /// `write_bmp` back to `fs::write` leaves every other test in this file
+    /// `write_png` back to `fs::write` leaves every other test in this file
     /// green, which is exactly what an earlier injection found.
     ///
     /// A 4K capture is ~33 MB, so a save that dies part-way is a realistic
@@ -3059,13 +3160,13 @@ mod tests {
         let path = dir.join("shot.bmp");
 
         let before = safeio::writes_performed();
-        write_bmp(&path, 4, 4, &[0xFF00_00FFu32; 16]).expect("save");
+        write_png(&path, 4, 4, &[0xFF00_00FFu32; 16]).expect("save");
         let after = safeio::writes_performed();
 
         assert!(
             after > before,
             "the save did not go through safeio (writes_performed stayed at {before}) \
-             -- write_bmp must not use std::fs::write"
+             -- write_png must not use std::fs::write"
         );
     }
 
@@ -3354,7 +3455,7 @@ mod tests {
         assert!(
             path.exists(),
             "notification named {} which does not exist",
-            path.display()
+            path.shown()
         );
         assert!(
             notif.message.contains("saved"),
@@ -3535,111 +3636,67 @@ mod tests {
         );
     }
 
-    // ---- BMP encoder tests ----
+    // ---- Writing a capture ----
 
+    /// **A capture is written as a PNG that reads back as the capture**, pixel
+    /// for pixel, through the decoder the system uses.
     #[test]
-    fn test_bmp_encode_1x1_white() {
-        let pixels = vec![0xFFFFFFFF_u32]; // ARGB white
-        let data = encode_bmp(1, 1, &pixels).expect("encode should succeed");
-
-        // Check file header magic.
-        assert_eq!(&data[0..2], b"BM");
-
-        // Total size: 14 + 40 + 4 = 58 bytes.
-        let file_size = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
-        assert_eq!(file_size, 58);
-
-        // Pixel data offset.
-        let offset = u32::from_le_bytes([data[10], data[11], data[12], data[13]]);
-        assert_eq!(offset, 54);
-
-        // Pixel at offset 54: BGRA = (0xFF, 0xFF, 0xFF, 0xFF).
-        assert_eq!(data[54], 0xFF); // B
-        assert_eq!(data[55], 0xFF); // G
-        assert_eq!(data[56], 0xFF); // R
-        assert_eq!(data[57], 0xFF); // A
+    fn a_capture_is_written_as_a_png_that_reads_back() {
+        let scratch = temp_dir("png");
+        let path = scratch.dir().join("shot.png");
+        let pixels = vec![0xFFFF_0000, 0xFF00_FF00, 0xFF00_00FF, 0x8000_0000];
+        write_png(&path, 2, 2, &pixels).expect("write");
+        let bytes = std::fs::read(&path).expect("read");
+        assert!(bytes.starts_with(b"\x89PNG"), "not a PNG");
+        let back = imagecodec::decode(&bytes, imagecodec::Limits::default()).expect("decode");
+        assert_eq!((back.width, back.height), (2, 2));
+        assert_eq!(back.pixels, pixels);
     }
 
+    /// Pixels that are not the capture's size are refused, and nothing is
+    /// written.
     #[test]
-    fn test_bmp_encode_2x2() {
-        // 2x2 image:
-        //   top-left=red, top-right=green, bottom-left=blue, bottom-right=black
-        let pixels = vec![
-            0xFFFF0000, 0xFF00FF00, // row 0 (top)
-            0xFF0000FF, 0xFF000000, // row 1 (bottom)
-        ];
-        let data = encode_bmp(2, 2, &pixels).expect("encode should succeed");
-
-        let offset = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
-
-        // BMP is bottom-up, so first row in file is row 1 (bottom).
-        // Row 1, pixel 0 = blue (ARGB 0xFF0000FF) → BGRA = (0xFF, 0x00, 0x00, 0xFF)
-        assert_eq!(data[offset], 0xFF); // B
-        assert_eq!(data[offset + 1], 0x00); // G
-        assert_eq!(data[offset + 2], 0x00); // R
-        assert_eq!(data[offset + 3], 0xFF); // A
-
-        // Row 1, pixel 1 = black (ARGB 0xFF000000) → BGRA = (0x00, 0x00, 0x00, 0xFF)
-        assert_eq!(data[offset + 4], 0x00); // B
-        assert_eq!(data[offset + 5], 0x00); // G
-        assert_eq!(data[offset + 6], 0x00); // R
-        assert_eq!(data[offset + 7], 0xFF); // A
-
-        // Row 0, pixel 0 = red (ARGB 0xFFFF0000) → BGRA = (0x00, 0x00, 0xFF, 0xFF)
-        assert_eq!(data[offset + 8], 0x00); // B
-        assert_eq!(data[offset + 9], 0x00); // G
-        assert_eq!(data[offset + 10], 0xFF); // R
-        assert_eq!(data[offset + 11], 0xFF); // A
-
-        // Row 0, pixel 1 = green (ARGB 0xFF00FF00) → BGRA = (0x00, 0xFF, 0x00, 0xFF)
-        assert_eq!(data[offset + 12], 0x00); // B
-        assert_eq!(data[offset + 13], 0xFF); // G
-        assert_eq!(data[offset + 14], 0x00); // R
-        assert_eq!(data[offset + 15], 0xFF); // A
+    fn a_capture_of_the_wrong_size_is_not_written() {
+        let scratch = temp_dir("png-size");
+        let path = scratch.dir().join("shot.png");
+        let err = write_png(&path, 2, 3, &[0xFF00_0000; 5]).expect_err("five pixels for six");
+        assert!(matches!(err, WriteError::Encode(_)), "{err:?}");
+        assert!(!path.exists());
     }
 
+    /// A new capture's folder is made if it is not there -- the default one
+    /// is not, on a new system.
     #[test]
-    fn test_bmp_encode_pixel_mismatch_error() {
-        let pixels = vec![0xFF000000; 5]; // 5 pixels but dimensions say 2x3=6
-        let result = encode_bmp(2, 3, &pixels);
-        assert!(result.is_err());
+    fn a_new_capture_makes_its_folder() {
+        let scratch = temp_dir("png-folder");
+        let dir = scratch.dir().join("Pictures").join("Screenshots");
+        let saved = write_new_png(&dir, "shot.png", 1, 1, &[0xFF12_3456]).expect("save");
+        assert_eq!(saved, dir.join("shot.png"));
     }
 
+    /// The default folder is the home directory's Pictures/Screenshots, not
+    /// a path beginning with a literal `~`.
     #[test]
-    fn test_bmp_encode_zero_dimensions() {
-        let pixels: Vec<u32> = vec![];
-        let data = encode_bmp(0, 0, &pixels).expect("encode should succeed");
-        assert_eq!(&data[0..2], b"BM");
-        let file_size = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
-        assert_eq!(file_size, 54); // Just headers, no pixel data.
+    fn the_default_folder_is_under_home() {
+        let dir = Settings::default().save_directory;
+        assert!(!dir.starts_with("~"), "{}", dir.shown());
+        assert!(dir.ends_with(Path::new("Pictures").join("Screenshots")));
     }
 
+    /// A new capture is stamped with the time it was taken, not a fixed date.
     #[test]
-    fn test_bmp_header_dimensions() {
-        let pixels = vec![0xFF000000; 10 * 20];
-        let data = encode_bmp(10, 20, &pixels).expect("encode should succeed");
-
-        // Width at offset 18 (4 bytes LE).
-        let width = i32::from_le_bytes([data[18], data[19], data[20], data[21]]);
-        assert_eq!(width, 10);
-
-        // Height at offset 22 (4 bytes LE).
-        let height = i32::from_le_bytes([data[22], data[23], data[24], data[25]]);
-        assert_eq!(height, 20);
-
-        // Bits per pixel at offset 28 (2 bytes LE).
-        let bpp = u16::from_le_bytes([data[28], data[29]]);
-        assert_eq!(bpp, 32);
-    }
-
-    #[test]
-    fn test_bmp_info_header_size() {
-        let pixels = vec![0xFF000000; 4];
-        let data = encode_bmp(2, 2, &pixels).expect("encode should succeed");
-
-        // Info header size at offset 14 (4 bytes LE).
-        let info_size = u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
-        assert_eq!(info_size, 40);
+    fn a_new_capture_is_stamped_with_the_clock() {
+        let before = now_utc();
+        let stamp = Capture::new(1, 1, vec![0]).timestamp;
+        let after = now_utc();
+        assert!(
+            before <= stamp && stamp <= after,
+            "{before:?} {stamp:?} {after:?}"
+        );
+        let (year, month, day, hour, minute, second) = stamp;
+        assert!(year >= 2026, "{year}");
+        assert!((1..=12).contains(&month) && (1..=31).contains(&day));
+        assert!(hour < 24 && minute < 60 && second < 60);
     }
 
     // ---- Capture tests ----
@@ -3648,7 +3705,7 @@ mod tests {
     fn test_capture_default_filename() {
         let capture =
             Capture::new(100, 100, vec![0; 10000]).with_timestamp(2026, 5, 17, 14, 30, 45);
-        assert_eq!(capture.default_filename(), "screenshot_20260517_143045.bmp");
+        assert_eq!(capture.default_filename(), "screenshot_20260517_143045.png");
     }
 
     #[test]

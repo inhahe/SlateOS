@@ -1,0 +1,17 @@
+[package]
+name = "hwquery"
+version = "0.1.0"
+edition = "2024"
+description = "What the machine's hardware is, as the kernel publishes it: read once for System Information and the Device Manager"
+
+[dependencies]
+# /proc/meminfo, /proc/net/dev, /proc/monitors and the rest, parsed once.
+procinfo = { path = "../../procinfo" }
+
+[features]
+# `SyscallProvider::at`, for a program's tests to read a fixture tree. Only a
+# dev-dependency turns it on.
+testing = []
+
+[lints]
+workspace = true

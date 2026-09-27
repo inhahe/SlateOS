@@ -75,6 +75,9 @@ use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 const SIDEBAR_WIDTH: f32 = 220.0;
 const ENTRY_LIST_WIDTH: f32 = 320.0;
 const TOOLBAR_HEIGHT: f32 = 48.0;
+/// The not-saved notice's strip under the toolbar, and one line of it.
+const NOTICE_H: f32 = 34.0;
+const NOTICE_LINE_H: f32 = 15.0;
 const ROW_HEIGHT: f32 = 52.0;
 /// Height of the entry list's own header strip -- the "N entries" line, which
 /// stays put while the rows below it scroll.
@@ -194,6 +197,11 @@ struct Layout {
     window: Rect,
     /// The toolbar strip across the top.
     toolbar: Rect,
+    /// The strip under the toolbar that says the vault is not saved. Its own
+    /// strip: the lines were drawn at the top of the window, before the
+    /// toolbar, which filled the same pixels -- so a password manager that
+    /// loses every entry at close said so where it could not be seen.
+    notice: Rect,
     /// The category sidebar down the left.
     sidebar: Rect,
     /// The entry-list column, header strip included.
@@ -213,6 +221,7 @@ impl Layout {
 
         let mut top = 0.0;
         let toolbar = take_top(&mut top, height, width, TOOLBAR_HEIGHT);
+        let notice = take_top(&mut top, height, width, NOTICE_H);
         let body = (height - top).max(0.0);
 
         let sidebar = trim(Rect::new(0.0, top, SIDEBAR_WIDTH, body), window);
@@ -241,6 +250,7 @@ impl Layout {
         Self {
             window,
             toolbar,
+            notice,
             sidebar,
             list,
             list_rows,
@@ -3105,7 +3115,7 @@ impl AppState {
     /// independent second opinion the layout tests check that against.
     #[cfg(test)]
     const fn rows_top() -> f32 {
-        TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT
+        TOOLBAR_HEIGHT + NOTICE_H + LIST_HEADER_HEIGHT
     }
 
     /// The height of the entry list's scrolling row area.
@@ -5958,12 +5968,13 @@ impl AppState {
         // Background
         draw_rect(&mut frame, 0.0, 0.0, w, h, self.palette.base, 0.0);
 
-        // After the background, or it would be painted over.
+        render_toolbar(&mut frame, self, &layout);
+        // In the strip under the toolbar, which nothing else is drawn in.
         for (i, line) in NOT_KEPT_LINES.iter().enumerate() {
             #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-            let ty = 2.0 + i as f32 * 12.0;
-            let avail = (w - 16.0).max(0.0);
-            if avail <= 0.0 || ty + 12.0 > h {
+            let ty = layout.notice.y + 3.0 + i as f32 * NOTICE_LINE_H;
+            let avail = (layout.notice.w - 16.0).max(0.0);
+            if avail <= 0.0 || ty + NOTICE_LINE_H > layout.notice.y + layout.notice.h {
                 break;
             }
             frame.push(RenderCommand::Text {
@@ -5975,7 +5986,7 @@ impl AppState {
                 } else {
                     self.palette.subtext0
                 },
-                font_size: if i == 0 { 11.0 } else { 9.0 },
+                font_size: if i == 0 { 12.0 } else { 11.0 },
                 font_weight: if i == 0 {
                     FontWeightHint::Bold
                 } else {
@@ -5985,8 +5996,6 @@ impl AppState {
                 overflow: TextOverflow::Ellipsis,
             });
         }
-
-        render_toolbar(&mut frame, self, &layout);
         render_sidebar(&mut frame, self, &layout);
         render_entry_list(&mut frame, self, &layout);
 
@@ -8160,7 +8169,7 @@ mod tests {
     }
 
     /// A point one pixel into whichever entry row is drawn first.
-    const FIRST_ROW_Y: f32 = TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT + 1.0;
+    const FIRST_ROW_Y: f32 = AppState::rows_top() + 1.0;
 
     #[test]
     fn one_wheel_notch_crosses_three_rows_of_the_entry_list() {
@@ -9864,5 +9873,48 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let state = AppState::new(unlocked_vault());
+        let commands: Vec<RenderCommand> = state.draw((1200.0, 800.0)).commands().to_vec();
+        for line in NOT_KEPT_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !NOT_KEPT_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
     }
 }

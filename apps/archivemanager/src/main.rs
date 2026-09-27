@@ -3444,6 +3444,10 @@ fn plural(count: usize) -> &'static str {
 /// demo goes through the same parser a real file does, so what the screen
 /// shows is what the format actually says — and Test, Extract and the sizes
 /// in the columns are all true of it.
+///
+/// `#[cfg(test)]`: it is the tests' archive, and nothing may open it for a
+/// user as though a file had been read.
+#[cfg(test)]
 fn sample_archive_bytes() -> Vec<u8> {
     /// Repeat `line` until the result is at least `want` bytes, so a demo
     /// file has a plausible size *and* real content to checksum.
@@ -3544,13 +3548,15 @@ fn sample_archive_bytes() -> Vec<u8> {
     ziparchive::create(&write)
 }
 
-/// Create a sample archive for demonstration/testing.
+/// The tests' archive, parsed: an invented `/home/user/project.zip` no
+/// user opened, so `#[cfg(test)]`.
 ///
 /// # Panics
 ///
 /// Panics if the crate's own writer produces bytes its own reader rejects.
 /// That is not a runtime condition — it is the two halves of `ziparchive`
 /// disagreeing, which every test in this file would be meaningless under.
+#[cfg(test)]
 #[must_use]
 pub fn create_sample_archive() -> ArchiveModel {
     let path = PathBuf::from("/home/user/project.zip");

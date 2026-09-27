@@ -48,7 +48,7 @@
 //!
 //! # Undo
 //!
-//! Every change is an [`Edit`] -- where, what went, what came -- so undoing is
+//! Every change is an `Edit` -- where, what went, what came -- so undoing is
 //! replacing one with the other and does not keep copies of the text. Typing
 //! is gathered into one step a word at a time, as is deleting, because an undo
 //! that takes back one letter per press is one nobody uses twice.

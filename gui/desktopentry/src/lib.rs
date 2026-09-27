@@ -34,7 +34,7 @@
 //!
 //! Reading the environment and the filesystem is kept to [`scan`] and to the
 //! functions that say so, so everything else runs in a test with neither. And
-//! nothing here starts a program: [`Exec::expand`] produces the argument
+//! nothing here starts a program: `Exec::expand` produces the argument
 //! vector, and starting it is the caller's, which knows how programs are
 //! started on this system.
 

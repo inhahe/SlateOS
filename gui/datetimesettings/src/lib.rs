@@ -330,7 +330,7 @@ pub mod clock {
     }
 
     /// Seconds since the epoch: this thread's fixed time, if a test has set
-    /// one ([`with_time`]), else the system clock. A clock set before the
+    /// one (`with_time`), else the system clock. A clock set before the
     /// epoch -- one that is badly wrong -- reads as the epoch.
     #[must_use]
     pub fn now_utc_secs() -> u64 {

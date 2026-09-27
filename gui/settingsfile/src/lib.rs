@@ -160,7 +160,7 @@ pub fn load(name: &str) -> Document {
 /// Only with the `testing` feature -- which only a `[dev-dependencies]` entry
 /// turns on, so no shipped program has it -- and only when the file would be
 /// written outside the system's temporary directory: a test writing the
-/// developer's own configuration. See [`testing::refuse_a_real_configuration`].
+/// developer's own configuration. See `testing::refuse_a_real_configuration`.
 pub fn store(name: &str, doc: &Document) -> io::Result<()> {
     let path = path_for(name).ok_or_else(|| {
         io::Error::new(

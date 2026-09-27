@@ -1159,7 +1159,7 @@ impl<T: Transport> ShellSession<T> {
     ///
     /// For the paints that must happen: the first, and after the display
     /// changes size. Everything else goes through
-    /// [`refresh_background`](Self::refresh_background), which sends the
+    /// `refresh_background`, which sends the
     /// surface only when something on it changed.
     ///
     /// # Errors

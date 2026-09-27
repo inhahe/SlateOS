@@ -92,7 +92,7 @@ pub mod datetime_settings;
 pub mod device_settings;
 /// The sweep that proves a module draws nothing that is immediately erased.
 ///
-/// Test-only, like [`palette_check`]: it exists to check the other modules'
+/// Test-only, like `appearance`'s `palette_check`: it exists to check the other modules'
 /// render output, and a release build has nothing to check.
 #[cfg(test)]
 pub mod draw_check;
@@ -112,8 +112,6 @@ pub mod notif_pane;
 pub mod osd;
 pub mod overview;
 mod pictures;
-/// The sweep that proves a module was converted off its own colour constants.
-///
 pub mod power;
 pub mod power_settings;
 pub mod print_manager;
@@ -3098,7 +3096,7 @@ impl DesktopShell {
     /// Today that is one field: which shortcut cycles the keyboard layout.
     /// It lives in `input.yaml` beside the layout itself, because the two are
     /// the same subject and because
-    /// [`persist_input_layout`](Self::persist_input_layout) already writes
+    /// `persist_input_layout` already writes
     /// that file — a second configuration format for one neighbouring value
     /// would be a second thing to keep in step.
     ///
@@ -3337,11 +3335,11 @@ impl DesktopShell {
     /// Where every taskbar tile stands, in [`taskbar_slots`](Self::taskbar_slots)'
     /// order -- the Aero reference's row, in which a pinned program is a
     /// square as tall as the tiles and a window is as wide as its picture and
-    /// title need, up to [`TASKBAR_BUTTON_MAX_WIDTH`].
+    /// title need, up to `TASKBAR_BUTTON_MAX_WIDTH`.
     ///
     /// When they do not all fit, the widest windows give way first, each down
     /// to a square, so a short title is the last to be cut; past that, every
-    /// tile shares what there is ([`fit_tiles`]). The tray is never given up:
+    /// tile shares what there is (`fit_tiles`). The tray is never given up:
     /// it is measured first, and the tiles have what is left of the bar.
     ///
     /// All at once, because a tile's place depends on every tile before it:
@@ -3425,8 +3423,8 @@ impl DesktopShell {
     }
 
     /// The line between the pinned tiles and the windows', where the
-    /// reference draws it -- [`TASKBAR_DIVIDER_OFFSET`] past the last pin, as
-    /// tall as [`TASKBAR_DIVIDER_HEIGHT`] and centred in the bar -- or `None`
+    /// reference draws it -- `TASKBAR_DIVIDER_OFFSET` past the last pin, as
+    /// tall as `TASKBAR_DIVIDER_HEIGHT` and centred in the bar -- or `None`
     /// unless both sections have tiles.
     #[must_use]
     pub fn taskbar_divider_rect(&self) -> Option<Rect> {
@@ -7608,7 +7606,7 @@ impl DesktopShell {
     /// was typed and with why under it, so a typo is corrected rather than
     /// typed again. Anything else -- a pin, a start menu row, an icon -- says
     /// so in a notification, as a document that cannot be opened does
-    /// ([`say_cannot_open`](Self::say_cannot_open)). Until this, both closed
+    /// (`say_cannot_open`). Until this, both closed
     /// on nothing having happened, and only the host's standard error said
     /// otherwise.
     pub fn launch_failed(&mut self, launch: &hotkeys::Launch, why: &str) {
@@ -9690,7 +9688,7 @@ impl DesktopShell {
     ///
     /// Both at once, because the second is what the first falls back to. Not
     /// in [`new`](Self::new), for the reason on
-    /// [`system_zone`](Self::system_zone); the session calls this when it
+    /// `system_zone`; the session calls this when it
     /// starts. See `design-decisions.md` §875.
     pub fn load_datetime(&mut self) {
         self.datetime = datetimesettings::DateTimeFile::load().settings;
@@ -11406,7 +11404,9 @@ impl DesktopShell {
 
     /// Set the focus mode *as a user action*.
     ///
-    /// Not the same as assigning [`FocusAssistManager::manual_mode`], and the
+    /// Not the same as assigning
+    /// [`FocusAssistManager::manual_mode`](focus_assist::FocusAssistManager::manual_mode),
+    /// and the
     /// difference is the whole of `snooze_schedule_if_it_would_resume` below:
     /// a person turning this off means "leave me alone about this until it
     /// would have changed anyway", which the manager cannot express because it

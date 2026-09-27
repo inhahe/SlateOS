@@ -667,7 +667,7 @@ impl LoginScreen {
     /// Adopt the picture uploaded to this screen's own surface under `id`.
     ///
     /// Takes the picture's size and fit alongside it because the three are one
-    /// decision: see [`LoginScreen::background_fit`]. Pass `0` to go back to the plain
+    /// decision: see `background_fit`. Pass `0` to go back to the plain
     /// colour, which is what the session does when the background names no
     /// picture, when the file cannot be read, and when the compositor refuses
     /// it -- in all three cases the underlay is the background, and the

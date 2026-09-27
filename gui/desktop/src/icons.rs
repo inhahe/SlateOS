@@ -132,7 +132,7 @@ const DEFAULT_CARET_WIDTH: f32 = 1.0;
 /// Derived rather than tabulated, so that every size the setting offers -- and
 /// any it offers later -- gets a cell that fits it: a 96-pixel glyph in the
 /// 80-pixel default cell would overlap its neighbours. At the default 32 pixels
-/// this is exactly [`DEFAULT_GRID_WIDTH`] by [`DEFAULT_GRID_HEIGHT`]; above it,
+/// this is exactly `DEFAULT_GRID_WIDTH` by `DEFAULT_GRID_HEIGHT`; above it,
 /// width grows one-for-one with the glyph (the label under it gets the room
 /// too) and height grows with the glyph alone, since the label is still two
 /// lines of the same text.
@@ -1777,7 +1777,7 @@ impl DesktopIconLayer {
     /// Handle mouse button release. Answers whether any icon moved -- which is
     /// when there is a layout to save.
     ///
-    /// A drop is carried out by [`drop_plan`](Self::drop_plan), the same
+    /// A drop is carried out by `drop_plan`, the same
     /// function that draws the outline of where it will land.
     #[must_use = "a drop that moved icons has a layout to save"]
     pub fn handle_mouse_up(&mut self, _x: f32, _y: f32, button: MouseButton) -> bool {

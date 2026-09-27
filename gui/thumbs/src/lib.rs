@@ -153,7 +153,7 @@ pub struct Thumbnail {
     /// Absolute path of the source file or directory.
     ///
     /// A `PathBuf`, not a `String`: this is the disk cache's key, hashed by
-    /// [`simple_hash`]. Held as a lossy string, two files whose names differ
+    /// `simple_hash`. Held as a lossy string, two files whose names differ
     /// only in bytes that are not UTF-8 collapsed to the same key and hashed
     /// to the same cache filename — so one file was shown the other's
     /// thumbnail.
@@ -627,7 +627,7 @@ pub struct ThumbConfig {
     /// Text color for previews and labels.
     pub text_color: Color,
     /// Most pixels a source picture may have before it is declined rather than
-    /// decoded. See [`DEFAULT_MAX_SOURCE_PIXELS`] for why this is not simply
+    /// decoded. See `DEFAULT_MAX_SOURCE_PIXELS` for why this is not simply
     /// the decoder's own default.
     ///
     /// Configurable rather than a constant because the right answer depends on
@@ -640,9 +640,9 @@ pub struct ThumbConfig {
     pub max_source_pixels: u64,
     /// Most pixels a picture may have when its decoder shrinks it while
     /// reading (PNG, JPEG): a bound on time, not memory. See
-    /// [`DEFAULT_MAX_STREAMED_PIXELS`].
+    /// `DEFAULT_MAX_STREAMED_PIXELS`.
     pub max_streamed_pixels: u64,
-    /// Largest file read to make a preview. See [`DEFAULT_MAX_SOURCE_BYTES`].
+    /// Largest file read to make a preview. See `DEFAULT_MAX_SOURCE_BYTES`.
     pub max_source_bytes: u64,
 }
 
@@ -1204,12 +1204,14 @@ pub struct ThumbnailRequest {
 
 /// Background thumbnail generator with a request queue.
 ///
-/// Callers submit requests via [`push`], then call [`process_batch`] to
+/// Callers submit requests via [`push`](Self::push), then call
+/// [`process_batch`](Self::process_batch) to
 /// generate some number of thumbnails synchronously (suitable for calling once
 /// per frame or on idle).  Completed thumbnails are collected via
-/// [`take_completed`].
+/// [`take_completed`](Self::take_completed).
 ///
-/// When the directory changes, call [`cancel_all`] to clear the pending queue.
+/// When the directory changes, call [`cancel_all`](Self::cancel_all) to clear
+/// the pending queue.
 ///
 /// # The disk cache belongs here
 ///
@@ -1722,7 +1724,7 @@ pub fn render_placeholder(
 /// lossy-path-string collision `Thumbnail::source_path` documents.
 ///
 /// Not the same hash the *disk* cache names its files with
-/// ([`simple_hash`]), which is a filename and not an identity; that one is
+/// (`simple_hash`), which is a filename and not an identity; that one is
 /// left alone so an existing on-disk cache is not silently orphaned.
 #[must_use]
 pub fn image_id(path: &Path, mtime: u64, size: u64) -> u64 {

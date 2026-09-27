@@ -85,7 +85,12 @@ const MAX_QUEUE_DEPTH: usize = 64;
 ///
 /// Messages larger than this should use shared memory (page
 /// flipping will be added later for zero-copy large messages).
-const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64 KiB
+///
+/// Public so that the send syscalls can refuse an oversize body *before*
+/// copying it in: `Message::from_bytes` enforces it too, but only once the
+/// whole buffer is kernel memory (known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`).
+pub const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64 KiB
 
 // ---------------------------------------------------------------------------
 // Channel ID and Handle

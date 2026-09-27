@@ -50,6 +50,11 @@ use crate::netns::NetNsId;
 /// UDP header size.
 const UDP_HEADER_SIZE: usize = 8;
 
+/// The largest payload one datagram can carry: the 16-bit UDP length field
+/// counts the header too.  `send` refuses more with `InvalidArgument`; the send
+/// syscall judges it against this before copying the payload in.
+pub const MAX_PAYLOAD: usize = u16::MAX as usize - UDP_HEADER_SIZE;
+
 /// Maximum number of bound UDP sockets.
 ///
 /// Supports multiple concurrent UDP services (DNS, DHCP, game

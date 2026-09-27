@@ -1465,6 +1465,21 @@ pub fn sys_channel_create(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok2(r0, r1)
 }
 
+/// Copy a channel message body in from user space, refusing an oversize one
+/// before anything is allocated or read.
+///
+/// A body above [`crate::ipc::channel::MAX_MESSAGE_SIZE`] is `MessageTooLarge`
+/// -- the error `Message::from_bytes` gives -- but decided here, from the
+/// length, rather than after the syscall had copied up to 1 GiB of the
+/// caller's memory into the kernel for a message that could never be sent.
+fn read_message_body(ptr: u64, len: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+    let max = crate::ipc::channel::MAX_MESSAGE_SIZE;
+    if len > max {
+        return Err(KernelError::MessageTooLarge);
+    }
+    crate::mm::user::read_user_vec(ptr, len, max)
+}
+
 /// `SYS_CHANNEL_SEND` — send a message on a channel.
 ///
 /// `arg0`: channel handle.
@@ -1481,7 +1496,7 @@ pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
     // Copy the message body into the kernel before parsing it: `Message` owns
     // its bytes and the send path can block, so a slice over user memory would
     // be both a SMAP violation and a TOCTOU hazard (see `sys_pipe_write`).
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    let data = match read_message_body(args.arg1, len) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1672,7 +1687,7 @@ pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+    let data = match read_message_body(args.arg1, data_len) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1703,7 +1718,7 @@ pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+    let data = match read_message_body(args.arg1, data_len) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1744,7 +1759,7 @@ pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
     // can block on a full queue.  Transferring capabilities out of a slice that
     // a peer thread could remap mid-send would be especially bad: the handles
     // the kernel installs in the receiver would not be the ones it validated.
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+    let data = match read_message_body(args.arg1, data_len) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -13111,10 +13126,11 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
     // Copied before the handle lookup below, so the datagram the driver
     // eventually DMAs is the one that was validated — a peer thread cannot
     // rewrite it between here and the NIC.
-    let data = match crate::mm::user::read_user_vec(args.arg3, data_len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
+    let data =
+        match crate::mm::user::read_user_vec(args.arg3, data_len, crate::net::udp::MAX_PAYLOAD) {
+            Ok(d) => d,
+            Err(e) => return SyscallResult::err(e),
+        };
 
     // Look up the actual bound port from the socket handle.
     let src_port: u16 = match crate::net::udp::local_port(_handle) {

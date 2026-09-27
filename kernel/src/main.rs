@@ -3685,6 +3685,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         proc::spawn::self_test_munmap_abi(),
     );
+    // The channel and UDP send syscalls judge a payload's size before copying
+    // it in (known-issues.md A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC).
+    selftest::dispatch_debug(
+        "send-size gate (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_sizegate_abi(),
+    );
 
     {
         #[inline(never)]

@@ -24142,6 +24142,73 @@ pub fn self_test_munmap_abi() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of the payload size gates on the channel and UDP send
+/// syscalls: an oversize request is refused from its length alone, before the
+/// kernel reads -- or allocates for -- a byte of it.  The probe program is
+/// [`elf::build_sizegate_abi_test_elf`]; its doc has the table of exit codes.
+pub fn self_test_sizegate_abi() -> KernelResult<()> {
+    serial_println!("[spawn] Running send-size gate (ring 3) test...");
+
+    let probe_elf = elf::build_sizegate_abi_test_elf();
+    let argv: &[&[u8]] = &[b"sizegate"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "spawn-test-sizegate",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&probe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: sizegate probe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Eight syscalls that fail fast and never block.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: send-size gate (ring 3) — expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: send-size gate (ring 3) — probe {:#04x} disagreed (exit {:?}); \
+             see build_sizegate_abi_test_elf's probe table",
+            exit_code.unwrap_or(-1),
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   send-size gate (ring 3: 8 probes — four channel sends and a UDP send \
+         over their limits refused before the payload is read; in-limit controls and the \
+         64 KiB boundary reach the copy): OK"
+    );
+    Ok(())
+}
+
 /// Path Z end-to-end test: run a **real, prebuilt, dynamically-linked glibc**
 /// Linux binary to completion.
 ///

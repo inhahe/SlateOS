@@ -7235,6 +7235,186 @@ pub fn build_munmap_abi_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build the ring-3 probe for the payload size gates of the channel and UDP
+/// send syscalls.
+///
+/// Each probe asks for a send whose length is over the limit, from a pointer
+/// that is **not mapped**.  That combination is the whole test: a syscall that
+/// judges the size first answers with the size error; one that copies first
+/// fails the copy and answers `InvalidAddress` -- which is what every one of
+/// these did until 2026-09-26, having first tried to allocate a kernel buffer
+/// of the requested size (known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`).  The controls ask for an
+/// in-limit length from the same unmapped pointer and must get
+/// `InvalidAddress`: the gate refuses sizes, not everything.
+///
+/// The handle is bogus on purpose: every answer below is decided before the
+/// handle is looked up, which is itself part of what is pinned.
+///
+/// | Code | Call | Length | Expect |
+/// |---|---|---|---|
+/// | `0x41` | `channel_send` (201) | 64 KiB + 1 | `-302` MessageTooLarge |
+/// | `0x42` | `channel_send_timeout` (208) | 64 KiB + 1 | `-302` |
+/// | `0x43` | `channel_send_blocking` (209) | 64 KiB + 1 | `-302` |
+/// | `0x44` | `channel_send_caps` (206), no caps | 64 KiB + 1 | `-302` |
+/// | `0x45` | `udp_send` (811) | 65,528 (one over) | `-3` InvalidArgument |
+/// | `0x46` | `channel_send` | 16 | `-101` InvalidAddress (control) |
+/// | `0x47` | `udp_send` | 16 | `-101` (control) |
+/// | `0x48` | `channel_send` | exactly 64 KiB | `-101`: the limit is inclusive |
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 + 56
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    const MESSAGE_TOO_LARGE: i32 = -302;
+    const EINVAL: i32 = -3;
+    const EFAULT: i32 = -101;
+    const UNMAPPED: u64 = 0x0000_0030_0000_0000;
+    const BOGUS_HANDLE: u64 = 0xFFFF_FFF0;
+    const MAX_MESSAGE: u64 = 64 * 1024;
+    const MAX_UDP_PAYLOAD: u64 = 65_535 - 8;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    /// `syscall(nr, rdi, rsi, rdx, r10, r8)`; if `rax != expect`, `exit(fail)`.
+    fn probe(code: &mut alloc::vec::Vec<u8>, nr: u32, regs: [u64; 5], expect: i32, fail: u32) {
+        // movabs rdi / rsi / rdx / r10 / r8, imm64
+        for (prefix, value) in [
+            ([0x48, 0xBF], regs[0]),
+            ([0x48, 0xBE], regs[1]),
+            ([0x48, 0xBA], regs[2]),
+            ([0x49, 0xBA], regs[3]),
+            ([0x49, 0xB8], regs[4]),
+        ] {
+            code.extend_from_slice(&prefix);
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        code.push(0xB8); // mov eax, nr
+        code.extend_from_slice(&nr.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
+        code.extend_from_slice(&(expect as u32).to_le_bytes());
+        code.extend_from_slice(&[0x74, 0x0D]); // je +13 — over the exit block
+        code.push(0xBF); // mov edi, <fail>
+        code.extend_from_slice(&fail.to_le_bytes());
+        code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.push(0xCC); // int3 — exit does not return
+    }
+
+    let over = MAX_MESSAGE + 1;
+    probe(
+        &mut code,
+        201,
+        [BOGUS_HANDLE, UNMAPPED, over, 0, 0],
+        MESSAGE_TOO_LARGE,
+        0x41,
+    );
+    probe(
+        &mut code,
+        208,
+        [BOGUS_HANDLE, UNMAPPED, over, 0, 0],
+        MESSAGE_TOO_LARGE,
+        0x42,
+    );
+    probe(
+        &mut code,
+        209,
+        [BOGUS_HANDLE, UNMAPPED, over, 0, 0],
+        MESSAGE_TOO_LARGE,
+        0x43,
+    );
+    probe(
+        &mut code,
+        206,
+        [BOGUS_HANDLE, UNMAPPED, over, 0, 0],
+        MESSAGE_TOO_LARGE,
+        0x44,
+    );
+    probe(
+        &mut code,
+        811,
+        [BOGUS_HANDLE, 0x7F00_0001, 1, UNMAPPED, MAX_UDP_PAYLOAD + 1],
+        EINVAL,
+        0x45,
+    );
+    probe(
+        &mut code,
+        201,
+        [BOGUS_HANDLE, UNMAPPED, 16, 0, 0],
+        EFAULT,
+        0x46,
+    );
+    probe(
+        &mut code,
+        811,
+        [BOGUS_HANDLE, 0x7F00_0001, 1, UNMAPPED, 16],
+        EFAULT,
+        0x47,
+    );
+    probe(
+        &mut code,
+        201,
+        [BOGUS_HANDLE, UNMAPPED, MAX_MESSAGE, 0, 0],
+        EFAULT,
+        0x48,
+    );
+
+    // --- every probe agreed -------------------------------------------------
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.push(0xCC); // int3
+
+    // --- file image ---------------------------------------------------------
+    let code_len = code.len();
+    let file_size = code_offset as usize + code_len;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0); // e_shnum
+    write_u16(&mut buf, 62, 0); // e_shstrndx
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset); // p_offset
+    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, code_len as u64); // p_filesz
+    write_u64(&mut buf, ph + 40, code_len as u64); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    buf[code_offset as usize..file_size].copy_from_slice(&code);
+
+    buf
+}
+
 /// Build a test ELF for SEH: exception handler catches fault and exits.
 ///
 /// The ELF contains two code regions:

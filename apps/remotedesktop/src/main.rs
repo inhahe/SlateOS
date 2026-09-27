@@ -501,6 +501,20 @@ pub struct RemoteSession {
     pub duration_secs: u64,
 }
 
+impl RemoteSession {
+    /// How long the session has been connected, at `now` (seconds since the
+    /// epoch): from the server's handshake to `now` while it is connected,
+    /// and what was kept when it ended otherwise. `duration_secs` alone is
+    /// never updated while a session runs, so a live one read "0s".
+    #[must_use]
+    pub fn duration_at(&self, now: u64) -> u64 {
+        match (self.state == SessionState::Connected, self.connected_at) {
+            (true, Some(since)) => now.saturating_sub(since),
+            _ => self.duration_secs,
+        }
+    }
+}
+
 /// Performance metrics for an active session.
 #[derive(Clone, Debug, Default)]
 pub struct PerfMetrics {
@@ -1398,6 +1412,7 @@ impl RemoteDesktopApp {
                         self.record_attempt(id, false);
                     }
                     if let Some(session) = self.sessions.get_mut(at) {
+                        session.duration_secs = session.duration_at(now_secs());
                         session.state = SessionState::Disconnected;
                     }
                     self.live.retain(|l| l.session_id != id);
@@ -3269,7 +3284,7 @@ impl RemoteDesktopApp {
                 let detail_fields: Vec<(&str, String)> = vec![
                     ("Status", session.state.label().into()),
                     ("Session ID", session.id.to_string()),
-                    ("Duration", format_duration(session.duration_secs)),
+                    ("Duration", format_duration(session.duration_at(now_secs()))),
                 ];
 
                 for (label, value) in &detail_fields {
@@ -6475,6 +6490,28 @@ mod tests {
         assert_eq!(app.password_prompt, None);
         let said = app.status_message.clone().unwrap_or_default();
         assert!(said.contains("RDP is not implemented"), "{said}");
+    }
+
+    /// A connected session's duration runs from the handshake; an ended
+    /// one keeps what it had.
+    #[test]
+    fn a_sessions_duration_runs_from_its_handshake() {
+        let mut session = RemoteSession {
+            id: 1,
+            profile_id: 1,
+            display_name: String::from("desk"),
+            state: SessionState::Connected,
+            connected_at: Some(1_000),
+            duration_secs: 0,
+        };
+        assert_eq!(session.duration_at(1_065), 65);
+        session.state = SessionState::Disconnected;
+        session.duration_secs = 65;
+        assert_eq!(
+            session.duration_at(9_999),
+            65,
+            "an ended session kept counting"
+        );
     }
 
     /// CopyRect reads the old pixels even where source and destination

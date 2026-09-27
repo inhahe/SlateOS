@@ -34,6 +34,7 @@ INPUT = "keys_and_the_pointer_reach_the_remote_machine"
 REFUSED = "a_refused_password_is_a_failed_attempt"
 ASKS = "connect_asks_for_the_password_and_refuses_what_is_not_vnc"
 OVERLAP = "an_overlapping_copy_reads_the_old_pixels"
+DURATION = "a_sessions_duration_runs_from_its_handshake"
 HANDSHAKE = "a_session_shakes_hands_and_shows_the_screen"
 PASSWORD = "a_password_is_proven_by_the_challenge"
 OUTSIDE = "a_rectangle_outside_the_desktop_is_refused"
@@ -112,6 +113,12 @@ MAIN = [
         "                    let _id = self.connect_vnc(prompt.profile_index, &prompt.text);",
         "                    let _ = prompt;",
         [ASKS],
+    ),
+    (
+        "a connected session's duration does not run",
+        "            (true, Some(since)) => now.saturating_sub(since),",
+        "            (true, Some(_)) => 0,",
+        [DURATION],
     ),
 ]
 

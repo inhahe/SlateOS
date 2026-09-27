@@ -3,6 +3,8 @@ name = "remotedesktop"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# ZRLE's one zlib stream per session, inflated a rectangle at a time.
+deflate = { path = "../../deflate" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

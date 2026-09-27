@@ -1854,8 +1854,19 @@ impl App for TypingTutorApp {
     /// tick that drives one. Without an interval here the loop never sends
     /// `Event::Tick`, `advance_time` is never called, and every WPM and every
     /// duration the app can show reads zero -- which is what this program did.
+    ///
+    /// Only while the stopwatch runs: from a lesson's first keystroke to its
+    /// last. Before the first key nothing is being timed -- the start is
+    /// stamped from the clock as the key arrives -- and a clock asked for on
+    /// the lesson list, or over a finished lesson, woke the machine ten times
+    /// a second for nothing.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(Duration::from_millis(100))
+        let timing = self.view == AppView::Typing
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.total_keystrokes > 0 && !s.finished);
+        timing.then_some(Duration::from_millis(100))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -3380,7 +3391,25 @@ mod tests {
     /// correct and tested throughout the period when nothing called it.
     #[test]
     fn the_app_asks_the_window_loop_for_a_clock() {
-        let app = TypingTutorApp::new();
+        let mut app = TypingTutorApp::new();
+        assert_eq!(
+            App::tick_interval(&app),
+            None,
+            "the lesson list asked for a clock"
+        );
+        app.start_lesson(0);
+        assert_eq!(
+            App::tick_interval(&app),
+            None,
+            "a lesson not yet begun asked for a clock: nothing is timed before the first key"
+        );
+        let first = app.lessons[0].text.chars().next().unwrap_or('a');
+        app.handle_key(&KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: first.to_string(),
+        });
         let interval = App::tick_interval(&app).expect("a typing tutor needs a clock");
         assert!(
             interval <= Duration::from_millis(500),

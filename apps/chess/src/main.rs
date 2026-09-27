@@ -2075,8 +2075,12 @@ impl App for ChessApp {
     /// Black's search runs on this tick rather than inside the click handler.
     /// Without an interval here the game would enter `thinking` after White's
     /// first move and stay there.
+    ///
+    /// Only then: a board waiting for White has nothing to advance, and a
+    /// clock asked for anyway woke the machine sixteen times a second for as
+    /// long as the window was open.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(Duration::from_millis(60))
+        self.thinking.then_some(Duration::from_millis(60))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -3575,6 +3579,37 @@ mod tests {
         app.handle_event(&Event::Tick { elapsed_ms: 16 });
     }
 
+    /// The clock runs while Black thinks and not otherwise: a board waiting
+    /// for White asks for none.
+    #[test]
+    fn the_clock_runs_only_while_black_thinks() {
+        let mut app = ChessApp::new();
+        assert_eq!(app.tick_interval(), None, "an idle board asked for a clock");
+        click_sized(
+            &mut app,
+            Target::Square(1, 4),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        click_sized(
+            &mut app,
+            Target::Square(3, 4),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        assert!(app.thinking, "control: e2-e4 hands the move to Black");
+        assert!(
+            app.tick_interval().is_some(),
+            "Black's search was given no clock"
+        );
+        app.handle_event(&Event::Tick { elapsed_ms: 16 });
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "the clock outlived Black's reply"
+        );
+    }
+
     #[test]
     fn every_square_is_clickable_at_every_window_size() {
         // The board is solved from the window, so all sixty-four hit boxes
@@ -4200,9 +4235,9 @@ mod tests {
             app.initial_size(),
             (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
         );
-        // Without a tick interval the game would enter `thinking` after
-        // White's first move and stay there for ever.
-        assert!(app.tick_interval().is_some());
+        // A board waiting for White asks for no clock; Black's search gets
+        // one -- `the_clock_runs_only_while_black_thinks`.
+        assert_eq!(app.tick_interval(), None);
     }
 
     #[test]

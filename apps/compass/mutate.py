@@ -257,6 +257,31 @@ MUTATIONS = [
         "            Event::CloseRequested => Response::Redraw,",
         ["the_close_button_closes_the_window_and_nothing_else_does"],
     ),
+    # 2026-09-27: no invented position; the user sets one by hand.
+    (
+        "a fresh window invents New York again",
+        "            position: None,",
+        "            position: Some(Coordinate::new(40.7128, -74.0060)),",
+        ["a_fresh_window_knows_no_position"],
+    ),
+    (
+        "a waypoint is marked at nowhere",
+        "        let Some(here) = self.position.clone() else {",
+        "        let Some(here) = self.position.clone().or(Some(Coordinate::new(0.0, 0.0))) else {",
+        ["a_fresh_window_knows_no_position"],
+    ),
+    (
+        "a waypoint is measured from nowhere",
+        "        let here = self.position.as_ref()?;",
+        "        let origin = Coordinate::new(0.0, 0.0);\n        let here = self.position.as_ref().unwrap_or(&origin);",
+        ["a_fresh_window_knows_no_position"],
+    ),
+    (
+        "the set-position button is never hit",
+        "                f.hit(Target::SetPosition, here);",
+        "                let _ = here;",
+        ["the_set_position_button_sets_it"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -2,8 +2,10 @@
 //!
 //! A database viewer/browser tool (like DB Browser for `SQLite`) with:
 //! - SQL parser: basic SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE
-//! - Data types: INTEGER, REAL, self.palette.text, BLOB, NULL
-//! - In-memory table storage (simulated `SQLite` engine)
+//! - Data types: INTEGER, REAL, TEXT, BLOB, NULL
+//! - In-memory tables and an SQL engine of its own -- not `SQLite`: no
+//!   database driver here reads a `.db` file, and the window says so
+//!   (`NO_TABLES_WHY`); an imported CSV becomes a table
 //! - Table schema viewer with column names, types, constraints
 //! - Paginated data browser with column sorting
 //! - SQL query editor with syntax highlighting hints

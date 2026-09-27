@@ -1461,7 +1461,10 @@ pub struct ScanConfig {
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
-            target_input: String::from("192.168.1.0/24"),
+            // Empty rather than someone's typical home network: the field's
+            // hint shows an example, and `NetScanApp::new` fills in this
+            // machine's own network when it can read one.
+            target_input: String::new(),
             port_input: String::new(),
             profile: ScanProfile::Quick,
             // The one this program can do: ping and ARP need raw packets.
@@ -2175,8 +2178,20 @@ impl Default for NetScanApp {
 }
 
 impl NetScanApp {
+    /// The window as it opens: the target is this machine's own network,
+    /// read as the Network Manager reads it, when there is one to read.
     pub fn new() -> Self {
-        Self::default()
+        Self::on(&machine())
+    }
+
+    /// [`new`](Self::new), reading the network from `provider` -- the
+    /// machine, or a test's fixture tree.
+    fn on(provider: &dyn hwquery::HardwareProvider) -> Self {
+        let mut app = Self::default();
+        if let Some(net) = machine_subnet(provider) {
+            app.config.target_input = net;
+        }
+        app
     }
 
     /// Start a scan with the current configuration -- or, if one is under
@@ -4909,6 +4924,48 @@ impl App for NetScanApp {
     }
 }
 
+/// Where the network is read from: the machine.
+#[cfg(not(test))]
+fn machine() -> hwquery::SyscallProvider {
+    hwquery::SyscallProvider::new()
+}
+
+/// Under test, a root with nothing under it, so no test's outcome depends on
+/// the computer it runs on.
+#[cfg(test)]
+fn machine() -> hwquery::SyscallProvider {
+    hwquery::SyscallProvider::at("no-machine-under-test")
+}
+
+/// The network this machine is on, as a CIDR range to scan: the first
+/// interface that is not loopback and has both an address and a netmask
+/// the kernel says are assigned. `None` when there is no such interface --
+/// the field then stays empty rather than guessing.
+fn machine_subnet(provider: &dyn hwquery::HardwareProvider) -> Option<String> {
+    provider.query_network().ok()?.iter().find_map(|a| {
+        let (hwquery::Address::Is(ip), hwquery::Address::Is(mask)) = (&a.ipv4, &a.subnet) else {
+            return None;
+        };
+        if ip.starts_with("127.") {
+            return None;
+        }
+        subnet_of(ip, mask)
+    })
+}
+
+/// `ip` with `mask` as a CIDR range, `"10.0.2.0/24"`. `None` for text that
+/// is not an address, or a mask whose ones are not contiguous -- which names
+/// no range.
+fn subnet_of(ip: &str, mask: &str) -> Option<String> {
+    let ip = u32::from(ip.parse::<std::net::Ipv4Addr>().ok()?);
+    let mask = u32::from(mask.parse::<std::net::Ipv4Addr>().ok()?);
+    let prefix = mask.leading_ones();
+    if mask.checked_shl(prefix).unwrap_or(0) != 0 || prefix == 0 {
+        return None;
+    }
+    Some(format!("{}/{prefix}", std::net::Ipv4Addr::from(ip & mask)))
+}
+
 fn main() -> ExitCode {
     // No scan at launch: connecting to every address on the network is
     // something the user asks for, not something opening a window does.
@@ -4993,6 +5050,61 @@ mod tests {
     )]
 
     use super::*;
+
+    /// An address and its mask make the range that holds it.
+    #[test]
+    fn a_subnet_is_the_address_under_its_mask() {
+        assert_eq!(
+            subnet_of("10.0.2.15", "255.255.255.0").as_deref(),
+            Some("10.0.2.0/24")
+        );
+        assert_eq!(
+            subnet_of("172.16.5.9", "255.240.0.0").as_deref(),
+            Some("172.16.0.0/12")
+        );
+        assert_eq!(
+            subnet_of("10.0.2.15", "255.0.255.0"),
+            None,
+            "a mask with a hole names no range"
+        );
+        assert_eq!(
+            subnet_of("10.0.2.15", "0.0.0.0"),
+            None,
+            "the whole internet is not a network to scan"
+        );
+        assert_eq!(subnet_of("not an address", "255.255.255.0"), None);
+    }
+
+    /// **The window opens on this machine's network**, read from SlateOS's
+    /// `/proc/net` -- where it opened on 192.168.1.0/24, a typical home
+    /// network and probably not this one (QEMU's is 10.0.2.0/24).
+    #[test]
+    fn the_target_is_this_machines_network() {
+        let dir = scratchdir::ScratchDir::new("netscan_machine");
+        std::fs::create_dir_all(dir.dir().join("proc")).expect("fixture");
+        let write = |net: &str| std::fs::write(dir.dir().join("proc/net"), net).expect("fixture");
+        let provider =
+            || hwquery::SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+        write(
+            "Interface: eth0  (UP)\n  MAC:     52:54:00:12:34:56\n  IPv4:    10.0.2.15\n  Netmask: 255.255.255.0\n",
+        );
+        assert_eq!(machine_subnet(&provider()).as_deref(), Some("10.0.2.0/24"));
+        assert_eq!(
+            NetScanApp::on(&provider()).config.target_input,
+            "10.0.2.0/24",
+            "the window did not open on the machine's network"
+        );
+        write(
+            "Interface: eth0  (UP)\n  MAC:     52:54:00:12:34:56\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n",
+        );
+        assert_eq!(
+            machine_subnet(&provider()),
+            None,
+            "an unconfigured card named a network"
+        );
+        // And with nothing readable, the field is empty -- not a guess.
+        assert_eq!(NetScanApp::new().config.target_input, "");
+    }
     use std::net::SocketAddrV4;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -6268,6 +6380,9 @@ mod tests {
     #[test]
     fn test_app_key_f5_starts_scan() {
         let mut app = NetScanApp::new();
+        // A range to scan -- the window no longer invents one; the prober
+        // under test reaches no network, so nothing leaves the machine.
+        app.config.target_input = String::from("192.168.1.0/24");
         app.prober = slow;
         app.config.concurrency = 2;
         let f5 = Event::Key(KeyEvent {
@@ -6971,6 +7086,9 @@ mod tests {
     /// An app holding one scan result of `n` hosts, each with `ports` ports.
     fn app_with_hosts(n: usize, ports: usize) -> NetScanApp {
         let mut app = NetScanApp::new();
+        // A range to scan -- the window no longer invents one; the prober
+        // under test reaches no network, so nothing leaves the machine.
+        app.config.target_input = String::from("192.168.1.0/24");
         app.active_tab = ViewTab::Results;
         app.results = Some(ScanResult {
             id: 1,

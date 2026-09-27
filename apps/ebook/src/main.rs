@@ -312,7 +312,7 @@ const OPEN_BUTTON_WIDTH: f32 = 120.0;
 /// The card asking whether to take a book out of the library.
 const CONFIRM_WIDTH: f32 = 460.0;
 const CONFIRM_HEIGHT: f32 = 150.0;
-const CONFIRM_BUTTON_WIDTH: f32 = 110.0;
+const CONFIRM_BUTTON_WIDTH: f32 = 140.0;
 
 /// A rectangle a click is tested against, the same one it is drawn in.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2802,7 +2802,7 @@ impl EbookApp {
             overflow: TextOverflow::Ellipsis,
         });
         let (remove, keep) = self.confirm_buttons();
-        for (button, label) in [(remove, "Take it out"), (keep, "Keep it")] {
+        for (button, label) in [(remove, "Take it out (Y)"), (keep, "Keep it (N)")] {
             push_button(cmds, button, tc);
             cmds.push(RenderCommand::Text {
                 x: button.x + 12.0,

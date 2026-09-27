@@ -170738,9 +170738,11 @@ All three write owner-only files; the file dialog and the dialogs are modal.
 
 **Not done:** the operator's third part of C-Q25 -- a program reading a
 password through a capability after a prompt -- lives in `gui/credentials`,
-the system keyring (lane C). And the credential manager still cannot **edit**
-or **delete** an entry (`todo.txt`), which matters more now that entries are
-kept.
+the system keyring (lane C). *(Amended the same day: the credential manager
+could not **edit** or **delete** an entry either -- `update_entry` and
+`remove_entry` had no caller -- which mattered more once entries were kept.
+Both are wired: Edit (Ctrl+E) opens the form filled in and keeps what it does
+not show; Delete asks first.)*
 
 ### [E] The ebook reader could open no book but five invented ones -- 2026-09-27
 **Status:** FIXED (lane E, 2026-09-27).

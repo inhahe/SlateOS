@@ -15,7 +15,9 @@ Two tables:
   over, and a close waits once for a save that failed.
   And its doors out (2026-09-27, C-Q25): Export only after the warning says
   what the file is, and every field quoted; a backup is the vault sealed,
-  restored only with its master password and only after asking.
+  restored only with its master password and only after asking. And the
+  entry's own controls (2026-09-27): Edit changes what the form shows and
+  keeps what it does not; Delete asks first.
 * **vaultfile.rs** -- the file itself: a header that asks for too much work is
   refused before any is done, and contents are read whole or not at all.
 
@@ -51,6 +53,11 @@ RESTORE = "a_restore_needs_the_backups_password_and_asks_before_replacing"
 MODAL = "a_vault_dialog_is_modal"
 BUTTONS = "the_settings_buttons_can_be_pressed"
 PICKER_KEYS = "the_file_dialog_takes_the_keys_while_it_is_up"
+EDIT_KEEPS = "editing_a_login_changes_what_was_typed_and_keeps_the_rest"
+EDIT_KIND = "an_entry_being_edited_keeps_its_kind"
+CARD_KEPT = "a_card_number_left_alone_stays_as_it_was_kept"
+DELETE_ASKS = "delete_asks_first_and_then_takes_the_entry_out_of_the_vault"
+BUTTONS_ON_ENTRY = "edit_and_delete_can_be_pressed_on_an_entry"
 
 MAIN = [
     (
@@ -169,6 +176,48 @@ MAIN = [
         "            Picked::Handled => return Response::Redraw,",
         "            Picked::Handled => {}",
         [PICKER_KEYS],
+    ),
+    (
+        "an edit adds a new entry instead",
+        "    let id = if let Some(id) = form.editing {",
+        "    let id = if let Some(id) = None::<u64> {",
+        [EDIT_KEEPS, CARD_KEPT],
+    ),
+    (
+        "an edit loses the one-time-code secret",
+        "                    n.totp_secret.clone_from(&o.totp_secret);\n",
+        "",
+        [EDIT_KEEPS],
+    ),
+    (
+        "an unchanged card number is masked again",
+        "                    n.number_masked.clone_from(&o.number_masked);\n",
+        "",
+        [CARD_KEPT],
+    ),
+    (
+        "an entry being edited can change kind",
+        "        if self.kind == kind || self.editing.is_some() {",
+        "        if self.kind == kind {",
+        [EDIT_KIND],
+    ),
+    (
+        "delete does not ask",
+        "        state.dialog = Some(VaultDialog::DeleteConfirm { id });",
+        "        delete_entry(state, id);",
+        [DELETE_ASKS],
+    ),
+    (
+        "a confirmed delete deletes nothing",
+        "    if state.vault.remove_entry(id) {",
+        "    if false {",
+        [DELETE_ASKS],
+    ),
+    (
+        "edit and delete are decoration",
+        "        frame.hit(target, Rect::new(bx, y - 4.0, width, 26.0));\n",
+        "",
+        [BUTTONS_ON_ENTRY],
     ),
 ]
 

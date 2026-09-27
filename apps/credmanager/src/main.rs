@@ -170,6 +170,12 @@ enum Target {
     RestoreReplace,
     /// Any vault dialog: leave it, doing nothing.
     DialogCancel,
+    /// Entry detail: change this entry.
+    EditEntry,
+    /// Entry detail: delete this entry (after asking).
+    DeleteEntry,
+    /// The delete question: yes.
+    DeleteConfirmed,
     /// New-entry form: the type chooser, indexing [`EntryType::all`].
     NewKind(usize),
     /// New-entry form: field `n`, indexing [`fields_for`].
@@ -881,10 +887,8 @@ impl Vault {
 
     /// Delete an entry.
     ///
-    /// No caller yet: adding a credential is wired up as of this change and
-    /// deleting one is not, so there is no control that reaches this. See
-    /// `todo.txt`.
-    #[allow(dead_code, reason = "no delete control yet -- see todo.txt")]
+    /// Reached from the entry's Delete button and the Delete key, after a
+    /// question -- see `ask_delete`. It had no caller until 2026-09-27.
     fn remove_entry(&mut self, entry_id: u64) -> bool {
         let before = self.entries.len();
         self.entries.retain(|e| e.id != entry_id);
@@ -901,9 +905,8 @@ impl Vault {
         self.entries.iter_mut().find(|e| e.id == entry_id)
     }
 
-    /// Replace an entry's payload. No caller: the detail view shows a
-    /// credential and cannot edit one. See `todo.txt`.
-    #[allow(dead_code, reason = "no edit control yet -- see todo.txt")]
+    /// Replace an entry's payload, from the form's Edit. It had no caller
+    /// until 2026-09-27.
     fn update_entry(&mut self, entry_id: u64, data: EntryData, now: u64) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.data = data;
@@ -2895,6 +2898,8 @@ fn field_is_secret(kind: EntryType, index: usize) -> bool {
 /// A credential being written, before it is a credential.
 #[derive(Clone, Debug)]
 struct NewEntryForm {
+    /// The entry this form changes, or `None` for a new one.
+    editing: Option<u64>,
     kind: EntryType,
     /// One string per entry in `fields_for(kind)`.
     values: Vec<String>,
@@ -2905,6 +2910,7 @@ struct NewEntryForm {
 impl NewEntryForm {
     fn new(kind: EntryType) -> Self {
         Self {
+            editing: None,
             kind,
             values: vec![String::new(); fields_for(kind).len()],
             focused: 0,
@@ -2918,7 +2924,9 @@ impl NewEntryForm {
     /// a typed secret into a field that is drawn in the clear would be the
     /// worst possible way to find that out.
     fn set_kind(&mut self, kind: EntryType) {
-        if self.kind == kind {
+        // An entry being edited keeps its kind: a login does not turn into a
+        // note by a click on the wrong pill.
+        if self.kind == kind || self.editing.is_some() {
             return;
         }
         *self = Self::new(kind);
@@ -2926,6 +2934,43 @@ impl NewEntryForm {
 
     fn labels(&self) -> &'static [&'static str] {
         fields_for(self.kind)
+    }
+
+    /// The form over an existing entry, its fields filled in -- in the order
+    /// [`fields_for`] names them.
+    fn for_entry(entry: &Entry) -> Self {
+        let values: Vec<String> = match &entry.data {
+            EntryData::Login(d) => vec![
+                d.site.clone(),
+                d.username.clone(),
+                d.password.clone(),
+                d.url.clone(),
+                d.notes.clone(),
+            ],
+            EntryData::SecureNote(d) => vec![d.title.clone(), d.content.clone()],
+            EntryData::CreditCard(d) => vec![
+                d.name.clone(),
+                d.number_masked.clone(),
+                d.expiry.clone(),
+                d.cardholder.clone(),
+                d.notes.clone(),
+            ],
+            EntryData::Identity(d) => vec![
+                d.name.clone(),
+                d.email.clone(),
+                d.phone.clone(),
+                d.address.clone(),
+            ],
+            EntryData::SshKey(d) => {
+                vec![d.name.clone(), d.fingerprint.clone(), d.public_key.clone()]
+            }
+        };
+        Self {
+            editing: Some(entry.id),
+            kind: entry.entry_type(),
+            values,
+            focused: 0,
+        }
     }
 
     fn value(&self, index: usize) -> &str {
@@ -3069,6 +3114,8 @@ enum VaultDialog {
     },
     /// The backup is open: replace this vault's entries with its own?
     RestoreConfirm { path: PathBuf, backup: Box<Vault> },
+    /// Delete this entry?
+    DeleteConfirm { id: u64 },
 }
 
 /// What the file dialog that is up was opened to do with the file chosen.
@@ -4528,6 +4575,28 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         state.palette.base,
     );
 
+    // Edit and Delete, at the right of the badge's line. Delete asks first.
+    let mut bx = x_start + panel_width - pad;
+    for (label, target, width) in [
+        ("Delete", Target::DeleteEntry, 70.0),
+        ("Edit (Ctrl+E)", Target::EditEntry, 110.0),
+    ] {
+        bx -= width;
+        draw_button(
+            frame,
+            bx,
+            y - 4.0,
+            width,
+            26.0,
+            label,
+            state.palette.surface1,
+            state.palette.text,
+            false,
+        );
+        frame.hit(target, Rect::new(bx, y - 4.0, width, 26.0));
+        bx -= 8.0;
+    }
+
     if entry.starred {
         draw_text(
             frame,
@@ -5265,7 +5334,11 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         frame,
         x_start + pad,
         y,
-        "New Entry",
+        if form.editing.is_some() {
+            "Edit Entry"
+        } else {
+            "New Entry"
+        },
         state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
@@ -5273,9 +5346,13 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
     );
     y += 36.0;
 
-    // Type chooser: one pill per kind, the chosen one filled.
+    // Type chooser: one pill per kind, the chosen one filled. An entry being
+    // edited keeps its kind, so only its own pill is drawn.
     let mut chooser_x = x_start + pad;
     for (index, kind) in EntryType::all().iter().enumerate() {
+        if form.editing.is_some() && *kind != form.kind {
+            continue;
+        }
         let label = kind.label();
         let w = text::padded_width(label, 10.0, SMALL_FONT_SIZE, FontWeightHint::Regular);
         if chooser_x + w > x_start + pad + inner {
@@ -6588,6 +6665,27 @@ fn render_vault_dialog(
                 ("Cancel", Target::DialogCancel, false),
             ],
         ),
+        VaultDialog::DeleteConfirm { id } => (
+            "Delete this entry?",
+            vec![
+                small(
+                    state.vault.get_entry(*id).map_or("", |e| e.display_name()),
+                    state.palette.text,
+                ),
+                small(
+                    "It is gone from this vault as soon as you say so.",
+                    state.palette.subtext0,
+                ),
+                small(
+                    "A backup made before now still holds it.",
+                    state.palette.subtext0,
+                ),
+            ],
+            [
+                ("Delete", Target::DeleteConfirmed, true),
+                ("Keep it", Target::DialogCancel, false),
+            ],
+        ),
         VaultDialog::RestoreConfirm { path, backup } => (
             "Replace this vault's entries?",
             vec![
@@ -7041,10 +7139,33 @@ fn save_new_entry(state: &mut AppState) -> bool {
     let Some(form) = state.new_entry.as_ref() else {
         return false;
     };
-    let Some(data) = form.build() else {
+    let Some(mut data) = form.build() else {
         return false;
     };
-    let id = state.vault.add_entry(data, state.now);
+    let id = if let Some(id) = form.editing {
+        // What the form does not show is kept as it was: a login's
+        // one-time-code secret, and a card number the form showed masked
+        // and was not changed -- masking a mask again would lose it.
+        if let Some(old) = state.vault.get_entry(id) {
+            match (&old.data, &mut data) {
+                (EntryData::Login(o), EntryData::Login(n)) => {
+                    n.totp_secret.clone_from(&o.totp_secret);
+                }
+                (EntryData::CreditCard(o), EntryData::CreditCard(n))
+                    if form.value(1) == o.number_masked =>
+                {
+                    n.number_masked.clone_from(&o.number_masked);
+                }
+                _ => {}
+            }
+        }
+        if !state.vault.update_entry(id, data, state.now) {
+            return false;
+        }
+        id
+    } else {
+        state.vault.add_entry(data, state.now)
+    };
     state.new_entry = None;
     state.selected_entry_id = Some(id);
     state.detail_view = DetailView::EntryDetail;
@@ -7053,6 +7174,42 @@ fn save_new_entry(state: &mut AppState) -> bool {
     state.run_audit();
     state.clamp_scroll();
     true
+}
+
+/// Open the form over the selected entry, to change it.
+fn open_edit_entry(state: &mut AppState) {
+    let Some(entry) = state
+        .selected_entry_id
+        .and_then(|id| state.vault.get_entry(id))
+    else {
+        return;
+    };
+    state.new_entry = Some(NewEntryForm::for_entry(entry));
+    state.detail_view = DetailView::NewEntry;
+    state.detail_scroll = 0.0;
+}
+
+/// Ask whether to delete the selected entry.
+fn ask_delete(state: &mut AppState) {
+    if let Some(id) = state
+        .selected_entry_id
+        .filter(|id| state.vault.get_entry(*id).is_some())
+    {
+        state.dialog = Some(VaultDialog::DeleteConfirm { id });
+    }
+}
+
+/// Delete the entry the question was about.
+fn delete_entry(state: &mut AppState, id: u64) {
+    state.dialog = None;
+    if state.vault.remove_entry(id) {
+        if state.selected_entry_id == Some(id) {
+            state.selected_entry_id = None;
+        }
+        state.refresh_filter();
+        state.run_audit();
+        state.clamp_scroll();
+    }
 }
 
 /// Throw the form away.
@@ -7252,6 +7409,15 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         Key::G if key.modifiers.ctrl => {
             state.detail_view = DetailView::PasswordGenerator;
             regenerate_password(state);
+            EventResult::Consumed
+        }
+        // A plain letter goes to the search box, so editing is Ctrl+E.
+        Key::E if key.modifiers.ctrl => {
+            open_edit_entry(state);
+            EventResult::Consumed
+        }
+        Key::Delete if state.selected_entry_id.is_some() => {
+            ask_delete(state);
             EventResult::Consumed
         }
         Key::Escape => {
@@ -7461,6 +7627,20 @@ fn act_on(state: &mut AppState, target: Target) -> EventResult {
             state.dialog = None;
             EventResult::Consumed
         }
+        Target::EditEntry => {
+            open_edit_entry(state);
+            EventResult::Consumed
+        }
+        Target::DeleteEntry => {
+            ask_delete(state);
+            EventResult::Consumed
+        }
+        Target::DeleteConfirmed => {
+            if let Some(VaultDialog::DeleteConfirm { id }) = state.dialog {
+                delete_entry(state, id);
+            }
+            EventResult::Consumed
+        }
         // The field is where typing already goes.
         Target::RestoreInput => EventResult::Consumed,
         Target::NewPassword | Target::ConfirmPassword => {
@@ -7633,6 +7813,7 @@ fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         Export,
         Open,
         Replace,
+        Delete(u64),
         Nothing,
     }
     let then = match (&mut state.dialog, key.key) {
@@ -7640,6 +7821,7 @@ fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         (Some(VaultDialog::ExportWarning), Key::Enter) => Then::Export,
         (Some(VaultDialog::RestorePassword { .. }), Key::Enter) => Then::Open,
         (Some(VaultDialog::RestoreConfirm { .. }), Key::Enter) => Then::Replace,
+        (Some(VaultDialog::DeleteConfirm { id }), Key::Enter) => Then::Delete(*id),
         (Some(VaultDialog::RestorePassword { input, error, .. }), Key::Backspace) => {
             input.pop();
             *error = None;
@@ -7660,6 +7842,7 @@ fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         }
         Then::Open => state.restore_open(),
         Then::Replace => state.restore_replace(),
+        Then::Delete(id) => delete_entry(state, id),
         Then::Nothing => {}
     }
     EventResult::Consumed
@@ -11476,5 +11659,143 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(dir & 0o077, 0, "{dir:o}");
+    }
+
+    // == Edit and delete (2026-09-27) ============================================
+    //
+    // With the vault kept on disk, an entry saved could never be changed or
+    // taken back out: `update_entry` and `remove_entry` had no caller.
+
+    /// A login with a one-time-code secret, a tag, a folder and a star, selected.
+    fn app_with_a_login() -> (AppState, u64) {
+        let mut state = unlocked_app();
+        let mut login = LoginData::new("bank.example", "ann", "old-password");
+        login.totp_secret = Some("JBSWY3DPEHPK3PXP".to_string());
+        let id = state.vault.add_entry(EntryData::Login(login), 100);
+        let folder = state.vault.add_folder("Money");
+        state.vault.set_folder(id, Some(folder));
+        state.vault.add_tag(id, "important");
+        state.vault.toggle_star(id);
+        state.selected_entry_id = Some(id);
+        state.refresh_filter();
+        (state, id)
+    }
+
+    #[test]
+    fn editing_a_login_changes_what_was_typed_and_keeps_the_rest() {
+        let (mut state, id) = app_with_a_login();
+        state.now = 500;
+        assert_eq!(act_on(&mut state, Target::EditEntry), EventResult::Consumed);
+        assert_eq!(state.detail_view, DetailView::NewEntry);
+        assert!(drawn(&state).contains("Edit Entry"), "{}", drawn(&state));
+        let form = state.new_entry.as_mut().unwrap();
+        assert_eq!(
+            form.value(2),
+            "old-password",
+            "the form did not open on the entry"
+        );
+        form.focus(2);
+        while form.backspace() {}
+        form.type_text("new-password");
+        assert!(save_new_entry(&mut state));
+
+        assert_eq!(state.vault.entries.len(), 1, "an edit added an entry");
+        let entry = state.vault.get_entry(id).unwrap();
+        let EntryData::Login(login) = &entry.data else {
+            panic!("{:?}", entry.data)
+        };
+        assert_eq!(login.password, "new-password");
+        assert_eq!(login.site, "bank.example");
+        assert_eq!(
+            login.totp_secret.as_deref(),
+            Some("JBSWY3DPEHPK3PXP"),
+            "the TOTP secret was lost"
+        );
+        assert_eq!(entry.tags, vec!["important".to_string()]);
+        assert!(entry.folder_id.is_some() && entry.starred);
+        assert_eq!((entry.created_at, entry.modified_at), (100, 500));
+    }
+
+    #[test]
+    fn an_entry_being_edited_keeps_its_kind() {
+        let (mut state, _) = app_with_a_login();
+        open_edit_entry(&mut state);
+        let form = state.new_entry.as_mut().unwrap();
+        form.set_kind(EntryType::SecureNote);
+        assert_eq!(form.kind, EntryType::Login);
+        assert!(
+            !probe::is_visible(&state, Target::NewKind(1)),
+            "another kind is offered for an entry being edited"
+        );
+    }
+
+    #[test]
+    fn a_card_number_left_alone_stays_as_it_was_kept() {
+        let mut state = unlocked_app();
+        let id = state.vault.add_entry(
+            EntryData::CreditCard(CreditCardData::new(
+                "Visa",
+                "************4242",
+                "12/30",
+                "Ann",
+            )),
+            1,
+        );
+        state.selected_entry_id = Some(id);
+        open_edit_entry(&mut state);
+        let form = state.new_entry.as_mut().unwrap();
+        form.focus(2);
+        while form.backspace() {}
+        form.type_text("01/31");
+        assert!(save_new_entry(&mut state));
+        let EntryData::CreditCard(card) = &state.vault.get_entry(id).unwrap().data else {
+            panic!()
+        };
+        assert_eq!(card.number_masked, "************4242");
+        assert_eq!(card.expiry, "01/31");
+    }
+
+    #[test]
+    fn delete_asks_first_and_then_takes_the_entry_out_of_the_vault() {
+        let (scratch, mut state) = first_run("delete");
+        make_vault(&mut state, MASTER, MASTER);
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        add_login(&mut state, "mail.example", "other-secret");
+        let id = state.vault.entries[0].id;
+        state.selected_entry_id = Some(id);
+
+        handle_event(&mut state, &key(Key::Delete));
+        assert!(
+            matches!(state.dialog, Some(VaultDialog::DeleteConfirm { .. })),
+            "{:?}",
+            state.dialog
+        );
+        assert!(
+            drawn(&state).contains("Delete this entry?"),
+            "{}",
+            drawn(&state)
+        );
+        handle_event(&mut state, &key(Key::Escape));
+        assert_eq!(state.vault.entries.len(), 2, "Escape deleted it");
+
+        assert_eq!(
+            act_on(&mut state, Target::DeleteEntry),
+            EventResult::Consumed
+        );
+        handle_event(&mut state, &key(Key::Enter));
+        assert_eq!(state.vault.entries.len(), 1);
+        assert!(state.vault.get_entry(id).is_none());
+        assert_eq!(state.selected_entry_id, None);
+
+        let mut again = reopen(&scratch);
+        assert!(again.vault.unlock(MASTER, 0));
+        assert_eq!(again.vault.entries.len(), 1, "the deletion was not kept");
+    }
+
+    #[test]
+    fn edit_and_delete_can_be_pressed_on_an_entry() {
+        let (state, _) = app_with_a_login();
+        assert!(probe::is_visible(&state, Target::EditEntry));
+        assert!(probe::is_visible(&state, Target::DeleteEntry));
     }
 }

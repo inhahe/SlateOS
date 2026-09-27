@@ -56575,10 +56575,12 @@ what hid the Add button doing nothing.
 
 In rough order of how much a user would miss it:
 
-* **Edit** — `Vault::update_entry` and `get_entry_mut`. The detail view shows a
-  credential and cannot change one, so a password that has been rotated cannot
-  be recorded.
-* **Delete** — `Vault::remove_entry`.
+* ~~**Edit**~~ — DONE 2026-09-27 (lane E): the entry's Edit button (Ctrl+E)
+  opens the form filled in; saving changes what the form shows and keeps what
+  it does not (a login's one-time-code secret, a card number left alone, its
+  tags, folder, star and creation time).
+* ~~**Delete**~~ — DONE 2026-09-27 (lane E): the entry's Delete button and the
+  Delete key ask first.
 * ~~**Export and backup**~~ — DONE 2026-09-27 (lane E): Settings has Back
   up, Restore and Export (C-Q25, §1417); `serialize_backup`, which left every
   password out, is deleted.
@@ -56594,8 +56596,7 @@ In rough order of how much a user would miss it:
 * **Breach flagging** — `Vault::set_compromised`, which needs a feed to learn
   from as well as a control.
 * ~~**Persistence**~~ — DONE 2026-09-27 (lane E): the vault is kept sealed
-  on disk (`src/vaultfile.rs`). Which makes **Edit** and **Delete** above
-  matter more: an entry kept is an entry that cannot be taken back out.
+  on disk (`src/vaultfile.rs`), and Edit and Delete came with it.
 
 One duplicate to resolve rather than build: `Vault::search_entries` is a second
 full-text search beside the toolbar's, which filters through

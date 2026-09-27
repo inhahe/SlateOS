@@ -8,7 +8,10 @@ The table covers what changed on 2026-09-27: each category keeps its read as a
 `Result`, so a category that could not be read says why -- naming the path the
 read used -- and one that was read and found nothing says "None found".  Both
 used to draw an empty pane, and the one-value categories named
-`/sys/hardware/...` paths nothing reads any more.
+`/sys/hardware/...` paths nothing reads any more.  And a value nothing
+reports -- a cache, the memory's speed and slots, the adapter's memory, a
+refresh rate with no primary output -- is drawn as not reported, where it was
+"0 KiB", "0 MHz", "0 / 0", "0 MiB" and "0 Hz".
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -25,6 +28,7 @@ SRC = Path(__file__).parent / "src" / "main.rs"
 
 UNREADABLE = "an_unreadable_category_is_not_an_empty_one"
 SUMMARY = "the_summary_invents_no_version_build_or_manufacturer"
+ZERO = "a_value_nothing_reports_is_not_drawn_as_zero"
 
 MUTATIONS = [
     (
@@ -62,6 +66,60 @@ MUTATIONS = [
         '            Property::new("System Manufacturer", Self::NOT_REPORTED),',
         '            Property::new("System Manufacturer", "SMBIOS: To Be Filled By O.E.M."),',
         [SUMMARY],
+    ),
+    (
+        "an unreported cache is drawn as 0 KiB again",
+        '            Property::new("L2 Cache", &Self::num_or_absent(cpu.l2_kb, "KiB")),',
+        '            Property::new("L2 Cache", &format!("{} KiB", cpu.l2_kb.unwrap_or(0))),',
+        [ZERO],
+    ),
+    (
+        "an unreported speed is drawn as 0 MHz again",
+        '            Property::new("Speed", &Self::num_or_absent(mem.speed_mhz, "MHz")),',
+        '            Property::new("Speed", &format!("{} MHz", mem.speed_mhz.unwrap_or(0))),',
+        [ZERO],
+    ),
+    (
+        "unreported slots are drawn as 0 / 0 again",
+        "                    _ => Self::NOT_REPORTED.to_string(),\n                },",
+        '                    _ => String::from("0 / 0"),\n                },',
+        [ZERO],
+    ),
+    (
+        "a heading is drawn over no slots",
+        "        if !mem.slots.is_empty() {",
+        "        if true {",
+        [ZERO],
+    ),
+    (
+        "an unreported VRAM is drawn as 0 MiB again",
+        "            || Self::NOT_REPORTED.to_string(),\n            |mb|",
+        '            || String::from("0 MiB (0.0 GiB)"),\n            |mb|',
+        [ZERO],
+    ),
+    (
+        "the VRAM is scaled by a thousand",
+        "f64::from(mb) / 1024.0",
+        "f64::from(mb) / 1000.0",
+        [ZERO],
+    ),
+    (
+        "an empty name is drawn blank",
+        "        Self::or_absent(Some(value).filter(|v| !v.is_empty()))",
+        "        Self::or_absent(Some(value))",
+        [ZERO],
+    ),
+    (
+        "no primary output is called unreported",
+        "                    Self::NO_PRIMARY\n                } else {",
+        "                    Self::NOT_REPORTED\n                } else {",
+        [ZERO],
+    ),
+    (
+        "the refresh rate loses its unit",
+        '|hz| format!("{hz} Hz")',
+        '|hz| format!("{hz}")',
+        [ZERO],
     ),
 ]
 

@@ -740,6 +740,24 @@ impl SysInfoState {
         value.map_or_else(|| Self::NOT_REPORTED.to_string(), |n| format!("{n} {unit}"))
     }
 
+    /// A text field `hwquery` leaves empty when nothing reports it. Drawn
+    /// empty it reads as a value that happens to be blank.
+    fn text_or_absent(value: &str) -> String {
+        Self::or_absent(Some(value).filter(|v| !v.is_empty()))
+    }
+
+    /// Why a display has no resolution or refresh rate: those are the primary
+    /// output's, and `hwquery` reads no other row in its place.
+    const NO_PRIMARY: &'static str = "No primary output";
+
+    /// A size in MiB, with the GiB beside it, or that it was not reported.
+    fn mib_or_absent(value: Option<u32>) -> String {
+        value.map_or_else(
+            || Self::NOT_REPORTED.to_string(),
+            |mb| format!("{mb} MiB ({:.1} GiB)", f64::from(mb) / 1024.0),
+        )
+    }
+
     fn props_system_summary(&self) -> Vec<Property> {
         let (Ok(cpu), Ok(mem)) = (&self.cpu_info, &self.memory_info) else {
             // The OS rows below are this program's own constants and stay
@@ -834,16 +852,18 @@ impl SysInfoState {
                 "Max Turbo Clock",
                 &Self::num_or_absent(cpu.max_turbo_mhz, "MHz"),
             ),
-            Property::new(
-                "L1 Data Cache",
-                &format!("{} KiB (per core)", cpu.l1_data_kb),
-            ),
+            // Processor 0's caches, as the kernel reports them. They used to
+            // read "(per core)" and "(shared)", which nothing read: an L2 is
+            // shared by a cluster of cores on some processors, and the
+            // kernel's `shared_cpu_list` is a subset it is sure of, not the
+            // whole set, so it cannot settle the question either.
+            Property::new("L1 Data Cache", &Self::num_or_absent(cpu.l1_data_kb, "KiB")),
             Property::new(
                 "L1 Instruction Cache",
-                &format!("{} KiB (per core)", cpu.l1_inst_kb),
+                &Self::num_or_absent(cpu.l1_inst_kb, "KiB"),
             ),
-            Property::new("L2 Cache", &format!("{} KiB (per core)", cpu.l2_kb)),
-            Property::new("L3 Cache", &format!("{} KiB (shared)", cpu.l3_kb)),
+            Property::new("L2 Cache", &Self::num_or_absent(cpu.l2_kb, "KiB")),
+            Property::new("L3 Cache", &Self::num_or_absent(cpu.l3_kb, "KiB")),
             Property::new("Architecture", "x86_64"),
             Property::blank(),
             Property::heading("--- CPU Features ---"),
@@ -877,15 +897,25 @@ impl SysInfoState {
                     mem.available_mb as f64 / 1024.0
                 ),
             ),
-            Property::new("Memory Type", &mem.mem_type),
-            Property::new("Speed", &format!("{} MHz", mem.speed_mhz)),
+            // The type, the speed and the slots are SMBIOS facts, and nothing
+            // here reads SMBIOS. They were "", "0 MHz" and "0 / 0" -- a
+            // machine with no memory slots.
+            Property::new("Memory Type", &Self::text_or_absent(&mem.mem_type)),
+            Property::new("Speed", &Self::num_or_absent(mem.speed_mhz, "MHz")),
             Property::new(
                 "Slots Used / Total",
-                &format!("{} / {}", mem.slots_used, mem.slots_total),
+                &match (mem.slots_used, mem.slots_total) {
+                    (Some(used), Some(total)) => format!("{used} / {total}"),
+                    _ => Self::NOT_REPORTED.to_string(),
+                },
             ),
-            Property::blank(),
-            Property::heading("--- Per-Slot Details ---"),
         ];
+        // No heading over nothing: with no slot read, the row above has
+        // already said so.
+        if !mem.slots.is_empty() {
+            props.push(Property::blank());
+            props.push(Property::heading("--- Per-Slot Details ---"));
+        }
         for slot in &mem.slots {
             props.push(Property::blank());
             props.push(Property::new("Slot", &slot.slot_name));
@@ -938,15 +968,26 @@ impl SysInfoState {
             Err(e) => return Self::unreadable("Display", e),
         };
         let mut props = vec![
-            Property::new("GPU Name", &d.gpu_name),
-            Property::new("Vendor", &d.vendor),
+            // Nothing publishes the adapter -- `/proc/monitors` describes
+            // outputs -- so its name, vendor, memory and driver say so, where
+            // they were blank and "0 MiB".
+            Property::new("GPU Name", &Self::text_or_absent(&d.gpu_name)),
+            Property::new("Vendor", &Self::text_or_absent(&d.vendor)),
+            Property::new("VRAM", &Self::mib_or_absent(d.vram_mb)),
             Property::new(
-                "VRAM",
-                &format!("{} MiB ({:.1} GiB)", d.vram_mb, d.vram_mb as f64 / 1024.0),
+                "Resolution",
+                if d.resolution.is_empty() {
+                    Self::NO_PRIMARY
+                } else {
+                    &d.resolution
+                },
             ),
-            Property::new("Resolution", &d.resolution),
-            Property::new("Refresh Rate", &format!("{} Hz", d.refresh_rate_hz)),
-            Property::new("Driver Version", &d.driver_version),
+            Property::new(
+                "Refresh Rate",
+                &d.refresh_rate_hz
+                    .map_or_else(|| Self::NO_PRIMARY.to_string(), |hz| format!("{hz} Hz")),
+            ),
+            Property::new("Driver Version", &Self::text_or_absent(&d.driver_version)),
             Property::blank(),
             Property::heading("--- Display Outputs ---"),
         ];
@@ -2811,10 +2852,10 @@ mod tests {
             logical_processors: 8,
             base_clock_mhz: Some(1000),
             max_turbo_mhz: Some(2000),
-            l1_data_kb: 32,
-            l1_inst_kb: 32,
-            l2_kb: 512,
-            l3_kb: 8192,
+            l1_data_kb: Some(32),
+            l1_inst_kb: Some(32),
+            l2_kb: Some(512),
+            l3_kb: Some(8192),
             features: (0..24)
                 .map(|i| (format!("FEATURE_{i}"), i % 2 == 0))
                 .collect(),
@@ -2827,9 +2868,9 @@ mod tests {
             total_mb: 4096,
             available_mb: 2048,
             mem_type: "FixtureRAM".to_string(),
-            speed_mhz: 1600,
-            slots_used: 1,
-            slots_total: 2,
+            speed_mhz: Some(1600),
+            slots_used: Some(1),
+            slots_total: Some(2),
             slots: vec![MemorySlot {
                 slot_name: "Slot 0".to_string(),
                 size_mb: 4096,
@@ -3221,6 +3262,108 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A value nothing reports is drawn as not reported, never as a zero: the
+    /// caches, the memory's speed and slots and the adapter's memory were
+    /// "0 KiB", "0 MHz", "0 / 0" and "0 MiB", which read as measurements of a
+    /// very strange machine. And a value that is reported is still drawn.
+    #[test]
+    fn a_value_nothing_reports_is_not_drawn_as_zero() {
+        let value = |rows: &[Property], name: &str| {
+            rows.iter()
+                .find(|p| p.name == name)
+                .map(|p| p.value.clone())
+                .unwrap_or_else(|| panic!("no {name} row"))
+        };
+        let mut app = SysInfoState::new();
+        let mut cpu = fixture_cpu();
+        cpu.l1_data_kb = None;
+        cpu.l1_inst_kb = None;
+        cpu.l2_kb = None;
+        cpu.l3_kb = None;
+        app.cpu_info = Ok(cpu);
+        let mut memory = fixture_memory();
+        memory.mem_type = String::new();
+        memory.speed_mhz = None;
+        memory.slots_used = None;
+        memory.slots_total = None;
+        memory.slots = Vec::new();
+        app.memory_info = Ok(memory);
+        app.display_info = Ok(DisplayInfo {
+            gpu_name: String::new(),
+            vendor: String::new(),
+            vram_mb: None,
+            resolution: String::new(),
+            refresh_rate_hz: None,
+            outputs: Vec::new(),
+            driver_version: String::new(),
+        });
+
+        let cpu_rows = app.props_cpu();
+        for cache in [
+            "L1 Data Cache",
+            "L1 Instruction Cache",
+            "L2 Cache",
+            "L3 Cache",
+        ] {
+            assert_eq!(
+                value(&cpu_rows, cache),
+                SysInfoState::NOT_REPORTED,
+                "{cache}"
+            );
+        }
+        let memory_rows = app.props_memory();
+        for row in ["Memory Type", "Speed", "Slots Used / Total"] {
+            assert_eq!(
+                value(&memory_rows, row),
+                SysInfoState::NOT_REPORTED,
+                "{row}"
+            );
+        }
+        assert!(
+            !memory_rows.iter().any(|p| p.name.contains("Per-Slot")),
+            "a heading over no slots"
+        );
+        let display_rows = app.props_display();
+        for row in ["GPU Name", "Vendor", "VRAM", "Driver Version"] {
+            assert_eq!(
+                value(&display_rows, row),
+                SysInfoState::NOT_REPORTED,
+                "{row}"
+            );
+        }
+        for row in ["Resolution", "Refresh Rate"] {
+            assert_eq!(value(&display_rows, row), SysInfoState::NO_PRIMARY, "{row}");
+        }
+
+        // And what is reported is drawn, with its unit.
+        app.cpu_info = Ok(fixture_cpu());
+        app.memory_info = Ok(fixture_memory());
+        app.display_info = Ok(DisplayInfo {
+            gpu_name: String::from("Fixture GPU"),
+            vendor: String::new(),
+            vram_mb: Some(8192),
+            resolution: String::from("1920x1200"),
+            refresh_rate_hz: Some(60),
+            outputs: Vec::new(),
+            driver_version: String::new(),
+        });
+        let cpu_rows = app.props_cpu();
+        assert_eq!(value(&cpu_rows, "L1 Data Cache"), "32 KiB");
+        assert_eq!(value(&cpu_rows, "L1 Instruction Cache"), "32 KiB");
+        assert_eq!(value(&cpu_rows, "L2 Cache"), "512 KiB");
+        assert_eq!(value(&cpu_rows, "L3 Cache"), "8192 KiB");
+        let memory_rows = app.props_memory();
+        assert_eq!(value(&memory_rows, "Memory Type"), "FixtureRAM");
+        assert_eq!(value(&memory_rows, "Speed"), "1600 MHz");
+        assert_eq!(value(&memory_rows, "Slots Used / Total"), "1 / 2");
+        assert!(memory_rows.iter().any(|p| p.name.contains("Per-Slot")));
+        let display_rows = app.props_display();
+        assert_eq!(value(&display_rows, "GPU Name"), "Fixture GPU");
+        assert_eq!(value(&display_rows, "VRAM"), "8192 MiB (8.0 GiB)");
+        assert_eq!(value(&display_rows, "Resolution"), "1920x1200");
+        assert_eq!(value(&display_rows, "Refresh Rate"), "60 Hz");
+    }
+
     /// The summary invents nothing: the kernel's release is the one it
     /// reports, and the OS version, build and manufacturer -- which nothing
     /// publishes -- say so, where they were "1.0.0", "2026.05.17-nightly" and
@@ -3505,7 +3648,8 @@ mod tests {
             "the resolution should be the PRIMARY output's mode"
         );
         assert_eq!(
-            display.refresh_rate_hz, 60,
+            display.refresh_rate_hz,
+            Some(60),
             "the refresh rate should be the PRIMARY output's, not the first row's 75"
         );
         assert_eq!(
@@ -3518,7 +3662,7 @@ mod tests {
         );
         assert!(display.gpu_name.is_empty(), "invented an adapter name");
         assert!(display.vendor.is_empty(), "invented a vendor");
-        assert_eq!(display.vram_mb, 0, "invented a VRAM size");
+        assert_eq!(display.vram_mb, None, "invented a VRAM size");
         assert!(
             display.driver_version.is_empty(),
             "invented a driver version"

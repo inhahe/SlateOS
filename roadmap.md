@@ -7846,7 +7846,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Property tables for each category (CPU, memory, storage, display, network, PCI, etc.)
   - [x] Expand/collapse tree nodes, search across categories
   - [x] Export to text, copy to clipboard
-  - [x] Live hardware querying (hwquery.rs: HardwareProvider trait, SyscallProvider from /sys/hardware/*, FallbackProvider, RefreshManager with per-category TTL)
+  - [x] Live hardware querying (hwquery.rs: HardwareProvider trait, SyscallProvider from /sys/hardware/*, FallbackProvider, RefreshManager with per-category TTL) — *as built now (2026-09-27): `apps/hwquery`, shared with the Device Manager; `SyscallProvider` reads `/sys/devices` and `/proc` (§850). `FallbackProvider` (deleted 09-15) and `RefreshManager` (deleted 09-27) both answered a failed read with invented values; every query now returns its error, and a value nothing publishes is `None`, never 0.*
 - [x] Screenshot utility:
   - [x] 5 capture modes (full screen, window, region selection, delayed, pick window)
   - [x] BMP encoder (32-bit BGRA, overflow-safe dimension checks)

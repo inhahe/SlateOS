@@ -154,6 +154,13 @@ pub fn load(name: &str) -> Document {
 ///
 /// If there is no configuration directory to write to, if it cannot be
 /// created, or if the write or the rename fails.
+///
+/// # Panics
+///
+/// Only with the `testing` feature -- which only a `[dev-dependencies]` entry
+/// turns on, so no shipped program has it -- and only when the file would be
+/// written outside the system's temporary directory: a test writing the
+/// developer's own configuration. See [`testing::refuse_a_real_configuration`].
 pub fn store(name: &str, doc: &Document) -> io::Result<()> {
     let path = path_for(name).ok_or_else(|| {
         io::Error::new(
@@ -161,6 +168,8 @@ pub fn store(name: &str, doc: &Document) -> io::Result<()> {
             "no configuration directory: neither XDG_CONFIG_HOME nor HOME is set",
         )
     })?;
+    #[cfg(feature = "testing")]
+    testing::refuse_a_real_configuration(name, &path);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -567,6 +576,46 @@ pub mod testing {
         out
     }
 
+    /// Refuse -- by panicking -- a [`store`](super::store) of `name` at `path`
+    /// when `path` is not inside the system's temporary directory.
+    ///
+    /// Compiled only with this feature, which only a test build has, so a
+    /// write anywhere else is a test writing the developer's own
+    /// `~/.config/slateos` -- which has happened, and left files behind that
+    /// nobody could account for (`known-issues.md`, "[E] A test that forgets
+    /// its scratch settings writes the developer's own"). Until this, the only
+    /// guard was each test's author remembering [`with_scratch_config`].
+    ///
+    /// **Decided by where the file would go, not by who is asking.** The
+    /// alternative -- a flag set by [`with_scratch_config`] on the calling
+    /// thread -- also catches a forgetful test that happens to run while
+    /// another holds a scratch turn, which this lets through into *that*
+    /// test's scratch directory. But it refuses writes that harm nothing: a
+    /// test that makes its own [`ScratchDir`] and points `XDG_CONFIG_HOME` at
+    /// it, as this crate's own tests do, and a thread a test starts inside
+    /// its turn. The harm is the developer's configuration being written, so
+    /// that is what is tested for, and a forgetful test still fails -- on
+    /// every run but the rare one that overlaps another's turn.
+    ///
+    /// A panic rather than an error: most saves are `keep()` calls that show a
+    /// failure on screen rather than return it, and a `Result` a test may
+    /// ignore is the failure this exists to end.
+    ///
+    /// # Panics
+    ///
+    /// When `path` is outside `std::env::temp_dir()`.
+    pub(crate) fn refuse_a_real_configuration(name: &str, path: &Path) {
+        let temp = env::temp_dir();
+        assert!(
+            path.starts_with(&temp),
+            "settingsfile::store(\"{name}\") would write {} -- outside {}, so the developer's own \
+             configuration rather than a scratch one. This test forgot to borrow one: wrap it in \
+             settingsfile::testing::with_scratch_config.",
+            path.display(),
+            temp.display()
+        );
+    }
+
     /// The file a settings group would be written to inside the scratch
     /// directory `root`.
     #[must_use]
@@ -634,6 +683,49 @@ mod tests {
         }
         drop(guard);
         out
+    }
+
+    /// **A test build refuses to write outside a scratch configuration**:
+    /// with the `testing` feature, which only a test build has, a store that
+    /// would land outside the temporary directory panics before touching the
+    /// disk, naming the file and the fix -- and one inside a scratch directory
+    /// is written as ever. Compiled only with the feature: `cargo test -p
+    /// settingsfile --features testing`, and every workspace run, where a
+    /// dependent's `[dev-dependencies]` turns it on.
+    #[cfg(feature = "testing")]
+    #[test]
+    fn a_test_build_refuses_to_write_outside_a_scratch_configuration() {
+        // Not temporary: this crate's own directory. Nothing is written there,
+        // because the refusal comes before the first write.
+        let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("never-written");
+        let real_str = real.to_str().expect("a UTF-8 path").to_string();
+        let doc = Document::parse("key: value\n");
+        let refused = with_env(Some(&real_str), None, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store("guard", &doc)))
+        });
+        let payload = refused.expect_err("a store outside the temporary directory went ahead");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.contains("with_scratch_config"),
+            "no word of the fix: {message}"
+        );
+        assert!(
+            message.contains("\"guard\""),
+            "no word of which file: {message}"
+        );
+        assert!(
+            !real.exists(),
+            "the refusal came after something was written"
+        );
+
+        let scratch = ScratchDir::new("store-guard");
+        let root = scratch.path("cfg");
+        let root_str = root.to_str().expect("a UTF-8 path").to_string();
+        with_env(Some(&root_str), None, || store("guard", &doc))
+            .expect("a store inside a scratch directory was refused");
     }
 
     // -- Watcher --

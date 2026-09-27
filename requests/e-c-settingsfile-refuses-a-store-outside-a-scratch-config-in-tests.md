@@ -1,7 +1,13 @@
 # Lane E -> lane C: `settingsfile::store` refuses, in tests, to write a real configuration
 
 **Filed:** 2026-09-26 by lane E. **For:** lane C (`gui/settingsfile`).
-**Status:** OPEN.
+**Status:** LANDED on `lane-c` 2026-09-27 (lane C); it reaches `main` with lane C's next
+publish. Decided by *where*, not *who* (`design-decisions.md` §1409): under the `testing`
+feature, `store` panics -- naming the file and `with_scratch_config` -- when the file would
+go outside `std::env::temp_dir()`. Not the thread-local flag proposed below: that also refuses
+harmless writes (a test's own `ScratchDir`, as `settingsfile`'s tests use; a thread started
+inside a turn), and the harm is the developer's configuration being written, which this
+catches every time. Run against every crate that reaches `settingsfile`, features unified.
 
 **In short:** a test that saves a setting without first borrowing a scratch
 configuration folder writes into the real `~/.config/slateos` of whoever runs

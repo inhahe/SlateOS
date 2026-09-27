@@ -259,6 +259,34 @@ def run(
     )
 
 
+def run_guarded(repo: Path, func: str, script: Path, guard: bool) -> subprocess.CompletedProcess:
+    """Drive `run_checker` from inside the scratch repository `repo`.
+
+    The environment is `child_env()` minus every git repository binding, and
+    that is load-bearing: this suite itself runs inside the push hook, where
+    GIT_DIR names the repository being pushed -- the very accident the guard
+    exists for. `gitenv.clean_env()` keeps git talking to `repo` and nothing
+    else, in the driver and in the fake checkers it runs.
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import gitenv  # noqa: E402
+
+    driver = repo / f"driver-{script.stem}{'-guard' if guard else ''}.sh"
+    driver.write_text(
+        "set -u\n"
+        + preamble(repo, True)
+        + ("CHECKER_REPO_GUARD=1\n" if guard else "")
+        + f"{func}\n"
+        + f'run_checker testgate "{sys.executable}" "{script.as_posix()}"\n'
+        + 'echo "MARKER-RETURNED rc=$?"\n',
+        encoding="utf-8",
+        newline="",
+    )
+    env = gitenv.clean_env(child_env())
+    return subprocess.run(["sh", str(driver)], cwd=str(repo), capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", env=env)
+
+
 def start(
     tmp: Path,
     func: str,
@@ -1223,6 +1251,72 @@ def main() -> int:
                   "src/a.rs: 3 sites" in kept[0].read_text(encoding="utf-8"))
         for p in kept:
             p.unlink()
+
+        # ------------------------------------------------------------------
+        # A gate must not change the repository it judges. The two accidents
+        # (2026-08-29, 2026-09-26) were checker self-tests whose scratch
+        # repository was the real one; the guard fingerprints refs, index
+        # content and config around each gate and stops the run if a gate
+        # changed any of them. Driven in a scratch repository standing in for
+        # the one being pushed.
+        print("group: the repository guard")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import gitenv  # noqa: E402
+
+        judged = tmp_root / "judged"
+        judged.mkdir()
+        genv = gitenv.clean_env()
+        for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "g@example.invalid"],
+                    ["config", "user.name", "g"], ["config", "commit.gpgsign", "false"],
+                    ["commit", "-q", "--allow-empty", "-m", "base"]):
+            subprocess.run(["git", *cmd], cwd=str(judged), env=genv, check=True,
+                           capture_output=True)
+        (judged / "tracked.txt").write_text("x\n", encoding="utf-8", newline="")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=str(judged), env=genv, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "tracked"], cwd=str(judged), env=genv,
+                       check=True)
+
+        def git_step(argv: str) -> str:
+            return ("import subprocess\n"
+                    f"subprocess.run({argv!r}.split(), check=True, capture_output=True)\n"
+                    "print('did it')\n")
+
+        cases = [
+            ("a clean gate passes the guard", "print('ok')\n", False),
+            ("a gate that runs `git status` (index stat refresh) passes",
+             git_step("git status --porcelain"), False),
+            ("a gate that commits is stopped",
+             git_step("git commit -q --allow-empty -m fixture"), True),
+            ("a gate that stages a file is stopped",
+             "open('new.txt', 'w').write('n')\n" + git_step("git add new.txt"), True),
+            ("a gate that sets core.bare is stopped",
+             git_step("git config core.bare true"), True),
+        ]
+        for index, (label, body, should_stop) in enumerate(cases):
+            script = fake_checker(tmp_root, f"guard-case-{index}", body)
+            r = run_guarded(judged, func, script, guard=True)
+            out = r.stdout + r.stderr
+            stopped = "CHANGED THE REPOSITORY" in out
+            # Stopped runs exit from inside run_checker, so the driver's marker
+            # line is the second half of each verdict: present exactly when the
+            # gate was allowed to return.
+            check(label, stopped == should_stop and (("MARKER-RETURNED" in out) != should_stop),
+                  out.strip()[-400:])
+            if should_stop:
+                check(f"{label}: and the gate is named", "gate 'testgate'" in out)
+            # Undo what the case did. Each case fingerprints its own before and
+            # after, so this only keeps the fixture tidy; a commit a case added
+            # can stay.
+            for undo in (["config", "core.bare", "false"], ["reset", "-q", "--hard", "HEAD"],
+                         ["clean", "-qfd"]):
+                subprocess.run(["git", *undo], cwd=str(judged), env=genv, capture_output=True)
+
+        committing = fake_checker(tmp_root, "guard-off", git_step("git commit -q --allow-empty -m off"))
+        r = run_guarded(judged, func, committing, guard=False)
+        out = r.stdout + r.stderr
+        check("without CHECKER_REPO_GUARD the guard stays out of the way",
+              "MARKER-RETURNED rc=0" in out and "CHANGED THE REPOSITORY" not in out,
+              out.strip()[-300:])
 
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)

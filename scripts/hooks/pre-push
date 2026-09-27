@@ -650,6 +650,14 @@ CHECKER_NOTE="
 The gate's bypass is the wrong reaction to it: the bypass turns the gate off,
 and the question the gate asks is still unanswered."
 export CHECKER_LOGDIR CHECKER_PROG CHECKER_REFUSING CHECKER_NOTE
+# Every gate here runs with git's GIT_DIR in its environment, which is where a
+# checker's scratch repository becomes this one. run_checker fingerprints the
+# repository around each gate and stops the push if one changed it -- see "A
+# gate must not change the repository it judges" in scripts/run-checker.sh.
+# Not exported: it is read by run_checker in this shell, and a suite this hook
+# runs must not inherit it.
+# shellcheck disable=SC2034  # read by run_checker, from scripts/run-checker.sh
+CHECKER_REPO_GUARD=1
 
 # The one implementation of "did that checker reach a verdict?", shared with
 # scripts/boot-test.sh. It lived here first, and was moved out the day the same

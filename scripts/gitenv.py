@@ -40,6 +40,25 @@ the gate passed: it had correctly verified a fixture, and the fixture was the
 repository. Repaired in ``f0534726e``; regression-tested in
 `scripts/test-check-requests-not-deleted.py`.
 
+It happened again on 2026-09-26, and the second time is the argument for a net
+rather than a warning. ``check-release-staleness.py`` gained a ``--selftest``
+that builds a scratch repository to count real commits, written without this
+module. Its first run inside ``pre-push`` wrote seven fixture commits onto
+`lane-a` -- ``{}`` over ``bench/boot-history.jsonl`` and
+``bench/last-release-boot.json``, ``x = 1`` over ``bench/baselines.toml``. The
+push had already resolved its ref, so nothing was published; the boot test
+started beside it found ``scripts/x.py`` tracked and missing, and the branch was
+rewound. Repaired in ``bc1bbad54`` (``clean_env()`` everywhere, and a
+second-line check that ``git rev-parse --absolute-git-dir`` is the scratch
+directory's own before the first write -- the git dir, not ``--show-toplevel``,
+which under a bare ``GIT_DIR`` names the current directory whatever repository
+is written). ``scripts/test-check-release-staleness.py`` holds it.
+
+The net under every call site is in ``scripts/run-checker.sh`` ("A gate must
+not change the repository it judges"): with ``CHECKER_REPO_GUARD`` set, as the
+push hook sets it, a gate that changes a ref, the index's content or the
+config stops the run by name, whatever it reported.
+
 What to use
 -----------
 

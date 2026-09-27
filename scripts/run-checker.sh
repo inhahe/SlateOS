@@ -229,8 +229,38 @@
 # One sample point here answers it for all of them, which is the same argument
 # that put the crash/finding distinction in this file rather than in each gate.
 
+# ## A gate must not change the repository it judges
+#
+# Git exports GIT_DIR into a hook's environment, and GIT_DIR outranks the `cwd`
+# or `-C` a checker gives its scratch repository. Twice a self-test's fixture
+# has therefore been built in the repository being pushed: on 2026-08-29
+# (check-requests-not-deleted: core.bare=true on the shared config, the index
+# replaced, two commits whose tree was one directory -- published, because the
+# gate passed) and on 2026-09-26 (check-release-staleness: seven fixture
+# commits on the branch). scripts/gitenv.py is the cure at each call site. This
+# is the net under all of them: a gate is judged by what it did as well as by
+# what it said.
+#
+# Opt-in (CHECKER_REPO_GUARD=1), because the fingerprint costs two git
+# processes per gate, and the danger lives where git exports GIT_DIR: the push
+# hook sets it; boot-test.sh, which no hook runs, does not.
+#
+# The index is fingerprinted by content (`ls-files -s`), not by the file's
+# mtime: `git status` and `git diff` rewrite the index to refresh stat data
+# without changing a byte of what it records, and a guard that fired on that
+# would be switched off within a day.
+
 # run_checker [--may-skip] <label> <command> [args...]
 run_checker() {
+    # Defined in here so that anything cutting run_checker out of this file
+    # (test-pre-push-run-checker.py does, by brace matching) gets it too.
+    _rc_repo_state() {
+        git show-ref --head 2>/dev/null
+        git ls-files -s 2>/dev/null | cksum
+        _rc_cfg=$(git rev-parse --git-common-dir 2>/dev/null)/config
+        if [ -f "$_rc_cfg" ]; then cksum < "$_rc_cfg"; fi
+        return 0
+    }
     # Cleared on every call, flagged or not — see the header on stale state.
     # Both are the *outward* channel: this file only ever writes them, and the
     # caller reads them, which is why shellcheck cannot see a use.
@@ -303,8 +333,31 @@ run_checker() {
     _rc_t0=
     [ -n "${CHECKER_TIMING_LOG:-}" ] && _rc_t0=$(date +%s 2>/dev/null)
 
+    _rc_before=
+    if [ -n "${CHECKER_REPO_GUARD:-}" ]; then _rc_before=$(_rc_repo_state); fi
     PYTHONUNBUFFERED=1 "$@" >"$_rc_log" 2>&1
     _rc=$?
+    if [ -n "${CHECKER_REPO_GUARD:-}" ]; then
+        _rc_after=$(_rc_repo_state)
+        if [ "$_rc_before" != "$_rc_after" ]; then
+            cat "$_rc_log" >&2
+            echo "" >&2
+            echo "$_rc_prog: STOPPING -- gate '$_rc_label' CHANGED THE REPOSITORY it was judging." >&2
+            echo "$_rc_prog: refs, index content or config differ from before it ran." >&2
+            echo "--- before ---" >&2
+            printf '%s\n' "$_rc_before" | head -n 40 >&2
+            echo "--- after ---" >&2
+            printf '%s\n' "$_rc_after" | head -n 40 >&2
+            echo "" >&2
+            echo "Its verdict, whatever it was, is worthless: it judged a fixture that was" >&2
+            echo "the repository. Look for git run with cwd=<tempdir> and no" >&2
+            echo "env=gitenv.clean_env() (scripts/gitenv.py), and repair the branch" >&2
+            echo "(\`git reflog\` shows where it was) before pushing anything." >&2
+            echo "Command: $_rc_cmd" >&2
+            echo "Output kept at $_rc_log" >&2
+            exit 1
+        fi
+    fi
 
     # Record this gate's cost NOW, before the outcome is classified.
     #

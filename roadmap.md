@@ -1898,6 +1898,36 @@ live.
   text area is its first user. Offered to the programs that keep their own
   straight-line undo (lane E adopts; `requests/c-e-the-operators-answers-to-c-q24-c-q25-c-q26.md`).
 
+- `[C]` **Each look keeps its own colours** -- open (C-Q15, §1421). In
+  `gui/appearance`: the accent and the user's other interface colours stored
+  per look (Outlined, Filled) in `appearance.yaml`, a one-accent file read as
+  that accent for both; the palette resolves the colours of the look in use.
+  Then lane E's Settings page edits the look being edited.
+
+- `[C]` **One list of the installed programs, in userspace** -- open (C-Q20,
+  §1425). First an inventory of all four lists -- the kernel's
+  `fs::appregistry`, the shell's database, `apps/fileassoc`, and the per-role
+  defaults of the deleted `default_apps.rs` (git history) -- into one table,
+  nothing dropped; then a library under `gui/` holding all of it, read by the
+  shell; then Settings, the file manager and file associations (lane E); only
+  then does lane A remove the kernel's registry.
+
+- `[C]` **Automatic sign-in, with a key held at start-up to choose** -- open
+  (C-Q22, §1427). `gui/desktop/src/login_screen.rs`: sign in automatically with
+  no pause; a key held as the login screen starts shows the chooser; the hint
+  shown until automatic sign-in begins; no automatic sign-in when starting for
+  repair. Lane A shows the hint on the earlier screens.
+
+- `[C]` **"Too close to see one on the other", one test for the two colour
+  warnings** -- open (C-Q19, §1424). In `appearance`, for the calendar's
+  event-colour warning and Settings' accent warning (lane E).
+
+- `[C]` **A claim every lane sees when it starts a task outside its obvious
+  territory** -- open (the operator's C-Q20 suggestion, §1425). A shared record
+  in the git common directory, like the halts, so another lane can see at once
+  that a feature is being built; the `CLAUDE.md` wording that would make it a
+  rule goes to the operator.
+
 - `[C]` **A program may ask the password manager for a password -- with a key
   for it, and the user's consent** -- open (C-Q25, §1417). In the credential
   service (`gui/credentials`): the request over the service's IPC, refused

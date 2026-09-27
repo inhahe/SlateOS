@@ -82514,6 +82514,215 @@ the same history.
 **Judgment call, easy to change:** the two keys. They are in one `match` in
 `TextArea::edit_key`.
 
+## 1421. Each look keeps its own colours: the accent chosen under one theme is not carried into another
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended C, then A; the operator chose A and added keeping colours per theme) &middot; **Lane:** C, with E
+
+**In short:** Under the optional "Filled" look, the accent you chose is drawn
+deeper on the grey boxes so its text stays readable, and it can look muddier
+than the swatch you picked. The boxes stay as they are. Instead, the accent --
+and any other interface colour you set -- is remembered separately for each
+look: switching to the Filled look brings back the colours you chose for it
+(or its defaults), and switching back brings back the others, so a choice made
+for one look never lands on the other.
+
+**The question:** `open-questions.md` C-Q15 (now resolved).
+
+**The operator's answer, verbatim:** "Can't you do A and save accent and
+whatever other UI colors per desktop theme, so switching to filled theme won't
+keep their previous accent change? Another option, if you think it's better to
+carry accent, etc. changes across themes, is to measure all the contrasts
+whenever they switch to the filled theme and then if something isn't enough
+then ask the user if they want to reset the colors to default for the theme, or
+maybe if they want to do color settings per theme (and then reset to the
+default for the theme if they do)?"
+
+**Chosen of the two:** colours kept per look. The alternative -- measuring on
+every switch and asking -- puts a question in front of the user at the moment
+they changed something else, and a colour that is fine under one look and
+unreadable under the other is exactly what keeping them apart prevents.
+
+| What | How |
+|---|---|
+| Where they live | `appearance.yaml`: the accent and the user's other interface colours under the look they were chosen for (Outlined, Filled); a file written before this -- one accent -- reads as that accent for both, so nobody's choice is lost |
+| What Settings shows | the colours of the look being edited; changing a colour changes it for that look only -- lane E's page |
+| Readability | unchanged: every colour still passes through the palette's legibility floor, under either look |
+
+## 1422. The games: each board decided by whether its colours mean something, and every game polished
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A; the operator chose C and left the per-game calls to Claude) &middot; **Lane:** C (the calls), E (the games)
+
+**In short:** Every game's menus, score panels and window follow the desktop's
+theme. The playing surface is decided game by game: where the colours carry
+meaning -- minesweeper's numbers, tetris's seven pieces, a card's suit -- they
+stay what players know; where they are decoration -- a chess board's squares,
+the felt under the cards -- they follow the theme, so dark mode is dark. And
+the operator asked that the games look as polished as possible.
+
+**The question:** `open-questions.md` C-Q16 (now resolved). **Verbatim:** "C,
+and I'll let Claude decide which games get which treament. One other thing: try
+to make the games look as polished as possible."
+
+**The rule for each call**, so the list can be extended without asking: a
+colour keeps its own value when a player *reads* it -- tells two things apart
+by it, or knows a convention by it; it follows the theme when it only fills
+space. The per-game list is in the request to lane E, which owns the games
+(`requests/c-e-the-operators-answers-c-q16-c-q17-c-q19-c-q21.md`).
+
+## 1423. The five unreachable features are wired up; where two versions exist, the one kept gets everything both could do
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended C, starting with the installer; the operator chose A) &middot; **Lane:** C (the rule), with E (the five are in its programs)
+
+**In short:** Five programs each held a finished, tested feature no one could
+reach: the installer's bootloader setup, the image viewer's video playing, the
+process explorer's six tools, system information's hardware queries, and a
+remote-settings page. All five are to be wired into their programs rather than
+deleted. Where a feature also exists somewhere that *is* reachable -- the image
+viewer's video player beside the separate video player program -- the one that
+survives must end up with every ability of both, before the other goes.
+
+**The question:** `open-questions.md` C-Q17 (now resolved). **Verbatim:**
+"Option A. I think I saw somewhere in C-Q17 that one of the five finished
+features already has a wired up version of itself. If true, make the one that
+survives have all the features of both versions."
+
+**The rule this sets, beyond the five:** dead code with a live twin is merged,
+not merely deleted -- the survivor first takes what only the dead copy had.
+Applied the same day to the shell's own unreachable launcher
+(`TD-C-THE-DESKTOP-CRATE-CARRIES-A-SECOND-LAUNCHER-NOTHING-USES`): compared
+feature by feature with `apps/launcher`, the live one already had everything --
+search, frecency, categories, keywords, Tab completion, Ctrl+number -- except
+an API for adding programs that nothing called; it now needs to list installed
+programs as the start menu does, which is in the request to lane E.
+
+## 1424. An event colour too close to the accent is allowed, with a warning -- both ways round
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended C, weakly; the operator chose to warn) &middot; **Lane:** C (the shared test), with E (the two pickers)
+
+**In short:** A calendar event coloured almost like your accent has its dot
+vanish into today's circle. The colours stay exactly as you chose them -- the
+calendar never alters them. Instead, choosing an event colour too close to the
+accent shows a warning, and so does choosing an accent too close to an event's
+colour; the second warning says which events clash and offers a way straight
+to changing them.
+
+**The question:** `open-questions.md` C-Q19 (now resolved). **Verbatim:**
+"Either don't allow the user to change an event color to something too close to
+the accent color, or warn them if they do, and then leave it alone. And the same
+choice has to to be made in the other direction: the user changing the accent
+color to something that conflicts with an event color. I think that choice
+should definitely be 'warn' rather than 'don't allow,' and in the warning, tell
+how to change the offending event color(s) and/or have a link right there to
+changing the event color(s)."
+
+| Part | Whose |
+|---|---|
+| One test of "too close to see one on the other", so the two warnings cannot disagree | lane C, `appearance` |
+| The warning in the calendar's event-colour picker | lane E, `apps/calendar` |
+| The warning in Settings' accent picker, naming the clashing events, with a way to each | lane E, `apps/settings` |
+| The desktop's calendar drawing | unchanged: it draws the colour chosen (`gui/desktop/src/calendar.rs`) |
+
+## 1425. One list of the installed programs, in userspace; nothing it holds is lost on the way
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A or B; the operator chose B, with a condition) &middot; **Lane:** C (the library), A (the kernel's registry), E (the programs that read it)
+
+**In short:** Four parts of the system each kept a list of which programs are
+installed, and none could read another's. The one list will be a library in
+userspace, which the start menu, Settings, the file manager and the file
+associations program all read; the kernel's registry goes. Before anything is
+deleted, every program, category, file type, MIME type and per-role default
+that any of the four held is gathered and carried into the new place, so the
+merge loses nothing.
+
+**The question:** `open-questions.md` C-Q20 (now resolved). **Verbatim:** "B,
+but I think before deleting anything else you should collect all of the
+built-in apps, categories, MIME types, apps, file types, per-role defaults, etc.
+and make sure they survive in the new place or wherever they belong."
+
+**Order of the work:** (1) inventory all four lists -- the kernel's
+`fs::appregistry`, the shell's `launcher.rs` database, `apps/fileassoc`, and the
+per-role defaults that were in `default_apps.rs` (git history) -- into one table;
+(2) the library under `gui/`, holding all of it, read by the shell first; (3) the
+other readers move to it; (4) only then does lane A remove `fs::appregistry` and
+decide what `fs::startmenu` and `/proc/startmenu` become.
+
+**The operator's second point in the same answer**, about how the lanes
+communicate: "whenever you take it upon yourself to do a task, add it to some
+text file that other agents read ... or maybe send that you're starting the task
+to all other agents ... only when the roadmap file doesn't clearly say that the
+program or feature belongs to your own lane." The mechanism is being built as a
+claim every lane can see at once (the same shared store the halts use); the
+change to `CLAUDE.md` that would make it a rule is put to the operator directly,
+because `CLAUDE.md` changes on the operator's own word, not on a relay.
+
+## 1426. A daily backup runs at its time whether or not anyone is signed in, and a missed one runs as soon as the machine is on again
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A, with a prompt for missed backups; the operator chose A without the prompt) &middot; **Lane:** C (the question), with D (the service), B (starting it) and E (the backup program)
+
+**In short:** Setting a backup to run every day did nothing. It will be run by
+a background service that the system starts at boot, so a daily backup happens
+on time even when nobody is signed in. If one was missed because the machine
+was off, it runs as soon as the machine is on again -- before anyone signs in,
+and without asking.
+
+**The question:** `open-questions.md` C-Q21 (now resolved). **Verbatim:** "It
+doesn't matter how long it stays broken as long as it's fixed by the time the OS
+is finished ... option A. Though I think that if a backup is missed because the
+machine is off, it shouldn't just ask when the user signs on, it should backup if
+the machine comes back on after it was missed even if the user hasn't signed on
+yet. And in that case, I don't think it should ask the user whether to backup or
+not regardless. By the way, I guess backup should be a service handled by our
+startup manager ... I don't know if that handles services run all the time too,
+or only things loaded when the user logs in. I think the former?"
+
+**On the operator's question:** yes -- the init system starts services at boot,
+independent of sign-in; the backup service is one of those. The work is lane D's
+(`services/`), with lane B's init starting it and lane E's backup program writing
+the schedule the service reads (`BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS`).
+
+## 1427. Automatic sign-in with no pause; hold a key to choose, and see that you can from the first moment
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended B; the operator chose A, and added showing the key) &middot; **Lane:** C (the login screen), A (the earliest screens)
+
+**In short:** An account set to sign in by itself will do so, with no pause at
+start-up. To choose a different account, hold a key while the machine starts.
+That the key exists is shown on the screen from the moment the system has it
+until automatic sign-in begins -- and, where the firmware lets the system draw
+over its own start-up logo, there too. Starting for repair skips automatic
+sign-in.
+
+**The question:** `open-questions.md` C-Q22 (now resolved). **Verbatim (the
+decision):** "The user can always just use the menu to logout and login/switch
+accounts after it autologs in, so it's not that crucial, and I definitely don't
+want an unnecessary pause during bootup. But also provide the key they can hold
+during startup and show that it's available as soon as the OS gets control of the
+screen up until it starts the automatic login process. Also, either I'm crazy,
+or some BIOSes allow the OS to show a little OS-loading widget ON the BIOS
+screen, maybe you could show that the key is available even there." And on
+repair: "I guess it would be nice to skip auto-login during recovery anyway."
+
+| Part | Whose |
+|---|---|
+| Sign in automatically; held key shows the chooser; no automatic sign-in when starting for repair | lane C, `gui/desktop/src/login_screen.rs` |
+| The hint on the system's first screens, and over the firmware's logo where UEFI leaves it up (the boot graphics table) | lane A |
+
+## 1428. The feature list is re-checked one section at a time, as work is picked from it, and every check is dated
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude's recommendation, B) &middot; **Lane:** C, for every lane
+
+**In short:** About half the items checked in `roadmap-detailed.md` were wrong,
+mostly saying "not built" about built things. It is not re-checked wholesale.
+Whoever picks work from a section first checks that section against the code,
+and each checked item records that it was checked and on what date -- so an
+empty box can be told from an unexamined one, and the list converges instead of
+being re-checked forever.
+
+**The question:** `open-questions.md` C-Q23 (now resolved). **Verbatim:** "B".
+
+**The convention:** a checked item carries `(checked YYYY-MM-DD)` beside its
+status flag; an item whose code contradicts the design is flagged as such, not
+merely marked done. See `roadmap-detailed.md`'s header.
+
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 
 **Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text

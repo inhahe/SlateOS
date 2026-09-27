@@ -16,6 +16,15 @@ This is the fine-grained companion to `roadmap.md`. Every actionable feature fro
 
 Status key: `[ ]` not started, `[-]` in progress, `[x]` done, `[~]` deferred
 
+**Checking before trusting (the operator's answer to C-Q23, `design-decisions.md`
+§1428).** Items here age faster than anyone updates them: of thirty checked on
+2026-09-16, about half were wrong, mostly "not built" about built things. So
+before picking work from a section, check that section against the code, and
+mark each item checked with its date -- `(checked 2026-09-27)` beside the
+status -- so an unexamined box can be told from an examined one. An item whose
+code contradicts the design is flagged as such, not marked done. Sections are
+checked as they are used, not all at once.
+
 ### Testing Responsibility
 
 This OS is built entirely by AI. The human operator does not review code line-by-line and does not run test suites. **AI is the developer, reviewer, and tester.** Every module, function, and subsystem must be tested by AI before it is considered done. "It compiles" is not "it works."

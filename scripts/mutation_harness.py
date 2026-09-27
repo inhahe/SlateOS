@@ -148,6 +148,32 @@ def build_tests(crate, timeout=1800):
     )
 
 
+def failed_tests(stdout):
+    """The names of the tests a `cargo test` run reports as failed.
+
+    A failing unit test is listed under its whole path: `tests::name` for
+    tests in the crate root, `input::tests::name` for tests in a module the
+    root declares.  This read only the first once, so a crate whose tests live
+    in a submodule -- `apps/editor`'s close question is tested in `input.rs` --
+    had every failure it reported go unread, and each mutant was scored
+    "caught by a crash": `[ok]`, whatever the tests had actually said.  The
+    name after `tests::` is what a table's `expect` names.
+
+    An integration test -- a file in the crate's `tests/` -- is a binary of
+    its own, and lists its failures bare: `    name`, no path.  Those went
+    unread the same way until 2026-09-27, when `apps/snapstore`'s store tests
+    were the first a table named; they are read from the summary block that
+    follows `failures:`, where every line is a test's name.
+    """
+    failed = set(re.findall(r"^    (?:[A-Za-z0-9_]+::)*tests::(\S+)$", stdout, re.M))
+    for block in re.findall(r"^failures:\n((?:    \S+\n)+)", stdout, re.M):
+        for line in block.splitlines():
+            name = line.strip()
+            if "::" not in name:
+                failed.add(name)
+    return failed
+
+
 def run_tests(crate, timeout):
     """Run one crate's suite and classify what happened to it.
 
@@ -166,6 +192,13 @@ def run_tests(crate, timeout):
             crate,
             "--target",
             "x86_64-pc-windows-gnu",
+            # Every test binary runs even when one fails. Cargo stops at the
+            # first failing binary otherwise, so a crate with integration
+            # tests had a mutant caught by `tests/audit.rs` never reach the
+            # test the table named in `tests/store.rs` -- scored WRONG TESTS
+            # for a row whose named test was never run. A crate with one test
+            # binary is unaffected.
+            "--no-fail-fast",
         ],
         capture_output=True,
         text=True,
@@ -181,14 +214,7 @@ def run_tests(crate, timeout):
         cwd=REPO,
         env=cargo_env(),
     )
-    # A failing test is listed under its whole path: `tests::name` for tests
-    # in the crate root, `input::tests::name` for tests in a module the root
-    # declares.  This read only the first, so a crate whose tests live in a
-    # submodule -- `apps/editor`'s close question is tested in `input.rs` --
-    # had every failure it reported go unread, and each mutant was scored
-    # "caught by a crash": `[ok]`, whatever the tests had actually said.  The
-    # name after `tests::` is what a table's `expect` names.
-    failed = set(re.findall(r"^    (?:[A-Za-z0-9_]+::)*tests::(\S+)$", out.stdout, re.M))
+    failed = failed_tests(out.stdout)
     compiled = "could not compile" not in out.stdout + out.stderr
     timed_out = out.returncode == 124
     # Did a test binary actually start?  Without this the harness cannot tell a
@@ -284,7 +310,13 @@ def check_the_table(original, mutations, src_dir=None):
     # is in `main.rs` and its tests drive it through `input.rs` -- and a table
     # naming such a test was refused as naming "no such test".
     if src_dir is not None:
-        for other in sorted(src_dir.glob("*.rs")):
+        others = sorted(src_dir.glob("*.rs"))
+        # ...and in the crate's integration tests, which drive the public API
+        # as a caller would and are where a library's promises are pinned:
+        # `apps/snapstore`'s store tests live in `tests/`, beside `src/`.
+        if src_dir.name == "src":
+            others += sorted((src_dir.parent / "tests").glob("*.rs"))
+        for other in others:
             defined |= set(
                 re.findall(
                     r"fn\s+([a-z0-9_]+)\s*\(\s*\)",

@@ -1717,7 +1717,10 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 
 _Kexec-style OS reboot without rebooting the PC, available as a power menu option.
 Gated for programs by `power.reload` (§1.5), which is deliberately not implied by
-`power.reboot` — the caller picks the image._
+`power.reboot` — the caller picks the image._ *2026-09-26: blocked by the kernel,
+which cannot start an image without the firmware; asked of lanes A (the mechanism)
+and B (`powerctl`) in `requests/c-ab-a-restart-that-keeps-the-computer-on.md`. The
+start menu adds the choice when they land.*
 
 #### Other Desktop Features
 - [x] Notification pane (per-app disable option) — *verified 2026-09-25: the pane's settings view lists each program that has notified, with a switch that files it as Silent or back as Normal (`NotificationPane`, `AppSettingKind::Enabled`); the shell writes the rule to `notifications.yaml` (`apply_app_notification_setting`) and its filter obeys it from then on.*

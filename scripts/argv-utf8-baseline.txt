@@ -93,7 +93,6 @@ userspace/logind/src/main.rs:argv-as-string
 userspace/losetup/src/main.rs:argv-as-string
 userspace/lp/src/main.rs:argv-as-string
 userspace/lsblk/src/main.rs:argv-as-string
-userspace/lscpu/src/main.rs:argv-as-string
 userspace/lsmod/src/main.rs:argv-as-string
 userspace/lsof/src/main.rs:argv-as-string
 userspace/lspci/src/main.rs:argv-as-string

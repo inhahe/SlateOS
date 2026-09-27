@@ -503,6 +503,20 @@ impl Table {
         self.ntreecols > 0
     }
 
+    /// `scols_new_symbols()`, `scols_symbols_set_branch`, `_vertical` and
+    /// `_right`, then `scols_table_set_symbols`: the tree drawn with these
+    /// pieces. The paddings, which a program setting its own symbols leaves
+    /// `NULL`, are what upstream falls back to for `NULL` -- one space each.
+    pub fn set_tree_symbols(&mut self, branch: &[u8], vertical: &[u8], right: &[u8]) {
+        self.symbols = Some(Symbols {
+            tree_branch: branch.to_vec(),
+            tree_vert: vertical.to_vec(),
+            tree_right: right.to_vec(),
+            title_padding: b" ".to_vec(),
+            cell_padding: b" ".to_vec(),
+        });
+    }
+
     /// `scols_table_get_title` + `scols_cell_set_data` + the alignment:
     /// a line printed above a human-readable table.
     pub fn set_title(&mut self, title: &[u8], align: u32) {

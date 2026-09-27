@@ -1676,7 +1676,13 @@ dependencies = [
 name = "lscpu"
 version = "0.1.0"
 dependencies = [
- "usageerror",
+ "getoptlong",
+ "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]

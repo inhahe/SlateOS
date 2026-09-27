@@ -10,7 +10,8 @@
 //!   -- `-0` passes, `-1` is a RANGE error, not an invalid one.
 //! * [`parse_size`] reads `strtoumax(str, &end, 0)`, so `010` is eight and
 //!   `0x10` sixteen, and accepts a fraction only before a suffix: `1.5K` is
-//!   1536, `1.5` is refused.
+//!   1536, `1.5` is refused. [`parse_size_res`] is the same call as a
+//!   caller that ignores its status sees it (`lscpu`'s cache sizes).
 //! * The two message shapes differ, and the difference is observable (see
 //!   [`num_error_message`] and [`size_error_message`]).
 //! * [`strtotimeval`] is `strtold` then two truncations toward zero, so
@@ -537,13 +538,30 @@ fn do_scale_by_power(x: &mut u64, base: u64, power: i32) -> Result<(), NumErr> {
 ///
 /// Note the base: the leading conversion is `strtoumax(str, &end, 0)`, so `010`
 /// is eight and `0x10` is sixteen.
+///
+/// # Errors
+///
+/// As upstream: [`NumErr::Invalid`] for no number, a sign, or a suffix it
+/// does not know; [`NumErr::Range`] for a number or a scaled size past
+/// `UINTMAX_MAX`.
+pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
+    parse_size_res(s).0
+}
+
+/// `parse_size(str, &res, NULL)` as a caller that ignores its status sees
+/// it: the status, and what `*res` holds afterwards. That is 0 after most
+/// failures, but after a size whose scaling overflowed it is the number as
+/// far as it was scaled -- upstream falls through to `*res = x` with the
+/// error still to return -- so `lscpu`, which ignores the status, shows a
+/// cache of `16E` as 16 PiB.
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "indices step through `s` and are read with `get`; the fraction arithmetic is upstream's, each multiply guarded by a `<= u64::MAX / 10` test and each divisor proved non-zero first"
 )]
-pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
+pub fn parse_size_res(s: &[u8]) -> (Result<u64, NumErr>, u64) {
+    let fail = |e: NumErr| (Err(e), 0u64);
     if s.is_empty() {
-        return Err(NumErr::Invalid);
+        return fail(NumErr::Invalid);
     }
 
     // Only positive numbers are acceptable. The check is on the first
@@ -553,19 +571,21 @@ pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
         lead += 1;
     }
     if s.get(lead) == Some(&b'-') {
-        return Err(NumErr::Invalid);
+        return fail(NumErr::Invalid);
     }
 
     let Some(sc) = scan_integer(s, 0) else {
-        return Err(NumErr::Invalid);
+        return fail(NumErr::Invalid);
     };
     if sc.saturated || sc.magnitude > u128::from(u64::MAX) {
-        return Err(NumErr::Range);
+        return fail(NumErr::Range);
     }
-    let mut x = u64::try_from(sc.magnitude).map_err(|_| NumErr::Range)?;
+    let Ok(mut x) = u64::try_from(sc.magnitude) else {
+        return fail(NumErr::Range);
+    };
     let mut p = sc.end;
     if p >= s.len() {
-        return Ok(x); // without suffix
+        return (Ok(x), x); // without suffix
     }
 
     let mut base: u64 = 1024;
@@ -582,7 +602,7 @@ pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
         } else if at(p + 1) != 0 {
             // The C locale's decimal point is `.` and is one byte long.
             if frac != 0 || at(p) != b'.' {
-                return Err(NumErr::Invalid); // unexpected suffix
+                return fail(NumErr::Invalid); // unexpected suffix
             }
             let mut fstr = p + 1;
             while at(fstr) == b'0' {
@@ -591,18 +611,21 @@ pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
             }
             let end = if at(fstr).is_ascii_digit() {
                 let Some(fsc) = scan_integer(s.get(fstr..).unwrap_or_default(), 0) else {
-                    return Err(NumErr::Invalid);
+                    return fail(NumErr::Invalid);
                 };
                 if fsc.saturated || fsc.magnitude > u128::from(u64::MAX) {
-                    return Err(NumErr::Range);
+                    return fail(NumErr::Range);
                 }
-                frac = u64::try_from(fsc.magnitude).map_err(|_| NumErr::Range)?;
+                let Ok(f) = u64::try_from(fsc.magnitude) else {
+                    return fail(NumErr::Range);
+                };
+                frac = f;
                 fstr + fsc.end
             } else {
                 fstr
             };
             if frac != 0 && end >= s.len() {
-                return Err(NumErr::Invalid); // a fraction with no suffix
+                return fail(NumErr::Invalid); // a fraction with no suffix
             }
             p = end;
             continue;
@@ -618,7 +641,7 @@ pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
     } else if let Some(i) = SUF2.iter().position(|&c| c == here && c != 0) {
         i32::try_from(i).unwrap_or(0) + 1
     } else {
-        return Err(NumErr::Invalid);
+        return fail(NumErr::Invalid);
     };
 
     let scaled = do_scale_by_power(&mut x, base, pwr);
@@ -647,14 +670,14 @@ pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
         }
 
         // Walk the fraction backwards from its last digit, adding what each
-        // digit is worth in `frac_base`.
+        // digit is worth in `frac_base` -- in `uintmax_t`, which wraps.
         loop {
             let seg = frac % 10;
             let seg_div = frac_div / frac_poz;
             frac /= 10;
             frac_poz = frac_poz.saturating_mul(10);
             if seg != 0 && seg_div / seg != 0 {
-                x = x.saturating_add(frac_base / (seg_div / seg));
+                x = x.wrapping_add(frac_base / (seg_div / seg));
             }
             if frac == 0 {
                 break;
@@ -665,7 +688,7 @@ pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
     // `parse_size` writes the (possibly overflowed) result out and *then*
     // returns the error, so a caller that ignored the status would still see a
     // number. `strtosize_or_err` does not ignore it.
-    scaled.map(|()| x)
+    (scaled.map(|()| x), x)
 }
 
 /// The argument is inside util-linux's own `'%s'`, escaped where it is not
@@ -1023,6 +1046,26 @@ mod tests {
         // `Y` overflows 64 bits, and so does one past `u64::MAX`.
         assert_eq!(parse_size(b"1Y"), Err(NumErr::Range));
         assert_eq!(parse_size(b"18446744073709551616"), Err(NumErr::Range));
+    }
+
+    #[test]
+    fn a_size_that_overflows_while_scaling_is_left_part_scaled() {
+        // 16 * 1024^5 fits; a sixth 1024 does not, and `*res` keeps 16P.
+        assert_eq!(parse_size_res(b"16E"), (Err(NumErr::Range), 16 << 50));
+        assert_eq!(parse_size_res(b"1Y"), (Err(NumErr::Range), 1 << 60));
+        // Failures before the scaling leave 0.
+        assert_eq!(parse_size_res(b"garbage"), (Err(NumErr::Invalid), 0));
+        assert_eq!(
+            parse_size_res(b"99999999999999999999K"),
+            (Err(NumErr::Range), 0)
+        );
+        assert_eq!(parse_size_res(b"32K"), (Ok(32768), 32768));
+        // The fraction is added in `uintmax_t`, which wraps. Its `.9` is a
+        // whole unit (`frac_base / (10 / 9)`), so 18.9EB is 19 * 10^18,
+        // past 2^64.
+        let wrapped = 18_000_000_000_000_000_000u64.wrapping_add(1_000_000_000_000_000_000);
+        assert_eq!(parse_size_res(b"18.9EB"), (Ok(wrapped), wrapped));
+        assert_eq!(parse_size(b"1.9K"), Ok(2048));
     }
 
     #[test]

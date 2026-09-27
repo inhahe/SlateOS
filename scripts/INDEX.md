@@ -229,6 +229,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lossy-decode.py` | Find lossy byte->text conversions that reach a VALUE, not a message. |
 | `scripts/ls-diff.sh` | Compare our `ls` -- and `dir` and `vdir`, its other two builds -- against GNU's, inside WSL. |
 | `scripts/ls-quote-probe.py` | Measure all ten of GNU's quoting styles at once, byte for byte. |
+| `scripts/lscpu-diff.sh` | Differential test: our `lscpu` against util-linux 2.39.3's. |
 | `scripts/lsirq-diff.sh` | Differential test: our `lsirq` against util-linux 2.39.3's. |
 | `scripts/lsmem-diff.sh` | Differential test: our `lsmem` against util-linux 2.39.3's. |
 | `scripts/make-spike/run.sh` | Cross-compile upstream GNU make and link it against SlateOS's own libc.a. |
@@ -422,6 +423,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/uptime-diff.sh` | Differential test: our `uptime` against procps-ng `uptime`. |
 | `scripts/users-diff.sh` | users-diff.sh — compare our `users` against GNU's, inside WSL. |
 | `scripts/util-linux-extra.sh` | Unpacks Ubuntu's util-linux-extra and rfkill packages, without root, as harness references. |
+| `scripts/util-linux-source.sh` | Fetches util-linux 2.39.3's source and test data, for harnesses that need them. |
 | `scripts/verify_mutations.py` | Check a `mutate.py` table against the source it claims to break. |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
@@ -435,4 +437,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_425 scripts._
+_427 scripts._

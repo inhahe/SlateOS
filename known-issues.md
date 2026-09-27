@@ -594,7 +594,19 @@ tool.
 
 ---
 
-## TD-B-LSCPU-HAS-NO-PER-CPU-TABLE-SO-FIVE-OPTIONS-REFUSE — 2026-09-15 — OPEN
+## TD-B-LSCPU-HAS-NO-PER-CPU-TABLE-SO-FIVE-OPTIONS-REFUSE — 2026-09-15 — ✅ FIXED 2026-09-26 (lane B)
+
+**Fixed by replacing the program.** `userspace/lscpu` is now a port of
+util-linux 2.39.3's `lscpu` (as Ubuntu 24.04 ships it, design-decisions
+§1038), built on the `smartcols` crate: `-e`, `-p`, `-C`, `--hex`,
+`--online`, `--offline` and `--sysroot` all do what upstream's do, per CPU,
+from each CPU's own `topology/`, `cache/` and `cpufreq/` files. Checked by
+`scripts/lscpu-diff.sh` against the real `lscpu` on util-linux's own
+snapshots of nineteen machines, trees of its own, and WSL itself. The
+reversed-range underflow noted below went with the old parser; the port's
+CPU-list parser is upstream's `cpulist_parse`, which refuses `5-2`. What
+follows is the entry as it was.
+
 
 **In short:** `lscpu -e`, `-p`, `--hex`, `--online` and `--offline` now refuse
 with exit 1 instead of printing the ordinary CPU summary and exiting 0. All
@@ -169498,7 +169510,7 @@ loop has its own edge cases around values, `=`, and operands.
 
 **Where:** the standalone ports that already share `usageerror` (the
 diagnostic wording) but not a parser -- `blockdev`, `capsh`, `chattr`,
-`hostnamectl`, `lscpu`, `objdump`, `resolvectl`,
+`hostnamectl`, `objdump`, `resolvectl`,
 `route`, `sanitize`, `systemctl`, `tput` -- plus hand-parsed programs that do
 not use it yet. (`logger` was one; its port uses `getoptlong`, 413e56f1d. So
 was `getopt` itself -- now a port of util-linux's, whose script-facing parse
@@ -169507,8 +169519,8 @@ distinct entries, `W;`. And `flock`, now a port of util-linux's, whose
 old hand parser took an unknown option for the file to lock. And `lsmem`,
 now a port of util-linux's printing through the `smartcols` crate, whose old
 parser refused `--summ`, and whose old program invented a block size when it
-could not read one -- design-decisions §1036. And `prlimit` and `column`,
-likewise ported onto `getoptlong` and `smartcols`.)
+could not read one -- design-decisions §1036. And `prlimit`, `column`,
+`lsirq` and `lscpu`, likewise ported onto `getoptlong` and `smartcols`.)
 
 **The proper fix,** now possible: `getoptlong` (extracted from
 `coreutils/src/getopt.rs` on 2026-09-26) is the shared parser. Converting a
@@ -169754,10 +169766,14 @@ and so does `column` (`scripts/column-diff.sh`: 594 cases in all its
 modes, plus 9 at which only upstream never finishes -- a port that
 needed the column moves, re-parenting and `--table-column` properties added
 to the crate), and so does `lsirq` (`scripts/lsirq-diff.sh`: 212 cases on
-`/proc` files of its own, plus 1 at which only upstream never finishes);
-the others still do not use it.
+`/proc` files of its own, plus 1 at which only upstream never finishes),
+and so does `lscpu` (`scripts/lscpu-diff.sh`: 1421 cases on
+util-linux's snapshots of nineteen machines, trees of its own and WSL
+itself, plus 3 narrow terminals at which only upstream never
+finishes -- a port that needed tree symbols of the program's own added to
+the crate); the others still do not use it.
 
-**Where:** `userspace/lsblk`, `findmnt`, `lscpu` (its `-e`/`-p` tables),
+**Where:** `userspace/lsblk`, `findmnt`,
 `lsns`, `losetup` (`--list`), `swapon` (`--show`), `rfkill`,
 `fdisk` (`-l`'s partition table). `rfkill`'s reference, like `lsirq`'s,
 is not installed in WSL; `scripts/util-linux-extra.sh` unpacks both without

@@ -4336,7 +4336,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] bridge/tc/ebtables: L2 bridge management, traffic control (7 qdisc types, filter matching, ethernet bridge filtering, 170 tests)
   - [x] nsenter: enter namespaces of other processes (8 namespace types, per-ns file overrides)
   - [x] unshare: create new namespaces (CLONE_NEW* flags, user mapping, mount propagation)
-  - [x] lscpu: CPU architecture info (topology, caches, flags, JSON, vulnerabilities)
+  - [x] lscpu: CPU architecture info (topology, caches, flags, JSON, vulnerabilities) -- since 2026-09-26 a port of util-linux 2.39.3's `lscpu*.c` as Ubuntu 24.04 ships it (design-decisions §1038) on `smartcols`, adding the per-CPU `-e`/`-p`, `-C`, `--hex`, `-a`/`-b`/`-c` and `--sysroot` the old program refused; `scripts/lscpu-diff.sh` (util-linux's snapshots of nineteen machines, trees of its own, WSL itself): 1421 cases agree, 3 more where only upstream never finishes
   - [x] lsmem: memory block display (sysfs enumeration, range merging, JSON, summary) -- since 2026-09-26 a port of util-linux 2.39.3's `lsmem.c` printing through `smartcols`, the libsmartcols port (design-decisions §1036); `scripts/lsmem-diff.sh`, 346 cases, all agree
   - [x] chattr/lsattr: ext4 file attributes (22 flag types, +/-/= specification, recursive)
   - [x] perf/perf-stat/perf-record/perf-report/perf-top: performance monitoring (14 events, binary perf.data format, 172 tests)

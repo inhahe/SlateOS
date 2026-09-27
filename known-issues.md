@@ -158874,7 +158874,9 @@ real feature and is not claimed to be in scope.
 **Status:** FIXED 2026-09-27 (design-decisions §976, the operator's answer to
 A-Q17: honour the rectangles). The software backends now compose each CRTC's
 planes -- cropped, scaled, placed, blended -- with the `planecompose` crate
-(`kernel/src/drm/compose.rs`), and the legacy cursor is drawn with them. An
+(`kernel/src/drm/compose.rs`), and the legacy cursor is drawn too: by
+virtio-gpu's own cursor when it fits the device's 64x64, composed otherwise
+(design-decisions §1400). An
 atomic commit is checked by recording its result and validating that, so a
 rectangle outside its framebuffer, a scale beyond 16x, a format the plane does
 not list, or a scene a backend cannot compose is refused (`EINVAL` /

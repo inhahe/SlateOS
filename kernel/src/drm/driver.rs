@@ -496,6 +496,34 @@ pub struct VirtioGpuBackend {
     width: u32,
     /// Display height from GET_DISPLAY_INFO.
     height: u32,
+    /// What the device's own cursor is showing (design-decisions §976 item
+    /// 2), so that a sync sends only what changed.
+    cursor: HwCursorState,
+}
+
+/// A cursor as the device shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HwCursor {
+    /// Where its hot spot is on the display.
+    pub x: u32,
+    pub y: u32,
+    /// The hot spot within the image.
+    pub hot_x: u32,
+    pub hot_y: u32,
+    /// Which image it was drawn from (`CursorState::image`).
+    pub image: u64,
+}
+
+/// What the device's cursor is showing, as far as the driver knows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HwCursorState {
+    /// Nothing: the state the device starts in.
+    Hidden,
+    /// This cursor.
+    Shown(HwCursor),
+    /// A command failed part-way, so the device's state is not known and the
+    /// next sync sends everything again.
+    Unknown,
 }
 
 impl VirtioGpuBackend {
@@ -510,10 +538,57 @@ impl VirtioGpuBackend {
                 available: true,
                 width: w,
                 height: h,
+                cursor: HwCursorState::Hidden,
             })
         } else {
             None
         }
+    }
+
+    /// Whether the device came up.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.available
+    }
+
+    /// What the device's cursor is showing, as far as the driver knows.
+    #[must_use]
+    pub fn hw_cursor(&self) -> HwCursorState {
+        self.cursor
+    }
+
+    /// Bring the device's cursor to `want` (`None`: hidden), sending only
+    /// what changed: nothing if it is already so, a move if only the position
+    /// differs, the image (drawn by `draw`, see
+    /// [`crate::virtio::gpu::cursor_update`]) if the image or its hot spot
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// The device's. The recorded state then becomes
+    /// [`HwCursorState::Unknown`], so the next sync starts over.
+    pub fn sync_cursor(
+        &mut self,
+        want: Option<HwCursor>,
+        draw: impl FnOnce(&mut [u8]) -> KernelResult<()>,
+    ) -> KernelResult<()> {
+        let result = match (self.cursor, want) {
+            (HwCursorState::Hidden, None) => return Ok(()),
+            (HwCursorState::Shown(h), Some(w)) if h == w => return Ok(()),
+            (_, None) => crate::virtio::gpu::cursor_hide(),
+            (HwCursorState::Shown(h), Some(w))
+                if h.image == w.image && h.hot_x == w.hot_x && h.hot_y == w.hot_y =>
+            {
+                crate::virtio::gpu::cursor_move(w.x, w.y)
+            }
+            (_, Some(w)) => crate::virtio::gpu::cursor_update(w.x, w.y, w.hot_x, w.hot_y, draw),
+        };
+        self.cursor = match (&result, want) {
+            (Ok(()), None) => HwCursorState::Hidden,
+            (Ok(()), Some(w)) => HwCursorState::Shown(w),
+            (Err(_), _) => HwCursorState::Unknown,
+        };
+        result
     }
 
     /// Driver name.

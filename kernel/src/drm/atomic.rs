@@ -579,9 +579,11 @@ fn validate(dev: &DrmDevice, affected: &Affected) -> KernelResult<()> {
 fn show(dev: &mut DrmDevice, affected: &Affected) -> KernelResult<()> {
     for &id in &affected.modesets {
         dev.show_crtc(id)?;
+        dev.sync_hw_cursor_for(id)?;
     }
     for &id in &affected.redraws {
         dev.present(id, None)?;
+        dev.sync_hw_cursor_for(id)?;
     }
     Ok(())
 }
@@ -781,6 +783,10 @@ pub struct CursorState {
     pub hot_x: u32,
     /// "Hot spot" Y offset within the cursor image.
     pub hot_y: u32,
+    /// Which image this is: bumped by every `cursor_set`, so a hardware
+    /// cursor uploads it again even when the handle is the same one -- a
+    /// client may redraw its cursor buffer and set it again.
+    pub image: u64,
 }
 
 impl CursorState {
@@ -796,6 +802,7 @@ impl CursorState {
             visible: false,
             hot_x: 0,
             hot_y: 0,
+            image: 0,
         }
     }
 }

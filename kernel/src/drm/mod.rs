@@ -436,6 +436,19 @@ impl DrmDevice {
                 p.fb = None;
             }
         }
+        // A primary plane left without a framebuffer hands the screen back to
+        // the console, and a device cursor over it goes too, as a composed one
+        // would. Logged rather than returned: the framebuffer is gone either
+        // way, and an error here would tell the caller it was not.
+        for idx in 0..self.crtcs.len() {
+            if let Err(e) = self.sync_hw_cursor(idx) {
+                serial_println!(
+                    "[drm] the device cursor could not follow FB {}'s destruction: {:?}",
+                    fb_id,
+                    e,
+                );
+            }
+        }
         Ok(())
     }
 
@@ -522,7 +535,10 @@ impl DrmDevice {
             self.restore_display(saved);
             return Err(e);
         }
-        if let Err(e) = self.show_crtc(crtc_id) {
+        if let Err(e) = self
+            .show_crtc(crtc_id)
+            .and_then(|()| self.sync_hw_cursor_for(crtc_id))
+        {
             self.restore_display(saved);
             self.reshow(crtc_id);
             return Err(e);
@@ -566,7 +582,10 @@ impl DrmDevice {
     /// logged, not returned: the caller is already returning the error that
     /// matters, the one that made this necessary.
     pub(crate) fn reshow(&mut self, crtc_id: DrmObjectId) {
-        if let Err(e) = self.present(crtc_id, None) {
+        if let Err(e) = self
+            .present(crtc_id, None)
+            .and_then(|()| self.sync_hw_cursor_for(crtc_id))
+        {
             serial_println!(
                 "[drm] CRTC {} could not be redrawn after a failed change: {:?}",
                 crtc_id,
@@ -954,7 +973,10 @@ impl DrmDevice {
             restore(self);
             return Err(e);
         }
-        if let Err(e) = self.present(crtc_id, None) {
+        if let Err(e) = self
+            .present(crtc_id, None)
+            .and_then(|()| self.sync_hw_cursor_for(crtc_id))
+        {
             restore(self);
             self.reshow(crtc_id);
             return Err(e);
@@ -1282,6 +1304,7 @@ impl DrmDevice {
         cs.hot_x = hot_x;
         cs.hot_y = hot_y;
         cs.visible = gem_handle != 0;
+        cs.image = cs.image.wrapping_add(1);
         self.show_cursor_change(crtc_idx, crtc_id, saved)
     }
 
@@ -1299,23 +1322,34 @@ impl DrmDevice {
         crtc_id: DrmObjectId,
         saved: CursorState,
     ) -> KernelResult<()> {
-        let after = self
+        let now = self
             .cursor_states
             .get(crtc_idx)
-            .map(compose::cursor_damage)
+            .copied()
             .ok_or(KernelError::NotFound)?;
-        let before = compose::cursor_damage(&saved);
-        let Err(e) = self.present_pair(crtc_id, before, after) else {
+        // The composed image changes only where a composed cursor was or now
+        // is; a cursor the device draws (design-decisions §976 item 2) is
+        // moved by `sync_hw_cursor` and redraws nothing.
+        let before = self.composed_cursor_damage(&saved);
+        let after = self.composed_cursor_damage(&now);
+        let Err(e) = self
+            .present_pair(crtc_id, before, after)
+            .and_then(|()| self.sync_hw_cursor(crtc_idx))
+        else {
             return Ok(());
         };
         if let Some(cs) = self.cursor_states.get_mut(crtc_idx) {
             *cs = saved;
         }
-        // Redraw both squares from the restored state. After a refusal nothing
-        // was drawn and this repaints the same pixels; after a device failure
-        // part-way, one square may have been drawn and not the other. Logged,
-        // not returned: `e` is the error that matters.
-        if let Err(again) = self.present_pair(crtc_id, before, after) {
+        // Redraw both squares and re-sync the device's cursor from the
+        // restored state. After a refusal nothing was drawn and this repaints
+        // the same pixels; after a device failure part-way, one square may
+        // have been drawn and not the other. Logged, not returned: `e` is the
+        // error that matters.
+        if let Err(again) = self
+            .present_pair(crtc_id, before, after)
+            .and_then(|()| self.sync_hw_cursor(crtc_idx))
+        {
             serial_println!(
                 "[drm] the cursor on CRTC {} could not be redrawn after a failed change: {:?}",
                 crtc_id,

@@ -13,7 +13,11 @@
 //! * the primary plane, opaque, with its rectangles;
 //! * any overlay plane bound to the CRTC, then its cursor plane, blended as
 //!   premultiplied alpha when their format carries alpha;
-//! * the legacy cursor (`cursor_set`), on top, placed by its hot spot.
+//! * the legacy cursor (`cursor_set`), on top, placed by its hot spot --
+//!   unless the device draws it: virtio-gpu shows a cursor that fits its
+//!   64x64 one on its own cursor queue, and moving it redraws nothing
+//!   (`DrmDevice::cursor_in_hardware`, `sync_hw_cursor`; design-decisions
+//!   §1400).
 //!
 //! The arithmetic is in the `planecompose` crate, where every pixel of it is
 //! tested on the host; what is here is the kernel's side: turning GEM frame
@@ -181,6 +185,48 @@ pub fn gem_pages(gem: &GemObject) -> KernelResult<Vec<&[u8]>> {
     Ok(pages)
 }
 
+/// Copy a `width` x `height` cursor image out of `gem`, whose rows are
+/// `gem.pitch` bytes apart, into a device cursor image, whose rows are
+/// [`crate::virtio::gpu::CURSOR_PITCH`] apart. A pixel at a time: a row of
+/// the source may cross a frame boundary, a pixel cannot (both the pitch and
+/// the frame size are multiples of four).
+fn copy_cursor_image(
+    gem: &GemObject,
+    width: u32,
+    height: u32,
+    image: &mut [u8],
+) -> KernelResult<()> {
+    let pages = gem_pages(gem)?;
+    for y in 0..height {
+        for x in 0..width {
+            let src = u64::from(y)
+                .checked_mul(u64::from(gem.pitch))
+                .and_then(|row| row.checked_add(u64::from(x).checked_mul(4)?))
+                .and_then(|o| usize::try_from(o).ok())
+                .ok_or(KernelError::InternalError)?;
+            let page = src
+                .checked_div(FRAME_SIZE)
+                .ok_or(KernelError::InternalError)?;
+            let within = src
+                .checked_rem(FRAME_SIZE)
+                .ok_or(KernelError::InternalError)?;
+            let pixel = pages
+                .get(page)
+                .and_then(|p| p.get(within..within.checked_add(4)?))
+                .ok_or(KernelError::InternalError)?;
+            let dst = (y as usize)
+                .checked_mul(crate::virtio::gpu::CURSOR_PITCH)
+                .and_then(|row| row.checked_add((x as usize).checked_mul(4)?))
+                .ok_or(KernelError::InternalError)?;
+            image
+                .get_mut(dst..dst.checked_add(4).ok_or(KernelError::InternalError)?)
+                .ok_or(KernelError::InternalError)?
+                .copy_from_slice(pixel);
+        }
+    }
+    Ok(())
+}
+
 /// What a pixel no layer covers shows: opaque black.
 pub const BACKGROUND: u32 = 0xFF00_0000;
 
@@ -194,6 +240,115 @@ impl super::DrmDevice {
             self.backend,
             super::DrmBackend::Limine(_) | super::DrmBackend::VirtioGpu(_)
         )
+    }
+
+    /// Whether the legacy cursor `cs` is shown by the device's own cursor
+    /// rather than composed (design-decisions §976 item 2): on virtio-gpu, a
+    /// visible image that fits the device's 64x64 cursor with its hot spot
+    /// inside the image, and that hot spot at a position the device can
+    /// express -- not left of or above the display's corner. Any other cursor
+    /// is composed, so every cursor is shown; the device's is just cheaper,
+    /// since moving it redraws nothing.
+    #[must_use]
+    pub fn cursor_in_hardware(&self, cs: &super::atomic::CursorState) -> bool {
+        matches!(&self.backend, super::DrmBackend::VirtioGpu(b) if b.is_available())
+            && cs.visible
+            && cs.gem_handle != 0
+            && cs.width <= crate::virtio::gpu::CURSOR_SIZE
+            && cs.height <= crate::virtio::gpu::CURSOR_SIZE
+            && cs.hot_x < cs.width
+            && cs.hot_y < cs.height
+            && cs.x >= 0
+            && cs.y >= 0
+    }
+
+    /// The part of the display the legacy cursor `cs` occupies in the
+    /// *composed* image: its rectangle when it is composed, nothing when it
+    /// is hidden or the device draws it.
+    #[must_use]
+    pub fn composed_cursor_damage(&self, cs: &super::atomic::CursorState) -> Rect {
+        if self.cursor_in_hardware(cs) {
+            Rect::new(0, 0, 0, 0)
+        } else {
+            cursor_damage(cs)
+        }
+    }
+
+    /// What the device's own cursor is showing, on a backend that has one.
+    #[must_use]
+    pub fn hw_cursor(&self) -> Option<super::driver::HwCursorState> {
+        match &self.backend {
+            super::DrmBackend::VirtioGpu(b) => Some(b.hw_cursor()),
+            _ => None,
+        }
+    }
+
+    /// What the device's cursor should show for the CRTC at `crtc_idx`: the
+    /// legacy cursor when the device draws it and the DRM owns the screen --
+    /// a mode, and a framebuffer on the primary plane -- and nothing
+    /// otherwise, as a composed cursor is not drawn then either.
+    fn wanted_hw_cursor(&self, crtc_idx: usize) -> Option<super::driver::HwCursor> {
+        let cs = self.cursor_states.get(crtc_idx)?;
+        if !self.cursor_in_hardware(cs) {
+            return None;
+        }
+        let crtc = self.crtcs.get(crtc_idx)?;
+        crtc.mode?;
+        self.planes
+            .iter()
+            .find(|p| p.id == crtc.primary_plane)?
+            .fb?;
+        Some(super::driver::HwCursor {
+            x: u32::try_from(cs.x).ok()?,
+            y: u32::try_from(cs.y).ok()?,
+            hot_x: cs.hot_x,
+            hot_y: cs.hot_y,
+            image: cs.image,
+        })
+    }
+
+    /// Bring the device's own cursor in line with the model for the CRTC at
+    /// `crtc_idx` -- shown, moved, re-imaged or hidden, sending only what
+    /// changed. Called after everything that can change what the device
+    /// cursor should show: the cursor calls, a mode-set, a flip, an atomic
+    /// commit, a framebuffer's destruction. A no-op on a backend without one.
+    ///
+    /// # Errors
+    ///
+    /// The device's, or `NotFound` for a cursor image that has vanished.
+    pub(crate) fn sync_hw_cursor(&mut self, crtc_idx: usize) -> KernelResult<()> {
+        let want = self.wanted_hw_cursor(crtc_idx);
+        let cs = self.cursor_states.get(crtc_idx).copied();
+        let super::DrmDevice {
+            backend,
+            gem_objects,
+            ..
+        } = self;
+        let super::DrmBackend::VirtioGpu(b) = backend else {
+            return Ok(());
+        };
+        b.sync_cursor(want, |image| {
+            let cs = cs.ok_or(KernelError::InternalError)?;
+            let gem = gem_objects
+                .iter()
+                .find(|g| g.handle == cs.gem_handle)
+                .ok_or(KernelError::NotFound)?;
+            copy_cursor_image(gem, cs.width, cs.height, image)
+        })
+    }
+
+    /// [`Self::sync_hw_cursor`] for a CRTC named by id.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for an unknown CRTC, then as `sync_hw_cursor`.
+    pub(crate) fn sync_hw_cursor_for(&mut self, crtc_id: DrmObjectId) -> KernelResult<()> {
+        let idx = self
+            .crtcs
+            .iter()
+            .position(|c| c.id == crtc_id)
+            .ok_or(KernelError::NotFound)?;
+        self.sync_hw_cursor(idx)
     }
 
     /// One pixel of what is on screen, read back from a software backend's
@@ -275,6 +430,7 @@ impl super::DrmDevice {
             && cs.gem_handle != 0
             && cs.width != 0
             && cs.height != 0
+            && !self.cursor_in_hardware(cs)
         {
             if !self.gem_objects.iter().any(|g| g.handle == cs.gem_handle) {
                 return Err(KernelError::NotFound);
@@ -790,21 +946,24 @@ fn run(
         .map(|c| c.primary_plane)
         .ok_or(KernelError::InternalError)?;
 
-    // A: the display's size. B: larger, for an origin inside it. C: the
-    // cursor image. X: a format the plane does not list. S: too small for
-    // what it will be said to hold.
+    // A: the display's size. B: larger, for an origin inside it. C and K:
+    // cursor images, 16x16 (fits virtio-gpu's device cursor) and 80x80 (does
+    // not). X: a format the plane does not list. S: too small for what it
+    // will be said to hold.
     let gem_a = created.gem(dev, w, h, PixelFormat::Xrgb8888)?;
     let fb_a = created.fb(dev, gem_a, w, h, PixelFormat::Xrgb8888)?;
     let (bw, bh) = (w.saturating_add(32), h.saturating_add(16));
     let gem_b = created.gem(dev, bw, bh, PixelFormat::Xrgb8888)?;
     let fb_b = created.fb(dev, gem_b, bw, bh, PixelFormat::Xrgb8888)?;
     let gem_c = created.gem(dev, 16, 16, PixelFormat::Argb8888)?;
+    let gem_k = created.gem(dev, 80, 80, PixelFormat::Argb8888)?;
     let gem_x = created.gem(dev, 16, 16, PixelFormat::Xbgr8888)?;
     let fb_x = created.fb(dev, gem_x, 16, 16, PixelFormat::Xbgr8888)?;
     let gem_s = created.gem(dev, 16, 16, PixelFormat::Xrgb8888)?;
     fill(dev, gem_a, w, h, pattern_a)?;
     fill(dev, gem_b, bw, bh, pattern_b)?;
     fill(dev, gem_c, 16, 16, cursor_image)?;
+    fill(dev, gem_k, 80, 80, cursor_image)?;
 
     // Put `fb` on the primary plane showing `src` at `dst`, atomically.
     let commit = |dev: &mut super::DrmDevice,
@@ -991,75 +1150,150 @@ fn run(
         "fb_create accepted a pitch narrower than a row",
     );
 
-    // (f) The cursor, over the trivial scene: drawn at its hot spot, blended,
-    //     moved (its old place restored from the plane beneath), hidden.
+    // (f) The cursor, over the trivial scene. One the device's own cursor
+    //     cannot take -- here 80x80, beyond virtio-gpu's 64x64, and any
+    //     cursor at all on a backend without one -- is composed: drawn at its
+    //     hot spot, blended, its old place restored from the plane beneath
+    //     when it moves. One the device can take is shown by the device and
+    //     never touches the scanout (design-decisions §976 item 2).
     let r = commit(dev, fb_a, (0, 0, w, h), (0, 0, w, h), false);
     check(
         &mut fail,
         r.is_ok(),
         "atomic commit refused the whole buffer back",
     );
+    let at_i32 = |v: u32| i32::try_from(v).unwrap_or(0);
     let (cx, cy) = (w / 8, h / 8);
-    let r = dev.cursor_set(crtc_id, gem_c, 16, 16, 2, 3).and_then(|()| {
-        dev.cursor_move(
-            crtc_id,
-            i32::try_from(cx).unwrap_or(0),
-            i32::try_from(cy).unwrap_or(0),
-        )
-    });
+    let (mx, my) = (w / 2, h / 2);
+
+    // (f1) Composed.
+    let r = dev
+        .cursor_set(crtc_id, gem_k, 80, 80, 2, 3)
+        .and_then(|()| dev.cursor_move(crtc_id, at_i32(cx), at_i32(cy)));
     check(
         &mut fail,
         r.is_ok(),
-        "the cursor could not be set and moved",
+        "a composed cursor could not be set and moved",
     );
     // The image's top-left is the position less the hot spot.
     let (left, top) = (cx - 2, cy - 3);
     check(
         &mut fail,
-        shows(dev, &[(left + 4, top + 1), (left + 15, top + 7)], |_, _| {
+        shows(dev, &[(left + 4, top + 1), (left + 79, top + 7)], |_, _| {
             0x0000_FF00
         }),
-        "the cursor's opaque half is not drawn at its hot spot",
+        "a composed cursor's opaque half is not drawn at its hot spot",
     );
     check(
         &mut fail,
         shows(
             dev,
-            &[(left + 4, top + 12), (left - 1, top), (left + 16, top + 1)],
+            &[(left + 4, top + 12), (left - 1, top), (left + 80, top + 1)],
             pattern_a,
         ),
-        "the cursor's transparent half, or the screen beside it, is not the plane beneath",
+        "a composed cursor's transparent half, or the screen beside it, is not the plane beneath",
     );
-    let (mx, my) = (w / 2, h / 2);
-    let r = dev.cursor_move(
-        crtc_id,
-        i32::try_from(mx).unwrap_or(0),
-        i32::try_from(my).unwrap_or(0),
-    );
-    check(&mut fail, r.is_ok(), "the cursor could not be moved");
+    let r = dev.cursor_move(crtc_id, at_i32(mx), at_i32(my));
+    check(&mut fail, r.is_ok(), "a composed cursor could not be moved");
     check(
         &mut fail,
-        shows(dev, &[(left + 4, top + 1), (left + 15, top + 7)], pattern_a),
-        "where the cursor was is not restored from the plane beneath",
+        shows(dev, &[(left + 4, top + 1), (left + 79, top + 7)], pattern_a),
+        "where a composed cursor was is not restored from the plane beneath",
     );
     check(
         &mut fail,
         shows(dev, &[(mx - 2 + 4, my - 3 + 1)], |_, _| 0x0000_FF00),
-        "the cursor is not drawn where it moved to",
+        "a composed cursor is not drawn where it moved to",
     );
+
+    // (f2) A 16x16 cursor: the device's, where there is one.
+    let r = dev.cursor_set(crtc_id, gem_c, 16, 16, 2, 3);
+    check(&mut fail, r.is_ok(), "a 16x16 cursor could not be set");
+    let image = dev.cursor_state(crtc_id).map_or(0, |cs| cs.image);
+    let shown_at = |x: u32, y: u32| {
+        Some(super::driver::HwCursorState::Shown(
+            super::driver::HwCursor {
+                x,
+                y,
+                hot_x: 2,
+                hot_y: 3,
+                image,
+            },
+        ))
+    };
+    if dev.hw_cursor().is_some() {
+        check(
+            &mut fail,
+            shows(
+                dev,
+                &[(mx - 2 + 4, my - 3 + 1), (mx - 2 + 70, my - 3 + 5)],
+                pattern_a,
+            ),
+            "a cursor the device draws was also composed, or the composed one it replaced is still there",
+        );
+        check(
+            &mut fail,
+            dev.hw_cursor() == shown_at(mx, my),
+            "the device cursor is not showing the image set, at its position",
+        );
+        let r = dev.cursor_move(crtc_id, at_i32(cx), at_i32(cy));
+        check(&mut fail, r.is_ok(), "the device cursor could not be moved");
+        check(
+            &mut fail,
+            dev.hw_cursor() == shown_at(cx, cy)
+                && shows(dev, &[(cx - 2 + 4, cy - 3 + 1)], pattern_a),
+            "moving the device cursor did not move it, or drew it into the scanout",
+        );
+        // It follows the CRTC: off with it, back with it.
+        let r = dev.set_crtc(crtc_id, None, 0, 0, &[], None);
+        check(
+            &mut fail,
+            r.is_ok() && dev.hw_cursor() == Some(super::driver::HwCursorState::Hidden),
+            "turning the CRTC off did not hide the device cursor",
+        );
+        let r = dev.set_crtc(crtc_id, Some(fb_a), 0, 0, &[conn_id], Some(&mode));
+        check(
+            &mut fail,
+            r.is_ok() && dev.hw_cursor() == shown_at(cx, cy),
+            "turning the CRTC back on did not bring the device cursor back",
+        );
+    } else {
+        check(
+            &mut fail,
+            shows(dev, &[(mx - 2 + 4, my - 3 + 1)], |_, _| 0x0000_FF00)
+                && shows(dev, &[(mx - 2 + 20, my - 3 + 1)], pattern_a),
+            "a 16x16 cursor is not composed where it is",
+        );
+        let r = dev.cursor_move(crtc_id, at_i32(cx), at_i32(cy));
+        check(&mut fail, r.is_ok(), "a composed cursor could not be moved");
+        check(
+            &mut fail,
+            shows(dev, &[(cx - 2 + 4, cy - 3 + 1)], |_, _| 0x0000_FF00),
+            "a 16x16 cursor is not composed where it moved to",
+        );
+    }
+
+    // (f3) Refused, changing nothing; then hidden.
+    let before = dev.cursor_state(crtc_id).copied();
     check(
         &mut fail,
         matches!(
             dev.cursor_set(crtc_id, gem_s, 64, 64, 0, 0),
             Err(KernelError::InvalidArgument)
-        ),
-        "a cursor larger than its buffer was not refused",
+        ) && dev
+            .cursor_state(crtc_id)
+            .map(|cs| (cs.gem_handle, cs.width, cs.image))
+            == before.map(|cs| (cs.gem_handle, cs.width, cs.image)),
+        "a cursor larger than its buffer was not refused, or changed the cursor",
     );
     let r = dev.cursor_set(crtc_id, 0, 0, 0, 0, 0);
     check(&mut fail, r.is_ok(), "the cursor could not be hidden");
     check(
         &mut fail,
-        shows(dev, &[(mx - 2 + 4, my - 3 + 1)], pattern_a),
+        shows(dev, &[(cx - 2 + 4, cy - 3 + 1)], pattern_a)
+            && dev
+                .hw_cursor()
+                .is_none_or(|s| s == super::driver::HwCursorState::Hidden),
         "a hidden cursor is still on screen",
     );
 

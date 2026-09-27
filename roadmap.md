@@ -1859,6 +1859,12 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The start menu glows, as the reference's glass** -- done
+  2026-09-26. With shadows on, the menu casts the reference's glow in the
+  accent (`aero-start-menu`'s `0 0 38px 4px`) as well as the shadow every
+  panel casts, and has a line of light just inside its edge. Its outline stays
+  the window frame's, so a menu and a window side by side are edged alike.
+
 - `[C]` **The tray lights what the pointer is over** -- done 2026-09-26. A
   program's icon, the chevron, the bell and the clock each light under the
   pointer, as the reference's `aero-trayico:hover`, `aero-tray-arrow:hover`

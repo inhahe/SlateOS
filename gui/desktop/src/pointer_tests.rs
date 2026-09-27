@@ -418,6 +418,79 @@ fn a_wheel_over_either_part_of_the_power_button_scrolls_the_list() {
     }
 }
 
+/// **The start menu is the reference's glass**: a glow in the accent round
+/// it when shadows are on -- none when they are off, a glow being a shadow in
+/// light -- and a line of light just inside its edge, which keeps the window
+/// frame's outline.
+#[test]
+fn the_start_menu_glows_and_has_a_light_inside_its_edge() {
+    use appearance::config::testing::with_scratch_config;
+    with_scratch_config("start-menu-glow", |_root| {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let menu = shell.start_menu_rect();
+        let glow = guitk::theme::with_alpha(shell.theme.accent_color, crate::START_MENU_GLOW_ALPHA);
+        let glows = |shell: &DesktopShell| {
+            shell
+                .render_start_menu()
+                .expect("open")
+                .commands
+                .iter()
+                .filter(|c| {
+                    matches!(c, RenderCommand::BoxShadow { x, y, width, height, color, spread, .. }
+                        if (*x, *y, *width, *height) == (menu.x, menu.y, menu.w, menu.h)
+                            && *color == glow && *spread > 0.0)
+                })
+                .count()
+        };
+        assert!(
+            shell.appearance.drop_shadows,
+            "the fixture expects shadows on"
+        );
+        assert_eq!(glows(&shell), 1, "no glow round the menu");
+
+        let tree = shell.render_start_menu().expect("open");
+        let light =
+            guitk::theme::with_alpha(guitk::color::Color::WHITE, crate::START_MENU_INNER_LIGHT);
+        let lines: Vec<Rect> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *color == light => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let inner = lines[0];
+        assert!(
+            inner.x > menu.x
+                && inner.y > menu.y
+                && inner.x + inner.w < menu.x + menu.w
+                && inner.y + inner.h < menu.y + menu.h,
+            "the light is not inside the edge: {inner:?} in {menu:?}"
+        );
+        assert!(
+            tree.commands.iter().any(|c| matches!(c,
+                RenderCommand::StrokeRect { x, y, width, height, color, .. }
+                    if (*x, *y, *width, *height) == (menu.x, menu.y, menu.w, menu.h)
+                        && *color == shell.theme.panel_border_color)),
+            "the menu lost the window frame's outline"
+        );
+
+        let mut settings = shell.appearance.clone();
+        settings.drop_shadows = false;
+        shell.set_appearance(settings);
+        assert_eq!(glows(&shell), 0, "glowing with shadows off");
+    });
+}
+
 /// **The search field is the reference's `aero-sm-search`**: a well with a
 /// quiet line round it -- not the accent's ring -- and a magnifier at its
 /// start, before the hint and before anything typed.
@@ -3105,7 +3178,10 @@ fn the_corner_radius_grows_with_the_display_scaling() {
 
 #[test]
 fn drop_shadows_are_drawn_only_when_the_user_asks_for_them() {
-    for (wanted, expected) in [(true, 1), (false, 0)] {
+    // Two with shadows on: the shadow every floating panel casts, and the
+    // start menu's glow in the accent -- a shadow in light, which goes with
+    // them, as the reference's `aero-start-menu` casts both.
+    for (wanted, expected) in [(true, 2), (false, 0)] {
         let mut shell = shell();
         let mut appearance = AppearanceSettings::default();
         appearance.drop_shadows = wanted;

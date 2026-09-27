@@ -610,6 +610,16 @@ const FOLDER_CLOSED_ICON: &str = "pan-end";
 /// How strongly the start menu marks the row the keyboard is on: the accent
 /// at this alpha, under the row's own text.
 const START_MENU_SELECTED_ALPHA: u8 = 70;
+/// The glow round the start menu, in the accent: the reference's
+/// `0 0 38px 4px` at 0.5.
+const START_MENU_GLOW_ALPHA: u8 = 128;
+/// How soft that glow is: the reference's 38.
+const START_MENU_GLOW_BLUR: f32 = 38.0;
+/// How far it spreads before it softens: the reference's 4.
+const START_MENU_GLOW_SPREAD: f32 = 4.0;
+/// The line of light just inside the start menu's edge, in white: the
+/// reference's `inset 0 0 0 1px` at 0.4.
+const START_MENU_INNER_LIGHT: u8 = 102;
 /// A row under the pointer, in the accent: the reference's `aero-sm-app:hover`
 /// wash, a pale tint of its blue -- quieter than the keyboard's row, which
 /// says where Enter goes rather than where the pointer is.
@@ -7875,9 +7885,26 @@ impl DesktopShell {
         let menu = self.start_menu_rect();
         let radii = self.corner_radii();
 
-        // Background
+        // Background. Under it, when the user has shadows, the shadow every
+        // floating panel casts and the reference's glow in the accent
+        // (`aero-start-menu`'s `0 0 38px 4px`) -- a glow is a shadow in light,
+        // and goes with them.
         if self.appearance.drop_shadows {
             shadow(&mut tree, menu, radii);
+            tree.box_shadow(
+                menu.x,
+                menu.y,
+                menu.w,
+                menu.h,
+                Shadow {
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    blur: self.scale(START_MENU_GLOW_BLUR),
+                    spread: self.scale(START_MENU_GLOW_SPREAD),
+                    color: with_alpha(self.theme.accent_color, START_MENU_GLOW_ALPHA),
+                },
+                radii,
+            );
         }
         fill_round(&mut tree, menu, self.theme.start_menu_bg, radii);
         // The places column, in a shade of its own: rounded where it meets the
@@ -7900,6 +7927,27 @@ impl DesktopShell {
             self.theme.panel_border_color,
             self.scale(1.0),
             radii,
+        );
+        // And a line of light just inside that, as the reference's glass has
+        // (`inset 0 0 0 1px`). The outline itself stays the window frame's,
+        // so a menu and a window side by side are edged alike.
+        let line = self.scale(1.0);
+        stroke_round(
+            &mut tree,
+            Rect::new(
+                menu.x + line * 1.5,
+                menu.y + line * 1.5,
+                (menu.w - line * 3.0).max(0.0),
+                (menu.h - line * 3.0).max(0.0),
+            ),
+            with_alpha(Color::WHITE, START_MENU_INNER_LIGHT),
+            line,
+            CornerRadii {
+                top_left: (radii.top_left - line * 1.5).max(0.0),
+                top_right: (radii.top_right - line * 1.5).max(0.0),
+                bottom_right: (radii.bottom_right - line * 1.5).max(0.0),
+                bottom_left: (radii.bottom_left - line * 1.5).max(0.0),
+            },
         );
 
         // The search field, at the foot of the programs: the menu is a list of

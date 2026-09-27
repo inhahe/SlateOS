@@ -29,6 +29,7 @@ use crate::render::FontWeightHint;
 use crate::text;
 use crate::text::TextCursor;
 use crate::textedit;
+use core::num::NonZeroU32;
 
 /// Single-line text input state with cursor, selection, and clipboard.
 #[derive(Clone, Debug, Default)]
@@ -51,12 +52,24 @@ pub struct TextInput {
     /// on screen, so it has no side of a boundary to be on. Only the caret
     /// does.
     selection_anchor: Option<usize>,
-    /// Clipboard contents (internal; real clipboard would use IPC).
-    clipboard: String,
-    /// The most characters typing and pasting may leave in the field -- a
-    /// form field's `maxlength` -- or `None` for no limit. See
-    /// [`set_capacity`](Self::set_capacity).
-    capacity: Option<usize>,
+    /// Clipboard contents (internal; real clipboard would use IPC), `None`
+    /// for nothing copied.
+    ///
+    /// A `Box<str>` in an `Option` rather than a `String`: sixteen bytes
+    /// rather than twenty-four, for the reason [`capacity`](Self::capacity)
+    /// is four -- see the size note on the struct's test,
+    /// `a_text_field_stays_eighty_bytes`.
+    clipboard: Option<Box<str>>,
+    /// The most characters typing and pasting may leave in the field, plus
+    /// one -- so a limit of nothing has a value and `None`, no limit, is the
+    /// niche -- or `None` for no limit. See [`set_capacity`](Self::set_capacity).
+    ///
+    /// Four bytes, not an `Option<usize>`'s sixteen, because a `TextInput` is
+    /// held by value in programs' form types, and adding sixteen bytes here
+    /// once took the finance program's form over clippy's
+    /// `large_enum_variant` threshold: its largest variant holds four fields
+    /// and its next two, so every byte here counts twice in the difference.
+    capacity: Option<NonZeroU32>,
 }
 
 impl TextInput {
@@ -98,7 +111,7 @@ impl TextInput {
     /// For a caller arranging a paste it did not cut -- a test, or a menu
     /// command wired to a real clipboard service when one exists.
     pub fn set_clipboard(&mut self, text: String) {
-        self.clipboard = text;
+        self.clipboard = Some(text.into_boxed_str());
     }
 
     /// What the last cut or copy put on the clipboard.
@@ -109,7 +122,7 @@ impl TextInput {
     /// discovered.
     #[must_use]
     pub fn clipboard(&self) -> &str {
-        &self.clipboard
+        self.clipboard.as_deref().unwrap_or("")
     }
 
     pub fn new() -> Self {
@@ -117,7 +130,7 @@ impl TextInput {
             text: String::new(),
             cursor: TextCursor::default(),
             selection_anchor: None,
-            clipboard: String::new(),
+            clipboard: None,
             capacity: None,
         }
     }
@@ -127,15 +140,21 @@ impl TextInput {
     ///
     /// Characters, not bytes, so a limit cannot cut a character in half.
     /// A limit on what the *user* puts in: [`set_text`](Self::set_text) is
-    /// the program's, and is not cut.
+    /// the program's, and is not cut. A limit of 4,294,967,295 characters or
+    /// more is no limit: no one-line field is held to one that large, and the
+    /// field keeps its limit in four bytes (see the `capacity` field).
     pub fn set_capacity(&mut self, capacity: Option<usize>) {
-        self.capacity = capacity;
+        self.capacity = capacity
+            .and_then(|n| u32::try_from(n).ok())
+            .and_then(|n| n.checked_add(1))
+            .and_then(NonZeroU32::new);
     }
 
     /// The field's limit, if it has one.
     #[must_use]
-    pub const fn capacity(&self) -> Option<usize> {
+    pub fn capacity(&self) -> Option<usize> {
         self.capacity
+            .and_then(|stored| usize::try_from(stored.get().saturating_sub(1)).ok())
     }
 
     pub fn clear(&mut self) {
@@ -341,7 +360,7 @@ impl TextInput {
     /// How many characters may go in place of the bytes `start..end`, under
     /// the [capacity](Self::set_capacity): everything if there is none.
     fn room_over(&self, start: usize, end: usize) -> usize {
-        let Some(capacity) = self.capacity else {
+        let Some(capacity) = self.capacity() else {
             return usize::MAX;
         };
         let kept = self
@@ -379,26 +398,29 @@ impl TextInput {
 
     pub fn cut(&mut self) {
         if self.has_selection() {
-            self.clipboard = self.selected_text().to_string();
+            self.clipboard = Some(Box::from(self.selected_text()));
             self.delete_selection();
         }
     }
 
     pub fn copy(&mut self) {
         if self.has_selection() {
-            self.clipboard = self.selected_text().to_string();
+            self.clipboard = Some(Box::from(self.selected_text()));
         }
     }
 
     /// Paste the clipboard over the selection, as [`insert_text`](Self::insert_text)
     /// types: control characters left out, and cut to the capacity.
     pub fn paste(&mut self) {
-        if self.clipboard.is_empty() {
+        // Taken for the length of the insert, which borrows `self` mutably,
+        // and put back: pasting does not consume the clipboard.
+        let Some(clip) = self.clipboard.take() else {
             return;
+        };
+        if !clip.is_empty() {
+            self.insert_text(&clip);
         }
-        let clip = core::mem::take(&mut self.clipboard);
-        self.insert_text(&clip);
-        self.clipboard = clip;
+        self.clipboard = Some(clip);
     }
 }
 
@@ -733,6 +755,34 @@ mod tests {
 
     fn edit(input: &mut TextInput, k: crate::event::Key, ctrl: bool, text: &str) -> KeyEdit {
         input.edit_key(&key(k, ctrl, text), FONT_SIZE, FontWeightHint::Regular)
+    }
+
+    /// A limit of nothing is a field that takes nothing -- representable, not
+    /// mistaken for no limit -- and a limit too large to keep is none.
+    #[test]
+    fn a_limit_of_nothing_holds_nothing_and_a_huge_one_holds_everything() {
+        let mut input = TextInput::new();
+        input.set_capacity(Some(0));
+        assert_eq!(input.capacity(), Some(0));
+        input.insert_char('x');
+        assert_eq!(input.text(), "");
+        input.set_capacity(Some(usize::MAX));
+        assert_eq!(input.capacity(), None);
+        input.insert_char('x');
+        assert_eq!(input.text(), "x");
+    }
+
+    /// A `TextInput` is held by value in programs' form types, and clippy's
+    /// `large_enum_variant` counts its bytes there: the finance program's form
+    /// has a variant of four fields beside one of two, so every byte here
+    /// counts twice in the difference the lint measures. Sixteen more bytes
+    /// once (the capacity, as an `Option<usize>`) took that form over the
+    /// lint's threshold on the shipping target and stopped every boot test at
+    /// the `cfg(unix)` gate. Pinned so the next growth is a decision: if this
+    /// fails, check the programs that embed several fields before raising it.
+    #[test]
+    fn a_text_field_stays_eighty_bytes() {
+        assert_eq!(core::mem::size_of::<TextInput>(), 80);
     }
 
     /// **A field holds at most its capacity**, counted in characters: typing

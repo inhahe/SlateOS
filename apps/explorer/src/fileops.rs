@@ -355,9 +355,67 @@ impl OperationPlan {
     }
 
     /// Build a plan for copying `sources` into `dest_dir`.
+    ///
+    /// See [`plan_transfer`](Self::plan_transfer) for what happens to a
+    /// source that is already there, and to a folder asked to go inside
+    /// itself.
     pub fn plan_copy(
         sources: &[PathBuf],
         dest_dir: &Path,
+        conflict_policy: ConflictPolicy,
+        error_policy: ErrorPolicy,
+    ) -> io::Result<Self> {
+        Self::plan_transfer(
+            sources,
+            dest_dir,
+            FileOperation::Copy,
+            conflict_policy,
+            error_policy,
+        )
+    }
+
+    /// Build a plan for moving `sources` into `dest_dir`.
+    ///
+    /// A source already in `dest_dir` is left out: see
+    /// [`plan_transfer`](Self::plan_transfer).
+    pub fn plan_move(
+        sources: &[PathBuf],
+        dest_dir: &Path,
+        conflict_policy: ConflictPolicy,
+        error_policy: ErrorPolicy,
+    ) -> io::Result<Self> {
+        Self::plan_transfer(
+            sources,
+            dest_dir,
+            FileOperation::Move,
+            conflict_policy,
+            error_policy,
+        )
+    }
+
+    /// What copying and moving share: every source, and everything under
+    /// it, with where it goes.
+    ///
+    /// **A source whose destination is itself is never a taken name.** A
+    /// paste back into the folder it came from, or a drop onto its own
+    /// folder, puts the source exactly where it already is, and settling
+    /// that with the conflict policy is how data is lost: "replace it"
+    /// replaces a file with itself, and a move then deletes the source --
+    /// the only copy there is. So a copy of it is a duplicate, beside it and
+    /// numbered (`notes (2).txt`), whatever the policy says, which is what
+    /// a paste into the same folder means everywhere else; and a move of it
+    /// has nothing to do and is left out of the plan. The menu's "Replace
+    /// it" (2026-09-27) is what made the first reachable: until then the
+    /// policy was always to keep both, whose numbered copy hid the problem.
+    ///
+    /// **A folder cannot go inside itself.** Copying or moving `A` into `A`,
+    /// or anywhere under it, is refused: the tree read now would be written
+    /// into a branch of itself, and a move would then try to delete the
+    /// folder it had just been put in.
+    fn plan_transfer(
+        sources: &[PathBuf],
+        dest_dir: &Path,
+        operation: FileOperation,
         conflict_policy: ConflictPolicy,
         error_policy: ErrorPolicy,
     ) -> io::Result<Self> {
@@ -366,31 +424,39 @@ impl OperationPlan {
         let mut total_bytes: u64 = 0;
 
         for src in sources {
-            Self::scan_source(src, dest_dir, &mut actions, &mut index, &mut total_bytes)?;
+            let file_name = src.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "source has no file name")
+            })?;
+            if src.is_dir() && inside(dest_dir, src) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "\u{201c}{}\u{201d} cannot go inside itself",
+                        file_name.shown()
+                    ),
+                ));
+            }
+            let mut dest = dest_dir.join(file_name);
+            if same_file(src, &dest) {
+                if operation == FileOperation::Move {
+                    continue;
+                }
+                dest = resolve_rename(&dest);
+            }
+            Self::scan_source(src, &dest, &mut actions, &mut index, &mut total_bytes)?;
         }
 
-        let total_files = actions.iter().filter(|a| !a.is_dir).count() as u32;
+        let total_files =
+            u32::try_from(actions.iter().filter(|a| !a.is_dir).count()).unwrap_or(u32::MAX);
 
         Ok(Self {
-            operation: FileOperation::Copy,
+            operation,
             actions,
             total_bytes,
             total_files,
             conflict_policy,
             error_policy,
         })
-    }
-
-    /// Build a plan for moving `sources` into `dest_dir`.
-    pub fn plan_move(
-        sources: &[PathBuf],
-        dest_dir: &Path,
-        conflict_policy: ConflictPolicy,
-        error_policy: ErrorPolicy,
-    ) -> io::Result<Self> {
-        let mut plan = Self::plan_copy(sources, dest_dir, conflict_policy, error_policy)?;
-        plan.operation = FileOperation::Move;
-        Ok(plan)
     }
 
     /// Build a plan for linking `sources` into `dest_dir`.
@@ -422,8 +488,16 @@ impl OperationPlan {
             let Some(name) = src.file_name() else {
                 continue;
             };
+            // A link made in the folder its target is in goes beside it,
+            // numbered, whatever the policy: "replace it" would delete the
+            // file to put a link to the deleted file in its place. See
+            // `plan_transfer`.
+            let mut dest = dest_dir.join(name);
+            if same_file(src, &dest) {
+                dest = resolve_rename(&dest);
+            }
             actions.push(PlannedAction {
-                dest: Some(dest_dir.join(name)),
+                dest: Some(dest),
                 // Recorded from the *source*, and only so that a failure can
                 // say "directory" or "file". Nothing walks it.
                 is_dir: src.is_dir(),
@@ -466,19 +540,22 @@ impl OperationPlan {
         })
     }
 
-    /// Recursively scan a source path and add planned copy actions.
+    /// Recursively scan a source path and add planned copy actions, `src`
+    /// going to `dest` and everything under it to the same place under
+    /// `dest`.
+    ///
+    /// Given the destination rather than the folder it goes in, because the
+    /// top of the tree is not always named as the source is: a duplicate in
+    /// the source's own folder is `name (2)`, and everything inside it has to
+    /// follow it there.
     fn scan_source(
         src: &Path,
-        dest_base: &Path,
+        dest: &Path,
         actions: &mut Vec<PlannedAction>,
         index: &mut u32,
         total_bytes: &mut u64,
     ) -> io::Result<()> {
-        let file_name = src.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "source has no file name")
-        })?;
-        let dest = dest_base.join(file_name);
-
+        let dest = dest.to_path_buf();
         let meta = fs::metadata(src)?;
         if meta.is_dir() {
             // Directory creation action.
@@ -494,7 +571,13 @@ impl OperationPlan {
             // Recurse into children.
             for entry in fs::read_dir(src)? {
                 let entry = entry?;
-                Self::scan_source(&entry.path(), &dest, actions, index, total_bytes)?;
+                Self::scan_source(
+                    &entry.path(),
+                    &dest.join(entry.file_name()),
+                    actions,
+                    index,
+                    total_bytes,
+                )?;
             }
         } else {
             let size = meta.len();
@@ -1009,6 +1092,16 @@ impl OperationExecutor {
         self.next = 0;
         self.stopped = false;
 
+        // Nothing to do -- a move of files into the folder they are already
+        // in plans nothing. There is no destination to keep a journal in, and
+        // `journal_dir` would fall back to the process's working directory and
+        // write one there.
+        if self.actions.is_empty() {
+            self.progress.state = OperationState::Completed;
+            self.push_summary();
+            return true;
+        }
+
         let dest_dir = self.journal_dir();
         let plan_id = self.plan.id();
         match OperationJournal::open(&dest_dir, plan_id) {
@@ -1346,16 +1439,21 @@ impl OperationExecutor {
             }
         }
 
+        self.push_summary();
+    }
+
+    /// The `Complete` event: what was done, skipped and failed.
+    fn push_summary(&mut self) {
         let elapsed = self.started.map_or(Duration::ZERO, |s| s.elapsed());
         let succeeded = self.progress.completed_files.saturating_sub(self.skipped);
 
         self.events.push(FileOpEvent::Complete {
             summary: OperationSummary {
-                operation: operation.clone(),
+                operation: self.plan.operation.clone(),
                 total_files: self.plan.total_files,
                 succeeded,
                 skipped: self.skipped,
-                failed: self.errors.len() as u32,
+                failed: u32::try_from(self.errors.len()).unwrap_or(u32::MAX),
                 total_bytes: self.plan.total_bytes,
                 elapsed,
                 errors: self.errors.clone(),
@@ -1414,7 +1512,11 @@ impl OperationExecutor {
         // "no" -- which would make the create below fail with a bare
         // AlreadyExists that the conflict policy never got to rule on.
         let occupied = fs::symlink_metadata(dest).is_ok();
-        let dest = if occupied {
+        let dest = if occupied && same_file(&action.src, dest) {
+            // Occupied by the file it would link to: beside it, whatever the
+            // policy -- see `plan_link`.
+            resolve_rename(dest)
+        } else if occupied {
             match conflict {
                 ConflictPolicy::Skip => return Ok(ActionOutcome::Skipped),
                 // `OverwriteIfNewer` cannot be answered for a link: the
@@ -1460,6 +1562,12 @@ impl OperationExecutor {
         })?;
 
         if action.is_dir {
+            // A folder that is its own destination has nothing to create --
+            // and must not be given an undo entry, since undoing a copy
+            // removes what the copy made, and this would name the original.
+            if same_file(&action.src, dest) {
+                return Ok(ActionOutcome::Skipped);
+            }
             if !dest.exists() {
                 fs::create_dir_all(dest)?;
             }
@@ -1470,6 +1578,20 @@ impl OperationExecutor {
 
         // Conflict resolution.
         if dest.exists() {
+            // The planner leaves no source that is its own destination, but a
+            // name can come to be one by another route -- a hard link, or a
+            // folder linked inside itself -- and the policy must never be
+            // asked about a file and itself: see `plan_transfer`.
+            if same_file(&action.src, dest) {
+                if self.plan.operation == FileOperation::Move {
+                    return Ok(ActionOutcome::Skipped);
+                }
+                let renamed = resolve_rename(dest);
+                self.atomic_copy_file(&action.src, &renamed)?;
+                self.undo_entries
+                    .push((action.src.clone(), UndoTarget::Path(renamed)));
+                return Ok(ActionOutcome::Done);
+            }
             match conflict {
                 ConflictPolicy::Skip => return Ok(ActionOutcome::Skipped),
                 ConflictPolicy::Overwrite => { /* continue to overwrite */ }
@@ -1989,6 +2111,41 @@ fn create_symlink(target: &Path, link: &Path, _target_is_dir: bool) -> io::Resul
 /// `remove_dir_all` on a link to a directory deletes the *directory*. This is
 /// used where a link is being replaced, so following one would destroy the
 /// thing the old link pointed at in order to make room for a new link.
+/// Whether `a` and `b` name one file or folder: the same device and inode,
+/// as every unix and SlateOS can say.
+///
+/// "Cannot tell" -- either of them unreadable, or not there -- is `false`,
+/// which is what "no such file yet" should be.
+#[cfg(unix)]
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// [`same_file`] on the Windows development host, by resolved path: `std`
+/// keeps a file's identity there behind an unstable feature, so two names
+/// for one file through a hard link are missed. The rest -- the same path
+/// spelt differently, in another case, through `..` -- is caught.
+#[cfg(not(unix))]
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Whether `path` is `dir` or anywhere under it, compared as resolved paths.
+/// "Cannot tell" is `false`.
+fn inside(path: &Path, dir: &Path) -> bool {
+    match (fs::canonicalize(path), fs::canonicalize(dir)) {
+        (Ok(p), Ok(d)) => p.starts_with(&d),
+        _ => false,
+    }
+}
+
 fn remove_link_or_file(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
@@ -3804,5 +3961,180 @@ mod tests {
         executor.finish();
         assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
         assert!(!root.join("dst").join("b.txt").exists());
+    }
+
+    // ---- a source that is its own destination (2026-09-27) ----------------
+    //
+    // With "Replace it" on the explorer's menu, a cut pasted back into its own
+    // folder copied the file onto itself and then deleted the source: the
+    // only copy there was.
+
+    const EVERY_POLICY: [ConflictPolicy; 5] = [
+        ConflictPolicy::Rename,
+        ConflictPolicy::Skip,
+        ConflictPolicy::Overwrite,
+        ConflictPolicy::OverwriteIfNewer,
+        ConflictPolicy::Ask,
+    ];
+
+    #[test]
+    fn a_file_moved_into_its_own_folder_stays_whatever_the_policy() {
+        for policy in EVERY_POLICY {
+            let scratch = temp_dir(&format!("self_move_{policy:?}"));
+            let root = scratch.dir().to_path_buf();
+            write_file(&root.join("note.txt"), "hello");
+            let plan = OperationPlan::plan_move(
+                &[root.join("note.txt")],
+                &root,
+                policy,
+                ErrorPolicy::StopOnFirst,
+            )
+            .unwrap();
+            assert!(
+                plan.actions.is_empty(),
+                "{policy:?}: a move to where it is planned work"
+            );
+            let mut executor = OperationExecutor::new(plan);
+            let _events = executor.execute();
+            assert_eq!(
+                read_file(&root.join("note.txt")),
+                "hello",
+                "{policy:?}: the file was lost"
+            );
+            assert!(!root.join("note (2).txt").exists(), "{policy:?}");
+            assert_eq!(
+                executor.progress().state,
+                OperationState::Completed,
+                "{policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_copied_into_its_own_folder_is_a_duplicate_whatever_the_policy() {
+        for policy in EVERY_POLICY {
+            let scratch = temp_dir(&format!("self_copy_{policy:?}"));
+            let root = scratch.dir().to_path_buf();
+            write_file(&root.join("note.txt"), "hello");
+            let plan = OperationPlan::plan_copy(
+                &[root.join("note.txt")],
+                &root,
+                policy,
+                ErrorPolicy::StopOnFirst,
+            )
+            .unwrap();
+            let mut executor = OperationExecutor::new(plan);
+            let _events = executor.execute();
+            assert_eq!(read_file(&root.join("note.txt")), "hello", "{policy:?}");
+            assert_eq!(
+                read_file(&root.join("note (2).txt")),
+                "hello",
+                "{policy:?}: no duplicate"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_copied_into_its_own_folder_is_duplicated_whole() {
+        let scratch = temp_dir("self_copy_dir");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("album").join("a.txt"), "a");
+        write_file(&root.join("album").join("inner").join("b.txt"), "b");
+        let plan = OperationPlan::plan_copy(
+            &[root.join("album")],
+            &root,
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(read_file(&root.join("album (2)").join("a.txt")), "a");
+        assert_eq!(
+            read_file(&root.join("album (2)").join("inner").join("b.txt")),
+            "b"
+        );
+        assert!(
+            !root.join("album").join("a (2).txt").exists(),
+            "the files were duplicated inside the original instead"
+        );
+        assert_eq!(read_file(&root.join("album").join("a.txt")), "a");
+    }
+
+    #[test]
+    fn a_folder_moved_into_the_folder_it_is_in_is_left_alone() {
+        let scratch = temp_dir("self_move_dir");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("album").join("a.txt"), "a");
+        let plan = OperationPlan::plan_move(
+            &[root.join("album")],
+            &root,
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        assert!(plan.actions.is_empty());
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(read_file(&root.join("album").join("a.txt")), "a");
+    }
+
+    #[test]
+    fn a_folder_cannot_go_inside_itself() {
+        let scratch = temp_dir("self_inside");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("album").join("inner").join("b.txt"), "b");
+        for dest in [root.join("album"), root.join("album").join("inner")] {
+            for plan in [
+                OperationPlan::plan_copy(
+                    &[root.join("album")],
+                    &dest,
+                    ConflictPolicy::Rename,
+                    ErrorPolicy::StopOnFirst,
+                ),
+                OperationPlan::plan_move(
+                    &[root.join("album")],
+                    &dest,
+                    ConflictPolicy::Rename,
+                    ErrorPolicy::StopOnFirst,
+                ),
+            ] {
+                let err = plan.expect_err("a folder was planned into itself");
+                assert!(err.to_string().contains("inside itself"), "{err}");
+            }
+        }
+        // A sibling whose name merely starts the same is not inside it.
+        fs::create_dir_all(root.join("album2")).unwrap();
+        assert!(
+            OperationPlan::plan_copy(
+                &[root.join("album")],
+                &root.join("album2"),
+                ConflictPolicy::Rename,
+                ErrorPolicy::StopOnFirst,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_link_made_in_its_own_folder_never_replaces_the_file() {
+        let scratch = temp_dir("self_link");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("note.txt"), "hello");
+        let plan = OperationPlan::plan_link(
+            &[root.join("note.txt")],
+            &root,
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::SkipAndContinue,
+        );
+        assert_eq!(
+            plan.actions.first().and_then(|a| a.dest.clone()),
+            Some(root.join("note (2).txt"))
+        );
+        let mut executor = OperationExecutor::new(plan);
+        // A host that cannot make links fails the one link; either way the
+        // file it points at is still there.
+        let _events = executor.execute();
+        assert_eq!(read_file(&root.join("note.txt")), "hello");
     }
 }

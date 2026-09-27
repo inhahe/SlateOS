@@ -3014,6 +3014,14 @@ impl ExplorerState {
                 return;
             }
         };
+        // A cut pasted back into the folder it came from plans nothing
+        // (`OperationPlan::plan_transfer`): said so, and the clipboard kept
+        // for the paste the user meant.
+        if plan.actions.is_empty() && operation == FileOperation::Move {
+            self.status_message = "Already in this folder, so nothing was moved".to_string();
+            self.clipboard = Some(op);
+            return;
+        }
 
         // A copy leaves the sources in place, so the clipboard stays usable for
         // a second paste. A cut consumed them, so it must not. Decided here
@@ -12235,5 +12243,26 @@ mod tests {
             .iter()
             .any(|item| matches!(item, MenuItem::Submenu { id, .. } if *id == MENU_CONFLICT_BASE));
         assert!(offered, "the folder menu does not offer the choice");
+    }
+
+    // ---- a cut pasted back where it came from (2026-09-27) ----
+
+    #[test]
+    fn a_cut_pasted_back_into_its_own_folder_keeps_the_file_even_under_replace() {
+        let scratch = temp_dir("self_paste");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("note.txt"), "hello");
+        let mut state = state_at(&root);
+        state.conflict_policy = ConflictPolicy::Overwrite;
+        state.clipboard = Some(ClipboardOp::Cut(vec![root.join("note.txt")]));
+        state.paste();
+        settle(&mut state);
+        assert_eq!(fs::read_to_string(root.join("note.txt")).unwrap(), "hello");
+        assert!(
+            state.status_message.contains("Already in this folder"),
+            "{}",
+            state.status_message
+        );
+        assert!(state.clipboard.is_some(), "the cut was spent on nothing");
     }
 }

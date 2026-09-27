@@ -29,6 +29,19 @@ family) invoke WSL. **`boot-test.sh` does not** -- every `wsl` string in it is a
 echoed instruction telling the operator to rebuild the rootfs by hand, so the boot
 test this runner is most often pointed at is not affected.
 
+A SECOND EXCEPTION, ALSO MEASURED: a Windows App Execution Alias. On this host
+`python3` resolves first to `%LOCALAPPDATA%\\Microsoft\\WindowsApps\\python3.exe`,
+which is not an interpreter but a request to activate a Store-packaged app, and
+packaged apps start outside the caller's Job Object. Under this runner (a 15 s
+timeout on a 90 s sleeper, 2026-09-26) the job counted 1 process of 3. The
+timeout still killed the sleeper, because `taskkill /T` walks the tree by
+parentage rather than by job, but the job's other two guarantees are gone: if
+this runner dies, kill-on-close cannot reach the escaped processes, and the cost
+line does not count them (a 26-minute push through the alias reported 28 s of
+CPU). `proctree.Tree` detects an alias by its reparse tag and this runner prints
+a warning when handed one; the cure is to pass a real interpreter -- `python`,
+not `python3`, on this host -- as `boot-test.sh` and the push hook do.
+
 This module is the *streaming* front end to that: the child keeps this
 process's stdout and stderr, so its output appears live. For the batch case —
 feed stdin, capture the output, enforce a deadline — call

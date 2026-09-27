@@ -26536,8 +26536,13 @@ mod start_search_tests {
         assert_eq!(shell.start_selected, Some(first));
         drop(shell.handle_hotkey(&press(Key::PageDown)));
         let paged = shell.start_selected.expect("Page Down picked a row");
-        assert!(paged > first, "Page Down did not move");
         let visible = shell.start_menu_visible_rows();
+        // A windowful on -- or the last program, in a list shorter than
+        // that -- never just the next row.
+        assert!(
+            paged == last || paged >= first + visible,
+            "Page Down moved from row {first} to {paged}, not a page of {visible}"
+        );
         assert!(
             (shell.start_menu_scroll..shell.start_menu_scroll + visible).contains(&paged),
             "the row Page Down reached is off the list"

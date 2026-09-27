@@ -12,7 +12,7 @@
 //!
 //! ## Validation
 //!
-//! `atomic_check()` validates:
+//! `atomic_check()` validates the requests as written:
 //! - All referenced CRTC/plane/connector IDs exist in the device.
 //! - Requested modes are in the connector's mode list.
 //! - Planes reference valid framebuffers.
@@ -20,24 +20,39 @@
 //!   (`possible_crtcs` bitmask).
 //! - Connector ↔ CRTC bindings use compatible encoders.
 //!
+//! …and then the state they produce, by recording it and putting the old
+//! state back afterwards, so that check and commit cannot disagree:
+//! - Every plane the commit sets shows a source inside its framebuffer, at a
+//!   scale the backend can do.
+//! - Every mode the commit sets is one the backend accepts.
+//! - Every scene the commit changes can be shown whole: anything more than a
+//!   whole, unmoved primary plane is composed (design-decisions §976), which
+//!   needs a software backend and formats laid out like the scanout. What
+//!   cannot be shown as asked is refused, never shown some other way.
+//!
 //! ## Commit
 //!
-//! `atomic_commit()` applies all validated changes atomically:
-//! - CRTC **mode** changes → [`DrmDevice::set_crtc`], which programs the
-//!   backend and updates the object model together. A mode change that the
-//!   hardware refuses fails the commit rather than being recorded.
+//! `atomic_commit()` records and validates exactly as `atomic_check()`
+//! does, then shows the result:
+//! - CRTC **mode** changes → recorded by `DrmDevice::record_crtc`, shown by
+//!   `DrmDevice::show_crtc`, which programs the backend. A mode-set re-fits
+//!   the CRTC's primary plane to the new mode (its source origin kept),
+//!   unless the same commit sets that plane's rectangles, which then win.
 //! - CRTC **active** state → internal state update only. This is a known gap,
 //!   tracked as `TD-DRM-ATOMIC-ACTIVE-IS-COSMETIC`: no backend is asked to
 //!   blank, so `active: false` means "the object model says off" and nothing
 //!   more. Fixing it properly means making the re-enable path work, which
 //!   needs a framebuffer that an `active: true` commit does not carry.
-//! - Plane FB/CRTC assignment + src/dst rects → internal state update.
+//! - Plane FB/CRTC assignment + src/dst rects → recorded, and every CRTC a
+//!   changed plane was or now is bound to is redrawn.
 //! - Connector CRTC binding → internal state update.
 //!
-//! If any step fails, previous changes within this commit are NOT rolled
-//! back (the commit is "atomic" in the sense that check prevents invalid
-//! states, not that hardware changes are transactional).  This matches
-//! Linux DRM behavior.
+//! A refusal at any stage leaves the object model exactly as it was: the
+//! state is snapshotted first and put back. A failure *after* validation --
+//! the device failing while programmed or drawn -- also restores the model,
+//! then redraws the touched CRTCs from it. That is stronger than Linux, whose
+//! drivers commit only what their own atomic check accepted but make no
+//! promise about a hardware failure part-way.
 //!
 //! ## References
 //!
@@ -162,12 +177,34 @@ pub struct IRect {
 // Atomic check
 // ---------------------------------------------------------------------------
 
-/// Validate an atomic state against a DRM device.
+/// Validate an atomic state against a DRM device, changing nothing.
 ///
-/// Checks that all referenced objects exist, modes are supported,
-/// and bindings are compatible.  Returns `Ok(())` if the state is
-/// valid and can be committed.
-pub fn atomic_check(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
+/// Two stages. First the requests as written (`check_requests`): every
+/// object exists, modes are advertised, bindings are routable, rectangles are
+/// not empty. Then the result: the state is recorded exactly as
+/// [`atomic_commit`] records it, everything it changes is validated as it
+/// would be shown (`validate`), and the snapshot taken first is put back.
+///
+/// Checking the result by constructing it is what makes check and commit
+/// agree. The alternative -- re-deriving "what the commit would do" in a
+/// second implementation -- is two implementations that can drift: a plane's
+/// rectangles checked as they stand, say, rather than as a mode change in the
+/// same commit re-fits them.
+///
+/// # Errors
+///
+/// `NotFound`, `InvalidArgument` or `NotSupported`, from the first check that
+/// fails; see the module docs.
+pub fn atomic_check(dev: &mut DrmDevice, state: &AtomicState) -> KernelResult<()> {
+    check_requests(dev, state)?;
+    let saved = dev.snapshot_display();
+    let result = record(dev, state).and_then(|affected| validate(dev, &affected));
+    dev.restore_display(saved);
+    result
+}
+
+/// The checks that need only the request and the objects it names.
+fn check_requests(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
     // Validate CRTC changes.
     for cs in &state.crtc_changes {
         // CRTC must exist.
@@ -342,39 +379,38 @@ pub fn atomic_check(dev: &DrmDevice, state: &AtomicState) -> KernelResult<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Atomic commit
-// ---------------------------------------------------------------------------
+/// What a recorded commit changed: what `validate` checks and `show`
+/// shows.
+#[derive(Default)]
+struct Affected {
+    /// CRTCs whose mode the commit set or cleared. Shown by
+    /// `DrmDevice::show_crtc`, which programs the backend.
+    modesets: Vec<DrmObjectId>,
+    /// CRTCs whose scene changed otherwise -- a plane bound to them, before or
+    /// after. Shown by `DrmDevice::present`. Never also in `modesets`.
+    redraws: Vec<DrmObjectId>,
+    /// Planes whose state the commit set: named in it, or the primary plane
+    /// of a CRTC whose mode it set, which a mode-set re-fits.
+    planes: Vec<DrmObjectId>,
+}
 
-/// Apply an atomic state to a DRM device.
-///
-/// The state MUST have been validated by `atomic_check()` first.
-/// If `state.test_only` is set, this function does nothing beyond
-/// the check (dry-run mode).
-///
-/// Applies changes in order: CRTCs first (mode/active), then planes
-/// (FB/CRTC binding, src/dst rects), then connectors (CRTC binding).
-pub fn atomic_commit(dev: &mut DrmDevice, state: &AtomicState) -> KernelResult<()> {
-    // Validate first.
-    atomic_check(dev, state)?;
-
-    if state.test_only {
-        return Ok(());
+fn push_unique(v: &mut Vec<DrmObjectId>, id: DrmObjectId) {
+    if !v.contains(&id) {
+        v.push(id);
     }
+}
 
-    // Apply CRTC changes.
-    //
-    // A mode change goes through `DrmDevice::set_crtc`, which programs the
-    // backend. Until 2026-08-21 this wrote `crtc.mode` directly and touched no
-    // hardware at all, despite this module's header saying "CRTC active state +
-    // mode changes → backend `mode_set()`" — so an atomic commit reported a
-    // resolution change that never happened. That was merely untrue then; it
-    // became dangerous the moment `DrmDevice::page_flip` started trusting
-    // `crtc.mode` to decide whether a framebuffer is the right size, because a
-    // fabricated mode would make it wave through a buffer the display engine
-    // reads with a different stride. See `design-decisions.md` §270 (*page
-    // flip*; there is a second §270 about self-test skips — see
-    // `known-issues.md` A-DESIGN-DECISIONS-NINE-DUPLICATE-SECTION-NUMBERS).
+/// Record every change in `state` into the object model, touching no
+/// hardware. Order: CRTCs (a mode-set re-fits the CRTC's primary plane to the
+/// new mode, its source origin kept), then planes (so a plane change in the
+/// same commit overrides that re-fit), then connectors.
+///
+/// # Errors
+///
+/// `DrmDevice::record_crtc`'s refusals.
+fn record(dev: &mut DrmDevice, state: &AtomicState) -> KernelResult<Affected> {
+    let mut affected = Affected::default();
+
     for cs in &state.crtc_changes {
         if let Some(mode_opt) = &cs.mode {
             let (fb_id, x, y, conns) = if mode_opt.is_some() {
@@ -384,11 +420,20 @@ pub fn atomic_commit(dev: &mut DrmDevice, state: &AtomicState) -> KernelResult<(
                 // A disable names neither a framebuffer nor connectors.
                 (None, 0, 0, Vec::new())
             };
-            dev.set_crtc(cs.id, fb_id, x, y, &conns, mode_opt.as_ref())?;
+            dev.record_crtc(cs.id, fb_id, x, y, &conns, mode_opt.as_ref())?;
+            push_unique(&mut affected.modesets, cs.id);
+            if let Some(primary) = dev
+                .crtcs()
+                .iter()
+                .find(|c| c.id == cs.id)
+                .map(|c| c.primary_plane)
+            {
+                push_unique(&mut affected.planes, primary);
+            }
         }
         if let Some(active) = cs.active {
             // Applied after the mode, so an explicit `active` in the same
-            // commit wins over the `true` that a successful `set_crtc` implies.
+            // commit wins over the `true` that a mode-set implies.
             //
             // NOTE: this is an object-model bit only — no backend is asked to
             // blank its output. That is a real gap (`TD-DRM-ATOMIC-ACTIVE-IS-COSMETIC`
@@ -402,54 +447,184 @@ pub fn atomic_commit(dev: &mut DrmDevice, state: &AtomicState) -> KernelResult<(
         }
     }
 
-    // Apply plane changes.
     for ps in &state.plane_changes {
-        if let Some(plane) = dev.plane_mut(ps.id) {
-            if let Some(fb_opt) = ps.fb_id {
-                plane.fb = fb_opt;
-            }
-            if let Some(crtc_opt) = ps.crtc_id {
-                plane.crtc = crtc_opt;
-            }
-            if let Some(src) = &ps.src_rect {
-                plane.src_x = src.x;
-                plane.src_y = src.y;
-                plane.src_w = src.w;
-                plane.src_h = src.h;
-            }
-            if let Some(dst) = &ps.dst_rect {
-                plane.dst_x = dst.x;
-                plane.dst_y = dst.y;
-                plane.dst_w = dst.w;
-                plane.dst_h = dst.h;
-            }
+        // Existence was checked by `check_requests`.
+        let Some(plane) = dev.plane_mut(ps.id) else {
+            continue;
+        };
+        let was_on = plane.crtc;
+        if let Some(fb_opt) = ps.fb_id {
+            plane.fb = fb_opt;
         }
+        if let Some(crtc_opt) = ps.crtc_id {
+            plane.crtc = crtc_opt;
+        }
+        if let Some(src) = &ps.src_rect {
+            plane.src_x = src.x;
+            plane.src_y = src.y;
+            plane.src_w = src.w;
+            plane.src_h = src.h;
+        }
+        if let Some(dst) = &ps.dst_rect {
+            plane.dst_x = dst.x;
+            plane.dst_y = dst.y;
+            plane.dst_w = dst.w;
+            plane.dst_h = dst.h;
+        }
+        let now_on = plane.crtc;
+        // Both: a plane moved from one CRTC to another leaves a hole in the
+        // first and appears on the second.
+        for crtc in [was_on, now_on].into_iter().flatten() {
+            push_unique(&mut affected.redraws, crtc);
+        }
+        push_unique(&mut affected.planes, ps.id);
     }
 
-    // Apply connector changes.
-    // Two-pass approach: first compute encoder bindings (immutable borrow),
-    // then apply mutations (mutable borrow).  Avoids borrow conflicts.
+    // Two-pass per connector: compute the encoder binding (immutable borrow),
+    // then apply it (mutable borrow).
     for cs in &state.connector_changes {
         if let Some(crtc_opt) = cs.crtc_id {
-            // Phase 1: compute the encoder ID (immutable borrow).
             let enc_id = if let Some(crtc_id) = crtc_opt {
                 find_compatible_encoder(dev, cs.id, crtc_id)
             } else {
                 None
             };
-
-            // Phase 2: apply mutations.
             if let Some(conn) = dev.connector_mut(cs.id) {
                 conn.current_encoder = enc_id;
             }
-
-            // Update encoder's CRTC binding.
             if let Some(enc_id) = enc_id {
                 if let Some(enc) = dev.encoder_mut(enc_id) {
                     enc.crtc = crtc_opt;
                 }
             }
         }
+    }
+
+    let modesets = &affected.modesets;
+    affected.redraws.retain(|c| !modesets.contains(c));
+    Ok(affected)
+}
+
+/// Whether the recorded state can be shown, touching nothing.
+///
+/// * Every plane the commit set, if bound to a CRTC with a framebuffer, must
+///   show a source inside that framebuffer, at a scale within
+///   `compose::LIMITS` --
+///   whether or not its CRTC is on, as Linux checks it: a plane bound to a
+///   CRTC with no mode is not shown now, but will be the moment one is set,
+///   and a mode-set is not where a plane's own mistake should first surface.
+/// * Every mode the commit set must be one the backend accepts.
+/// * Every scene the commit changed must be showable as a whole
+///   (`DrmDevice::validate_scene`): composed, if it is anything more than
+///   a whole, unmoved primary plane, which needs a backend and formats that
+///   can compose it (design-decisions §976).
+///
+/// # Errors
+///
+/// The first refusal: `InvalidArgument` for rectangles that cannot be shown,
+/// `NotSupported` for what this backend cannot compose, and the backend's own
+/// refusals of a mode.
+fn validate(dev: &DrmDevice, affected: &Affected) -> KernelResult<()> {
+    for &id in &affected.planes {
+        let Some(p) = dev.planes().iter().find(|p| p.id == id) else {
+            continue;
+        };
+        let (Some(fb_id), Some(_)) = (p.fb, p.crtc) else {
+            continue; // disabled or unbound: shows nothing
+        };
+        let fb = dev.fb_get(fb_id).ok_or(KernelError::NotFound)?;
+        let fits = super::compose::plane_rects(p).and_then(|(src, dst)| {
+            planecompose::check_layer(fb.width, fb.height, src, dst, super::compose::LIMITS)
+                .map_err(super::compose::map_err)
+        });
+        if let Err(e) = fits {
+            serial_println!(
+                "[drm-atomic] check FAIL: plane {} cannot show ({}, {}) {}x{} of FB {} ({}x{}) at ({}, {}) {}x{}",
+                id,
+                p.src_x,
+                p.src_y,
+                p.src_w,
+                p.src_h,
+                fb_id,
+                fb.width,
+                fb.height,
+                p.dst_x,
+                p.dst_y,
+                p.dst_w,
+                p.dst_h,
+            );
+            return Err(e);
+        }
+    }
+    for &id in affected.modesets.iter().chain(&affected.redraws) {
+        if let Err(e) = dev.validate_crtc(id) {
+            serial_println!(
+                "[drm-atomic] check FAIL: CRTC {} cannot show the result on {}: {:?}",
+                id,
+                dev.driver_name(),
+                e,
+            );
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Show everything a recorded, validated commit changed: program each
+/// mode-set, then redraw each other changed scene.
+///
+/// # Errors
+///
+/// The backend's, from the first CRTC that fails.
+fn show(dev: &mut DrmDevice, affected: &Affected) -> KernelResult<()> {
+    for &id in &affected.modesets {
+        dev.show_crtc(id)?;
+    }
+    for &id in &affected.redraws {
+        dev.present(id, None)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Atomic commit
+// ---------------------------------------------------------------------------
+
+/// Apply an atomic state to a DRM device, all of it or none of it.
+///
+/// The requests are checked, the state recorded and validated as it will be
+/// shown -- exactly as [`atomic_check`] does -- and only then is anything
+/// programmed or drawn. A `test_only` commit stops there and puts the
+/// snapshot back. A refusal at any stage leaves the object model as it was.
+///
+/// A failure after validation has passed is the device failing, not the
+/// request: the object model is restored and every CRTC the commit touched is
+/// redrawn from it (`DrmDevice::reshow`), so the screen agrees with the
+/// model again as far as the device allows.
+///
+/// # Errors
+///
+/// As [`atomic_check`], then the backend's.
+pub fn atomic_commit(dev: &mut DrmDevice, state: &AtomicState) -> KernelResult<()> {
+    check_requests(dev, state)?;
+    let saved = dev.snapshot_display();
+    let affected = match record(dev, state).and_then(|a| validate(dev, &a).map(|()| a)) {
+        Ok(a) => a,
+        Err(e) => {
+            dev.restore_display(saved);
+            return Err(e);
+        }
+    };
+    if state.test_only {
+        dev.restore_display(saved);
+        return Ok(());
+    }
+    if let Err(e) = show(dev, &affected) {
+        dev.restore_display(saved);
+        for &id in affected.modesets.iter().chain(&affected.redraws) {
+            dev.reshow(id);
+        }
+        return Err(e);
     }
 
     serial_println!(
@@ -641,7 +816,7 @@ pub(crate) fn self_test() -> KernelResult<()> {
     }
 
     // Test 2: check against the primary device with valid objects.
-    super::with_primary(|dev| {
+    super::with_primary_mut(|dev| {
         let state = AtomicState::new();
         atomic_check(dev, &state)?;
         serial_println!("[drm-atomic]   Empty atomic check: OK");
@@ -649,7 +824,7 @@ pub(crate) fn self_test() -> KernelResult<()> {
     })?;
 
     // Test 3: check with valid CRTC change.
-    super::with_primary(|dev| {
+    super::with_primary_mut(|dev| {
         let crtc_id = dev
             .crtcs()
             .first()
@@ -668,7 +843,7 @@ pub(crate) fn self_test() -> KernelResult<()> {
     })?;
 
     // Test 4: check with invalid CRTC ID → NotFound.
-    super::with_primary(|dev| {
+    super::with_primary_mut(|dev| {
         let mut state = AtomicState::new();
         state.add_crtc(CrtcState {
             id: DrmObjectId::new(9999),
@@ -692,7 +867,7 @@ pub(crate) fn self_test() -> KernelResult<()> {
     })?;
 
     // Test 5: check with invalid plane → NotFound.
-    super::with_primary(|dev| {
+    super::with_primary_mut(|dev| {
         let mut state = AtomicState::new();
         state.add_plane(PlaneState {
             id: DrmObjectId::new(9998),
@@ -714,7 +889,7 @@ pub(crate) fn self_test() -> KernelResult<()> {
     })?;
 
     // Test 6: check with zero-size mode → InvalidArgument.
-    super::with_primary(|dev| {
+    super::with_primary_mut(|dev| {
         let crtc_id = dev
             .crtcs()
             .first()

@@ -52,6 +52,8 @@ pub mod ati;
 pub mod atomic;
 #[allow(dead_code)]
 pub mod card_fd;
+/// Showing a CRTC's planes as they were asked for (design-decisions §976).
+pub mod compose;
 #[allow(dead_code)]
 pub mod connector;
 #[allow(dead_code)]
@@ -188,6 +190,20 @@ pub enum DrmBackend {
     /// live in the card's own video memory, so its `gem_destroy` must not go
     /// anywhere near the buddy allocator. See [`ati::backend::AtiBackend`].
     Ati(ati::backend::AtiBackend),
+}
+
+/// The display state a mode-set or an atomic commit can change -- every
+/// CRTC and plane whole, and the connector/encoder routing -- taken before
+/// the change so that a failure part-way can put it back
+/// (`DrmDevice::restore_display`). Cursor state is not here: neither path
+/// changes it.
+pub(crate) struct DisplaySnapshot {
+    crtcs: Vec<DrmCrtc>,
+    planes: Vec<DrmPlane>,
+    /// `(connector, current_encoder)`.
+    connectors: Vec<(DrmObjectId, Option<DrmObjectId>)>,
+    /// `(encoder, crtc)`.
+    encoders: Vec<(DrmObjectId, Option<DrmObjectId>)>,
 }
 
 impl DrmDevice {
@@ -336,6 +352,21 @@ impl DrmDevice {
     // --- Framebuffer operations ---
 
     /// Create a framebuffer object from a GEM handle.
+    ///
+    /// Refused unless the GEM object holds every byte the framebuffer
+    /// describes -- `(height - 1) * pitch + width * bpp` -- and the pitch holds
+    /// a whole row. Everything that reads a framebuffer (the scanout copies,
+    /// composition, flushes) can then trust its geometry, rather than each
+    /// having to clamp against whatever buffer it finds behind it. Linux
+    /// refuses the same requests the same way (`drm_gem_fb_init_with_funcs`
+    /// and `framebuffer_check`, both `EINVAL`).
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for an unknown GEM handle; `InvalidArgument` for a zero
+    /// dimension or one beyond the advertised maximum
+    /// ([`planecompose::MAX_DIMENSION`]), a pitch narrower than a row, or a
+    /// GEM object too small for the framebuffer.
     pub fn fb_create(
         &mut self,
         gem_handle: u32,
@@ -344,9 +375,26 @@ impl DrmDevice {
         pitch: u32,
         format: PixelFormat,
     ) -> KernelResult<DrmObjectId> {
-        // Verify the GEM handle exists.
-        if !self.gem_objects.iter().any(|g| g.handle == gem_handle) {
-            return Err(KernelError::NotFound);
+        let gem = self
+            .gem_objects
+            .iter()
+            .find(|g| g.handle == gem_handle)
+            .ok_or(KernelError::NotFound)?;
+        if width == 0
+            || height == 0
+            || width > planecompose::MAX_DIMENSION
+            || height > planecompose::MAX_DIMENSION
+        {
+            return Err(KernelError::InvalidArgument);
+        }
+        // Both products are below 2^64 (each factor is below 2^32), so a
+        // saturated result is only ever "too large", which is refused anyway.
+        let row = u64::from(width).saturating_mul(u64::from(format.bpp()));
+        let need = u64::from(height.saturating_sub(1))
+            .saturating_mul(u64::from(pitch))
+            .saturating_add(row);
+        if u64::from(pitch) < row || u64::try_from(gem.size).map_or(true, |s| s < need) {
+            return Err(KernelError::InvalidArgument);
         }
         let id = self.alloc_id();
         let fb = DrmFramebuffer {
@@ -400,8 +448,8 @@ impl DrmDevice {
     // --- Display operations ---
 
     /// Configure a CRTC: program `mode`, drive it out of `connectors`, and
-    /// scan `fb_id` out of its primary plane — or, with `mode: None`, turn it
-    /// off.
+    /// scan `fb_id` out of its primary plane from origin `x, y` — or, with
+    /// `mode: None`, turn it off.
     ///
     /// This is the kernel side of `DRM_IOCTL_MODE_SETCRTC`, and it is the only
     /// path that changes a display timing. Until 2026-08-21 there was none, and
@@ -429,7 +477,13 @@ impl DrmDevice {
     ///   successful return code.
     /// * **The framebuffer must cover the mode at the requested origin.** Linux
     ///   makes exactly this check (`Invalid fb size`), and it is what stops the
-    ///   display engine reading past the end of the buffer.
+    ///   display engine reading past the end of the buffer. It is made on the
+    ///   scene the call leaves behind ([`Self::validate_scene`]), in which the
+    ///   primary plane shows a mode's worth of the buffer from `x, y`.
+    /// * **An origin other than the buffer's corner, a buffer larger than the
+    ///   mode, or a visible cursor is composed** (design-decisions §976), so it
+    ///   needs a backend that composes and a buffer it can compose. Elsewhere
+    ///   it is refused, never shown from the corner instead.
     ///
     /// ## Errors
     ///
@@ -437,15 +491,100 @@ impl DrmDevice {
     /// * `InvalidArgument` — a disable that also names a framebuffer or
     ///   connectors; an enable that names neither; a mode no listed connector
     ///   advertises; a connector that cannot reach this CRTC; a framebuffer too
-    ///   small for the mode.
-    /// * Whatever the backend's `set_mode`/`disable_crtc` returns —
+    ///   small for the mode at the origin given.
+    /// * `NotSupported` — a scene that must be composed, on a backend or in a
+    ///   pixel format that cannot compose it.
+    /// * Whatever the backend's `set_mode`/`check_mode`/`disable_crtc` returns —
     ///   `NotSupported` from a backend that cannot retime at all, `NotFound`
     ///   from one that has no timing for the requested size.
     ///
-    /// The object model is updated **only after** the backend reports success,
-    /// so a failed mode-set leaves `GETCRTC` reporting what is genuinely still
-    /// being scanned out rather than what was asked for.
+    /// A refusal changes nothing: the new state is recorded and validated
+    /// before anything is programmed or drawn, and put back as it was if any
+    /// check fails, so `GETCRTC` reports what is genuinely being scanned out
+    /// rather than what was asked for. A failure *after* every check has
+    /// passed -- the device failing while it is programmed or drawn -- also
+    /// puts the model back, and then redraws the restored scene, so that what
+    /// is on screen is what the model says.
     pub fn set_crtc(
+        &mut self,
+        crtc_id: DrmObjectId,
+        fb_id: Option<DrmObjectId>,
+        x: u32,
+        y: u32,
+        connectors: &[DrmObjectId],
+        mode: Option<&DrmMode>,
+    ) -> KernelResult<()> {
+        let saved = self.snapshot_display();
+        if let Err(e) = self
+            .record_crtc(crtc_id, fb_id, x, y, connectors, mode)
+            .and_then(|()| self.validate_crtc(crtc_id))
+        {
+            self.restore_display(saved);
+            return Err(e);
+        }
+        if let Err(e) = self.show_crtc(crtc_id) {
+            self.restore_display(saved);
+            self.reshow(crtc_id);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Whether `crtc_id`'s recorded state can be shown, touching nothing: its
+    /// mode by the backend's `check_mode`, its scene by
+    /// [`Self::validate_scene`]. A CRTC being turned off has nothing to check,
+    /// and neither does one whose primary plane has no framebuffer -- the
+    /// state a device is enumerated in, and one an atomic commit can return
+    /// to, in which the DRM draws nothing and the console keeps the screen.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for an unknown CRTC; the backend's and `validate_scene`'s
+    /// refusals.
+    pub(crate) fn validate_crtc(&self, crtc_id: DrmObjectId) -> KernelResult<()> {
+        let mode = self
+            .crtcs
+            .iter()
+            .find(|c| c.id == crtc_id)
+            .ok_or(KernelError::NotFound)?
+            .mode;
+        let Some(mode) = mode else {
+            return Ok(());
+        };
+        self.backend_check_mode(&mode)?;
+        match self.scene(crtc_id)? {
+            Some(scene) => self.validate_scene(&scene),
+            None => Ok(()),
+        }
+    }
+
+    /// After a device failure part-way through showing a change, with the
+    /// model already restored: redraw `crtc_id` from it, so the screen agrees
+    /// with the model again. Best effort, and deliberately not a second
+    /// mode-set -- a backend that just failed to program one is not asked to
+    /// program another from inside its own error path. A failure here is
+    /// logged, not returned: the caller is already returning the error that
+    /// matters, the one that made this necessary.
+    pub(crate) fn reshow(&mut self, crtc_id: DrmObjectId) {
+        if let Err(e) = self.present(crtc_id, None) {
+            serial_println!(
+                "[drm] CRTC {} could not be redrawn after a failed change: {:?}",
+                crtc_id,
+                e,
+            );
+        }
+    }
+
+    /// Record the state [`Self::set_crtc`] asks for, touching no hardware:
+    /// the checks that need only the object model, then the CRTC's mode, its
+    /// routing and its primary plane. Whether the result can be shown is
+    /// `Self::show_crtc`'s question; the caller takes a
+    /// `Self::snapshot_display` first and restores it if either fails.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set_crtc`], for the checks made here.
+    pub(crate) fn record_crtc(
         &mut self,
         crtc_id: DrmObjectId,
         fb_id: Option<DrmObjectId>,
@@ -478,11 +617,6 @@ impl DrmDevice {
             if fb_id.is_some() || !connectors.is_empty() {
                 return Err(KernelError::InvalidArgument);
             }
-            match &mut self.backend {
-                DrmBackend::Limine(b) => b.disable_crtc(crtc_id),
-                DrmBackend::VirtioGpu(b) => b.disable_crtc(crtc_id),
-                DrmBackend::Ati(b) => b.disable_crtc(crtc_id),
-            }?;
             if let Some(c) = self.crtcs.get_mut(crtc_idx) {
                 c.active = false;
                 c.mode = None;
@@ -502,13 +636,8 @@ impl DrmDevice {
             return Err(KernelError::InvalidArgument);
         }
 
-        // Resolve every connector before anything is programmed, and take the
+        // Resolve every connector before anything is recorded, and take the
         // kernel's own copy of the matched mode from the first of them.
-        //
-        // The encoder each connector will be routed through is chosen here too,
-        // but not *recorded* until the backend has succeeded — the routing is
-        // part of what `GETCONNECTOR` and `GETENCODER` report, and a failed
-        // mode-set must not leave them describing a path no signal takes.
         let mut kernel_mode: Option<DrmMode> = None;
         let mut routing: Vec<(DrmObjectId, DrmObjectId)> = Vec::new();
         for &conn_id in connectors {
@@ -556,37 +685,18 @@ impl DrmDevice {
         }
         let kernel_mode = kernel_mode.ok_or(KernelError::InvalidArgument)?;
 
+        // The framebuffer and its memory must exist. Whether it covers the mode
+        // from `x, y` is a question about the scene this leaves, answered by
+        // `validate_scene` -- where an atomic commit's own plane rectangles,
+        // applied after this, are taken into account too.
         let fb = self
             .framebuffers
             .iter()
             .find(|f| f.id == fb_id)
             .ok_or(KernelError::NotFound)?;
-        // `x`/`y` are the origin *within* the framebuffer that lands at the top
-        // left of the display, so the buffer must extend a full mode past them.
-        // Checked arithmetic: a caller-supplied origin near `u32::MAX` would
-        // otherwise wrap and turn an absurd request into a passing one.
-        let need_w = kernel_mode
-            .hdisplay
-            .checked_add(x)
-            .ok_or(KernelError::InvalidArgument)?;
-        let need_h = kernel_mode
-            .vdisplay
-            .checked_add(y)
-            .ok_or(KernelError::InvalidArgument)?;
-        if fb.width < need_w || fb.height < need_h {
-            return Err(KernelError::InvalidArgument);
+        if !self.gem_objects.iter().any(|g| g.handle == fb.gem_handle) {
+            return Err(KernelError::NotFound);
         }
-        let gem = self
-            .gem_objects
-            .iter()
-            .find(|g| g.handle == fb.gem_handle)
-            .ok_or(KernelError::NotFound)?;
-
-        match &mut self.backend {
-            DrmBackend::Limine(b) => b.set_mode(crtc_id, &kernel_mode, fb, gem),
-            DrmBackend::VirtioGpu(b) => b.set_mode(crtc_id, &kernel_mode, fb, gem),
-            DrmBackend::Ati(b) => b.set_mode(crtc_id, &kernel_mode, fb, gem),
-        }?;
 
         if let Some(c) = self.crtcs.get_mut(crtc_idx) {
             c.active = true;
@@ -617,6 +727,127 @@ impl DrmDevice {
             p.dst_h = kernel_mode.vdisplay;
         }
         Ok(())
+    }
+
+    /// Program `crtc_id`'s recorded mode and show its recorded scene: the
+    /// hardware half of [`Self::set_crtc`], and of an atomic commit that sets
+    /// or clears a mode.
+    ///
+    /// A CRTC with no mode is turned off. A trivial scene -- the primary plane
+    /// alone, whole and unmoved, the size of the mode -- goes to the backend's
+    /// `set_mode`, which programs the timing and scans the buffer out in one
+    /// step, exactly as before design-decisions §976. Anything else is
+    /// validated whole, the mode is checked with the backend's `check_mode`,
+    /// and the scene is composed: never flipped raw first and then drawn over.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::validate_scene`]'s refusals, and whatever the backend returns.
+    pub(crate) fn show_crtc(&mut self, crtc_id: DrmObjectId) -> KernelResult<()> {
+        let mode = self
+            .crtcs
+            .iter()
+            .find(|c| c.id == crtc_id)
+            .ok_or(KernelError::NotFound)?
+            .mode;
+        let Some(mode) = mode else {
+            return match &mut self.backend {
+                DrmBackend::Limine(b) => b.disable_crtc(crtc_id),
+                DrmBackend::VirtioGpu(b) => b.disable_crtc(crtc_id),
+                DrmBackend::Ati(b) => b.disable_crtc(crtc_id),
+            };
+        };
+        // A recorded mode always comes with a primary framebuffer (both
+        // `record_crtc` and an atomic commit refuse a mode without one), so no
+        // scene here means the object model contradicts itself. Validated
+        // again although the callers have: this is the last point before the
+        // backend is touched, and the check is a few comparisons.
+        let scene = self.scene(crtc_id)?.ok_or(KernelError::InternalError)?;
+        self.validate_scene(&scene)?;
+        if scene.trivial {
+            let Some(compose::LayerSource::Framebuffer(fb_id)) =
+                scene.layers.first().map(|l| l.source)
+            else {
+                return Err(KernelError::InternalError);
+            };
+            let fb = self
+                .framebuffers
+                .iter()
+                .find(|f| f.id == fb_id)
+                .ok_or(KernelError::NotFound)?;
+            let gem = self
+                .gem_objects
+                .iter()
+                .find(|g| g.handle == fb.gem_handle)
+                .ok_or(KernelError::NotFound)?;
+            return match &mut self.backend {
+                DrmBackend::Limine(b) => b.set_mode(crtc_id, &mode, fb, gem),
+                DrmBackend::VirtioGpu(b) => b.set_mode(crtc_id, &mode, fb, gem),
+                DrmBackend::Ati(b) => b.set_mode(crtc_id, &mode, fb, gem),
+            };
+        }
+        // Only the software backends reach here: `validate_scene` refused a
+        // composed scene on any other.
+        self.backend_check_mode(&mode)?;
+        self.present(crtc_id, None)
+    }
+
+    /// Whether this device's backend would accept `mode`, touching nothing:
+    /// its `check_mode`, the refusals of its `set_mode` that depend on the
+    /// mode alone.
+    ///
+    /// # Errors
+    ///
+    /// The backend's refusal.
+    pub(crate) fn backend_check_mode(&self, mode: &DrmMode) -> KernelResult<()> {
+        match &self.backend {
+            DrmBackend::Limine(b) => b.check_mode(mode),
+            DrmBackend::VirtioGpu(b) => b.check_mode(mode),
+            DrmBackend::Ati(b) => b.check_mode(mode),
+        }
+    }
+
+    /// The display state a mode-set or an atomic commit can change, as it
+    /// stands: what `Self::restore_display` puts back when the change fails
+    /// part-way.
+    pub(crate) fn snapshot_display(&self) -> DisplaySnapshot {
+        DisplaySnapshot {
+            crtcs: self.crtcs.clone(),
+            planes: self.planes.clone(),
+            connectors: self
+                .connectors
+                .iter()
+                .map(|c| (c.id, c.current_encoder))
+                .collect(),
+            encoders: self.encoders.iter().map(|e| (e.id, e.crtc)).collect(),
+        }
+    }
+
+    /// Put back a [`DisplaySnapshot`]. Matched by object id rather than by
+    /// position: nothing that takes a snapshot adds or removes objects, but if
+    /// that ever changes, a positional restore would silently write one
+    /// object's state onto another.
+    pub(crate) fn restore_display(&mut self, saved: DisplaySnapshot) {
+        for c in saved.crtcs {
+            if let Some(cur) = self.crtcs.iter_mut().find(|x| x.id == c.id) {
+                *cur = c;
+            }
+        }
+        for p in saved.planes {
+            if let Some(cur) = self.planes.iter_mut().find(|x| x.id == p.id) {
+                *cur = p;
+            }
+        }
+        for (id, enc) in saved.connectors {
+            if let Some(cur) = self.connectors.iter_mut().find(|x| x.id == id) {
+                cur.current_encoder = enc;
+            }
+        }
+        for (id, crtc) in saved.encoders {
+            if let Some(cur) = self.encoders.iter_mut().find(|x| x.id == id) {
+                cur.crtc = crtc;
+            }
+        }
     }
 
     /// Detach every encoder currently routed to `crtc_id`, and every connector
@@ -688,32 +919,69 @@ impl DrmDevice {
         if fb.width != mode.hdisplay || fb.height != mode.vdisplay {
             return Err(KernelError::InvalidArgument);
         }
-        let gem = self
-            .gem_objects
-            .iter()
-            .find(|g| g.handle == fb.gem_handle)
-            .ok_or(KernelError::NotFound)?;
+        if !self.gem_objects.iter().any(|g| g.handle == fb.gem_handle) {
+            return Err(KernelError::NotFound);
+        }
 
+        // Put the buffer on the primary plane first, then show the CRTC's
+        // scene: the plane's rectangles and the cursor are part of what is
+        // shown (design-decisions §976), and a scene that is only this buffer,
+        // whole, is still the one row copy it always was. On failure the plane
+        // is put back, so it never names a buffer that is not on screen --
+        // before this the field was written only after the backend succeeded,
+        // for the same reason.
         let primary_plane = crtc.primary_plane;
-        match &mut self.backend {
-            DrmBackend::Limine(b) => b.page_flip(crtc_id, fb, gem),
-            DrmBackend::VirtioGpu(b) => b.page_flip(crtc_id, fb, gem),
-            DrmBackend::Ati(b) => b.page_flip(crtc_id, fb, gem),
-        }?;
-        // Record what is now on screen. Without this the primary plane reports
-        // `fb_id = 0` forever — only `atomic.rs` ever wrote this field — so a
-        // client that asks which buffer is being scanned out is told "none"
-        // while looking at it.
-        if let Some(p) = self.planes.iter_mut().find(|p| p.id == primary_plane) {
-            p.fb = Some(fb_id);
+        let previous = self
+            .planes
+            .iter_mut()
+            .find(|p| p.id == primary_plane)
+            .map(|p| p.fb.replace(fb_id));
+        let restore = |dev: &mut Self| {
+            if let (Some(prev), Some(p)) = (
+                previous,
+                dev.planes.iter_mut().find(|p| p.id == primary_plane),
+            ) {
+                p.fb = prev;
+            }
+        };
+        // Validated before anything is drawn, so a refusal -- the plane's
+        // rectangles do not fit this buffer, or it cannot be composed -- leaves
+        // the screen and the model as they were.
+        let valid = self
+            .scene(crtc_id)
+            .and_then(|scene| scene.map_or(Ok(()), |s| self.validate_scene(&s)));
+        if let Err(e) = valid {
+            restore(self);
+            return Err(e);
+        }
+        if let Err(e) = self.present(crtc_id, None) {
+            restore(self);
+            self.reshow(crtc_id);
+            return Err(e);
         }
         Ok(())
     }
 
-    /// Flush a dirty region of a framebuffer to the display.
+    /// Flush a dirty region of a framebuffer to the display: redraw it
+    /// wherever `fb_id` is shown.
     ///
-    /// For paravirtualized GPUs (virtio-gpu), this triggers a host-side
-    /// transfer.  For direct-scanout hardware, this is typically a no-op.
+    /// Where a CRTC shows the buffer as a trivial scene -- alone, whole,
+    /// unmoved, the size of the mode -- this is the row copy (virtio-gpu adds
+    /// the host transfer; direct-scanout hardware only orders the writes).
+    /// Anywhere else -- moved, scaled, under a cursor (design-decisions §976)
+    /// -- the region is mapped through each layer that shows the buffer and
+    /// recomposed where it lands.
+    ///
+    /// A buffer no CRTC shows changes nothing on screen, and the call succeeds
+    /// having done nothing, as Linux's `DIRTYFB` does. Until 2026-09-27 the
+    /// software backends copied the region onto the scanout whichever buffer
+    /// was on it, so a client flushing its back buffer drew it over its front
+    /// one, and one flushing before its first mode-set drew over the console.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for an unknown framebuffer; otherwise what showing it
+    /// returns.
     pub fn flush_region(
         &mut self,
         fb_id: DrmObjectId,
@@ -722,22 +990,37 @@ impl DrmDevice {
         w: u32,
         h: u32,
     ) -> KernelResult<()> {
-        let fb = self
-            .framebuffers
-            .iter()
-            .find(|f| f.id == fb_id)
-            .ok_or(KernelError::NotFound)?;
-        let gem = self
-            .gem_objects
-            .iter()
-            .find(|g| g.handle == fb.gem_handle)
-            .ok_or(KernelError::NotFound)?;
-
-        match &mut self.backend {
-            DrmBackend::Limine(b) => b.flush_region(fb, gem, x, y, w, h),
-            DrmBackend::VirtioGpu(b) => b.flush_region(fb, gem, x, y, w, h),
-            DrmBackend::Ati(b) => b.flush_region(fb, gem, x, y, w, h),
+        if self.fb_get(fb_id).is_none() {
+            return Err(KernelError::NotFound);
         }
+        // A region starting past `i32::MAX` is past every display too; pinning
+        // it there keeps it empty of anything visible rather than wrapping it
+        // back on screen.
+        let region = planecompose::Rect::new(
+            i32::try_from(x).unwrap_or(i32::MAX),
+            i32::try_from(y).unwrap_or(i32::MAX),
+            w,
+            h,
+        );
+        let this_fb = compose::LayerSource::Framebuffer(fb_id);
+        let crtc_ids: Vec<DrmObjectId> = self.crtcs.iter().map(|c| c.id).collect();
+        for crtc_id in crtc_ids {
+            let Some(scene) = self.scene(crtc_id)? else {
+                continue;
+            };
+            // Where each layer showing this buffer puts the region; for a
+            // trivial scene that is the region itself, clipped to the screen.
+            let damage = scene
+                .layers
+                .iter()
+                .filter(|l| l.source == this_fb)
+                .filter_map(|l| planecompose::source_to_dest(region, l.src, l.dst))
+                .reduce(planecompose::Rect::union);
+            if let Some(d) = damage {
+                self.present(crtc_id, Some(d))?;
+            }
+        }
+        Ok(())
     }
 
     /// The mode a connector should be driven at absent any client preference:
@@ -959,23 +1242,87 @@ impl DrmDevice {
             .position(|c| c.id == crtc_id)
             .ok_or(KernelError::NotFound)?;
 
-        // Validate GEM handle if non-zero.
-        if gem_handle != 0 && !self.gem_objects.iter().any(|g| g.handle == gem_handle) {
-            return Err(KernelError::NotFound);
+        // Validate GEM handle if non-zero, and that it holds the image it is
+        // said to: `height` rows of `width` ARGB pixels, the rows the GEM
+        // object's own pitch apart. The cursor is drawn from it now
+        // (design-decisions §976), so a short buffer is the caller's mistake
+        // to be told about here, not a failure to draw later.
+        if gem_handle != 0 {
+            let gem = self
+                .gem_objects
+                .iter()
+                .find(|g| g.handle == gem_handle)
+                .ok_or(KernelError::NotFound)?;
+            if width == 0
+                || height == 0
+                || width > planecompose::MAX_DIMENSION
+                || height > planecompose::MAX_DIMENSION
+            {
+                return Err(KernelError::InvalidArgument);
+            }
+            // Each factor is below 2^32, so the products fit in u64; a
+            // saturated sum is only ever "too large", which is refused anyway.
+            let row = u64::from(width).saturating_mul(4);
+            let need = u64::from(height.saturating_sub(1))
+                .saturating_mul(u64::from(gem.pitch))
+                .saturating_add(row);
+            if u64::from(gem.pitch) < row || u64::try_from(gem.size).map_or(true, |s| s < need) {
+                return Err(KernelError::InvalidArgument);
+            }
         }
 
         let cs = self
             .cursor_states
             .get_mut(crtc_idx)
             .ok_or(KernelError::NotFound)?;
+        let saved = *cs;
         cs.gem_handle = gem_handle;
         cs.width = width;
         cs.height = height;
         cs.hot_x = hot_x;
         cs.hot_y = hot_y;
         cs.visible = gem_handle != 0;
+        self.show_cursor_change(crtc_idx, crtc_id, saved)
+    }
 
-        Ok(())
+    /// Redraw where the cursor was (`saved`) and where it is now, or -- if
+    /// that fails -- put `saved` back, so a cursor the backend cannot show
+    /// (design-decisions §976: one that is not composed is refused, never
+    /// accepted and left undrawn) is not left recorded as though it were.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::present`].
+    fn show_cursor_change(
+        &mut self,
+        crtc_idx: usize,
+        crtc_id: DrmObjectId,
+        saved: CursorState,
+    ) -> KernelResult<()> {
+        let after = self
+            .cursor_states
+            .get(crtc_idx)
+            .map(compose::cursor_damage)
+            .ok_or(KernelError::NotFound)?;
+        let before = compose::cursor_damage(&saved);
+        let Err(e) = self.present_pair(crtc_id, before, after) else {
+            return Ok(());
+        };
+        if let Some(cs) = self.cursor_states.get_mut(crtc_idx) {
+            *cs = saved;
+        }
+        // Redraw both squares from the restored state. After a refusal nothing
+        // was drawn and this repaints the same pixels; after a device failure
+        // part-way, one square may have been drawn and not the other. Logged,
+        // not returned: `e` is the error that matters.
+        if let Err(again) = self.present_pair(crtc_id, before, after) {
+            serial_println!(
+                "[drm] the cursor on CRTC {} could not be redrawn after a failed change: {:?}",
+                crtc_id,
+                again,
+            );
+        }
+        Err(e)
     }
 
     /// Move the cursor position for a CRTC.
@@ -993,10 +1340,13 @@ impl DrmDevice {
             .cursor_states
             .get_mut(crtc_idx)
             .ok_or(KernelError::NotFound)?;
+        let saved = *cs;
         cs.x = x;
         cs.y = y;
-
-        Ok(())
+        // Two cursor-sized squares, not the screen: the old position is
+        // restored from the planes beneath it, the new one blended on top
+        // (design-decisions §976).
+        self.show_cursor_change(crtc_idx, crtc_id, saved)
     }
 
     /// Get the cursor state for a CRTC.
@@ -1590,6 +1940,11 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[drm]   Mode-set and page-flip discipline ({w}x{h}): OK");
         Ok(())
     })?;
+
+    // 11b. Plane composition (design-decisions §976): planes shown where and
+    //      at the size asked, the cursor drawn, refusals leaving the model and
+    //      the screen untouched -- every expected pixel read back.
+    compose::self_test()?;
 
     // 12. ATI/AMD legacy register + timing arithmetic.
     //

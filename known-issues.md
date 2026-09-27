@@ -158871,7 +158871,21 @@ real feature and is not claimed to be in scope.
 
 ### [A] DRM plane geometry is write-only: an atomic commit can move or scale a plane and nothing happens -- 2026-09-17
 
-**Status:** OPEN
+**Status:** FIXED 2026-09-27 (design-decisions §976, the operator's answer to
+A-Q17: honour the rectangles). The software backends now compose each CRTC's
+planes -- cropped, scaled, placed, blended -- with the `planecompose` crate
+(`kernel/src/drm/compose.rs`), and the legacy cursor is drawn with them. An
+atomic commit is checked by recording its result and validating that, so a
+rectangle outside its framebuffer, a scale beyond 16x, a format the plane does
+not list, or a scene a backend cannot compose is refused (`EINVAL` /
+`EOPNOTSUPP`), never accepted and ignored; a refusal leaves the object model
+and the screen as they were. Found and fixed on the way: `fb_create` never
+checked that a GEM object held the framebuffer it was said to hold;
+`flush_region` drew any framebuffer onto the screen whether or not it was being
+shown; a scanned-out buffer's format was never checked against its plane's
+list (RGB565 was byte-copied into an XRGB scanout); and the cursor's rows were
+assumed packed although `gem_create` pads them. Boot self-test: `drm` step
+11b, "Plane composition", reads every expected pixel back out of the scanout.
 
 **In short:** a graphics "plane" is a layer the display hardware can place
 and scale on screen -- how a cursor or a video overlay gets positioned. The

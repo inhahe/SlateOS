@@ -11539,9 +11539,11 @@ fn drm_card_ioctl_mode_getresources(
     res.count_encoders = count_encoders;
     res.min_width = 0;
     res.min_height = 0;
-    // Conventional virtual-driver framebuffer-size cap (matches vkms/virtio).
-    res.max_width = 16384;
-    res.max_height = 16384;
+    // Conventional virtual-driver framebuffer-size cap (matches vkms/virtio),
+    // and the limit `DrmDevice::fb_create` enforces -- one constant, so what is
+    // advertised and what is accepted cannot drift apart.
+    res.max_width = planecompose::MAX_DIMENSION;
+    res.max_height = planecompose::MAX_DIMENSION;
     match write_user_struct(argp, &res) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => linux_err(e),

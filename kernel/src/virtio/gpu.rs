@@ -1173,6 +1173,48 @@ impl ScanoutMem<'_> {
     }
 }
 
+impl ScanoutMem<'_> {
+    /// The framebuffer as writable pages, one per backing frame, for
+    /// `planecompose` (design-decisions §976). Every page is [`FRAME_SIZE`]
+    /// bytes except the last, which ends where the framebuffer does, so
+    /// the list has exactly the shape `planecompose::PagedMut` requires.
+    ///
+    /// Takes `&mut self`, and the view comes only from [`with_scanout_mut`],
+    /// so the slices cannot outlive the closure or coexist with a second set.
+    ///
+    /// # Safety
+    ///
+    /// The returned slices alias the scanout, so nothing else may write it
+    /// while they live. Inside [`with_scanout_mut`], which holds the device
+    /// lock for the whole closure, that excludes every writer that goes
+    /// through this module. The one that does not is a raw pointer from
+    /// [`first_frame_addr`], which the caller must not be writing through at
+    /// the same time.
+    #[must_use]
+    pub unsafe fn pages_mut(&mut self) -> alloc::vec::Vec<&mut [u8]> {
+        let total = self.len();
+        let mut pages = alloc::vec::Vec::with_capacity(self.frames.len());
+        let mut start = 0usize;
+        for pf in self.frames {
+            if start >= total {
+                break;
+            }
+            let len = FRAME_SIZE.min(total.saturating_sub(start));
+            let Some(addr) = pf.addr().checked_add(self.hhdm) else {
+                break;
+            };
+            // SAFETY: `pf` is one of the device's own scanout frames, HHDM-
+            // mapped at `addr` for `FRAME_SIZE` bytes, and `len <= FRAME_SIZE`.
+            // Each frame appears once in the list, so the slices are disjoint;
+            // the caller guarantees nothing else writes the scanout while they
+            // live (see this function's contract).
+            pages.push(unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, len) });
+            start = start.saturating_add(FRAME_SIZE);
+        }
+        pages
+    }
+}
+
 /// Run `f` with a bounds-checked view of the scanout framebuffer.
 ///
 /// Returns `None` if there is no device.
@@ -1202,6 +1244,22 @@ pub fn with_scanout<R>(f: impl FnOnce(&ScanoutMem<'_>) -> R) -> Option<R> {
         height: dev.height,
     };
     Some(f(&view))
+}
+
+/// [`with_scanout`], lending the view mutably: for
+/// [`ScanoutMem::pages_mut`], whose slices must not outlive the closure or
+/// coexist with another set. The same lock, held the same way -- see
+/// [`with_scanout`] for why that is safe and what `f` must not do.
+pub fn with_scanout_mut<R>(f: impl FnOnce(&mut ScanoutMem<'_>) -> R) -> Option<R> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref()?;
+    let mut view = ScanoutMem {
+        frames: &dev.fb_frames,
+        hhdm: dev.hhdm_offset,
+        width: dev.width,
+        height: dev.height,
+    };
+    Some(f(&mut view))
 }
 
 /// Write a pixel. Does NOT auto-flush.

@@ -1457,6 +1457,7 @@ dependencies = [
  "netipc",
  "netproto",
  "netring",
+ "planecompose",
  "sha2",
  "spin",
  "tzrules",

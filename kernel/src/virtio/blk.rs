@@ -15,10 +15,11 @@
 //!
 //! After submitting a request, the driver yields the CPU via `HLT`
 //! and waits for the device to fire an IRQ.  The IOAPIC handler
-//! acknowledges the device interrupt by reading the ISR status
-//! register, then wakes the CPU from HLT.  The driver then checks
-//! the used ring for the completion.  Falls back to polling if
-//! interrupts are not yet configured (early boot).
+//! acknowledges the interrupt by reading the ISR status register of
+//! every virtio-blk function routed to that line -- each device records
+//! its own line and port in `IRQ_ROUTES` -- then wakes the CPU from HLT.
+//! The driver then checks the used ring for the completion.  Falls back
+//! to polling if interrupts are not yet configured (early boot).
 //!
 //! ## DMA buffers
 //!
@@ -27,11 +28,11 @@
 //! DMA; virtual addresses (via HHDM) are used by the driver to write
 //! headers and read status.
 
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
-use crate::pci::{self, PciDevice};
+use crate::pci::{self, PciAddress, PciDevice};
 use crate::virtio::queue::{VRING_DESC_F_WRITE, Virtqueue};
 use crate::virtio::{
     REG_ISR_STATUS, STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, VirtioLegacyPci,
@@ -79,46 +80,166 @@ const DMA_STATUS_OFFSET: usize = 512 + 4096; // 1 byte
 // IRQ support — lock-free state for ISR context
 // ---------------------------------------------------------------------------
 
-/// I/O port base for the virtio-blk device, used by the ISR to
-/// acknowledge interrupts by reading the ISR status register.
-/// Set to 0 when no device is initialized.
-static BLK_IO_BASE: AtomicU16 = AtomicU16::new(0);
+/// Most virtio-blk functions whose interrupts the ISR can acknowledge.
+///
+/// The boot configuration attaches two (the swap disk and the glibc rootfs);
+/// eight is headroom. Slots fill from index 0 and are never freed, so the ISR
+/// stops at the first empty one and an unused slot costs nothing.
+const MAX_IRQ_ROUTES: usize = 8;
 
-/// PCI IRQ line for the virtio-blk device (from PCI config space).
-/// 0xFF means no device or IRQ not assigned.
-static BLK_IRQ_LINE: AtomicU8 = AtomicU8::new(0xFF);
+/// Set in a used [`IRQ_ROUTES`] slot, so that an all-zero slot is empty.
+const ROUTE_USED: u64 = 1 << 24;
+
+/// The PCI Interrupt Line value firmware leaves on a function it did not
+/// route to any interrupt input (logged as `irq=255` by the PCI scan).
+const NO_IRQ_LINE: u8 = 0xFF;
+
+/// Each initialised virtio-blk function's interrupt route, readable from the
+/// ISR without a lock.
+///
+/// One `AtomicU64` per function: bits 0-15 hold its legacy I/O port base, bits
+/// 16-23 its PCI IRQ line, bit 24 is [`ROUTE_USED`], and bits 32-47 its PCI
+/// address packed as `bus << 8 | device << 3 | function`. One word per device
+/// is the point. The ISR can never pair one device's line with another
+/// device's port, and pairing them wrong is the bug this replaced.
+///
+/// That was two single-slot globals: the port was written by every device's
+/// `init` (last writer wins), and the line by `probe_all` for the first device
+/// only (first writer wins). With the two disks the boot attaches, IRQ 10 --
+/// the swap disk's line -- was acknowledged by reading the ISR register of the
+/// rootfs disk on IRQ 11. The swap disk's own interrupt was never
+/// acknowledged, its level-triggered pin stayed asserted, and IRQ 10 stormed
+/// at about half a million interrupts a second until the storm detector masked
+/// it, three or four times a boot. The rootfs disk's line was never unmasked
+/// at all, so its requests completed on whichever interrupt next woke the
+/// CPU. See known-issues `A-VIRTIO-BLK-ACKED-THE-WRONG-DISK`.
+static IRQ_ROUTES: [AtomicU64; MAX_IRQ_ROUTES] = [const { AtomicU64::new(0) }; MAX_IRQ_ROUTES];
 
 /// Whether interrupt-driven I/O is active.  When false, the driver
 /// falls back to polling (used during early boot before IOAPIC is up).
 static IRQ_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Called from the IOAPIC device IRQ handler for every external
-/// device interrupt.  Checks whether this IRQ matches the virtio-blk
-/// device's PCI IRQ line, then reads the ISR status register to
-/// acknowledge the interrupt at the device level (required for
-/// level-triggered PCI interrupts to de-assert the IRQ line).
+/// One decoded [`IRQ_ROUTES`] entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IrqRoute {
+    /// The function's PCI address, packed by [`pci_key`].
+    pci: u16,
+    /// The IRQ line the function asserts.
+    irq: u8,
+    /// The legacy I/O port base whose ISR status register acknowledges it.
+    io_base: u16,
+}
+
+/// Pack a PCI address into 16 bits: bus in 15:8, device in 7:3, function in
+/// 2:0, the layout `pci` uses for its own INTx claim table.
+fn pci_key(addr: PciAddress) -> u16 {
+    (u16::from(addr.bus) << 8)
+        | ((u16::from(addr.device) & 0x1F) << 3)
+        | (u16::from(addr.function) & 0x07)
+}
+
+impl IrqRoute {
+    /// The slot encoding described at [`IRQ_ROUTES`].
+    fn pack(self) -> u64 {
+        ROUTE_USED
+            | u64::from(self.io_base)
+            | (u64::from(self.irq) << 16)
+            | (u64::from(self.pci) << 32)
+    }
+
+    /// Decode a slot, or `None` for an empty one.
+    #[allow(clippy::cast_possible_truncation)] // each field is masked to its width first
+    fn unpack(word: u64) -> Option<Self> {
+        if word & ROUTE_USED == 0 {
+            return None;
+        }
+        Some(Self {
+            io_base: (word & 0xFFFF) as u16,
+            irq: ((word >> 16) & 0xFF) as u8,
+            pci: ((word >> 32) & 0xFFFF) as u16,
+        })
+    }
+}
+
+/// The routes registered so far, in registration order.
+fn irq_routes() -> impl Iterator<Item = IrqRoute> {
+    IRQ_ROUTES
+        .iter()
+        .map_while(|slot| IrqRoute::unpack(slot.load(Ordering::Acquire)))
+}
+
+/// Record the interrupt route of a function this driver services.
 ///
-/// For non-matching IRQs, this function performs two atomic loads
-/// (~1 ns) and returns immediately.  The actual I/O port read only
-/// happens when the IRQ matches.
+/// A second registration for the same PCI function -- a re-probe --
+/// replaces its own slot rather than taking another.
+///
+/// # Errors
+///
+/// `ResourceExhausted` when [`MAX_IRQ_ROUTES`] functions are already routed.
+/// The caller must then leave the function unclaimed: an interrupt the ISR
+/// cannot acknowledge is exactly what storms a shared line, and an unclaimed
+/// function is silenced by `pci::quiesce_unclaimed_intx` instead.
+fn register_irq_route(route: IrqRoute) -> KernelResult<()> {
+    let word = route.pack();
+    for slot in &IRQ_ROUTES {
+        let current = slot.load(Ordering::Acquire);
+        match IrqRoute::unpack(current) {
+            Some(existing) if existing.pci == route.pci => {
+                slot.store(word, Ordering::Release);
+                return Ok(());
+            }
+            Some(_) => {}
+            None => {
+                if slot
+                    .compare_exchange(0, word, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+                // Lost a race for this slot: if the winner was a re-probe of
+                // the same function, replace it; otherwise try the next slot.
+                if IrqRoute::unpack(slot.load(Ordering::Acquire))
+                    .is_some_and(|winner| winner.pci == route.pci)
+                {
+                    slot.store(word, Ordering::Release);
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err(KernelError::ResourceExhausted)
+}
+
+/// Called from the IOAPIC device IRQ handler for every external device
+/// interrupt: acknowledges every virtio-blk function routed to `irq`, by
+/// reading its ISR status register, which de-asserts its level-triggered pin.
+///
+/// *Every* function on the line, not the first match: two disks on one shared
+/// line both have to be acknowledged, and which of them interrupted is only
+/// known from reading each one's register.
+///
+/// For an IRQ no virtio-blk function uses, this is one relaxed load per
+/// registered route and no port I/O.
 ///
 /// This function runs in ISR context — no locks, no allocations.
 ///
-/// Returns `true` if this device actually had a pending interrupt.
+/// Returns `true` if any of them actually had a pending interrupt.
 pub fn handle_irq(irq: u32) -> bool {
-    let expected = BLK_IRQ_LINE.load(Ordering::Relaxed);
-    if expected == 0xFF || irq != u32::from(expected) {
-        return false;
+    let mut pending = false;
+    for route in irq_routes() {
+        if u32::from(route.irq) != irq {
+            continue;
+        }
+        // Read ISR status: acknowledges the interrupt at the device.
+        // Bit 0 = used buffer notification, bit 1 = config change.
+        // SAFETY: `route.io_base` is the legacy I/O port base of a virtio-blk
+        // function this driver initialised (it is registered only from
+        // `VirtioBlkDevice::init`, from the function's own BAR0), and the ISR
+        // status register is a read-only byte at a fixed offset within it.
+        let isr = unsafe { crate::port::inb(route.io_base.wrapping_add(REG_ISR_STATUS)) };
+        pending |= isr != 0;
     }
-    let io_base = BLK_IO_BASE.load(Ordering::Acquire);
-    if io_base == 0 {
-        return false;
-    }
-    // Read ISR status: acknowledges the interrupt at the device.
-    // Bit 0 = used buffer notification, bit 1 = config change.
-    // SAFETY: io_base is a valid virtio device I/O port, set during init.
-    let isr = unsafe { crate::port::inb(io_base.wrapping_add(REG_ISR_STATUS)) };
-    isr != 0
+    pending
 }
 
 // ---------------------------------------------------------------------------
@@ -152,9 +273,8 @@ pub struct VirtioBlkDevice {
     dma_frame: PhysFrame,
     /// Virtual address of the DMA request frame.
     dma_virt: *mut u8,
-    /// PCI IRQ line (0xFF if unknown/not assigned).
-    #[allow(dead_code)]
-    irq_line: u8,
+    /// The PCI function this device is, for [`Self::pci_address`].
+    pci_address: PciAddress,
 }
 
 // SAFETY: The device is accessed from a single thread (the shell).
@@ -173,13 +293,27 @@ impl VirtioBlkDevice {
         let io_base = pci_dev.bar0_io_port().ok_or(KernelError::NoSuchDevice)?;
         crate::serial_println!("[virtio-blk] BAR0 I/O port base: {:#x}", io_base);
 
+        // Route before claiming. The claim below lets this function keep
+        // asserting its pin, and only a route lets the ISR acknowledge it, so
+        // a function this driver cannot route must not be claimed: returning
+        // here leaves it for `pci::quiesce_unclaimed_intx` to silence. A
+        // function with no line assigned cannot interrupt and needs no route.
+        if pci_dev.irq_line != NO_IRQ_LINE {
+            register_irq_route(IrqRoute {
+                pci: pci_key(pci_dev.address),
+                irq: pci_dev.irq_line,
+                io_base,
+            })?;
+        }
+
         // Enable bus mastering for DMA.
         pci::enable_bus_master(pci_dev.address);
 
         // `handle_device_irq` calls this driver's `handle_irq` on every device
-        // IRQ, and that reads the ISR status register, which deasserts the
-        // line.  Recording the claim keeps `quiesce_unclaimed_intx` from
-        // silencing a function that is in fact serviced.
+        // IRQ, and that reads the ISR status register of every function routed
+        // to the line, which deasserts it.  Recording the claim keeps
+        // `quiesce_unclaimed_intx` from silencing a function that is in fact
+        // serviced.
         pci::claim_intx(pci_dev.address);
 
         let transport = VirtioLegacyPci::new(io_base);
@@ -237,10 +371,6 @@ impl VirtioBlkDevice {
             core::ptr::write_bytes(dma_virt, 0, frame::FRAME_SIZE);
         }
 
-        // Store the I/O base globally so the ISR can acknowledge
-        // interrupts without holding a lock.
-        BLK_IO_BASE.store(io_base, Ordering::Release);
-
         Ok(Self {
             transport,
             queue,
@@ -248,7 +378,7 @@ impl VirtioBlkDevice {
             hhdm_offset,
             dma_frame,
             dma_virt,
-            irq_line: 0xFF, // Set later by enable_irq().
+            pci_address: pci_dev.address,
         })
     }
 
@@ -257,30 +387,14 @@ impl VirtioBlkDevice {
         self.capacity
     }
 
-    /// Enable interrupt-driven I/O on this specific device instance.
+    /// The PCI function this device is.
     ///
-    /// Must be called after the IOAPIC is initialized and `cpu::sti()`.
-    /// Before this, the driver falls back to busy-wait polling.
-    ///
-    /// Prefer [`enable_interrupts()`] (module-level) when the device
-    /// has already been moved into the block device registry.
-    #[allow(dead_code)]
-    pub fn enable_irq(&mut self, irq_line: u8) {
-        self.irq_line = irq_line;
-        // SAFETY: The IRQ line is valid (from PCI config space) and the
-        // IOAPIC is initialized by this point.
-        // PCI interrupts are level-triggered, active-low.
-        unsafe {
-            crate::ioapic::set_level_triggered(irq_line);
-        }
-        unsafe {
-            crate::ioapic::unmask_irq(irq_line);
-        }
-        IRQ_ENABLED.store(true, Ordering::Release);
-        crate::serial_println!(
-            "[virtio-blk] IRQ {} unmasked — interrupt-driven I/O enabled",
-            irq_line,
-        );
+    /// For correlating a registered block device with its interrupt pin:
+    /// [`self_test_irq_routes`] reads a sector through the registry and then
+    /// watches this function's INTx status.
+    #[must_use]
+    pub fn pci_address(&self) -> PciAddress {
+        self.pci_address
     }
 
     /// Wait for the device to complete a request.
@@ -610,8 +724,7 @@ pub fn probe(hhdm_offset: u64) -> Option<VirtioBlkDevice> {
 
     match VirtioBlkDevice::init(&pci_dev, hhdm_offset) {
         Ok(dev) => {
-            // Store the PCI IRQ line for enable_interrupts() later.
-            BLK_IRQ_LINE.store(pci_dev.irq_line, Ordering::Release);
+            // `init` registered the device's interrupt route itself.
             crate::serial_println!("[virtio-blk] Device initialized successfully");
             Some(dev)
         }
@@ -642,12 +755,10 @@ pub fn probe_all(hhdm_offset: u64) -> alloc::vec::Vec<VirtioBlkDevice> {
 
         match VirtioBlkDevice::init(pci_dev, hhdm_offset) {
             Ok(dev) => {
-                // Store the first device's IRQ line for the shared
-                // interrupt handler.  All virtio-blk devices share
-                // the same IRQ handler via level-triggered IOAPIC.
-                if devices.is_empty() {
-                    BLK_IRQ_LINE.store(pci_dev.irq_line, Ordering::Release);
-                }
+                // `init` registered this device's own interrupt route. The
+                // devices do not share one line: the boot attaches two disks
+                // on different lines (10 and 11), and a single recorded line
+                // is how the second disk's pin went unacknowledged.
                 crate::serial_println!(
                     "[virtio-blk] Device {} initialized ({} sectors)",
                     devices.len(),
@@ -746,36 +857,170 @@ pub fn self_test(dev: &mut VirtioBlkDevice) -> KernelResult<()> {
     Ok(())
 }
 
-/// Enable interrupt-driven I/O for the virtio-blk device.
+/// Enable interrupt-driven I/O for every virtio-blk device.
 ///
-/// Configures the PCI IRQ line as level-triggered (required for PCI
-/// interrupts) and unmasks it in the IOAPIC.  After this call, the
-/// driver uses `HLT` to yield the CPU while waiting for completions
-/// instead of busy-wait polling.
+/// Configures each IRQ line a routed device uses as level-triggered
+/// (required for PCI interrupts) and unmasks it in the IOAPIC, once per line
+/// however many devices share it.  After this call, the driver uses `HLT` to
+/// yield the CPU while waiting for completions instead of busy-wait polling.
+///
+/// Every line, not the first device's: a disk whose line stays masked
+/// completes its requests on whatever interrupt next wakes the CPU, and one
+/// whose line is unmasked but unacknowledged storms it. Both happened, one to
+/// each disk; see [`IRQ_ROUTES`].
 ///
 /// Must be called after:
 /// - IOAPIC is initialized
 /// - Interrupts are enabled (`cpu::sti()`)
-/// - The virtio-blk device has been probed (`init()` already called)
+/// - The virtio-blk devices have been probed (`probe_all()` already called)
 ///
 /// Safe to call even if no device was found (returns silently).
 pub fn enable_interrupts() {
-    let irq = BLK_IRQ_LINE.load(Ordering::Acquire);
-    if irq == 0xFF {
-        return; // No device initialized.
+    let mut done = [NO_IRQ_LINE; MAX_IRQ_ROUTES];
+    let mut lines = 0usize;
+    for route in irq_routes() {
+        if done.contains(&route.irq) {
+            continue;
+        }
+        // PCI interrupts are level-triggered, active-low.
+        // SAFETY: IOAPIC is initialized (caller guarantees), and `route.irq`
+        // is the line firmware assigned to a function this driver
+        // initialised, not the no-line value (`init` routes only real lines).
+        unsafe {
+            crate::ioapic::set_level_triggered(route.irq);
+        }
+        // SAFETY: the IDT handler is installed, and `handle_device_irq` calls
+        // `handle_irq`, which acknowledges every function routed to the line.
+        unsafe {
+            crate::ioapic::unmask_irq(route.irq);
+        }
+        if let Some(slot) = done.get_mut(lines) {
+            *slot = route.irq;
+        }
+        lines = lines.saturating_add(1);
+        crate::serial_println!(
+            "[virtio-blk] IRQ {} enabled — interrupt-driven I/O active",
+            route.irq,
+        );
     }
-    // PCI interrupts are level-triggered, active-low.
-    // SAFETY: IOAPIC is initialized (caller guarantees).
-    unsafe {
-        crate::ioapic::set_level_triggered(irq);
+    if lines > 0 {
+        IRQ_ENABLED.store(true, Ordering::Release);
     }
-    // SAFETY: The IDT handler is installed and calls handle_irq().
-    unsafe {
-        crate::ioapic::unmask_irq(irq);
+}
+
+/// How long [`self_test_irq_routes`] gives a function's pin to fall after the
+/// read that raised it: far longer than an ISR on another CPU takes to run,
+/// far shorter than the storm detector's three-second window.
+const INTX_SETTLE_NS: u64 = 200_000_000;
+
+/// Every virtio-blk function's interrupt is acknowledged by its own ISR
+/// status register.
+///
+/// Two checks, both of which the single-slot globals `IRQ_ROUTES` replaced
+/// would have failed:
+///
+/// 1. **The table.** Each route pairs a function's own IRQ line with its own
+///    I/O port, as its PCI configuration space states them now. The old
+///    globals paired the swap disk's line (10) with the rootfs disk's port.
+/// 2. **The pin.** For every registered block device that is a virtio-blk
+///    function, one sector is read with interrupts on, and the function's
+///    INTx status bit must then clear within [`INTX_SETTLE_NS`]. A pin still
+///    asserted is an interrupt nothing acknowledged -- a storm in the making
+///    on a shared line, or a request that completed only because the CPU
+///    happened to wake. Before the fix both disks failed this: the swap
+///    disk's pin because its line was acknowledged at the other disk's port,
+///    the rootfs disk's because its line was never unmasked.
+///
+/// Run after [`enable_interrupts`]: with the lines masked there is no ISR to
+/// clear anything, and check 2 would fail on a correct tree.
+///
+/// # Errors
+///
+/// `InternalError`, after naming the function, when a route disagrees with
+/// configuration space, when a routed disk is missing from the registry, or
+/// when a pin stays asserted; the read's own error when a read fails.
+pub fn self_test_irq_routes() -> KernelResult<()> {
+    crate::serial_println!("[virtio-blk] Running interrupt-route self-test...");
+    let routes: alloc::vec::Vec<IrqRoute> = irq_routes().collect();
+    if routes.is_empty() {
+        crate::serial_println!("[virtio-blk]   no routed device -- nothing to check");
+        return Ok(());
     }
-    IRQ_ENABLED.store(true, Ordering::Release);
+
+    // 1. Each route against configuration space as it stands now.
+    let functions = pci::find_all_devices(VIRTIO_VENDOR, VIRTIO_BLK_DEVICE);
+    for route in &routes {
+        let Some(func) = functions.iter().find(|f| pci_key(f.address) == route.pci) else {
+            crate::serial_println!(
+                "[virtio-blk]   FAIL: route {:?} names a PCI function that is not a virtio-blk disk",
+                route
+            );
+            return Err(KernelError::InternalError);
+        };
+        if func.irq_line != route.irq || func.bar0_io_port() != Some(route.io_base) {
+            crate::serial_println!(
+                "[virtio-blk]   FAIL: {:02x}:{:02x}.{} is routed as irq {} at port {:#x}, \
+                 but its configuration space says irq {} at port {:?}",
+                func.address.bus,
+                func.address.device,
+                func.address.function,
+                route.irq,
+                route.io_base,
+                func.irq_line,
+                func.bar0_io_port()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // 2. Every registered virtio-blk disk: read, then watch its pin fall.
+    let mut checked: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
+    for info in crate::blkdev::list_devices() {
+        let mut buf = [0u8; SECTOR_SIZE];
+        let Some((addr, read)) = crate::blkdev::with_device(&info.name, |dev| {
+            dev.pci_address().map(|a| (a, dev.read_sector(0, &mut buf)))
+        })
+        .flatten() else {
+            continue; // not a PCI function (a RAM disk, say), or gone
+        };
+        if !routes.iter().any(|r| r.pci == pci_key(addr)) {
+            // Not ours: another driver's PCI disk.
+            continue;
+        }
+        read?;
+        let deadline = crate::hrtimer::now_ns().saturating_add(INTX_SETTLE_NS);
+        while pci::intx_asserting(addr) {
+            if crate::hrtimer::now_ns() >= deadline {
+                crate::serial_println!(
+                    "[virtio-blk]   FAIL: '{}' ({:02x}:{:02x}.{}) still asserts its interrupt \
+                     {} ms after a read completed -- nothing acknowledged it",
+                    info.name,
+                    addr.bus,
+                    addr.device,
+                    addr.function,
+                    INTX_SETTLE_NS / 1_000_000
+                );
+                return Err(KernelError::InternalError);
+            }
+            core::hint::spin_loop();
+        }
+        checked.push(pci_key(addr));
+    }
+    // A routed disk the registry does not hold was never read, and the table
+    // in step 1 cannot say whether its pin works: name it rather than pass.
+    if let Some(missed) = routes.iter().find(|r| !checked.contains(&r.pci)) {
+        crate::serial_println!(
+            "[virtio-blk]   FAIL: route {:?} belongs to no registered disk, so its pin was \
+             never exercised",
+            missed
+        );
+        return Err(KernelError::InternalError);
+    }
     crate::serial_println!(
-        "[virtio-blk] IRQ {} enabled — interrupt-driven I/O active",
-        irq,
+        "[virtio-blk]   {} disk(s): each route matches configuration space, and each pin \
+         fell after a read -- every interrupt was acknowledged at its own port",
+        checked.len()
     );
+    crate::serial_println!("[virtio-blk] Interrupt-route self-test PASSED");
+    Ok(())
 }

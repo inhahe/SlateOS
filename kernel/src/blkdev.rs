@@ -159,6 +159,16 @@ pub trait BlockDevice: Send {
     fn discard(&mut self, _start_lba: u64, _count: u64) -> KernelResult<()> {
         Err(KernelError::NotSupported)
     }
+
+    /// The PCI function behind this device, if it is one.
+    ///
+    /// For diagnostics that must tie a registered disk to its interrupt pin,
+    /// which the registry's names cannot do: `virtio::blk`'s interrupt-route
+    /// self-test reads a sector through the registry and then watches this
+    /// function's INTx status. Default: `None` (a RAM disk has no function).
+    fn pci_address(&self) -> Option<crate::pci::PciAddress> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +191,10 @@ impl BlockDevice for crate::virtio::blk::VirtioBlkDevice {
 
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
         self.write_sector(lba, buf)
+    }
+
+    fn pci_address(&self) -> Option<crate::pci::PciAddress> {
+        Some(crate::virtio::blk::VirtioBlkDevice::pci_address(self))
     }
 }
 

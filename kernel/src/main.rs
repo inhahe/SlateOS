@@ -9413,12 +9413,28 @@ extern "C" fn kernel_main() -> ! {
     // Step 22b: Enable interrupt-driven I/O for virtio devices.
     // Now that interrupts are globally enabled and the IOAPIC is
     // initialized, switch virtio drivers from polling to interrupt-
-    // driven completion.  The PCI IRQ is configured as level-triggered
-    // and unmasked.  Both devices may share the same IRQ line (IRQ 11
-    // on QEMU q35); the handler reads each device's ISR status register
-    // to acknowledge, which is correct for shared level-triggered IRQs.
+    // driven completion.  Each PCI IRQ a device uses is configured as
+    // level-triggered and unmasked.  Lines are shared (on this QEMU
+    // configuration the swap disk and virtio-net share IRQ 10, the rootfs
+    // disk and the RTL8139 IRQ 11); the handler reads the ISR status
+    // register of every function routed to the line, which is what a
+    // shared level-triggered IRQ requires.
     virtio::blk::enable_interrupts();
     virtio::net::enable_interrupts();
+
+    // Straight after, while nothing else is using the disks: every virtio-blk
+    // disk's interrupt must be acknowledged at its own port. An
+    // unacknowledged level-triggered pin storms its shared line, and the
+    // storms this replaced starved the daemon behind a network self-test into
+    // timing out (known-issues A-VIRTIO-BLK-ACKED-THE-WRONG-DISK). Diagnostic,
+    // not Integrity: the storm detector masks such a line, so the machine
+    // survives it, and the checks after this one still have something to say.
+    // The failure still reds the run.
+    selftest::dispatch_debug(
+        "virtio-blk interrupt routes",
+        selftest::Severity::Diagnostic,
+        virtio::blk::self_test_irq_routes(),
+    );
 
     {
         #[inline(never)]

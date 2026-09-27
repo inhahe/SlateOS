@@ -1218,7 +1218,11 @@ fn print_cpus_parsable(cxt: &Cxt, cols: &[CpuCol]) -> Vec<u8> {
         if i > 0 {
             out.push(b',');
         }
-        let mut data = cell_header(cxt, col).unwrap_or_default();
+        // `fputs(data && *data ? data : "")`: a cache header too long for
+        // upstream's buffer is `NULL`, and prints as nothing.
+        let Some(mut data) = cell_header(cxt, col) else {
+            continue;
+        };
         if !data.is_empty() && col != CpuCol::Cache && !cpu_desc(col).is_abbr {
             // "Socket", not "SOCKET".
             if let Some(rest) = data.get_mut(1..) {

@@ -552,9 +552,18 @@ impl Ctl {
             Some(w) => w,
             None => {
                 self.errno = EILSEQ;
-                // What the encoding leaves decodes, by construction.
+                // Invalid sequences as `\x<hex>`, and tried again; upstream's
+                // `err(EXIT_FAILURE, "read failed")` if even that does not
+                // decode (the encoding leaves only ASCII and whole
+                // characters, so it always does).
                 let encoded = mbs_invalid_encode(line, self.utf8);
-                mbs_to_wcs(&encoded, self.utf8).unwrap_or_default()
+                match mbs_to_wcs(&encoded, self.utf8) {
+                    Some(w) => w,
+                    None => {
+                        warn(short, "read failed", &std::io::Error::from_raw_os_error(EILSEQ));
+                        return Err(1);
+                    }
+                }
             }
         };
         match self.mode {

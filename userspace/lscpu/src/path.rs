@@ -197,23 +197,24 @@ impl PathCxt {
         Ok((n, cstr::c_str(&buf).to_vec()))
     }
 
-    /// `ul_path_scanf(pc, rel, fmt, ...)`: `None` when the file will not
-    /// open, else what `fscanf` stored (`Some(vec![])` for its `EOF` too --
-    /// every caller only counts).
-    #[must_use]
-    pub fn scanf(&self, rel: &[u8], fmt: &[u8]) -> Option<Vec<Scanned>> {
-        let file = self.open(rel).ok()?;
+    /// `ul_path_scanf(pc, rel, fmt, ...)`: what `fscanf` stored, or `None`
+    /// for its `EOF`.
+    ///
+    /// # Errors
+    ///
+    /// The file will not open.
+    pub fn scanf(&self, rel: &[u8], fmt: &[u8]) -> io::Result<Option<Vec<Scanned>>> {
+        let file = self.open(rel)?;
         let mut src = StreamSource::new(BufReader::new(file));
-        Some(cstr::scanf(&mut src, fmt).unwrap_or_default())
+        Ok(cstr::scanf(&mut src, fmt))
     }
 
-    /// One conversion's value, if exactly one was stored.
+    /// One conversion's value, if exactly one was stored: `== 1`, which an
+    /// open that failed, `EOF` and every other count all fail.
     fn scan_one(&self, rel: &[u8], fmt: &[u8]) -> Option<Scanned> {
-        let mut values = self.scanf(rel, fmt)?;
-        if values.len() == 1 {
-            values.pop()
-        } else {
-            None
+        match self.scanf(rel, fmt) {
+            Ok(Some(mut values)) if values.len() == 1 => values.pop(),
+            _ => None,
         }
     }
 

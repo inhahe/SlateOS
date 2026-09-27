@@ -24465,11 +24465,17 @@ pub fn self_test_sizegate_abi() -> KernelResult<()> {
     let probe_elf = elf::build_sizegate_abi_test_elf();
     let argv: &[&[u8]] = &[b"sizegate"];
     let envp: &[&[u8]] = &[];
+    // `udp_send` checks for a Socket capability before anything else, so
+    // without one probes 0x45 and 0x47 measure that check and never reach the
+    // gate. rq13, this rung's first boot, failed at 0x45 for exactly that
+    // reason. With the capability, every answer below is decided before the
+    // (bogus) handle is looked up, which is what the probes pin.
+    let caps = [(ResourceType::Socket, 0u64, Rights::WRITE)];
     let options = SpawnOptions {
         name: "spawn-test-sizegate",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities: &caps,
         fd_map: &[],
         argv,
         envp,

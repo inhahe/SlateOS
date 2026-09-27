@@ -1328,6 +1328,9 @@ pub struct EbookApp {
     pub selected_book: usize,
     pub view: AppView,
     pub theme: ThemeKind,
+    /// Whether this window keeps the theme in `ebook.yaml`: set by
+    /// [`EbookApp::new`], which `main` calls, and by nothing a test builds.
+    keeps_settings: bool,
     pub paginated: Option<PaginatedBook>,
 
     // Search state
@@ -1384,8 +1387,20 @@ enum Kept {
 
 impl EbookApp {
     /// The reader, with the library the user keeps.
+    ///
+    /// And with the reading theme the user chose last time, keeping any they
+    /// choose from now on (`ebook.yaml`). A reader a test builds with
+    /// [`with_shelf`](Self::with_shelf) keeps nothing, so no test writes the
+    /// developer's own settings.
     pub fn new() -> Self {
-        Self::with_shelf(shelf::shelf_path())
+        let mut app = Self::with_shelf(shelf::shelf_path());
+        app.keeps_settings = true;
+        let (theme, problem) = stored_theme(&settingsfile::load(CONFIG_NAME));
+        app.theme = theme;
+        if let Some(problem) = problem {
+            app.status = problem;
+        }
+        app
     }
 
     /// The reader, with the library kept at `path` (`None`: nowhere).
@@ -1444,6 +1459,7 @@ impl EbookApp {
             selected_book: 0,
             view: AppView::Library,
             theme: ThemeKind::System,
+            keeps_settings: false,
             paginated: None,
             search_query: String::new(),
             search_active: false,
@@ -1728,12 +1744,24 @@ impl EbookApp {
     // Theme
     // --------------------------------------------------------------------
 
-    /// Toggle between dark and sepia themes.
+    /// Toggle between the desktop's theme and sepia, and keep the choice.
+    ///
+    /// Until 2026-09-27 it lasted as long as the window: every new one opened
+    /// on the desktop's theme whatever had been chosen (C-Q26).
     pub fn toggle_theme(&mut self) {
         self.theme = match self.theme {
             ThemeKind::System => ThemeKind::Sepia,
             ThemeKind::Sepia => ThemeKind::System,
         };
+        if !self.keeps_settings {
+            return;
+        }
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        doc.set_str(&THEME_KEY, theme_name(self.theme));
+        if let Err(e) = settingsfile::store(CONFIG_NAME, &doc) {
+            self.status =
+                format!("The theme holds until the window closes -- it was not saved: {e}");
+        }
     }
 
     /// Get current theme colors.
@@ -3431,6 +3459,38 @@ impl App for EbookApp {
         RenderTree {
             commands: self.render_commands(),
         }
+    }
+}
+
+/// The reader's own settings file, `<config>/ebook.yaml` -- one file per
+/// program (C-Q26, option A; `design-decisions.md` §1418). The library is
+/// data, not a setting, and stays in `<config>/ebook/library.txt`.
+const CONFIG_NAME: &str = "ebook";
+
+/// Which reading theme is chosen: `system` or `sepia`.
+const THEME_KEY: [&str; 1] = ["theme"];
+
+/// How the settings file spells a theme.
+fn theme_name(theme: ThemeKind) -> &'static str {
+    match theme {
+        ThemeKind::System => "system",
+        ThemeKind::Sepia => "sepia",
+    }
+}
+
+/// The theme kept in `doc` -- the desktop's when there is none -- and a
+/// sentence when what is kept is not a theme this knows.
+fn stored_theme(doc: &yamldoc::Document) -> (ThemeKind, Option<String>) {
+    match doc.get_str(&THEME_KEY).as_deref() {
+        None | Some("system") => (ThemeKind::System, None),
+        Some("sepia") => (ThemeKind::Sepia, None),
+        Some(other) => (
+            ThemeKind::System,
+            Some(format!(
+                "{CONFIG_NAME}.yaml: theme is {other:?}, which is not system or sepia, \
+                 so the desktop's theme is used"
+            )),
+        ),
     }
 }
 
@@ -6088,5 +6148,49 @@ mod tests {
             assert_eq!(FontSizeLevel::from_label(size.label()), Some(size));
         }
         assert_eq!(FontSizeLevel::from_label("Huge"), None);
+    }
+
+    // == The reading theme is kept (2026-09-27, C-Q26) =========================
+
+    #[test]
+    fn the_theme_chosen_is_the_next_windows() {
+        settingsfile::testing::with_scratch_config("ebook-theme", |dir| {
+            let mut app = EbookApp::new();
+            assert_eq!(app.theme, ThemeKind::System, "the desktop's until chosen");
+            app.toggle_theme();
+            let next = EbookApp::new();
+            assert_eq!(
+                next.theme,
+                ThemeKind::Sepia,
+                "the choice did not outlive the window"
+            );
+            let text =
+                std::fs::read_to_string(dir.join("slateos").join("ebook.yaml")).unwrap_or_default();
+            assert!(text.contains("theme: sepia"), "{text:?}");
+        });
+    }
+
+    #[test]
+    fn a_reader_a_test_builds_keeps_no_theme() {
+        settingsfile::testing::with_scratch_config("ebook-theme-quiet", |dir| {
+            let mut app = EbookApp::with_shelf(None);
+            app.toggle_theme();
+            assert_eq!(app.theme, ThemeKind::Sepia);
+            assert!(
+                !dir.join("slateos").join("ebook.yaml").exists(),
+                "a reader that keeps nothing wrote its theme"
+            );
+        });
+    }
+
+    #[test]
+    fn a_kept_theme_this_does_not_know_is_said_and_the_desktops_used() {
+        let (theme, problem) = stored_theme(&yamldoc::Document::parse("theme: purple\n"));
+        assert_eq!(theme, ThemeKind::System);
+        assert!(problem.is_some_and(|p| p.contains("purple")));
+        assert_eq!(
+            stored_theme(&yamldoc::Document::parse("theme: sepia\n")),
+            (ThemeKind::Sepia, None)
+        );
     }
 }

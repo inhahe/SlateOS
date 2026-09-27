@@ -170816,9 +170816,9 @@ picker's routing in `on_event`. Tests: 30 new, on Windows and on Linux under
 WSL; mutation: `apps/ebook/mutate.py`, 23 rows.
 
 **Not done:** EPUB, the format most books are sold and lent in (a zip of
-XHTML chapters) -- the obvious next format; and the reading theme (System or
-Sepia) is still per session -- it belongs in the per-program settings file
-`design-decisions.md` §1418 (C-Q26) settles.
+XHTML chapters) -- the obvious next format. (The reading theme, System or
+Sepia, was per session too; since 2026-09-27 it is kept in `ebook.yaml`, the
+per-program settings file `design-decisions.md` §1418 (C-Q26) settles.)
 
 ### [F] Text is never hinted: the `hinting` font setting changes nothing -- 2026-09-26
 

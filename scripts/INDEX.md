@@ -29,6 +29,10 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/bashprobe.py` | Faithful transport to real bash, plus an arity-exact word probe. |
 | `scripts/bc-diff.sh` | Differential test: our bc against GNU bc. |
 | `scripts/bench-history.py` | Record and diff the kernel micro-benchmark scorecard across boots. |
+| `scripts/blkdiscard-diff.sh` | Differential test: our `blkdiscard` against util-linux 2.39.3's. |
+| `scripts/blkid-cli-diff.sh` | Differential test: our `blkid` and `findfs` against util-linux 2.39.3's. |
+| `scripts/blkid-diff.sh` | Differential test: `userspace/ulblkid`, the port of util-linux 2.39.3's |
+| `scripts/blockdev-diff.sh` | Differential test: our `blockdev` against util-linux 2.39.3's. |
 | `scripts/boot-history.py` | Record the outcome of every boot test, and count the streaks that |
 | `scripts/boot-test.sh` | boot-test.sh — Build the kernel, boot it in QEMU, verify BOOT_OK. |
 | `scripts/bootstrap-worktree.sh` | bootstrap-worktree.sh — make a fresh worktree or clone able to build and boot. |
@@ -231,6 +235,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lossy-decode.py` | Find lossy byte->text conversions that reach a VALUE, not a message. |
 | `scripts/ls-diff.sh` | Compare our `ls` -- and `dir` and `vdir`, its other two builds -- against GNU's, inside WSL. |
 | `scripts/ls-quote-probe.py` | Measure all ten of GNU's quoting styles at once, byte for byte. |
+| `scripts/lsblk-diff.sh` | Differential test: our `lsblk` against util-linux 2.39.3's. |
 | `scripts/lscpu-diff.sh` | Differential test: our `lscpu` against util-linux 2.39.3's. |
 | `scripts/lsirq-diff.sh` | Differential test: our `lsirq` against util-linux 2.39.3's. |
 | `scripts/lsmem-diff.sh` | Differential test: our `lsmem` against util-linux 2.39.3's. |
@@ -346,6 +351,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/sharutils-ref.sh` | Unpacks Ubuntu's sharutils package, without root, as the uuencode/uudecode harness reference. |
 | `scripts/shellcheck-all.sh` | Run shellcheck over every script in this directory and below it. |
 | `scripts/shred-diff.sh` | shred-diff.sh — compare our `shred` against GNU coreutils 9.4's, inside WSL. |
+| `scripts/smartcols-cases.py` | Scripts for scripts/smartcols-diff.sh: tables to build, each printed. |
+| `scripts/smartcols-diff.sh` | Differential test: `userspace/smartcols`, the port of libsmartcols, against |
 | `scripts/snapshot-todo2.sh` | Commit the current todo2.txt to local-only history on the orphan branch |
 | `scripts/soak-nmi-check.sh` | One-off soak: boot current kernel repeatedly under the i6300esb NMI watchdog |
 | `scripts/sort-diff.sh` | Differential test: our sort against the host's GNU sort. |
@@ -363,6 +370,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/strftime-diff.sh` | strftime-diff.sh — both of GNU's time formatters, ours against theirs. |
 | `scripts/strings-diff.sh` | Differential test: our `strings` against GNU binutils `strings`. |
 | `scripts/sum-diff.sh` | sum-diff.sh — compare our `sum` against GNU's, inside WSL. |
+| `scripts/swapon-diff.sh` | Differential test: our `swapon` and `swapoff` against util-linux 2.39.3's. |
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
 | `scripts/sync-diff.sh` | sync-diff.sh — compare our `sync` against the real GNU one, inside WSL. |
 | `scripts/syslog-client-check.sh` | What `libcsyslog`'s callers actually send to the system log, end to end. |
@@ -440,9 +448,10 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/which-lane.py` | Print which of the six parallel-agent lanes this session is, and what it owns. |
 | `scripts/who-holds-dir.py` | Report which processes are keeping a directory un-renamable, without admin. |
 | `scripts/whoami-diff.sh` | whoami-diff.sh — compare our `whoami` against the real GNU one, inside WSL. |
+| `scripts/wipefs-diff.sh` | Differential test: our `wipefs` against util-linux 2.39.3's. |
 | `scripts/workspace-test.py` | workspace-test.py — the workspace test gate, with the three mistakes |
 | `scripts/write-error-diff.sh` | write-error-diff.sh — one question, asked of every utility that answers it: |
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_435 scripts._
+_444 scripts._

@@ -189,6 +189,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/find-stranded-serialisers.py` | Which finished serialisers can nobody reach? |
 | `scripts/find-swallowed-ticks.py` | Which event dispatchers can return before reaching their own Tick arm? |
 | `scripts/find-unpinned-picker-routing.py` | Whose tests would notice if the file picker stopped receiving events? |
+| `scripts/findmnt-diff.sh` | Differential test: our `findmnt` against util-linux 2.39.3's. |
 | `scripts/flake-hunt.sh` | flake-hunt.sh — run a crate's test suite N times and report only the runs |
 | `scripts/flock-diff.sh` | Differential test: our `flock` against util-linux 2.39.3's. |
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
@@ -236,6 +237,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/merge-readiness.py` | Say whether incoming `origin/main` commits land in the part of the tree your |
 | `scripts/mknod-diff.sh` | mknod-diff.sh — compare our `mknod` against GNU's, inside WSL. |
 | `scripts/more-diff.sh` | Differential test: our more against util-linux's more. |
+| `scripts/mountpoint-diff.sh` | Differential test: our `mountpoint` against util-linux 2.39.3's. |
 | `scripts/msysbash.py` | The bash this repository's shell scripts actually run under -- found, not assumed. |
 | `scripts/multicall-aliases.py` | Find command names that a program answers to but that nothing can invoke. |
 | `scripts/mutate-gate.py` | Break one piece of a Python gate at a time and demand its `--selftest` notice. |
@@ -437,4 +439,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_427 scripts._
+_429 scripts._

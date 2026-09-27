@@ -49,7 +49,6 @@ crond:anacron
 dmidecode:biosdecode
 efibootmgr:efivar
 eject:volname
-findmnt:mountpoint
 fio:fio-verify
 firejail:firecfg
 firejail:firemon

@@ -1,0 +1,17 @@
+[package]
+name = "ulmount"
+version = "0.1.0"
+edition = "2024"
+description = "The part of util-linux 2.39.3's libmount that findmnt, mountpoint and swapon read mount tables with, ported"
+
+[lints]
+workspace = true
+
+[dependencies]
+# ul_optstr_next, the options-string scanner libmount is built on.
+ulstrutils = { path = "../ulstrutils" }
+# Paths from bytes.
+quoting = { path = "../quoting" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

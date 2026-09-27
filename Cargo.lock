@@ -892,8 +892,14 @@ dependencies = [
 name = "findmnt"
 version = "0.1.0"
 dependencies = [
- "procinfo",
+ "getoptlong",
  "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulmount",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -1939,6 +1945,17 @@ dependencies = [
  "procinfo",
  "quoting",
  "scratchdir",
+]
+
+[[package]]
+name = "mountpoint"
+version = "0.1.0"
+dependencies = [
+ "getoptlong",
+ "quoting",
+ "stdfdguard",
+ "ulclosestream",
+ "ulmount",
 ]
 
 [[package]]
@@ -3277,6 +3294,15 @@ version = "0.1.0"
 dependencies = [
  "errmsg",
  "quoting",
+]
+
+[[package]]
+name = "ulmount"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+ "scratchdir",
+ "ulstrutils",
 ]
 
 [[package]]

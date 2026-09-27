@@ -67,7 +67,6 @@ userspace/earlyoom  # bare deny(clippy::all)
 userspace/efibootmgr  # bare deny(clippy::all)
 userspace/eject  # bare deny(clippy::all)
 userspace/fdisk
-userspace/findmnt  # bare deny(clippy::all)
 userspace/fio  # bare deny(clippy::all)
 userspace/firejail  # bare deny(clippy::all)
 userspace/fmt

@@ -67,7 +67,7 @@ fn a_source_match_is_a_devno_or_a_source() {
     let mut f = nocache();
     f.set_source_match(b"/dev/sda1");
     assert_eq!(f.matches.source.as_deref(), Some(&b"/dev/sda1"[..]));
-    assert!(f.flags & FL_NOSWAPMATCH == 0);
+    assert_eq!(f.flags & FL_NOSWAPMATCH, 0);
 }
 
 #[test]

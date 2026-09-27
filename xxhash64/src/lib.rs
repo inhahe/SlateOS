@@ -73,13 +73,13 @@ fn le32(b: &[u8]) -> u32 {
 /// ```
 #[must_use]
 pub fn xxh64(data: &[u8], seed: u64) -> u64 {
-    let mut stripes = data.chunks_exact(32);
+    let (stripes, rest) = data.as_chunks::<32>();
     let mut h = if data.len() >= 32 {
         let mut v1 = seed.wrapping_add(PRIME64_1).wrapping_add(PRIME64_2);
         let mut v2 = seed.wrapping_add(PRIME64_2);
         let mut v3 = seed;
         let mut v4 = seed.wrapping_sub(PRIME64_1);
-        for stripe in stripes.by_ref() {
+        for stripe in stripes {
             let (a, rest) = stripe.split_at(8);
             let (b, rest) = rest.split_at(8);
             let (c, d) = rest.split_at(8);
@@ -104,7 +104,7 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
     h = h.wrapping_add(data.len() as u64);
 
     // `XXH64_finalize`: what the stripes did not consume.
-    let mut tail = stripes.remainder();
+    let mut tail = rest;
     while tail.len() >= 8 {
         let (word, rest) = tail.split_at(8);
         h ^= round(0, le64(word));

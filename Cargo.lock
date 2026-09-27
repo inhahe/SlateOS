@@ -205,6 +205,18 @@ name = "blake2"
 version = "0.1.0"
 
 [[package]]
+name = "blkdiscard"
+version = "0.1.0"
+dependencies = [
+ "getoptlong",
+ "quoting",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulstrutils",
+]
+
+[[package]]
 name = "blkid"
 version = "0.1.0"
 dependencies = [

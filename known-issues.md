@@ -171329,8 +171329,9 @@ and `smartcols`, with a differential harness against WSL's.
 
 **Also:** the hand-written `wipefs` answered to `blkdiscard` too -- a
 personality no executable was ever produced for (the multicall baseline
-listed it as unreachable). The port does not; util-linux's `blkdiscard`
-(`sys-utils/blkdiscard.c`) wants a crate of its own.
+listed it as unreachable). `blkdiscard` is now a port of util-linux's in a
+crate of its own (`scripts/blkdiscard-diff.sh`: 23 cases, all an ordinary
+user can reach).
 
 ## TD-B-UTIL-LINUX-PORTS-WRITE-THROUGH-RUST-STDIO (lane B, 2026-09-26) — ✅ FIXED 2026-09-26 (lane B)
 

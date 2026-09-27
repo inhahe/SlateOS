@@ -98,10 +98,7 @@ const LONGS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
     ("help", Takes::Nothing),
 ];
-const LONG_VALS: [u8; 20] = [
-    b'c', b'd', b'D', b'g', b'o', b'k', b's', b't', b'l', b'L', b'U', b'p', b'H', b'i', b'S', b'O',
-    b'u', b'n', b'V', b'h',
-];
+const LONG_VALS: [u8; 20] = *b"cdDgokstlLUpHiSOunVh";
 
 /// `excl[]`: `-n` and `-u` exclude each other.
 const EXCL: [&[i32]; 1] = [&[b'n' as i32, b'u' as i32]];

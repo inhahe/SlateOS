@@ -1062,7 +1062,7 @@ mod tests {
         assert_eq!(tb.ents[1].options(), Some(&b"rw,x-foo=1"[..]));
         assert_eq!(tb.ents[1].user_optstr.as_deref(), Some(&b"x-foo=1"[..]));
         assert!(tb.ents[1].flags & MNT_FS_MERGED != 0);
-        assert!(tb.ents[0].flags & MNT_FS_MERGED == 0);
+        assert_eq!(tb.ents[0].flags & MNT_FS_MERGED, 0);
     }
 
     #[test]

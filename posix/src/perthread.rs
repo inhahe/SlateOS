@@ -205,7 +205,7 @@ impl PerThread {
 /// at `TP + TCB_SIZE` (both multiples of 16) keeps the next thing aligned.
 ///
 /// `crate::tls::TlsImage::reserve` adds this to every thread's mapping.
-pub const BLOCK_SIZE: u64 = (size_of::<PerThread>() as u64).next_multiple_of(16);
+pub(crate) const BLOCK_SIZE: u64 = (size_of::<PerThread>() as u64).next_multiple_of(16);
 
 /// The block sits at `TP + TCB_SIZE`, and `TP` is only guaranteed
 /// 16-byte-aligned, so the struct may not need more than that.

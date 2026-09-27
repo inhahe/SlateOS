@@ -139,8 +139,10 @@ pub const PERF_EVENT_IOC_REFRESH: u64 = 0x2402;
 pub const PERF_EVENT_IOC_RESET: u64 = 0x2403;
 /// Set output.
 pub const PERF_EVENT_IOC_SET_OUTPUT: u64 = 0x2405;
-/// Set BPF program.
-pub const PERF_EVENT_IOC_SET_BPF: u64 = 0x2408;
+/// Set BPF program: `_IOW('$', 8, __u32)`, so the direction (write) and the
+/// argument's size (4) are in the number, as in every `_IOW` -- the five
+/// above are `_IO`, which carry neither.
+pub const PERF_EVENT_IOC_SET_BPF: u64 = 0x4004_2408;
 
 // ---------------------------------------------------------------------------
 // PerfEventAttr — describes what to measure (simplified)
@@ -564,6 +566,17 @@ mod tests {
             | PERF_FLAG_PID_CGROUP
             | PERF_FLAG_FD_CLOEXEC;
         assert_eq!(combined, 0x0F);
+    }
+
+    /// `_IOW('$', 8, __u32)`, built as `asm-generic/ioctl.h` builds it: the
+    /// direction in bits 30-31, the size in 16-29, the type in 8-15.
+    #[test]
+    fn set_bpf_is_an_iow_of_a_u32() {
+        let (write, size, ty, nr) = (1u64, 4u64, u64::from(b'$'), 8u64);
+        assert_eq!(
+            PERF_EVENT_IOC_SET_BPF,
+            write << 30 | size << 16 | ty << 8 | nr
+        );
     }
 
     #[test]

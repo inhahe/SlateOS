@@ -173430,7 +173430,17 @@ were compared with glibc's headers, not musl's, and `PTHREAD_STACK_MIN` and
 `PTHREAD_KEYS_MAX` are two of the few numbers where the two differ. The
 oracle has to be the header the callers include.
 
-**Open:** nothing keeps it true -- see `todo.txt` (lane D), the constants gate.
+**Kept true since 2026-09-27** by the constants half of
+`scripts/check-libc-abi.py` (design-decisions.md §1130), which compares every
+public constant whose name a musl header defines with that header's value on
+each push that touches `posix/src`.  Its first run found three the audit had
+not reached, each fixed in the same change:
+
+| Where | What was wrong | Why the audit missed it |
+|---|---|---|
+| `linux_perf_event.rs` | `PERF_EVENT_IOC_SET_BPF` was 0x2408, as if it were an `_IO`; the kernel's is `_IOW('$', 8, __u32)`, 0x40042408 | its header, `linux/perf_event.h`, was not among the audit's |
+| `stdio.rs` | `TMP_MAX` was glibc's 238328; musl's is 10000.  `tmpnam` still tries glibc's 62 cubed names | it arrived with the stdio rewrite, nine hours after the audit |
+| `perthread.rs` | `BLOCK_SIZE`, the per-thread block's size, was public under the name musl's `sys/mount.h` gives 1024 -- not a wrong number but an internal one wearing a C name; now crate-private | its value is computed with `size_of`, which the audit's evaluator could not compute |
 
 ## D-POSIX-STDIN-WAS-A-NULL-POINTER — C's `stdin` was NULL, and CPython's REPL took it for a string (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
 

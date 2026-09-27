@@ -3684,8 +3684,14 @@ pub extern "C" fn remove(path: *const u8) -> i32 {
 
 /// `L_tmpnam`: room for [`tmpnam`]'s names.
 pub const L_TMPNAM: usize = 20;
-/// `TMP_MAX`: how many names [`tmpnam`] will try, glibc's 238328.
-pub const TMP_MAX: u32 = 238_328;
+/// `TMP_MAX`: how many distinct names [`tmpnam`] promises -- musl's header's
+/// 10000, the number a C program compiled here reads (design-decisions.md
+/// section 1119).  `tmpnam` itself tries glibc's [`TMPNAM_ATTEMPTS`].
+pub const TMP_MAX: u32 = 10_000;
+
+/// How many names [`tmpnam`] tries before it gives up: glibc's
+/// `ATTEMPTS_MIN`, 62 cubed, which is also glibc's `TMP_MAX`.
+const TMPNAM_ATTEMPTS: u32 = 62 * 62 * 62;
 
 /// Whether `path` names a directory.
 fn dir_exists(path: *const u8) -> bool {
@@ -3769,12 +3775,12 @@ unsafe fn path_search(
 
 /// glibc's `__gen_tempname(…, __GT_NOCREATE)`: fill the six `X`s at `at`
 /// with random letters and digits until the name does not exist -- `lstat`
-/// says `ENOENT` -- trying [`TMP_MAX`] times.  `false` with `EEXIST` if every
+/// says `ENOENT` -- trying [`TMPNAM_ATTEMPTS`] times.  `false` with `EEXIST` if every
 /// name was taken, or with `lstat`'s error if it failed otherwise.
 fn gen_tempname_nocreate(buf: &mut [u8], at: usize) -> bool {
     const LETTERS: &[u8; 62] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let saved = errno::get_errno();
-    for _ in 0..TMP_MAX {
+    for _ in 0..TMPNAM_ATTEMPTS {
         let mut r =
             u64::from(crate::random::arc4random()) << 32 | u64::from(crate::random::arc4random());
         for i in 0..6usize {

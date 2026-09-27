@@ -1859,6 +1859,11 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The power choices are the reference's flyout** -- done 2026-09-26
+  (`design-decisions.md` §1407). Each choice with its picture, in the
+  reference's order -- log out, lock, sleep, hibernate, restart, shut down --
+  rising above the caret with its right edge on the power button's.
+
 - `[C]` **The start menu lights what the pointer is over** -- done
   2026-09-26 (`design-decisions.md` §1406). Nothing in the start menu changed
   under the pointer until a click; now a program's row, a place, "Shut down",

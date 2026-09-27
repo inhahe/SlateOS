@@ -327,6 +327,12 @@ const BUILT_IN: &[(&str, &str)] = &[
     ),
     // The start menu power button's caret: its choices open upwards.
     ("pan-up", include_str!("../themes/aero/icons/pan-up.svg")),
+    // The power choices' log out, beside the set's shut down, restart,
+    // sleep, hibernate and lock.
+    (
+        "system-log-out",
+        include_str!("../themes/aero/icons/system-log-out.svg"),
+    ),
     (
         "accessories-calculator",
         include_str!("../themes/aero/icons/accessories-calculator.svg"),

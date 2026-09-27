@@ -593,10 +593,19 @@ pub use appearance::icons::{ICON_ID_TAG, IconRegistry, IconRequest};
 
 /// Inset of the power button and the places from their column's edges.
 const POWER_BUTTON_INSET: f32 = 8.0;
-const POWER_MENU_WIDTH: f32 = 170.0;
+/// The power choices' width: the reference's `aero-sm-power-flyout`, 236.
+const POWER_MENU_WIDTH: f32 = 236.0;
 const POWER_MENU_ROW_HEIGHT: f32 = 32.0;
-/// Space above the first and below the last row of the popup.
-const POWER_MENU_PADDING: f32 = 6.0;
+/// Space between the popup's edge and its rows, all round: the reference's
+/// `padding: 4px`.
+const POWER_MENU_PADDING: f32 = 4.0;
+/// A power choice's picture, in logical pixels: the reference's 17.
+const POWER_MENU_ICON: f32 = 17.0;
+/// From a power choice's left edge to its picture: the reference's
+/// `padding: 8px 10px`.
+const POWER_MENU_ROW_INSET: f32 = 10.0;
+/// From a power choice's picture to its words: the reference's `gap: 10px`.
+const POWER_MENU_ICON_GAP: f32 = 10.0;
 /// Gap between the power button and the popup that rises from it.
 const POWER_MENU_GAP: f32 = 6.0;
 /// Distance from a popup row's left edge to the start of its label.
@@ -3593,7 +3602,10 @@ impl DesktopShell {
             .min(self.screen_width as f32)
             .max(0.0);
         let y = (button.y - self.scale(POWER_MENU_GAP) - h).max(0.0);
-        Rect::new(button.x, y, w, h)
+        // Its right edge on the button's, over the caret that opens it -- the
+        // reference's `right: 0` -- and on the screen however wide it is.
+        let x = (button.x + button.w - w).max(0.0);
+        Rect::new(x, y, w, h)
     }
 
     /// How many popup rows fit, which is every entry unless the popup had to be
@@ -3613,10 +3625,13 @@ impl DesktopShell {
     pub fn power_menu_row_rect(&self, row: usize) -> Rect {
         let menu = self.power_menu_rect();
         let height = self.scale(POWER_MENU_ROW_HEIGHT);
+        let pad = self.scale(POWER_MENU_PADDING);
+        // Inside the popup's padding on every side, as the reference's items
+        // are: a lit row is a wash within the panel, not a band across it.
         Rect::new(
-            menu.x,
-            menu.y + self.scale(POWER_MENU_PADDING) + row as f32 * height,
-            menu.w,
+            menu.x + pad,
+            menu.y + pad + row as f32 * height,
+            (menu.w - pad * 2.0).max(0.0),
             height,
         )
     }
@@ -8603,6 +8618,7 @@ impl DesktopShell {
             shadow(tree, panel, radii);
         }
 
+        let icon_px = self.icon_px(POWER_MENU_ICON);
         let rows: Vec<power::PowerMenuRow<'_>> = (0..self.power_menu_visible_rows())
             .filter_map(|row| {
                 power::PowerChoice::ALL
@@ -8611,9 +8627,12 @@ impl DesktopShell {
                         label: choice.label(),
                         rect: self.power_menu_row_rect(row),
                         lit: self.start_lit == Some(StartLit::PowerRow(row)),
+                        icon: self.icon(choice.icon_name(), icon_px, self.theme.start_menu_fg),
                     })
             })
             .collect();
+        #[allow(clippy::cast_precision_loss)]
+        let icon_size = icon_px as f32;
 
         tree.extend(power::render_power_menu(
             panel,
@@ -8627,7 +8646,9 @@ impl DesktopShell {
                 },
                 radii,
                 font_size: self.font_size(TextRole::Item),
-                text_inset: self.scale(POWER_MENU_TEXT_INSET),
+                text_inset: self.scale(POWER_MENU_ROW_INSET),
+                icon_size,
+                icon_gap: self.scale(POWER_MENU_ICON_GAP),
                 lit: with_alpha(self.theme.accent_color, POWER_MENU_LIT_ALPHA),
                 lit_radii: CornerRadii::all(self.scale(4.0)),
             },

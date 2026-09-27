@@ -496,12 +496,12 @@ fn the_power_menu_offers_every_power_action_and_carries_each_out() {
     assert_eq!(
         labels,
         [
-            "Shut down",
-            "Restart",
+            "Log out",
+            "Lock",
             "Sleep",
             "Hibernate",
-            "Lock",
-            "Log out"
+            "Restart",
+            "Shut down"
         ]
     );
 
@@ -520,6 +520,93 @@ fn the_power_menu_offers_every_power_action_and_carries_each_out() {
         // Both menus go: the machine is about to change state behind them.
         assert!(!shell.power_menu_open);
         assert!(!shell.start_menu_open);
+    }
+}
+
+/// **The choices rise above the caret that opens them**, their right edge on
+/// the button's -- the reference's `right: 0; bottom: calc(100% + 6px)` --
+/// and stay on the screen at every scale.
+#[test]
+fn the_power_choices_rise_above_the_caret_with_their_right_edge_on_the_buttons() {
+    for percent in [100, 150, 200] {
+        let mut shell = scaled(percent);
+        shell.toggle_start_menu();
+        let button = shell.power_button_rect();
+        let caret = shell.power_caret_rect();
+        let menu = shell.power_menu_rect();
+        assert!(menu.x >= 0.0, "off the left of the screen at {percent}%");
+        assert!(
+            (menu.x + menu.w - (button.x + button.w)).abs() < 0.01,
+            "the right edges differ at {percent}%: {menu:?} against {button:?}"
+        );
+        assert!(
+            menu.x <= caret.x && menu.y + menu.h <= button.y,
+            "not above the caret at {percent}%: {menu:?} against {caret:?}"
+        );
+        // Every row inside the panel's padding, so a lit row is a wash in
+        // the panel rather than a band across it.
+        for row in 0..shell.power_menu_visible_rows() {
+            let rect = shell.power_menu_row_rect(row);
+            assert!(
+                rect.x > menu.x && rect.x + rect.w < menu.x + menu.w,
+                "row {row} touches the panel's sides at {percent}%: {rect:?} in {menu:?}"
+            );
+        }
+    }
+}
+
+/// **Every power choice draws its picture before its words**, as the
+/// reference's `aero-sm-power-item-ico` -- the freedesktop names, so a theme
+/// draws them -- in the choices' own text colour.
+#[test]
+fn every_power_choice_draws_its_picture_before_its_words() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    shell.toggle_power_menu();
+    let tree = shell.render_start_menu().expect("open");
+    let expected = [
+        ("Log out", "system-log-out"),
+        ("Lock", "system-lock-screen"),
+        ("Sleep", "system-suspend"),
+        ("Hibernate", "system-suspend-hibernate"),
+        ("Restart", "system-reboot"),
+        ("Shut down", "system-shutdown"),
+    ];
+    assert_eq!(shell.power_menu_visible_rows(), expected.len());
+    for (row, (label, icon)) in expected.iter().enumerate() {
+        let rect = shell.power_menu_row_rect(row);
+        let images: Vec<(f32, f32, u64)> = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } if rect.contains(*x + 1.0, *y + 1.0) => Some((*x, *width, *image_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1, "{label}: {images:?}");
+        let (x, width, id) = images[0];
+        let request = shell.icon_request(id).expect("an icon");
+        assert_eq!(request.name, *icon, "{label}");
+        assert_eq!(request.color, shell.theme.start_menu_fg, "{label}");
+        let text_x = tree
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text { x, y, text, .. }
+                    if text == label && rect.contains(*x, *y) =>
+                {
+                    Some(*x)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn on row {row}"));
+        assert!(text_x >= x + width, "{label}'s words overlap its picture");
     }
 }
 

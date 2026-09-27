@@ -155,14 +155,18 @@ pub enum PowerChoice {
 }
 
 impl PowerChoice {
-    /// Every choice, in the order the menu lists them.
+    /// Every choice, in the order the menu lists them, top to bottom: the
+    /// session's choices first, then the machine's from the lightest to
+    /// switching it off -- so "Shut down" is last, nearest the button the
+    /// menu rises from. The Aero reference's order (`SM_POWER`), with lock
+    /// where it has "sleep the display".
     pub const ALL: [Self; 6] = [
-        Self::ShutDown,
-        Self::Restart,
+        Self::LogOut,
+        Self::Lock,
         Self::Sleep,
         Self::Hibernate,
-        Self::Lock,
-        Self::LogOut,
+        Self::Restart,
+        Self::ShutDown,
     ];
 
     /// The words on the row. Verbs, since each is something the button does
@@ -176,6 +180,20 @@ impl PowerChoice {
             Self::Hibernate => "Hibernate",
             Self::Lock => "Lock",
             Self::LogOut => "Log out",
+        }
+    }
+
+    /// The picture beside the row's words: the freedesktop icon names, so a
+    /// theme that draws them draws these.
+    #[must_use]
+    pub const fn icon_name(self) -> &'static str {
+        match self {
+            Self::ShutDown => "system-shutdown",
+            Self::Restart => "system-reboot",
+            Self::Sleep => "system-suspend",
+            Self::Hibernate => "system-suspend-hibernate",
+            Self::Lock => "system-lock-screen",
+            Self::LogOut => "system-log-out",
         }
     }
 
@@ -1553,6 +1571,9 @@ pub struct PowerMenuRow<'a> {
     pub rect: Rect,
     /// Whether the pointer is over it, which lights it.
     pub lit: bool,
+    /// The picture drawn before the words: an image id from the shell's
+    /// icons, drawn at [`PowerMenuStyle::icon_size`].
+    pub icon: u64,
 }
 
 /// The colours and sizes a power menu is drawn with.
@@ -1573,15 +1594,20 @@ pub struct PowerMenuStyle {
     pub radii: CornerRadii,
     /// Label size in physical pixels — already scaled by the caller.
     pub font_size: f32,
-    /// Distance from a row's left edge to the start of its label.
+    /// Distance from a row's left edge to its picture, and from its words'
+    /// end to its right edge.
     pub text_inset: f32,
+    /// The side of a row's picture, in physical pixels.
+    pub icon_size: f32,
+    /// From a row's picture to its words.
+    pub icon_gap: f32,
     /// The wash under the row the pointer is over.
     pub lit: Color,
     /// The rounding of that wash.
     pub lit_radii: CornerRadii,
 }
 
-/// Draw a power menu: a panel, and one label per row.
+/// Draw a power menu: a panel, and one picture and label per row.
 ///
 /// The drop shadow is not drawn here. Every floating surface in the shell casts
 /// the same one, and only when the user has shadows switched on — that is one
@@ -1624,8 +1650,17 @@ pub fn render_power_menu(
                 corner_radii: style.lit_radii,
             });
         }
+        let icon_x = row.rect.x + style.text_inset;
+        cmds.push(RenderCommand::Image {
+            x: icon_x,
+            y: row.rect.y + (row.rect.h - style.icon_size).max(0.0) / 2.0,
+            width: style.icon_size,
+            height: style.icon_size,
+            image_id: row.icon,
+        });
+        let text_x = icon_x + style.icon_size + style.icon_gap;
         cmds.push(RenderCommand::Text {
-            x: row.rect.x + style.text_inset,
+            x: text_x,
             // Centred in the row rather than offset by a constant, so a larger
             // font size does not drift the label towards the row's bottom edge.
             y: row.rect.y + (row.rect.h - style.font_size).max(0.0) / 2.0,
@@ -1633,7 +1668,7 @@ pub fn render_power_menu(
             color: style.foreground,
             font_size: style.font_size,
             font_weight: FontWeightHint::Regular,
-            max_width: Some((row.rect.w - style.text_inset * 2.0).max(0.0)),
+            max_width: Some((row.rect.x + row.rect.w - style.text_inset - text_x).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
     }
@@ -1763,6 +1798,21 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+
+    /// **Every power choice's picture is one the built-in theme draws**, so
+    /// the menu is never a column of blanks on a machine with no icon theme
+    /// installed.
+    #[test]
+    fn every_power_choice_has_a_picture_the_built_in_theme_draws() {
+        let drawn = appearance::icons::built_in_names();
+        for choice in super::PowerChoice::ALL {
+            assert!(
+                drawn.contains(&choice.icon_name()),
+                "{choice:?}'s {} is not in the built-in set",
+                choice.icon_name()
+            );
+        }
+    }
 
     #[test]
     fn test_default_config() {

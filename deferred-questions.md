@@ -418,7 +418,13 @@ removing the feature.
 
 ---
 
-## DQ3 (was C-Q18) — When fullscreen is shown without being copied, what happens to the mouse pointer over it?
+## DQ3 (was C-Q18) — When fullscreen is shown without being copied, what happens to the mouse pointer over it? — ANSWERED 2026-09-27, `design-decisions.md` §1334
+
+*The operator answered it before the trigger fired, and answered the future
+case too: the pointer is always shown -- drawn on the presenter's copy today,
+and by the display's hardware cursor plane once a screen is shown without
+copying. Lane F wrote it up as §1334. Kept here for its history, and so
+the number is not reissued; there is nothing left to decide.*
 
 *(Was `open-questions.md` C-Q18, filed by lane C on 2026-09-13. Deferred
 2026-09-25 by lane C at lane F's request,

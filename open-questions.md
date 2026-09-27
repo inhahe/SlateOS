@@ -2330,13 +2330,18 @@ answered question left in the body is pure cost — and, being older, it sorts
   work by lane.
 
 - **Nothing draws the mouse pointer; what happens over fullscreen?** (C-Q18)
-  — deferred 2026-09-25 to `deferred-questions.md` DQ3, at lane F's request
+  — answered 2026-09-27: the pointer is always shown, drawn on the
+  presenter's copy today and by the display's hardware cursor plane once a
+  screen is shown without copying; the light/dark request is met by the
+  existing Default and Inverted outlined schemes. Written up by lane F as
+  `design-decisions.md` §1334. Before that it was
+  deferred 2026-09-25 to `deferred-questions.md` DQ3, at lane F's request
   (`requests/f-c-c-q18s-premise-changed-the-pointer-is-drawn-over-fullscreen-at-no-cost.md`).
   Lane F built the pointer as a layer laid over the picture as it is shown, the
   way a graphics chip's cursor plane is, and every presenter that exists copies
   a fullscreen picture anyway, so the pointer costs fullscreen nothing -- the
-  trade the question asked about does not exist yet. It comes back when a
-  presenter scans a fullscreen window out without copying it.
+  trade the question asked about does not exist yet. The operator's answer
+  settled the later case too, so it does not come back.
 
 - **What does "selected" look like, and what happens to a toolbar?** (C-Q13,
   C-Q14) — both answered 2026-09-12. Selection takes the accent everywhere, at

@@ -777,7 +777,9 @@ impl PdfDocument {
         self.pages.len()
     }
 
-    /// Create a sample document for testing/demonstration.
+    /// An invented document -- lorem ipsum on every page -- for the tests.
+    /// `#[cfg(test)]`: nothing may show a user a document no file holds.
+    #[cfg(test)]
     pub fn create_sample(path: PathBuf, page_count: usize) -> Self {
         let mut doc = Self::new(path);
         doc.metadata.title = Some("Sample Document".to_string());

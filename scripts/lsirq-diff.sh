@@ -36,11 +36,14 @@ set -u
 DIFF_PROG='lsirq'
 DIFF_PKG='lsirq'
 DIFF_NEED='timeout script stty unshare mount python3'
-# shellcheck source=util-linux-extra.sh
-. "$(dirname "$0")/util-linux-extra.sh"
-DIFF_REF="$UL_EXTRA_ROOT/usr/bin/lsirq"
+# The reference is unpacked, and put on PATH, after the preamble's re-execs.
+DIFF_NO_REF=1
+DIFF_NO_BINDIR=1
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
+# shellcheck source=util-linux-extra.sh
+. "$(dirname "$0")/util-linux-extra.sh"
+ul_extra_bindir usr/bin/lsirq
 
 pass=0; fail=0; broken=0; hung=0
 

@@ -11,16 +11,23 @@
 # same util-linux 2.39.3 source as the installed package, and link against
 # the installed libsmartcols.
 #
-# Sourced, inside WSL, by a harness BEFORE it sources diff-wsl.sh:
+# Sourced by a harness AFTER it sources diff-wsl.sh, which re-execs the harness
+# from the top -- into WSL, then under `timeout` -- so that anything run before
+# it runs again (scripts/check-diff-preamble-order.py). The harness tells the
+# preamble that the reference and the PATH directories are its own business,
+# and this provides both:
 #
-#     . "$(dirname "$0")/util-linux-extra.sh"
-#     DIFF_REF=$UL_EXTRA_ROOT/usr/bin/lsirq
+#     DIFF_NO_REF=1
+#     DIFF_NO_BINDIR=1
 #     . "$(dirname "$0")/diff-wsl.sh"
+#     . "$(dirname "$0")/util-linux-extra.sh"
+#     ul_extra_bindir usr/bin/lsirq
 #
-# On the Windows host, where the harness starts before diff-wsl.sh moves it
-# into WSL, this does nothing; the fetch happens on the second pass. A fetch
-# that fails leaves the reference missing, and diff-wsl.sh then skips the run
-# rather than pass wrongly.
+# `ul_extra_bindir PATH` unpacks the packages unless they are cached, then puts
+# our binary and the unpacked reference on the preamble's two PATH directories
+# under the harness's DIFF_PROG, as the preamble would have. A reference that
+# cannot be had is a skip, said out loud, as the preamble's own missing
+# reference is; a link that cannot be made is a failure.
 
 UL_EXTRA_ROOT=$HOME/.cache/slateos-ul-extra/root
 
@@ -38,4 +45,15 @@ ul_extra_fetch() {
   )
 }
 
-ul_extra_fetch
+# shellcheck disable=SC2154  # bindir, OURS and DIFF_PROG are the preamble's
+ul_extra_bindir() {
+  ul_extra_fetch
+  ul_extra_ref=$UL_EXTRA_ROOT/$1
+  if [ ! -x "$ul_extra_ref" ]; then
+    echo "$DIFF_PROG-diff: could not unpack $1 from Ubuntu's packages; skipping"
+    exit 0
+  fi
+  mkdir -p "$bindir/ours" "$bindir/gnu" || exit 1
+  ln -s "$OURS" "$bindir/ours/$DIFF_PROG" || exit 1
+  ln -s "$ul_extra_ref" "$bindir/gnu/$DIFF_PROG" || exit 1
+}

@@ -5050,14 +5050,15 @@ impl SystemRestoreUI {
             }
             // A component this system cannot keep is drawn faint: it is
             // listed so what a restore point does not hold is in plain view.
+            let unavailable = !checked;
             rt.push(RenderCommand::Text {
                 x: cx + CHECKBOX_SIZE + 4.0,
                 y: cy + 1.0,
                 text: comp.label().to_string(),
-                color: if checked {
-                    self.palette.text
-                } else {
+                color: if unavailable {
                     self.palette.overlay0
+                } else {
+                    self.palette.text
                 },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,

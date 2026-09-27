@@ -168962,9 +168962,14 @@ The card check sits above the find panel's branch, which returns before
 everything below it. This is the third app where that placement was the
 difference between a list and a modal with no exit.
 
-## `TD-C-THE-DESKTOP-CRATE-CARRIES-A-SECOND-LAUNCHER-NOTHING-USES` (lane C, 2026-09-27)
+## `TD-C-THE-DESKTOP-CRATE-CARRIES-A-SECOND-LAUNCHER-NOTHING-USES` (lane C, 2026-09-27) -- **FIXED 2026-09-27**
 
-**Status:** OPEN.
+**Status:** FIXED 2026-09-27, the same day: `LauncherState`, its frecency,
+`LauncherAction`, the dialog's constants and the category colour helpers are
+deleted, with their tests -- 2,510 lines to 608. What the shell uses stays:
+the program database, the three program paths, `search_score` and
+`program_started`. `scripts/reintro-palette.py` lost its 60 entries for the
+dialog (see the entry below for the rest of that harness).
 
 **In short:** `gui/desktop/src/launcher.rs` holds `LauncherState`, a
 search-as-you-type program launcher with its own key handling, fuzzy ranking
@@ -168983,6 +168988,28 @@ checking with a grep and `scripts/check-tested-but-uncalled.py` that nothing out
 the module names them; or, if the shell should have a launcher dialog after
 all, wire this one and delete lane E's copy -- a question for the operator, not
 a cleanup. Deleting is the default, since the start menu's search does the job.
+
+## `TD-C-THE-PALETTE-REINTRODUCTION-HARNESS-HAS-ROTTED` (lane C, 2026-09-27)
+
+**Status:** OPEN.
+
+**In short:** `scripts/reintro-palette.py` proves the palette-conversion tests
+are real by putting each old colour back and checking a test fails. No gate
+runs it, and it has rotted unseen: its `--check` mode stopped on a file that no
+longer exists. Found while deleting the dead launcher. Nine files it named are
+gone (settings pages moved to the Settings program, `blur.rs`, `a11y.rs`, the
+launcher's dialog), and their 400 entries were removed on 2026-09-27, since
+they can never apply. What is left: **1,459 defects, of which 308 no longer
+match the code they break and 3 match it ambiguously** (`--check`, 2026-09-27).
+
+**Where:** `scripts/reintro-palette.py`; the stale entries are listed by
+`python scripts/reintro-palette.py --check`.
+
+**Proper fix:** repair each stale entry to the code as it now reads -- each is
+the proof that a named test catches a named regression, so dropping them
+wholesale loses that proof -- or retire those whose test is gone; then wire
+`--check` (seconds, no build) into the boot test's tooling suites, so the next
+rename that strands an entry fails a gate rather than going unnoticed for weeks.
 
 ## `TD-C-THIRTY-EIGHT-CARD-TESTS-ASK-A-WEAKER-QUESTION-THAN-THEY-READ` (lane C, 2026-09-22)
 

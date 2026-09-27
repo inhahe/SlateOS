@@ -1501,8 +1501,8 @@ pub enum StartRow<'a> {
 ///
 /// The shell cannot start a process itself: it has no connection to the process
 /// server, and inventing one here would put policy about *how* programs start
-/// inside the window manager. It reports the intent instead, exactly as
-/// [`launcher::LauncherAction`] already does for the search dialog.
+/// inside the window manager. It reports the intent instead, and the host
+/// carries it out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellAction {
     /// The shell did not want this event; deliver it to the window under the

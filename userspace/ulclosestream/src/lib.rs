@@ -152,6 +152,22 @@ impl Stdout {
         }
     }
 
+    /// `fflush(stdout)`: what is held, written now. A failure sets the
+    /// stream's error flag, as glibc's does, for `close_stdout` to report.
+    pub fn flush(&mut self) {
+        if self.held.is_empty() {
+            return;
+        }
+        let chunk = std::mem::take(&mut self.held);
+        self.held_units = 0;
+        if let Err(e) = sys::write_all(sys::STDOUT, &chunk)
+            && self.failed.is_none()
+        {
+            // glibc drops what it could not write and sets the flag.
+            self.failed = Some(e);
+        }
+    }
+
     /// `exit` in a program that never registers `close_stdout` (`lsirq`):
     /// glibc's own flush of what is held, whose failure nobody hears of --
     /// no message, and the status is the program's.

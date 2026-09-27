@@ -58744,6 +58744,24 @@ test of the fixture, not of the bound.
 
 ### Deferred, each with the condition that un-defers it
 
+- **`apps/textline` can go.** Lane C extended `guitk::textinput::TextInput`
+  with textline's two extras -- `set_capacity(Some(n))` (characters, not
+  bytes; a full field answers Handled) and a paste that leaves control
+  characters out -- on lane-c as 137f64c5f; `LineEdit::handled` is
+  `edit_key(..) != KeyEdit::Unhandled`. **Trigger:** it is on `origin/main`
+  (`git show origin/main:gui/toolkit/src/textinput.rs | grep set_capacity`).
+  Then each app using `textline` moves to `TextInput` and the crate goes;
+  lane C reports the nine apps calling paste/edit_key pass unchanged.
+
+- **The settings-leak guard.** Lane C made `settingsfile`'s `store` panic
+  under its `testing` feature when the file would land outside
+  `std::env::temp_dir()` (lane-c 7ed763741; design-decisions §1409 says why
+  it judges by where, not by a flag). **Trigger:** it is on `origin/main`.
+  Then `known-issues.md` -> `[E] A test that forgets its scratch settings
+  writes the developer's own` is FIXED and
+  `requests/e-c-settingsfile-refuses-a-store-outside-a-scratch-config-in-tests.md`
+  is closed; lane C found every lane E test already clean.
+
 - **Three private copies of colour-as-hex-text** -- `parse_colour` and its
   writer in `apps/spreadsheet`, `apps/contacts` and `apps/kanban`. Lane C
   landed `guitk::color::Color::hex_text` (`#rrggbb`, or `#rrggbbaa` when not

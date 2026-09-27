@@ -56565,6 +56565,28 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
+## explorer: Ask when a pasted name is taken (lane E, 2026-09-27)
+
+The folder menu offers keep both / skip / replace if newer / replace for a
+paste or a drop onto a name the folder already has (C-Q26), and not "Ask",
+because nothing can ask yet:
+
+* `apps/explorer/src/fileops.rs`, copy: `ConflictPolicy::Ask` pushes
+  `FileOpEvent::Conflict` and returns `ActionOutcome::Skipped` -- "In a real
+  async implementation the caller would respond. For now, skip." A move
+  with `Ask` skips without the event.
+* The window has no conflict dialog.
+
+What it wants: the executor stops at the conflicting action in a state that
+says so (`src`, `dest`, and whether it is a copy or a move), `step()` does
+nothing further until the caller answers with keep both / skip / replace
+(and "the same for the rest"), and the answer is applied to that action
+before the loop moves on. The window draws the question when the
+operation it is stepping stops there -- names, sizes and dates of both --
+and "Ask" joins the menu's choices. The comment on
+`columnprefs::CONFLICT_CHOICES` says the executor can pause; it cannot, and
+the comment goes when this is done.
+
 ## credmanager: what a credential manager still cannot do
 
 Adding a credential and copying a field are wired up as of this change. The

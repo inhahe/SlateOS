@@ -2427,6 +2427,8 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]

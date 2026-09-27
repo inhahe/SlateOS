@@ -161045,7 +161045,7 @@ writer, and each is frozen at the value you would have chosen anyway:
 
 | App | Frozen at | Consequence |
 |---|---|---|
-| `markdowneditor` `autosave_enabled` | `true` | autosave is always on; it cannot be turned off, but nothing is lost by that |
+| `markdowneditor` `autosave_enabled` | `true` | autosave is always on; it cannot be turned off, but nothing is lost by that -- **it could be turned off after all, for the window only; since 2026-09-27 (lane E, C-Q26) the choice is kept in `markdowneditor.yaml`** |
 | `diskimager` `verify_after_write` | `true` | images are always verified; the window draws it as a checkbox that cannot be unchecked |
 | `imageviewer` `show_status_bar` | `true` | **fixed** -- `S` |
 | `spreadsheet` `show_toolbar` | `true` | **fixed** -- and it had to be `Ctrl+T`, because this handler's catch-all starts editing the cell on any printable character, so a bare `T` would have stopped being typeable into a spreadsheet. A fix that breaks typing is worse than the panel it frees |
@@ -161967,7 +161967,7 @@ and they want three different things:
 |---|---|
 | `apps/regextester` `i`/`g`/`m` | **a key.** The buttons are already drawn and already read; they needed a chord. Fixed. |
 | `apps/spreadsheet` `show_gridlines`, `show_formula_bar`, `show_status_bar` | **a key.** View toggles in an app that already has an `F1` list to advertise them on. |
-| `apps/lockscreen` `show_clock_seconds`, `show_date` | **a settings file, not a key.** `main` passes `LockScreenConfig::default()`, so a lock screen can never show seconds and always shows the date -- but a lock screen is a security surface where every keystroke belongs to the password field, and adding shortcuts to it would be the wrong repair. This one is blocked on where its configuration should live, which is a question for the operator rather than a line of code. |
+| `apps/lockscreen` `show_clock_seconds`, `show_date` | **Fixed 2026-09-27 (lane E, C-Q26): set on Settings' Screen Lock page, kept in `lockscreen.yaml`.** **a settings file, not a key.** `main` passes `LockScreenConfig::default()`, so a lock screen can never show seconds and always shows the date -- but a lock screen is a security surface where every keystroke belongs to the password field, and adding shortcuts to it would be the wrong repair. This one is blocked on where its configuration should live, which is a question for the operator rather than a line of code. |
 
 **Down to 51 in 23 apps** as of the spreadsheet and logviewer fixes, and
 `apps/passwordgen` dropped off the list entirely when its options were wired --
@@ -162044,6 +162044,18 @@ feature to design rather than a key to bind.
 Filed here so the next reader does not have to re-derive it, and not fixed,
 because guessing at a destructive default is exactly the kind of choice that
 should not be made by whoever happens to be passing.
+
+> **2026-09-27 (lane E, C-Q26):** the choice is offered without guessing
+> at a default -- the folder menu's *When the name is taken* (keep both,
+> skip, replace if newer, replace), kept in `explorer.yaml`, with keep
+> both still the default, so nothing changes for anybody who does not
+> choose. The prompt this entry asks for is the one piece left, and it is
+> bigger than a dialog: `ConflictPolicy::Ask` in the executor emits a
+> `Conflict` event and then **skips the file** ("In a real async
+> implementation the caller would respond. For now, skip."), and a move
+> skips without even the event -- so it cannot be offered until the
+> executor waits for an answer. `todo.txt` → *explorer: Ask when a pasted
+> name is taken*.
 
 **A second kind of noise, found by checking the two rows with the highest
 stakes.** `apps/installer`'s `wipe` and `auto_reboot` look frozen and are not:
@@ -164055,6 +164067,24 @@ to, because the test drives the app the way the crate's own callers do.
 both dialogs, so both doors reach it.
 
 ## `TD-C-A-PASSWORD-POLICY-NOBODY-CAN-STATE` (lane C, 2026-09-18)
+
+> **Status: FIXED 2026-09-27 (lane E), with C-Q26 answered (option A,
+> §1418).** The rules are drawn and changed on a Rules tab (`4`; Up/Down
+> choose, Left/Right change, Space flips) and kept in `passwordgen.yaml`
+> under `rules:` -- shortest and longest length, each kind of character,
+> how many kinds to mix, the least strength in bits, refuse the common
+> ones. A value there that cannot be used keeps its default and is said,
+> in the status bar and on the tab. The tab also says what the rules make
+> of the generated password and of the one in the analyser.
+>
+> **Four more things were wrong in the same program, found on the way:**
+> the analyser never drew what was typed into it (the meter measured a
+> password nobody could see); the digit keys switched tabs there, so
+> "abc123" jumped to the generator at the "1"; switching tabs kept
+> the old tab's strength on show beside the new tab's password, and the
+> status bar judged the generated password even on the analyser; and a
+> password's length was counted in bytes, so "pässwörd" was ten
+> characters long. All four fixed in the same change, each with a test.
 
 **In short:** `apps/passwordgen` checks every password it makes against a
 rule set -- must contain a digit, must contain a symbol, must not be a common

@@ -1156,10 +1156,7 @@ fn recv_tcp_seg6(
 
 /// Outcome of one non-filtered NIC read for the multiplexed RX pump.
 enum RawRx {
-    /// No frame available (`WOULD_BLOCK`) or a read error — draining is done.
-    None,
-    /// A frame arrived but is not a TCP segment addressed to us — skip it, but
-    /// keep draining (there may be more).
+    /// Not a TCP segment addressed to us.
     Ignore,
     /// A TCP segment addressed to us: peer identity `(src_ip, src_port, dst_port)`
     /// for routing to the owning connection, plus the parsed segment metadata. The
@@ -1175,16 +1172,8 @@ enum RawRx {
 /// the shared-RX-demux counterpart to [`recv_tcp_seg`]: where that function drops
 /// any frame not matching one connection, this one hands back the peer identity so
 /// a sibling connection's frames are delivered to *it* instead of being lost.
-fn recv_tcp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> RawRx {
-    let n = raw_rx(frame);
-    if n < 0 {
-        return RawRx::None; // WOULD_BLOCK or error → drain complete.
-    }
-    let len = n as usize;
-    if len > frame.len() {
-        return RawRx::Ignore;
-    }
-    let eth = match ethernet::Frame::parse(frame.get(..len).unwrap_or(&[])) {
+fn parse_tcp(me: &IfInfo, bytes: &[u8], pl: &mut [u8]) -> RawRx {
+    let eth = match ethernet::Frame::parse(bytes) {
         Some(eth) => eth,
         None => return RawRx::Ignore,
     };
@@ -1275,13 +1264,7 @@ struct UdpRx {
 /// D-NETSTACK-RX-DEMUX). Both IPv4 (`ETHERTYPE_IPV4` → [`ipv4::Packet`]) and IPv6
 /// (`ETHERTYPE_IPV6` → [`ipv6::Packet`]) UDP datagrams are classified; the family
 /// is reported so `OP_UDP_RECV` can report the correct `sockaddr` family.
-fn recv_udp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> Option<UdpRx> {
-    let n = raw_rx(frame);
-    if n < 0 {
-        return None; // WOULD_BLOCK or error.
-    }
-    let len = n as usize;
-    let bytes = frame.get(..len)?;
+fn parse_udp(me: &IfInfo, bytes: &[u8], pl: &mut [u8]) -> Option<UdpRx> {
     let eth = ethernet::Frame::parse(bytes)?;
     match eth.ethertype {
         ethernet::ETHERTYPE_IPV4 => {
@@ -2419,7 +2402,8 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
     let mut idle_ticks: u32 = 0;
     // Persistent ring-TCP session: survives across separate OP_RING_TCP control
     // calls so a connection opened in one call is addressable in later ones.
-    let mut ring_session = RingSession::new();
+    let mut sessions = Sessions::new();
+    let mut net = Net::new();
 
     // Persistent mode ignores the idle deadline and serves for the system's
     // lifetime; bounded mode exits after SERVICE_IDLE_ITERS idle iterations.
@@ -2453,7 +2437,8 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
                 &next_hop_mac,
                 me,
                 &mut txid,
-                &mut ring_session,
+                &mut sessions,
+                &mut net,
                 &mut reply,
             );
             let _ = syscall3(
@@ -2468,7 +2453,7 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
     }
 
     // Tear down any ring session the client left open (unmaps + closes conns).
-    ring_session.teardown(me);
+    sessions.close_all(&mut net, me);
 
     let _ = syscall1(SYS_SERVICE_UNREGISTER, listener as u64);
     if served > 0 {
@@ -2487,7 +2472,8 @@ fn handle_request(
     next_hop_mac: &Option<[u8; 6]>,
     me: &IfInfo,
     txid: &mut u16,
-    ring_session: &mut RingSession,
+    sessions: &mut Sessions,
+    net: &mut Net,
     out: &mut [u8],
 ) -> usize {
     let fail = |out: &mut [u8]| netipc::encode_fail(out).unwrap_or(0);
@@ -2586,7 +2572,7 @@ fn handle_request(
             let ok = match next_hop_mac {
                 Some(mac) => {
                     *txid = txid.wrapping_add(1);
-                    ring_tcp(ring_session, handle, size, me, mac, *txid)
+                    ring_tcp(sessions, net, handle, size, me, mac, *txid)
                 }
                 None => false,
             };
@@ -2727,77 +2713,200 @@ fn ring_send_transform(ring: &netring::Ring, sqe: &netipc::ring::Sqe) -> i32 {
     len as i32
 }
 
-/// Handle an [`netipc::OP_RING_TCP`] request: map the kernel-created ring region
-/// `handle` (`size` bytes) read-write, attach as a [`netring::Ring`], and drain
-/// the socket-opcode batch driving one live TCP connection, then unmap. Returns
-/// `true` iff at least one SQE was processed and every completion was posted.
-/// `seed_ipid` seeds the connection's IPv4 identification counter.
+/// What the daemon's tables key an entry by: the session (ring) that created
+/// it, and the id that session gave it, as `session << 32 | id`.
+///
+/// Ids are a client's own namespace, so two rings may use the same id for
+/// different things -- the kernel's raw-ring boot tests use fixed ids, while
+/// its sockets draw theirs from one counter. Keying by the pair keeps every
+/// session's entries apart while the tables stay one per daemon, which is what
+/// lets a frame for a connection on one ring be routed while another ring is
+/// being served (design B of A-Q15, design-decisions §972).
+type Key = u64;
+
+/// The [`Key`] for `id` in `session`.
+fn key(session: u32, id: u32) -> Key {
+    (u64::from(session) << 32) | u64::from(id)
+}
+
+/// The session a [`Key`] belongs to.
+#[allow(clippy::cast_possible_truncation)] // the top half is the session, by construction
+fn key_session(k: Key) -> u32 {
+    (k >> 32) as u32
+}
+
+/// One frame off the NIC, classified for [`pump`].
+enum Rx {
+    /// No frame was waiting (`WOULD_BLOCK`), or the read failed: draining is done.
+    Drained,
+    /// A TCP segment addressed to us.
+    Tcp(RawRx),
+    /// A UDP datagram addressed to us.
+    Udp(UdpRx),
+    /// A frame that is neither: skip it and keep draining.
+    Other,
+}
+
+/// Read one frame off the NIC and classify it once, for every protocol.
+///
+/// The TCP and UDP pumps used to read frames separately, and each discarded
+/// what was not its own: a UDP datagram arriving while a TCP connection was
+/// served was lost, and a TCP segment arriving while a datagram socket was
+/// served waited for its sender's retransmission. With every socket in one
+/// session (design A of A-Q15) that was ordinary traffic, not a corner case.
+fn recv_any(me: &IfInfo, frame: &mut [u8], tcp_pl: &mut [u8], udp_pl: &mut [u8]) -> Rx {
+    let n = raw_rx(frame);
+    if n < 0 {
+        return Rx::Drained;
+    }
+    let Some(bytes) = usize::try_from(n).ok().and_then(|len| frame.get(..len)) else {
+        return Rx::Other;
+    };
+    match parse_tcp(me, bytes, tcp_pl) {
+        RawRx::Ignore => {}
+        seg => return Rx::Tcp(seg),
+    }
+    match parse_udp(me, bytes, udp_pl) {
+        Some(dg) => Rx::Udp(dg),
+        None => Rx::Other,
+    }
+}
+
+/// Drain every frame waiting on the NIC and route each to its owner: a TCP
+/// segment to the connection (or listener) it belongs to, a UDP datagram to the
+/// socket bound to its port, in every session. Then run the retransmission
+/// timers, which an ACK that just arrived may have stopped. Returns `true` if
+/// any frame was read.
+///
+/// One pump for both protocols over one [`Net`]: see [`recv_any`] for what
+/// the two separate pumps it replaced used to drop.
+fn pump(net: &mut Net, me: &IfInfo, next_hop_mac: &[u8; 6]) -> bool {
+    let mut frame = [0u8; MAX_FRAME];
+    let mut tcp_pl = [0u8; MAX_FRAME];
+    let mut udp_pl = [0u8; UDP_DGRAM_MAX];
+    let mut any = false;
+    loop {
+        match recv_any(me, &mut frame, &mut tcp_pl, &mut udp_pl) {
+            Rx::Drained => break,
+            Rx::Other | Rx::Tcp(RawRx::Ignore) => any = true,
+            Rx::Tcp(RawRx::Seg(src_ip, src_port, dst_port, rx)) => {
+                any = true;
+                let plen = rx.payload_len.min(tcp_pl.len());
+                let payload = tcp_pl.get(..plen).unwrap_or(&[]);
+                if let Some(c) = net.conns.find_by_tuple(&src_ip, src_port, dst_port) {
+                    c.ingest_seg(me, &rx, payload);
+                } else {
+                    // No established connection owns this segment: offer it to the
+                    // listeners (backlog match, or a fresh SYN → passive open).
+                    // Unmatched by both → dropped.
+                    let _consumed = net.listeners.route_seg(
+                        me,
+                        &src_ip,
+                        src_port,
+                        dst_port,
+                        &rx,
+                        payload,
+                        next_hop_mac,
+                    );
+                }
+            }
+            Rx::Tcp(RawRx::Seg6(src_ip6, src_port, dst_port, rx)) => {
+                any = true;
+                let plen = rx.payload_len.min(tcp_pl.len());
+                let payload = tcp_pl.get(..plen).unwrap_or(&[]);
+                if let Some(c) = net.conns.find_by_tuple6(&src_ip6, src_port, dst_port) {
+                    c.ingest_seg(me, &rx, payload);
+                } else {
+                    let _consumed = net.listeners.route_seg6(
+                        me,
+                        &src_ip6,
+                        src_port,
+                        dst_port,
+                        &rx,
+                        payload,
+                        next_hop_mac,
+                    );
+                }
+            }
+            Rx::Udp(dg) => {
+                any = true;
+                // A datagram to an unbound port is dropped (no ICMP port-unreachable yet).
+                if let Some(sock) = net.udp.by_port(dg.dst_port) {
+                    let n = dg.payload_len.min(udp_pl.len());
+                    sock.push(
+                        dg.family,
+                        dg.src_ip,
+                        dg.src_port,
+                        udp_pl.get(..n).unwrap_or(&[]),
+                    );
+                }
+            }
+        }
+    }
+    net.conns.service_retransmits(me, now_ns());
+    any
+}
+
+/// Handle an [`netipc::OP_RING_TCP`] request: serve the SQEs queued on the ring
+/// `handle` (`size` bytes) against its session, mapping it first if it is new.
+/// Returns `true` iff at least one SQE was processed and every completion was
+/// posted. `seed_ipid` seeds a new session's IPv4 identification counter.
 fn ring_tcp(
-    session: &mut RingSession,
+    sessions: &mut Sessions,
+    net: &mut Net,
     handle: u64,
     size: u32,
     me: &IfInfo,
     next_hop_mac: &[u8; 6],
     seed_ipid: u16,
 ) -> bool {
-    // Ensure the session is mapped for this ring handle. A different handle (or a
-    // fresh start) opens a new session: tear down any prior mapping, map the new
-    // region, and reset the connection table + ident seed.
-    if session.handle != handle {
-        session.teardown(me);
-        let va = syscall2(SYS_SHM_MAP, handle, SHM_MAP_RW);
-        if va < 0 {
-            return false;
-        }
-        session.handle = handle;
-        session.va = va;
-        session.size = size;
-        session.conns = RingConns::new();
-        session.listeners = Listeners::new();
-        session.ipid = seed_ipid;
-    }
-
+    let Some(slot) = sessions.open(handle, size, seed_ipid) else {
+        return false;
+    };
+    let Some(session) = sessions.slots.get_mut(slot).and_then(Option::as_mut) else {
+        return false;
+    };
+    #[allow(clippy::cast_possible_truncation)] // slot < MAX_SESSIONS
+    let id_space = slot as u32;
     let base = session.va as u64 as *mut u8;
 
     // SAFETY: the mapping is valid and writable for `session.size` bytes for as
-    // long as the session holds `handle` (we only unmap in `teardown`); `attach`
-    // re-validates the ring geometry against that length and never reads/writes
-    // outside the mapping. Re-attaching each call is stateless — the SQ/CQ head/
-    // tail indices live in the shared region, so a fresh `Ring` view resumes
-    // exactly where the previous call left off. We are the sole SQ consumer and
-    // sole CQ producer (the kernel is the other party), satisfying the SPSC
-    // contract.
+    // long as the session exists (it is unmapped only in `Sessions::close`);
+    // `attach` re-validates the ring geometry against that length and never
+    // reads/writes outside the mapping. Re-attaching each call is stateless — the
+    // SQ/CQ head/tail indices live in the shared region, so a fresh `Ring` view
+    // resumes exactly where the previous call left off. We are the sole SQ
+    // consumer and sole CQ producer (the client is the other party), satisfying
+    // the SPSC contract.
     let (ok, stop) = unsafe {
         match netring::Ring::attach(base, session.size as usize) {
-            Some(ring) => ring_tcp_process(
-                &ring,
-                &mut session.conns,
-                &mut session.listeners,
-                &mut session.udp,
-                me,
-                next_hop_mac,
-                &mut session.ipid,
-            ),
+            Some(ring) => {
+                ring_tcp_process(&ring, net, id_space, me, next_hop_mac, &mut session.ipid)
+            }
             None => (false, false),
         }
     };
 
-    // On an explicit OP_STOP, close any still-live connections and unmap now.
+    // On an explicit OP_STOP, close what this session created and unmap it.
     if stop {
-        session.teardown(me);
+        sessions.close(slot, net, me);
     }
     ok
 }
 
-/// Maximum concurrent TCP connections one ring session can multiplex.
+/// Maximum concurrent TCP connections in the whole daemon.
 ///
-/// Each live [`TcpConn`] carries a `TCP_SND_BUF` (1 KiB) send buffer plus
-/// bookkeeping, so this is a deliberate cap: 8 slots ≈ 8–9 KiB of connection
-/// state — comfortable on the daemon's stack while covering the fan-out a
-/// socket-forwarding client needs (one live `TcpConn` per userspace socket).
-const MAX_RING_CONNS: usize = 8;
+/// Daemon-wide since 2026-09-27 ([`Net`]): until then this was per ring
+/// session, at 8, and only one session existed, so it was also the
+/// system-wide limit. 64 covers the load harness's largest tier (32 loopback
+/// connections, each two entries: the client end and the accepted end) with a
+/// program's ordinary sockets beside it. Each live [`TcpConn`] carries 1 KiB
+/// send and receive buffers plus bookkeeping, about 2.3 KiB, so the table is
+/// about 150 KiB of the serve loop's stack frame, well inside the stack's
+/// growth limit (`mm.max_stack_frames`).
+const MAX_RING_CONNS: usize = 64;
 
-/// A `conn_id`-keyed table of live TCP connections for one ring session.
+/// A table of live TCP connections, keyed by [`Key`] (session and `conn_id`).
 ///
 /// The io_uring socket opcodes address a connection by the [`netipc::ring::Sqe`]
 /// `conn_id` field, chosen by the client (in the Phase-5 socket-forwarding design
@@ -2819,7 +2928,7 @@ const MAX_RING_CONNS: usize = 8;
 /// frames; that is tracked in `known-issues.md` (D-NETSTACK-RX-DEMUX) as the next
 /// receive-path piece and is partly shaped by the Q22b persistent-daemon lifecycle.
 struct RingConns {
-    slots: [Option<(u32, TcpConn)>; MAX_RING_CONNS],
+    slots: [Option<(Key, TcpConn)>; MAX_RING_CONNS],
 }
 
 impl RingConns {
@@ -2839,7 +2948,7 @@ impl RingConns {
     }
 
     /// Borrow the live connection registered under `id`, if any.
-    fn get_mut(&mut self, id: u32) -> Option<&mut TcpConn> {
+    fn get_mut(&mut self, id: Key) -> Option<&mut TcpConn> {
         self.slots
             .iter_mut()
             .filter_map(|s| s.as_mut())
@@ -2887,7 +2996,7 @@ impl RingConns {
     /// caller to fill (`*slot = Some((id, conn))`), or `None` on a duplicate id or
     /// a full table. Reserving before moving the connection lets the caller retain
     /// ownership on failure (to close it gracefully) without a large-`Err` Result.
-    fn reserve(&mut self, id: u32) -> Option<&mut Option<(u32, TcpConn)>> {
+    fn reserve(&mut self, id: Key) -> Option<&mut Option<(Key, TcpConn)>> {
         if self.slots.iter().flatten().any(|(sid, _)| *sid == id) {
             return None; // duplicate conn_id
         }
@@ -2896,24 +3005,13 @@ impl RingConns {
 
     /// Remove and return the connection registered under `id`, if present, freeing
     /// its slot for reuse.
-    fn remove(&mut self, id: u32) -> Option<TcpConn> {
+    fn remove(&mut self, id: Key) -> Option<TcpConn> {
         for slot in &mut self.slots {
             if slot.as_ref().is_some_and(|(sid, _)| *sid == id) {
                 return slot.take().map(|(_, c)| c);
             }
         }
         None
-    }
-
-    /// Gracefully close every live connection and empty the table. Used when a
-    /// session ends (explicit `OP_STOP` or daemon shutdown) so no connection is
-    /// left half-open at the peer if the client did not `OP_CLOSE` it itself.
-    fn close_all(&mut self, me: &IfInfo) {
-        for slot in &mut self.slots {
-            if let Some((_, mut c)) = slot.take() {
-                c.close(me);
-            }
-        }
     }
 
     /// Run every live connection's retransmission timer at `now`
@@ -3044,7 +3142,7 @@ impl UdpSock {
 /// `conn_id` (the identity of the userspace `SOCK_DGRAM` fd) — the datagram
 /// sibling of [`RingConns`].
 struct UdpSocks {
-    slots: [Option<(u32, UdpSock)>; MAX_UDP_SOCKS],
+    slots: [Option<(Key, UdpSock)>; MAX_UDP_SOCKS],
 }
 
 impl UdpSocks {
@@ -3060,7 +3158,7 @@ impl UdpSocks {
     /// [`netipc::ring`] errno sentinel: [`ERR_ADDR_IN_USE`](netipc::ring::ERR_ADDR_IN_USE)
     /// if `port` is already bound (or `conn_id` is a duplicate), `-1` if the table
     /// is full.
-    fn bind(&mut self, conn_id: u32, port: u16) -> i32 {
+    fn bind(&mut self, conn_id: Key, port: u16) -> i32 {
         if self.slots.iter().flatten().any(|(id, _)| *id == conn_id) {
             return netipc::ring::ERR_ADDR_IN_USE; // duplicate conn_id
         }
@@ -3099,7 +3197,7 @@ impl UdpSocks {
     }
 
     /// Borrow the socket bound under `conn_id`, if any.
-    fn get_mut(&mut self, conn_id: u32) -> Option<&mut UdpSock> {
+    fn get_mut(&mut self, conn_id: Key) -> Option<&mut UdpSock> {
         self.slots
             .iter_mut()
             .filter_map(|s| s.as_mut())
@@ -3120,7 +3218,7 @@ impl UdpSocks {
     /// Remove the socket bound under `conn_id` (its `close(2)`), freeing the slot.
     /// Returns `true` if a socket was present. UDP is connectionless, so this just
     /// drops the buffer — no teardown handshake.
-    fn remove(&mut self, conn_id: u32) -> bool {
+    fn remove(&mut self, conn_id: Key) -> bool {
         for slot in &mut self.slots {
             if slot.as_ref().is_some_and(|(id, _)| *id == conn_id) {
                 *slot = None;
@@ -3129,31 +3227,6 @@ impl UdpSocks {
         }
         false
     }
-}
-
-/// Drain the NIC of inbound UDP datagrams, delivering each to the bound socket
-/// that owns its destination port (dropping datagrams to unbound ports). This is
-/// the UDP counterpart of [`ring_pump`]; `OP_UDP_RECV` calls it before dequeuing
-/// so a datagram that arrived for a *sibling* socket is buffered on that socket
-/// rather than lost. Returns `true` if any frame was consumed.
-///
-/// Cross-protocol caveat: like the TCP pump, this reads whole NIC frames, so any
-/// interleaved TCP frame is consumed and dropped here (D-NETSTACK-RX-DEMUX). Safe
-/// under the daemon's single-active-phase model; the future shared RX demux
-/// unifies both pumps.
-fn udp_pump(udp: &mut UdpSocks, me: &IfInfo) -> bool {
-    let mut frame = [0u8; MAX_FRAME];
-    let mut pl = [0u8; UDP_DGRAM_MAX];
-    let mut any = false;
-    while let Some(rx) = recv_udp_any(me, &mut frame, &mut pl) {
-        any = true;
-        if let Some(sock) = udp.by_port(rx.dst_port) {
-            let n = rx.payload_len.min(pl.len());
-            sock.push(rx.family, rx.src_ip, rx.src_port, &pl[..n]);
-        }
-        // Datagram to an unbound port → drop (no ICMP port-unreachable yet).
-    }
-    any
 }
 
 /// Build and transmit one UDP datagram from `sock`'s local port to
@@ -3348,7 +3421,7 @@ impl Listener {
 
 /// Table of active listeners, keyed by the `OP_LISTEN` `conn_id`.
 struct Listeners {
-    slots: [Option<(u32, Listener)>; MAX_LISTENERS],
+    slots: [Option<(Key, Listener)>; MAX_LISTENERS],
 }
 
 impl Listeners {
@@ -3360,7 +3433,7 @@ impl Listeners {
 
     /// Register a listener `id` bound to `port`. Rejects a duplicate id, a port
     /// already bound by another listener, or a full table (`false`).
-    fn add(&mut self, id: u32, port: u16, seed_ipid: u16) -> bool {
+    fn add(&mut self, id: Key, port: u16, seed_ipid: u16) -> bool {
         if self
             .slots
             .iter()
@@ -3379,7 +3452,7 @@ impl Listeners {
 
     /// Unregister the listener `id`, closing every connection still waiting in
     /// its backlog. `false` if there is no such listener.
-    fn remove(&mut self, id: u32, me: &IfInfo) -> bool {
+    fn remove(&mut self, id: Key, me: &IfInfo) -> bool {
         for slot in &mut self.slots {
             if slot.as_ref().is_some_and(|(lid, _)| *lid == id) {
                 if let Some((_, mut l)) = slot.take() {
@@ -3392,7 +3465,7 @@ impl Listeners {
     }
 
     /// Borrow the listener registered under `id`, if any.
-    fn get_mut(&mut self, id: u32) -> Option<&mut Listener> {
+    fn get_mut(&mut self, id: Key) -> Option<&mut Listener> {
         self.slots
             .iter_mut()
             .filter_map(|s| s.as_mut())
@@ -3495,73 +3568,137 @@ impl Listeners {
         }
         false
     }
+}
 
-    /// Gracefully close every listener's backlog and empty the table.
-    fn close_all(&mut self, me: &IfInfo) {
-        for slot in &mut self.slots {
-            if let Some((_, mut l)) = slot.take() {
+/// Everything the daemon knows about sockets, whichever ring created them: one
+/// table each of TCP connections, listeners and datagram sockets, keyed by
+/// ([`key`]) the session and id that created each entry.
+///
+/// One for the whole daemon, so [`pump`] can route any frame to its owner
+/// whatever session is being served. Until 2026-09-27 each ring session had
+/// tables of its own and only one session existed: a second ring reset the
+/// first, and a frame for anything outside the session being served was lost.
+struct Net {
+    conns: RingConns,
+    listeners: Listeners,
+    udp: UdpSocks,
+}
+
+impl Net {
+    fn new() -> Self {
+        Self {
+            conns: RingConns::new(),
+            listeners: Listeners::new(),
+            udp: UdpSocks::new(),
+        }
+    }
+
+    /// Close every connection, listener and datagram socket `session` created:
+    /// its ring's `OP_STOP`, or the daemon shutting down.
+    fn close_session(&mut self, session: u32, me: &IfInfo) {
+        for slot in &mut self.conns.slots {
+            if slot
+                .as_ref()
+                .is_some_and(|(k, _)| key_session(*k) == session)
+                && let Some((_, mut c)) = slot.take()
+            {
+                c.close(me);
+            }
+        }
+        for slot in &mut self.listeners.slots {
+            if slot
+                .as_ref()
+                .is_some_and(|(k, _)| key_session(*k) == session)
+                && let Some((_, mut l)) = slot.take()
+            {
                 l.close_all(me);
+            }
+        }
+        for slot in &mut self.udp.slots {
+            if slot
+                .as_ref()
+                .is_some_and(|(k, _)| key_session(*k) == session)
+            {
+                *slot = None;
             }
         }
     }
 }
 
-/// A persistent ring-TCP session: the mapped ring region plus the connection
-/// table that survives across *separate* `OP_RING_TCP` control calls.
-///
-/// The one-shot [`ring_tcp`] path mapped the ring, drained a single batch, and
-/// unmapped immediately — so a connection could not outlive one submission. This
-/// session keeps the mapping and the [`RingConns`] table alive between control
-/// calls, so a client can `OP_CONNECT` in one round and `OP_SEND`/`OP_RECV`/
-/// `OP_CLOSE` in later rounds against the *same* live [`TcpConn`] — the shape the
-/// persistent socket-forwarding daemon needs. The session is torn down (all
-/// connections closed, ring unmapped) on an explicit `OP_STOP` SQE or when the
-/// daemon's serve loop exits.
-struct RingSession {
-    /// SHM handle of the currently-mapped ring (0 = no session open).
+/// Most rings the daemon keeps mapped at once. In design B of A-Q15 (a ring
+/// per socket) this is the ceiling on sockets; in design A the kernel uses one.
+const MAX_SESSIONS: usize = 64;
+
+/// One mapped client ring.
+struct Session {
+    /// SHM handle of the ring.
     handle: u64,
-    /// Mapped virtual address of the ring region (valid iff `handle != 0`).
+    /// Where it is mapped.
     va: i64,
     /// Byte length of the mapping.
     size: u32,
-    /// Per-connection table, keyed by SQE `conn_id`.
-    conns: RingConns,
-    /// Listening sockets, keyed by the `OP_LISTEN` `conn_id`.
-    listeners: Listeners,
-    /// Bound UDP datagram sockets, keyed by the `OP_UDP_BIND` `conn_id`.
-    udp: UdpSocks,
-    /// IPv4 identification seed, advanced per new connection.
+    /// IPv4 identification seed for connections this session opens.
     ipid: u16,
 }
 
-impl RingSession {
-    /// An idle session (nothing mapped).
+/// Every ring the daemon has mapped, one session per client ring: its
+/// `OP_RING_TCP` rounds are served against the one [`Net`].
+///
+/// This replaced a single `RingSession` that was torn down whenever a ring
+/// with a different handle arrived, so a second ring destroyed the first ring's
+/// connections, listeners and datagram sockets (A-Q15, design-decisions §972).
+/// A session now ends only by its own ring's `OP_STOP`.
+struct Sessions {
+    slots: [Option<Session>; MAX_SESSIONS],
+}
+
+impl Sessions {
     fn new() -> Self {
         Self {
-            handle: 0,
-            va: 0,
-            size: 0,
-            conns: RingConns::new(),
-            listeners: Listeners::new(),
-            udp: UdpSocks::new(),
-            ipid: 0,
+            slots: core::array::from_fn(|_| None),
         }
     }
 
-    /// Tear the session down: gracefully close any live connections and unmap the
-    /// ring. Idempotent — a no-op when no session is open.
-    fn teardown(&mut self, me: &IfInfo) {
-        if self.handle == 0 {
-            return;
+    /// The slot of `handle`'s session, mapping the ring if it is new. `None`
+    /// if the ring cannot be mapped or every slot is taken -- the round fails
+    /// rather than evicting a live session.
+    fn open(&mut self, handle: u64, size: u32, seed_ipid: u16) -> Option<usize> {
+        if let Some(i) = self
+            .slots
+            .iter()
+            .position(|s| s.as_ref().is_some_and(|s| s.handle == handle))
+        {
+            return Some(i);
         }
-        self.conns.close_all(me);
-        self.listeners.close_all(me);
-        // UDP sockets are connectionless — just drop their buffers.
-        self.udp = UdpSocks::new();
-        syscall2(SYS_SHM_UNMAP, self.va as u64, self.size as u64);
-        self.handle = 0;
-        self.va = 0;
-        self.size = 0;
+        let free = self.slots.iter().position(Option::is_none)?;
+        let va = syscall2(SYS_SHM_MAP, handle, SHM_MAP_RW);
+        if va < 0 {
+            return None;
+        }
+        let slot = self.slots.get_mut(free)?;
+        *slot = Some(Session {
+            handle,
+            va,
+            size,
+            ipid: seed_ipid,
+        });
+        Some(free)
+    }
+
+    /// End the session in `slot`: close everything it created and unmap its ring.
+    fn close(&mut self, slot: usize, net: &mut Net, me: &IfInfo) {
+        if let Some(s) = self.slots.get_mut(slot).and_then(Option::take) {
+            #[allow(clippy::cast_possible_truncation)] // slot < MAX_SESSIONS
+            net.close_session(slot as u32, me);
+            syscall2(SYS_SHM_UNMAP, s.va as u64, u64::from(s.size));
+        }
+    }
+
+    /// End every session (the daemon is shutting down).
+    fn close_all(&mut self, net: &mut Net, me: &IfInfo) {
+        for i in 0..MAX_SESSIONS {
+            self.close(i, net, me);
+        }
     }
 }
 
@@ -3609,9 +3746,8 @@ impl RingSession {
 /// then tears the session down).
 fn ring_tcp_process(
     ring: &netring::Ring,
-    conns: &mut RingConns,
-    listeners: &mut Listeners,
-    udp: &mut UdpSocks,
+    net: &mut Net,
+    id_space: u32,
     me: &IfInfo,
     next_hop_mac: &[u8; 6],
     ipid: &mut u16,
@@ -3631,7 +3767,7 @@ fn ring_tcp_process(
                 // Advance the IPv4 ident seed past the handshake's own increments.
                 *ipid = ipid.wrapping_add(0x10);
                 let Some(local_port) = pick_local_port(&me.ip, &ip, port, |p| {
-                    conns.port_in_use(p) || listeners.port_in_use(p)
+                    net.conns.port_in_use(p) || net.listeners.port_in_use(p)
                 }) else {
                     break 'connect -1; // every ephemeral port is taken
                 };
@@ -3641,11 +3777,11 @@ fn ring_tcp_process(
                     // that has already arrived can complete the handshake immediately
                     // (a loopback/fast peer), letting us report success synchronously.
                     match TcpConn::connect_start(me, ip, port, *next_hop_mac, *ipid, local_port) {
-                        Some(c) => match conns.reserve(sqe.conn_id) {
+                        Some(c) => match net.conns.reserve(key(id_space, sqe.conn_id)) {
                             Some(slot) => {
-                                *slot = Some((sqe.conn_id, c));
-                                ring_pump(conns, listeners, me, next_hop_mac);
-                                match conns.get_mut(sqe.conn_id) {
+                                *slot = Some((key(id_space, sqe.conn_id), c));
+                                pump(net, me, next_hop_mac);
+                                match net.conns.get_mut(key(id_space, sqe.conn_id)) {
                                     Some(c) if c.established => 0,
                                     Some(_) => netipc::ring::ERR_IN_PROGRESS,
                                     None => -1,
@@ -3661,9 +3797,9 @@ fn ring_tcp_process(
                     }
                 } else {
                     match TcpConn::connect(me, ip, port, *next_hop_mac, *ipid, local_port) {
-                        Some(mut c) => match conns.reserve(sqe.conn_id) {
+                        Some(mut c) => match net.conns.reserve(key(id_space, sqe.conn_id)) {
                             Some(slot) => {
-                                *slot = Some((sqe.conn_id, c));
+                                *slot = Some((key(id_space, sqe.conn_id), c));
                                 0
                             }
                             None => {
@@ -3703,7 +3839,7 @@ fn ring_tcp_process(
                         None => -1, // next-hop unresolved → report failure
                         Some(mac) => 'connect6: {
                             let Some(local_port) = pick_local_port(&me.ip6, &addr, port, |p| {
-                                conns.port_in_use(p) || listeners.port_in_use(p)
+                                net.conns.port_in_use(p) || net.listeners.port_in_use(p)
                             }) else {
                                 break 'connect6 -1; // every ephemeral port is taken
                             };
@@ -3711,32 +3847,37 @@ fn ring_tcp_process(
                                 match TcpConn::connect_start6(
                                     me, addr, port, mac, *ipid, local_port,
                                 ) {
-                                    Some(c) => match conns.reserve(sqe.conn_id) {
-                                        Some(slot) => {
-                                            *slot = Some((sqe.conn_id, c));
-                                            ring_pump(conns, listeners, me, next_hop_mac);
-                                            match conns.get_mut(sqe.conn_id) {
-                                                Some(c) if c.established => 0,
-                                                Some(_) => netipc::ring::ERR_IN_PROGRESS,
-                                                None => -1,
+                                    Some(c) => {
+                                        match net.conns.reserve(key(id_space, sqe.conn_id)) {
+                                            Some(slot) => {
+                                                *slot = Some((key(id_space, sqe.conn_id), c));
+                                                pump(net, me, next_hop_mac);
+                                                match net.conns.get_mut(key(id_space, sqe.conn_id))
+                                                {
+                                                    Some(c) if c.established => 0,
+                                                    Some(_) => netipc::ring::ERR_IN_PROGRESS,
+                                                    None => -1,
+                                                }
                                             }
+                                            None => -1,
                                         }
-                                        None => -1,
-                                    },
+                                    }
                                     None => -1,
                                 }
                             } else {
                                 match TcpConn::connect6(me, addr, port, mac, *ipid, local_port) {
-                                    Some(mut c) => match conns.reserve(sqe.conn_id) {
-                                        Some(slot) => {
-                                            *slot = Some((sqe.conn_id, c));
-                                            0
+                                    Some(mut c) => {
+                                        match net.conns.reserve(key(id_space, sqe.conn_id)) {
+                                            Some(slot) => {
+                                                *slot = Some((key(id_space, sqe.conn_id), c));
+                                                0
+                                            }
+                                            None => {
+                                                c.close(me);
+                                                -1
+                                            }
                                         }
-                                        None => {
-                                            c.close(me);
-                                            -1
-                                        }
-                                    },
+                                    }
                                     None => -1,
                                 }
                             }
@@ -3744,24 +3885,38 @@ fn ring_tcp_process(
                     }
                 }
             }
-            netipc::ring::OP_SEND => {
-                ring_tcp_send(ring, conns, listeners, sqe.conn_id, me, next_hop_mac, &sqe)
-            }
-            netipc::ring::OP_RECV => {
-                ring_tcp_recv(ring, conns, listeners, sqe.conn_id, me, next_hop_mac, &sqe)
-            }
+            netipc::ring::OP_SEND => ring_tcp_send(
+                ring,
+                net,
+                key(id_space, sqe.conn_id),
+                me,
+                next_hop_mac,
+                &sqe,
+            ),
+            netipc::ring::OP_RECV => ring_tcp_recv(
+                ring,
+                net,
+                key(id_space, sqe.conn_id),
+                me,
+                next_hop_mac,
+                &sqe,
+            ),
             netipc::ring::OP_POLL => {
                 // First try TCP -- a connection or a listener; `-1` means neither, so
                 // fall through to a bound UDP datagram socket. A UDP socket is always
                 // writable (a datagram send never blocks) and readable when a
                 // datagram is queued.
-                let tcp = ring_tcp_poll(conns, listeners, sqe.conn_id, me, next_hop_mac);
+                let tcp = ring_tcp_poll(net, key(id_space, sqe.conn_id), me, next_hop_mac);
                 if tcp >= 0 {
                     tcp
-                } else if udp.get_mut(sqe.conn_id).is_some() {
-                    udp_pump(udp, me);
+                } else if net.udp.get_mut(key(id_space, sqe.conn_id)).is_some() {
+                    pump(net, me, next_hop_mac);
                     let mut bits = netipc::ring::POLL_WRITABLE;
-                    if udp.get_mut(sqe.conn_id).is_some_and(|s| s.has_data()) {
+                    if net
+                        .udp
+                        .get_mut(key(id_space, sqe.conn_id))
+                        .is_some_and(|s| s.has_data())
+                    {
                         bits |= netipc::ring::POLL_READABLE;
                     }
                     bits
@@ -3769,7 +3924,7 @@ fn ring_tcp_process(
                     -1
                 }
             }
-            netipc::ring::OP_CLOSE => match conns.remove(sqe.conn_id) {
+            netipc::ring::OP_CLOSE => match net.conns.remove(key(id_space, sqe.conn_id)) {
                 Some(mut c) => {
                     c.close(me);
                     0
@@ -3779,29 +3934,34 @@ fn ring_tcp_process(
                 // session (OP_STOP); with one ring for every socket the session
                 // is never stopped, so a closed listening socket must be
                 // removable on its own, its unaccepted connections with it.
-                None if udp.remove(sqe.conn_id) => 0,
-                None if listeners.remove(sqe.conn_id, me) => 0,
+                None if net.udp.remove(key(id_space, sqe.conn_id)) => 0,
+                None if net.listeners.remove(key(id_space, sqe.conn_id), me) => 0,
                 None => -1,
             },
             netipc::ring::OP_LISTEN => {
                 // Bind a listener id to a local port (low 16 bits of aux).
                 let port = (sqe.aux & 0xFFFF) as u16;
                 *ipid = ipid.wrapping_add(0x10);
-                if listeners.add(sqe.conn_id, port, *ipid) {
+                if net.listeners.add(key(id_space, sqe.conn_id), port, *ipid) {
                     0
                 } else {
                     -1
                 }
             }
-            netipc::ring::OP_ACCEPT => {
-                ring_tcp_accept(ring, conns, listeners, sqe.conn_id, me, next_hop_mac, &sqe)
-            }
+            netipc::ring::OP_ACCEPT => ring_tcp_accept(
+                ring,
+                net,
+                key(id_space, sqe.conn_id),
+                me,
+                next_hop_mac,
+                &sqe,
+            ),
             netipc::ring::OP_LOCALADDR => {
                 // getsockname: report this connection's local endpoint. The source IP
                 // is the daemon's interface address (`me.ip`/`me.ip6`); the local port
                 // is the ephemeral port the connection chose. Family is conveyed by the
                 // written length (6 = v4, 18 = v6).
-                match conns.get_mut(sqe.conn_id) {
+                match net.conns.get_mut(key(id_space, sqe.conn_id)) {
                     None => -1, // no such connection
                     Some(c) => {
                         if c.dst6.is_some() {
@@ -3837,7 +3997,7 @@ fn ring_tcp_process(
                 // down. `aux` carries the Linux `how` (SHUT_RD/WR/RDWR). SHUT_WR emits
                 // our FIN and marks the write side closed (subsequent sends → EPIPE);
                 // SHUT_RD marks the read side closed (subsequent recvs → EOF).
-                match conns.get_mut(sqe.conn_id) {
+                match net.conns.get_mut(key(id_space, sqe.conn_id)) {
                     None => -1, // no such connection
                     Some(c) => {
                         c.shutdown(me, sqe.aux);
@@ -3849,7 +4009,7 @@ fn ring_tcp_process(
                 // Create/bind a datagram socket under conn_id. Low 16 bits of aux
                 // are the requested local port (0 = ephemeral); OP_CLOSE unbinds it.
                 let port = (sqe.aux & 0xFFFF) as u16;
-                udp.bind(sqe.conn_id, port)
+                net.udp.bind(key(id_space, sqe.conn_id), port)
             }
             netipc::ring::OP_UDP_SEND => {
                 // Send one datagram from the bound socket to aux=[dst_ip:4][port_be:2].
@@ -3871,7 +4031,7 @@ fn ring_tcp_process(
                 if plen == usize::MAX {
                     -1
                 } else {
-                    match udp.get_mut(sqe.conn_id) {
+                    match net.udp.get_mut(key(id_space, sqe.conn_id)) {
                         Some(sock) => udp_sock_send(
                             me,
                             next_hop_mac,
@@ -3903,7 +4063,7 @@ fn ring_tcp_process(
                     {
                         -1
                     } else {
-                        match udp.get_mut(sqe.conn_id) {
+                        match net.udp.get_mut(key(id_space, sqe.conn_id)) {
                             Some(sock) => {
                                 udp_sock_send6(me, next_hop_mac, sock, &hdr, dst_port, &buf[..plen])
                             }
@@ -3918,7 +4078,7 @@ fn ring_tcp_process(
                 // source-address header (Sqe::pack_udp_addr) to the data window,
                 // payload following; result = payload length (header excluded).
                 let nonblock = sqe.aux & netipc::ring::RECV_NONBLOCK != 0;
-                udp_pump(udp, me);
+                pump(net, me, next_hop_mac);
                 let hdr_len = netipc::ring::UDP_ADDR_HDR_LEN;
                 let cap = sqe.data_len as usize;
                 if cap < hdr_len {
@@ -3926,7 +4086,7 @@ fn ring_tcp_process(
                 } else {
                     let mut payload = [0u8; UDP_DGRAM_MAX];
                     let room = (cap - hdr_len).min(UDP_DGRAM_MAX);
-                    match udp.get_mut(sqe.conn_id) {
+                    match net.udp.get_mut(key(id_space, sqe.conn_id)) {
                         None => -1, // not bound
                         Some(sock) => match sock.pop(&mut payload[..room]) {
                             Some((family, ip16, src_port, n)) => {
@@ -3985,14 +4145,13 @@ fn ring_tcp_process(
 ///   so the caller can retry rather than us silently dropping the write.
 fn ring_tcp_send(
     ring: &netring::Ring,
-    conns: &mut RingConns,
-    listeners: &mut Listeners,
-    target_id: u32,
+    net: &mut Net,
+    target_id: Key,
     me: &IfInfo,
     next_hop_mac: &[u8; 6],
     sqe: &netipc::ring::Sqe,
 ) -> i32 {
-    match conns.get_mut(target_id) {
+    match net.conns.get_mut(target_id) {
         None => return -1, // no such connection
         // A send after `shutdown(SHUT_WR)` is EPIPE, exactly like Linux: the write
         // side is closed and our FIN is already on the wire.
@@ -4007,8 +4166,9 @@ fn ring_tcp_send(
     }
     let nonblock = sqe.aux & netipc::ring::SEND_NONBLOCK != 0;
     // Drain any already-arrived ACKs so a window freed by the peer is visible.
-    ring_pump(conns, listeners, me, next_hop_mac);
-    if conns
+    pump(net, me, next_hop_mac);
+    if net
+        .conns
         .get_mut(target_id)
         .is_some_and(|c| c.send_window_full())
     {
@@ -4023,20 +4183,21 @@ fn ring_tcp_send(
             if idle >= TCP_DATA_ITERS {
                 break;
             }
-            if ring_pump(conns, listeners, me, next_hop_mac) {
+            if pump(net, me, next_hop_mac) {
                 idle = 0;
             } else {
                 idle = idle.saturating_add(1);
                 sleep_ns(POLL_SLEEP_NS);
             }
-            match conns.get_mut(target_id) {
+            match net.conns.get_mut(target_id) {
                 Some(c) if c.timed_out => return netipc::ring::ERR_TIMED_OUT,
                 Some(c) if !c.send_window_full() => break, // window drained → send below
                 Some(_) => {}
                 None => return -1, // connection vanished mid-send
             }
         }
-        if conns
+        if net
+            .conns
             .get_mut(target_id)
             .is_some_and(|c| c.send_window_full())
         {
@@ -4053,91 +4214,13 @@ fn ring_tcp_send(
     if !ring.read_data(off, window) {
         return -1;
     }
-    match conns.get_mut(target_id) {
+    match net.conns.get_mut(target_id) {
         Some(c) => match c.send(me, window) {
             Some(n) => n as i32,
             None => -1,
         },
         None => -1,
     }
-}
-
-/// Drain *every* frame currently queued on the NIC (and the loopback FIFO ahead of
-/// it), routing each TCP segment to the connection that owns its 4-tuple (via
-/// [`RingConns::find_by_tuple`]) and feeding it through the shared
-/// [`ingest_seg`](TcpConn::ingest_seg) core. This is the shared RX demux: because
-/// one NIC delivers frames for *all* connections on the ring, a naive
-/// per-connection read would discard a sibling's frames. The pump instead buffers
-/// each segment into its owner so no connection loses data while another is blocked
-/// in a receive.
-///
-/// A segment that matches no established connection is offered to the [`Listeners`]
-/// table ([`Listeners::route_seg`]): it either advances a pending passive-open
-/// backlog connection or, for a fresh SYN to a listening port, starts a new passive
-/// open (SYN_RCVD). Only segments matching neither a connection nor a listener are
-/// dropped. `next_hop_mac` is the reply next-hop for any SYN-ACK a passive open
-/// emits. Returns `true` if at least one frame was processed (the caller resets its
-/// idle counter so it keeps polling while traffic is flowing).
-fn ring_pump(
-    conns: &mut RingConns,
-    listeners: &mut Listeners,
-    me: &IfInfo,
-    next_hop_mac: &[u8; 6],
-) -> bool {
-    let mut frame = [0u8; MAX_FRAME];
-    let mut pl = [0u8; MAX_FRAME];
-    let mut any = false;
-    loop {
-        match recv_tcp_any(me, &mut frame, &mut pl) {
-            RawRx::None => break, // WOULD_BLOCK / error → NIC drained.
-            RawRx::Ignore => {
-                any = true; // A frame arrived but wasn't ours; keep draining.
-            }
-            RawRx::Seg(src_ip, src_port, dst_port, rx) => {
-                any = true;
-                let plen = rx.payload_len.min(pl.len());
-                let payload = pl.get(..plen).unwrap_or(&[]);
-                if let Some(c) = conns.find_by_tuple(&src_ip, src_port, dst_port) {
-                    c.ingest_seg(me, &rx, payload);
-                } else {
-                    // No established connection owns this segment: offer it to the
-                    // listeners (backlog match, or a fresh SYN → passive open).
-                    let _consumed = listeners.route_seg(
-                        me,
-                        &src_ip,
-                        src_port,
-                        dst_port,
-                        &rx,
-                        payload,
-                        next_hop_mac,
-                    );
-                    // Unmatched by both → drop (nothing to do).
-                }
-            }
-            RawRx::Seg6(src_ip6, src_port, dst_port, rx) => {
-                any = true;
-                let plen = rx.payload_len.min(pl.len());
-                let payload = pl.get(..plen).unwrap_or(&[]);
-                if let Some(c) = conns.find_by_tuple6(&src_ip6, src_port, dst_port) {
-                    c.ingest_seg(me, &rx, payload);
-                } else {
-                    let _consumed = listeners.route_seg6(
-                        me,
-                        &src_ip6,
-                        src_port,
-                        dst_port,
-                        &rx,
-                        payload,
-                        next_hop_mac,
-                    );
-                }
-            }
-        }
-    }
-    // Every arrival is in: now the retransmission timers, which an ACK that
-    // just arrived may have stopped.
-    conns.service_retransmits(me, now_ns());
-    any
 }
 
 /// Execute an `OP_RECV` SQE for connection `target_id`: poll the shared RX pump
@@ -4156,14 +4239,13 @@ fn ring_pump(
 /// the same ring can all receive without starving one another (D-NETSTACK-RX-DEMUX).
 fn ring_tcp_recv(
     ring: &netring::Ring,
-    conns: &mut RingConns,
-    listeners: &mut Listeners,
-    target_id: u32,
+    net: &mut Net,
+    target_id: Key,
     me: &IfInfo,
     next_hop_mac: &[u8; 6],
     sqe: &netipc::ring::Sqe,
 ) -> i32 {
-    match conns.get_mut(target_id) {
+    match net.conns.get_mut(target_id) {
         None => return -1, // no such connection
         // A recv before the handshake completed cannot return stream data; reject so
         // the kernel surfaces ENOTCONN rather than us spinning the whole receive
@@ -4173,7 +4255,7 @@ fn ring_tcp_recv(
     }
     // A recv after `shutdown(SHUT_RD)` reports EOF immediately, like Linux — the
     // read side is closed, so we neither deliver buffered bytes nor wait.
-    if conns.get_mut(target_id).is_some_and(|c| c.read_shut) {
+    if net.conns.get_mut(target_id).is_some_and(|c| c.read_shut) {
         return 0;
     }
     if sqe.aux & netipc::ring::RECV_NONBLOCK != 0 {
@@ -4182,8 +4264,8 @@ fn ring_tcp_recv(
         // the full receive deadline. If nothing is buffered and the stream is
         // still open, report WOULD_BLOCK so the kernel returns EAGAIN; a buffered
         // segment (or EOF) falls through to the shared copy-out below.
-        ring_pump(conns, listeners, me, next_hop_mac);
-        match conns.get_mut(target_id) {
+        pump(net, me, next_hop_mac);
+        match net.conns.get_mut(target_id) {
             Some(c) if c.rx_len == 0 && !c.peer_fin && c.timed_out => {
                 return netipc::ring::ERR_TIMED_OUT;
             }
@@ -4202,7 +4284,7 @@ fn ring_tcp_recv(
             // buffered — harmless for a fast path that stayed under the kernel's
             // control-channel timeout, but on the slower IPv6 loopback path it pushed
             // the round past `RECV_TIMEOUT_NS`, surfacing as a spurious `TimedOut`.
-            match conns.get_mut(target_id) {
+            match net.conns.get_mut(target_id) {
                 Some(c) if c.rx_len > 0 || c.peer_fin || c.timed_out => break,
                 Some(_) => {}
                 None => break, // connection vanished (shouldn't happen mid-recv)
@@ -4210,7 +4292,7 @@ fn ring_tcp_recv(
             if idle >= TCP_DATA_ITERS {
                 break;
             }
-            if ring_pump(conns, listeners, me, next_hop_mac) {
+            if pump(net, me, next_hop_mac) {
                 idle = 0;
             } else {
                 idle = idle.saturating_add(1);
@@ -4226,7 +4308,7 @@ fn ring_tcp_recv(
         // this way -- it waits itself, asking without blocking -- but the ring
         // tests in `proc/spawn.rs` do, and they read a short result as "no data
         // came back" whichever way it is said.
-        match conns.get_mut(target_id) {
+        match net.conns.get_mut(target_id) {
             Some(c) if c.rx_len == 0 && !c.peer_fin && c.timed_out => {
                 return netipc::ring::ERR_TIMED_OUT;
             }
@@ -4245,7 +4327,7 @@ fn ring_tcp_recv(
     // MSG_PEEK: copy buffered bytes out without consuming them, so a later
     // OP_RECV returns the same data again.
     let peek = sqe.aux & netipc::ring::RECV_PEEK != 0;
-    let n = match conns.get_mut(target_id) {
+    let n = match net.conns.get_mut(target_id) {
         Some(c) => {
             if peek {
                 c.peek_rx(out)
@@ -4297,22 +4379,17 @@ fn ring_tcp_recv(
 /// kernel reads as "not connected" and reports as no events at all: no
 /// `poll`/`select`/`epoll` caller was ever woken by an incoming connection
 /// (lane F's `requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`).
-fn ring_tcp_poll(
-    conns: &mut RingConns,
-    listeners: &mut Listeners,
-    target_id: u32,
-    me: &IfInfo,
-    next_hop_mac: &[u8; 6],
-) -> i32 {
-    if conns.get_mut(target_id).is_none() {
-        if listeners.get_mut(target_id).is_none() {
+fn ring_tcp_poll(net: &mut Net, target_id: Key, me: &IfInfo, next_hop_mac: &[u8; 6]) -> i32 {
+    if net.conns.get_mut(target_id).is_none() {
+        if net.listeners.get_mut(target_id).is_none() {
             return -1; // neither a connection nor a listener
         }
         // Route arrived frames first, as `ring_tcp_accept` does before it
         // dequeues: a handshake whose final ACK is waiting completes here, so
         // poll and accept judge the same backlog.
-        ring_pump(conns, listeners, me, next_hop_mac);
-        return if listeners
+        pump(net, me, next_hop_mac);
+        return if net
+            .listeners
             .get_mut(target_id)
             .is_some_and(|l| l.has_established())
         {
@@ -4323,12 +4400,12 @@ fn ring_tcp_poll(
     }
     // Non-destructive: route any arrived frames into their owners (this completes a
     // pending handshake via `ingest_seg` if the SYN-ACK has arrived), then peek.
-    ring_pump(conns, listeners, me, next_hop_mac);
+    pump(net, me, next_hop_mac);
     // Drive the SYN retransmit / connect timeout for a still-pending handshake.
-    if let Some(c) = conns.get_mut(target_id) {
+    if let Some(c) = net.conns.get_mut(target_id) {
         c.poll_connect(me);
     }
-    match conns.get_mut(target_id) {
+    match net.conns.get_mut(target_id) {
         Some(c) => {
             if c.connect_failed {
                 // Failed connect: signal POLLOUT (so poll wakes) with the error bit;
@@ -4376,14 +4453,13 @@ fn ring_tcp_poll(
 /// unknown listener, a too-small data window, or a duplicate/overflowing new id.
 fn ring_tcp_accept(
     ring: &netring::Ring,
-    conns: &mut RingConns,
-    listeners: &mut Listeners,
-    target_id: u32,
+    net: &mut Net,
+    target_id: Key,
     me: &IfInfo,
     next_hop_mac: &[u8; 6],
     sqe: &netipc::ring::Sqe,
 ) -> i32 {
-    if listeners.get_mut(target_id).is_none() {
+    if net.listeners.get_mut(target_id).is_none() {
         return -1; // no such listener
     }
     // Validate the peer-address window up front so we never consume a backlog
@@ -4392,8 +4468,9 @@ fn ring_tcp_accept(
         return -1;
     }
     // Drive pending passive-open handshakes (and any already-queued data) forward.
-    ring_pump(conns, listeners, me, next_hop_mac);
-    let mut conn = match listeners
+    pump(net, me, next_hop_mac);
+    let mut conn = match net
+        .listeners
         .get_mut(target_id)
         .and_then(Listener::take_established)
     {
@@ -4427,9 +4504,10 @@ fn ring_tcp_accept(
         conn.close(me);
         return -1;
     }
-    // Install under the caller-chosen id (low 32 bits of aux).
-    let new_id = (sqe.aux & 0xFFFF_FFFF) as u32;
-    match conns.reserve(new_id) {
+    // Install under the caller-chosen id (low 32 bits of aux), in the
+    // listener's session: the ring that asked.
+    let new_id = key(key_session(target_id), (sqe.aux & 0xFFFF_FFFF) as u32);
+    match net.conns.reserve(new_id) {
         Some(slot) => {
             *slot = Some((new_id, conn));
             0

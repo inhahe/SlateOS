@@ -14817,7 +14817,10 @@ Phase 5 progresses:
   receive queue is 2 deep per socket and drops the oldest datagram on overflow (UDP
   is lossy); and it inherits the daemon's single-active-phase RX-demux limitation
   (`D-NETSTACK-RX-DEMUX`) — the `udp_pump` drops interleaved TCP frames while
-  draining, same as the TCP pump.
+  draining, same as the TCP pump. *(Update 2026-09-27, lane A, which owns
+  `services/netstack` since the six-lane split: fixed on lane-a, awaiting a
+  boot. One `pump` now reads each frame once and routes TCP and UDP alike, over
+  daemon-wide tables — A-Q15's increment 2.)*
 - **`recvfrom` source-address out-params now populated (parity fix).**
   `recvfrom`'s `src_addr`/`addrlen` (arg4/arg5) are filled with the connected
   peer's endpoint on a successful receive, matching Linux for a connected stream

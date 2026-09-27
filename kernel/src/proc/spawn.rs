@@ -5127,6 +5127,45 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         }
     }
 
+    // The same two witnesses on design B of A-Q15 (design-decisions §972): a ring
+    // per socket, each its own daemon session. Both designs run in every boot, so
+    // neither rots while the other is the default. The ring mode is restored
+    // before any result is judged, so a failure cannot leave later rungs on B.
+    serial_println!(
+        "[spawn]   A-Q15 design B: the head-of-line and late-data witnesses again, each \
+         socket on a ring of its own"
+    );
+    crate::net::netstack_client::set_ring_mode(Some(
+        crate::net::netstack_client::RingMode::PerSocket,
+    ));
+    let hol_b = crate::net::socket::self_test_no_head_of_line();
+    let late_b = crate::net::socket::self_test_blocking_recv_waits_for_late_data();
+    crate::net::netstack_client::set_ring_mode(None);
+    for (name, result) in [
+        ("net::socket head-of-line, ring per socket", hol_b),
+        ("net::socket late data, ring per socket", late_b),
+    ] {
+        match result {
+            // Each check prints its own OK line.
+            Ok(Some(())) => {}
+            Ok(None) => {
+                serial_println!("[spawn]   {}: no IPv4 lease -- check skipped", name);
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   FAIL: {} ({:?}) — design B of A-Q15 is broken",
+                    name,
+                    e
+                );
+                crate::selftest::dispatch_debug(
+                    name,
+                    crate::selftest::Severity::Diagnostic,
+                    Err::<(), _>(e),
+                );
+            }
+        }
+    }
+
     // IPv6 connect parity (D-NETSOCK-SYNC, final gap): OP_CONNECT6 over the daemon.
     // Slirp offers no IPv6 peer or router, so this too drives the in-process
     // loopback — a non-blocking connect to the daemon's own link-local (me.ip6,

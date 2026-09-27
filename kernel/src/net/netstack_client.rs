@@ -9,16 +9,21 @@
 //! `connect → send → recv → close`, where each operation is a control
 //! round-trip against the daemon's *persistent* session.
 //!
-//! ## One ring for every socket
+//! ## One ring for every socket, or one each
 //!
-//! Every [`NetstackConn`] submits on **one** shared-memory ring, `SHARED_RING`,
-//! and addresses its own connections by ids unique system-wide
-//! ([`alloc_conn_id`]). This is design A of the operator's question A-Q15
-//! (`design-decisions.md` §972). Until 2026-09-27 every `NetstackConn` allocated
-//! a ring of its own, the daemon kept a single session and reset it whenever a
-//! different ring arrived, and so opening a second socket destroyed the first.
-//! Design B, a ring per socket with the daemon keeping them all, is §972's
-//! other half, to be built behind a switch and measured against this one.
+//! The operator's question A-Q15 (`design-decisions.md` §972) asks for two
+//! designs behind one switch, [`RingMode`], so they can be measured:
+//! - **A, the default:** every [`NetstackConn`] submits on **one**
+//!   shared-memory ring, `SHARED_RING`.
+//! - **B:** each `NetstackConn` gets a ring of its own, which the daemon keeps
+//!   as a session of its own.
+//!
+//! Either way, connections are addressed by ids unique system-wide
+//! ([`alloc_conn_id`]), and the daemon's tables are daemon-wide, so a frame for
+//! any socket is routed whichever ring is being served. Until 2026-09-27 every
+//! `NetstackConn` allocated a ring of its own while the daemon kept a single
+//! session and reset it whenever a different ring arrived: opening a second
+//! socket destroyed the first.
 //!
 //! ## Persistence
 //!
@@ -56,7 +61,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::ipc::{channel, service, shm};
 use crate::sched::kmutex::{KMutex, KMutexGuard};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 /// Send-staging window offset within the ring data area.
 const SND_OFF: u32 = 0;
@@ -121,21 +126,63 @@ pub fn userspace_enabled() -> bool {
 /// session and reset it whenever a different ring arrived. Opening a second
 /// socket therefore destroyed the first: the operator's question A-Q15.
 /// `design-decisions.md` §972 asks for this design (A) and the per-socket one
-/// (B) behind a switch, and for a measurement between them. This is A.
+/// (B) behind a switch ([`RingMode`]), and for a measurement between them.
+/// This is A, and the default.
 ///
 /// A sleeping lock, because it is held across a daemon round-trip and a
 /// round-trip blocks on the daemon's reply. It is always the innermost lock a
 /// socket operation takes: a socket's own lock, then this.
-///
-/// **One ordering constraint remains until design B.** The daemon still keeps
-/// a single session and resets it for a ring it has not seen. Three raw-ring
-/// boot tests in `proc/spawn.rs` (`netstack_ring_tcp_roundtrip`, `_multi_`,
-/// `_demux_`) open rings of their own, so each resets the session this ring
-/// uses. They are harmless only because they are the netstack battery's first
-/// rungs and run before any socket exists. Anything else that sends
-/// `OP_RING_TCP` with its own ring would destroy every live socket. Design B,
-/// where the daemon keeps a session per ring, removes this.
 static SHARED_RING: KMutex<Option<RingHandle>> = KMutex::new(None);
+
+/// Which ring a newly opened socket submits on: design A or B of A-Q15
+/// (`design-decisions.md` §972), which asks for both behind one switch so the
+/// two can be measured against each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RingMode {
+    /// Design A: every socket on [`SHARED_RING`], one daemon session in all.
+    /// Sockets share one queue, so one socket's slow round-trip delays the
+    /// next socket's.
+    Shared,
+    /// Design B: each socket on a ring of its own, which the daemon keeps as a
+    /// session of its own. Costs a region per socket, and the daemon's session
+    /// table (64) caps the number of sockets.
+    PerSocket,
+}
+
+/// [`set_ring_mode`]'s override: 0 none, 1 shared, 2 per-socket.
+static RING_MODE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+/// The mode a socket opened now gets.
+///
+/// [`set_ring_mode`]'s override if one is set, else the `net.ring` boot switch
+/// (`per-socket` for design B; anything else, or absent, for A).
+#[must_use]
+pub fn ring_mode() -> RingMode {
+    match RING_MODE_OVERRIDE.load(Ordering::Acquire) {
+        1 => RingMode::Shared,
+        2 => RingMode::PerSocket,
+        _ => {
+            if crate::fs::kernparam::get("net.ring").is_some_and(|v| v == "per-socket") {
+                RingMode::PerSocket
+            } else {
+                RingMode::Shared
+            }
+        }
+    }
+}
+
+/// Override the ring mode for sockets opened from now on (`None` returns the
+/// choice to the boot switch). Sockets already open keep the ring they have.
+/// For the load harness and the design-B self-tests, which run both designs in
+/// one boot.
+pub fn set_ring_mode(mode: Option<RingMode>) {
+    let v = match mode {
+        None => 0,
+        Some(RingMode::Shared) => 1,
+        Some(RingMode::PerSocket) => 2,
+    };
+    RING_MODE_OVERRIDE.store(v, Ordering::Release);
+}
 
 /// Next id [`alloc_conn_id`] hands out.
 static NEXT_CONN_ID: AtomicU32 = AtomicU32::new(1);
@@ -166,6 +213,18 @@ struct RingHandle {
     size: u32,
     /// Next `user_data` tag to hand out.
     next_ud: u64,
+    /// Whether the daemon has served a round for this ring, and so may hold a
+    /// session for it: an own ring's teardown stops that session only if so.
+    served: bool,
+}
+
+impl Drop for RingHandle {
+    /// Free the region. Only an own ring (design B) is ever dropped -- the
+    /// shared ring lives in a static for the whole boot -- and its teardown has
+    /// already stopped the daemon's session for it.
+    fn drop(&mut self) {
+        shm::close(self.handle);
+    }
 }
 
 impl RingHandle {
@@ -204,6 +263,7 @@ impl RingHandle {
             handle,
             size,
             next_ud: UD_BASE,
+            served: false,
         })
     }
 
@@ -216,52 +276,95 @@ impl RingHandle {
         let kaddr = shm::kernel_addr(self.handle)?;
         let len = self.size as usize;
         // SAFETY: `kaddr` is the stable kernel VA of our shm region, valid and
-        // aligned for `len` bytes for the region's lifetime (the region is never
-        // closed: `SHARED_RING` lives for the whole boot); `attach` only reads the
-        // header (published by `create`) and bounds-checks the geometry, so it can
-        // never read or write outside the region.
+        // aligned for `len` bytes for the region's lifetime (closed only when
+        // this `RingHandle` drops, and `&self` keeps it alive meanwhile); `attach`
+        // only reads the header (published by `create`) and bounds-checks the
+        // geometry, so it can never read or write outside the region.
         unsafe { netring::Ring::attach(kaddr, len) }.ok_or(KernelError::InternalError)
     }
 }
 
-/// Exclusive use of [`SHARED_RING`] for one daemon round-trip: its lock, and
-/// an attached view of the ring.
+/// Where a socket's round-trips go.
+enum RingRef {
+    /// [`SHARED_RING`] (design A).
+    Shared,
+    /// A ring of the socket's own (design B), guarded by whatever guards the
+    /// `NetstackConn`: the socket's own lock.
+    Own(RingHandle),
+}
+
+/// How a [`RingGuard`] holds its ring.
+enum RingLock<'a> {
+    /// The shared ring's lock.
+    Shared(KMutexGuard<'static, Option<RingHandle>>),
+    /// A socket's own ring, borrowed from its `NetstackConn`.
+    Own(&'a mut RingHandle),
+}
+
+/// Exclusive use of a ring for one daemon round-trip -- the shared ring's lock,
+/// or a socket's own ring -- and an attached view of it.
 ///
 /// Everything a round-trip touches -- the data window written before it, the
 /// completion, the window read after it -- happens while one of these is alive,
 /// so no other socket's round-trip can use the window in between. Operations
 /// that make several round-trips take one guard per round-trip, so other
 /// sockets interleave between them rather than waiting for the whole call.
-struct RingGuard {
-    lock: KMutexGuard<'static, Option<RingHandle>>,
+struct RingGuard<'a> {
+    lock: RingLock<'a>,
     view: netring::Ring,
 }
 
-impl RingGuard {
-    /// Take the ring, creating it on first use.
-    fn acquire() -> KernelResult<Self> {
-        let mut lock = SHARED_RING.lock();
-        if lock.is_none() {
-            *lock = Some(RingHandle::create()?);
+impl<'a> RingGuard<'a> {
+    /// Take `ring`: the shared ring's lock, created on first use, or the
+    /// socket's own ring.
+    fn acquire(ring: &'a mut RingRef) -> KernelResult<Self> {
+        match ring {
+            RingRef::Shared => {
+                let mut lock = SHARED_RING.lock();
+                if lock.is_none() {
+                    *lock = Some(RingHandle::create()?);
+                }
+                let view = lock.as_ref().ok_or(KernelError::InternalError)?.attach()?;
+                Ok(Self {
+                    lock: RingLock::Shared(lock),
+                    view,
+                })
+            }
+            RingRef::Own(h) => {
+                let view = h.attach()?;
+                Ok(Self {
+                    lock: RingLock::Own(h),
+                    view,
+                })
+            }
         }
-        let view = lock.as_ref().ok_or(KernelError::InternalError)?.attach()?;
-        Ok(Self { lock, view })
     }
 
-    /// The ring handle behind the lock. Always `Some` once `acquire` returned.
+    /// The ring handle. Always there once `acquire` returned.
     fn handle(&self) -> KernelResult<&RingHandle> {
-        self.lock.as_ref().ok_or(KernelError::InternalError)
+        match &self.lock {
+            RingLock::Shared(g) => g.as_ref().ok_or(KernelError::InternalError),
+            RingLock::Own(h) => Ok(h),
+        }
+    }
+
+    /// The ring handle, mutably.
+    fn handle_mut(&mut self) -> KernelResult<&mut RingHandle> {
+        match &mut self.lock {
+            RingLock::Shared(g) => g.as_mut().ok_or(KernelError::InternalError),
+            RingLock::Own(h) => Ok(h),
+        }
     }
 
     /// Hand out the next `user_data` tag.
     fn next_ud(&mut self) -> u64 {
-        match self.lock.as_mut() {
-            Some(h) => {
+        match self.handle_mut() {
+            Ok(h) => {
                 let ud = h.next_ud;
                 h.next_ud = h.next_ud.wrapping_add(1);
                 ud
             }
-            None => UD_BASE,
+            Err(_) => UD_BASE,
         }
     }
 
@@ -306,6 +409,9 @@ impl RingGuard {
         'rounds: for _ in 0..8u32 {
             rounds = rounds.saturating_add(1);
             self.submit_round()?;
+            if let Ok(h) = self.handle_mut() {
+                h.served = true;
+            }
             while let Some(c) = self.view.cq_pop() {
                 if c.user_data == want_ud {
                     got = Some(c);
@@ -406,6 +512,9 @@ pub enum LocalEndpoint {
 pub struct NetstackConn {
     /// This client's own connection id, from [`alloc_conn_id`].
     conn_id: u32,
+    /// The ring its round-trips go through, fixed at [`open`](Self::open) by
+    /// [`ring_mode`].
+    ring: RingRef,
     /// Every id this client has installed in the daemon's session and not yet
     /// closed: its own connection or datagram socket, a listener, connections
     /// it accepted. Teardown closes each one.
@@ -426,22 +535,22 @@ pub struct NetstackConn {
 // state the round-trips update.
 
 impl NetstackConn {
-    /// Prepare a client with a fresh connection id. Does **not** contact the
-    /// daemon yet — the first round-trip happens on [`connect`](Self::connect).
+    /// Prepare a client with a fresh connection id, on the ring [`ring_mode`]
+    /// chooses now: the shared ring (design A), or a new ring of its own
+    /// (design B). Does **not** contact the daemon yet — the first round-trip
+    /// happens on [`connect`](Self::connect).
     ///
     /// # Errors
     ///
-    /// Never, today: the ring it will use is created on first use by a
-    /// round-trip. The signature stays fallible for callers written against the
-    /// per-socket ring this replaced, and for design B (A-Q15), which allocates a
-    /// ring here again.
-    // Fallible on purpose while it cannot fail: design B's per-socket ring is
-    // allocated here, and a signature that loses its `Result` for one increment
-    // and regains it the next would churn every caller twice.
-    #[allow(clippy::unnecessary_wraps)]
+    /// In per-socket mode, an error creating the ring's shared memory.
     pub fn open() -> KernelResult<Self> {
+        let ring = match ring_mode() {
+            RingMode::Shared => RingRef::Shared,
+            RingMode::PerSocket => RingRef::Own(RingHandle::create()?),
+        };
         Ok(Self {
             conn_id: alloc_conn_id(),
+            ring,
             installed: Vec::new(),
         })
     }
@@ -457,26 +566,29 @@ impl NetstackConn {
         self.conn_id
     }
 
+    // The three below take the `installed` field, not `self`: a `RingGuard`
+    // borrows `self.ring`, and these run while one is alive.
+
     /// Make room to record one more installed id, before the round-trip that
     /// installs it (see the `installed` field).
-    fn reserve_install(&mut self) -> KernelResult<()> {
-        self.installed
+    fn reserve_install(installed: &mut Vec<u32>) -> KernelResult<()> {
+        installed
             .try_reserve(1)
             .map_err(|_| KernelError::OutOfMemory)
     }
 
     /// Record that `id` now names something in the daemon's session.
-    fn install(&mut self, id: u32) {
-        if !self.installed.contains(&id) {
+    fn install(installed: &mut Vec<u32>, id: u32) {
+        if !installed.contains(&id) {
             // Cannot reallocate: `reserve_install` made room before the
             // round-trip that installed `id`.
-            self.installed.push(id);
+            installed.push(id);
         }
     }
 
     /// Record that `id` no longer names anything in the daemon's session.
-    fn uninstall(&mut self, id: u32) {
-        self.installed.retain(|&i| i != id);
+    fn uninstall(installed: &mut Vec<u32>, id: u32) {
+        installed.retain(|&i| i != id);
     }
 
     /// Open the TCP connection to `ip:port`.
@@ -504,12 +616,12 @@ impl NetstackConn {
     /// completion, service-channel failure) — distinct from a `< 0` connect
     /// result, which is a normal "no upstream" outcome.
     pub fn connect(&mut self, ip: &[u8; 4], port: u16, nonblock: bool) -> KernelResult<i32> {
-        self.reserve_install()?;
+        Self::reserve_install(&mut self.installed)?;
         // Recorded before the round-trip, dropped only on a definite refusal:
         // if the round-trip itself fails, the daemon may still have installed
         // the connection, and a teardown OP_CLOSE for an unknown id is harmless.
-        self.install(self.conn_id);
-        let mut ring = RingGuard::acquire()?;
+        Self::install(&mut self.installed, self.conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let ud = ring.next_ud();
         let mut aux = netipc::ring::Sqe::pack_endpoint(ip, port);
         if nonblock {
@@ -527,7 +639,7 @@ impl NetstackConn {
         // leave a live connection installed in the daemon session; anything else
         // installed nothing.
         if res < 0 && res != netipc::ring::ERR_IN_PROGRESS {
-            self.uninstall(self.conn_id);
+            Self::uninstall(&mut self.installed, self.conn_id);
         }
         Ok(res)
     }
@@ -546,10 +658,10 @@ impl NetstackConn {
     ///
     /// Returns an error on a control-protocol fault (see [`connect`](Self::connect)).
     pub fn connect6(&mut self, ip6: &[u8; 16], port: u16, nonblock: bool) -> KernelResult<i32> {
-        self.reserve_install()?;
+        Self::reserve_install(&mut self.installed)?;
         // Recorded before the round-trip, as in `connect`.
-        self.install(self.conn_id);
-        let mut ring = RingGuard::acquire()?;
+        Self::install(&mut self.installed, self.conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         if !ring.write_data(SND_OFF as usize, ip6) {
             return Err(KernelError::InternalError);
         }
@@ -568,7 +680,7 @@ impl NetstackConn {
         };
         let res = ring.submit_and_reap(&sqe)?;
         if res < 0 && res != netipc::ring::ERR_IN_PROGRESS {
-            self.uninstall(self.conn_id);
+            Self::uninstall(&mut self.installed, self.conn_id);
         }
         Ok(res)
     }
@@ -623,7 +735,7 @@ impl NetstackConn {
         while off < buf.len() {
             // The ring per chunk, not for the whole buffer: a large send by one
             // socket lets other sockets' round-trips in between its chunks.
-            let mut ring = RingGuard::acquire()?;
+            let mut ring = RingGuard::acquire(&mut self.ring)?;
             let end = off.saturating_add(SND_CAP as usize).min(buf.len());
             let chunk = buf.get(off..end).ok_or(KernelError::InternalError)?;
             if !ring.write_data(SND_OFF as usize, chunk) {
@@ -730,7 +842,7 @@ impl NetstackConn {
         nonblock: bool,
         peek: bool,
     ) -> KernelResult<i32> {
-        let mut ring = RingGuard::acquire()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let want = buf.len().min(RCV_CAP as usize);
         let want_u32 = u32::try_from(want).map_err(|_| KernelError::InternalError)?;
         let ud = ring.next_ud();
@@ -787,10 +899,10 @@ impl NetstackConn {
     /// - [`KernelError::ResourceExhausted`] — the daemon's socket table is full.
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn udp_bind(&mut self, port: u16) -> KernelResult<u16> {
-        self.reserve_install()?;
+        Self::reserve_install(&mut self.installed)?;
         // Recorded before the round-trip, as in `connect`.
-        self.install(self.conn_id);
-        let mut ring = RingGuard::acquire()?;
+        Self::install(&mut self.installed, self.conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_UDP_BIND,
@@ -801,12 +913,12 @@ impl NetstackConn {
         };
         let res = ring.submit_and_reap(&sqe)?;
         if res == netipc::ring::ERR_ADDR_IN_USE {
-            self.uninstall(self.conn_id);
+            Self::uninstall(&mut self.installed, self.conn_id);
             return Err(KernelError::AddrInUse);
         }
         if res < 0 {
             // Table full (daemon `-1`) or any other bind failure.
-            self.uninstall(self.conn_id);
+            Self::uninstall(&mut self.installed, self.conn_id);
             return Err(KernelError::ResourceExhausted);
         }
         // A bound UDP socket holds a daemon-side slot, recorded above so teardown
@@ -830,7 +942,7 @@ impl NetstackConn {
     /// - [`KernelError::NotConnected`] — the socket is not bound (daemon `-1`).
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn udp_send_to(&mut self, ip: &[u8; 4], port: u16, buf: &[u8]) -> KernelResult<i32> {
-        let mut ring = RingGuard::acquire()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         // A single datagram must fit the ring send window (the daemon also caps it
         // to its per-datagram maximum and returns ERR_MSG_SIZE). Rather than
         // silently truncate a payload larger than the window, reject it as EMSGSIZE
@@ -880,7 +992,7 @@ impl NetstackConn {
     /// - [`KernelError::NotConnected`] — the socket is not bound (daemon `-1`).
     /// - a control-protocol fault (see [`connect`](Self::connect)).
     pub fn udp_send_to6(&mut self, ip6: &[u8; 16], port: u16, buf: &[u8]) -> KernelResult<i32> {
-        let mut ring = RingGuard::acquire()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         // The 16-byte destination address plus the payload must fit the ring send
         // window; reject an oversized datagram as EMSGSIZE rather than truncating
         // (a datagram is all-or-nothing).
@@ -965,7 +1077,7 @@ impl NetstackConn {
         buf: &mut [u8],
         nonblock: bool,
     ) -> KernelResult<(i32, u16, [u8; 16], u16)> {
-        let mut ring = RingGuard::acquire()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let hdr_len = netipc::ring::UDP_ADDR_HDR_LEN;
         // The daemon writes a 24-byte address header + payload into the recv
         // window, so the window must be at least the header plus whatever payload
@@ -1053,7 +1165,7 @@ impl NetstackConn {
     ///
     /// Same as [`poll_ready`](Self::poll_ready).
     pub fn poll_on(&mut self, conn_id: u32) -> KernelResult<(bool, bool, bool)> {
-        let mut ring = RingGuard::acquire()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_POLL,
@@ -1087,10 +1199,10 @@ impl NetstackConn {
     ///
     /// Returns a control-protocol fault (see [`connect`](Self::connect)).
     pub fn listen(&mut self, listener_id: u32, port: u16) -> KernelResult<i32> {
-        self.reserve_install()?;
+        Self::reserve_install(&mut self.installed)?;
         // Recorded before the round-trip, as in `connect`.
-        self.install(listener_id);
-        let mut ring = RingGuard::acquire()?;
+        Self::install(&mut self.installed, listener_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_LISTEN,
@@ -1101,7 +1213,7 @@ impl NetstackConn {
         };
         let res = ring.submit_and_reap(&sqe)?;
         if res != 0 {
-            self.uninstall(listener_id);
+            Self::uninstall(&mut self.installed, listener_id);
         }
         Ok(res)
     }
@@ -1129,10 +1241,10 @@ impl NetstackConn {
         new_conn_id: u32,
         peer: &mut [u8; 6],
     ) -> KernelResult<i32> {
-        self.reserve_install()?;
+        Self::reserve_install(&mut self.installed)?;
         // Recorded before the round-trip, as in `connect`.
-        self.install(new_conn_id);
-        let mut ring = RingGuard::acquire()?;
+        Self::install(&mut self.installed, new_conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let ud = ring.next_ud();
         // Reuse the recv-landing window for the 6-byte peer address: the guard
         // holds the ring for this whole round-trip, so no other receive can land
@@ -1148,7 +1260,7 @@ impl NetstackConn {
         let res = ring.submit_and_reap(&sqe)?;
         if res != 0 {
             // Nothing accepted (an empty backlog, or a refusal): nothing to close.
-            self.uninstall(new_conn_id);
+            Self::uninstall(&mut self.installed, new_conn_id);
         } else if !ring.read_data(RCV_OFF as usize, peer) {
             // Accepted, so it stays recorded for teardown to close.
             return Err(KernelError::InternalError);
@@ -1174,10 +1286,10 @@ impl NetstackConn {
         new_conn_id: u32,
         peer: &mut [u8; 18],
     ) -> KernelResult<i32> {
-        self.reserve_install()?;
+        Self::reserve_install(&mut self.installed)?;
         // Recorded before the round-trip, as in `connect`.
-        self.install(new_conn_id);
-        let mut ring = RingGuard::acquire()?;
+        Self::install(&mut self.installed, new_conn_id);
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_ACCEPT,
@@ -1190,7 +1302,7 @@ impl NetstackConn {
         let res = ring.submit_and_reap(&sqe)?;
         if res != 0 {
             // Nothing accepted (an empty backlog, or a refusal): nothing to close.
-            self.uninstall(new_conn_id);
+            Self::uninstall(&mut self.installed, new_conn_id);
         } else if !ring.read_data(RCV_OFF as usize, peer) {
             // Accepted, so it stays recorded for teardown to close.
             return Err(KernelError::InternalError);
@@ -1229,7 +1341,7 @@ impl NetstackConn {
     ///
     /// Same as [`local_addr`](Self::local_addr).
     pub fn local_addr_on(&mut self, conn_id: u32) -> KernelResult<LocalEndpoint> {
-        let mut ring = RingGuard::acquire()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let ud = ring.next_ud();
         // Ask for the 18-byte (v6) form; the daemon writes 6 for a v4 connection.
         let sqe = netipc::ring::Sqe {
@@ -1302,7 +1414,7 @@ impl NetstackConn {
     ///
     /// Same as [`shutdown`](Self::shutdown).
     pub fn shutdown_on(&mut self, conn_id: u32, how: u64) -> KernelResult<()> {
-        let mut ring = RingGuard::acquire()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_SHUTDOWN,
@@ -1336,7 +1448,7 @@ impl NetstackConn {
         if !self.installed.contains(&conn_id) {
             return Ok(());
         }
-        let mut ring = RingGuard::acquire()?;
+        let mut ring = RingGuard::acquire(&mut self.ring)?;
         let ud = ring.next_ud();
         let sqe = netipc::ring::Sqe {
             op: netipc::ring::OP_CLOSE,
@@ -1346,7 +1458,7 @@ impl NetstackConn {
         };
         // A `-1` (unknown id) is fine: it is already gone.
         let _ = ring.submit_and_reap(&sqe)?;
-        self.uninstall(conn_id);
+        Self::uninstall(&mut self.installed, conn_id);
         Ok(())
     }
 
@@ -1370,13 +1482,10 @@ impl NetstackConn {
     /// emptied as it goes. The shared session itself is never stopped -- other
     /// sockets are using it.
     fn teardown(&mut self) {
-        if self.installed.is_empty() {
-            return;
-        }
         let ids = core::mem::take(&mut self.installed);
         for id in ids {
             // A guard per id, so other sockets interleave with a long teardown.
-            let Ok(mut ring) = RingGuard::acquire() else {
+            let Ok(mut ring) = RingGuard::acquire(&mut self.ring) else {
                 // No ring to reach the daemon through: nothing can be closed, and
                 // the daemon's own table is what outlives this.
                 return;
@@ -1391,12 +1500,32 @@ impl NetstackConn {
             // Best effort, per id: a daemon that restarted has nothing to close.
             let _ = ring.submit_and_reap(&sqe);
         }
+        // A ring of our own is a daemon session of its own (design B): stop it,
+        // so the daemon unmaps the region before `RingHandle`'s drop frees it.
+        // Only if the daemon ever served it -- a never-used ring has no session
+        // to stop, and must not contact the daemon at all.
+        if matches!(&self.ring, RingRef::Own(h) if h.served) {
+            if let Ok(mut ring) = RingGuard::acquire(&mut self.ring) {
+                let ud = ring.next_ud();
+                let sqe = netipc::ring::Sqe {
+                    op: netipc::ring::OP_STOP,
+                    user_data: ud,
+                    ..netipc::ring::Sqe::default()
+                };
+                // Best effort: the region is freed either way.
+                let _ = ring.submit_and_reap(&sqe);
+            }
+            if let RingRef::Own(h) = &mut self.ring {
+                h.served = false;
+            }
+        }
     }
 }
 
 impl Drop for NetstackConn {
     fn drop(&mut self) {
-        // Close whatever the caller did not close.
+        // Close whatever the caller did not close, and stop an own ring's
+        // session; the `RingHandle` field's own drop then frees its region.
         self.teardown();
     }
 }

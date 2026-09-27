@@ -7288,29 +7288,32 @@ pub(crate) fn mprotect_core(addr: u64, len: u64, prot: u64) -> crate::error::Ker
     let mut va = addr;
     while va < end {
         let virt = VirtAddr::new(va);
-        if let Some(current) = page_table::translate_flags(pml4, virt) {
-            // Compute new flags: clear WRITABLE + NO_EXECUTE + USER_ACCESSIBLE,
-            // then set them according to prot.  Preserve PRESENT, COW, and any
-            // other PTE bits.  USER_ACCESSIBLE is the hardware enforcement of
-            // PROT_NONE for *already-present* pages: clearing it makes a ring-3
-            // touch fault (present + user-access-denied) while keeping the
-            // frame and its contents, so mprotect back to an accessible prot
+        if let Some(current) = page_table::read_leaf_pte(pml4, virt) {
+            // The permission bits come from prot; the rest of the entry is
+            // kept.  USER_ACCESSIBLE is the hardware enforcement of PROT_NONE
+            // for *already-present* pages: clearing it makes a ring-3 touch
+            // fault (present + user-access-denied) while keeping the frame
+            // and its contents, so mprotect back to an accessible prot
             // restores access losslessly (design-decisions §32).
-            let mut new_flags = current
-                & !PageFlags::WRITABLE
-                & !PageFlags::NO_EXECUTE
-                & !PageFlags::USER_ACCESSIBLE;
+            //
+            // Writability goes through `page_table::user_protect_flags`: a
+            // page that is copy-on-write, or whose frame another address
+            // space also maps, gets COW rather than WRITABLE (its first write
+            // copies), and a read-only request clears COW.  Until 2026-09-27
+            // this kept COW on a read-only request, so the fault handler went
+            // on granting writes to a page the program had made read-only --
+            // W^X undone on any page a fork had left copy-on-write.
+            let mut requested = PageFlags::PRESENT;
             if want_access {
-                new_flags |= PageFlags::USER_ACCESSIBLE;
+                requested |= PageFlags::USER_ACCESSIBLE;
             }
-            // Never set WRITABLE on a CoW page — the CoW fault handler
-            // will upgrade the page on first write.
-            if want_write && !current.contains(PageFlags::COW) {
-                new_flags |= PageFlags::WRITABLE;
+            if want_write {
+                requested |= PageFlags::WRITABLE;
             }
             if !want_exec {
-                new_flags |= PageFlags::NO_EXECUTE;
+                requested |= PageFlags::NO_EXECUTE;
             }
+            let new_flags = page_table::user_protect_flags(current, requested);
 
             // SAFETY: pml4 is the calling process's PML4; virt is a
             // user-space 4 KiB-aligned address whose mapping we just

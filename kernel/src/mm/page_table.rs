@@ -1797,6 +1797,132 @@ pub unsafe fn change_flags_4k(
     Ok(())
 }
 
+/// The flags a present user leaf gets when a program changes its protection
+/// to `requested`, given the entry it has now.
+///
+/// Only the permission bits are taken from `requested`:
+/// [`PageFlags::USER_ACCESSIBLE`], [`PageFlags::WRITABLE`] and
+/// [`PageFlags::NO_EXECUTE`].  Every other bit of `current` -- the memory
+/// type, [`PageFlags::SHARED`], the accessed and dirty bits -- is kept.
+///
+/// Writability is where a protection change can break isolation, so it is
+/// not simply copied:
+/// - a shared-by-design page gets exactly what was asked;
+/// - a private page that is copy-on-write, or whose frame is referenced more
+///   than once (after a fork, or a page-cache page under a private file
+///   mapping), is logically writable but must not be written in place: it
+///   gets [`PageFlags::COW`] instead of [`PageFlags::WRITABLE`], and its
+///   first write copies it (`cow::resolve_cow_fault`, which judges by the
+///   same reference count);
+/// - a read-only request clears both, so a copy-on-write page made read-only
+///   faults on a write rather than being quietly copied and written.
+///
+/// Before 2026-09-27 the native `mprotect` replaced a leaf's flags wholesale,
+/// so a copy-on-write page made writable was written in place -- into the
+/// frame the other process still maps -- and the Linux one kept `COW` on a
+/// read-only request, so the fault handler went on granting writes (W^X
+/// undone after any fork).  `COW` now means "logically writable, copy
+/// first", and nothing else.
+#[must_use]
+pub fn user_protect_flags(current: PageTableEntry, requested: PageFlags) -> PageFlags {
+    let permission = PageFlags::USER_ACCESSIBLE.bits()
+        | PageFlags::WRITABLE.bits()
+        | PageFlags::NO_EXECUTE.bits()
+        | PageFlags::COW.bits();
+    let mut flags = PageFlags::from_bits(current.flags().bits() & !permission);
+    flags |= PageFlags::from_bits(
+        requested.bits() & (PageFlags::USER_ACCESSIBLE.bits() | PageFlags::NO_EXECUTE.bits()),
+    );
+    if requested.contains(PageFlags::WRITABLE) {
+        if current.is_shared() {
+            flags |= PageFlags::WRITABLE;
+        } else if current.is_cow() || frame_is_multiply_referenced(current.phys_addr()) {
+            flags |= PageFlags::COW;
+        } else {
+            flags |= PageFlags::WRITABLE;
+        }
+    }
+    flags
+}
+
+/// Whether the allocator-owned 16 KiB frame containing `phys` has more than
+/// one reference -- the test `cow::resolve_cow_fault` uses to decide whether
+/// a write must copy first.  A frame the allocator does not manage (device
+/// memory) reports a count of 0 and so is not.
+fn frame_is_multiply_referenced(phys: u64) -> bool {
+    let base = phys & !(FRAME_SIZE as u64).wrapping_sub(1);
+    PhysFrame::from_addr(base).is_some_and(|f| frame::refcount(f) > 1)
+}
+
+/// Change the protection of the 16 KiB frame mapped at `virt` the way a
+/// program's `mprotect` asks: each of its four PTEs gets
+/// [`user_protect_flags`] of its own current entry.
+///
+/// This is the native `mprotect` primitive.  [`change_flags`], which writes
+/// one flag set to all four, is for kernel mappings: a user frame can have
+/// entries in different states (after a partial copy-on-write resolve the
+/// four can point into different frames with different reference counts),
+/// and each must keep its own non-permission bits.
+///
+/// All-or-nothing: every entry is checked present before any is written.
+///
+/// # Safety
+///
+/// Same requirements as [`change_flags`].  The caller must flush the TLB.
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe fn change_user_protection(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    requested: PageFlags,
+) -> KernelResult<()> {
+    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+
+    if !virt.is_frame_aligned() {
+        return Err(KernelError::BadAlignment);
+    }
+    if !virt.is_canonical() {
+        return Err(KernelError::InvalidAddress);
+    }
+
+    // Walk to the PT (no creation).
+    // SAFETY for all read_entry calls: each table address is either
+    // pml4_phys (caller-provided, valid per fn safety contract) or from a
+    // present, non-huge parent entry.  Indices from the canonical virt.
+    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return Err(KernelError::InvalidAddress);
+    }
+    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() || pdpte.is_huge() {
+        return Err(KernelError::InvalidAddress);
+    }
+    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() || pde.is_huge() {
+        return Err(KernelError::InvalidAddress);
+    }
+    let pt = pde.phys_addr();
+    let base_pt_index = virt.pt_index();
+
+    for i in 0..HW_PAGES_PER_FRAME {
+        // SAFETY: pt valid from a present pde; base_pt_index is 16 KiB-frame
+        // aligned (a multiple of 4), so base_pt_index + i < 512.
+        if !unsafe { read_entry(pt, base_pt_index + i, hhdm) }.is_present() {
+            return Err(KernelError::InvalidAddress);
+        }
+    }
+    for i in 0..HW_PAGES_PER_FRAME {
+        // SAFETY: as above.
+        let pte = unsafe { read_entry(pt, base_pt_index + i, hhdm) };
+        let updated = PageTableEntry::new(pte.phys_addr(), user_protect_flags(pte, requested));
+        // SAFETY: pt valid, index < 512, exclusive access (caller guarantee).
+        unsafe {
+            write_entry(pt, base_pt_index + i, updated, hhdm);
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Swap PTE helpers
 // ---------------------------------------------------------------------------

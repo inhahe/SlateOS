@@ -64,7 +64,9 @@
 //! - RFC 1951: DEFLATE Compressed Data Format Specification
 //! - RFC 1952: GZIP file format specification
 //! - RFC 1950: ZLIB Compressed Data Format Specification
-//! - Based on the public-domain `puff.c` by Mark Adler
+//! - The decoder is table-driven, as zlib's, zlib-ng's and libdeflate's are
+//!   (`inflate.rs`, design-decisions §1039); the public-domain `puff.c` by
+//!   Mark Adler, which it replaced, is kept as the tests' oracle (`puff.rs`)
 
 #![no_std]
 
@@ -72,7 +74,6 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cmp::Ordering;
 
 /// Everything that can go wrong reading a DEFLATE, gzip or zlib stream.
 ///
@@ -199,55 +200,28 @@ impl core::fmt::Display for Error {
 pub type Result<T> = core::result::Result<T, Error>;
 
 mod fixed_buffer;
+mod inflate;
+#[cfg(test)]
+mod puff;
 pub use fixed_buffer::{Filled, ZlibStop, zlib_decompress_into, zlib_inflate_into};
 
 // ---------------------------------------------------------------------------
-// Bit reader — reads bits from a byte stream, LSB first
+// Byte reader -- the gzip header's fields
 // ---------------------------------------------------------------------------
 
-/// Reads bits from a byte buffer, least-significant-bit first.
+/// Reads a gzip header's fields, a byte at a time. The DEFLATE bit stream has
+/// its own reader, in `inflate.rs`.
 struct BitReader<'a> {
     data: &'a [u8],
     pos: usize, // byte position
-    bit: u8,    // bit position within current byte (0-7)
 }
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self {
-            data,
-            pos: 0,
-            bit: 0,
-        }
+        Self { data, pos: 0 }
     }
 
-    /// Read `n` bits (1..=25) and return as u32 (LSB first).
-    fn read_bits(&mut self, n: u8) -> Result<u32> {
-        let mut val = 0u32;
-        for i in 0..n {
-            let Some(&byte) = self.data.get(self.pos) else {
-                return Err(Error::UnexpectedEnd);
-            };
-            let b = (byte >> self.bit) & 1;
-            val |= u32::from(b) << i;
-            self.bit = self.bit.wrapping_add(1);
-            if self.bit >= 8 {
-                self.bit = 0;
-                self.pos = self.pos.wrapping_add(1);
-            }
-        }
-        Ok(val)
-    }
-
-    /// Align to the next byte boundary (discard remaining bits).
-    fn align(&mut self) {
-        if self.bit > 0 {
-            self.bit = 0;
-            self.pos = self.pos.wrapping_add(1);
-        }
-    }
-
-    /// Read a raw byte at the current byte position (must be aligned).
+    /// Read a raw byte at the current byte position.
     fn read_byte(&mut self) -> Result<u8> {
         let Some(&b) = self.data.get(self.pos) else {
             return Err(Error::UnexpectedEnd);
@@ -256,21 +230,11 @@ impl<'a> BitReader<'a> {
         Ok(b)
     }
 
-    /// Read a 16-bit little-endian value (must be aligned).
+    /// Read a 16-bit little-endian value.
     fn read_u16_le(&mut self) -> Result<u16> {
         let lo = self.read_byte()?;
         let hi = self.read_byte()?;
         Ok(u16::from(lo) | (u16::from(hi) << 8))
-    }
-
-    /// Remaining bytes in the stream.
-    #[allow(dead_code)]
-    fn remaining(&self) -> usize {
-        if self.pos >= self.data.len() {
-            0
-        } else {
-            self.data.len().wrapping_sub(self.pos)
-        }
     }
 
     /// Current byte position.
@@ -280,7 +244,7 @@ impl<'a> BitReader<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Huffman decoder
+// Code sizes
 // ---------------------------------------------------------------------------
 
 /// Maximum code length allowed by DEFLATE.
@@ -294,129 +258,6 @@ const MAX_DIST_CODES: usize = 32;
 
 /// Maximum total codes for code length alphabet.
 const MAX_CL_CODES: usize = 19;
-
-/// A Huffman decode table built from a set of code lengths.
-///
-/// Uses a two-level lookup: codes up to `MAX_BITS` are stored in a
-/// flat table indexed by reversed bit pattern.  For a kernel where
-/// memory is limited, we use the "counts + symbols" approach from
-/// puff.c which is compact and fast.
-struct HuffmanTable {
-    /// Number of codes of each length (index = length, 0..=MAX_BITS).
-    counts: [u16; MAX_BITS + 1],
-    /// Symbols sorted by code, then by symbol value.
-    symbols: [u16; MAX_LIT_CODES + MAX_DIST_CODES],
-    /// Number of valid symbols.
-    num_symbols: usize,
-}
-
-impl HuffmanTable {
-    const fn empty() -> Self {
-        Self {
-            counts: [0; MAX_BITS + 1],
-            symbols: [0; MAX_LIT_CODES + MAX_DIST_CODES],
-            num_symbols: 0,
-        }
-    }
-
-    /// Build a Huffman table from an array of code lengths.
-    ///
-    /// `lengths[i]` is the code length for symbol `i`.  A length of 0
-    /// means the symbol is not present in the alphabet.
-    fn build(lengths: &[u8]) -> Result<Self> {
-        let mut table = Self::empty();
-        table.num_symbols = lengths.len();
-
-        // Count the number of codes for each code length. The `get_mut` is
-        // the length check as well as the bounds check: `counts` has exactly
-        // `MAX_BITS + 1` slots, and DEFLATE cannot represent a code longer
-        // than `MAX_BITS`, so a length that misses the array came from a
-        // malformed stream rather than an unusual one.
-        for &len in lengths {
-            let slot = table
-                .counts
-                .get_mut(len as usize)
-                .ok_or(Error::InvalidHuffmanTable)?;
-            *slot = slot.wrapping_add(1);
-        }
-
-        // `counts[0]` is the number of symbols with no code at all. If that
-        // is every symbol the alphabet is empty — degenerate, but legal: a
-        // block containing no back-references has an empty distance alphabet.
-        let uncoded = table.counts.first().copied().unwrap_or(0);
-        if uncoded as usize == lengths.len() {
-            return Ok(table);
-        }
-
-        // Check that the Huffman tree is complete or under-subscribed.
-        // The Kraft inequality: sum of 2^(-len) for each code must be ≤ 1.
-        let mut left: i32 = 1;
-        for bits in 1..=MAX_BITS {
-            let count = table.counts.get(bits).copied().unwrap_or(0);
-            left = left.wrapping_mul(2).wrapping_sub(i32::from(count));
-            if left < 0 {
-                return Err(Error::InvalidHuffmanTable); // over-subscribed
-            }
-        }
-
-        // Compute offsets: where codes of each length start in the
-        // symbols array.
-        let mut offsets = [0u16; MAX_BITS + 1];
-        for bits in 1..MAX_BITS {
-            let start = offsets.get(bits).copied().unwrap_or(0);
-            let count = table.counts.get(bits).copied().unwrap_or(0);
-            if let Some(next) = offsets.get_mut(bits.wrapping_add(1)) {
-                *next = start.wrapping_add(count);
-            }
-        }
-
-        // Fill in the symbols array, sorted by code length then value.
-        for (sym, &len) in lengths.iter().enumerate() {
-            if len == 0 {
-                continue;
-            }
-            let Some(offset) = offsets.get_mut(len as usize) else {
-                continue;
-            };
-            let idx = *offset as usize;
-            *offset = offset.wrapping_add(1);
-            if let Some(slot) = table.symbols.get_mut(idx) {
-                *slot = sym as u16;
-            }
-        }
-
-        Ok(table)
-    }
-
-    /// Decode one symbol from the bit stream.
-    ///
-    /// Reads bits one at a time, accumulating a code and checking
-    /// against each code length.  This is simple (no lookup tables)
-    /// and works well for the small alphabets in DEFLATE.
-    fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16> {
-        let mut code: u32 = 0;
-        let mut first: u32 = 0; // first code of this length
-        let mut index: u32 = 0; // index into symbols for this length
-
-        for len in 1..=MAX_BITS {
-            let bit = reader.read_bits(1)?;
-            code = code.wrapping_mul(2).wrapping_add(bit);
-            let count = u32::from(self.counts.get(len).copied().unwrap_or(0));
-            if code.wrapping_sub(first) < count {
-                let sym_idx = index.wrapping_add(code.wrapping_sub(first)) as usize;
-                return self
-                    .symbols
-                    .get(sym_idx)
-                    .copied()
-                    .ok_or(Error::InvalidSymbol);
-            }
-            first = first.wrapping_add(count).wrapping_mul(2);
-            index = index.wrapping_add(count);
-        }
-
-        Err(Error::InvalidSymbol)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // DEFLATE tables — length and distance extra bits
@@ -519,253 +360,12 @@ pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
 /// As [`inflate`], plus [`Error::OutputTooLarge`] once the output reaches
 /// `limit`.
 pub fn inflate_limited(data: &[u8], limit: usize) -> Result<Vec<u8>> {
-    let mut reader = BitReader::new(data);
-    let mut output = Vec::with_capacity(data.len().saturating_mul(2).min(limit));
-
-    loop {
-        // Read block header: BFINAL (1 bit) + BTYPE (2 bits).
-        let bfinal = reader.read_bits(1)?;
-        let btype = reader.read_bits(2)?;
-
-        match btype {
-            0 => inflate_stored(&mut reader, &mut output, limit)?,
-            1 => inflate_fixed(&mut reader, &mut output, limit)?,
-            2 => inflate_dynamic(&mut reader, &mut output, limit)?,
-            _ => return Err(Error::ReservedBlockType), // reserved
-        }
-
-        if bfinal != 0 {
-            break;
-        }
-    }
-
-    Ok(output)
-}
-
-/// Decode a stored (uncompressed) block.
-fn inflate_stored(reader: &mut BitReader<'_>, output: &mut Vec<u8>, limit: usize) -> Result<()> {
-    reader.align();
-    let len = reader.read_u16_le()?;
-    let nlen = reader.read_u16_le()?;
-
-    // LEN and NLEN should be one's complements of each other.
-    if len != !nlen {
-        return Err(Error::StoredLengthMismatch);
-    }
-
-    for _ in 0..len {
-        if output.len() >= limit {
-            return Err(Error::OutputTooLarge);
-        }
-        let b = reader.read_byte()?;
-        output.push(b);
-    }
-
-    Ok(())
-}
-
-/// Decode a block with fixed Huffman codes.
-fn inflate_fixed(reader: &mut BitReader<'_>, output: &mut Vec<u8>, limit: usize) -> Result<()> {
-    let (lit_table, dist_table) = fixed_tables()?;
-    inflate_codes(reader, &lit_table, &dist_table, output, limit)
-}
-
-/// Decode a block with dynamic Huffman codes.
-fn inflate_dynamic(reader: &mut BitReader<'_>, output: &mut Vec<u8>, limit: usize) -> Result<()> {
-    let (lit_table, dist_table) = read_dynamic_tables(reader)?;
-    inflate_codes(reader, &lit_table, &dist_table, output, limit)
-}
-
-/// The fixed block's two tables (RFC 1951 §3.2.6).
-fn fixed_tables() -> Result<(HuffmanTable, HuffmanTable)> {
-    Ok((
-        HuffmanTable::build(&fixed_lit_lengths())?,
-        HuffmanTable::build(&fixed_dist_lengths())?,
-    ))
-}
-
-/// Read a dynamic block's header -- the code-length code, then the
-/// literal/length and distance code lengths it encodes -- and build the two
-/// tables the block's symbols are decoded with.
-///
-/// Shared by [`inflate_dynamic`] and [`InflateStream`], so the one-shot and
-/// streaming decoders cannot disagree about which headers are valid or which
-/// error a bad one produces.
-fn read_dynamic_tables(reader: &mut BitReader<'_>) -> Result<(HuffmanTable, HuffmanTable)> {
-    // Read the number of literal/length codes, distance codes, and
-    // code-length codes.
-    let hlit = reader.read_bits(5)?.wrapping_add(257) as usize; // 257..286
-    let hdist = reader.read_bits(5)?.wrapping_add(1) as usize; // 1..32
-    let hclen = reader.read_bits(4)?.wrapping_add(4) as usize; // 4..19
-
-    if hlit > 286 || hdist > 30 || hclen > 19 {
-        return Err(Error::InvalidHuffmanTable);
-    }
-
-    // Read code-length code lengths (3 bits each, in permuted order).
-    let mut cl_lens = [0u8; MAX_CL_CODES];
-    for &order in CL_ORDER.iter().take(hclen) {
-        // Read first, place second: the three bits must leave the stream
-        // whether or not the permuted slot exists, or every following symbol
-        // is decoded from a shifted position. Every `CL_ORDER` entry is < 19
-        // so the slot always does exist; `get_mut` states that rather than
-        // trusting the table.
-        let bits = reader.read_bits(3)? as u8;
-        if let Some(slot) = cl_lens.get_mut(order as usize) {
-            *slot = bits;
-        }
-    }
-
-    let cl_table = HuffmanTable::build(&cl_lens)?;
-
-    // Decode literal/length and distance code lengths.
-    let total = hlit.wrapping_add(hdist);
-    let mut all_lens = [0u8; MAX_LIT_CODES + MAX_DIST_CODES];
-    let mut i = 0;
-
-    while i < total {
-        let sym = cl_table.decode(reader)?;
-
-        match sym {
-            0..=15 => {
-                // Literal code length.
-                if let Some(slot) = all_lens.get_mut(i) {
-                    *slot = sym as u8;
-                }
-                i = i.wrapping_add(1);
-            }
-            16 => {
-                // Repeat previous length 3..6 times.
-                if i == 0 {
-                    return Err(Error::InvalidHuffmanTable);
-                }
-                let repeat = reader.read_bits(2)?.wrapping_add(3) as usize;
-                let prev = all_lens.get(i.wrapping_sub(1)).copied().unwrap_or(0);
-                for _ in 0..repeat {
-                    if i >= total {
-                        return Err(Error::InvalidHuffmanTable);
-                    }
-                    if let Some(slot) = all_lens.get_mut(i) {
-                        *slot = prev;
-                    }
-                    i = i.wrapping_add(1);
-                }
-            }
-            17 => {
-                // Repeat zero 3..10 times.
-                let repeat = reader.read_bits(3)?.wrapping_add(3) as usize;
-                for _ in 0..repeat {
-                    if i >= total {
-                        return Err(Error::InvalidHuffmanTable);
-                    }
-                    if let Some(slot) = all_lens.get_mut(i) {
-                        *slot = 0;
-                    }
-                    i = i.wrapping_add(1);
-                }
-            }
-            18 => {
-                // Repeat zero 11..138 times.
-                let repeat = reader.read_bits(7)?.wrapping_add(11) as usize;
-                for _ in 0..repeat {
-                    if i >= total {
-                        return Err(Error::InvalidHuffmanTable);
-                    }
-                    if let Some(slot) = all_lens.get_mut(i) {
-                        *slot = 0;
-                    }
-                    i = i.wrapping_add(1);
-                }
-            }
-            _ => return Err(Error::InvalidHuffmanTable),
-        }
-    }
-
-    let lit_table = HuffmanTable::build(all_lens.get(..hlit).ok_or(Error::InvalidHuffmanTable)?)?;
-    let dist_table = HuffmanTable::build(
-        all_lens
-            .get(hlit..total)
-            .ok_or(Error::InvalidHuffmanTable)?,
-    )?;
-    Ok((lit_table, dist_table))
-}
-
-/// Decode literal/length + distance symbols until end-of-block (256).
-fn inflate_codes(
-    reader: &mut BitReader<'_>,
-    lit_table: &HuffmanTable,
-    dist_table: &HuffmanTable,
-    output: &mut Vec<u8>,
-    limit: usize,
-) -> Result<()> {
-    loop {
-        let sym = lit_table.decode(reader)?;
-
-        // 256 is the end-of-block symbol, and it is the *only* thing that ends
-        // a block: below it is a literal, above it a length code. Written as a
-        // three-way comparison because that is what the alphabet is.
-        match sym.cmp(&256) {
-            Ordering::Less => {
-                // Literal byte.
-                if output.len() >= limit {
-                    return Err(Error::OutputTooLarge);
-                }
-                output.push(sym as u8);
-            }
-            Ordering::Equal => return Ok(()),
-            Ordering::Greater => {
-                // Length/distance pair — back-reference.
-                let len_idx = (sym as usize).wrapping_sub(257);
-                let base_len = *LENGTH_BASE.get(len_idx).ok_or(Error::InvalidSymbol)?;
-                let extra = *LENGTH_EXTRA.get(len_idx).ok_or(Error::InvalidSymbol)?;
-                let length = usize::from(base_len).wrapping_add(reader.read_bits(extra)? as usize);
-
-                let dist_sym = dist_table.decode(reader)? as usize;
-                let base_dist = *DIST_BASE.get(dist_sym).ok_or(Error::InvalidSymbol)?;
-                let dist_extra = *DIST_EXTRA.get(dist_sym).ok_or(Error::InvalidSymbol)?;
-                let distance =
-                    usize::from(base_dist).wrapping_add(reader.read_bits(dist_extra)? as usize);
-
-                if distance == 0 || distance > output.len() {
-                    return Err(Error::DistanceTooFar);
-                }
-
-                // Copy from the sliding window. Source and destination overlap
-                // whenever `length > distance` — distance=1, length=100 is a
-                // hundred copies of one byte — so the read walks forward through
-                // bytes this very loop is appending. That is the definition, not
-                // an accident: a cursor `distance` behind the tail reproduces the
-                // modulo-cycling formulation exactly, because by the time it
-                // reaches a repeated position the byte there has been written.
-                // It also removes the `% distance`, and with it any question
-                // about a zero divisor.
-                let mut src = output.len().wrapping_sub(distance);
-                for _ in 0..length {
-                    if output.len() >= limit {
-                        return Err(Error::OutputTooLarge);
-                    }
-                    // `src` trails the tail by exactly `distance`, which was
-                    // checked against the length above, so it is always in range.
-                    let Some(&b) = output.get(src) else {
-                        return Err(Error::DistanceTooFar);
-                    };
-                    output.push(b);
-                    src = src.wrapping_add(1);
-                }
-            }
-        }
-    }
+    inflate::inflate_vec(data, limit)
 }
 
 // ---------------------------------------------------------------------------
 // Streaming inflate — incremental decompression
 // ---------------------------------------------------------------------------
-
-/// The DEFLATE window size: back-references can look up to 32 KiB behind.
-const WINDOW_SIZE: usize = 32768;
-
-/// `WINDOW_SIZE - 1`, for wrapping a ring index without a division.
-const WINDOW_MASK: usize = WINDOW_SIZE - 1;
 
 /// Where an [`InflateStream`] is between two calls to `read`.
 ///
@@ -780,7 +380,7 @@ enum StreamState {
     /// About to read a block header.
     BlockHeader,
     /// Inside a stored block, with this many bytes of it still to copy.
-    Stored { remaining: u16 },
+    Stored { remaining: usize },
     /// Between two symbols of a fixed or dynamic block.
     Codes,
     /// Inside a back-reference: this many bytes still to copy from `distance`
@@ -795,7 +395,7 @@ enum StreamState {
 /// Decodes as far as the caller's buffer reaches and stops there, in the middle
 /// of a block or of a back-reference if that is where the buffer ends. Between
 /// reads it holds the 32 KiB window back-references read from, the current
-/// block's two Huffman tables, and nothing else: memory does not grow with the
+/// block's Huffman tables, and nothing else: memory does not grow with the
 /// output, with the size of a block, or with how the caller slices its reads.
 ///
 /// # Output limit
@@ -823,22 +423,18 @@ enum StreamState {
 /// }
 /// ```
 pub struct InflateStream<'a> {
-    reader: BitReader<'a>,
-    /// The last `WINDOW_SIZE` bytes produced, as a ring: byte `total_out - 1`
-    /// is at `(total_out - 1) & WINDOW_MASK`. Allocated once, at full size.
-    window: Vec<u8>,
-    /// Bytes handed to the caller so far. Every decoded byte is handed over
-    /// at once, so this is also the number decoded.
-    total_out: usize,
+    bits: inflate::Bits<'a>,
+    /// The last 32 KiB produced, and the count of bytes handed to the caller
+    /// -- every decoded byte is handed over at once, so also the number
+    /// decoded.
+    window: inflate::Window,
     /// Caller's total-output cap.
     limit: usize,
     state: StreamState,
     /// Whether the block being decoded is the last (its BFINAL bit).
     final_block: bool,
-    /// The current block's literal/length table.
-    lit: HuffmanTable,
-    /// The current block's distance table.
-    dist: HuffmanTable,
+    /// The current block's decode tables.
+    tables: inflate::Tables,
     /// The error that stopped decoding, once one has.
     failed: Option<Error>,
 }
@@ -856,14 +452,12 @@ pub struct InflateStream<'a> {
 #[must_use]
 pub fn inflate_stream(data: &[u8], limit: usize) -> InflateStream<'_> {
     InflateStream {
-        reader: BitReader::new(data),
-        window: vec![0; WINDOW_SIZE],
-        total_out: 0,
+        bits: inflate::Bits::new(data),
+        window: inflate::Window::new(),
         limit,
         state: StreamState::BlockHeader,
         final_block: false,
-        lit: HuffmanTable::empty(),
-        dist: HuffmanTable::empty(),
+        tables: inflate::Tables::new(),
         failed: None,
     }
 }
@@ -897,7 +491,7 @@ impl InflateStream<'_> {
     /// Total decompressed bytes returned by `read` so far.
     #[must_use]
     pub fn total_out(&self) -> usize {
-        self.total_out
+        self.window.total()
     }
 
     /// Decode into `out[*n..]` until it is full or the stream ends.
@@ -909,132 +503,71 @@ impl InflateStream<'_> {
         while *n < out.len() {
             match self.state {
                 StreamState::Done => return Ok(()),
-                StreamState::BlockHeader => self.start_block()?,
-                StreamState::Stored { remaining } => {
-                    let mut remaining = remaining;
-                    while remaining > 0 && *n < out.len() {
-                        // Checked before the byte is read, as `inflate_stored`
-                        // does, so the two fail on the same byte.
-                        if self.total_out >= self.limit {
-                            self.state = StreamState::Stored { remaining };
-                            return Err(Error::OutputTooLarge);
-                        }
-                        let b = match self.reader.read_byte() {
-                            Ok(b) => b,
-                            Err(e) => {
-                                self.state = StreamState::Stored { remaining };
-                                return Err(e);
-                            }
-                        };
-                        self.emit(b, out, n);
-                        remaining = remaining.wrapping_sub(1);
-                    }
-                    self.state = if remaining == 0 {
-                        self.end_of_block()
-                    } else {
-                        StreamState::Stored { remaining }
+                StreamState::BlockHeader => {
+                    let (bfinal, stored) = inflate::block_header(&mut self.bits, &mut self.tables)?;
+                    self.final_block = bfinal;
+                    self.state = match stored {
+                        Some(0) => self.end_of_block(),
+                        Some(len) => StreamState::Stored { remaining: len },
+                        None => StreamState::Codes,
                     };
                 }
-                StreamState::Codes => self.next_symbol(out, n)?,
+                StreamState::Stored { remaining } => {
+                    let left = inflate::stored_stream(
+                        &mut self.bits,
+                        &mut self.window,
+                        self.limit,
+                        remaining,
+                        out,
+                        n,
+                    )?;
+                    self.state = if left == 0 {
+                        self.end_of_block()
+                    } else {
+                        StreamState::Stored { remaining: left }
+                    };
+                }
+                StreamState::Codes => {
+                    let mut pending = None;
+                    let ended = inflate::codes_stream(
+                        &mut self.bits,
+                        &self.tables,
+                        &mut self.window,
+                        self.limit,
+                        out,
+                        n,
+                        &mut pending,
+                    )?;
+                    if ended {
+                        self.state = self.end_of_block();
+                    } else if let Some((remaining, distance)) = pending {
+                        self.state = StreamState::Copy {
+                            remaining,
+                            distance,
+                        };
+                    }
+                }
                 StreamState::Copy {
                     remaining,
                     distance,
                 } => {
-                    let mut remaining = remaining;
-                    while remaining > 0 && *n < out.len() {
-                        if self.total_out >= self.limit {
-                            self.state = StreamState::Copy {
-                                remaining,
-                                distance,
-                            };
-                            return Err(Error::OutputTooLarge);
-                        }
-                        // `distance` was checked against `total_out` when the
-                        // copy began and is at most 32 768, the window's size,
-                        // so the source is always a byte already written.
-                        let src = self.total_out.wrapping_sub(distance) & WINDOW_MASK;
-                        let b = self.window.get(src).copied().unwrap_or(0);
-                        self.emit(b, out, n);
-                        remaining = remaining.wrapping_sub(1);
-                    }
-                    self.state = if remaining == 0 {
+                    let left = inflate::copy_stream(
+                        &mut self.window,
+                        self.limit,
+                        remaining,
+                        distance,
+                        out,
+                        n,
+                    )?;
+                    self.state = if left == 0 {
                         StreamState::Codes
                     } else {
                         StreamState::Copy {
-                            remaining,
+                            remaining: left,
                             distance,
                         }
                     };
                 }
-            }
-        }
-        Ok(())
-    }
-
-    /// Read a block header and set up for its body.
-    fn start_block(&mut self) -> Result<()> {
-        let bfinal = self.reader.read_bits(1)?;
-        let btype = self.reader.read_bits(2)?;
-        self.final_block = bfinal != 0;
-        match btype {
-            0 => {
-                self.reader.align();
-                let len = self.reader.read_u16_le()?;
-                let nlen = self.reader.read_u16_le()?;
-                if len != !nlen {
-                    return Err(Error::StoredLengthMismatch);
-                }
-                self.state = if len == 0 {
-                    self.end_of_block()
-                } else {
-                    StreamState::Stored { remaining: len }
-                };
-            }
-            1 => {
-                (self.lit, self.dist) = fixed_tables()?;
-                self.state = StreamState::Codes;
-            }
-            2 => {
-                (self.lit, self.dist) = read_dynamic_tables(&mut self.reader)?;
-                self.state = StreamState::Codes;
-            }
-            _ => return Err(Error::ReservedBlockType),
-        }
-        Ok(())
-    }
-
-    /// Decode one literal/length symbol and act on it, as `inflate_codes` does.
-    fn next_symbol(&mut self, out: &mut [u8], n: &mut usize) -> Result<()> {
-        let sym = self.lit.decode(&mut self.reader)?;
-        match sym.cmp(&256) {
-            Ordering::Less => {
-                if self.total_out >= self.limit {
-                    return Err(Error::OutputTooLarge);
-                }
-                self.emit(sym as u8, out, n);
-            }
-            Ordering::Equal => self.state = self.end_of_block(),
-            Ordering::Greater => {
-                let len_idx = (sym as usize).wrapping_sub(257);
-                let base_len = *LENGTH_BASE.get(len_idx).ok_or(Error::InvalidSymbol)?;
-                let extra = *LENGTH_EXTRA.get(len_idx).ok_or(Error::InvalidSymbol)?;
-                let length =
-                    usize::from(base_len).wrapping_add(self.reader.read_bits(extra)? as usize);
-
-                let dist_sym = self.dist.decode(&mut self.reader)? as usize;
-                let base_dist = *DIST_BASE.get(dist_sym).ok_or(Error::InvalidSymbol)?;
-                let dist_extra = *DIST_EXTRA.get(dist_sym).ok_or(Error::InvalidSymbol)?;
-                let distance = usize::from(base_dist)
-                    .wrapping_add(self.reader.read_bits(dist_extra)? as usize);
-
-                // Before a byte of the copy, as in `inflate_codes`.
-                if distance == 0 || distance > self.total_out {
-                    return Err(Error::DistanceTooFar);
-                }
-                self.state = StreamState::Copy {
-                    remaining: length,
-                    distance,
-                };
             }
         }
         Ok(())
@@ -1048,18 +581,6 @@ impl InflateStream<'_> {
             StreamState::BlockHeader
         }
     }
-
-    /// Hand one decoded byte to the caller and to the window.
-    fn emit(&mut self, b: u8, out: &mut [u8], n: &mut usize) {
-        if let Some(slot) = out.get_mut(*n) {
-            *slot = b;
-        }
-        if let Some(slot) = self.window.get_mut(self.total_out & WINDOW_MASK) {
-            *slot = b;
-        }
-        *n = n.wrapping_add(1);
-        self.total_out = self.total_out.wrapping_add(1);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,40 +592,20 @@ impl InflateStream<'_> {
 struct Adler32State {
     s1: u32,
     s2: u32,
-    /// Bytes fed since last modular reduction. Kept under 5552 to avoid
-    /// overflow of the `u32` accumulators.
-    pending: u32,
 }
 
 impl Adler32State {
-    const MOD: u32 = 65521;
-    const CHUNK: u32 = 5552;
-
     fn new() -> Self {
-        Self {
-            s1: 1,
-            s2: 0,
-            pending: 0,
-        }
+        Self { s1: 1, s2: 0 }
     }
 
+    /// Fold `data` in; the sums are left reduced.
     fn update(&mut self, data: &[u8]) {
-        for &b in data {
-            self.s1 = self.s1.wrapping_add(u32::from(b));
-            self.s2 = self.s2.wrapping_add(self.s1);
-            self.pending = self.pending.wrapping_add(1);
-            if self.pending >= Self::CHUNK {
-                self.s1 %= Self::MOD;
-                self.s2 %= Self::MOD;
-                self.pending = 0;
-            }
-        }
+        (self.s1, self.s2) = adler_fold(self.s1, self.s2, data);
     }
 
     fn finish(&self) -> u32 {
-        let s1 = self.s1 % Self::MOD;
-        let s2 = self.s2 % Self::MOD;
-        (s2 << 16) | s1
+        (self.s2 << 16) | self.s1
     }
 }
 
@@ -2645,23 +2146,36 @@ pub fn gunzip_limited(data: &[u8], limit: usize) -> Result<Vec<u8>> {
 ///   s2 = sum of all running s1 values mod 65521
 #[allow(clippy::arithmetic_side_effects)]
 pub fn adler32(data: &[u8]) -> u32 {
-    const MOD: u32 = 65521;
-    let mut s1: u32 = 1;
-    let mut s2: u32 = 0;
+    let (s1, s2) = adler_fold(1, 0, data);
+    (s2 << 16) | s1
+}
 
-    // Process in chunks of 5552 to avoid overflow of the u32
-    // accumulators before taking the modulus.  5552 is the largest
-    // n such that 255*n*(n+1)/2 + n*255 < 2^32.
-    for chunk in data.chunks(5552) {
-        for &byte in chunk {
-            s1 = s1.wrapping_add(u32::from(byte));
+/// Adler-32's modulus, the largest prime below 2^16.
+const ADLER_MOD: u32 = 65521;
+
+/// The most bytes the sums can take, from reduced values, before they must be
+/// reduced again: the largest n with 255 n (n + 1) / 2 + (n + 1) (65521 - 1)
+/// below 2^32.
+const ADLER_RUN: usize = 5552;
+
+/// Fold `data` into the Adler-32 sums `s1` and `s2` (each below 65521), and
+/// return them reduced: a run of [`ADLER_RUN`] bytes at a time, reducing after
+/// each.
+///
+/// The plain byte loop, on purpose. A version that summed sixteen bytes at a
+/// time with weights -- the same sums without the chain of dependent adds --
+/// measured slower on this machine (9 ms against 5 on 9 MB), because baseline
+/// x86-64 has no 32-bit vector multiply to turn it into.
+fn adler_fold(mut s1: u32, mut s2: u32, data: &[u8]) -> (u32, u32) {
+    for run in data.chunks(ADLER_RUN) {
+        for &b in run {
+            s1 = s1.wrapping_add(u32::from(b));
             s2 = s2.wrapping_add(s1);
         }
-        s1 %= MOD;
-        s2 %= MOD;
+        s1 %= ADLER_MOD;
+        s2 %= ADLER_MOD;
     }
-
-    (s2 << 16) | s1
+    (s1, s2)
 }
 
 // ---------------------------------------------------------------------------
@@ -2805,11 +2319,10 @@ pub fn zlib_deflate(data: &[u8]) -> Vec<u8> {
 )]
 mod tests {
     use super::{
-        BitWriter, DEFAULT_MAX_CHAIN, Error, HuffmanTable, LzToken, MAX_OUTPUT, adler32, deflate,
-        deflate_level, deflate_stored, encode_dynamic, encode_fixed, fixed_lit_lengths, gunzip,
-        gunzip_limited, gzip, inflate, inflate_limited, inflate_stream, level_max_chain,
-        lz77_tokenize, stored_size, zlib_deflate, zlib_inflate, zlib_inflate_limited,
-        zlib_inflate_stream,
+        BitWriter, DEFAULT_MAX_CHAIN, Error, LzToken, MAX_OUTPUT, adler32, deflate, deflate_level,
+        deflate_stored, encode_dynamic, encode_fixed, fixed_lit_lengths, gunzip, gunzip_limited,
+        gzip, inflate, inflate_limited, inflate_stream, level_max_chain, lz77_tokenize,
+        stored_size, zlib_deflate, zlib_inflate, zlib_inflate_limited, zlib_inflate_stream,
     };
     use alloc::format;
     use alloc::string::String;
@@ -2847,10 +2360,15 @@ mod tests {
     /// moves one of them.
     #[test]
     fn fixed_table_shape() {
-        let table = HuffmanTable::build(&fixed_lit_lengths()).unwrap();
-        assert_eq!(table.counts[7], 24);
-        assert_eq!(table.counts[8], 152);
-        assert_eq!(table.counts[9], 112);
+        let lengths = fixed_lit_lengths();
+        let mut of = [0usize; 16];
+        for &l in &lengths {
+            of[usize::from(l)] += 1;
+        }
+        assert_eq!(of[7], 24);
+        assert_eq!(of[8], 152);
+        assert_eq!(of[9], 112);
+        assert!(crate::inflate::check_code(&lengths).is_ok());
     }
 
     /// Round-tripping is the compressor's only real test: the encoder and the
@@ -3237,13 +2755,13 @@ mod tests {
     #[test]
     fn a_lone_one_bit_code_is_under_subscribed_and_still_legal() {
         assert!(
-            HuffmanTable::build(&[1, 0, 0]).is_ok(),
+            crate::inflate::check_code(&[1, 0, 0]).is_ok(),
             "a single one-bit code is legal and real encoders emit it"
         );
         // The neighbouring case must still fail: three symbols cannot all hold
         // a one-bit code, and accepting that would be over-subscription.
         assert_eq!(
-            HuffmanTable::build(&[1, 1, 1]).err(),
+            crate::inflate::check_code(&[1, 1, 1]).err(),
             Some(Error::InvalidHuffmanTable),
             "over-subscription must still be rejected"
         );
@@ -3668,7 +3186,8 @@ mod tests {
     // block. These tests pin the replacement to `inflate_limited` byte for
     // byte and error for error, and pin the three properties it exists for.
 
-    use super::{WINDOW_SIZE, encode_distance, encode_length, fixed_code, fixed_dist_code};
+    use super::{encode_distance, encode_length, fixed_code, fixed_dist_code};
+    use crate::inflate::WINDOW_SIZE;
 
     /// Read `data` to the end through a buffer of `chunk` bytes: the bytes
     /// delivered, and how the stream ended.

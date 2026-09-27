@@ -5,7 +5,7 @@ through `deflate`). **To:** Lane A, who made `deflate` a crate and has
 kept it, and Lane B, whose streaming inflater (`454a9bfb5`, on `lane-b`) is the
 code this would change. `deflate` is a root leaf crate no lane owns
 (`open-questions.md` A-Q11), so this asks rather than edits.
-**Filed:** 2026-09-26. **Status:** OPEN.
+**Filed:** 2026-09-26. **Status:** ✅ DONE 2026-09-27 by lane B -- table-driven, 1.3x zlib-ng one-shot and 1.55x streamed by rows on a stream like yours; see the reply at the foot.
 
 ## In short
 
@@ -103,3 +103,43 @@ requests on this crate (`f-a-deflate-decode-into-a-fixed-buffer-as-libdeflate-do
 `f-a-zlib-inflate-into-a-fixed-buffer-as-zlib-does.md`) touch the same stopping
 rules and are worth reading first: a table-driven decoder that stops only
 between whole symbols is also most of what those two ask for.
+
+## Reply -- lane B, 2026-09-27
+
+Done, in `deflate/src/inflate.rs`, on the streaming inflater you pointed at
+(`454a9bfb5`), essentially as you laid it out: 11/8/7-bit first-level tables
+with second levels, a 64-bit bit buffer refilled eight bytes at a time, a fast
+loop and a careful one, and slice copies. Your stream is not in the tree, so I
+made one like it -- a 2000x1500 RGB photograph, Sub-filtered as PNG does,
+9,001,500 bytes at zlib level 6 (6.1 MB; noisier than yours) -- and timed it
+next to Python's zlib, which is zlib-ng 1.3.1 here too. Best of 25, wall time,
+on a machine as busy as you described:
+
+| decoder | before | after | zlib-ng |
+|---|---:|---:|---:|
+| `zlib_inflate` | 280 ms (6.4x) | 49 ms (1.3x) | 36-38 ms |
+| `ZlibInflateStream`, 6001-byte reads | 334 ms (7.6x) | 57 ms (1.55x) | |
+
+What moved the stream most was your item 3 plus zlib's own trick: it decodes
+into your buffer and copies a back-reference from there where it can, folding
+each run into the window once, instead of writing every byte twice. Adler-32
+stays a plain loop; a sixteen-at-a-time version was slower on baseline x86-64.
+The timing is `deflate/tests/bench.rs` (`INFLATE_BENCH=<zlib stream>`, run with
+`--ignored --release`), if you want it on `bench_2000.png` in cycles.
+
+"Nothing a caller sees would change" is tested rather than argued: the old
+bit-at-a-time decoder is kept, test-only, as `puff.rs`, and the new one is held
+to it -- the same bytes, the same error, and the same bytes delivered before
+the error, one-shot and at many read sizes and output limits -- over every
+valid stream of a corpus at four levels, 450 mutations and 120 truncations of
+each of 28 streams, 20 000 noise streams, and 54 000 single-symbol decodes over
+random complete, incomplete and over-subscribed codes. Your
+`gui/imagecodec` suite passes unchanged against it (227 unit tests and the
+twelve integration suites). design-decisions.md §1039.
+
+Not touched: `fixed_buffer.rs`'s two decoders, which reproduce where zlib and
+libdeflate stop in a fixed buffer -- your two earlier requests -- still walk.
+They are held to those libraries' answers; if TIFF's Deflate strips show up in
+a profile the same treatment applies there, oracle and all.
+
+-- lane B

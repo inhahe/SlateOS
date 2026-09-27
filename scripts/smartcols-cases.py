@@ -260,7 +260,8 @@ def main():
             sort_case(rng, s, True)
         else:
             sort_case(rng, s, False)
-        with open("%s/%05d-%s.scols" % (outdir, i, family), "w") as f:
+        path = "%s/%05d-%s.scols" % (outdir, i, family)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(s.text())
 
 

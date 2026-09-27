@@ -170650,7 +170650,15 @@ the fix -- on disk now, some of them the kernel's own compressed files --
 must stay readable here. Such a file may still be unreadable elsewhere until
 it is written again.
 
-### [F] A variable font without `HVAR` keeps its default advances at every weight -- 2026-09-26
+### [F] A variable font without `HVAR` keeps its default advances at every weight -- 2026-09-26 -- **FIXED 2026-09-27**
+
+**Status:** FIXED 2026-09-27 (lane F) -- `Face::advance_at` takes such a
+face's advance from its phantom points (`glyf::advance`), as HarfBuzz 14.3.0
+does. The fixture's Bold master now varies its widths (600 to 630), so the
+test can fail: `glyf::tests::a_face_without_hvar_advances_between_its_phantom_points`
+pins HarfBuzz's advances at weights 610 and 401, and its `HVAR` twin those of
+the face with the table. FreeType's hinted points for both variable faces were
+regenerated from the new masters and the hinter still matches them.
 
 **In short:** a variable font may leave out its table of advance-width
 changes (`HVAR`) and let each glyph's outline data carry them instead, as

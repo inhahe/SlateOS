@@ -2129,11 +2129,14 @@ impl Face {
     /// Horizontal advance for a glyph at a variable-font instance, in font
     /// units.
     ///
-    /// The `hmtx` advance corrected by `HVAR`. Identical to
-    /// [`advance`](Self::advance) when the face does not vary, carries no
-    /// `HVAR`, or is asked for the default instance — the last because the
-    /// default instance's advance *is* what `hmtx` stores, so every delta is
-    /// zero there by construction.
+    /// The `hmtx` advance corrected by `HVAR` -- or, in a `glyf` face with
+    /// `gvar` and no `HVAR`, the distance between the glyph's left and right
+    /// phantom points where `gvar` moved them, as HarfBuzz measures it
+    /// (`glyf_accelerator_t::get_advance_with_var_unscaled`). Identical to
+    /// [`advance`](Self::advance) when the face does not vary, carries
+    /// neither table, or is asked for the default instance -- the last
+    /// because the default instance's advance *is* what `hmtx` stores, so
+    /// every delta is zero there by construction.
     ///
     /// The result is clamped at zero rather than allowed to wrap: a negative
     /// advance would drag the rest of the line backwards over the glyph, which
@@ -2146,12 +2149,18 @@ impl Face {
     /// for a font's unmapped tail.
     pub fn advance_at(&self, gid: u16, coords: &var::Coords) -> Result<u16, SfntError> {
         let base = self.advance(gid)?;
-        let Some(hvar) = self.hvar.as_ref() else {
-            return Ok(base);
-        };
         if coords.is_default() {
             return Ok(base);
         }
+        let Some(hvar) = self.hvar.as_ref() else {
+            // Without `HVAR`, HarfBuzz takes a `glyf` face's advance from the
+            // phantom points `gvar` moved; a face without either does not
+            // vary its advances.
+            if self.gvar.is_some() && matches!(self.outlines, Outlines::Glyf { .. }) {
+                return Ok(crate::glyf::advance(self, gid, coords.as_slice()));
+            }
+            return Ok(base);
+        };
         let delta = hvar.advance_delta(&self.data, gid, coords.as_slice());
         Ok(
             u16::try_from(i32::from(base).saturating_add(i32::from(delta)).max(0))

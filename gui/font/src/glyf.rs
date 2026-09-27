@@ -174,6 +174,32 @@ pub(crate) fn bounds(face: &Face, gid: u16, coords: &[i16]) -> Result<Option<BBo
     Ok(Some(b))
 }
 
+/// The glyph's advance at `coords` in a face whose `gvar` must carry it, for
+/// want of `HVAR`: HarfBuzz 14.3.0's `glyf_accelerator_t::
+/// get_advance_with_var_unscaled`, which `hb_font_get_glyph_h_advance` asks
+/// in that case -- the distance between the left and right phantom points
+/// where `gvar` moved them, by HarfBuzz's `roundf` and never below zero; or
+/// half an em, HarfBuzz's answer for a glyph it cannot read.
+pub(crate) fn advance(face: &Face, gid: u16, coords: &[i16]) -> u16 {
+    let half_em = face.units_per_em() / 2;
+    let Ok(points) = points(face, gid, coords, Scalars::Drawn) else {
+        return half_em;
+    };
+    let first = points.len().saturating_sub(PHANTOM_COUNT);
+    let (Some(left), Some(right)) = (points.get(first), points.get(first.saturating_add(1))) else {
+        return half_em;
+    };
+    let width = crate::hbcalc::roundf(right.x - left.x).clamp(0.0, f32::from(u16::MAX));
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a whole number clamped into `u16` just above"
+    )]
+    {
+        width as u16
+    }
+}
+
 /// All of the glyph's points at `coords`, its four phantom points last, as
 /// HarfBuzz's `glyf_accelerator_t::get_points` collects them.
 ///
@@ -1076,6 +1102,33 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Every glyph's advance in `face` at `weight`, against HarfBuzz's.
+    fn check_advances(face: &[u8], weight: f32, want: &[u16]) {
+        let face = Face::parse(face.to_vec()).unwrap();
+        let coords = face
+            .variation_axes()
+            .unwrap()
+            .normalize_tags(&[(*b"wght", weight)]);
+        let got: Vec<u16> = (0..u16::try_from(want.len()).unwrap())
+            .map(|gid| face.advance_at(gid, &coords).unwrap())
+            .collect();
+        assert_eq!(got, want, "weight {weight}");
+    }
+
+    #[test]
+    fn a_face_without_hvar_advances_between_its_phantom_points() {
+        use crate::hint::fixture::{VAR_NOHVAR, VAR_NOHVAR_ADVANCES_401, VAR_NOHVAR_ADVANCES_610};
+        check_advances(&VAR_NOHVAR, 610.0, &VAR_NOHVAR_ADVANCES_610);
+        check_advances(&VAR_NOHVAR, 401.0, &VAR_NOHVAR_ADVANCES_401);
+    }
+
+    #[test]
+    fn a_face_with_hvar_advances_as_harfbuzz_reads_it() {
+        use crate::hint::fixture::{VAR, VAR_ADVANCES_401, VAR_ADVANCES_610};
+        check_advances(&VAR, 610.0, &VAR_ADVANCES_610);
+        check_advances(&VAR, 401.0, &VAR_ADVANCES_401);
     }
 
     #[test]

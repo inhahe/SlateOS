@@ -1054,10 +1054,12 @@ impl FileDialog {
             return None;
         }
 
-        // Check if the filename already has a matching extension.
+        // Check if the filename already has a matching extension -- in any
+        // case: `report.PDF` under a `*.pdf` filter is a PDF already, not a
+        // name that needs a second `.pdf`.
         for pattern in &filter.patterns {
             if let Some(ext) = pattern.strip_prefix("*.")
-                && name.ends_with(&format!(".{ext}"))
+                && has_extension(name, ext)
             {
                 return None;
             }
@@ -1909,16 +1911,40 @@ fn matches_any_pattern(filename: &OsStr, patterns: &[&str]) -> bool {
     };
     for pattern in patterns {
         if let Some(ext) = pattern.strip_prefix("*.")
-            && filename.ends_with(&format!(".{ext}"))
+            && has_extension(filename, ext)
         {
             return true;
         }
-        // Exact match fallback
+        // Exact match fallback: a name, which the filesystem compares exactly.
         if *pattern == filename {
             return true;
         }
     }
     false
+}
+
+/// Whether `name` ends in `.ext`, the extension's letters compared without
+/// regard to ASCII case -- a JPEG named `DSC0001.JPG` is a JPEG, and a filter
+/// for `*.jpg` that hid it would show a camera's folder as empty.
+///
+/// The name, not [`DirEntry::extension`], because a pattern can have two dots:
+/// `*.tar.gz` cannot be decided from the extension `gz`. Compared as bytes,
+/// folding ASCII only: a pattern's letters are ASCII, every byte of a
+/// multi-byte character is outside ASCII and so compares exactly, and no
+/// offset here can land inside a character.
+fn has_extension(name: &str, ext: &str) -> bool {
+    let Some(dot) = ext
+        .len()
+        .checked_add(1)
+        .and_then(|tail| name.len().checked_sub(tail))
+    else {
+        return false;
+    };
+    let bytes = name.as_bytes();
+    bytes.get(dot) == Some(&b'.')
+        && bytes
+            .get(dot.saturating_add(1)..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(ext.as_bytes()))
 }
 
 /// The directory containing `path`, by SlateOS's path rules.
@@ -2777,6 +2803,19 @@ mod tests {
         assert_eq!(dialog.confirm(), Some(PathBuf::from("/src/main.rs")));
     }
 
+    /// **A name already carrying the filter's extension, in another case, is
+    /// not given a second one**: `report.PDF` under a `*.pdf` filter is
+    /// saved as `report.PDF`, not `report.PDF.pdf`.
+    #[test]
+    fn a_saved_name_with_the_extension_in_capitals_gets_no_second_one() {
+        let mut dialog = FileDialog::save()
+            .with_filter("PDF documents", &["*.pdf"])
+            .with_initial_path("/docs");
+        dialog.set_filter_index(0);
+        dialog.set_filename("report.PDF");
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/docs/report.PDF")));
+    }
+
     #[test]
     fn test_save_no_double_extension() {
         let mut dialog = FileDialog::save()
@@ -3090,6 +3129,54 @@ mod tests {
             "/home/user"
         );
         assert_eq!(join_path(OsStr::new("/a/b"), OsStr::new("c")), "/a/b/c");
+    }
+
+    /// **A filter reads an extension in any case**: a camera's `DSC0001.JPG`
+    /// under "Images (`*.jpg`)", a `.Jpg`, a `.TAR.GZ` under `*.tar.gz`. Still
+    /// not a name that only *contains* the letters, a longer extension, or one
+    /// with no dot before it -- and a name with no text spelling still
+    /// matches only `*`.
+    #[test]
+    fn a_filter_reads_an_extension_in_any_case() {
+        for (name, patterns) in [
+            ("DSC0001.JPG", &["*.jpg"][..]),
+            ("holiday.Jpg", &["*.jpg"]),
+            ("SCAN.PNG", &["*.jpg", "*.png"]),
+            ("BACKUP.TAR.GZ", &["*.tar.gz"]),
+            ("report.pdf", &["*.PDF"]),
+        ] {
+            assert!(
+                matches_any_pattern(OsStr::new(name), patterns),
+                "{name} is not listed under {patterns:?}"
+            );
+        }
+        for (name, patterns) in [
+            ("DSC0001.JPGX", &["*.jpg"][..]),
+            ("DSC0001JPG", &["*.jpg"]),
+            ("archive.GZ", &["*.tar.gz"]),
+            ("photo.j\u{e9}g", &["*.jpg"]),
+            ("jpg", &["*.jpg"]),
+        ] {
+            assert!(
+                !matches_any_pattern(OsStr::new(name), patterns),
+                "{name} is listed under {patterns:?}"
+            );
+        }
+
+        // Through the dialog, as the request that found it put it.
+        let mut dialog = FileDialog::open().with_filter("Images", &["*.jpg"]);
+        dialog.set_entries(vec![DirEntry {
+            name: OsString::from("DSC0001.JPG"),
+            is_dir: false,
+            size: 1,
+            modified_timestamp: 0,
+            extension: OsString::from("jpg"),
+        }]);
+        assert_eq!(
+            dialog.entries().len(),
+            1,
+            "an upper-case extension was filtered out"
+        );
     }
 
     #[test]

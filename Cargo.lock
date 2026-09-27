@@ -506,6 +506,14 @@ name = "crc32"
 version = "0.1.0"
 
 [[package]]
+name = "crc32c"
+version = "0.1.0"
+
+[[package]]
+name = "crc64"
+version = "0.1.0"
+
+[[package]]
 name = "credentials"
 version = "0.1.0"
 dependencies = [
@@ -3895,6 +3903,10 @@ dependencies = [
  "quoting",
  "scratchdir",
 ]
+
+[[package]]
+name = "xxhash64"
+version = "0.1.0"
 
 [[package]]
 name = "yacc"

@@ -154,6 +154,16 @@ members = [
     # the gzip trailer and `gui/imagecodec` needs it for PNG chunk CRCs, and
     # neither can name `crate::crypto`.
     "crc32",
+    # CRC-32C (Castagnoli), CRC-64 (ECMA-182, the /WE and bare framings) and
+    # XXH64: the superblock checksums libblkid's probers verify -- ext4, XFS,
+    # btrfs, bcache, bcachefs, EROFS and more. The kernel keeps its own CRC-32C
+    # in `crypto.rs` for the same reason `crc32` once lived there; these are
+    # the copies everything outside the kernel links, checked against the
+    # values util-linux's own `lib/crc32c.c`, `lib/crc64.c` and bundled
+    # `xxhash.h` compute.
+    "crc32c",
+    "crc64",
+    "xxhash64",
     # AES (FIPS-197) and RFC 3394 key wrap. Nothing in the tree implemented the
     # cipher at all -- `kernel/src/fs/diskencrypt.rs` names `Aes256Xts` in an
     # enum and stops there -- so the first caller that genuinely needed it, the

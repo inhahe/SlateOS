@@ -170746,19 +170746,31 @@ bugs, worth reporting upstream; the point counting may be one too (FreeType
 counts from the start of the composite being built, which differs only for a
 nested one).
 
-### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26 -- **clip boxes FIXED 2026-09-27; paint extents OPEN**
+### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26 -- **FIXED 2026-09-27**
 
-**Status:** half fixed. `Face::glyph_extents_at` asks `COLR` first, as
-HarfBuzz does, and a glyph the `ClipList` covers reports its clip box, varied
-and rounded as `ClipBoxFormat2` does (`colr::clip_extents`). That is every
-colour glyph of `seguiemj.ttf`: all 12,977 sampled boxes now agree. **Still
-open:** a colour glyph with no clip box -- HarfBuzz then measures its *paint*
-(`hb_paint_extents`: the union of what each layer covers, under its
-transforms and clips; COLRv0 layers included), which this does not do, so
-such a glyph still reports its base glyph's outline box. No font on this host
-has one.
+**Status:** FIXED 2026-09-27 (lane F). `Face::glyph_extents_at` asks `COLR`
+first, as HarfBuzz does (`colr::glyph_extents`). A glyph the `ClipList` covers
+reports its clip box, varied and rounded as `ClipBoxFormat2` does; any other
+colour glyph has its paint measured as `hb_paint_extents` measures it
+(`gui/font/src/colr/extents.rs`) -- a version-1 graph once HarfBuzz's bounded
+pre-pass finds it bounded, a version-0 glyph's layers -- in HarfBuzz's
+`float` arithmetic, with its nesting and edge limits and its cycle detectors.
 
-**In short:** asked for the ink box of a colour emoji glyph, this crate
+Checked against HarfBuzz 14.3.0 two ways. A fixture font built for it
+(`gui/font/tools/gen_colr_fixture.py`) has 56 colour glyphs: every paint that
+moves or combines, fixed and variable, at two instances; clip boxes reached
+through `PaintColrGlyph`; cycles; the nesting limit on both sides; a fan-out
+cut by the edge limit, where one edge more or less moves the box; null
+paints; and an unknown composite mode. And `tools/outline_oracle.py` ran over
+six colour fonts from Google Fonts and Mozilla. Four are variable COLRv1
+fonts with no clip list at all (Nabla, Honk, Foldit, Kalnia Glaze); the
+others are Bungee Spice and Twemoji Mozilla's COLRv0. Every one of 115,666
+glyph-instances agrees, where 6,658 had disagreed: Honk 2,960, Twemoji
+3,689, Nabla 4 and Bungee Spice 5. `seguiemj.ttf` still agrees on all 12,977.
+Tables HarfBuzz's sanitizer would edit are the one difference left, and only
+hostile fonts have them: see the next entry.
+
+**In short (as found):** asked for the ink box of a colour emoji glyph, this crate
 answers with the box of the plain glyph underneath it, while HarfBuzz answers
 with the colour glyph's own. Only the fallback placement of a combining mark
 on a colour glyph reads that box, so a mark on an emoji may sit a little off
@@ -170773,11 +170785,49 @@ at the instance, if it has one; otherwise the extents of its paint
 **Found by:** `tools/outline_oracle.py` over `seguiemj.ttf`, whose boxes
 disagree for 697 of 12,977 glyphs sampled while every path agrees.
 
-**What is left:** the paint extents -- a walk of the paint graph as
-`hb_paint_extents` walks it (a clip glyph's box is the bounds of its drawn
-path, transformed; a paint unions the current clip into the group's bounds;
-`to_glyph_extents` rounds the corners) -- checked with a fixture font whose
-colour glyphs have no clip boxes, since no host font has one.
+**What was left, and was done:** the paint extents -- a walk of the paint
+graph as `hb_paint_extents` walks it (a clip glyph's box is the bounds of its
+drawn path, transformed; a paint unions the current clip into the group's
+bounds; `to_glyph_extents` rounds the corners) -- checked with a fixture font
+whose colour glyphs have no clip boxes, since no host font had one.
+
+### [F] A `COLR` table HarfBuzz's sanitizer would repair is measured as written -- 2026-09-27 -- **OPEN**
+
+**In short:** HarfBuzz checks a colour font's `COLR` table before it uses it,
+and quietly repairs what fails the check. It cuts a paint graph off where it
+nests more than 64 levels deep. It drops the whole table if the repairs would
+take more than 32 edits, or if the check runs out of its work budget. This
+crate reads the table as written. So for a font whose paint graph is deeper
+than 64 levels, or shared so heavily that checking it is expensive, a colour
+glyph's box can differ from HarfBuzz's. Other glyphs' boxes can differ too,
+because a repair made in a shared part of the table empties every glyph that
+uses that part. No real font is affected; only a hostile or fuzzed one is.
+
+**Where:** `gui/font/src/colr/extents.rs`, which measures boxes for
+`Face::glyph_extents_at`. The renderer (`colr.rs`) reads the table the same
+way, but it is not a HarfBuzz-parity renderer and has its own limits. The walk
+already handles the sanitizer's simplest repairs: a null offset, an offset
+past the end of the table and a record cut short all read as the null paint,
+as a nulled offset does.
+
+**How to reproduce:** add a glyph `nested(63, glyph("square"))` to
+`tools/gen_colr_fixture.py`. That chain is 65 levels deep, and fontTools
+shares its `PaintGlyph(square)` record with other glyphs. HarfBuzz nulls that
+record's paint offset, so `c_fill` and every other glyph using it report
+`[0, 0, 0, 0]`. This crate reports their real boxes. Found while building the
+fixture, which now reaches the walk's own nesting limit through
+`PaintColrGlyph` hops instead; the sanitizer does not follow those.
+
+**The fix:** once per face, emulate `hb_sanitize_context_t` over `COLR`.
+Visit the table in HarfBuzz's order: the base glyph list's records in order,
+then the layer list. Count a nesting level for each `Paint::sanitize`, and
+check each format's struct size, colour lines and affines as HarfBuzz does.
+Record every offset it would null. Run two rounds, as `sanitize_blob` does,
+and reject the table past 32 edits or once the operation budget is spent.
+The budget is 64 bytes of checking per table byte, and never less than
+16,384. Then have `Tables` read the recorded offsets as null. The budget
+must be charged byte for byte, as HarfBuzz charges each `check_range`, or the
+table is rejected at a different point.
 
 ### [F] A variable font whose outlines are CFF (`CFF2`) would not open -- 2026-09-26 -- **FIXED 2026-09-26**
 

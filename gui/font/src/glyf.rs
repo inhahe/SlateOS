@@ -785,8 +785,12 @@ fn read_coords(
 /// expanded: each node remembers the component it is visiting, and a
 /// component is dropped when it is the one a trailing node -- the tortoise,
 /// which moves one node for every two the chain grows -- is visiting.
+///
+/// `COLR`'s extents walk (`crate::colr::extents`) keeps two more, as
+/// HarfBuzz's paint context does: one over the colour glyphs a
+/// `PaintColrGlyph` names, one over the layers a `PaintColrLayers` visits.
 #[derive(Default)]
-struct Decycler {
+pub(crate) struct Decycler {
     /// Toggled as nodes come and go; the tortoise moves when it is set.
     awake: bool,
     /// The trailing node's depth.
@@ -797,7 +801,7 @@ struct Decycler {
 
 impl Decycler {
     /// A new node, one deeper: `hb_decycler_node_t`'s constructor.
-    fn enter(&mut self) -> usize {
+    pub(crate) fn enter(&mut self) -> usize {
         self.awake = !self.awake;
         let node = self.values.len();
         self.values.push(0);
@@ -810,7 +814,7 @@ impl Decycler {
     }
 
     /// The deepest node goes: the destructor.
-    fn leave(&mut self) {
+    pub(crate) fn leave(&mut self) {
         self.values.pop();
         if self.awake {
             self.tortoise = self.tortoise.and_then(|t| t.checked_sub(1));
@@ -820,7 +824,7 @@ impl Decycler {
 
     /// Whether `node` may visit `gid`: not if the tortoise, another node, is
     /// visiting it.
-    fn visit(&mut self, node: usize, gid: u32) -> bool {
+    pub(crate) fn visit(&mut self, node: usize, gid: u32) -> bool {
         if let Some(v) = self.values.get_mut(node) {
             *v = gid;
         }

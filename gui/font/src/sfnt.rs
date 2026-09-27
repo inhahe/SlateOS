@@ -2733,6 +2733,9 @@ impl Face {
     /// [`glyph_bbox_at`](Self::glyph_bbox_at) is the box; this is the box as
     /// HarfBuzz rounds it, which depends on where the box came from:
     ///
+    /// * a colour glyph reports the box `COLR` gives it, which HarfBuzz asks
+    ///   for first: its clip box, or else its paint measured
+    ///   ([`crate::colr::glyph_extents`]);
     /// * a `glyf` glyph read without deltas reports the box its header
     ///   states, in whole units already;
     /// * a `glyf` glyph at a varied instance reports the box around its
@@ -2751,8 +2754,9 @@ impl Face {
     #[must_use]
     pub(crate) fn glyph_extents_at(&self, gid: u16, coords: &var::Coords) -> Option<[i32; 4]> {
         use crate::hbcalc::roundf_i32;
-        // HarfBuzz asks `COLR` first: a colour glyph's clip box is its box.
-        if let Some(extents) = crate::colr::clip_extents(self, gid, coords) {
+        // HarfBuzz asks `COLR` first: a colour glyph's box is the one it
+        // gives.
+        if let Some(extents) = crate::colr::glyph_extents(self, gid, coords) {
             return Some(extents);
         }
         if let Outlines::Cff(cff) = &self.outlines {

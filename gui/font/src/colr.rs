@@ -70,6 +70,15 @@
 //! one a [`ColourPalette`] chooses, as CSS's `font-palette` chooses it
 //! ([`palette_index`]): the theme picks light or dark, and a face that marks
 //! neither paints with its first palette either way.
+//!
+//! # Extents
+//!
+//! A colour glyph's box, as the shaper's fallback mark placement reads it
+//! (`Face::glyph_extents_at`), is the one HarfBuzz reports: its clip box, or
+//! else its paint walked as `hb_paint_extents` walks it, in HarfBuzz's
+//! `float` arithmetic -- the submodule `extents`. That is not the bounds the
+//! renderer sizes its canvas by, which answer a different question (what a
+//! glyph covers, in pixels, at a size) and need not agree to the unit.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -127,28 +136,12 @@ pub fn has_colour(face: &Face, gid: u16) -> bool {
         .is_some_and(|t| t.base_v1(gid).is_some() || t.base_v0(gid).is_some())
 }
 
-/// The box HarfBuzz reports for glyph `gid` from `COLR`, when the table's
-/// `ClipList` gives the glyph a clip box: HarfBuzz asks `COLR` before the
-/// outline tables (`hb_ot_get_glyph_extents`), and a clip box is its whole
-/// answer (`COLR::get_extents`) -- varied at `coords`, each corner's delta
-/// rounded by HarfBuzz's `roundf` before it is added
-/// (`ClipBoxFormat2::get_clip_box`). Left edge, top edge, width rightwards,
-/// height downwards, in font units.
-///
-/// `None` for a glyph the clip list does not cover, or a face without
-/// `COLR`: HarfBuzz then measures the glyph's paint, which this does not
-/// yet do (known-issues.md), or its outline.
-#[must_use]
-pub(crate) fn clip_extents(face: &Face, gid: u16, coords: &Coords) -> Option<[i32; 4]> {
-    let tables = Tables::of(face, coords)?;
-    let [x_min, y_min, x_max, y_max] = tables.clip_corners(gid)?;
-    Some([
-        x_min,
-        y_max,
-        x_max.saturating_sub(x_min),
-        y_min.saturating_sub(y_max),
-    ])
-}
+mod extents;
+
+/// The box HarfBuzz reports for a colour glyph -- its clip box, or its paint
+/// measured -- which it asks `COLR` for before any outline table: see
+/// [`extents`].
+pub(crate) use extents::glyph_extents;
 
 /// Glyph `gid` of `face` painted in colour at `scale` pixels per font unit,
 /// at variation instance `coords`, with `foreground` (straight `0xAARRGGBB`)
@@ -381,6 +374,26 @@ struct Tables<'a> {
 /// A `varIndexBase` that names no variation.
 const NO_VARIATION: u32 = 0xFFFF_FFFF;
 
+/// What a base glyph's BaseGlyphList record says its paint is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BasePaint {
+    /// The paint at this offset in `COLR`.
+    At(usize),
+    /// None: the record's paint offset is null. To draw, that is no recipe;
+    /// to HarfBuzz's extents, it is the null paint -- the glyph is a
+    /// version-1 colour glyph that paints nothing.
+    Null,
+}
+
+impl BasePaint {
+    fn at(self) -> Option<usize> {
+        match self {
+            Self::At(at) => Some(at),
+            Self::Null => None,
+        }
+    }
+}
+
 impl<'a> Tables<'a> {
     fn of(face: &'a Face, coords: &'a Coords) -> Option<Self> {
         let (colr, cpal) = face.colour_tables()?;
@@ -449,10 +462,20 @@ impl<'a> Tables<'a> {
 
     /// The version-1 paint of base glyph `gid`, from the BaseGlyphList.
     fn base_v1(&self, gid: u16) -> Option<usize> {
+        self.base_paint(gid).and_then(BasePaint::at)
+    }
+
+    /// Base glyph `gid`'s record in the BaseGlyphList, if it has one.
+    fn base_paint(&self, gid: u16) -> Option<BasePaint> {
         let list = self.base_list?;
         let count = u32_at(self.colr, list)?;
         let record = find_record(self.colr, list.checked_add(4)?, 6, count, gid)?;
-        at_offset(list, u32_at(self.colr, record.checked_add(2)?)?)
+        Some(
+            match at_offset(list, u32_at(self.colr, record.checked_add(2)?)?) {
+                Some(at) => BasePaint::At(at),
+                None => BasePaint::Null,
+            },
+        )
     }
 
     /// The version-0 layers of base glyph `gid`: `(first, count)`.

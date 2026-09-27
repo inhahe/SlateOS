@@ -50,6 +50,8 @@ mod bidi_tables;
 pub mod bitmap;
 pub mod cff;
 pub mod colr;
+#[cfg(test)]
+mod colr_fixture;
 mod context;
 pub mod deadkey;
 mod device;

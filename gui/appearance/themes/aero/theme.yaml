@@ -9,7 +9,8 @@
 # ~/.config/slateos/appearance.yaml.
 #
 # `colors` is dark mode and `colors-light` is light mode. A theme with only one
-# of the two is shown in that mode whichever the user has chosen.
+# of the two is shown in that mode whichever the user has chosen. `terminal` and
+# `terminal-light`, at the end, are a terminal's colours for the same two modes.
 #
 # Colours are opaque, written "#rrggbb" -- in quotes, because an unquoted `#`
 # after a space begins a comment. The accent is not here: it is the user's own
@@ -28,7 +29,7 @@ meta:
   author: SlateOS
   version: "1.0"
   tags: [default, dark, light]
-  supports: [colors]
+  supports: [colors, terminal]
 
 colors:
   # Backgrounds, darkest to lightest: the frame behind everything, the
@@ -92,3 +93,57 @@ colors-light:
   rosewater: "#965e52"
   flamingo: "#a05757"
   maroon: "#c33b47"
+
+# A terminal's colours: what it writes in and on, its cursor, and the sixteen
+# colours programs name by number. A theme that leaves these sections out gets
+# its own hues in the slots every terminal gives them -- red for red, green for
+# green, pink as magenta and teal as cyan -- so retinting `colors` retints the
+# terminal to match; set a slot here to choose it outright. The numbers keep
+# their meanings: colour 1 is red on every terminal, and a program that prints
+# red expects red. The foreground is held to the same contrast floor as text;
+# the sixteen are not, being the program's choice.
+terminal:
+  # What the terminal writes in and on, and its cursor.
+  foreground: "#cdd6f4"
+  background: "#1e1e2e"
+  cursor: "#f5e0dc"
+  # The sixteen colours programs name by number: 0-7, then the bright 8-15.
+  black: "#45475a"
+  red: "#f38ba8"
+  green: "#a6e3a1"
+  yellow: "#f9e2af"
+  blue: "#89b4fa"
+  magenta: "#f5c2e7"
+  cyan: "#94e2d5"
+  white: "#bac2de"
+  bright-black: "#585b70"
+  bright-red: "#f38ba8"
+  bright-green: "#a6e3a1"
+  bright-yellow: "#f9e2af"
+  bright-blue: "#89b4fa"
+  bright-magenta: "#f5c2e7"
+  bright-cyan: "#94e2d5"
+  bright-white: "#a6adc8"
+
+terminal-light:
+  # What the terminal writes in and on, and its cursor.
+  foreground: "#000000"
+  background: "#eff1f5"
+  cursor: "#965e52"
+  # The sixteen colours programs name by number: 0-7, then the bright 8-15.
+  black: "#000000"
+  red: "#d20f39"
+  green: "#317b21"
+  yellow: "#976014"
+  blue: "#0036a3"
+  magenta: "#9f508a"
+  cyan: "#13787e"
+  white: "#acb0be"
+  bright-black: "#6b6d78"
+  bright-red: "#d20f39"
+  bright-green: "#317b21"
+  bright-yellow: "#976014"
+  bright-blue: "#0036a3"
+  bright-magenta: "#9f508a"
+  bright-cyan: "#13787e"
+  bright-white: "#bcc0cc"

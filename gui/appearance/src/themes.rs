@@ -94,7 +94,7 @@
 //! [`AppearanceSettings::read_from`]: crate::AppearanceSettings::read_from
 
 use guitk::color::Color;
-use guitk::palette::{THEME_ROLES, ThemeColors};
+use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors};
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -131,6 +131,13 @@ pub const DARK_SECTION: &str = "colors";
 
 /// The section holding a theme's light-mode colours.
 pub const LIGHT_SECTION: &str = "colors-light";
+
+/// The section holding a terminal's dark-mode colours -- its foreground,
+/// background, cursor and the sixteen by number (`guitk::palette::TERMINAL_ROLES`).
+pub const TERMINAL_DARK_SECTION: &str = "terminal";
+
+/// The section holding a terminal's light-mode colours.
+pub const TERMINAL_LIGHT_SECTION: &str = "terminal-light";
 
 /// The largest theme file that is read.
 ///
@@ -351,6 +358,8 @@ pub fn parse(text: &str) -> ThemeFile {
     let colors = ThemeColors {
         dark: read_colors(&doc, DARK_SECTION, &mut warnings),
         light: read_colors(&doc, LIGHT_SECTION, &mut warnings),
+        terminal_dark: read_terminal(&doc, TERMINAL_DARK_SECTION, &mut warnings),
+        terminal_light: read_terminal(&doc, TERMINAL_LIGHT_SECTION, &mut warnings),
     };
     ThemeFile {
         meta,
@@ -442,20 +451,41 @@ fn push_item(items: &mut Vec<String>, raw: &str) {
     }
 }
 
-/// The colours one section sets, by role.
+/// The colours one `colors` section sets, by role.
 fn read_colors(doc: &Document, section: &str, warnings: &mut Warnings) -> BTreeMap<String, Color> {
+    read_section(doc, section, &THEME_ROLES, "colour", warnings)
+}
+
+/// The colours one `terminal` section sets, by [`TERMINAL_ROLES`] name.
+fn read_terminal(
+    doc: &Document,
+    section: &str,
+    warnings: &mut Warnings,
+) -> BTreeMap<String, Color> {
+    read_section(doc, section, &TERMINAL_ROLES, "terminal colour", warnings)
+}
+
+/// The colours one section sets, by name: `roles` are the names it may use,
+/// and `what` is what one of them is called in a warning.
+fn read_section(
+    doc: &Document,
+    section: &str,
+    roles: &[&str],
+    what: &str,
+    warnings: &mut Warnings,
+) -> BTreeMap<String, Color> {
     let mut out = BTreeMap::new();
     for role in doc.keys(&[section]) {
         let at = format!("{section}.{role}");
-        if role == "accent" {
+        if role == "accent" && roles == THEME_ROLES.as_slice() {
             warnings.push(format!(
                 "`{at}` is ignored: the accent is the user's to choose, in Settings"
             ));
             continue;
         }
-        if !THEME_ROLES.contains(&role.as_str()) {
+        if !roles.contains(&role.as_str()) {
             warnings.push(format!(
-                "`{at}` is ignored: this desktop has no colour called `{}`",
+                "`{at}` is ignored: this desktop has no {what} called `{}`",
                 quoted(&role)
             ));
             continue;
@@ -1497,7 +1527,149 @@ colors:
                 Palette::for_mode(light).roles(),
                 "light = {light}"
             );
+            // And its terminal sections, written out in full as a template,
+            // are exactly what the palette derives when none is written.
+            let terminal = file.colors.terminal_roles(light);
+            let missing: Vec<&str> = guitk::palette::TERMINAL_ROLES
+                .iter()
+                .copied()
+                .filter(|role| !terminal.contains_key(*role))
+                .collect();
+            assert_eq!(missing, Vec::<&str>::new(), "terminal, light = {light}");
+            assert_eq!(
+                themed.terminal,
+                Palette::for_mode(light).terminal,
+                "terminal, light = {light}"
+            );
         }
+    }
+
+    // ---- the terminal ----
+
+    /// **The built-in terminal is the palette's hues in a terminal's slots**:
+    /// red in red's, green in green's, pink as magenta and teal as cyan, the
+    /// bright eight the same hues; the page and the text as its background and
+    /// foreground; and four greys, black the darker mark and white the paler,
+    /// in both modes -- the light mode's from its real greys, since its
+    /// subtexts are a blue ink.
+    #[test]
+    fn the_terminal_is_the_palettes_hues_in_a_terminals_slots() {
+        use guitk::theme::{contrast_ratio, relative_luminance};
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let t = p.terminal;
+            let hues = [p.red, p.green, p.yellow, p.blue, p.pink, p.teal];
+            assert_eq!(t.ansi[1..7], hues, "light = {light}");
+            assert_eq!(t.ansi[9..15], hues, "bright, light = {light}");
+            assert_eq!(
+                (t.foreground, t.background),
+                (p.text, p.base),
+                "light = {light}"
+            );
+            let [black, white, bright_black, bright_white] =
+                [t.ansi[0], t.ansi[7], t.ansi[8], t.ansi[15]];
+            for (name, grey) in [
+                ("black", black),
+                ("white", white),
+                ("bright black", bright_black),
+                ("bright white", bright_white),
+            ] {
+                let spread = grey.r.max(grey.g).max(grey.b) - grey.r.min(grey.g).min(grey.b);
+                assert!(
+                    spread <= 0x30,
+                    "{name} is not a grey in light = {light}: {grey:?}"
+                );
+            }
+            assert!(
+                relative_luminance(black) < relative_luminance(white)
+                    && relative_luminance(bright_black) < relative_luminance(bright_white),
+                "black is not the darker mark in light = {light}"
+            );
+            if light {
+                assert!(
+                    contrast_ratio(bright_black, t.background)
+                        >= guitk::palette::TEXT_CONTRAST_FLOOR,
+                    "bright black -- the dim programs print comments in -- cannot be read"
+                );
+            }
+        }
+    }
+
+    /// **A theme's `terminal` section sets the slots it names**, and the ones
+    /// it leaves follow the theme's hues -- so retinting `colors` retints the
+    /// terminal. Its foreground is held to the floor on its own background.
+    #[test]
+    fn a_themes_terminal_section_sets_its_slots_and_the_rest_follow_its_hues() {
+        use guitk::theme::contrast_ratio;
+        let file = parse(
+            "colors:\n  red: \"#ff0000\"\n\
+             terminal:\n  cyan: \"#00ffff\"\n  background: \"#101010\"\n  foreground: \"#202020\"\n",
+        );
+        assert_eq!(file.warnings, Vec::<String>::new());
+        let t = Palette::for_theme(false, &file.colors).terminal;
+        assert_eq!(
+            t.ansi[1],
+            Color::rgb(0xff, 0, 0),
+            "the theme's red is not the terminal's"
+        );
+        assert_eq!(t.ansi[9], Color::rgb(0xff, 0, 0), "nor the bright red");
+        assert_eq!(
+            t.ansi[6],
+            Color::rgb(0, 0xff, 0xff),
+            "the section's cyan was not set"
+        );
+        assert_eq!(t.background, Color::rgb(0x10, 0x10, 0x10));
+        assert!(
+            contrast_ratio(t.foreground, t.background) >= guitk::palette::TEXT_CONTRAST_FLOOR,
+            "an unreadable foreground was kept: {:?} on {:?}",
+            t.foreground,
+            t.background
+        );
+        // A theme of one mode is shown in that mode whichever is asked for,
+        // its terminal with it, as its colours are (`ThemeColors::variant`).
+        let asked_light = Palette::for_theme(true, &file.colors).terminal;
+        assert_eq!(asked_light.ansi[6], Color::rgb(0, 0xff, 0xff));
+
+        // A theme of both: light mode reads `terminal-light`, dark `terminal`.
+        let both = parse(
+            "colors:\n  red: \"#ff0000\"\ncolors-light:\n  red: \"#aa0000\"\n\
+             terminal:\n  cyan: \"#00ffff\"\nterminal-light:\n  cyan: \"#008080\"\n",
+        );
+        assert_eq!(both.warnings, Vec::<String>::new());
+        assert_eq!(
+            Palette::for_theme(true, &both.colors).terminal.ansi[6],
+            Color::rgb(0, 0x80, 0x80)
+        );
+        assert_eq!(
+            Palette::for_theme(false, &both.colors).terminal.ansi[6],
+            Color::rgb(0, 0xff, 0xff)
+        );
+    }
+
+    /// **A high-contrast scheme's terminal writes its ink on its page.**
+    #[test]
+    fn a_high_contrast_terminal_writes_the_schemes_ink_on_its_page() {
+        let black = Color::rgb(0, 0, 0);
+        let yellow = Color::rgb(0xff, 0xff, 0);
+        let t = Palette::high_contrast(black, yellow, Color::rgb(0, 0xaa, 0xff)).terminal;
+        assert_eq!((t.foreground, t.background), (yellow, black));
+    }
+
+    /// **A name a terminal has no slot for is reported**, as a colour the
+    /// desktop has no role for is -- `accent` included, which the `colors`
+    /// sections answer differently.
+    #[test]
+    fn a_terminal_name_with_no_slot_is_reported() {
+        let file = parse("terminal:\n  purple: \"#800080\"\n  accent: \"#ff0000\"\n");
+        assert_eq!(file.warnings.len(), 2, "{:?}", file.warnings);
+        assert!(
+            file.warnings
+                .iter()
+                .all(|w| w.contains("no terminal colour called")),
+            "{:?}",
+            file.warnings
+        );
+        assert!(file.colors.terminal_dark.is_empty());
     }
 
     // ---- where a user's themes are ----

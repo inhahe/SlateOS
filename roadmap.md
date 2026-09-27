@@ -1859,6 +1859,13 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **A theme dresses the terminal too** -- done 2026-09-27
+  (`design-decisions.md` §1410). The palette every program is handed carries a
+  terminal's colours -- background, foreground, cursor and the sixteen by
+  number -- the theme's own hues in the slots every terminal gives them unless
+  the theme's `terminal` section says otherwise. The terminal application
+  moving onto them is lane E's.
+
 - `[C]` **A program that cannot start is said, not swallowed** -- done
   2026-09-27. A launch that failed was printed to the desktop's standard
   error and nowhere else, so a mistyped Run box line, a pin to a program

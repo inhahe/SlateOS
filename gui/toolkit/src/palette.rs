@@ -580,6 +580,153 @@ pub struct Palette {
     /// measured, and a theme that changed only the page could otherwise leave
     /// the built-in text unreadable on it.
     themed: bool,
+    /// What a terminal emulator draws in: see [`TerminalColors`]. The
+    /// palette's own hues in the slots every terminal gives them, unless the
+    /// theme's `terminal` section says otherwise.
+    pub terminal: TerminalColors,
+}
+
+/// The colours a terminal emulator draws in: its own background and
+/// foreground, its cursor, and the sixteen colours programs name by number --
+/// 0 to 7, then 8 to 15 the bright ones. A theme's `terminal` section, so one
+/// theme dresses the whole desktop, terminals included.
+///
+/// **A theme chooses the shades; the numbers keep their meanings.** Colour 1
+/// is red on every terminal there is, and a program that prints red expects
+/// red. The built-in sixteen are the palette's own hues in the slots every
+/// terminal gives them -- red in red's, green in green's, pink as magenta and
+/// teal as cyan, as Catppuccin's terminal themes place them -- so a theme that
+/// retints its hues retints its terminal to match, and a `terminal` section can
+/// set any slot outright.
+///
+/// **Held to the floor: the foreground, not the sixteen.** The foreground is
+/// what the terminal writes when nothing says otherwise, so it is made legible
+/// on the background as every text ink is ([`legible_on`]). The sixteen are
+/// the program's choice -- black on a black background is something a program
+/// may mean -- and are left as the theme states them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalColors {
+    /// What the terminal writes in when a program names no colour.
+    pub foreground: Color,
+    /// What it writes on.
+    pub background: Color,
+    /// The cursor.
+    pub cursor: Color,
+    /// Colours 0 to 15: black, red, green, yellow, blue, magenta, cyan and
+    /// white, then the bright eight in the same order.
+    pub ansi: [Color; 16],
+}
+
+/// What a theme's `terminal` section may set, in [`TerminalColors`]' order:
+/// the three the terminal draws itself, then the sixteen by number.
+pub const TERMINAL_ROLES: [&str; 19] = [
+    "foreground",
+    "background",
+    "cursor",
+    "black",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "white",
+    "bright-black",
+    "bright-red",
+    "bright-green",
+    "bright-yellow",
+    "bright-blue",
+    "bright-magenta",
+    "bright-cyan",
+    "bright-white",
+];
+
+impl TerminalColors {
+    /// Nothing yet: what a palette holds for the instant between being built
+    /// and having its terminal derived from it ([`of`](Self::of)).
+    const UNSET: Self = Self {
+        foreground: Color::rgb(0, 0, 0),
+        background: Color::rgb(0, 0, 0),
+        cursor: Color::rgb(0, 0, 0),
+        ansi: [Color::rgb(0, 0, 0); 16],
+    };
+
+    /// The built-in terminal colours for `palette`: its page and its text,
+    /// its rosewater for the cursor, and its hues in the slots every terminal
+    /// gives them.
+    ///
+    /// The four greys -- black, white and their bright pairs -- are the
+    /// mode's greys, black the darker mark and white the paler on both. In
+    /// the dark they are Mocha's: the raised surfaces and the subtexts. In
+    /// the light they cannot be Latte's the same way, because this palette's
+    /// light subtexts are a deepened blue ink, not greys (`#00688b`): black is
+    /// the text, white and bright white the raised surfaces, and bright black
+    /// -- the "dim" that programs print comments in -- the faintest mark made
+    /// legible on the page, a grey that can still be read.
+    #[must_use]
+    pub fn of(palette: &Palette) -> Self {
+        let p = palette;
+        let (black, white, bright_black, bright_white) = if p.light {
+            (p.text, p.surface2, legible_on(p.overlay0, p.base), p.surface1)
+        } else {
+            (p.surface1, p.subtext1, p.surface2, p.subtext0)
+        };
+        let mut colors = Self {
+            foreground: p.text,
+            background: p.base,
+            cursor: p.rosewater,
+            ansi: [
+                black,
+                p.red,
+                p.green,
+                p.yellow,
+                p.blue,
+                p.pink,
+                p.teal,
+                white,
+                bright_black,
+                p.red,
+                p.green,
+                p.yellow,
+                p.blue,
+                p.pink,
+                p.teal,
+                bright_white,
+            ],
+        };
+        colors.hold_the_foreground();
+        colors
+    }
+
+    /// Set the colour a theme's `terminal` section names `name` -- one of
+    /// [`TERMINAL_ROLES`]. Any other name is not a slot and is ignored: the
+    /// theme's reader reports it, because the palette has nowhere to.
+    pub fn set(&mut self, name: &str, color: Color) {
+        let slot = match name {
+            "foreground" => &mut self.foreground,
+            "background" => &mut self.background,
+            "cursor" => &mut self.cursor,
+            number => {
+                let Some(index) = TERMINAL_ROLES
+                    .iter()
+                    .skip(3)
+                    .position(|role| *role == number)
+                else {
+                    return;
+                };
+                let Some(slot) = self.ansi.get_mut(index) else {
+                    return;
+                };
+                slot
+            }
+        };
+        *slot = color;
+    }
+
+    /// The foreground, made legible on the background ([`legible_on`]).
+    fn hold_the_foreground(&mut self) {
+        self.foreground = legible_on(self.foreground, self.background);
+    }
 }
 
 /// The colours a theme sets, by role name, for each mode -- what
@@ -598,6 +745,11 @@ pub struct ThemeColors {
     pub dark: BTreeMap<String, Color>,
     /// The roles set for light mode.
     pub light: BTreeMap<String, Color>,
+    /// The terminal colours set for dark mode, by [`TERMINAL_ROLES`] name --
+    /// the theme's `terminal` section.
+    pub terminal_dark: BTreeMap<String, Color>,
+    /// The terminal colours set for light mode: `terminal-light`.
+    pub terminal_light: BTreeMap<String, Color>,
 }
 
 impl ThemeColors {
@@ -605,6 +757,18 @@ impl ThemeColors {
     #[must_use]
     pub fn roles(&self, light: bool) -> &BTreeMap<String, Color> {
         if light { &self.light } else { &self.dark }
+    }
+
+    /// The terminal colours set for one mode. Asked for the mode the palette
+    /// is built in, which [`variant`](Self::variant) has already settled: a
+    /// theme's terminal section goes with its colours.
+    #[must_use]
+    pub fn terminal_roles(&self, light: bool) -> &BTreeMap<String, Color> {
+        if light {
+            &self.terminal_light
+        } else {
+            &self.terminal_dark
+        }
     }
 
     /// The roles to draw with when `light` is asked for, and the mode they
@@ -728,6 +892,7 @@ impl Palette {
                 light: true,
                 ink_sources: [LIGHT_TEXT, LIGHT_SUBTEXT0, LIGHT_SUBTEXT1, LIGHT_LINK],
                 themed: false,
+                terminal: TerminalColors::UNSET,
             }
         } else {
             Self {
@@ -764,9 +929,11 @@ impl Palette {
                 light: false,
                 ink_sources: [TEXT, SUBTEXT0, SUBTEXT1, LINK],
                 themed: false,
+                terminal: TerminalColors::UNSET,
             }
         };
         chosen.apply_text_floor();
+        chosen.terminal = TerminalColors::of(&chosen);
         chosen
     }
 
@@ -900,6 +1067,15 @@ impl Palette {
         palette.ink_sources = sources;
         palette.themed = true;
         palette.apply_text_floor();
+        // The terminal from the theme's hues, then its own section for the
+        // mode the palette was built in, then the floor again for whatever
+        // foreground and background that section chose.
+        let mut terminal = TerminalColors::of(&palette);
+        for (name, color) in theme.terminal_roles(light) {
+            terminal.set(name, *color);
+        }
+        terminal.hold_the_foreground();
+        palette.terminal = terminal;
         palette
     }
 
@@ -1106,9 +1282,20 @@ impl Palette {
             // on this palette keeps them instead of putting the mode's back.
             // The link is still the mode's: the scheme has no link colour.
             ink_sources: [fg, fg, fg, link_source],
+            // Rebuilt below from this palette's own page and ink: the
+            // ordinary palette's terminal is drawn on the ordinary page.
+            terminal: TerminalColors::UNSET,
             // The categorical hues, from the mode that suits this background.
             ..ordinary
         }
+        .with_its_terminal()
+    }
+
+    /// This palette with its [`terminal`](Self::terminal) derived from it.
+    #[must_use]
+    fn with_its_terminal(mut self) -> Self {
+        self.terminal = TerminalColors::of(&self);
+        self
     }
 
     /// Every field of this palette, paired with its name.
@@ -1186,6 +1373,10 @@ impl Palette {
             ink_sources: _,
             // Not a colour: whether a theme was laid over the palette.
             themed: _,
+            // Colours, but a terminal's table rather than roles: by default
+            // they are the roles above in a terminal's slots, and a theme's
+            // `terminal` section sets them apart from its `colors`.
+            terminal: _,
         } = *self;
         [
             ("crust", crust),

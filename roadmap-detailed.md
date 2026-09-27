@@ -1842,8 +1842,8 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [ ] Dynamic wallpapers: list of images with time-of-day triggers (e.g., day image 06:00-18:00, night image 18:00-06:00)
 
 ##### Tier 3 — Terminal Color Scheme
-- [ ] 16 ANSI colors + background + foreground, specifically for terminal emulators
-- [ ] Included as a `terminal` section in theme YAML so a single theme unifies the whole desktop including terminals
+- [x] 16 ANSI colors + background + foreground, specifically for terminal emulators — *2026-09-27 (`design-decisions.md` §1410): `Palette::terminal`, the theme's own hues in a terminal's slots by default; the terminal application adopting it is lane E's (`requests/c-e-the-terminal-draws-in-the-themes-terminal-colours.md`).*
+- [x] Included as a `terminal` section in theme YAML so a single theme unifies the whole desktop including terminals — *2026-09-27: `terminal` and `terminal-light`, written out in full in the shipped theme as a template.*
 
 ##### What Themes Do NOT Control
 - **Layout** (taskbar position, widget placement, panel arrangement) — these are settings, not themes. Applying a theme must never break muscle memory.

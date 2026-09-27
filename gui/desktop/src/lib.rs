@@ -635,6 +635,22 @@ const START_MENU_GLOW_SPREAD: f32 = 4.0;
 /// The line of light just inside the start menu's edge, in white: the
 /// reference's `inset 0 0 0 1px` at 0.4.
 const START_MENU_INNER_LIGHT: u8 = 102;
+/// One window's place in the Alt+Tab switcher: a square cell around its
+/// program's picture.
+const SWITCHER_CELL: f32 = 72.0;
+/// A program's picture in its switcher cell.
+const SWITCHER_ICON: f32 = 40.0;
+/// Between the switcher's glass edge and what it holds.
+const SWITCHER_PADDING: f32 = 14.0;
+/// The band across the switcher's top that names the window the switch goes to.
+const SWITCHER_TITLE_BAND: f32 = 30.0;
+/// The least room the switcher leaves between itself and the screen's edge.
+const SWITCHER_SCREEN_MARGIN: f32 = 50.0;
+/// The mark round a switcher cell, inside the cell.
+const SWITCHER_MARK_INSET: f32 = 3.0;
+/// The switcher's least width, so a title has room even over one or two
+/// windows' cells.
+const SWITCHER_MIN_WIDTH: f32 = 240.0;
 /// A row under the pointer, in the accent: the reference's `aero-sm-app:hover`
 /// wash, a pale tint of its blue -- quieter than the keyboard's row, which
 /// says where Enter goes rather than where the pointer is.
@@ -730,6 +746,18 @@ const RUN_BROWSER_HEIGHT: f32 = 440.0;
 /// floating the same distance above the same desktop, and shadows that
 /// disagreed about the light source would look like a rendering fault.
 const WINDOW_SHADOW: Shadow = Shadow::drop(4.0, 12.0, Color::rgba(0, 0, 0, 90));
+
+/// Where the Alt+Tab switcher's parts are, from
+/// [`DesktopShell::switcher_layout`].
+struct SwitcherLayout {
+    /// The glass.
+    panel: Rect,
+    /// The band naming the window the switch goes to.
+    title: Rect,
+    /// The cells on show, each with its window's index in
+    /// [`DesktopShell::switcher_windows`].
+    cells: Vec<(usize, Rect)>,
+}
 
 // --- Type scale ------------------------------------------------------------
 
@@ -7927,62 +7955,223 @@ impl DesktopShell {
             return None;
         }
 
-        // Overlay background
-        let overlay_w = self
-            .scale(400.0)
-            .min(self.screen_width as f32 - self.scale(100.0))
-            .max(0.0);
-        let overlay_h = self.scale(80.0);
-        let overlay_x = (self.screen_width as f32 - overlay_w) / 2.0;
-        let overlay_y = (self.screen_height as f32 - overlay_h) / 2.0;
-        let overlay = Rect::new(overlay_x, overlay_y, overlay_w, overlay_h);
+        // The reference has no switcher; it is drawn in the reference's glass,
+        // as the start menu is -- a panel of the desktop's, over whatever is
+        // behind it -- with each window's program picture in a cell of its own
+        // and the chosen window's title across the top, whole or cut with a
+        // mark. It used to be the first twelve characters of every title, cut
+        // unmarked, beside one another in one row whatever their number.
+        let size = self.font_size(TextRole::Body);
+        let title_width = windows
+            .get(self.alt_tab_index)
+            .map_or(0.0, |window| text::width(&window.title, size));
+        let layout = self.switcher_layout(windows.len(), self.alt_tab_index, title_width);
         let radii = self.corner_radii();
+        self.glass_under(&mut tree, layout.panel, radii, self.theme.overlay_bg);
+        self.glass_edge(&mut tree, layout.panel, radii);
 
-        // The switcher floats over whatever is behind it, so it casts a shadow
-        // for the same reason a window does.
-        if self.appearance.drop_shadows {
-            shadow(&mut tree, overlay, radii);
-        }
-        fill_round(&mut tree, overlay, self.theme.overlay_bg, radii);
-        stroke_round(
-            &mut tree,
-            overlay,
-            self.theme.accent_color,
-            self.scale(2.0),
-            radii,
-        );
-
-        // Window entries
-        let item_w = overlay_w / windows.len().max(1) as f32;
-        let inset = self.scale(4.0);
-        for (i, window) in windows.iter().enumerate() {
-            let ix = overlay_x + i as f32 * item_w;
-
-            if i == self.alt_tab_index {
+        let fg = self.theme.overlay_fg;
+        let px = self.icon_px(SWITCHER_ICON);
+        let side = px as f32;
+        let inset = self.scale(SWITCHER_MARK_INSET);
+        let mark_radii = CornerRadii::all(self.scale(4.0));
+        for (index, cell) in &layout.cells {
+            let Some(window) = windows.get(*index) else {
+                continue;
+            };
+            // The window the switch goes to, marked as the accent marks "you
+            // are here" everywhere else in the shell -- the start menu's
+            // keyboard row -- with the line of its lit rows round it.
+            if *index == self.alt_tab_index {
+                let mark = Rect::new(
+                    cell.x + inset,
+                    cell.y + inset,
+                    (cell.w - inset * 2.0).max(0.0),
+                    (cell.h - inset * 2.0).max(0.0),
+                );
                 fill_round(
                     &mut tree,
-                    Rect::new(
-                        ix + inset,
-                        overlay_y + inset,
-                        (item_w - inset * 2.0).max(0.0),
-                        (overlay_h - inset * 2.0).max(0.0),
-                    ),
-                    self.theme.overlay_selected_bg,
-                    radii,
+                    mark,
+                    with_alpha(self.theme.accent_color, START_MENU_SELECTED_ALPHA),
+                    mark_radii,
+                );
+                stroke_round(
+                    &mut tree,
+                    mark,
+                    with_alpha(self.theme.accent_color, START_MENU_LIT_EDGE_ALPHA),
+                    self.scale(1.0),
+                    mark_radii,
                 );
             }
+            let program = self.program_for_app_id(&window.app_id);
+            tree.push(guitk::render::RenderCommand::Image {
+                x: cell.x + (cell.w - side) / 2.0,
+                y: cell.y + (cell.h - side) / 2.0,
+                width: side,
+                height: side,
+                image_id: self.picture_of(program, px, fg),
+            });
+        }
 
-            let title: String = window.title.chars().take(12).collect();
-            tree.text(
-                ix + self.scale(10.0),
-                overlay_y + overlay_h / 2.0 - self.scale(6.0),
-                &title,
-                self.theme.overlay_fg,
-                self.font_size(TextRole::Caption),
+        // The chosen window's title, centred over the cells, whole or cut
+        // with a mark -- it is the one thing that tells two windows of one
+        // program apart.
+        if let Some(window) = windows.get(self.alt_tab_index) {
+            let shown = text::elide(
+                &window.title,
+                layout.title.w,
+                "\u{2026}",
+                size,
+                guitk::render::FontWeightHint::Regular,
+            );
+            let width = text::width(&shown, size).min(layout.title.w);
+            let offset = (layout.title.w - width) / 2.0;
+            tree.text_in(
+                layout.title.x + offset,
+                layout.title.y + (layout.title.h - size) / 2.0,
+                layout.title.w - offset,
+                &window.title,
+                fg,
+                size,
             );
         }
 
         Some(tree)
+    }
+
+    /// The glass a floating panel of the shell sits in, under whatever the
+    /// panel lays over its fill: the shadow every floating panel casts and the
+    /// reference's glow in the accent (`aero-start-menu`'s `0 0 38px 4px`),
+    /// both only when the user has shadows -- a glow is a shadow in light, and
+    /// goes with them -- then `fill`.
+    ///
+    /// [`glass_edge`](Self::glass_edge) finishes it. Two halves so a panel
+    /// can lay a shade of its own between them -- the start menu's places
+    /// column -- and still be edged over it.
+    fn glass_under(&self, tree: &mut RenderTree, rect: Rect, radii: CornerRadii, fill: Color) {
+        if self.appearance.drop_shadows {
+            shadow(tree, rect, radii);
+            tree.box_shadow(
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                Shadow {
+                    offset_x: 0.0,
+                    offset_y: 0.0,
+                    blur: self.scale(START_MENU_GLOW_BLUR),
+                    spread: self.scale(START_MENU_GLOW_SPREAD),
+                    color: with_alpha(self.theme.accent_color, START_MENU_GLOW_ALPHA),
+                },
+                radii,
+            );
+        }
+        fill_round(tree, rect, fill, radii);
+    }
+
+    /// The glass's edges, over whatever the panel laid on its fill: the
+    /// window frame's outline -- so a panel and a window side by side are
+    /// edged alike -- and a line of light just inside it, as the reference's
+    /// glass has (`inset 0 0 0 1px`).
+    fn glass_edge(&self, tree: &mut RenderTree, rect: Rect, radii: CornerRadii) {
+        stroke_round(
+            tree,
+            rect,
+            self.theme.panel_border_color,
+            self.scale(1.0),
+            radii,
+        );
+        let line = self.scale(1.0);
+        stroke_round(
+            tree,
+            Rect::new(
+                rect.x + line * 1.5,
+                rect.y + line * 1.5,
+                (rect.w - line * 3.0).max(0.0),
+                (rect.h - line * 3.0).max(0.0),
+            ),
+            with_alpha(Color::WHITE, START_MENU_INNER_LIGHT),
+            line,
+            CornerRadii {
+                top_left: (radii.top_left - line * 1.5).max(0.0),
+                top_right: (radii.top_right - line * 1.5).max(0.0),
+                bottom_right: (radii.bottom_right - line * 1.5).max(0.0),
+                bottom_left: (radii.bottom_left - line * 1.5).max(0.0),
+            },
+        );
+    }
+
+    /// Where the Alt+Tab switcher's glass and cells go, for `count` windows
+    /// with the `selected` one to be shown, whose title is `title_width`
+    /// wide.
+    ///
+    /// The windows are laid out in rows of cells, as many to a row as the
+    /// screen has room for, and as many rows; past that, the switcher shows
+    /// the page of cells that holds the selected window, so a long list steps
+    /// through in pages rather than running off the screen. The glass is as
+    /// wide as the cells, or as the chosen title up to the screen's room,
+    /// whichever is wider, with the cells centred in it.
+    fn switcher_layout(&self, count: usize, selected: usize, title_width: f32) -> SwitcherLayout {
+        let cell = self.scale(SWITCHER_CELL);
+        let pad = self.scale(SWITCHER_PADDING);
+        let band = self.scale(SWITCHER_TITLE_BAND);
+        let margin = self.scale(SWITCHER_SCREEN_MARGIN);
+        let screen_w = self.screen_width as f32;
+        let screen_h = self.screen_height as f32;
+        let fit = |room: f32| {
+            if cell > 0.0 && room >= cell {
+                (room / cell) as usize
+            } else {
+                1
+            }
+        };
+        let columns = fit(screen_w - 2.0 * (margin + pad)).min(count).max(1);
+        let needed = count.div_ceil(columns).max(1);
+        let rows = fit(screen_h - 2.0 * (margin + pad) - band).min(needed);
+        let page = columns.saturating_mul(rows).max(1);
+        // `page` and `columns` are at least one, so neither division can
+        // fail; `checked_` says so to the arithmetic lint rather than hiding it.
+        let first = selected.checked_div(page).unwrap_or(0).saturating_mul(page);
+        let shown = count.saturating_sub(first).min(page);
+
+        let cells_width = columns as f32 * cell;
+        let room = (screen_w - 2.0 * margin).max(0.0);
+        let width = (cells_width + 2.0 * pad)
+            .max((title_width + 2.0 * pad).min(room))
+            .max(self.scale(SWITCHER_MIN_WIDTH).min(room));
+        let height = band + rows as f32 * cell + 2.0 * pad;
+        let cells_left = ((width - cells_width) / 2.0).max(pad);
+        let panel = Rect::new(
+            ((screen_w - width) / 2.0).max(0.0),
+            ((screen_h - height) / 2.0).max(0.0),
+            width,
+            height,
+        );
+        let cells = (0..shown)
+            .map(|offset| {
+                let column = offset.checked_rem(columns).unwrap_or(0);
+                let row = offset.checked_div(columns).unwrap_or(0);
+                (
+                    first.saturating_add(offset),
+                    Rect::new(
+                        panel.x + cells_left + column as f32 * cell,
+                        panel.y + pad + band + row as f32 * cell,
+                        cell,
+                        cell,
+                    ),
+                )
+            })
+            .collect();
+        SwitcherLayout {
+            title: Rect::new(
+                panel.x + pad,
+                panel.y + pad,
+                (width - 2.0 * pad).max(0.0),
+                band,
+            ),
+            panel,
+            cells,
+        }
     }
 
     /// Render the start menu.
@@ -7995,28 +8184,8 @@ impl DesktopShell {
         let menu = self.start_menu_rect();
         let radii = self.corner_radii();
 
-        // Background. Under it, when the user has shadows, the shadow every
-        // floating panel casts and the reference's glow in the accent
-        // (`aero-start-menu`'s `0 0 38px 4px`) -- a glow is a shadow in light,
-        // and goes with them.
-        if self.appearance.drop_shadows {
-            shadow(&mut tree, menu, radii);
-            tree.box_shadow(
-                menu.x,
-                menu.y,
-                menu.w,
-                menu.h,
-                Shadow {
-                    offset_x: 0.0,
-                    offset_y: 0.0,
-                    blur: self.scale(START_MENU_GLOW_BLUR),
-                    spread: self.scale(START_MENU_GLOW_SPREAD),
-                    color: with_alpha(self.theme.accent_color, START_MENU_GLOW_ALPHA),
-                },
-                radii,
-            );
-        }
-        fill_round(&mut tree, menu, self.theme.start_menu_bg, radii);
+        // The glass, under what the menu lays over it.
+        self.glass_under(&mut tree, menu, radii, self.theme.start_menu_bg);
         // The places column, in a shade of its own: rounded where it meets the
         // menu's own corners and square where it meets the programs.
         let right = self.start_menu_right_rect();
@@ -8031,34 +8200,8 @@ impl DesktopShell {
                 bottom_left: 0.0,
             },
         );
-        stroke_round(
-            &mut tree,
-            menu,
-            self.theme.panel_border_color,
-            self.scale(1.0),
-            radii,
-        );
-        // And a line of light just inside that, as the reference's glass has
-        // (`inset 0 0 0 1px`). The outline itself stays the window frame's,
-        // so a menu and a window side by side are edged alike.
-        let line = self.scale(1.0);
-        stroke_round(
-            &mut tree,
-            Rect::new(
-                menu.x + line * 1.5,
-                menu.y + line * 1.5,
-                (menu.w - line * 3.0).max(0.0),
-                (menu.h - line * 3.0).max(0.0),
-            ),
-            with_alpha(Color::WHITE, START_MENU_INNER_LIGHT),
-            line,
-            CornerRadii {
-                top_left: (radii.top_left - line * 1.5).max(0.0),
-                top_right: (radii.top_right - line * 1.5).max(0.0),
-                bottom_right: (radii.bottom_right - line * 1.5).max(0.0),
-                bottom_left: (radii.bottom_left - line * 1.5).max(0.0),
-            },
-        );
+        // And the glass's edges, over the places column's shade.
+        self.glass_edge(&mut tree, menu, radii);
 
         // The search field, at the foot of the programs: the menu is a list of
         // programs, and the field says how to find one in it.
@@ -12958,9 +13101,10 @@ mod window_manager_tests {
     )]
 
     use super::{
-        DesktopShell, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers, ShellControlAction,
-        ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState, hotkeys, snap, text,
-        window_rules,
+        DesktopShell, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers, Rect,
+        START_MENU_GLOW_ALPHA, START_MENU_SELECTED_ALPHA, ShellControlAction, ShellRequest,
+        TextRole, WindowId, WindowInfo, WindowList, WindowState, hotkeys, snap, text, window_rules,
+        with_alpha,
     };
 
     fn shell() -> DesktopShell {
@@ -14423,6 +14567,224 @@ mod window_manager_tests {
             shell.finish_alt_tab(),
             Some(ShellRequest::window(second, ShellControlAction::Activate)),
             "and back again"
+        );
+    }
+
+    // ---- the switcher's drawing ----
+
+    /// The texts a rendered switcher draws.
+    fn switcher_texts(shell: &DesktopShell) -> Vec<(String, Option<f32>)> {
+        shell
+            .render_alt_tab()
+            .expect("the switcher is up")
+            .commands
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Text {
+                    text, max_width, ..
+                } => Some((text, max_width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The rectangles of the pictures a rendered switcher draws.
+    fn switcher_pictures(shell: &DesktopShell) -> Vec<Rect> {
+        shell
+            .render_alt_tab()
+            .expect("the switcher is up")
+            .commands
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the switcher marks the window the switch goes to: its fill in
+    /// the accent at the keyboard row's strength.
+    fn switcher_mark(shell: &DesktopShell) -> Vec<Rect> {
+        let mark = with_alpha(shell.theme.accent_color, START_MENU_SELECTED_ALPHA);
+        shell
+            .render_alt_tab()
+            .expect("the switcher is up")
+            .commands
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if color == mark => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The switcher names the window the switch goes to, whole or cut with a
+    /// mark** -- and only that one. It drew the first twelve characters of
+    /// every title side by side, cut with no mark, so two documents of one
+    /// program read alike and a long title read as a short one.
+    #[test]
+    fn the_switcher_names_the_chosen_window_whole_or_marked() {
+        let mut shell = shell();
+        let long = "Quarterly report for the board, final draft with the appendices.odt";
+        open(&mut shell, long);
+        open(&mut shell, "notes.txt");
+        shell.start_alt_tab();
+        let chosen = shell.switcher_windows()[shell.alt_tab_index].title.clone();
+        let texts = switcher_texts(&shell);
+        assert_eq!(texts.len(), 1, "every window's title is drawn: {texts:?}");
+        let (drawn, bound) = &texts[0];
+        assert!(bound.is_some(), "the title is drawn with no bound");
+        assert!(
+            drawn == &chosen
+                || (drawn.ends_with('\u{2026}')
+                    && chosen.starts_with(drawn.trim_end_matches('\u{2026}'))),
+            "drawn {drawn:?} for {chosen:?}"
+        );
+        assert_ne!(drawn, &chosen.chars().take(12).collect::<String>());
+
+        // The long one, when it is chosen, is cut and says so.
+        while shell.switcher_windows()[shell.alt_tab_index].title != long {
+            shell.next_alt_tab();
+        }
+        // Whole, while the screen has room for it: the glass widens to the
+        // title rather than cutting it to the width of two cells.
+        let (drawn, _) = switcher_texts(&shell).remove(0);
+        assert_eq!(drawn, long, "a title the screen has room for was cut");
+        shell.screen_width = 400;
+        let (drawn, _) = switcher_texts(&shell).remove(0);
+        assert!(
+            drawn.ends_with('\u{2026}'),
+            "a cut title is not marked: {drawn:?}"
+        );
+    }
+
+    /// **Every window has a cell with its program's picture**, and the mark
+    /// is on the chosen window's cell and follows the choice.
+    #[test]
+    fn every_window_has_a_picture_and_the_mark_follows_the_choice() {
+        let mut shell = shell();
+        for i in 0..4 {
+            open(&mut shell, &format!("w{i}"));
+        }
+        shell.start_alt_tab();
+        let pictures = switcher_pictures(&shell);
+        assert_eq!(pictures.len(), 4);
+        let before = switcher_mark(&shell);
+        assert_eq!(before.len(), 1, "one window is chosen");
+        let chosen = pictures[shell.alt_tab_index];
+        assert!(
+            before[0].x <= chosen.x && before[0].x + before[0].w >= chosen.x + chosen.w,
+            "the mark {:?} is not round the chosen window's picture {chosen:?}",
+            before[0]
+        );
+        shell.next_alt_tab();
+        let after = switcher_mark(&shell);
+        assert_ne!(before, after, "the mark stayed where it was");
+        let chosen = pictures[shell.alt_tab_index];
+        assert!(after[0].x <= chosen.x && after[0].x + after[0].w >= chosen.x + chosen.w);
+    }
+
+    /// **A long list wraps into rows, and pages, and never leaves the
+    /// screen** -- and the chosen window is always among the cells shown.
+    #[test]
+    fn a_long_switcher_wraps_and_pages_on_the_screen() {
+        let mut shell = DesktopShell::new(800, 600);
+        for i in 0..60 {
+            open(&mut shell, &format!("w{i}"));
+        }
+        shell.start_alt_tab();
+        let screen = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut pages = std::collections::BTreeSet::new();
+        let mut most_rows = 0;
+        for _ in 0..60 {
+            let pictures = switcher_pictures(&shell);
+            assert!(!pictures.is_empty());
+            let rows: std::collections::BTreeSet<i64> =
+                pictures.iter().map(|r| r.y.round() as i64).collect();
+            most_rows = most_rows.max(rows.len());
+            assert!(
+                pictures.iter().all(|r| r.x >= screen.x
+                    && r.y >= screen.y
+                    && r.x + r.w <= screen.w
+                    && r.y + r.h <= screen.h),
+                "a picture is off the screen"
+            );
+            assert!(
+                pictures.len() < 60,
+                "every window on one page of an 800x600 screen"
+            );
+            pages.insert(pictures.len());
+            assert_eq!(
+                switcher_mark(&shell).len(),
+                1,
+                "the chosen window is not shown"
+            );
+            shell.next_alt_tab();
+        }
+        assert!(pages.len() > 1, "the list never turned a page");
+        assert!(most_rows > 1, "sixty windows, and never more than one row");
+    }
+
+    /// **The switcher is the reference's glass**: under shadows, the accent
+    /// glow the start menu casts; without them, none.
+    #[test]
+    fn the_switcher_is_glass_and_glows_only_under_shadows() {
+        let glow = |shell: &DesktopShell| {
+            let accent = with_alpha(shell.theme.accent_color, START_MENU_GLOW_ALPHA);
+            shell
+                .render_alt_tab()
+                .expect("the switcher is up")
+                .commands
+                .iter()
+                .filter(|cmd| {
+                    matches!(cmd, guitk::render::RenderCommand::BoxShadow { color, .. } if *color == accent)
+                })
+                .count()
+        };
+        let mut shell = shell();
+        open(&mut shell, "a");
+        open(&mut shell, "b");
+        shell.start_alt_tab();
+        shell.appearance.drop_shadows = true;
+        assert_eq!(glow(&shell), 1);
+        shell.appearance.drop_shadows = false;
+        assert_eq!(glow(&shell), 0);
+
+        // Edged as the start menu is, shadows or not: the window frame's
+        // outline, and the line of light just inside it.
+        let edges: Vec<guitk::color::Color> = shell
+            .render_alt_tab()
+            .expect("the switcher is up")
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                guitk::render::RenderCommand::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            edges.contains(&shell.theme.panel_border_color),
+            "the switcher has no outline: {edges:?}"
+        );
+        assert!(
+            edges.contains(&with_alpha(
+                guitk::color::Color::WHITE,
+                super::START_MENU_INNER_LIGHT
+            )),
+            "the switcher has no light inside its edge: {edges:?}"
         );
     }
 

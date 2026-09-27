@@ -1859,6 +1859,14 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **Alt+Tab is the reference's glass** -- done 2026-09-27
+  (`design-decisions.md` §1413). The switcher showed the first twelve
+  characters of every title in one row, cut unmarked, and ran off the screen
+  past a dozen windows. Now: the start menu's glass (its two halves shared),
+  each window's program picture in a cell, the chosen window marked and its
+  title across the top whole or cut with a mark, rows that wrap and pages
+  that turn so the choice is always on screen.
+
 - `[C]` **A path can be typed into every Open and Save window** -- done
   2026-09-27 (`design-decisions.md` §1412). The toolkit's dialog showed its
   folder as text nobody could edit; its address bar is now `guitk::pathbar`:

@@ -29,6 +29,15 @@
 //! descriptor, per-operation argument shapes before the ring, `SQPOLL` with
 //! `IOPOLL` refused, `SQPOLL` gated on `CAP_SYS_NICE` -- and flag sets from
 //! later kernels (`B-D-IO-URING-WAS-NOT-LINUXS`).
+//!
+//! ## Reached through `syscall()`
+//!
+//! glibc wraps none of these calls: programs -- liburing above all -- make them with
+//! `syscall(SYS_io_uring_setup, …)`, which answers with the checks below and then
+//! `ENOSYS`, as the kernel's own Linux table does.  Until 2026-09-26 the C
+//! library also exported `io_uring_setup`, `io_uring_enter` and `io_uring_register` under their own names -- liburing's, which it defines itself since 2.2, which glibc does not, and
+//! `syscall()` answered `ENOSYS` without a look; the names went as libaio's
+//! did (design-decisions.md §1114).
 
 use crate::errno;
 
@@ -497,7 +506,6 @@ fn check_setup(entries: u32, p: &IoUringParams) -> Result<(), i32> {
 /// a reserved word, an unknown flag, no entries or too many without
 /// `IORING_SETUP_CLAMP`, `REGISTERED_FD_ONLY` without `NO_MMAP`, a bad
 /// `CQSIZE`, a flag combination it refuses.  Everything else is `ENOSYS`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn io_uring_setup(entries: u32, params: *mut IoUringParams) -> i32 {
     // `copy_from_user(&p, params, sizeof(p))`, first.
     if params.is_null() || !crate::uio::access_ok(params.addr(), size_of::<IoUringParams>()) {
@@ -541,7 +549,6 @@ fn no_ring(fd: i32, registered: bool) -> i32 {
 /// for -- see [`no_ring`].  Its later checks (`EXT_ARG`'s argument, the
 /// signal set, the counts) are about a ring, so on SlateOS they are never
 /// reached, as they are not on Linux for a descriptor that is not one.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn io_uring_enter(
     fd: i32,
     _to_submit: u32,
@@ -563,7 +570,6 @@ pub extern "C" fn io_uring_enter(
 /// `IORING_REGISTER_USE_REGISTERED_RING` is taken off it) is `EINVAL`, then
 /// the ring is looked for -- see [`no_ring`].  The per-operation checks
 /// come after, and are never reached.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn io_uring_register(fd: i32, opcode: u32, _arg: *mut u8, _nr_args: u32) -> i32 {
     let registered = opcode & IORING_REGISTER_USE_REGISTERED_RING != 0;
     if opcode & !IORING_REGISTER_USE_REGISTERED_RING >= IORING_REGISTER_LAST {

@@ -135,8 +135,23 @@ pub const SYS_IO_CANCEL: u64 = 210;
 /// Linux `__NR_io_pgetevents`.
 pub const SYS_IO_PGETEVENTS: u64 = 333;
 
+/// Linux `__NR_perf_event_open`.
+pub const SYS_PERF_EVENT_OPEN: u64 = 298;
+
+/// Linux `__NR_bpf`.
+pub const SYS_BPF: u64 = 321;
+
 /// Linux `__NR_pidfd_send_signal`.
 pub const SYS_PIDFD_SEND_SIGNAL: u64 = 424;
+
+/// Linux `__NR_io_uring_setup`.
+pub const SYS_IO_URING_SETUP: u64 = 425;
+
+/// Linux `__NR_io_uring_enter`.
+pub const SYS_IO_URING_ENTER: u64 = 426;
+
+/// Linux `__NR_io_uring_register`.
+pub const SYS_IO_URING_REGISTER: u64 = 427;
 
 /// Linux `__NR_pidfd_open`.
 pub const SYS_PIDFD_OPEN: u64 = 434;
@@ -312,6 +327,9 @@ fn ret_u32(v: u32) -> SyscallArg {
 /// | 186 `gettid` | [`crate::process::gettid`] | CPython's `os.gettid` |
 /// | 202 `futex` | [`crate::linux_futex::futex`] | all six arguments |
 /// | 206-210, 333 `io_setup` … `io_pgetevents` | [`crate::linux_aio_abi`] | libaio's calls; glibc wraps none (§1114) |
+/// | 298 `perf_event_open` | [`crate::linux_perf_event`] | Linux 6.6's checks, then `ENOSYS`: no PMU |
+/// | 321 `bpf` | [`crate::linux_bpf`] | Linux 6.6's checks, then `ENOSYS`: no BPF |
+/// | 425-427 `io_uring_*` | [`crate::linux_io_uring`] | Linux 6.6's checks, then `ENOSYS`: no rings |
 /// | 318 `getrandom` | [`crate::unistd::getrandom`] | CPython's `bootstrap_hash` |
 /// | 424 `pidfd_send_signal` | [`crate::process::pidfd_send_signal`] | |
 /// | 434 `pidfd_open` | [`crate::process::pidfd_open`] | CPython's `_Py_pidfd_open` |
@@ -426,6 +444,39 @@ pub extern "C" fn syscall(
             )
         }),
         SYS_PIDFD_OPEN => ret_i32(crate::process::pidfd_open(trunc_i32(a1), trunc_u32(a2))),
+        // Linux's own calls that glibc does not wrap and SlateOS does not
+        // implement: they answer as the kernel's Linux table does -- Linux
+        // 6.6's checks, then ENOSYS -- and C reaches them only this way.
+        SYS_PERF_EVENT_OPEN => ret_i32(crate::linux_perf_event::perf_event_open(
+            ptr_arg(a1).cast::<crate::linux_perf_event::PerfEventAttr>(),
+            trunc_i32(a2),
+            trunc_i32(a3),
+            trunc_i32(a4),
+            word_u64(a5),
+        )),
+        SYS_BPF => ret_i32(crate::linux_bpf::bpf(
+            trunc_u32(a1),
+            ptr_arg(a2),
+            trunc_u32(a3),
+        )),
+        SYS_IO_URING_SETUP => ret_i32(crate::linux_io_uring::io_uring_setup(
+            trunc_u32(a1),
+            ptr_arg(a2).cast::<crate::linux_io_uring::IoUringParams>(),
+        )),
+        SYS_IO_URING_ENTER => ret_i32(crate::linux_io_uring::io_uring_enter(
+            trunc_i32(a1),
+            trunc_u32(a2),
+            trunc_u32(a3),
+            trunc_u32(a4),
+            ptr_arg(a5).cast_const(),
+            trunc_usize(a6),
+        )),
+        SYS_IO_URING_REGISTER => ret_i32(crate::linux_io_uring::io_uring_register(
+            trunc_i32(a1),
+            trunc_u32(a2),
+            ptr_arg(a3),
+            trunc_u32(a4),
+        )),
         SYS_PIDFD_SEND_SIGNAL => ret_i32(crate::process::pidfd_send_signal(
             trunc_i32(a1),
             trunc_i32(a2),
@@ -514,6 +565,11 @@ mod tests {
             SYS_IO_PGETEVENTS,
             SYS_PIDFD_SEND_SIGNAL,
             SYS_PIDFD_OPEN,
+            SYS_PERF_EVENT_OPEN,
+            SYS_BPF,
+            SYS_IO_URING_SETUP,
+            SYS_IO_URING_ENTER,
+            SYS_IO_URING_REGISTER,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -664,5 +720,59 @@ mod tests {
         // Whatever getrandom does on this build (host or target), the
         // indirection must produce the identical value.
         assert_eq!(n, direct);
+    }
+
+    /// perf_event_open, bpf and io_uring, pinned against syscall_64.tbl.
+    #[test]
+    fn test_perf_bpf_io_uring_numbers_are_linux_numbers() {
+        assert_eq!(
+            [
+                SYS_PERF_EVENT_OPEN,
+                SYS_BPF,
+                SYS_IO_URING_SETUP,
+                SYS_IO_URING_ENTER,
+                SYS_IO_URING_REGISTER,
+            ],
+            [298, 321, 425, 426, 427]
+        );
+    }
+
+    /// The five reach Linux 6.6's checks through `syscall()`, where they
+    /// used to be ENOSYS without a look: each NULL here is judged where
+    /// Linux judges it.
+    #[test]
+    fn test_perf_bpf_io_uring_are_checked_through_syscall() {
+        let answer = |n, args| {
+            errno::set_errno(0);
+            (call(n, args), errno::get_errno())
+        };
+        // perf: the flags first, then the attr.
+        assert_eq!(
+            answer(SYS_PERF_EVENT_OPEN, [0, 0, -1, -1, 1 << 20, 0]),
+            (-1, errno::EINVAL)
+        );
+        assert_eq!(
+            answer(SYS_PERF_EVENT_OPEN, [0, 0, -1, -1, 0, 0]),
+            (-1, errno::EFAULT)
+        );
+        // bpf: an attr is read only when there is something to read.
+        assert_eq!(answer(SYS_BPF, [0, 0, 8, 0, 0, 0]), (-1, errno::EFAULT));
+        assert_eq!(
+            answer(SYS_BPF, [1 << 20, 0, 0, 0, 0, 0]),
+            (-1, errno::EINVAL)
+        );
+        // io_uring: the parameter block first; no ring to enter or register.
+        assert_eq!(
+            answer(SYS_IO_URING_SETUP, [8, 0, 0, 0, 0, 0]),
+            (-1, errno::EFAULT)
+        );
+        assert_eq!(
+            answer(SYS_IO_URING_ENTER, [-1, 0, 0, 0, 0, 0]),
+            (-1, errno::EBADF)
+        );
+        assert_eq!(
+            answer(SYS_IO_URING_REGISTER, [-1, 0, 0, 0, 0, 0]),
+            (-1, errno::EBADF)
+        );
     }
 }

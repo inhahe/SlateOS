@@ -24435,6 +24435,18 @@ this took the module out. (`scripts/check-libc-abi.py`'s `NO_ORACLE` entry
 for `Dbm` now names a type that is gone; it is harmless, and `scripts/**` is
 unassigned -- A-Q11 -- so it is left for whoever next edits that table.)
 
+**Forty-fourth pass, 2026-09-26 — `linux_perf_event.rs` and `linux_bpf.rs`
+(1 site each), lane D.** Neither needed anything at its NULL -- `perf_event_open`
+judges its flags, then the attribute; `bpf` reads its attribute only when
+there is something to read -- but both were exported under names glibc does
+not have, as were `linux_io_uring.rs`'s three. perf, libbpf and liburing make
+these calls by number, and liburing (2.2 on) defines `io_uring_setup`,
+`io_uring_enter` and `io_uring_register` itself, so ours could only shadow a
+ported one at a static link; meanwhile `syscall()` answered all five `ENOSYS`
+without a look. Now `syscall()` runs the same Linux 6.6 checks -- the answers
+the kernel's own Linux table gives -- and the names are gone, as libaio's
+went (§1114).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24458,8 +24470,8 @@ finishes every file the sweep counted at four, three and two, the three the
 recount of 2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs`
 needed nothing at their NULLs -- `pwd.rs`'s database did
 (`B-D-PWD-KNEW-ONLY-ROOT`). Of the ten it counted at one, `pipe.rs`,
-`poll.rs`, `shadow.rs` and `ndbm.rs` are done (the fortieth to forty-third
-passes); next are `linux_bpf.rs`, `linux_perf_event.rs`, `malloc.rs`,
+`poll.rs`, `shadow.rs`, `ndbm.rs`, `linux_perf_event.rs` and `linux_bpf.rs`
+are done (the fortieth to forty-fourth passes); next are `malloc.rs`,
 `uio.rs` (new, and already right), `utmpx.rs` and `utsname.rs`. The thirty-ninth pass was across files,
 not at a count: the callbacks.
 

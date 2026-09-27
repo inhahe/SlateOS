@@ -18,6 +18,15 @@
 //! matching their behavior on a Linux kernel with
 //! `perf_event_paranoid = 3` or a kernel built without
 //! `CONFIG_PERF_EVENTS=y`.
+//!
+//! ## Reached through `syscall()`
+//!
+//! glibc wraps none of these calls: programs -- `perf`, libbpf's CPU profiler, JIT profilers -- make them with
+//! `syscall(SYS_perf_event_open, …)`, which answers with the checks below and then
+//! `ENOSYS`, as the kernel's own Linux table does.  Until 2026-09-26 the C
+//! library also exported `perf_event_open` under its own name, which glibc does not, and
+//! `syscall()` answered `ENOSYS` without a look; the names went as libaio's
+//! did (design-decisions.md §1114).
 
 use crate::errno;
 use crate::linux_perf_attr_types::PERF_ATTR_FLAG_EXCLUDE_KERNEL;
@@ -356,7 +365,6 @@ fn validate_attr(attr: &PerfEventAttr) -> Result<(), i32> {
 /// * `ENOSYS` — everything valid and privilege held, but the kernel
 ///   has no PMU driver yet. Real callers treat this identically to a
 ///   Linux kernel built without `CONFIG_PERF_EVENTS=y`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn perf_event_open(
     attr: *mut PerfEventAttr,
     pid: i32,

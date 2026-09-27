@@ -2597,11 +2597,6 @@ impl Vfs {
         // Quota: check whether this write would exceed the user's quota.
         // uid 0 is the default until per-process identity is wired up.
         enforce_quota_write(path, data.len() as u64)?;
-        // Auto-version: save the old content before overwriting.
-        // Called before taking the VFS lock to avoid deadlock (record_version
-        // reads the file through VFS internally).  TOCTOU between read and
-        // write is acceptable — version history is best-effort.
-        super::history::try_auto_record(path);
         let cache_inval = {
             let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
@@ -2623,6 +2618,12 @@ impl Vfs {
         super::index::on_file_changed(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         super::audit::log_ok(super::audit::AuditOp::Write, 0, path);
+        // Version history (design-decisions §936, §971): queue this save's
+        // result to be recorded after we return, instead of reading back and
+        // checksumming the old content before the write, which was about
+        // half the cost of saving a small file.  A no-op for a path not
+        // enrolled for history.
+        super::history::record_after_save(path);
         Ok(())
     }
 

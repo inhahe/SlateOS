@@ -1,8 +1,29 @@
 //! File version history tracking.
 //!
 //! Provides automatic versioning of file contents.  When enabled for a
-//! path, each modification saves the previous content to the CAS (content-
-//! addressed store) and records the version in a per-file history chain.
+//! path, each save's result is stored in the CAS (content-addressed store)
+//! and recorded as a version in a per-file history chain.
+//!
+//! ## When a version is taken (design-decisions §936, §971)
+//!
+//! A version is the file **as it stands after the save that made it**, and it
+//! is taken **after the save has returned**, by a background worker
+//! ([`record_after_save`]).  The save itself does no read-back and no
+//! checksum; that was about half the cost of saving a small file.  After three
+//! saves the history holds the file as it was after each of them, so going
+//! back to "before my last save" is the entry before the newest.
+//!
+//! Two consequences, both accepted by §936 and §971:
+//! - a crash between a save returning and the worker reaching it loses that
+//!   one entry;
+//! - saves to one file faster than the worker drains the queue collapse into
+//!   one entry holding the latest content -- the worker reads the file when
+//!   it gets to it, and reading it at save time would mean holding a copy,
+//!   which is option B of A-Q14, the one not chosen.
+//!
+//! A **delete** still records synchronously, before the file goes: afterwards
+//! there is nothing left to read.  And a version identical to the newest one
+//! is not recorded twice.
 //!
 //! ## Design
 //!
@@ -12,9 +33,10 @@
 //! - **Per-path history**: Each tracked path has a bounded list of version
 //!   entries: `(timestamp, hash, size)`.  Older versions beyond the limit
 //!   are evicted (and their CAS references released for GC).
-//! - **Opt-in**: Not all paths are tracked.  The caller decides which
-//!   paths/directories to watch.  The VFS can call `record_version()`
-//!   before overwriting a file.
+//! - **Opt-in**: Not all paths are tracked: only those under a directory
+//!   enrolled with [`enable_for_dir`].  The VFS queues a save's path once the
+//!   write has succeeded ([`record_after_save`]) and records before a delete
+//!   ([`try_auto_record`]).
 //! - **Bounded**: configurable max versions per file and max total entries
 //!   to prevent unbounded memory growth.
 //!
@@ -34,6 +56,7 @@
 use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::cas::Hash256;
@@ -71,9 +94,11 @@ pub struct HistoryConfig {
     pub enabled: bool,
     /// Whether VFS auto-versioning is active.
     ///
-    /// When true, the VFS automatically calls `record_version()` before
-    /// overwriting or removing files.  Independent of `enabled` — manual
-    /// recording via the kshell `fhist record` command works regardless.
+    /// When true, the VFS records each save's result after the save returns
+    /// ([`record_after_save`]) and a file's content before it is removed
+    /// ([`try_auto_record`]), for paths under an enrolled directory.
+    /// Independent of `enabled` — manual recording via the kshell
+    /// `fhist record` command works regardless.
     pub auto_version: bool,
 }
 
@@ -266,15 +291,29 @@ pub fn enable_for_dir(dir: impl AsRef<Path>) -> KernelResult<()> {
     if dir.as_bytes().is_empty() {
         return Err(KernelError::InvalidArgument);
     }
-    let mut inner = HISTORY.lock();
-    if inner
-        .opt_in_dirs
-        .iter()
-        .any(|d| d.as_path().as_bytes() == dir.as_bytes())
     {
-        return Ok(());
+        let mut inner = HISTORY.lock();
+        if inner
+            .opt_in_dirs
+            .iter()
+            .any(|d| d.as_path().as_bytes() == dir.as_bytes())
+        {
+            return Ok(());
+        }
+        inner.opt_in_dirs.push(dir.to_path_buf());
     }
-    inner.opt_in_dirs.push(dir.to_path_buf());
+    // The first enrolment is the first moment a save can need recording, so
+    // the worker starts here and a system with no history runs none.  If it
+    // cannot start, the enrolment still stands: saves record synchronously,
+    // as they did before the worker existed.
+    if let Err(e) = spawn_worker() {
+        serial_println!(
+            "[history] the history worker did not start ({:?}); saves under {} record \
+             synchronously",
+            e,
+            dir.display()
+        );
+    }
     Ok(())
 }
 
@@ -306,17 +345,15 @@ pub fn enrolled_dirs() -> Vec<PathBuf> {
     HISTORY.lock().opt_in_dirs.clone()
 }
 
-/// Try to auto-record a version of a file before it is modified or deleted.
-///
-/// Called by VFS write/remove paths.  Failures are silently ignored —
-/// version history is best-effort and must never prevent a write operation.
-pub fn try_auto_record(path: impl AsRef<Path>) {
-    let path = path.as_ref();
+/// Whether a write or delete at `path` should be versioned automatically:
+/// the path is eligible, auto-versioning is on, and the path lies under an
+/// enrolled directory.
+fn auto_eligible(path: &Path) -> bool {
     // Pure and lock-free, so it runs first: a path on procfs, devfs, sysfs or
     // /tmp is ineligible however it was enrolled, and an internal metadata
     // file never gets a history.
     if !should_auto_version(path) {
-        return;
+        return false;
     }
     // One acquisition answers both remaining questions, then the lock is
     // dropped before any work -- `record_version` takes it again itself.
@@ -327,19 +364,148 @@ pub fn try_auto_record(path: impl AsRef<Path>) {
     // that function pure and testable, and matters mechanically:
     // `crate::sync::Mutex` is not reentrant, so a registry lookup inside a
     // function this one calls while holding the lock would deadlock.
-    {
-        let inner = HISTORY.lock();
-        if !inner.config.enabled || !inner.config.auto_version {
-            return;
-        }
-        if !enrolled_locked(&inner, path) {
-            return;
-        }
+    let inner = HISTORY.lock();
+    inner.config.enabled && inner.config.auto_version && enrolled_locked(&inner, path)
+}
+
+/// Record a version of a file **now**, before it is deleted.
+///
+/// Called by the VFS remove paths: once the file is gone there is nothing to
+/// read, so this one cannot wait for the worker.  (A save goes through
+/// [`record_after_save`] instead.)  Failures are ignored -- version history is
+/// best-effort and must never prevent the operation.
+pub fn try_auto_record(path: impl AsRef<Path>) {
+    let path = path.as_ref();
+    if !auto_eligible(path) {
+        return;
     }
     // Non-fatal: ignore errors from recording.  The file operation
     // must succeed even if history recording fails (e.g., CAS full,
     // file too large, read error).
     let _ = record_version(path);
+}
+
+// ---------------------------------------------------------------------------
+// Recording after the save returns (design-decisions §936, §971)
+// ---------------------------------------------------------------------------
+
+/// Paths whose post-save content is waiting to be recorded, oldest first.
+/// A path appears at most once: a second save before the worker reaches the
+/// first is the same job, since the worker records what the file holds when
+/// it gets there.
+static PENDING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// The most paths [`PENDING`] holds.  Past it a save records synchronously,
+/// the old cost, rather than growing the queue without bound or dropping a
+/// version.
+const MAX_PENDING: usize = 1024;
+
+/// The history worker's task id, 0 until [`spawn_worker`] has started it.
+static WORKER_TID: AtomicU64 = AtomicU64::new(0);
+
+/// Set when a job is queued, cleared by the worker before it looks: a wake
+/// that lands while the worker is busy is not lost.
+static WORKER_WAKE: AtomicBool = AtomicBool::new(false);
+
+/// Test hook: while set, the worker leaves the queue alone, so the self-test
+/// can see a save return with its version still pending.
+static WORKER_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// How long the worker sleeps when idle, in ticks, before looking again even
+/// without a wake: a lost wake costs at most this long.
+const WORKER_IDLE_TICKS: u64 = 100;
+
+/// Queue a save's result to be recorded after the save has returned.
+///
+/// Called by the VFS once a whole-file write has succeeded.  Does nothing for
+/// a path that is not auto-versioned.  Records synchronously -- the old cost,
+/// never a lost version -- when the worker is not running (it starts with the
+/// first enrolment, [`enable_for_dir`]) or the queue is full.
+pub fn record_after_save(path: impl AsRef<Path>) {
+    let path = path.as_ref();
+    if !auto_eligible(path) {
+        return;
+    }
+    let tid = WORKER_TID.load(Ordering::Acquire);
+    let queued = tid != 0 && {
+        let mut pending = PENDING.lock();
+        if pending.iter().any(|p| p.as_path() == path) {
+            true
+        } else if pending.len() < MAX_PENDING {
+            pending.push(path.to_path_buf());
+            true
+        } else {
+            false
+        }
+    };
+    if queued {
+        WORKER_WAKE.store(true, Ordering::Release);
+        crate::sched::try_wake(tid);
+    } else {
+        // Non-fatal, as in `try_auto_record`.
+        let _ = record_version(path);
+    }
+}
+
+/// Start the history worker, once.  Called when the first directory is
+/// enrolled, so a system with no history enabled runs no worker at all.
+///
+/// # Errors
+///
+/// Whatever `sched::spawn` fails with.  Saves then record synchronously.
+fn spawn_worker() -> KernelResult<()> {
+    if WORKER_TID.load(Ordering::Acquire) != 0 {
+        return Ok(());
+    }
+    let pml4 = crate::mm::page_table::active_pml4_phys();
+    let priority = crate::sched::task::DEFAULT_PRIORITY.saturating_add(4);
+    let tid = crate::sched::spawn(b"fs-history", priority, history_worker, 0, pml4)?;
+    // A race between two first enrolments could spawn two workers; both would
+    // drain the same queue correctly, and only the first id is kept for wakes.
+    if WORKER_TID
+        .compare_exchange(0, tid, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        serial_println!(
+            "[history] a second history worker ({}) started; it is harmless",
+            tid
+        );
+    }
+    Ok(())
+}
+
+/// The history worker: record each queued path's current content, and sleep
+/// when there is none.
+extern "C" fn history_worker(_arg: u64) {
+    loop {
+        WORKER_WAKE.store(false, Ordering::Release);
+        if !WORKER_PAUSED.load(Ordering::Acquire) {
+            let next = {
+                let mut pending = PENDING.lock();
+                if pending.is_empty() {
+                    None
+                } else {
+                    Some(pending.remove(0))
+                }
+            };
+            if let Some(path) = next {
+                // A failure is one lost version, not a failed save: the save
+                // returned long ago.  A path deleted since its save reads as
+                // NotFound, and the delete recorded the content itself.
+                let _ = record_version(&path);
+                continue;
+            }
+        }
+        if !WORKER_WAKE.load(Ordering::Acquire) {
+            let now = crate::apic::tick_count();
+            crate::sched::sleep_until_tick_interruptible(now.saturating_add(WORKER_IDLE_TICKS));
+        }
+    }
+}
+
+/// Whether `path` is waiting for the worker.
+fn is_pending(path: &Path) -> bool {
+    PENDING.lock().iter().any(|p| p.as_path() == path)
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +567,23 @@ pub fn record_version(path: impl AsRef<Path>) -> KernelResult<Option<Hash256>> {
     // Add to history.
     let mut inner = HISTORY.lock();
     inner.record_count = inner.record_count.saturating_add(1);
+
+    // A version identical to the newest is not a new version: a delete right
+    // after a save, or a save that rewrote the same bytes, would otherwise
+    // record the same content twice.  `cas::put` took a reference for this
+    // entry, so it is released again.
+    if inner
+        .files
+        .get(path)
+        .and_then(|fh| fh.versions.last())
+        .is_some_and(|newest| newest.hash == hash)
+    {
+        drop(inner);
+        // Releasing the reference just taken cannot fail for a blob `put`
+        // returned; a failure would only leave one reference too many.
+        crate::fs::cas::release(&hash).ok();
+        return Ok(Some(hash));
+    }
 
     // Insert the version entry.
     // Scope the mutable borrow of inner.files so we can update counters after.
@@ -641,6 +824,100 @@ pub fn list_tracked(prefix: Option<&Path>, max: usize) -> Vec<(PathBuf, usize)> 
 // ---------------------------------------------------------------------------
 
 /// Self-test for the file version history module.
+/// Test 7's body: a save to the enrolled `test_path` returns with its version
+/// still pending, the worker then records it, and two saves leave the history
+/// ending `[.., v1, v2]`.  The caller cleans up and un-pauses the worker however
+/// this returns.
+fn history_after_save_test(test_path: &str, v1: &[u8], v2: &[u8]) -> KernelResult<()> {
+    use crate::fs::Vfs;
+
+    let path = Path::new(test_path);
+    let tid = WORKER_TID.load(Ordering::Acquire);
+    if tid == 0 {
+        serial_println!(
+            "[history]   FAIL: enrolling {} did not start the history worker",
+            test_path
+        );
+        return Err(KernelError::InternalError);
+    }
+    let newest_is = |want: &[u8]| {
+        get_history(test_path)
+            .last()
+            .and_then(|e| get_version_data(&e.hash).ok())
+            .is_some_and(|d| d.as_slice() == want)
+    };
+    // Up to 2000 yields for the worker to drain: it runs at a lower priority
+    // than this test, and only when this test yields.
+    let wait_drained = || {
+        for _ in 0..2000 {
+            if !is_pending(path) {
+                return true;
+            }
+            crate::sched::try_wake(tid);
+            crate::sched::yield_now();
+        }
+        !is_pending(path)
+    };
+
+    // 1. With the worker paused, a save returns with its version pending: the
+    //    save path recorded nothing itself.
+    WORKER_PAUSED.store(true, Ordering::Release);
+    let before = get_history(test_path).len();
+    if let Err(e) = Vfs::write_file(test_path, v1) {
+        serial_println!(
+            "[history]   FAIL: / is mounted read-write but writing {} failed: {:?}",
+            test_path,
+            e
+        );
+        return Err(KernelError::InternalError);
+    }
+    let grew = get_history(test_path).len() != before;
+    let pending = is_pending(path);
+    WORKER_PAUSED.store(false, Ordering::Release);
+    WORKER_WAKE.store(true, Ordering::Release);
+    if grew || !pending {
+        serial_println!(
+            "[history]   FAIL: the save recorded its own version (history grew: {}, queued: {})",
+            grew,
+            pending
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 2. The worker records it, as the save left the file.
+    if !wait_drained() || !newest_is(v1) {
+        serial_println!("[history]   FAIL: the worker did not record v1 after the save");
+        return Err(KernelError::InternalError);
+    }
+
+    // 3. A second save: v2 is the newest entry, and v1 the one before it.
+    Vfs::write_file(test_path, v2)?;
+    if !wait_drained() || !newest_is(v2) {
+        serial_println!("[history]   FAIL: the worker did not record v2 after the save");
+        return Err(KernelError::InternalError);
+    }
+    let history = get_history(test_path);
+    let previous_is_v1 = history
+        .len()
+        .checked_sub(2)
+        .and_then(|i| history.get(i))
+        .and_then(|e| get_version_data(&e.hash).ok())
+        .is_some_and(|d| d.as_slice() == v1);
+    if !previous_is_v1 {
+        serial_println!(
+            "[history]   FAIL: after two saves the entry before the newest is not v1 ({} entries)",
+            history.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[history]   auto-version after the save OK (each save returned first; the worker \
+         recorded v1, then v2, as each save left the file)"
+    );
+    Ok(())
+}
+
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[history] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();
@@ -856,8 +1133,15 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[history]   disabled tracking OK");
     }
 
-    // --- Test 7: VFS auto-versioning ---
-    // Writes to a non-/tmp path should automatically record versions.
+    // --- Test 7: VFS auto-versioning, after the save (design-decisions §971) ---
+    // A save to an enrolled path returns before its version is recorded, and the
+    // version recorded is the file as that save left it: after writing v1 then v2
+    // the history ends [.., v1, v2].  Until 2026-09-27 this asserted that the
+    // newest entry after writing v2 held v1 -- the content v2's save replaced,
+    // read back on the save path.  A-Q14 was answered A: the post-save content,
+    // taken after the save returns, which is what makes §936's "never on the save
+    // path" possible.  The assertion changed on purpose; the property tested (a
+    // write to an enrolled path is versioned) did not.
     {
         use crate::fs::Vfs;
 
@@ -865,18 +1149,11 @@ pub fn self_test() -> KernelResult<()> {
         let old_auto = HISTORY.lock().config.auto_version;
         set_auto_version(true);
         let test_path = "/_history_autoversion_test";
-        let v1 = b"Auto-versioned content v1";
-        let v2 = b"Auto-versioned content v2";
 
         // Clear any prior history for this path.
         clear_file(test_path);
 
-        // A-Q10 made the history opt-in, so this test must now enrol the
-        // path it uses -- the same shape as the `set_auto_version(true)`
-        // above, and restored the same way on every exit path. The
-        // assertions below are UNCHANGED: a write to an eligible, enrolled
-        // path still records a version. Only the preconditions grew, which
-        // is different in kind from a test whose assertion inverts.
+        // Enrolment is what starts the worker, so it comes first.
         if enable_for_dir(test_path).is_err() {
             serial_println!("[history]   FAIL: enrolling {} was rejected", test_path);
             set_auto_version(old_auto);
@@ -884,75 +1161,26 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // Whether `/` is mounted read-write is a fact the mount table holds;
-        // a failed write is not that fact. The old form skipped this section
-        // on any error at all, which included the auto-version bug it tests.
+        // a failed write is not that fact.
         let root_rw = Vfs::mounts_full()
             .iter()
             .any(|(p, _, opts)| p.as_path() == crate::fs::path::Path::new("/") && !opts.read_only);
-        if !root_rw {
-            skips.record("auto-version on write", "/ is not mounted read-write");
-            serial_println!("[history]   SKIP auto-version test: / not mounted read-write");
-            set_auto_version(old_auto);
-            disable_for_dir(test_path);
-        } else {
-            // Write v1 — first write, no prior file to version.
-            if let Err(e) = Vfs::write_file(test_path, v1) {
-                serial_println!(
-                    "[history]   FAIL: / is mounted read-write but writing {} failed: {:?}",
-                    test_path,
-                    e
-                );
-                set_auto_version(old_auto);
-                disable_for_dir(test_path);
-                return Err(KernelError::InternalError);
-            }
-            // History should be empty (no prior content to save).
-            let h1 = get_history(test_path);
-            // Write v2 — this should auto-record v1 before overwriting.
-            Vfs::write_file(test_path, v2)?;
-
-            let h2 = get_history(test_path);
-            let auto_recorded = h2.len().saturating_sub(h1.len());
-
-            if auto_recorded < 1 {
-                serial_println!("[history]   ERROR: auto-version did not record previous content");
-                clear_file(test_path);
-                Vfs::remove(test_path).ok();
-                set_auto_version(old_auto);
-                disable_for_dir(test_path);
-                return Err(KernelError::InternalError);
-            }
-
-            // Verify the auto-recorded version contains v1 data.
-            if let Some(entry) = h2.last() {
-                match get_version_data(&entry.hash) {
-                    Ok(data) if data.as_slice() == v1 => {
-                        serial_println!("[history]   auto-version on write OK");
-                    }
-                    Ok(_) => {
-                        serial_println!("[history]   ERROR: auto-recorded data doesn't match v1");
-                        clear_file(test_path);
-                        Vfs::remove(test_path).ok();
-                        set_auto_version(old_auto);
-                        disable_for_dir(test_path);
-                        return Err(KernelError::InternalError);
-                    }
-                    Err(e) => {
-                        serial_println!(
-                            "[history]   ERROR: cannot read auto-recorded data: {:?}",
-                            e
-                        );
-                        clear_file(test_path);
-                        Vfs::remove(test_path).ok();
-                        set_auto_version(old_auto);
-                        disable_for_dir(test_path);
-                        return Err(KernelError::InternalError);
-                    }
-                }
-            }
-
+        if root_rw {
+            let outcome = history_after_save_test(
+                test_path,
+                b"Auto-versioned content v1",
+                b"Auto-versioned content v2",
+            );
+            // Cleanup on every path, including a failed one.
+            WORKER_PAUSED.store(false, Ordering::Release);
             clear_file(test_path);
             Vfs::remove(test_path).ok();
+            set_auto_version(old_auto);
+            disable_for_dir(test_path);
+            outcome?;
+        } else {
+            skips.record("auto-version on write", "/ is not mounted read-write");
+            serial_println!("[history]   SKIP auto-version test: / not mounted read-write");
             set_auto_version(old_auto);
             disable_for_dir(test_path);
         }

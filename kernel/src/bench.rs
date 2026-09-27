@@ -6667,11 +6667,15 @@ fn bench_vfs_write_breakdown() {
     // the cost. Every one of these is per-write and independent of the byte count,
     // which is why a 256-byte and a 16 KiB write cost nearly the same.
     // The same quantity the A/B measures, obtained directly instead of by difference.
-    // `try_auto_record` is the call `write_file_resolved` makes, and it is `pub`, so
+    // `record_after_save` is the call `write_file_resolved` makes, and it is `pub`, so
     // there is no reason to infer it. Two routes to one number: if they disagree, the
-    // A/B has a confounder and that disagreement is the finding.
+    // A/B has a confounder and that disagreement is the finding.  (Until 2026-09-27 the
+    // call was `try_auto_record`, which read back and checksummed the old content on the
+    // save path; design-decisions §971 moved that work to a worker, so this series is
+    // expected to drop for an enrolled path.  The series keeps its name so its history
+    // shows the drop.)
     let history_only = run("vfs_write_breakdown_history", 200, || {
-        crate::fs::history::try_auto_record(&resolved);
+        crate::fs::history::record_after_save(&resolved);
     });
     let quota_only = run("vfs_write_breakdown_quota", 200, || {
         // No black_box: these return unit, and clippy denies passing one to a

@@ -176,8 +176,8 @@ report() {
 # under the harness (other processes write to them), so a size can move
 # between the two runs; a real difference differs twice.
 both() {
-  local o_rc g_rc try
-  for try in 1 2; do
+  local o_rc g_rc
+  for _ in 1 2; do
     run_side ours "$@" >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
     run_side gnu "$@" >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
     judge "$o_rc" "$g_rc"

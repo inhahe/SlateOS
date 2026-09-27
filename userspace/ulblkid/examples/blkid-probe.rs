@@ -6,7 +6,7 @@
 
 use std::io::Write;
 
-use ulblkid::partitions::{Parttable, Partlist};
+use ulblkid::partitions::{Partlist, Parttable};
 use ulblkid::{
     PARTS_ENTRY_DETAILS, PARTS_FORCE_GPT, PARTS_MAGIC, Probe, SUBLKS_BADCSUM, SUBLKS_FSINFO,
     SUBLKS_LABEL, SUBLKS_LABELRAW, SUBLKS_MAGIC, SUBLKS_SECTYPE, SUBLKS_TYPE, SUBLKS_USAGE,
@@ -175,7 +175,11 @@ fn main() {
         dump_parts(&mut out, &path, PARTS_FORCE_GPT);
     }
     let mut stdout = std::io::stdout().lock();
-    if stdout.write_all(&out).and_then(|()| stdout.flush()).is_err() {
+    if stdout
+        .write_all(&out)
+        .and_then(|()| stdout.flush())
+        .is_err()
+    {
         std::process::exit(1);
     }
 }

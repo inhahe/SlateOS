@@ -1866,6 +1866,9 @@ BENCH_TIMEOUT=1200
 NO_BUILD=0
 NO_STAGE=0
 BENCH=0
+# The gate cache (design-decisions 979): 1 unless --no-gate-cache.  Release and
+# bench boots switch it off where the gate phase starts, whatever this says.
+GATE_CACHE_REQ=1
 # Serial-stall wedge detector (opt-in; 0 = disabled).  A genuinely wedged kernel
 # stops emitting serial output, whereas a merely-slow boot keeps printing as it
 # grinds through the self-test suite.  When --stall-secs=N (N>0) is set, the wait
@@ -2000,6 +2003,10 @@ NO_ROOTFS=0
 for arg in "$@"; do
     case "$arg" in
         --no-build) NO_BUILD=1 ;;
+        # --no-gate-cache runs every gate, replaying none from the gate cache
+        # (design-decisions 979).  Release and bench boots do the same without
+        # being asked: they are the full, uncached check.
+        --no-gate-cache) GATE_CACHE_REQ=0 ;;
         # --no-stage implies --no-build: boot exactly the image already in the
         # ESP, touching neither the compiler nor build/esp.  This is what makes a
         # long soak reproducible.  `--no-build` alone is NOT enough: staging runs
@@ -3830,6 +3837,47 @@ CHECKER_TIMING_LOG="$CHECKER_LOGDIR/boot-test-gate-timing.$$.tsv"
 export CHECKER_TIMING_LOG
 : >"$CHECKER_TIMING_LOG" 2>/dev/null || CHECKER_TIMING_LOG=""
 
+# The gate cache (design-decisions 979, C-Q11 idea 2; scripts/gate-cache.py).
+# A Python gate whose every recorded input -- the files and listings it read,
+# the paths it asked about, the variables it read, the git answers it got --
+# is unchanged since it last passed replays that pass instead of running, and
+# says HIT on its last line.  Measured before it existed: 55% of gate time went
+# to gates that never refused, over inputs most changes do not touch
+# (design-decisions 974).
+#
+# Off for release and bench boots, which are the full, uncached check, and
+# with --no-gate-cache.  A random tenth of would-be hits run fresh anyway and
+# are compared (GATE_CACHE_VERIFY_RATE); one that disagrees writes DISABLED to
+# the store, which turns the cache off for every lane until someone reads it.
+GATE_CACHE=0
+_gc_why=""
+if [ "$GATE_CACHE_REQ" = "0" ]; then
+    _gc_why="--no-gate-cache"
+elif [ "$BENCH" -eq 1 ] || [ "$BENCH_PROFILE" = "release" ]; then
+    _gc_why="a release or bench boot runs every gate"
+elif [ ! -f "$PROJECT_ROOT/scripts/gate-cache.py" ]; then
+    _gc_why="scripts/gate-cache.py is missing"
+else
+    GATE_CACHE=1
+fi
+GATE_CACHE_DRIVER="$PROJECT_ROOT/scripts/gate-cache.py"
+GATE_CACHE_LOG="$CHECKER_LOGDIR/boot-test-gate-cache.$$.tsv"
+export GATE_CACHE GATE_CACHE_DRIVER GATE_CACHE_LOG
+if [ "$GATE_CACHE" = "1" ]; then
+    : >"$GATE_CACHE_LOG" 2>/dev/null || GATE_CACHE_LOG=""
+    _gc_common=$(git -C "$PROJECT_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    if [ -n "$_gc_common" ] && [ -f "$_gc_common/gate-cache/DISABLED" ]; then
+        echo "=== Gate cache: DISABLED -- a verification caught it replaying a wrong verdict ==="
+        sed 's/^/    /' "$_gc_common/gate-cache/DISABLED"
+        echo "    Every gate runs until someone finds the cause and deletes"
+        echo "    $_gc_common/gate-cache/DISABLED."
+    else
+        echo "=== Gate cache: on (a fresh run for ${GATE_CACHE_VERIFY_RATE:-0.1} of would-be hits; --no-gate-cache runs every gate) ==="
+    fi
+else
+    echo "=== Gate cache: off ($_gc_why) ==="
+fi
+
 # A landed request is stamped, not deleted (roadmap.md rule 2, §315).
 #
 # This runs FIRST, ahead of every other gate, because it is the only one here
@@ -3887,6 +3935,53 @@ check_requests_not_deleted() {
 }
 
 check_requests_not_deleted
+
+# Every tracked file has exactly one owner (design-decisions §973, the
+# operator's answer to A-Q11).  Until 2026-09-27 which-lane.py gave about a
+# thousand files to nobody -- scripts/, requests/, the root crates, the files at
+# the top of the tree -- and two lanes once edited one of them, the push hook,
+# on the same night, each believing it was theirs.  The table now answers every
+# path with a lane, the operator, or a shared-document rule; this refuses a
+# file it cannot answer, a table line naming nothing tracked, and a script
+# owned twice, so a new file gets its owner in the commit that creates it.
+#
+# The self-test runs first and a failure disqualifies the verdict: every lane's
+# write scope rests on these answers, so a table that misreads a path is worse
+# than no gate.
+check_every_file_owned() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== file-ownership check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the ownership table against its own cases ==="
+    if ! run_checker which-lane-selftest "$py" "$PROJECT_ROOT/scripts/which-lane.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  which-lane.py failed its own self-test, so" >&2
+        echo "its answer to \"whose file is this?\" -- which every lane's write scope" >&2
+        echo "rests on -- is not trustworthy until it passes." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that every tracked file has an owner ==="
+    if run_checker which-lane-check-all "$py" "$PROJECT_ROOT/scripts/which-lane.py" --check-all; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Every tracked file has exactly one owner" >&2
+    echo "(design-decisions §973); the lines above name what has none, what the" >&2
+    echo "table lists that no longer exists, or what it lists twice.  How to give" >&2
+    echo "a new file its owner is printed with them." >&2
+    exit 1
+}
+
+check_every_file_owned
 
 # A file declared `text eol=lf` that holds CRLF on disk, which no git command
 # you would think to run will tell you about.
@@ -4900,6 +4995,14 @@ check_user_access_sites() {
         return 0
     fi
 
+    if ! run_checker check-user-access-sites-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-user-access-sites.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-user-access-sites.py fails its" >&2
+        echo "own cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
     echo "=== Checking kernel writes to user memory ==="
     if run_checker check-user-access-sites "$py" "$PROJECT_ROOT/scripts/check-user-access-sites.py"; then
         return 0
@@ -5333,6 +5436,14 @@ check_usage_status() {
         return 0
     fi
 
+    if ! run_checker check-usage-status-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-usage-status.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-usage-status.py fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
     echo "=== Checking that usage messages report failure ==="
     if run_checker check-usage-status "$py" "$PROJECT_ROOT/scripts/check-usage-status.py"; then
         return 0
@@ -5375,6 +5486,14 @@ check_query_status() {
     else
         echo "=== query-status check: skipped (no python) ===" >&2
         return 0
+    fi
+
+    if ! run_checker check-query-status-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-query-status.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-query-status.py fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        return 1
     fi
 
     echo "=== Checking that answering a query reports success ==="
@@ -7438,10 +7557,25 @@ check_python_suites() {
         # evidence available afterwards was how far the alphabet got. One
         # number per suite turns that into an attribution.
         suite_start=$(date +%s)
-        out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        # Through the gate cache when it is on (design-decisions 979): a suite
+        # whose inputs are all unchanged replays its last passing run.  The
+        # cache's own note is kept out of the one-line summary below -- that
+        # line is the suite's own last line, which is what says what it proved
+        # -- and is shown as a tag instead, so a replayed suite never reads as
+        # one that ran.
+        if [ "${GATE_CACHE:-0}" = "1" ]; then
+            out="$(PYTHONIOENCODING=:replace "$py" "$GATE_CACHE_DRIVER" --label "$(basename "$f")" -- "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        else
+            out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        fi
         suite_secs=$(( $(date +%s) - suite_start ))
+        # `|| true` on both: under `set -euo pipefail` a grep that matches
+        # nothing -- every suite, when the cache is off -- would end the boot.
+        suite_cache=$(printf '%s\n' "$out" | grep '^gate-cache: ' | tail -1 | awk '{print $2}' || true)
+        out=$(printf '%s\n' "$out" | grep -v '^gate-cache: ' || true)
+        [ -n "$suite_cache" ] && suite_cache="  [gate cache: $suite_cache]"
         if [ "$rc" -eq 0 ]; then
-            printf '    %-32s %5ss  %s\n' "$(basename "$f")" "$suite_secs" "$(printf '%s\n' "$out" | tail -1)"
+            printf '    %-32s %5ss  %s%s\n' "$(basename "$f")" "$suite_secs" "$(printf '%s\n' "$out" | tail -1)" "$suite_cache"
             # A passing suite is reported by its LAST LINE ONLY, so a suite that
             # drops a group and still ends with "all N passed" reports a skip
             # that nothing above this line can see.  That is not hypothetical:
@@ -8367,6 +8501,20 @@ echo "=== Gates OK (${GATES_SECONDS}s) ==="
 # `run_checker`), so a small top-N over a large remainder means the expensive
 # work is somewhere this instrument cannot see, and that is worth knowing
 # immediately rather than concluding after optimising the wrong thing.
+if [ "${GATE_CACHE:-0}" = "1" ] && [ -n "${GATE_CACHE_LOG:-}" ] && [ -s "$GATE_CACHE_LOG" ]; then
+    # One line per outcome, with the seconds it took, so a boot says both how
+    # much the cache saved and how much of the phase it could not touch.
+    echo "=== Gate cache: $(awk -F'\t' '
+        { n[$2]++; s[$2] += $3 }
+        END {
+            out = ""
+            for (k in n) out = out sprintf("%s%d %s (%.0fs)", (out == "" ? "" : ", "), n[k], tolower(k), s[k])
+            print out
+        }' "$GATE_CACHE_LOG") ==="
+    if grep -q "VERIFY-FAILED" "$GATE_CACHE_LOG"; then
+        echo "=== Gate cache: a verification FAILED this run -- see VERIFY FAILED above; the cache is now off ==="
+    fi
+fi
 if [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -s "$CHECKER_TIMING_LOG" ]; then
     _gt_n=$(wc -l <"$CHECKER_TIMING_LOG" | tr -d ' ')
     _gt_sum=$(awk -F'\t' '{s += $2} END {print s + 0}' "$CHECKER_TIMING_LOG")

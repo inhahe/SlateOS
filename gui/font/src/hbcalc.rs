@@ -26,6 +26,32 @@ pub(crate) fn roundf(x: f32) -> f32 {
     (x + 0.5).floor()
 }
 
+/// `hb_font_t::scale_glyph_extents` at one unit per font unit, where it is
+/// nearly the identity: each edge of the box -- left, top, and right and
+/// bottom as the sums `x_bearing + width` and `y_bearing + height` -- goes
+/// through `em_fscale_x` or `_y`, which take an `int16_t`, then the left and
+/// top edges are floored, the right and bottom ceiled, and the width and
+/// height taken between them again. So a box whose edges fit in 16 bits
+/// comes back as it went in, and an edge past ±32,767 wraps as C's
+/// conversion wraps it on every target HarfBuzz is built for. HarfBuzz
+/// applies it to a `COLR` clip box and to an `sbix` picture's box, but not
+/// to a box measured from a paint or a `CBDT` glyph's, scaled after it.
+pub(crate) fn scale_glyph_extents_at_upem([x, y, width, height]: [i32; 4]) -> [i32; 4] {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "`int` to `int16_t`, which wraps, as HarfBuzz's call does"
+    )]
+    let edge = |v: i32| i32::from(v as i16);
+    let (left, top) = (edge(x), edge(y));
+    let (right, bottom) = (edge(x.wrapping_add(width)), edge(y.wrapping_add(height)));
+    [
+        left,
+        top,
+        right.wrapping_sub(left),
+        bottom.wrapping_sub(top),
+    ]
+}
+
 /// [`roundf`], converted to an integer as C converts a `float` to an `int`.
 ///
 /// The conversion truncates, which after `roundf` is exact. For the `NaN`
@@ -45,6 +71,25 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+
+    #[test]
+    fn a_box_that_fits_in_16_bits_scales_to_itself_and_one_that_does_not_wraps() {
+        assert_eq!(
+            scale_glyph_extents_at_upem([-120, 700, 640, -900]),
+            [-120, 700, 640, -900]
+        );
+        // The right edge, 375,000, is -18,216 as an `int16_t`: HarfBuzz's
+        // box for such an `sbix` picture (`bitmap_fixture`'s `sbix_wide`).
+        assert_eq!(
+            scale_glyph_extents_at_upem([0, 19, 375_000, -19]),
+            [0, 19, -18_216, -19]
+        );
+        // The left edge wraps too, and the width is taken from both.
+        assert_eq!(
+            scale_glyph_extents_at_upem([40_000, 0, 100, 0]),
+            [-25_536, 0, 100, 0]
+        );
+    }
 
     #[test]
     fn a_half_rounds_up_on_both_sides_of_zero() {

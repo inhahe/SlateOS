@@ -26,6 +26,7 @@ pub enum PlaneType {
 }
 
 /// A DRM plane — one compositing layer.
+#[derive(Clone)]
 pub struct DrmPlane {
     /// Unique object ID.
     pub id: DrmObjectId,
@@ -40,7 +41,12 @@ pub struct DrmPlane {
     pub fb: Option<DrmObjectId>,
     /// Currently assigned CRTC (None = unbound).
     pub crtc: Option<DrmObjectId>,
-    /// Source rectangle (in framebuffer coordinates, 16.16 fixed point).
+    /// Source rectangle, in framebuffer coordinates, in whole pixels.
+    ///
+    /// Whole pixels, not Linux's 16.16: the native atomic syscall packs
+    /// 16-bit integers and legacy `SETCRTC` takes an integer origin, so no
+    /// caller of this ABI can express a fraction. `compose::plane_rects` shifts
+    /// them into the 16.16 `planecompose` works in.
     pub src_x: u32,
     pub src_y: u32,
     pub src_w: u32,

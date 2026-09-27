@@ -2229,29 +2229,19 @@ impl ScaledFont {
     /// line rather than being cut mid-word: breaking inside a word is a
     /// per-script decision (it is wrong for Latin, required for CJK) that
     /// belongs to a real line breaker, not here.
+    ///
+    /// Each paragraph is shaped once, which proposes where every line ends,
+    /// and each line is confirmed by shaping it alone -- the lines are those
+    /// that measuring every candidate line would give, for about three
+    /// shapings of the text rather than one per word for every character.
     #[must_use]
     pub fn wrap(&self, text: &str, max_width: f32) -> Vec<String> {
-        let mut lines = Vec::new();
-        for para in text.split('\n') {
-            let mut line = String::new();
-            for word in para.split(' ') {
-                if line.is_empty() {
-                    line.push_str(word);
-                    continue;
-                }
-                let mut candidate = line.clone();
-                candidate.push(' ');
-                candidate.push_str(word);
-                if self.measure(&candidate) <= max_width {
-                    line = candidate;
-                } else {
-                    lines.push(core::mem::take(&mut line));
-                    line.push_str(word);
-                }
-            }
-            lines.push(line);
-        }
-        lines
+        crate::shape::wrap(text, max_width, &|s| self.shape(s))
+    }
+
+    /// [`wrap`](Self::wrap), saying which lines are known to fit.
+    pub(crate) fn wrap_lines(&self, text: &str, max_width: f32) -> Vec<crate::shape::WrappedLine> {
+        crate::shape::wrap_lines(text, max_width, &|s| self.shape(s))
     }
 
     /// [`wrap`](Self::wrap), except that a word wider than `max_width` is
@@ -2283,8 +2273,11 @@ impl ScaledFont {
     #[must_use]
     pub fn wrap_hard(&self, text: &str, max_width: f32) -> Vec<String> {
         let mut lines = Vec::new();
-        for line in self.wrap(text, max_width) {
-            if self.measure(&line) <= max_width {
+        for wrapped in self.wrap_lines(text, max_width) {
+            // A line of several words was measured to fit as it was made;
+            // only one of a single word may be too wide.
+            let line = wrapped.text;
+            if wrapped.fits || self.measure(&line) <= max_width {
                 lines.push(line);
                 continue;
             }
@@ -3701,6 +3694,28 @@ mod tests {
         // And it still works afterwards.
         let _ = f.glyph(gid).unwrap();
         assert_eq!(f.cached_glyphs(), 1);
+    }
+
+    /// One shaping of each paragraph breaks where shaping every candidate
+    /// line does, at every width, on the outline face.
+    #[test]
+    fn wrapping_by_one_shaping_breaks_where_shaping_each_line_does() {
+        let f = font(40.0);
+        for text in [
+            "A AA  AAA A AAAA A A AA AAAAAAAAAA A",
+            " AA A\n\nA A A AAA A ",
+            "AAAAAAAAAAAAAAAAAAAAAAAA A A",
+        ] {
+            let whole = f.measure(text).max(1.0);
+            for step in 0..=40u8 {
+                let width = whole * f32::from(step) / 32.0;
+                assert_eq!(
+                    f.wrap(text, width),
+                    crate::shape::wrap_by_words(text, width, &|s| f.measure(s)),
+                    "{text:?} at {width}"
+                );
+            }
+        }
     }
 
     #[test]

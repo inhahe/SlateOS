@@ -2189,11 +2189,20 @@ impl TcpConn {
         }
     }
 
-    /// Gracefully close: send our FIN|ACK and briefly drain the peer's final ACK
-    /// (and a late FIN, which we ACK for a clean teardown). If the write side was
-    /// already shut down (`shutdown(SHUT_WR)`), the FIN is already on the wire, so
-    /// we skip re-emitting it and only drain the teardown.
-    fn close(&mut self, me: &IfInfo) {
+    /// Start closing: send our FIN, unless a `shutdown(SHUT_WR)` already has,
+    /// and return. The peer's answer -- its ACK, its own FIN -- is handled
+    /// while the connection lingers in [`Closing`], through the pump, with the
+    /// daemon serving everyone else meanwhile.
+    ///
+    /// Until 2026-09-27 the close waited here: it read up to 40 frames off the
+    /// wire, sleeping between, to acknowledge the peer's FIN. Two faults. The
+    /// daemon serves one request at a time, so every close held up every
+    /// socket for at least 200 ms, and far longer under emulation. And the
+    /// reads were the per-connection kind, which drop any frame that is not
+    /// this connection's -- a close ate its siblings' traffic. rq15's
+    /// late-data witness waited 12 s for bytes that way (known-issues
+    /// `A-NETSTACK-CLOSE-BLOCKED-THE-DAEMON-AND-ATE-OTHERS-FRAMES`).
+    fn begin_close(&mut self, me: &IfInfo) {
         if !self.write_shut {
             self.ipid = self.ipid.wrapping_add(1);
             self.emit(
@@ -2203,29 +2212,25 @@ impl TcpConn {
                 tcp::FLAG_FIN | tcp::FLAG_ACK,
                 &[],
             );
+            self.write_shut = true;
         }
-        let fin_seq = self.snd_nxt.wrapping_add(1); // Our FIN consumed one seq.
+    }
 
-        let mut frame = [0u8; MAX_FRAME];
-        let mut pl = [0u8; MAX_FRAME];
-        for _ in 0..40 {
-            let mut any = false;
-            while let Some(rx) = self.recv_one_seg(me, &mut frame, &mut pl) {
-                any = true;
-                // A late FIN from the peer still needs an ACK for a clean teardown.
-                if rx.flags & tcp::FLAG_FIN != 0 && rx.seq == self.rcv_nxt {
-                    self.rcv_nxt = self
-                        .rcv_nxt
-                        .wrapping_add(rx.payload_len as u32)
-                        .wrapping_add(1);
-                    self.ipid = self.ipid.wrapping_add(1);
-                    self.emit(me, fin_seq, self.rcv_nxt, tcp::FLAG_ACK, &[]);
-                }
-            }
-            if !any {
-                sleep_ns(POLL_SLEEP_NS);
-            }
+    /// A segment for this connection after its owner closed it (it lingers in
+    /// [`Closing`]): acknowledge the peer's FIN, as the old blocking close did
+    /// while it waited. `true` once that is done and nothing is left to answer.
+    fn closing_seg(&mut self, me: &IfInfo, rx: &TcpRx) -> bool {
+        if rx.flags & tcp::FLAG_FIN != 0 && rx.seq == self.rcv_nxt {
+            self.rcv_nxt = self
+                .rcv_nxt
+                .wrapping_add(rx.payload_len as u32)
+                .wrapping_add(1);
+            self.ipid = self.ipid.wrapping_add(1);
+            let fin_seq = self.snd_nxt.wrapping_add(1); // Our FIN consumed one seq.
+            self.emit(me, fin_seq, self.rcv_nxt, tcp::FLAG_ACK, &[]);
+            return true;
         }
+        false
     }
 }
 
@@ -2249,7 +2254,10 @@ fn tcp_fetch(
     let mut conn = TcpConn::connect(me, *dst_ip, dst_port, *next_hop_mac, id, local_port)?;
     conn.send(me, payload)?;
     let written = conn.recv(me, out);
-    conn.close(me);
+    // No `Net` here to linger in, so the peer's FIN goes unacknowledged; the
+    // peer retransmits it a few times and gives up. The one-shot path is a
+    // blocking legacy request that reads the wire itself anyway.
+    conn.begin_close(me);
     Some(written)
 }
 
@@ -2431,6 +2439,7 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
         if rlen > 0 {
             let req = &req[..rlen as usize];
             let mut reply = [0u8; MSG_CAP];
+            let started = now_ns();
             let reply_len = handle_request(
                 req,
                 &next_hop_mac,
@@ -2440,6 +2449,14 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
                 &mut net,
                 &mut reply,
             );
+            // The daemon serves one request at a time, so a request that takes
+            // long holds up every socket. Say so, with its opcode: the next
+            // stall names itself instead of being inferred from a timeout on
+            // the kernel side (rq15, 2026-09-27).
+            let took_ms = now_ns().saturating_sub(started) / 1_000_000;
+            if took_ms >= SLOW_REQUEST_MS {
+                print_slow_request(req.first().copied().unwrap_or(0), took_ms);
+            }
             let _ = syscall3(
                 SYS_CHANNEL_SEND,
                 ch,
@@ -2461,6 +2478,47 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
         print("[netstack] no requests before idle deadline; unregistered\n");
     }
     0
+}
+
+/// A request that holds the daemon this long is logged ([`print_slow_request`]).
+const SLOW_REQUEST_MS: u64 = 1_000;
+
+/// `[netstack] slow request: opcode 0x.. held the daemon for N ms`, without
+/// an allocator: digits written into a stack buffer.
+fn print_slow_request(opcode: u8, ms: u64) {
+    let mut buf = [0u8; 96];
+    let mut len = 0usize;
+    let mut put = |s: &[u8]| {
+        for &b in s {
+            if let Some(d) = buf.get_mut(len) {
+                *d = b;
+                len += 1;
+            }
+        }
+    };
+    put(b"[netstack] slow request: opcode 0x");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    put(&[
+        HEX[usize::from(opcode >> 4)],
+        HEX[usize::from(opcode & 0xf)],
+    ]);
+    put(b" held the daemon for ");
+    let mut digits = [0u8; 20];
+    let mut n = ms;
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 || i == 0 {
+            break;
+        }
+    }
+    put(&digits[i..]);
+    put(b" ms\n");
+    if let Ok(s) = core::str::from_utf8(buf.get(..len).unwrap_or(&[])) {
+        print(s);
+    }
 }
 
 /// Handle one control request, writing the reply into `out` and returning its
@@ -2794,6 +2852,8 @@ fn pump(net: &mut Net, me: &IfInfo, next_hop_mac: &[u8; 6]) -> bool {
                 let payload = tcp_pl.get(..plen).unwrap_or(&[]);
                 if let Some(c) = net.conns.find_by_tuple(&src_ip, src_port, dst_port) {
                     c.ingest_seg(me, &rx, payload);
+                } else if net.closing.ingest(me, &src_ip, src_port, dst_port, &rx) {
+                    // A connection its owner closed, answering its peer.
                 } else {
                     // No established connection owns this segment: offer it to the
                     // listeners (backlog match, or a fresh SYN → passive open).
@@ -2815,6 +2875,8 @@ fn pump(net: &mut Net, me: &IfInfo, next_hop_mac: &[u8; 6]) -> bool {
                 let payload = tcp_pl.get(..plen).unwrap_or(&[]);
                 if let Some(c) = net.conns.find_by_tuple6(&src_ip6, src_port, dst_port) {
                     c.ingest_seg(me, &rx, payload);
+                } else if net.closing.ingest6(me, &src_ip6, src_port, dst_port, &rx) {
+                    // A connection its owner closed, answering its peer.
                 } else {
                     let _consumed = net.listeners.route_seg6(
                         me,
@@ -2842,7 +2904,9 @@ fn pump(net: &mut Net, me: &IfInfo, next_hop_mac: &[u8; 6]) -> bool {
             }
         }
     }
-    net.conns.service_retransmits(me, now_ns());
+    let now = now_ns();
+    net.conns.service_retransmits(me, now);
+    net.closing.expire(now);
     any
 }
 
@@ -3408,11 +3472,12 @@ impl Listener {
         self.backlog.iter().flatten().any(Self::acceptable)
     }
 
-    /// Gracefully close every backlog connection (listener teardown).
-    fn close_all(&mut self, me: &IfInfo) {
+    /// Close every backlog connection (listener teardown), without waiting:
+    /// each lingers in `closing` to answer its peer.
+    fn close_all(&mut self, me: &IfInfo, closing: &mut Closing) {
         for slot in &mut self.backlog {
-            if let Some(mut c) = slot.take() {
-                c.close(me);
+            if let Some(c) = slot.take() {
+                closing.retire(c, me);
             }
         }
     }
@@ -3451,11 +3516,11 @@ impl Listeners {
 
     /// Unregister the listener `id`, closing every connection still waiting in
     /// its backlog. `false` if there is no such listener.
-    fn remove(&mut self, id: Key, me: &IfInfo) -> bool {
+    fn remove(&mut self, id: Key, me: &IfInfo, closing: &mut Closing) -> bool {
         for slot in &mut self.slots {
             if slot.as_ref().is_some_and(|(lid, _)| *lid == id) {
                 if let Some((_, mut l)) = slot.take() {
-                    l.close_all(me);
+                    l.close_all(me, closing);
                 }
                 return true;
             }
@@ -3581,6 +3646,110 @@ struct Net {
     conns: RingConns,
     listeners: Listeners,
     udp: UdpSocks,
+    /// Connections their owner has closed, lingering to answer their peers.
+    closing: Closing,
+}
+
+/// Most closed connections that linger at once.
+const MAX_CLOSING: usize = 16;
+
+/// How long a closed connection lingers for its peer's FIN.
+const CLOSE_LINGER_NS: u64 = 2_000_000_000;
+
+/// Connections closed by their owner, kept until the peer's FIN has been
+/// acknowledged or [`CLOSE_LINGER_NS`] has passed. The pump offers them the
+/// segments no live connection claims ([`TcpConn::closing_seg`]), so a close
+/// never waits for its peer in the request that asked for it, and never reads
+/// the wire itself. A full table drops the connection nearest its deadline:
+/// its peer has had longest to answer.
+struct Closing {
+    slots: [Option<(TcpConn, u64)>; MAX_CLOSING],
+}
+
+impl Closing {
+    fn new() -> Self {
+        Self {
+            slots: core::array::from_fn(|_| None),
+        }
+    }
+
+    /// Close `c` without waiting: send its FIN and keep it to answer the
+    /// peer's. One whose peer has already sent a FIN (acknowledged when it
+    /// arrived) has nothing left to answer, and is dropped.
+    fn retire(&mut self, mut c: TcpConn, me: &IfInfo) {
+        c.begin_close(me);
+        if c.peer_fin {
+            return;
+        }
+        let deadline = now_ns().saturating_add(CLOSE_LINGER_NS);
+        let slot = match self.slots.iter().position(Option::is_none) {
+            Some(i) => i,
+            None => self
+                .slots
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, s)| s.as_ref().map_or(0, |(_, d)| *d))
+                .map_or(0, |(i, _)| i),
+        };
+        if let Some(s) = self.slots.get_mut(slot) {
+            *s = Some((c, deadline));
+        }
+    }
+
+    /// Offer an IPv4 segment to the lingering connection it belongs to.
+    /// `true` if one claimed it.
+    fn ingest(
+        &mut self,
+        me: &IfInfo,
+        src_ip: &[u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        rx: &TcpRx,
+    ) -> bool {
+        self.ingest_where(me, rx, |c| {
+            c.dst6.is_none()
+                && c.dst_ip == *src_ip
+                && c.dst_port == src_port
+                && c.local_port == dst_port
+        })
+    }
+
+    /// The IPv6 sibling of [`Self::ingest`].
+    fn ingest6(
+        &mut self,
+        me: &IfInfo,
+        src_ip6: &[u8; 16],
+        src_port: u16,
+        dst_port: u16,
+        rx: &TcpRx,
+    ) -> bool {
+        self.ingest_where(me, rx, |c| {
+            c.dst6 == Some(*src_ip6) && c.dst_port == src_port && c.local_port == dst_port
+        })
+    }
+
+    fn ingest_where(&mut self, me: &IfInfo, rx: &TcpRx, owns: impl Fn(&TcpConn) -> bool) -> bool {
+        for slot in &mut self.slots {
+            let done = match slot.as_mut() {
+                Some((c, _)) if owns(c) => c.closing_seg(me, rx),
+                _ => continue,
+            };
+            if done {
+                *slot = None;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Drop the connections whose linger has run out.
+    fn expire(&mut self, now: u64) {
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|(_, d)| now >= *d) {
+                *slot = None;
+            }
+        }
+    }
 }
 
 impl Net {
@@ -3589,28 +3758,35 @@ impl Net {
             conns: RingConns::new(),
             listeners: Listeners::new(),
             udp: UdpSocks::new(),
+            closing: Closing::new(),
         }
     }
 
     /// Close every connection, listener and datagram socket `session` created:
     /// its ring's `OP_STOP`, or the daemon shutting down.
     fn close_session(&mut self, session: u32, me: &IfInfo) {
-        for slot in &mut self.conns.slots {
+        let Self {
+            conns,
+            listeners,
+            closing,
+            ..
+        } = self;
+        for slot in &mut conns.slots {
             if slot
                 .as_ref()
                 .is_some_and(|(k, _)| key_session(*k) == session)
-                && let Some((_, mut c)) = slot.take()
+                && let Some((_, c)) = slot.take()
             {
-                c.close(me);
+                closing.retire(c, me);
             }
         }
-        for slot in &mut self.listeners.slots {
+        for slot in &mut listeners.slots {
             if slot
                 .as_ref()
                 .is_some_and(|(k, _)| key_session(*k) == session)
                 && let Some((_, mut l)) = slot.take()
             {
-                l.close_all(me);
+                l.close_all(me, closing);
             }
         }
         for slot in &mut self.udp.slots {
@@ -3802,7 +3978,7 @@ fn ring_tcp_process(
                     }
                 } else {
                     match TcpConn::connect(me, ip, port, *next_hop_mac, *ipid, local_port) {
-                        Some(mut c) => match net.conns.reserve(key(id_space, sqe.conn_id)) {
+                        Some(c) => match net.conns.reserve(key(id_space, sqe.conn_id)) {
                             Some(slot) => {
                                 *slot = Some((key(id_space, sqe.conn_id), c));
                                 0
@@ -3811,7 +3987,7 @@ fn ring_tcp_process(
                                 // Duplicate id or table full: tear the fresh conn down
                                 // gracefully rather than leaking the peer's half-open
                                 // connection, then report failure.
-                                c.close(me);
+                                net.closing.retire(c, me);
                                 -1
                             }
                         },
@@ -3871,14 +4047,14 @@ fn ring_tcp_process(
                                 }
                             } else {
                                 match TcpConn::connect6(me, addr, port, mac, *ipid, local_port) {
-                                    Some(mut c) => {
+                                    Some(c) => {
                                         match net.conns.reserve(key(id_space, sqe.conn_id)) {
                                             Some(slot) => {
                                                 *slot = Some((key(id_space, sqe.conn_id), c));
                                                 0
                                             }
                                             None => {
-                                                c.close(me);
+                                                net.closing.retire(c, me);
                                                 -1
                                             }
                                         }
@@ -3930,8 +4106,8 @@ fn ring_tcp_process(
                 }
             }
             netipc::ring::OP_CLOSE => match net.conns.remove(key(id_space, sqe.conn_id)) {
-                Some(mut c) => {
-                    c.close(me);
+                Some(c) => {
+                    net.closing.retire(c, me);
                     0
                 }
                 // Not a TCP connection — it may be a bound UDP datagram socket,
@@ -3940,7 +4116,12 @@ fn ring_tcp_process(
                 // is never stopped, so a closed listening socket must be
                 // removable on its own, its unaccepted connections with it.
                 None if net.udp.remove(key(id_space, sqe.conn_id)) => 0,
-                None if net.listeners.remove(key(id_space, sqe.conn_id), me) => 0,
+                None if net
+                    .listeners
+                    .remove(key(id_space, sqe.conn_id), me, &mut net.closing) =>
+                {
+                    0
+                }
                 None => -1,
             },
             netipc::ring::OP_LISTEN => {
@@ -4476,7 +4657,7 @@ fn ring_tcp_accept(
     }
     // Drive pending passive-open handshakes (and any already-queued data) forward.
     pump(net, me, next_hop_mac);
-    let mut conn = match net
+    let conn = match net
         .listeners
         .get_mut(target_id)
         .and_then(Listener::take_established)
@@ -4508,7 +4689,7 @@ fn ring_tcp_accept(
         ring.write_data(sqe.data_off as usize, &addr)
     };
     if !wrote {
-        conn.close(me);
+        net.closing.retire(conn, me);
         return -1;
     }
     // Install under the caller-chosen id (low 32 bits of aux), in the
@@ -4522,7 +4703,7 @@ fn ring_tcp_accept(
         None => {
             // Duplicate id or table full: close the accepted connection rather than
             // leak the peer's established half, then report failure.
-            conn.close(me);
+            net.closing.retire(conn, me);
             -1
         }
     }

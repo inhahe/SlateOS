@@ -273,33 +273,47 @@ fn is_ccitt(scheme: u16) -> bool {
     )
 }
 
+/// The alpha `TIFFRGBAImageBegin` takes from the first `ExtraSamples` value:
+/// associated or unassociated as it says, an unspecified one as associated
+/// when there are more than three samples, and otherwise none (0).
+pub(super) fn alpha_of(dir: &Directory) -> u16 {
+    match dir.sample_info.first() {
+        Some(&extra::UNSPECIFIED) if dir.samples_per_pixel > 3 => extra::ASSOCIATED_ALPHA,
+        Some(&first @ (extra::ASSOCIATED_ALPHA | extra::UNASSOCIATED_ALPHA)) => first,
+        _ => 0,
+    }
+}
+
+/// The photometric interpretation `TIFFRGBAImageBegin` works with: the
+/// field, or, without one, a guess from the colour samples -- one is grey
+/// (white at zero for a fax), three are RGB.
+///
+/// # Errors
+///
+/// [`ImageError::Unsupported`] where there is no field and no guess.
+pub(super) fn photometric_of(dir: &Directory) -> ImageResult<u16> {
+    let colours = i32::from(dir.samples_per_pixel).wrapping_sub(i32::from(dir.extra_samples()));
+    match dir.photometric {
+        Some(p) => Ok(p),
+        None => match colours {
+            1 if is_ccitt(dir.compression) => Ok(photometric::MIN_IS_WHITE),
+            1 => Ok(photometric::MIN_IS_BLACK),
+            3 => Ok(photometric::RGB),
+            _ => Err(ImageError::Unsupported(
+                "TIFF without PhotometricInterpretation",
+            )),
+        },
+    }
+}
+
 /// `TIFFRGBAImageBegin`, and the choice of routine.
 fn begin(dir: &Directory) -> ImageResult<Image> {
     let refuse = ImageError::Unsupported;
     let bits = dir.bits_per_sample;
     let samples = dir.samples_per_pixel;
-    let mut alpha = 0u16;
-    if let Some(&first) = dir.sample_info.first() {
-        match first {
-            extra::UNSPECIFIED => {
-                if samples > 3 {
-                    alpha = extra::ASSOCIATED_ALPHA;
-                }
-            }
-            extra::ASSOCIATED_ALPHA | extra::UNASSOCIATED_ALPHA => alpha = first,
-            _ => {}
-        }
-    }
+    let alpha = alpha_of(dir);
     let colours = i32::from(samples).wrapping_sub(i32::from(dir.extra_samples()));
-    let p = match dir.photometric {
-        Some(p) => p,
-        None => match colours {
-            1 if is_ccitt(dir.compression) => photometric::MIN_IS_WHITE,
-            1 => photometric::MIN_IS_BLACK,
-            3 => photometric::RGB,
-            _ => return Err(refuse("TIFF without PhotometricInterpretation")),
-        },
-    };
+    let p = photometric_of(dir)?;
     let mut color_map = None;
     match p {
         photometric::PALETTE | photometric::MIN_IS_WHITE | photometric::MIN_IS_BLACK => {

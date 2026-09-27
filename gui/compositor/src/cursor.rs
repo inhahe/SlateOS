@@ -32,11 +32,11 @@
 //!
 //! # The artwork
 //!
-//! Every shape is vector outlines on a 32-unit grid ([`art`]), rasterized with
+//! Every shape is vector outlines on a 32-unit grid (`art`), rasterized with
 //! the font engine's exact-area rasterizer at whatever size the user and the
 //! display ask for, so a 48-pixel pointer on a 2x display is as sharp as a
 //! 16-pixel one. The outline is not drawn separately: it is the body's coverage
-//! grown by a pixel or two ([`grow`]), which keeps it exactly concentric with
+//! grown by a pixel or two (`grow`), which keeps it exactly concentric with
 //! the fill at every size — two separately drawn shapes would drift apart by a
 //! pixel somewhere.
 

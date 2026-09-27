@@ -77,6 +77,10 @@ const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
 const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+/// Cursor-queue commands (virtio 1.1 §5.7.6.10): show an image with a hot
+/// spot at a position, or move the one shown.
+const VIRTIO_GPU_CMD_UPDATE_CURSOR: u32 = 0x0300;
+const VIRTIO_GPU_CMD_MOVE_CURSOR: u32 = 0x0301;
 /// `RESOURCE_CREATE_3D` — the first command in the 3D block (0x0200 is
 /// `CTX_CREATE`, so this is 0x0200 + 4).  Only sent when the device offered
 /// `VIRTIO_GPU_F_VIRGL`; see [`create_resource_3d`] for why we need it at all.
@@ -275,6 +279,54 @@ struct VirtioGpuResourceFlush {
     _padding: u32,
 }
 
+/// The side of a virtio-gpu cursor image, in pixels. QEMU's cursor is 64x64
+/// and ignores a cursor resource of any other size, and Linux's virtio-gpu
+/// driver advertises exactly this size.
+pub const CURSOR_SIZE: u32 = 64;
+
+/// Bytes in a cursor image: 64 x 64 B8G8R8A8 pixels, which is one frame.
+const CURSOR_BYTES: usize = (CURSOR_SIZE as usize) * (CURSOR_SIZE as usize) * 4;
+const _: () = assert!(CURSOR_BYTES == FRAME_SIZE);
+
+/// Bytes from one row of a cursor image to the next: packed.
+pub const CURSOR_PITCH: usize = (CURSOR_SIZE as usize) * 4;
+
+/// `virtio_gpu_cursor_pos`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuCursorPos {
+    scanout_id: u32,
+    x: u32,
+    y: u32,
+    _padding: u32,
+}
+
+/// `virtio_gpu_update_cursor`: the one request shape for both
+/// `UPDATE_CURSOR` (image, hot spot and position) and `MOVE_CURSOR`
+/// (position; QEMU still reads `resource_id`, as "is it visible").
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuUpdateCursor {
+    hdr: VirtioGpuCtrlHdr,
+    pos: VirtioGpuCursorPos,
+    resource_id: u32,
+    hot_x: u32,
+    hot_y: u32,
+    _padding: u32,
+}
+
+// As with RESOURCE_CREATE_3D: the device drops a request shorter than its
+// struct without saying so. A 24-byte header, a 16-byte position, 16 more.
+const _: () = assert!(core::mem::size_of::<VirtioGpuUpdateCursor>() == 56);
+
+/// The device's cursor resource, created the first time a cursor is shown
+/// and reused for every image after.
+struct CursorResource {
+    resource_id: u32,
+    /// Its backing store: one frame, the whole 64x64 image.
+    frame: PhysFrame,
+}
+
 // ---------------------------------------------------------------------------
 // Device state
 // ---------------------------------------------------------------------------
@@ -285,8 +337,7 @@ struct VirtioGpuDevice {
     transport: ModernTransport,
     /// Control virtqueue (queue 0).
     controlq: Virtqueue,
-    /// Cursor virtqueue (queue 1).
-    #[allow(dead_code)]
+    /// Cursor virtqueue (queue 1): the hardware cursor's commands.
     cursorq: Virtqueue,
     /// HHDM offset for phys→virt conversion.
     hhdm_offset: u64,
@@ -302,6 +353,9 @@ struct VirtioGpuDevice {
     resource_id: u32,
     /// Next resource ID to allocate.
     next_resource_id: u32,
+    /// The hardware cursor's image resource (design-decisions §976 item 2);
+    /// `None` until a cursor is first shown.
+    cursor: Option<CursorResource>,
 }
 
 // SAFETY: VirtioGpuDevice contains raw pointers (inside Virtqueue and transport)
@@ -422,6 +476,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         height: 0,
         resource_id: 0,
         next_resource_id: 1,
+        cursor: None,
     };
 
     // Query display info.
@@ -1017,6 +1072,214 @@ fn resource_flush(
 }
 
 // ---------------------------------------------------------------------------
+// Hardware cursor (queue 1)
+// ---------------------------------------------------------------------------
+
+/// Send one cursor-queue request and wait until the device has consumed it.
+///
+/// Cursor requests have no response (the device reads the request and hands
+/// the buffer back), so the chain is a single device-readable descriptor.
+/// The request is staged in the control frame, which every command uses
+/// synchronously under the `DEVICE` lock, so nothing else is in it.
+#[allow(clippy::arithmetic_side_effects)]
+fn send_cursor_cmd(dev: &mut VirtioGpuDevice, req: &VirtioGpuUpdateCursor) -> KernelResult<()> {
+    let ctl_phys = dev.ctl_frame.addr();
+    let ctl_virt = (ctl_phys + dev.hhdm_offset) as *mut u8;
+    let len = core::mem::size_of::<VirtioGpuUpdateCursor>();
+    // SAFETY: `ctl_virt` is the HHDM mapping of the device's own DMA control
+    // frame, FRAME_SIZE bytes, and `len` is 56. The source is a live `repr(C)`
+    // value of exactly `len` bytes, and the two cannot overlap. No other
+    // command is in flight: all of them run synchronously under `DEVICE`.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (req as *const VirtioGpuUpdateCursor).cast::<u8>(),
+            ctl_virt,
+            len,
+        );
+    }
+    dev.cursorq.submit(&[(ctl_phys, len as u32, 0)])?;
+    dev.transport.notify_queue(1);
+    let mut attempts = 0u32;
+    let head = loop {
+        if let Some((head, _len)) = dev.cursorq.poll_used() {
+            break head;
+        }
+        attempts = attempts.wrapping_add(1);
+        if attempts > 5_000_000 {
+            // As in `send_ctrl_cmd`: a timed-out chain is still the device's,
+            // so it is not returned to the free list.
+            return Err(KernelError::TimedOut);
+        }
+        core::hint::spin_loop();
+    };
+    dev.cursorq.free_chain(head);
+    Ok(())
+}
+
+/// The cursor resource and its frame, created on first use: a 64x64
+/// B8G8R8A8 2D resource backed by one zeroed frame.
+///
+/// Made with the 2D command even on a virgl device, as Linux's driver makes
+/// its cursor buffers: the host reads a cursor back rather than scanning it
+/// out, so the `SCANOUT` bind that forces [`create_resource_3d`] for the
+/// framebuffer does not arise.
+fn cursor_resource(dev: &mut VirtioGpuDevice) -> KernelResult<(u32, PhysFrame)> {
+    if let Some(c) = &dev.cursor {
+        return Ok((c.resource_id, c.frame));
+    }
+    let frame = frame::alloc_frame()?;
+    let Some(virt) = frame.addr().checked_add(dev.hhdm_offset) else {
+        free_cursor_frame(frame);
+        return Err(KernelError::InvalidAddress);
+    };
+    // SAFETY: the frame was just allocated and is exclusively ours; the HHDM
+    // maps it writable for FRAME_SIZE bytes.
+    unsafe {
+        core::ptr::write_bytes(virt as *mut u8, 0, FRAME_SIZE);
+    }
+    let made = create_resource_2d(dev, CURSOR_SIZE, CURSOR_SIZE)
+        .and_then(|id| attach_backing_addrs(dev, id, &[frame.addr()]).map(|()| id));
+    match made {
+        Ok(resource_id) => {
+            dev.cursor = Some(CursorResource { resource_id, frame });
+            Ok((resource_id, frame))
+        }
+        Err(e) => {
+            // A resource created before a failed attach is left with the
+            // device: 16 KiB of host memory with no guest backing, and
+            // unreferencing it would be one more command to a device that has
+            // just failed one. The frame comes back either way -- a failed
+            // attach leaves the device holding nothing of it.
+            free_cursor_frame(frame);
+            Err(e)
+        }
+    }
+}
+
+/// Return a cursor frame that never became a live resource's backing.
+fn free_cursor_frame(f: PhysFrame) {
+    // SAFETY: the caller allocated `f` and never handed it to the device as
+    // the backing of a live resource, so nothing else refers to it.
+    if let Err(e) = unsafe { frame::free_frame(f) } {
+        // Nothing to propagate it to: the caller is already returning the
+        // failure that led here. A frame that will not free is leaked, which
+        // is what the log line records.
+        serial_println!("[virtio-gpu] cursor frame could not be freed: {:?}", e);
+    }
+}
+
+fn cursor_request(
+    cmd: u32,
+    x: u32,
+    y: u32,
+    resource_id: u32,
+    hot_x: u32,
+    hot_y: u32,
+) -> VirtioGpuUpdateCursor {
+    VirtioGpuUpdateCursor {
+        hdr: VirtioGpuCtrlHdr::new(cmd),
+        pos: VirtioGpuCursorPos {
+            scanout_id: 0,
+            x,
+            y,
+            _padding: 0,
+        },
+        resource_id,
+        hot_x,
+        hot_y,
+        _padding: 0,
+    }
+}
+
+/// Show an image as the device's cursor on scanout 0, its hot spot
+/// (`hot_x`, `hot_y` within the image) at (`x`, `y`) on the display.
+///
+/// `draw` is handed the 64x64 image -- B, G, R, A bytes, rows
+/// [`CURSOR_PITCH`] apart, already cleared to transparent -- and fills in
+/// what it has. It runs with the device lock held, so it must not call back
+/// into this module.
+///
+/// # Errors
+///
+/// `NoSuchDevice` without the device; whatever `draw` returns; `IoError` or
+/// `TimedOut` from the device.
+pub fn cursor_update(
+    x: u32,
+    y: u32,
+    hot_x: u32,
+    hot_y: u32,
+    draw: impl FnOnce(&mut [u8]) -> KernelResult<()>,
+) -> KernelResult<()> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    let (resource_id, frame) = cursor_resource(dev)?;
+    let virt = frame
+        .addr()
+        .checked_add(dev.hhdm_offset)
+        .ok_or(KernelError::InvalidAddress)?;
+    {
+        // SAFETY: the cursor frame is this device's own, HHDM-mapped for
+        // FRAME_SIZE == CURSOR_BYTES bytes. The host reads it only while a
+        // TRANSFER_TO_HOST_2D is in flight, and every earlier one completed
+        // before its command returned, so nothing else touches it while this
+        // slice lives; it is dropped before the transfer below.
+        let image = unsafe { core::slice::from_raw_parts_mut(virt as *mut u8, CURSOR_BYTES) };
+        image.fill(0);
+        draw(image)?;
+    }
+    transfer_to_host_2d(dev, resource_id, 0, 0, CURSOR_SIZE, CURSOR_SIZE, 0)?;
+    send_cursor_cmd(
+        dev,
+        &cursor_request(
+            VIRTIO_GPU_CMD_UPDATE_CURSOR,
+            x,
+            y,
+            resource_id,
+            hot_x,
+            hot_y,
+        ),
+    )
+}
+
+/// Move the device's cursor on scanout 0 so its hot spot is at (`x`, `y`),
+/// keeping its image.
+///
+/// # Errors
+///
+/// `NoSuchDevice` without the device, `InvalidArgument` if no cursor has
+/// ever been shown (there is nothing to move), and the device's errors.
+pub fn cursor_move(x: u32, y: u32) -> KernelResult<()> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    let resource_id = dev
+        .cursor
+        .as_ref()
+        .map(|c| c.resource_id)
+        .ok_or(KernelError::InvalidArgument)?;
+    // QEMU reads a MOVE_CURSOR's resource id as "visible or not", so it is
+    // the cursor's own, not 0.
+    send_cursor_cmd(
+        dev,
+        &cursor_request(VIRTIO_GPU_CMD_MOVE_CURSOR, x, y, resource_id, 0, 0),
+    )
+}
+
+/// Hide the device's cursor on scanout 0: `UPDATE_CURSOR` naming no
+/// resource. Harmless if none is shown.
+///
+/// # Errors
+///
+/// `NoSuchDevice` without the device, and the device's errors.
+pub fn cursor_hide() -> KernelResult<()> {
+    let mut guard = DEVICE.lock();
+    let dev = guard.as_mut().ok_or(KernelError::NoSuchDevice)?;
+    send_cursor_cmd(
+        dev,
+        &cursor_request(VIRTIO_GPU_CMD_UPDATE_CURSOR, 0, 0, 0, 0, 0),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -1173,6 +1436,48 @@ impl ScanoutMem<'_> {
     }
 }
 
+impl ScanoutMem<'_> {
+    /// The framebuffer as writable pages, one per backing frame, for
+    /// `planecompose` (design-decisions §976). Every page is [`FRAME_SIZE`]
+    /// bytes except the last, which ends where the framebuffer does, so
+    /// the list has exactly the shape `planecompose::PagedMut` requires.
+    ///
+    /// Takes `&mut self`, and the view comes only from [`with_scanout_mut`],
+    /// so the slices cannot outlive the closure or coexist with a second set.
+    ///
+    /// # Safety
+    ///
+    /// The returned slices alias the scanout, so nothing else may write it
+    /// while they live. Inside [`with_scanout_mut`], which holds the device
+    /// lock for the whole closure, that excludes every writer that goes
+    /// through this module. The one that does not is a raw pointer from
+    /// [`first_frame_addr`], which the caller must not be writing through at
+    /// the same time.
+    #[must_use]
+    pub unsafe fn pages_mut(&mut self) -> alloc::vec::Vec<&mut [u8]> {
+        let total = self.len();
+        let mut pages = alloc::vec::Vec::with_capacity(self.frames.len());
+        let mut start = 0usize;
+        for pf in self.frames {
+            if start >= total {
+                break;
+            }
+            let len = FRAME_SIZE.min(total.saturating_sub(start));
+            let Some(addr) = pf.addr().checked_add(self.hhdm) else {
+                break;
+            };
+            // SAFETY: `pf` is one of the device's own scanout frames, HHDM-
+            // mapped at `addr` for `FRAME_SIZE` bytes, and `len <= FRAME_SIZE`.
+            // Each frame appears once in the list, so the slices are disjoint;
+            // the caller guarantees nothing else writes the scanout while they
+            // live (see this function's contract).
+            pages.push(unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, len) });
+            start = start.saturating_add(FRAME_SIZE);
+        }
+        pages
+    }
+}
+
 /// Run `f` with a bounds-checked view of the scanout framebuffer.
 ///
 /// Returns `None` if there is no device.
@@ -1202,6 +1507,22 @@ pub fn with_scanout<R>(f: impl FnOnce(&ScanoutMem<'_>) -> R) -> Option<R> {
         height: dev.height,
     };
     Some(f(&view))
+}
+
+/// [`with_scanout`], lending the view mutably: for
+/// [`ScanoutMem::pages_mut`], whose slices must not outlive the closure or
+/// coexist with another set. The same lock, held the same way -- see
+/// [`with_scanout`] for why that is safe and what `f` must not do.
+pub fn with_scanout_mut<R>(f: impl FnOnce(&mut ScanoutMem<'_>) -> R) -> Option<R> {
+    let guard = DEVICE.lock();
+    let dev = guard.as_ref()?;
+    let mut view = ScanoutMem {
+        frames: &dev.fb_frames,
+        hhdm: dev.hhdm_offset,
+        width: dev.width,
+        height: dev.height,
+    };
+    Some(f(&mut view))
 }
 
 /// Write a pixel. Does NOT auto-flush.

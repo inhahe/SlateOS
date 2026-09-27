@@ -186,6 +186,11 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
+| `scripts/gate-cache.py` | Replay a gate's passing verdict when nothing it read has changed. |
+| `scripts/gate-cost-report.py` | What each boot-test gate has cost, against what it has caught. |
+| `scripts/gatecache_site/sitecustomize.py` | Gate-cache bootstrap: trace this Python process when a cached gate runs it. |
+| `scripts/gatecache_tee.py` | Run one read-only git command for a traced gate, and record what it answered. |
+| `scripts/gatecache_trace.py` | Record everything a Python process reads, for the gate cache. |
 | `scripts/gen-chmod-fixture.sh` | Measure GNU chmod's answer for a cross product of mode strings, starting |
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
@@ -354,6 +359,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-diff-bound.sh` | Two-probe test for the bound that `diff-wsl.sh` puts around every harness. |
 | `scripts/test-diff-forward.sh` | Does a `DIFF_*` knob set on the command line reach the far side of the WSL |
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
+| `scripts/test-gate-cache.py` | Tests for the gate cache: `gate-cache.py`, `gatecache_trace.py`, `gatecache_tee.py`. |
+| `scripts/test-gate-cost-report.py` | Run `gate-cost-report.py`'s self-test under the boot test's tooling gate. |
 | `scripts/test-gittree.py` | Tests for `scripts/gittree.py` — reading many blobs out of one git process. |
 | `scripts/test-grade-positional.py` | Regression tests for `scripts/grade-positional.py`. |
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
@@ -369,6 +376,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-pre-push-run-checker.py` | Tests for `run_checker`, the shared checker-invocation helper. |
 | `scripts/test-pre-push-suites-scope.py` | Tests for which scripts a push counts as changed, in `scripts/hooks/pre-push`. |
 | `scripts/test-pre-push-touches.py` | Tests for the pre-push hook's `touches` helper (scripts/hooks/pre-push). |
+| `scripts/test-pre-push-tree-is-push.py` | Tests for `tree_is_push`, the precondition of pre-push gates 52-73. |
 | `scripts/test-pre-push-unixhalf-gate.py` | Behavioural tests for pre-push gate 12 (coreutils' unix half). |
 | `scripts/test-proctree.py` | test-proctree.py — tests for `proctree.resolve_command` and friends. |
 | `scripts/test-prune-build-cache.py` | Run `prune-build-cache.py`'s self-test under the boot test's tooling gate. |
@@ -405,4 +413,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_395 scripts._
+_403 scripts._

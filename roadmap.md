@@ -194,12 +194,12 @@ day. Prune on the schedule above from the start, not once the volume is tight.
 
 | Lane | Agent name | Name | Owns (writes freely) |
 |------|------|------|----------------------|
-| **A** | `Lane A` | **Kernel, Core & Networking** | `kernel/**`, `bench/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `services/netstack/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh` |
-| **B** | `Lane B` | **Userland** | `userspace/**`, `init/**` |
-| **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's six crates |
-| **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` |
-| **E** | `Lane E` | **Applications** | `apps/**`, `randrange/**` |
-| **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**` |
+| **A** | `Lane A` | **Kernel, Core & Networking** | `kernel/**`, `bench/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `services/netstack/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh`; since §973 also the gate machinery (`scripts/hooks/**`, `scripts/run-checker.sh`, `scripts/which-lane.py`, the gates that judge every lane) and the kernel's scripts, the hash and crypto crates (`sha1`, `sha2`, `md5`, `pwkdf`, `blockbuf`, `crc32`), and the boot and repository configuration (`esp/**`, `limine.conf`, `.gitignore`, `.gitattributes`, `clippy.toml`, `.cargo/**`) |
+| **B** | `Lane B` | **Userland** | `userspace/**`, `init/**`; since §973 also the differential harnesses and userland checkers in `scripts/`, and ten root crates (`procinfo`, `libcall`, `optionalfile`, …) |
+| **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's six crates; since §973 also the GUI gates and gui/ reintroduction harnesses in `scripts/` |
+| **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh`; since §973 also the libc checkers, fixtures, rootfs manifest, toolchain setup and port spikes in `scripts/`, `build-env.md`, `posix-blockers.md` |
+| **E** | `Lane E` | **Applications** | `apps/**`, `randrange/**`; since §973 also the app gates and surveys in `scripts/`, and seven root crates (`deflate`, `tzrules`, `yamldoc`, `textfmt`, …) |
+| **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**`, `gui/video/**` (reserved 2026-09-27 for F-Q2's video codec crate, before its first file); since §973 also four scripts (`check-generated-tables.py`, `reintro-evdev.py`, the `q45_*` pair) |
 
 **Never writes** is simply everything another row owns. Where two rows
 overlap, the **longer path wins**: `gui/compositor/` is lane F's although
@@ -209,13 +209,34 @@ that rule, from the machine-readable copy of this table in
 `scripts/which-lane.py` — which every script that needs ownership reads, so
 **when this table changes, that one changes in the same commit.**
 
-**Owned by no lane:** the shared documents and the workspace `Cargo.toml`
-(rules 3 and 4 govern those), `scripts/**` other than the files named above,
-and the small top-level library crates (`sha2`, `procinfo`, `tzrules`,
-`deflate`, `crc32`, … — most are used by three to five lanes). Who may change
-those is `open-questions.md` → **A-Q11**, still unanswered; until it is,
-change one through a request to the lanes that use it, or keep the change
-additive and say so in the commit.
+**Every tracked file has exactly one owner** (`design-decisions.md` §973, the
+operator's answer to A-Q11, 2026-09-27). `python scripts/which-lane.py --owner
+<path>` answers every path with one of four things:
+- **a lane.** The table above, the file-by-file table of `scripts/` in
+  `which-lane.py` (`SCRIPT_OWNERS`), and, for a request, its sender:
+  `requests/a-bc-<slug>.md` is lane A's.
+- **the operator.** `CLAUDE.md`, the design texts, the operator's notes and
+  backups. No lane edits these unless the operator says to.
+- **a shared document.** The files every lane writes under a named per-lane
+  rule: `roadmap.md`, `known-issues.md`, `design-decisions.md`,
+  `open-questions.md` and the rest, rule 3; the workspace `Cargo.toml` and
+  `Cargo.lock`, rule 4.
+- **nobody**, which the boot test and the push hook (gate 51) refuse.
+
+A lane that wants a change in another lane's file files a request, as for
+any tree. A new file gets its owner **in the commit that creates it**:
+- a script directly in `scripts/`: add its name to your own lane's block of
+  `SCRIPT_OWNERS`. That additive line is the one edit to `which-lane.py`
+  (lane A's) that needs no request. Then regenerate `scripts/INDEX.md`,
+  which is shared and generated: run `gen-script-index.py`, never hand-edit
+  it.
+- a request: name it by sender.
+- anything else new at the top of the tree: ask lane A, which owns the table.
+
+An owner does not make a script run. A harness that nothing runs rots however
+clearly it is owned; lane C's palette harness did, 308 of 1,459 entries
+(`known-issues.md` TD-C-THE-PALETTE-REINTRODUCTION-HARNESS-HAS-ROTTED). Its
+owner is also who wires it into a gate.
 
 **Rationale for the cut** (2026-09-22; `design-decisions.md` §1100). Each of
 the three old lanes had one part with a deep backlog and one part coupled
@@ -288,9 +309,8 @@ phantom `pkg/**` until the six-lane rewrite of 2026-09-22 removed it.)
 
 **Programs reach the disk image through lane D's recipe.** How `rootfs.ext4`
 is built (`scripts/create-ext4-rootfs.sh`) is lane D's. The list of which
-programs go on it, `scripts/rootfs-bin-manifest.txt`, sits under `scripts/`
-and so is covered by A-Q11 like the rest of that directory; lanes B and D
-coordinate changes to it by request.
+programs go on it, `scripts/rootfs-bin-manifest.txt`, is lane D's too since
+§973 (lane D claimed it); lane B asks for changes to it by request.
 
 ### Lane C — Desktop & Toolkit
 
@@ -550,7 +570,7 @@ gain. (Full reasoning: `design-decisions.md` §437.)
 | File | Your region | Inside it you may |
 |------|-------------|-------------------|
 | `roadmap.md` | The lines tagged with your own lane letter. | Edit them freely. Never reflow or reorder lines you do not own; never touch the shared prose sections (like this one) without a request to the other lanes. |
-| `known-issues.md` | Entries whose heading carries your lane letter (`### [C] …`), plus **any** entry you are status-stamping — see the exception below. | Edit, restructure, mark fixed. New entries go at the end of `known-issues.md` with your lane letter in the heading. Move an entry to `known-issues-resolved.md` once it is fixed *and* the fix has been on `main` for a full boot test. |
+| `known-issues.md` | Entries whose heading carries your lane letter (`### [C] …`), plus **any** entry you are status-stamping — see the exception below. | Edit, restructure, mark fixed. New entries go at the end of **your own lane's `## Lane X: new entries` section** at the bottom of `known-issues.md`, with your lane letter in the heading (design-decisions §977; until 2026-09-27 every lane appended at the end of the file, which collided whenever two lanes wrote between merges). An amendment still goes directly under the entry it amends. Move an entry to `known-issues-resolved.md` once it is fixed *and* the fix has been on `main` for a full boot test. |
 | `design-decisions.md` | Your **open** numeric band: **C** §800–899, **A** §900–999, **B** §1000–1099, **D** §1100–1199, **E** §1200–1299, **F** §1300–1399 (as of 2026-09-22; a lane moves to a new band when its gate warns at 80%). Every lower band is closed — its numbers are spent, not free. The authoritative table is in the file's own "Numbering and file order" header, which the gate parses; this row is a copy and the header wins. (It had already lagged: until 2026-09-22 it still gave lane B §700–799, closed since 2026-09-05.) | Add and edit your own sections. Take the next unused number in your open band, and **insert immediately after the last entry already in that band** — *not* at EOF, and *not* before the next band's first heading, which is a different place and the wrong one (the §500s and §600s are thoroughly interleaved by months of merges, so "before the first §600" would put a lane-C entry inside lane A's run). Each band ascending in file order is what gives every lane its own insertion offset and makes the merge automatic. A lane whose band is still empty inserts where the band's row in the header says (lanes D–F start after §360, §498 and §127 respectively), and the gate prints that line too. Every new section carries a `**Lane:**` field. Never edit another lane's band. **Run `python scripts/check-design-decisions-bands.py`** — it prints your next number and the exact line to insert after, and `scripts/boot-test.sh` refuses to build if you get it wrong. |
 | `open-questions.md` | Questions whose ID carries your lane letter. | **This file holds OPEN questions only.** When one is answered, *delete the entry* and add a one-line record to the `## Resolved` index at the bottom, under your own lane's subheading. Write entries for a reader who does not know the subsystem — see `CLAUDE.md` and the file's own header. |
 | `deferred-questions.md` | Your own `DQ<n>` entries. (They were `D-Q<n>` until 2026-09-22, when `D-` became lane D's question prefix; DQ1 and DQ2 carry their old names in their headings, and lane D's own numbering starts at D-Q3 so that no old citation of D-Q1 or D-Q2 can ever point at the wrong thing.) | Same shape as `open-questions.md`: entries leave the file when promoted or dropped, with a one-line record in its `## Closed` index. Every entry carries a `Trigger:` for promoting it back. See `design-decisions.md` §313. |
@@ -958,16 +978,19 @@ What lane A actually has left:
 | work | state |
 |---|---|
 | head-of-line witness dispatch fix | **landed**: the witness now declines with a reason rather than failing, and points at A-Q15. A-Q15 answered 2026-09-27 (design-decisions §972): build both designs behind one switch and measure A's slowdown against B's memory; lane A's next networking task |
-| A-Q15 (§972) increment 1: design A, one ring for every socket | **done on lane-a 2026-09-27, awaiting a boot.** Two sockets are alive at once, the head-of-line witness runs, and a new late-data witness proves a blocking recv waits. Increment 2, design B behind the `RingMode` switch (the daemon keeps a session per ring, with daemon-wide tables and one pump for TCP and UDP): **done on lane-a 2026-09-27, awaiting a boot**; every boot runs both witnesses in both modes. Increment 3, the in-OS load harness (`net::ring_bench`: request/response, idle beside busy and bulk at k = 2, 8, 24 in both designs, B reported as a percentage of A; full run in the bench suite, a small run every boot): **done on lane-a 2026-09-27**. Remaining: increment 4 -- run it in a `--bench` boot, then record the measurement, the QEMU-validity note, the hybrid assessment and the bare-metal deferral |
+| A-Q15 (§972) increment 1: design A, one ring for every socket | **done on lane-a 2026-09-27, awaiting a boot.** Two sockets are alive at once, the head-of-line witness runs, and a new late-data witness proves a blocking recv waits. Increment 2, design B behind the `RingMode` switch (the daemon keeps a session per ring, with daemon-wide tables and one pump for TCP and UDP): **done on lane-a 2026-09-27, awaiting a boot**; every boot runs both witnesses in both modes. Increment 3, the in-OS load harness (`net::ring_bench`: request/response, idle beside busy and bulk at k = 2, 8, 24 in both designs, B reported as a percentage of A; full run in the bench suite, a small run every boot): **done on lane-a 2026-09-27**. **rq15, the first boot of all three, failed on them:** design B's late-data witness (a blocking recv gave up at 12 s for data sent at 2.5 s), then the per-boot bench hung in idle-beside-busy to the 2400 s timeout. Two root causes, both fixed on lane-a-wip the same day: `KMutex` let a releaser take the lock straight back, so the busy sender starved every other socket on the shared ring (handoff added, `known-issues.md` `A-KMUTEX-BARGING-STARVED-A-WAITER`); and the daemon's close blocked it and read the wire through a filter that dropped other connections' frames (close made asynchronous, `A-NETSTACK-CLOSE-BLOCKED-THE-DAEMON-AND-ATE-OTHERS-FRAMES`). Also: a blocking connect now waits in the kernel instead of in the daemon, the daemon logs any request that holds it 1 s or more, and idle-beside-busy probes from a worker under the load deadline. Remaining: a green boot of those fixes, then increment 4 -- run it in a `--bench` boot, then record the measurement, the QEMU-validity note, the hybrid assessment and the bare-metal deferral |
 | `/sys/devices` producer (A->C ask 1, option c) | served: `system/cpu/cpuid/`, `system/memory/`, and `block/<name>/{sector_count,sector_size,read_only}` from `blkdev::list_devices()` (2026-09-15, dd-939). No `cpufreq/` and no `net/` -- no frequency source, and `InterfaceInfo` has no name field, so both would be invented |
 | A-Q10 half 2 (defer the read-back) | **done 2026-09-27**: A-Q14 answered A (design-decisions §971); the `fs-history` worker records each save after it returns |
-| C-Q11 idea 2: run only the gates a change needs | **open, next after A-Q15's first increment.** Lane C relayed the operator's idea (`requests/c-a-two-ways-to-test-a-change-without-a-full-boot.md`); lane A's answer is `requests/a-c-testing-without-a-full-boot-lane-a-takes-both.md`. A gate cache keyed on what each checker actually read, traced as it runs. Only passes are cached, a checker that spawns a process or opens a socket is never cached, and release boots run everything. rq12: 9279 s of gates against about five minutes of QEMU |
+| C-Q11 idea 2: run only the gates a change needs | **built on lane-a 2026-09-27; first measured by the boot after it lands** (design-decisions §979). A gate whose every input is unchanged replays its last pass: `scripts/gate-cache.py` with `gatecache_trace.py`, `gatecache_tee.py` and `gatecache_site/`, and 45 tests in `test-gate-cache.py`. It traces what each Python gate and its Python children read: files, listings, stat answers, variables, and read-only git answers through a tee. It stores only passes and refuses anything it cannot see. It re-checks every input at lookup, entries last one UTC day, and 10% of would-be hits run fresh; a disagreement writes `DISABLED` for every lane. A traced failure is re-run untraced. On for debug boots, including the tooling-suite sweep; off for release and bench boots and with `--no-gate-cache`. Measured before a boot used it: check-selftest-skips 50 s to 0.5 s, check-eol 14 s to 0.7 s |
 | C-Q11 idea 1: a way into a running guest | **open, after idea 2.** Lane A: the host-guest channel and its kernel side. The in-guest agent (userland) and the host tool (`scripts/`) are to be split with the lanes that own them |
-| `scripts/` ownership | **blocked on A-Q11** — operator |
-| whether pushing should be gated | **blocked on A-Q13** — operator |
+| every file gets one owner (A-Q11, §973) | **done on lane-a 2026-09-27.** `which-lane.py` answers all 8114 tracked files with a lane, the operator or a shared-document rule. `scripts/` is assigned file by file (lanes C and D named theirs), requests go by sender, and root crates by who depends on them. The crypto family goes to A with `aes`/`hmac`. `--check-all` is the gate, in the boot test and in the hook as gate 51. The rule is in the six-lane section above. Every lane is told when it reaches `main` |
+| fast checks at push time (A-Q13, §974) | **half done on lane-a 2026-09-27.** The inventory found 53 boot-only gates. The 22 with a median of 15s or less that judge source are now push gates 52-73, each scoped by `touches` with its own bypass. Each runs only where the working tree is the push (`tree_is_push`, tested by `test-pre-push-tree-is-push.py`, mutation-checked). Dropped: two that read boot history and one that grades a build artifact. **Self-tests audited 2026-09-27** (§974 item 3: a gate runs at push time only with a self-test the hook runs first): 15 of the 22 had one; gate 66 is itself one; gates 57, 61 and 62 got theirs, each mutation-checked (10/10, 12/12 and 13/13 mutations killed), run by the hook and the boot test, and 61/62 now also run when the scanner they borrow changes; gates 70 and 71 belong to lanes E and F, requested (`requests/a-e-…`, `requests/a-f-…`). Cost against catches: measured (`gate-cost-report.py`). **Remaining:** classify the 101 recorded refusals across 33 gates as catches or false alarms, and confirm each false alarm fixed |
 | bare-metal USB boot, then §263's iGPU half | **blocked on the operator being physically at the machine** |
-| A-Q16: convert the non-leaf `PreemptSpinMutex`es? | **blocked on A-Q16** — operator. Cost now measured: ~235ns/acquire (26 / 160 / 395ns for raw / preempt-spin / tracked) |
-| A-Q17: DRM atomic accepts plane rectangles it never applies | **blocked on A-Q17** — operator. Recommend refusing the commit (dd-945) |
+| A-Q16: convert the non-leaf `PreemptSpinMutex`es (§975) | **answered 2026-09-27 (A), open.** Convert the outer locks of §949's 89 pairs, checking interrupt-safety per lock first. Price each at acquisitions × ~235ns (26 / 160 / 395ns for raw / preempt-spin / tracked). Revert the hot-path ones, pinning their order with a self-test instead |
+| A-Q17: honour the plane rectangles (§976) | **done on lane-a 2026-09-27, awaiting a boot.** The Limine and virtio-gpu 2D backends compose each CRTC's planes and the legacy cursor with the `planecompose` crate: crop, nearest scale up to 16x, place, clip, blend, damage-limited. set_crtc, page_flip and the atomic path record the new state, validate every scene it changes, then show it; a refusal (EINVAL malformed, EOPNOTSUPP not composable here) restores the model and the screen, and `atomic_check` is record-validate-restore. Also fixed: `fb_create` checks the GEM size, `flush_region` redraws only where its buffer is shown, a plane's format list is enforced, cursor rows use the GEM pitch. Host tests pixel-exact; boot self-test `drm` 11b reads the scanout back. virtio-gpu's cursor is on the device's cursor queue (§976 item 2): a cursor up to 64x64 is drawn by the device and moving it redraws nothing, any other is composed, and one sync keeps the device's cursor in line with the model after every change that can affect it. How it is built: design-decisions §1400 |
+| A-Q18: a section per lane in `known-issues.md` (§977) | **done 2026-09-27.** Six `## Lane X: new entries` sections at the end, existing entries unmoved. The file's header, roadmap.md's shared-document row and every lane were told. Reaches `main` with lane A's next publish |
+| replace the running kernel without a reboot (lane D's request, operator's decision §1126) | **open, taken 2026-09-27.** The kernel half: freeze every thread, rewinding blocked calls through `ERESTART*` so they re-run after the swap. Write versioned hand-over records that describe each process's objects in the ABI's terms (mappings, capabilities, channels, registers, timers), not kernel structs. Load the new image beforehand and jump to it; it rebuilds its objects and thaws, falling back to the old kernel if the rebuild fails. It shares its freeze-and-save core with hibernation. The netstack opts in to a state hand-over rather than resetting its connections: TCP-repair-style export of each connection's sequence and window state, buffered bytes and timers, plus listeners and datagram bindings, keyed as `Net` keys them. The design is recorded as a lane A decision when built. Request: `requests/d-a-replace-the-running-kernel-without-a-reboot.md` (on lane-d until lane D publishes) |
+| A-Q21: wire in the security modules (§978) | **answered 2026-09-27 (B), open.** Fix each one first, then connect it: `secureboot` (fingerprint lists, then a door, for lane B's parked request), `diskencrypt` (real key derivation), `sealing`/`capsettings`/`secpolicy` (re-key by file identity), `authbroker`. Then syscall doors for `acl`/`fcomment`/`queryable`/`tags` |
 | the `fs/` wiring backlog: 340 of 430 modules have no consumer but `/proc` | **not operator-gated, but not a bug either.** dd-950: the unread fields are the shape of a missing userspace consumer. One worked example exists (`gui/desktop/src/power_settings.rs` reads `/proc/brightness`); the other ~339 are a documentation pattern (`provides` where `records` is true) plus real wiring. Sweeping 337 docs on one lane's reading of the architecture is what dd-951 warns against |
 | ~100 remaining unread kernel fields | triage framework recorded (dd-950); the two big clusters are done (power family 12, DRM plane 6). Remaining value is low per-field and the rule matters more than the count |
 
@@ -2506,12 +2529,24 @@ lane C's `guitk`.
   `known-issues.md` TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET and
   `compositor::tests::bench_fill_floor`.
 
-- `[F]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)
+- `[F]` Video-encoded capture fallback (lines ~4623, ~5060): **VP9**,
+  decided 2026-09-27 (design-decisions.md §1332). A port of libvpx for
+  encoding and decoding on the CPU, threaded across every core. Hardware VP9
+  (Intel's media driver, AMD's through Mesa, both over VA-API) comes once the
+  GPU stack exists. The encoder films buffer-backed windows for the
+  compositor's capture stream; the decoder serves SlateOS's remote viewer.
+
+- `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
+  and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
+  and gets thumbnails wherever a picture does. HEIC waits on
+  `open-questions.md` F-Q1 (a patent question), and would reuse the container.
 
 - `[F]` Port FreeRDP (line ~5058)
 
-Also lane F's to act on when answered: `open-questions.md` → **C-Q18**
-(nothing draws the mouse pointer), filed by lane C before the split.
+`open-questions.md` **C-Q18** (the pointer over fullscreen), filed by lane C
+before the split, was answered 2026-09-27 (§1334): the pointer is always
+shown. It is drawn on the presenter's copy today, and moves to the display's
+hardware cursor plane when a screen is shown without copying.
 
 
 ---
@@ -7565,7 +7600,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] `[F]` **JPEG is libjpeg-turbo, ported** — JPEG decoded to within 3 levels of what every other program shows, and some kinds (CMYK, RGB-coded, arithmetic-coded, separate-scan sequential) wrongly or not at all. `gui/imagecodec/src/jpeg/` is now a port of libjpeg-turbo 3.1.1's decompressor -- markers, Huffman, progressive and arithmetic decoding, block smoothing, the accurate integer and reduced inverse DCTs, fancy upsampling, colour conversion, and its handling of damaged data -- with Chrome's choices on top (colour space, CMYK formula, 100 scans). Every JPEG test is exact now; 146 seeds at four sizes and 32,000 mutants agree with libjpeg-turbo to the bit. Faster too: 0.76 s for a 21-megapixel photograph, from 1.42 s. Lossless JPEG as well (`jdlhuff.c`, `jddiffct.c`, `jdlossls.c`), held by 56 fixtures of its own and 20,000 lossless mutants. design-decisions.md §1318.
   - [x] `[F]` **An application can decline a close to ask about unsaved work** — a window's close button closed it whatever the application answered, so every editor threw away unsaved changes without a word. `Response::KeepOpen` (and `EventResponse::KeepOpen`) keeps the window open and redraws, so the application can show its "Save changes?" question and exit itself when the user answers; any other answer still closes, so no window can have an X that does nothing. Lane E's request. design-decisions.md §1309.
   - [x] `[F]` **Double clicks reach applications** — double-clicking did nothing inside any application (the file picker could not open a file by double-clicking it; a double click selected no word), because the compositor sends single presses by design and nothing paired them. Every application's event loop (`oswindow::EventLoop::poll`) now delivers `DoubleClick` after the press that completes one, at the user's double-click speed from `input.yaml`, by design-decisions §502's rules plus a four-pixel slop. Timed by a stamp the compositor now puts on every input event (input protocol v7), so a busy application still pairs clicks by when they were made. Lane E's request. design-decisions.md §1310.
-  - [ ] `[F]` Video-encoded capture fallback (H.264/VP9 for games/video)
+  - [ ] `[F]` Video-encoded capture fallback (VP9 for games/video, §1332: libvpx, threaded; hardware where found)
 
 ### 3.4 Window manager / desktop shell
 - [x] Window *control* (ask the compositor to focus/minimize/maximize/restore/tile/close) — placement and geometry are the compositor's, and the shell keeps no copy; see §506
@@ -8082,7 +8117,7 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
 ### 4.5 Remote desktop
 - [ ] `[F]` Port FreeRDP (working remote desktop early)
 - [x] Native compositor-level streaming (efficient draw-command forwarding) — the multi-window **scene protocol** lives in the shared `guiremote` crate (`gui/remote/src/scene.rs`), layered on that crate's existing single-window `RenderCommand` wire codec (`encode_frame`/`decode_frame`, `ORDR` magic) rather than a compositor-local duplicate. `SCEN`-magic frames forward each window's vector `RenderCommand`s instead of pixels, so a remote viewer replays the scene through its own rasterizer (orders of magnitude smaller than a raster for typical flat-shaded desktops). `SceneFrame`/`SceneWindow` carry per-window geometry+opacity in bottom→top z-order plus removed-window ids; `encode_scene_frame`/`decode_scene_frame` embed an `ORDR` sub-frame per present window and round-trip every `RenderCommand` variant (bounds-checked decoder rejects truncation, bad magic, unsupported version, oversized/`TooManyWindows` counts). `SceneSession` does delta suppression via an FNV-1a fingerprint of each window's command blob — unchanged windows send geometry-only (`commands: None`), and `apply_scene_frame` reconstructs the full scene viewer-side by carrying forward prior commands for delta windows. The compositor depends on `guiremote`; `Compositor::capture_stream_frame` walks the z-stack and emits a `SceneFrame` from the live visible window set, exposed over IPC via `StreamStart`/`StreamCapture`/`StreamStop`. 7 scene unit tests (frame round-trip, malformed-input rejection, version/magic checks, delta suppression, content-change resend, removed-window reporting, apply carry-forward, reset) on top of guiremote's 19 codec tests, plus 2 compositor IPC/forwarding tests. NOTE: DMA-BUF/buffer-backed windows have no vector commands, so they stream as empty command lists — pixel forwarding for those is the video-encoded capture fallback's job (next item).
-- [ ] `[F]` Video-encoded capture fallback for fullscreen games/video
+- [ ] `[F]` Video-encoded capture fallback for fullscreen games/video (VP9, §1332)
 - [x] DynDNS setup helper in settings (remote.rs: 5 DynDNS providers, remote desktop config, firewall integration)
 
 ### 4.6 System snapshots

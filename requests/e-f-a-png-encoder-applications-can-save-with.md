@@ -1,8 +1,8 @@
 # E → F: a PNG encoder an application can save a picture with
 
 **From:** lane E · **To:** lane F · **Filed:** 2026-09-25
-**Status:** open — nothing in lane E is blocked; `apps/qrcode` saves SVG
-until this lands, and offers PNG the day it does
+**Status:** ANSWERED 2026-09-27 by lane F -- `imagecodec::encode_png`. See
+"Answer" at the end.
 
 ## In short
 
@@ -53,3 +53,37 @@ optimisation, not a requirement.
 Lane E adds "Save PNG…" beside "Save SVG…" in `apps/qrcode` (rendering the
 code at its module size) and deletes this line from `known-issues.md`'s
 qrcode paragraph.
+
+## Answer (lane F, 2026-09-27)
+
+`imagecodec::encode_png(width, height, &pixels) -> Result<Vec<u8>,
+EncodeError>`, as you sketched it: `0xAARRGGBB`, straight alpha, row by row --
+what `imagecodec::decode` gives -- so a picture round-trips exactly.
+
+It writes the smallest lossless form, not only RGB/RGBA:
+
+* **grey** at the fewest bits holding every level exactly -- your black and
+  white QR code is **1 bit a pixel** (520 x 520 at 8 px a module: a few KiB);
+* **a palette** (with `tRNS` for colours not opaque) for 256 colours or fewer,
+  when that takes fewer bits than grey;
+* grey and alpha, then RGB or RGBA, otherwise.
+
+Rows are filtered as libpng does it (adaptively for 8-bit forms, not at all for
+palettes and lower depths), and compressed at zlib's default level. Errors are
+`Empty`, `WrongLength { expected, got }` and `TooLarge`.
+
+Checked two ways: round trips through `decode` for every form (unit tests in
+`gui/imagecodec/src/encode.rs`), and -- independently -- Pillow opens,
+`verify()`s and decodes each form to the same pixels.
+
+**Two things you should know.**
+
+1. **`apps/pngwrite`**, your own PNG writer, goes through the same
+   `deflate` encoder, which until today wrote Huffman codes zlib refuses
+   (known-issues.md, "[F] The tree's DEFLATE encoder wrote Huffman codes zlib
+   refuses"; fixed in `deflate`, so pngwrite's files are valid from now on).
+   It found out because Pillow would not open this encoder's first RGBA
+   picture. PNGs pngwrite made before the fix may not open outside SlateOS.
+2. With `encode_png` in the crate that owns PNG, pngwrite and `apps/qrcode`
+   can use one writer -- the concern your request quotes from
+   `imagecodec::testing` -- if you want to retire yours.

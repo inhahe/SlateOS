@@ -31,8 +31,13 @@ Two copies of one entry in two files is worse than either extreme — they drift
 and no reader can tell which is current. This happened on 2026-08-16 and went
 unnoticed until it was looked for; see the entry below.
 
-How to write in this file, in one paragraph. New entries go at the end with
-your lane letter in the heading. Put a `**Status:** …` line immediately under
+How to write in this file, in one paragraph. New entries go at the end of
+**your own lane's section**, one of the six `## Lane X: new entries` sections
+at the bottom of this file, with your lane letter in the heading
+(`design-decisions.md` §977). Until 2026-09-27 every lane appended at the end
+of the file, so any two lanes writing between merges collided there, eleven
+times on one day. An amendment still goes directly under the entry it amends,
+wherever that entry is. Put a `**Status:** …` line immediately under
 the heading — `OPEN` / `FIXED <date>` / `RESOLVED <date>` — and keep it
 current; **any lane may update any entry's status line**, without filing a
 request, because an issue you fixed but cannot mark stays open forever in the
@@ -158866,7 +158871,23 @@ real feature and is not claimed to be in scope.
 
 ### [A] DRM plane geometry is write-only: an atomic commit can move or scale a plane and nothing happens -- 2026-09-17
 
-**Status:** OPEN
+**Status:** FIXED 2026-09-27 (design-decisions §976, the operator's answer to
+A-Q17: honour the rectangles). The software backends now compose each CRTC's
+planes -- cropped, scaled, placed, blended -- with the `planecompose` crate
+(`kernel/src/drm/compose.rs`), and the legacy cursor is drawn too: by
+virtio-gpu's own cursor when it fits the device's 64x64, composed otherwise
+(design-decisions §1400). An
+atomic commit is checked by recording its result and validating that, so a
+rectangle outside its framebuffer, a scale beyond 16x, a format the plane does
+not list, or a scene a backend cannot compose is refused (`EINVAL` /
+`EOPNOTSUPP`), never accepted and ignored; a refusal leaves the object model
+and the screen as they were. Found and fixed on the way: `fb_create` never
+checked that a GEM object held the framebuffer it was said to hold;
+`flush_region` drew any framebuffer onto the screen whether or not it was being
+shown; a scanned-out buffer's format was never checked against its plane's
+list (RGB565 was byte-copied into an XRGB scanout); and the cursor's rows were
+assumed packed although `gem_create` pads them. Boot self-test: `drm` step
+11b, "Plane composition", reads every expected pixel back out of the scanout.
 
 **In short:** a graphics "plane" is a layer the display hardware can place
 and scale on screen -- how a cursor or a video overlay gets positioned. The
@@ -170768,7 +170789,52 @@ does not move the glyph by its phantom point's delta at all -- where this
 subtracted it. Found by `hint_oracle.py --var` (new): 69% agreement for Noto
 Sans at weight 700, width 87.5.
 
-### [F] A variable font without `HVAR` keeps its default advances at every weight -- 2026-09-26
+### [F] The tree's DEFLATE encoder wrote Huffman codes zlib refuses -- 2026-09-27 -- **FIXED 2026-09-27**
+
+**Status:** FIXED 2026-09-27 by lane F in `deflate/src/lib.rs`
+(`build_code_lengths`, new `limit_lengths`) -- a crate no lane owns (A-Q11),
+fixed there because every user shared the bug; lanes A, B and E notified.
+
+**In short (as found):** data compressed by this tree's `deflate` crate --
+gzip and zip files, initramfs images, the kernel's compressed files, PNGs
+written by `apps/pngwrite` -- could be unreadable by every other system.
+zlib, and so Python, Pillow, browsers and most tools, stopped with "invalid
+code lengths set"; this tree's own decompressor read them, so nothing here
+noticed. Found writing `imagecodec::encode_png`: Pillow refused a 30x40 RGBA
+picture this tree's decoder read back perfectly.
+
+**Cause.** A DEFLATE block with its own Huffman codes stores their lengths,
+limited to 15 bits (7 for the code that codes the lengths themselves). Where
+the tree's lengths ran past the limit, the encoder shortened the longest code
+and lengthened the shortest -- which does not keep the code *complete* (its
+lengths' Kraft sum exactly 1). zlib refuses any incomplete code-length code,
+and even one lone code of length 1 there (`inftrees.c`). The 19-symbol
+code-length alphabet with its 7-bit limit met this often.
+
+**Fix.** Lengths cut to the limit are rebalanced by counting codes per length
+-- lengthening the longest short codes until the code is not over-subscribed,
+then shortening the longest codes that fit the room left -- and handed out by
+frequency, as zlib's `gen_bitlen` does; a lone symbol is paired with another
+at length 1. Tests check every code the encoder builds, and every dynamic
+block's three codes in its output, as `inftrees.c` would, and fail on the old
+code; the callers' suites (ziparchive, zip, logrotate, mkinitramfs,
+archivemanager, pdfviewer, explorer, pngwrite: 1,012 tests) pass unchanged.
+
+**Left as it was, on purpose:** the decompressor still accepts an incomplete
+code, as it did. zlib would refuse one, but files this encoder wrote before
+the fix -- on disk now, some of them the kernel's own compressed files --
+must stay readable here. Such a file may still be unreadable elsewhere until
+it is written again.
+
+### [F] A variable font without `HVAR` keeps its default advances at every weight -- 2026-09-26 -- **FIXED 2026-09-27**
+
+**Status:** FIXED 2026-09-27 (lane F) -- `Face::advance_at` takes such a
+face's advance from its phantom points (`glyf::advance`), as HarfBuzz 14.3.0
+does. The fixture's Bold master now varies its widths (600 to 630), so the
+test can fail: `glyf::tests::a_face_without_hvar_advances_between_its_phantom_points`
+pins HarfBuzz's advances at weights 610 and 401, and its `HVAR` twin those of
+the face with the table. FreeType's hinted points for both variable faces were
+regenerated from the new masters and the hinter still matches them.
 
 **In short:** a variable font may leave out its table of advance-width
 changes (`HVAR`) and let each glyph's outline data carry them instead, as
@@ -170856,9 +170922,31 @@ bugs, worth reporting upstream; the point counting may be one too (FreeType
 counts from the start of the composite being built, which differs only for a
 nested one).
 
-### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26
+### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26 -- **FIXED 2026-09-27**
 
-**In short:** asked for the ink box of a colour emoji glyph, this crate
+**Status:** FIXED 2026-09-27 (lane F). `Face::glyph_extents_at` asks `COLR`
+first, as HarfBuzz does (`colr::extents::glyph_extents`). A glyph the `ClipList` covers
+reports its clip box, varied and rounded as `ClipBoxFormat2` does; any other
+colour glyph has its paint measured as `hb_paint_extents` measures it
+(`gui/font/src/colr/extents.rs`) -- a version-1 graph once HarfBuzz's bounded
+pre-pass finds it bounded, a version-0 glyph's layers -- in HarfBuzz's
+`float` arithmetic, with its nesting and edge limits and its cycle detectors.
+
+Checked against HarfBuzz 14.3.0 two ways. A fixture font built for it
+(`gui/font/tools/gen_colr_fixture.py`) has 56 colour glyphs: every paint that
+moves or combines, fixed and variable, at two instances; clip boxes reached
+through `PaintColrGlyph`; cycles; the nesting limit on both sides; a fan-out
+cut by the edge limit, where one edge more or less moves the box; null
+paints; and an unknown composite mode. And `tools/outline_oracle.py` ran over
+six colour fonts from Google Fonts and Mozilla. Four are variable COLRv1
+fonts with no clip list at all (Nabla, Honk, Foldit, Kalnia Glaze); the
+others are Bungee Spice and Twemoji Mozilla's COLRv0. Every one of 115,666
+glyph-instances agrees, where 6,658 had disagreed: Honk 2,960, Twemoji
+3,689, Nabla 4 and Bungee Spice 5. `seguiemj.ttf` still agrees on all 12,977.
+Tables HarfBuzz's sanitizer would edit are the one difference left, and only
+hostile fonts have them: see the next entry.
+
+**In short (as found):** asked for the ink box of a colour emoji glyph, this crate
 answers with the box of the plain glyph underneath it, while HarfBuzz answers
 with the colour glyph's own. Only the fallback placement of a combining mark
 on a colour glyph reads that box, so a mark on an emoji may sit a little off
@@ -170873,9 +170961,98 @@ at the instance, if it has one; otherwise the extents of its paint
 **Found by:** `tools/outline_oracle.py` over `seguiemj.ttf`, whose boxes
 disagree for 697 of 12,977 glyphs sampled while every path agrees.
 
-**The fix:** measure a `COLR` version-1 glyph as HarfBuzz does, in
-`glyph_extents_at` before the outline box -- `crate::colr` already reads the
-clip boxes and walks the paint graph -- and check it with the same oracle.
+**What was left, and was done:** the paint extents -- a walk of the paint
+graph as `hb_paint_extents` walks it (a clip glyph's box is the bounds of its
+drawn path, transformed; a paint unions the current clip into the group's
+bounds; `to_glyph_extents` rounds the corners) -- checked with a fixture font
+whose colour glyphs have no clip boxes, since no host font had one.
+
+### [F] A colour bitmap glyph's box was empty, or its outline's, not its picture's -- 2026-09-27 -- **FIXED 2026-09-27**
+
+**Status:** FIXED 2026-09-27 (lane F). `Face::glyph_extents_at` asks `sbix`,
+then `CBDT`, before `COLR` and the outlines, as HarfBuzz does
+(`bitmap::glyph_extents`, `gui/font/src/bitmap.rs`). It reads the tables
+HarfBuzz's way:
+
+- one strike per table, the biggest, the first of those tied, whatever its
+  bit depth;
+- up to eight `sbix` dupes, and a PNG header read unchecked (0 by 0 when the
+  data is too short for one);
+- `CBDT` image formats 17 and 18 through index formats 1 and 3 only, from the
+  first record that covers the glyph;
+- HarfBuzz's own `roundf`;
+- HarfBuzz's `upem`;
+- the `int16_t` in `scale_glyph_extents`
+  (`hbcalc::scale_glyph_extents_at_upem`), which the `COLR` clip-box path now
+  goes through too.
+
+A face of pictures alone now has no box for a glyph neither table answers
+for, as HarfBuzz has none.
+
+Checked against HarfBuzz 14.3.0 in two ways. `tools/gen_bitmap_fixture.py`
+builds 29 glyphs in two byte-built faces, one per case of that reading; five
+mutations of the rules are each caught. `tools/outline_oracle.py` ran over
+Noto Color Emoji's `CBDT` build and HarfBuzz's own `sbix` and `CBDT` test
+fonts (`test/api/fonts`, `test/fuzzing/fonts`): all 4,046 of Noto's glyphs
+and every glyph of the others agree.
+
+**In short (as found):** a font whose emoji are pictures rather than
+outlines is Noto Color Emoji's bitmap build, the usual emoji font on Linux,
+or Apple's `sbix` fonts. It gave every glyph an empty box, or the box of the
+plain glyph underneath, where HarfBuzz gives the box of the picture. The
+fallback placement of a combining mark reads that box, so a mark on such an
+emoji sat where HarfBuzz would not put it. In a face of pictures alone, a
+glyph with no picture got an empty box where HarfBuzz has none. That placed
+marks HarfBuzz leaves alone, or zeroes.
+
+**Where:** `Face::glyph_extents_at` (`gui/font/src/sfnt.rs`) asked `COLR`
+and then the outlines; `hb_ot_get_glyph_extents` asks `sbix` and `CBDT`
+first.
+
+### [F] A `COLR` table HarfBuzz's sanitizer would repair is measured as written -- 2026-09-27 -- **OPEN**
+
+**In short:** HarfBuzz checks a colour font's `COLR` table before it uses it,
+and quietly repairs what fails the check. It cuts a paint graph off where it
+nests more than 64 levels deep. It drops the whole table if the repairs would
+take more than 32 edits, or if the check runs out of its work budget. This
+crate reads the table as written. So for a font whose paint graph is deeper
+than 64 levels, or shared so heavily that checking it is expensive, a colour
+glyph's box can differ from HarfBuzz's. Other glyphs' boxes can differ too,
+because a repair made in a shared part of the table empties every glyph that
+uses that part. No real font is affected; only a hostile or fuzzed one is.
+
+**Where:** `gui/font/src/colr/extents.rs`, which measures boxes for
+`Face::glyph_extents_at`. The renderer (`colr.rs`) reads the table the same
+way, but it is not a HarfBuzz-parity renderer and has its own limits. The walk
+already handles the sanitizer's simplest repairs: a null offset, an offset
+past the end of the table and a record cut short all read as the null paint,
+as a nulled offset does.
+
+The colour bitmap tables read the same way (`bitmap::glyph_extents`). The
+sanitizer's structural checks decide there as they do in HarfBuzz: the
+versions, arrays that must fit, a `CBLC` record's first glyph not after its
+last, and a strike or subtable HarfBuzz would null. Its 32-edit cap and its
+work budget are not emulated there either. A `CBLC` with more than 32 broken
+subtables is refused whole by HarfBuzz and read record by record here.
+
+**How to reproduce:** add a glyph `nested(63, glyph("square"))` to
+`tools/gen_colr_fixture.py`. That chain is 65 levels deep, and fontTools
+shares its `PaintGlyph(square)` record with other glyphs. HarfBuzz nulls that
+record's paint offset, so `c_fill` and every other glyph using it report
+`[0, 0, 0, 0]`. This crate reports their real boxes. Found while building the
+fixture, which now reaches the walk's own nesting limit through
+`PaintColrGlyph` hops instead; the sanitizer does not follow those.
+
+**The fix:** once per face, emulate `hb_sanitize_context_t` over `COLR`.
+Visit the table in HarfBuzz's order: the base glyph list's records in order,
+then the layer list. Count a nesting level for each `Paint::sanitize`, and
+check each format's struct size, colour lines and affines as HarfBuzz does.
+Record every offset it would null. Run two rounds, as `sanitize_blob` does,
+and reject the table past 32 edits or once the operation budget is spent.
+The budget is 64 bytes of checking per table byte, and never less than
+16,384. Then have `Tables` read the recorded offsets as null. The budget
+must be charged byte for byte, as HarfBuzz charges each `check_range`, or the
+table is rejected at a different point.
 
 ### [F] A variable font whose outlines are CFF (`CFF2`) would not open -- 2026-09-26 -- **FIXED 2026-09-26**
 
@@ -171841,3 +172018,102 @@ self-test.
 - `netstack_client::self_test_nonblock_connect` now polls sixteen times back
   to back, then on a clock, up to 15 s. The old daemon refused the connect
   inside that burst whenever the server's reply took longer than five polls.
+
+## Lane A: new entries
+
+Lane A (kernel, core & networking) appends new entries at the end of this
+section, above the next lane's heading (design-decisions §977).
+
+### A-KMUTEX-BARGING-STARVED-A-WAITER -- 2026-09-27 -- FIXED (lane A)
+
+**In short:** the kernel's sleeping lock let a task that released it take it
+straight back, before the task it had just woken could run. A task that
+released and re-took it in a loop kept everyone else out for ever. That hung
+boot rq15 for its last 20 minutes: one network connection sending without
+pause held the lock every connection shares, and a quiet connection waiting
+for it never got a turn.
+
+**Where:** `kernel/src/sched/kmutex.rs`. `unlock` cleared the flag and woke one
+waiter; the releaser's next `lock` won the fast-path CAS before the woken
+waiter was scheduled, and the waiter went back to sleep. In design A of A-Q15
+the netstack client's `SHARED_RING` is a `KMutex` held across a daemon
+round-trip, and `ring_bench`'s busy sender, whose data is always ready, never
+paused between round-trips: `idle_beside_busy`'s probe waited from boot second
+~1260 to the 2400 s timeout, while the scheduler showed only the daemon and the
+busy sender running.
+
+**Fix:** lock handoff, as Linux's mutex has had since 2016
+(`MUTEX_FLAG_HANDOFF`). A waiter that is woken and still loses sets `starving`;
+the next unlock then hands the mutex over (`HANDOFF`) instead of freeing it,
+and only a task that has already slept on the queue may take it
+(`WaitQueue::wait_until_woken` tells it which it is). The fast path is
+unchanged while nobody has been passed over. Self-test
+`kmutex::self_test_no_starvation`: a holder that takes, sleeps holding, and
+re-takes without pausing, 40 rounds; a waiter must have the mutex within three
+rounds of asking. Without the handoff it waits all 40.
+
+### A-NETSTACK-CLOSE-BLOCKED-THE-DAEMON-AND-ATE-OTHERS-FRAMES -- 2026-09-27 -- FIXED (lane A)
+
+**In short:** closing a network connection made the network service stop
+serving everyone else while it waited to finish the close, and while it
+waited it read other connections' incoming data off the wire and threw it
+away. Boot rq15's check that a waiting read gets data that arrives late failed
+this way in design B: the read waited 12 s for data sent at 2.5 s.
+
+**Where:** `services/netstack/src/main.rs`, `TcpConn::close`. It sent FIN, then
+polled up to 40 times for the peer's FIN, sleeping 5 ms whenever nothing came,
+inside the request that asked for the close. The daemon serves one request at
+a time, so every close held up every socket for at least 200 ms, far longer
+under emulation. Its reads were `recv_one_seg`, the per-connection kind, which
+drops a frame that is not this connection's: the loopback queue is read first,
+so a close ate its siblings' data. Design B closes a whole session per socket
+(`OP_STOP` → `close_session`), so the witness before the late-data one left a
+run of closes behind it.
+
+**The evidence, and its limit.** rq15's late-data round timed out on the kernel
+side at 12 s (`channel::recv_timeout`) -- the daemon had not even accepted it
+-- and its completion arrived later and was discarded
+(`[netstack-client] discarded 1 late completion(s)`). Blocking closes are the
+cause the code supports; no log said which request held the daemon. So the
+daemon now says: any request that holds it for 1 s or more prints
+`[netstack] slow request: opcode 0x.. held the daemon for N ms`.
+
+**Fix:** a close no longer waits or reads. `TcpConn::begin_close` sends FIN and
+returns; the connection moves to `Net::closing` (16 slots, 2 s linger, oldest
+dropped when full), where the pump offers it the segments no live connection
+claims, after live connections and before listeners, and it ACKs the peer's
+FIN (`TcpConn::closing_seg`) and leaves. Every ring-path close goes through
+`Closing::retire`.
+
+**Left open:** the legacy one-shot `OP_TCP_FETCH` (`tcp_fetch`) still reads the
+wire with the per-connection filtered read while it runs, so it can drop other
+connections' frames. It is a blocking request by design, used only by the boot
+self-test that fetches over slirp before any ring socket exists. Its close no
+longer waits (there is no `Net` to linger in). The proper fix is to route
+`tcp_fetch` through `Net` and the pump like the ring paths, or retire the
+opcode.
+
+## Lane B: new entries
+
+Lane B (userland) appends new entries at the end of this section, above the
+next lane's heading (design-decisions §977).
+
+## Lane C: new entries
+
+Lane C (desktop & toolkit) appends new entries at the end of this section,
+above the next lane's heading (design-decisions §977).
+
+## Lane D: new entries
+
+Lane D (POSIX, libc & toolchain) appends new entries at the end of this
+section, above the next lane's heading (design-decisions §977).
+
+## Lane E: new entries
+
+Lane E (applications) appends new entries at the end of this section, above the
+next lane's heading (design-decisions §977).
+
+## Lane F: new entries
+
+Lane F (graphics stack) appends new entries at the end of this section, which
+is the end of the file (design-decisions §977).

@@ -279,6 +279,67 @@ extern "C" fn busy_sender(_arg: u64) {
     BUSY_RUNNING.store(false, Ordering::Release);
 }
 
+/// The idle pairs the prober probes: `k` of them, in [`WORKER_CLIENT`] and
+/// [`WORKER_SERVER`] (the loads run one at a time, so they share the slots).
+static PROBE_PAIRS: AtomicU32 = AtomicU32::new(0);
+
+/// Each probe's latency in microseconds (saturating), round `r`'s probe of
+/// idle connection `i` at `r * MAX_K + i`; 0 means it failed.
+static PROBE_US: [AtomicU32; PROBE_ROUNDS * MAX_K] =
+    [const { AtomicU32::new(0) }; PROBE_ROUNDS * MAX_K];
+
+/// Probes that failed.
+static PROBE_ERRORS: AtomicU32 = AtomicU32::new(0);
+
+/// Set by the prober when it has finished, however it went.
+static PROBES_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Idle-beside-busy's prober: [`PROBE_ROUNDS`] rounds, each a round trip on
+/// every idle connection, [`PROBE_GAP_MS`] apart.
+///
+/// A task of its own, not the caller, and that is the point: the caller waits
+/// for it under [`LOAD_DEADLINE_MS`], and on the deadline closes the sockets,
+/// which ends a probe stuck in a blocking call. Until 2026-09-27 the caller
+/// probed, so a probe that never returned hung the boot until QEMU's timeout
+/// with nothing named -- which is how rq15 ended, when the busy sender kept
+/// the shared ring's mutex (`KMutex` handoff fixed that; this makes the next
+/// such fault a failure that names itself).
+extern "C" fn prober(_arg: u64) {
+    let k = usize::try_from(PROBE_PAIRS.load(Ordering::Acquire))
+        .unwrap_or(0)
+        .min(MAX_K);
+    for r in 0..PROBE_ROUNDS {
+        for i in 0..k {
+            let pair = Pair {
+                client: SocketHandle::from_raw(
+                    WORKER_CLIENT
+                        .get(i)
+                        .map_or(0, |a| a.load(Ordering::Acquire)),
+                ),
+                server: SocketHandle::from_raw(
+                    WORKER_SERVER
+                        .get(i)
+                        .map_or(0, |a| a.load(Ordering::Acquire)),
+                ),
+            };
+            let slot = r.saturating_mul(MAX_K).saturating_add(i);
+            match round_trip(pair, PROBE_LEN) {
+                Ok(ns) => {
+                    let us = u32::try_from(ns / 1_000).unwrap_or(u32::MAX).max(1);
+                    if let Some(a) = PROBE_US.get(slot) {
+                        a.store(us, Ordering::Release);
+                    }
+                }
+                Err(_) => {
+                    PROBE_ERRORS.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+        }
+        crate::sched::sleep_ms(PROBE_GAP_MS);
+    }
+    PROBES_DONE.store(true, Ordering::Release);
+}
+
 /// Wait until `done()` or the load deadline; `false` on the deadline.
 fn wait_for(done: impl Fn() -> bool) -> bool {
     let deadline =
@@ -418,35 +479,55 @@ fn idle_beside_busy(mode: RingMode, k: usize) -> KernelResult<Stats> {
     if crate::sched::spawn(b"ring-bench-busy", 16, busy_sender, 0, 0).is_err() {
         BUSY_RUNNING.store(false, Ordering::Release);
     }
-    let t0 = crate::hrtimer::now_ns();
-    let mut lat = Vec::new();
-    let mut errors = 0u32;
-    for _ in 0..PROBE_ROUNDS {
-        for p in idle {
-            match round_trip(*p, PROBE_LEN) {
-                Ok(ns) => {
-                    if lat.try_reserve(1).is_ok() {
-                        lat.push(u32::try_from(ns / 1_000).unwrap_or(u32::MAX).max(1));
-                    }
-                }
-                Err(_) => errors = errors.saturating_add(1),
-            }
+    for (i, p) in idle.iter().enumerate() {
+        if let (Some(c), Some(s)) = (WORKER_CLIENT.get(i), WORKER_SERVER.get(i)) {
+            c.store(p.client.raw(), Ordering::Release);
+            s.store(p.server.raw(), Ordering::Release);
         }
-        crate::sched::sleep_ms(PROBE_GAP_MS);
     }
+    for a in &PROBE_US {
+        a.store(0, Ordering::Release);
+    }
+    PROBE_ERRORS.store(0, Ordering::Release);
+    PROBES_DONE.store(false, Ordering::Release);
+    PROBE_PAIRS.store(u32::try_from(k).unwrap_or(0), Ordering::Release);
+    let t0 = crate::hrtimer::now_ns();
+    let probing = crate::sched::spawn(b"ring-bench-probe", 16, prober, 0, 0).is_ok();
+    let finished = probing && wait_for(|| PROBES_DONE.load(Ordering::Acquire));
     BUSY_STOP.store(true, Ordering::Release);
     let stopped = wait_for(|| !BUSY_RUNNING.load(Ordering::Acquire));
     let secs_ms = crate::hrtimer::now_ns().saturating_sub(t0) / 1_000_000;
+    // Closing the sockets ends any call still blocked on one, so a stuck
+    // prober or busy sender finishes (with errors) instead of outliving the
+    // load; each is given a moment to, so it cannot write into the next
+    // load's tables.
+    close_pairs(&pairs);
+    socket::close(srv);
+    if probing && !finished {
+        wait_for(|| PROBES_DONE.load(Ordering::Acquire));
+    }
+    if !stopped {
+        wait_for(|| !BUSY_RUNNING.load(Ordering::Acquire));
+    }
+    let mut lat: Vec<u32> = PROBE_US
+        .iter()
+        .take(PROBE_ROUNDS.saturating_mul(MAX_K))
+        .map(|a| a.load(Ordering::Acquire))
+        .filter(|&us| us != 0)
+        .collect();
+    let errors = PROBE_ERRORS.load(Ordering::Acquire);
     let st = stats(&mut lat);
     let extra = alloc::format!(
-        ",\"busy_bytes\":{},\"window_ms\":{}{}",
+        ",\"busy_bytes\":{},\"window_ms\":{}{}{}",
         BUSY_BYTES.load(Ordering::Acquire),
         secs_ms,
+        if finished { "" } else { ",\"timed_out\":true" },
         if stopped { "" } else { ",\"busy_stuck\":true" }
     );
     report("idle_beside_busy", mode, k, st, errors, &extra);
-    close_pairs(&pairs);
-    socket::close(srv);
+    if !finished {
+        return Err(KernelError::TimedOut);
+    }
     Ok(st)
 }
 

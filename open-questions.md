@@ -84,102 +84,111 @@ subsystem".)
 one: write it up in `design-decisions.md` as a `Decided by: Operator` entry,
 **delete the entry from here**, and add one line to the `
 
-## F-Q2 — [F] Remote desktop's video fallback (for games and video): which video format do we write an encoder for? — Status: OPEN (raised 2026-09-26)
+## F-Q3 — [F] Screenshots: how does a program get permission to read what is on the screen? — Status: OPEN (raised 2026-09-27)
 
-**In short:** remote desktop here sends *drawing instructions* rather than
-pictures, which keeps text sharp and uses little bandwidth -- but a game or a
-playing video has no drawing instructions, only changing pixels, so today it
-arrives blank. The design's answer is a fallback that films the screen and
-sends it as video. Nothing in the tree can make video yet, so lane F would
-write an encoder (the part that compresses the screen into a video stream)
-and, for a SlateOS viewer, the matching decoder. Which video format to write
-decides the cost, who can watch it, and whether patents are involved.
+**In short:** the screenshot tool cannot take screenshots, because no program
+can ask the display server (the compositor, the program that draws every
+window) for the screen's pixels. Adding that request is straightforward. The
+hard part is who may use it: whatever is on the screen -- a password being
+typed, someone's private messages -- would be readable by any program that
+asks. Today the compositor cannot even tell which program is asking, so the
+choice is how a program earns the right, and what the person at the screen
+sees when it does.
 
 **The options.**
 
 | Option | *What changes:* |
 |---|---|
-| **A.** VP8 | Streams play in any browser and in SlateOS's own viewer; no patent fees; roughly the quality of 2010-era web video. |
-| **B.** H.264 | Plays anywhere, often decoded by the graphics chip; somewhat better quality per bit than VP8; patent-pooled (fees for some uses in some countries until about 2030). |
-| **C.** VP9 | Better quality per bit than either (roughly half H.264's bitrate); no patent fees; plays in browsers; several times the work to write, and slower to encode. |
-| **D.** VP8 first, VP9 later | A working fallback soon, and the efficient one when it is worth the effort. |
+| **A.** Ask every time | Before each capture the compositor shows its own "Screenshot wants to capture the screen -- Allow / Deny" box, which no program can draw or click for you. One extra click per screenshot. |
+| **B.** Ask once per program, remember | The first capture asks as in A; after "Allow", that program captures without asking, until the permission is removed in Settings. |
+| **C.** The user's own action is the permission | The compositor does the choosing: Print Screen, or its own region/window picker, captures and hands the picture to the screenshot program. A program cannot start a capture by itself at all. |
+| **D.** No permission | Any program can read the screen whenever it likes, as on X11 Linux and on Windows. |
 
-**What each means for us.**
+**What each means.**
 
-- **VP8** (a video format Google made royalty-free) is the one this tree
-  already half-knows: a WebP photograph *is* a single VP8 frame, and
-  `gui/imagecodec` decodes those, to the bit. An encoder reuses that
-  understanding, and a viewer's decoder extends it with motion (the part that
-  says "this block moved from there"). Smallest effort by a wide margin.
-- **H.264** is the one every device can decode with dedicated hardware, which
-  matters for a phone or an old laptop as the *viewer*. Its patents are
-  pooled and licensed; most of the basic-profile ones have expired, not all.
-  That makes it a legal and policy question as much as an engineering one --
-  the same one F-Q1 asks about HEVC.
-- **VP9** is what the design text names alongside H.264. It is the best of
-  the three at a given bandwidth, and much the largest to write.
+- **A** needs nothing that does not exist yet, and it cannot be abused
+  silently: every capture is something the person agreed to just then. The
+  cost is the click, which a screen *recorder* pays once per recording and a
+  screenshot tool once per shot.
+- **B** is the convenient one (macOS works this way), but it depends on the
+  compositor knowing *which program* is connected, which it cannot yet: the
+  kernel does not pass it an identity it can trust (design-decisions §495,
+  lane A's side). It also lets another program use the trusted one as a
+  proxy -- for example by starting it with arguments that capture and save.
+- **C** is the most secure and the smoothest for the common case (the key
+  press *is* the consent -- the way Wayland desktops do it), but the tool's
+  own region and window pickers would move into the compositor, and a program
+  that needs pictures on its own schedule (a recorder, automation) would still
+  need A or B.
+- **D** is simple and dangerous: any program, including one downloaded a
+  minute ago, could quietly photograph the screen.
 
-**If never answered:** safe. Games and videos keep arriving blank over remote
-desktop, as they do now; ordinary windows are unaffected. Lane F works on
-other things meanwhile.
+**If never answered:** safe. The screenshot tool and screen recorder keep
+saying honestly that they cannot capture; nothing else is affected. Lane F
+builds the rest of the request -- the pixels, the protocol -- behind a gate
+that refuses, so that answering this is the last step rather than the first.
 
-**Claude's recommendation:** **D** -- VP8 now (royalty-free, playable
-everywhere, and a direct extension of code we already have and have tested to
-the bit), VP9 once the fallback is in use and bandwidth is the complaint. H.264
-only if hardware decoding on the viewer side turns out to matter more than the
-patent question.
+**Claude's recommendation:** **C, with A for programs that capture on their
+own schedule** -- the person's own key press or pick is the permission, and a
+recorder asks once per recording. B once the kernel can say which program is
+connected, if the prompt proves tiresome. Not D.
 
-**Where it bites:** a new encoder beside `gui/imagecodec/src/webp/lossy/` (or
-its own crate), `gui/remote` (the stream), and the compositor's
-`capture_stream_frame`, which today sends buffer-backed windows -- games, video
--- as empty command lists (roadmap: "Video-encoded capture fallback").
+**Where it bites:** lane E's request
+`requests/e-f-an-application-cannot-read-the-screen-so-no-screenshot-can-be-taken.md`;
+`gui/remote` (a capture request), `gui/compositor` (its handler, and the
+prompt or picker), `gui/window` (the call an application makes);
+`apps/screenshot` and the screen recorder on lane E's side.
 
-## F-Q1 — [F] iPhone photos (HEIC) and many web pictures (AVIF) will not open. Bring in the video decoders they need? — Status: OPEN (raised 2026-09-25)
+## F-Q1 — [F] iPhone photos (HEIC) will not open. May SlateOS include a decoder for a patented video format? — Status: OPEN (raised 2026-09-25, narrowed 2026-09-27)
 
-**In short:** two common kinds of picture cannot be opened at all: HEIC, which
-is how an iPhone saves every photograph unless told otherwise, and AVIF, which
-more and more websites serve and which a browser saves when you "Save image
-as". Each stores the picture as one frame of a modern video format, so opening
-it means bringing in a video decoder -- someone else's code, tens of thousands
-of lines -- and for HEIC, a format under patent licensing. Everything else
-people commonly open now works (PNG, JPEG, GIF, WebP, BMP, icons). Should we
-take these on, and which?
+**In short:** an iPhone saves every photograph as HEIC, and SlateOS cannot
+open one. Opening one means decoding HEVC, a video format covered by patents
+that their owners license for a fee. That fee is why Windows sells HEIC support
+separately for $0.99 and why Fedora Linux leaves it out. The question is
+whether SlateOS should include such a decoder, offer it as a separate install,
+or neither. (The other half of this question, AVIF, you answered "yes":
+design-decisions.md §1333.)
 
-**The question.** `gui/imagecodec` (the one picture decoder every program
-here uses) would need:
+**Your question: what is hard about "letting users replace the library"?**
+You are right that it is nearly trivial. The usable open decoder, libde265, is
+under the LGPL (a licence that lets anyone ship it, on one condition). The
+condition is that a user must be able to swap in their own build of that one
+library. The two things that could get in the way both have easy answers:
 
-- for **AVIF**: an **AV1** decoder (AV1: a video format made royalty-free by
-  its designers) and the **HEIF** container (a file layout of nested boxes,
-  shared by both formats);
-- for **HEIC**: an **HEVC** decoder (HEVC, also "H.265": a video format whose
-  patents are licensed for a fee through patent pools) and the same container.
+- **Rust bakes libraries into each program.** Linked that way, the decoder
+  would sit inside every program that shows a picture, and we would owe users
+  a way to rebuild all of them. So it goes in a separate library file or
+  helper program instead. That is easy, and the helper program is the safer
+  design anyway: a crafted picture that attacks the decoder then attacks a
+  helper that can do nothing else.
+- **This version of the LGPL (3) also forbids locking the user out.** If
+  SlateOS ever insists that only software it signed may run, a user's own
+  build of the decoder must still be allowed to run. As long as users can
+  always add their own signing key, this costs nothing.
+
+So the licence is not the obstacle. The **patents** are, and they are a legal
+and policy question rather than an engineering one.
+
+**The options** (the engineering is the same for all three up to the last
+step: the decoder is built as a separate, replaceable helper, and the only
+difference is whether a fresh install includes it):
 
 | Option | *What changes:* |
 |---|---|
-| **A.** AVIF now, HEIC not yet | AVIF pictures open and get thumbnails; iPhone photos still say they cannot be displayed. |
-| **B.** Both now | iPhone photos open too. |
-| **C.** Neither yet | Both keep failing to open, with a message saying so. |
+| **A.** Include it | iPhone photos open out of the box. If SlateOS is ever sold or distributed widely, the HEVC patent pools may ask for royalties. |
+| **B.** A separate install, one click away | The first time a HEIC file is opened, SlateOS offers to install "HEIC support". The base system contains no HEVC code; whoever installs it takes on the patent question, as with Windows' paid extension. |
+| **C.** Not yet | iPhone photos keep saying they cannot be displayed. |
 
-- **AVIF** has a clean path: `rav1d`, a Rust translation of the AV1 decoder
-  Chrome and Firefox use (dav1d), under a permissive licence (BSD, no conditions
-  beyond keeping the notice). AV1 decoding is defined to the bit, so its
-  pixels are the browsers'. Cost: a large port to vendor and keep current.
-- **HEIC** is where the real decision is. The usable open decoder (libde265)
-  is **LGPL** (a licence that lets you ship it, but obliges you to let users
-  replace that library with their own build), and the HEVC **patents** are why
-  Windows sells HEVC support separately and Fedora ships without it. That is a
-  legal and policy call about what this system ships, not an engineering one.
+**If never answered:** safe. HEIC files show an error saying they cannot be
+displayed, as now; nothing else is affected.
 
-**If never answered:** safe. Nothing breaks; these files show an error saying
-they cannot be displayed. It gets more noticeable as AVIF spreads.
+**Claude's recommendation:** **B**. Almost A's convenience, with the base
+system free of the one kind of code that carries a fee. If SlateOS will only
+ever be used privately, A is just as good, and simpler.
 
-**Claude's recommendation:** **A** -- AVIF through `rav1d` -- and HEIC held
-until you decide whether this system may ship an HEVC decoder (or offers one as
-a separate download, as Windows does). Meanwhile lane F is working on TIFF,
-which needs no such decision.
-
-**Where it bites:** `gui/imagecodec/src/lib.rs` (the format dispatch); a new
-`heif`/`avif` module; a `requests/` note to lanes C and E when it lands.
+**Where it bites:** `gui/imagecodec` (the format dispatch; the HEIF container
+reader §1333 builds for AVIF serves HEIC too), a helper program for the
+decoder, and the image viewer's "cannot display" message.
 
 ## C-Q26 — [C] Four programs have a preference with nowhere to keep it. Where do user settings live? — Status: OPEN (raised 2026-09-18)
 
@@ -1986,176 +1995,6 @@ port needed the exact rule, and the manual's own example was not enough to
 derive it either.
 
 
-## A-Q13: Eight times in two days, one agent's push has cost another agent a 20-minute test run. Should pushing be gated?
-
-**In short:** the three agents share one trunk. When one pushes something broken,
-nothing notices until another agent runs the full test cycle -- which takes 20 to
-40 minutes and fails partway through. That has happened eight times in two days,
-and each time the agent who paid was not the one who caused it. The question is
-whether pushing should have to pass something first, and if so what.
-
-**Glossary.** *Gate* -- an automatic check that can refuse. *Boot test* -- the full
-cycle: ~130 checks, a kernel build, then booting it in an emulator; 20-40 minutes.
-*Pre-push hook* -- checks that run on the pushing machine before a push is allowed;
-seconds to minutes.
-
-**The evidence, all from 2026-09-12 to 09-14.** Eight breakages arrived on the
-trunk and were found by a later agent's run:
-
-| what | found after | would a pre-push check have caught it? |
-|---|---|---|
-| a shell quoting fault (`SC2046`) | ~520 s | yes -- the check exists, but only in the boot |
-| a file read that hid three failures as one | ~520 s | yes, same |
-| code reading two fields that did not exist yet | ~1800 s | yes, a compile error |
-| eight file writes with the wrong line endings | 13 s and 16 s (twice, different files) | yes, same check, boot-only |
-| a list claiming to hold every case while missing one | 321 s | yes, same |
-| a shell fault in a *different* agent's tree | ~1895 s | yes, a compile error for another platform |
-| **two checks that were themselves wrong** | 198 s, 262 s | no -- these were false alarms |
-
-**Four were real, two were false alarms from checks I have since fixed.** That
-ratio matters for the answer: adding more gating without fixing the gates buys
-more false alarms, and an agent who learns to discount a red result is worse off
-than one who never had the check.
-
-**The thing that surprised me, and it rules out the obvious answer.** Lane C
-already runs the whole test suite before every merge -- about 6-7 minutes -- and it
-caught *neither* of the two faults in lane C's own tree. One was a compiler warning
-for a different platform; the other was a separate check written in Python. So
-"the agent tested before pushing" and "the trunk still works" are different
-claims, and the first has been quietly standing in for the second.
-
-**Why we cannot simply require the full cycle.** The trunk takes roughly 49
-merges a day (489 in ten days, 86 on the busiest). The full cycle is 20-40
-minutes and only one can run at a time on this machine. The arithmetic does not
-close: requiring it would cap the project at a handful of merges a day.
-
-**The options:**
-
-* **Move the fast checks to push time.** Several of the checks above already
-  exist and run *only* in the full cycle, for no reason anyone recorded. They
-  take seconds.
-  *What changes:* the agent who writes the fault sees it in seconds instead of a
-  different agent seeing it 20 minutes later. Five of the six real faults above
-  would have been caught this way. Costs a few seconds per push.
-* **Require the full cycle before merging to the trunk.**
-  *What changes:* the trunk is never broken; the project does a handful of merges
-  a day instead of fifty. This is the strongest guarantee and the one the
-  arithmetic refuses.
-* **Change nothing; the agents keep absorbing it.**
-  *What changes:* nothing. Eight runs in two days were spent on this, and the
-  cost falls on whoever runs the cycle rather than whoever caused the fault, so
-  no agent sees their own cost.
-* **Fix the checks first, then decide.**
-  *What changes:* nothing immediately. Two of eight alarms were the checks being
-  wrong; that rate is worth lowering before making them block more.
-
-**Recommendation: the first, and it is already half-blocked on A-Q11.** The
-checks exist, they are fast, and they are deterministic -- the only reason they
-run late is that nobody moved them. But putting them in the pre-push hook means
-editing `scripts/hooks/pre-push`, which is the file A-Q11 asks about, and two
-agents each believe it is theirs. I proposed one such move to lane B by notice
-and deliberately did not make it. **Answering A-Q11 unblocks this.**
-
-**If this is never answered:** nothing degrades, but the cost continues at
-roughly four boot runs a day of wasted work, charged to whichever agent runs the
-cycle. Lane C has seen the tally and seconds this question rather than filing a
-separate one.
-
-*Filed 2026-09-14 by lane A, with lane C's agreement. Lane C contributed the
-measurement that its own pre-merge suite caught neither of its own faults, and
-that a lane's gate has nothing scheduling it apart from another lane's boot --
-its slowest run today, 578 s of 399 s mean, was slow because my boot was running.*
-
----
-## A-Q11: Who owns `scripts/hooks/pre-push`?  Two lanes each believed they did, and both edited it the same night
-
-**In short:** the tool that tells each agent which files it may edit does not mention
-two files, and they are the two that sit between agents by nature: the script that runs
-before any agent uploads work, and the script every agent's code is checked by. Two of
-the three agents each concluded one of those files was theirs, and both edited it the
-same night. Nothing broke, by luck. **The part that is still a hazard after those two
-have stopped disagreeing: a third agent reading that tool would conclude it may edit
-either file freely.**
-
-The longer version: there is a script that runs automatically before any agent uploads work,
-and it decides whether the upload is allowed. Tonight two of the three agents each
-believed that file was theirs to edit, and both edited it within a few hours. Nothing
-broke, because their changes happened not to touch the same lines. The tool that is
-supposed to say who owns what does not mention the file at all.
-
-**The evidence.** `scripts/which-lane.py` is what every agent consults, and what a new
-session would consult:
-
-* Lane A owns `kernel/**`, `bench/**`, `toolchain/x86_64-slateos.json`,
-  `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh`.
-* Lane B owns `posix/**`, `userspace/**`, `services/**`, `init/**`,
-  `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh`.
-* Lane C owns the `gui/**`, `apps/**`, `net*/**` families.
-
-Neither `scripts/hooks/pre-push` nor `scripts/coreutils-check.sh` appears in any lane's
-owns list or any lane's never-writes list: `grep -c 'hooks/pre-push\|coreutils-check'
-scripts/which-lane.py` returns **0**, in both lane A's tree and lane B's.
-
-Lane B states their own instructions enumerate their write scope as the seven paths above
-**plus `scripts/hooks/pre-push` and `scripts/coreutils-check.sh`**, and separately state
-that `scripts/boot-test.sh` is lane A's. That is the whole of their claim and they infer
-nothing further from it. Lane A's instructions name neither file; lane A inferred the
-hook from owning "the boot test", which was an inference and not a reading.
-
-**Why the omission is probably not random**, which is lane B's observation and the most
-useful thing either lane found here: the table enumerates *trees* — `kernel/**`,
-`posix/**`, `gui/**` — and these two files are not trees. A push hook every lane pushes
-through and a check script every lane's crates go through have no tree to belong to, so
-a tree-shaped table has nowhere to put them. That suggests the fix is a rule for
-cross-cutting files rather than two more entries.
-
-The omission is not a stale checkout. `git show origin/lane-b:scripts/which-lane.py`
-diffed against lane A's copy: identical. It is a gap in the shared table that two lanes
-filled with opposite answers.
-list. Lane B reports that their own private instructions name it as theirs; lane A
-inferred it from owning "the boot test". Their copy of `which-lane.py` is byte-identical
-to lane A's, so this is not a stale checkout — it is a gap in the shared table that two
-lanes filled with opposite answers.
-
-**What actually happened, since it is the reason this is worth your time.** Lane A made
-six edits to that file tonight (renaming a gate, widening it by five gates, moving its
-summary, correcting its inventory). Lane B made one, and flagged the mismatch rather
-than proceeding quietly. No collision occurred. `CLAUDE.md` names exactly this as "the
-most expensive failure mode in this arrangement", and the only thing that prevented it
-was which lines each happened to touch.
-
-**The options:**
-
-* **Assign it to lane B.**  *What changes:* lane A files a request for any hook change;
-  since lane A owns `boot-test.sh` and most gates are wired in both, many changes would
-  become two-lane handshakes.
-* **Assign it to lane A.**  *What changes:* the reverse, and it sits oddly with lane B's
-  own instructions, which they should not have to contradict to follow the table.
-* **Declare it shared, with a rule.**  *What changes:* both may edit it; the rule has to
-  say how (e.g. append-only per gate, as the shared documents already work), because
-  "shared" without a convention is what produced tonight.
-* **Answer the general case instead.**  *What changes:* `scripts/**` has roughly 120
-  files and the table names six of them. Whatever is decided for the hook, the same
-  ambiguity covers every unnamed script, and a rule for the directory would settle more
-  than one question.
-
-**If this is never answered:** the lanes keep editing it on opposite assumptions. The
-failure is silent and occasional — two lanes touching the same region in one night — and
-when it happens the loser's change disappears without either noticing, because git
-merges a non-overlapping edit cleanly and nobody is watching that file for intent.
-
-**What each lane is doing until this is answered**, recorded so the asymmetry is visible
-rather than looking like one lane conceding. Lane B continues to edit the file, because
-their instructions name it and they should not act against their own instructions on a
-peer's reading — and they announce each edit first, so a collision cannot happen
-unnoticed while this is open. Lane A has stopped, because nothing in lane A's
-instructions authorises it: the difference is not politeness, it is that one lane has a
-source and the other had an inference. Lane B has offered to make any hook change lane A
-needs in the meantime, which is faster than a request queue.
-
-*Raised by lane A 2026-09-12 after lane B flagged the mismatch. Lane A is not a neutral
-party here and offers no recommendation between the first two options.*
-
 ## B-Q13 — [B] Two trailing questions the operator asked in their answers, which nobody had picked up — Status: OPEN
 
 **In short:** the operator's answers arrive in
@@ -2765,190 +2604,6 @@ earn their bytes" as a real question and correctly declines to answer it — but
 named it there rather than here, so it has never been in front of you.
 
 
-## A-Q16 — [A] Two kinds of lock in the kernel; one skips the deadlock checker, for a reason that turns out not to be true. Which way should that be settled? — Status: OPEN
-
-**In short:** the kernel has a cheap lock and an expensive lock. The
-expensive one is watched by a deadlock detector; the cheap one is not, and
-the stated reason it does not need watching is that nothing is ever locked
-*inside* it. A new check measured that: it happens **1256 times per boot**,
-in at least 24 places. Nothing has actually deadlocked, and the code is
-probably fine -- but the reason we believed it was fine was wrong, and the
-choice is whether to pay to find out properly.
-
-**Glossary, because none of this is guessable.** A *lock* stops two pieces
-of code touching the same data at once. A *deadlock* is two pieces of code
-each holding what the other needs, so both stop forever -- the classic cause
-is taking two locks in opposite orders. *lockdep* is the built-in detector
-that watches lock orders and complains about a possible deadlock even when
-one has not happened yet. A *leaf* lock is one that never takes another lock
-while held; leaf locks cannot participate in an ordering deadlock, which is
-why skipping the detector for them is sound.
-
-**Where it bites.** `design-decisions.md` §70 split the kernel's locks in
-two: `PreemptSpinMutex` (cheap, no detector, 489 uses, for "hot leaf
-locks") and `crate::sync::Mutex` (detector + statistics). The §70 text says
-ordering checks "add no value" for the cheap type *because* nothing nests
-inside it. §949's new check measured 1256 nested acquisitions per boot
-across ≥24 site pairs, including cross-module ones
-(`ipc/completion` -> `proc/thread`, `fs/cgroupfs` -> `cgroup`).
-
-One real instance was already fixed today: `INOTIFY_TABLE` documented its
-own lock order in prose *and* used the untracked type, so the order it
-documented could not be enforced. It is now the tracked type and lockdep
-confirms the order holds.
-
-| option | *What changes:* |
-|---|---|
-| **(a) Convert the non-leaf ones** (recommended) | the detector watches the orderings behind 89 distinct site pairs (measured 2026-09-17; the "12-15" here previously was extrapolated from a saturated cap); a real inversion becomes a loud boot failure instead of a hang. Costs per-acquire tracking on those paths. |
-| (b) Restate §70 honestly, accept the risk | nothing changes at runtime; §70 stops claiming a reason that is false and says the type is chosen for cost with ordering unchecked. The 1256 stay unwatched. |
-| (c) Convert only the cross-module pairs | the five cross-module orderings get watched; the same-module init-guard idiom (the bulk) stays as it is. |
-
-**My recommendation: (a), scoped by measurement rather than all at once.**
-
-**Measured after this question was filed, so the cost is no longer a
-guess.** There was no `PreemptSpinMutex` arm in `bench_lock_primitives`
-until 2026-09-17; there is now, and five boots agree:
-
-| | bare `spin::Mutex` | `PreemptSpinMutex` | `crate::sync::Mutex` |
-|---|---|---|---|
-| typical | 26ns | **160ns** | **395ns** |
-
-So converting one of these locks costs roughly **235ns per acquire**, and
-that 235ns is identifiable work -- lockdep, contention statistics, and two
-`rdtsc` reads -- rather than a general penalty for touching the acquire
-path. Which means the decision is per-lock and answerable: a lock taken
-once per boot costs nothing worth discussing, and one on a syscall path
-might.
-
-Two caveats on those numbers. They are QEMU TCG figures, so the *ratios*
-transfer and the nanoseconds do not. And one of the five boots reads
-28/268/719 -- uniformly higher across all three arms, so it is a slow boot
-rather than a slow lock, and is excluded rather than averaged in.
-
-A related measurement, because it bears on whether instrumenting these
-locks is inherently costly: the §949 leaf check adds three atomic
-operations to that same acquire path, and its cost is **below the noise
-floor** -- 166ns without it against 159/162/159 with it, the instrumented
-runs being the faster ones. So the 235ns is not "what it costs to touch
-this path"; it is what lockdep and statistics specifically cost.
-
-So: convert, read the arm, and revert any conversion that costs more than
-it is worth. The arm now exists to read.
-
-**If never answered:** the current behaviour is safe as far as anyone can
-tell and has been for months, so nothing breaks tomorrow. What degrades is
-that every new nesting added inside one of these 489 locks is equally
-unwatched, and the check now reports 24 of them at its cap on every boot --
-so the noise grows and the signal for a genuinely new one gets harder to
-see.
-
-
-## A-Q17 — [A] Moving or scaling a video/cursor layer silently does nothing. Should the kernel refuse the request, or start honouring it? — Status: OPEN
-
-**In short:** the display hardware can draw a picture as a layer and place
-or stretch it anywhere on screen -- that is how a video overlay or a mouse
-cursor gets positioned without redrawing everything. A program asks for a
-rectangle, the kernel stores the numbers, replies success, and never uses
-them. So moving or resizing that layer does nothing at all, and the program
-is told it worked.
-
-**Glossary.** A *plane* is one such hardware layer. *Atomic modeset* is the
-interface a display program uses to change several display settings at once,
-so they either all take effect together or none do -- it is the modern way
-Linux programs talk to a graphics driver. *Scanout* is the hardware
-continuously reading a framebuffer to send pixels to the monitor.
-
-**The measurement.** `drm/plane.rs` declares `src_x/y/w/h` (the region of
-the picture to take) and `dst_x/y/w/h` (where to put it on screen). Every
-occurrence of `dst_w` in the whole kernel is the declaration or one of five
-writes; there are **zero reads**. One of those writes is
-`drm/atomic.rs:423`, the atomic commit handler storing what a client asked
-for. Nothing in the scanout path consults any of it.
-
-| option | *What changes:* |
-|---|---|
-| **(a) Refuse a commit that sets a non-default rectangle** (recommended) | a program that tries to move a layer gets a clear error instead of false success. Programs that only ever use the full-screen default are unaffected. |
-| (b) Honour the rectangle in the scanout path | layers can actually be placed and scaled -- the feature works. This is real driver work, per backend, and needs hardware to verify. |
-| (c) Leave it, and document it | nothing changes; `/proc` and the API keep reporting success for a no-op. |
-
-**Why this needs you and not me.** (a) is a user-visible behaviour change to
-an API that Linux programs use by construction. Anything currently setting a
-rectangle gets success today and an error afterwards -- and "currently
-works" is doing a lot of work in that sentence, because what it means is
-"currently appears to work while doing nothing". That is a trade between two
-kinds of wrong, and which one is worse depends on what you want the OS to
-be honest about.
-
-**My recommendation is (a)**, on design-decisions 945: a simulated action
-should be disclosed where its result is read, and an API return value is
-where this one is read. There is no `/proc` header to put a note in, so the
-only honest disclosure available is the error. (b) is the right end state
-and is not blocked by (a) -- refusing now does not make honouring it later
-harder.
-
-**If never answered:** nothing breaks today, because nothing in the tree
-sets a plane rectangle. It gets worse with time in a specific way: the first
-real compositor to try it will spend a while looking for a bug in its own
-code, since every call it makes returns success.
-
-
-## A-Q18 — [A] Three lanes all append to the end of `known-issues.md` and it conflicted eleven times today. Should it get a per-lane seam like the other shared documents? — Status: OPEN
-
-**In short:** the three agents keep one shared file of known bugs. All three
-add new entries to the bottom, so any two that write between merges collide
-at the same spot. Today that happened eleven times. Every collision is
-trivial to fix -- keep both entries -- but each one stops a build pipeline
-that has to be started again from the beginning.
-
-**The other two shared documents already solve this, differently each.**
-
-| document | seam | conflicts today |
-|---|---|---|
-| `design-decisions.md` | per-lane numbering bands; 426 numbered sections, each lane inserting in its own range | 0 |
-| `open-questions.md` | per-lane question ids (`A-Q`/`B-Q`/`C-Q`); 31 open entries | 0 |
-| `known-issues.md` | none -- everyone appends at EOF | **11** |
-
-`roadmap.md` rule 3 says the per-lane conventions exist to make the merge
-clean, and for the two documents that have one it works: `design-decisions.md`
-auto-merged across a 72-commit divergence with zero conflicts. This file
-never got the same treatment.
-
-**Why it costs more than the fix suggests.** The resolution is mechanical --
-both sides are additive -- but it is not *always* mechanical, and that is the
-part worth knowing before choosing. Three times today the winning order
-mattered, because one side was an amendment (`### MOSTLY FIXED ... and the
-mechanism above was wrong`, `### TRIAGE ...`, my own `### Correction ...`)
-whose meaning depends on sitting directly under the entry it amends. A
-marker-deletion resolution silently re-parents such an amendment onto
-whatever the other lane appended. Twice it was lane C's amendment at risk and
-once it was mine.
-
-| option | *What changes:* |
-|---|---|
-| **(a) Per-lane append sections** (recommended) | each lane appends inside its own `## Lane A / B / C` section, so two lanes writing between merges no longer touch the same lines. New entries land in a different place than today. |
-| (b) Per-lane files, indexed | `known-issues-a.md` etc. with the existing index across them. No shared seam at all, but a reader needs three files, and cross-lane entries (of which there are many) need a home. |
-| (c) Leave it | nothing changes; the collisions stay mechanical and frequent, and the amendment-ordering hazard stays live. |
-
-**My recommendation is (a)**, because it matches what already works twice in
-this tree and needs no new tooling -- `check-known-issues-index` already
-walks the headings and would keep working. (b) is cleaner in principle and
-worse in practice: today's most useful entries are the cross-lane ones, where
-lane C's finding and mine turned out to be the same shape, and splitting the
-file makes that harder to notice.
-
-**Why it is yours and not mine.** It changes the layout of a document all
-three lanes write, so one lane reorganising it unilaterally is exactly the
-shared-word redefinition design-decisions 951 is about. It also wants a halt
-to do safely -- moving existing entries into sections while two other agents
-are appending would conflict with everything at once.
-
-**If never answered:** nothing breaks. The cost is steady rather than
-growing: roughly one chain restart per collision, plus the standing risk that
-an amendment gets re-parented by a resolution that looks correct because no
-conflict markers remain. I now assert adjacency (`parent < amendment <
-other`) rather than marker-absence, which covers my own resolutions and not
-anyone else's.
-
 ## E-Q1 — [E] Understanding speech needs a data file bigger than the space left on the system disk. Which engine, and does its data ship with the system or install later? — Status: OPEN (raised 2026-09-24)
 
 **In short:** SlateOS is meant to understand speech — dictation and voice
@@ -3062,123 +2717,6 @@ plain `TcpStream`, as `userspace/pkg` does.
 
 
 
-## A-Q21 — [A] Seven security modules are built but nothing uses them. Staged for later, or believed to be working? — Status: OPEN
-
-**In short:** the kernel has seven pieces of code whose job is to say
-"no" — checking passwords, unlocking encrypted disks, deciding who may
-open a file. All seven are written and tested. None of them is called by
-anything except a command typed by hand into the kernel's own shell. So
-nothing in the running system currently asks permission from any of them.
-I cannot tell from the code whether that is the plan or an oversight, and
-the answer changes what should happen next.
-
-**The seven, and what reaches each.** "Reached from kshell only" means the
-single caller outside the module is the kernel's interactive shell — a
-person typing, not the system running.
-
-| module | its job | reached from |
-|---|---|---|
-| `authbroker` | authenticate a principal | kshell only |
-| `diskencrypt` | unlock an encrypted volume | kshell only |
-| `capsettings` | may this user reach this path | kshell only |
-| `secpolicy` | allow/deny by policy | kshell only |
-| `sealing` | refuse writes to a sealed file | kshell only |
-| `reclock` | byte-range file locks | **no longer latent -- wired to `fcntl(F_SETLK/F_GETLK/F_UNLCK)` on 2026-09-21** |
-| `vfs::flock` | whole-file advisory locks | **this row was wrong -- see the correction below** |
-| `secureboot` | enrol keys, verify a boot image | `kshell` and `/proc` only — **no syscall at all** |
-
-**Two rows corrected on 2026-09-21, because a decision queue with stale rows
-is not decidable.**
-
-- **`reclock` is now reachable.** It was accurate when filed -- the table had
-  zero callers outside its own module. It is wired to `fcntl` as of today, and
-  the kernel's reason for granting every lock unconditionally turned out to be
-  a comment asserting an invariant nothing enforced. So this one is answered by
-  events rather than by the operator.
-
-- **`vfs::flock` was never latent, and I should not have written that it was.**
-  `nr::FLOCK => sys_flock(args)` is in the Linux dispatch table at
-  `syscall/linux.rs:3505`, `sys_flock` calls `Vfs::flock_resolved`, and
-  `posix/src/sys_file.rs` re-exports `flock()` for programs to call. Any
-  Linux-ABI process can take a whole-file advisory lock and always could. The
-  claim "nothing takes one" described the kernel's *internal* callers and was
-  then written into a column headed "reached from", which is a different
-  question -- the one that matters here is whether a *program* can reach it,
-  and it can.
-
-**What this does and does not change about the question.** It does not dissolve
-it: five modules (`authbroker`, `diskencrypt`, `capsettings`, `secpolicy`,
-`sealing`) plus `secureboot` are still reachable only by a human typing into
-kshell, and that is still the thing worth deciding. It does narrow it from
-seven to six, and it removes the two entries where the answer was "wire it"
-rather than "decide the policy".
-
-**More of the same shape, measured today.** The pattern is wider than security
-modules. Of the eight tables holding per-file metadata (see `known-issues.md`
-2026-09-21 and `design-decisions.md` §957), the syscall layer reaches almost
-none of them:
-
-| module | syscall-layer callers | kshell callers |
-|---|---|---|
-| `acl` | 0 | all of them |
-| `fcomment` | 0 | 10 of 13 |
-| `queryable` | 0 | 45 of 49 |
-| `tags` | 0 | 18 of 28 |
-
-So a user-visible feature set -- file comments, tags, indexed attributes,
-POSIX ACLs -- exists, is tested, and cannot be used by any program. That is the
-same question as the one above with a different blast radius: for `secpolicy`
-the consequence is that nothing is enforced, and for `tags` it is that a
-feature the design promises is unreachable. Worth answering together.
-**The eighth one is worse than latent, and it arrived after this was
-filed.** `userspace/sbctl` reports creating secure-boot keys and signing
-kernel images and does neither — `fs::write` appears nowhere in the crate.
-It prints *"Keys created successfully."* The other seven are silent about
-being unwired; this one tells the operator their kernel image is signed.
-If the answer below is "staged", that is defensible for the seven and not
-for this one, which should stop claiming success whatever is decided.
-
-**One detail that decides how it reads.** `diskencrypt`'s unlock is
-`unlock_volume(id, _passphrase)` — the underscore means the passphrase is
-not used at all, and its comment says so plainly: *"Simulated passphrase
-check (in real implementation, derive key and verify)"*. Candid in the
-file; invisible to anyone reading the function's name.
-
-**And the same in `secureboot`, found 2026-09-25.** Its check of a boot
-image, `verify_image(image_name, hash)`, never looks at `hash` — the
-fingerprint of the file being checked. It passes every image unless secure
-boot is switched on, and when it is on, it passes every image as long as one
-trusted key is on file, which the default table always has. So it is not only
-unused; its answer is fixed in advance. That changes option **B** for this
-row: it cannot simply be connected, because the first user of it (`sbctl
-verify`, lane B's tool) would then report *verified* for any file at all. It
-would need a real check first — for instance an allow-list and a deny-list of
-image fingerprints (`db` and `dbx`, the two lists the PC firmware standard
-already defines), which needs no certificate code in the kernel. Lane B's
-`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md` is parked on
-this question.
-
-| option | *What changes:* | cost |
-|---|---|---|
-| **A. It is staged — write that down** | nothing runs differently; each module gains a header saying it is not yet enforced, and one list tracks them | an hour. Stops the next person (me, twice already) re-deriving "nothing calls this" while judging how serious a bug is |
-| **B. It should be live — wire it up** | a wrong passphrase stops unlocking a volume; a sealed file stops accepting writes; `/proc` denial counts start moving | real work, module by module, and **each one activates its own latent defects on the day it is connected** — several key their tables by pathname, so two names for one file get two answers |
-| **C. Leave as is** | nothing changes | free, and the modules keep reading as finished when looked at individually |
-
-**Recommendation: A now, B per-module later.** A is cheap and removes the
-specific trap: these all currently look complete in isolation. B is the
-right destination but is not one decision — it is seven, each wanting its
-own fix-first-then-connect, because connecting one before fixing its keying
-turns a dormant bug into a live one.
-
-**If this is never answered:** nothing breaks today, and that is exactly the
-risk. The modules look finished, their `/proc` counters read zero, and a
-zero reads as *nothing was denied* rather than *nothing asked*. The cost
-arrives the first time someone wires one up believing it already worked.
-
-**Where it bites:** `kernel/src/fs/{authbroker,diskencrypt,capsettings,
-secpolicy,sealing,reclock}.rs` and `vfs.rs`'s `flock_resolved`. Full
-measurement, one grep per row, in `known-issues.md` 2026-09-21.
-
 ## A-Q22 — [A] If you rename a file, should it keep its version history? — Status: OPEN
 
 **In short:** the system keeps old versions of files, so you can go back to
@@ -3263,6 +2801,41 @@ answered question left in the body is pure cost — and, being older, it sorts
 
 ## Resolved — lane A
 
+- A-Q21 Seven security modules are built but nothing uses them. Staged for
+  later, or believed to be working? — resolved 2026-09-27 (978): **B, wire them
+  in, each fixed first.** `secureboot` gets a real fingerprint check before its
+  door, and `diskencrypt` a real key derivation. `sealing`, `capsettings` and
+  `secpolicy` are re-keyed by file identity before they are connected. The
+  per-file metadata tables get syscall doors in the same work.
+- A-Q18 Every lane appends to the end of `known-issues.md`: give it a per-lane
+  seam? — resolved 2026-09-27 (977): **A, a section per lane for new
+  entries.** Six `## Lane X: new entries` sections at the end; the entries
+  already in the file stay where they are.
+- A-Q17 Moving or scaling a video or cursor layer silently does nothing: refuse
+  the request, or honour it? — resolved 2026-09-27 (976): **B, honour it.** The
+  software backends compose the planes at flip time, and virtio-gpu's cursor
+  uses the device's cursor queue. A rectangle a backend cannot do is refused at
+  commit.
+- A-Q16 One kind of kernel lock skips the deadlock checker on a premise that
+  turned out false: which way? — resolved 2026-09-27 (975): **A, convert the
+  locks that have another lock taken under them, then revert by measurement**
+  any conversion whose cost on a hot path outweighs the check.
+- A-Q15 A program can only have one network connection open at a time: which
+  fix? — resolved 2026-09-27 (972): **measure A against B.** Both designs are
+  built behind one switch, and a load harness decides between them. Anything
+  QEMU cannot judge is deferred to bare metal.
+- A-Q14 A kept copy of a file: its content from before the save, or after it?
+  — resolved 2026-09-27 (971): **A, after it.** A version-history entry holds
+  the file as it stands after the save that made it.
+- A-Q13 One agent's push has cost another a full test run eight times in two
+  days: should pushing be gated? — resolved 2026-09-27 (974): **move the fast
+  checks to push time, and fix the checks that raise false alarms** before
+  they are moved.
+- A-Q11 Who owns `scripts/hooks/pre-push`? — resolved 2026-09-27 (973):
+  **every file gets one owner, and a gate refuses a file with none.** The hook
+  is lane A's. The rest of `scripts/`, `requests/`, the root crates and the
+  root files get owners by the rules §973 lists, and a lane wanting a change
+  asks the owner.
 - A-Q20 A lane may only publish work after a green test run, and lane A's has
   been red for days on another lane's faults. What should a blocked lane do?
   — resolved 2026-09-26 (968), the operator leaving it to Claude: **publish,
@@ -3551,7 +3124,13 @@ DQ1 and DQ2 and are never reissued.)*
 
 ## Resolved — lane F
 
-*(None yet. Lane F was created on 2026-09-22.)*
+- F-Q2 Remote desktop's video fallback: which video format? — resolved
+  2026-09-27 (1332): **VP9**, with hardware encoders and decoders where they
+  can be found, and a software fallback threaded across every core.
+
+(F-Q1's AVIF half, answered "yes", is §1333; its HEIC half is still open
+above. C-Q18, answered for lane F's code, is §1334; lane C files its index
+line when it retires the entry.)
 
 ## Resolved — pre-split (unprefixed `Q<n>`, single-agent era)
 

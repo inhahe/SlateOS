@@ -341,8 +341,10 @@ def draw_all(pen_for, g):
 def build_ttf(g, bold=False):
     """The face as TrueType -- or, with `bold`, the Bold master of the
     variable face (see `build_var`): every point moved, the accent's offset
-    and the scaled component's too, and each bearing 7 units short of the
-    glyph's left edge, so that the left phantom point moves."""
+    and the scaled component's too, each bearing 7 units short of the glyph's
+    left edge, so that the left phantom point moves, and the widths 600 to 630
+    by glyph order, so that the advances move -- which a face without `HVAR`
+    leaves to its right phantom point."""
     order = [".notdef"] + list(g) + ["eacute", "o.small"]
     fb = FontBuilder(UPEM, isTTF=True)
     fb.setupGlyphOrder(order)
@@ -387,7 +389,9 @@ def build_ttf(g, bold=False):
     metrics = fb_metrics(g, order)
     metrics["o.small"] = (600, left_edge("o.small"))
     if bold:
-        metrics = {name: (600, left_edge(name) - 7) for name in order}
+        metrics = {
+            name: (600 + 10 * (i % 4), left_edge(name) - 7) for i, name in enumerate(order)
+        }
     fb.setupHorizontalMetrics(metrics)
     fb.addOpenTypeFeatures(FEATURES)
     finish(fb, "HintFixture")
@@ -568,6 +572,22 @@ def drawn(data, order, weight):
     return rows
 
 
+def advances(data, weight):
+    """HarfBuzz's advance for each glyph at `weight`, one unit per font unit.
+    Every glyph is drawn first: without `HVAR` HarfBuzz reads an advance from
+    the phantom points through the same `gvar` scalar cache it draws through,
+    and the crate reproduces that cache once warm."""
+    import uharfbuzz as hb
+
+    face = hb.Face(hb.Blob(data))
+    font = hb.Font(face)
+    font.scale = (face.upem, face.upem)
+    font.set_variations({"wght": weight})
+    for gid in range(face.glyph_count):
+        font.draw_glyph_with_pen(gid, Recorder())
+    return [font.get_glyph_h_advance(gid) for gid in range(face.glyph_count)]
+
+
 def x_min(draw):
     """The left edge of what `draw` draws."""
     from fontTools.pens.boundsPen import BoundsPen
@@ -707,11 +727,21 @@ def main():
         ):
             rows = drawn(data, order, weight)
             w(f"/// HarfBuzz's drawing of each glyph of {why}, at weight {weight}: see [`Drawn`].\n")
+            # (the advance tables follow the drawings)
             w(f"pub(crate) static {label}: [Drawn; {len(rows)}] = [\n")
             for gid, name, ext, ops, coords in rows:
                 flat = ", ".join(rust_f32(v) for v in coords)
                 w(f"    ({gid}, \"{name}\", [{', '.join(str(v) for v in ext)}], \"{ops}\", &[{flat}]),\n")
             w("];\n\n")
+        for label, data, how in (
+            ("VAR", var, "from `HVAR`"),
+            ("VAR_NOHVAR", var_nohvar, "without `HVAR`, between the phantom points `gvar` moved"),
+        ):
+            for weight in (VAR_WEIGHT, 401):
+                adv = advances(data, weight)
+                w(f"/// HarfBuzz's advance for each glyph of the {label} face at weight {weight}:\n")
+                w(f"/// {how}.\n")
+                w(f"pub(crate) static {label}_ADVANCES_{weight}: [u16; {len(adv)}] = [{', '.join(str(a) for a in adv)}];\n\n")
     rustfmt(out)
     print(f"{len(ttf)} + {len(otf)} + {len(var)} + {len(var_nohvar)} + {len(var_cff2)} bytes of font -> {out}")
 

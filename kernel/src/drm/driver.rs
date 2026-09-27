@@ -247,6 +247,68 @@ impl LimineBackend {
         (self.pitch as usize).saturating_mul(self.height as usize)
     }
 
+    /// Read one pixel back out of the firmware framebuffer: a verification
+    /// path for self-tests, which must prove a composition landed where it
+    /// claimed to. `None` off-screen or without a framebuffer.
+    #[must_use]
+    pub fn read_pixel(&self, x: u32, y: u32) -> Option<u32> {
+        if self.fb_addr == 0 || x >= self.width || y >= self.height {
+            return None;
+        }
+        let off = (y as usize)
+            .checked_mul(self.pitch as usize)?
+            .checked_add((x as usize).checked_mul(4)?)?;
+        if off.checked_add(4)? > self.fb_len() {
+            return None;
+        }
+        let addr = self.fb_addr.checked_add(u64::try_from(off).ok()?)?;
+        // SAFETY: `fb_addr` is the bootloader framebuffer, HHDM-mapped for
+        // `fb_len()` bytes at init, and `off + 4 <= fb_len()` was checked
+        // above. A pixel offset is 4-aligned because the pitch is a whole
+        // number of 32-bit pixels. Volatile because the display engine reads
+        // this memory too.
+        Some(unsafe { core::ptr::read_volatile(addr as *const u32) })
+    }
+
+    /// Compose `layers` into the firmware framebuffer inside `damage`
+    /// (design-decisions §976). The aperture is linear, so it is one page.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` without a framebuffer; `planecompose`'s refusals mapped
+    /// by [`super::compose::map_err`].
+    pub fn compose(
+        &mut self,
+        damage: planecompose::Rect,
+        layers: &[planecompose::Layer<'_>],
+    ) -> KernelResult<()> {
+        if self.fb_addr == 0 {
+            return Err(KernelError::NotSupported);
+        }
+        let len = self.fb_len();
+        // SAFETY: `fb_addr` is the bootloader framebuffer, mapped at init for
+        // at least `pitch * height` bytes (`fb_len`). The slice lives only for
+        // this call, while the DRM device lock is held, so no other DRM path
+        // writes it meanwhile. The kernel console can also draw into this
+        // aperture; that is the same shared-surface race `page_flip`'s raw
+        // copies have always had (a torn picture, never a write outside the
+        // aperture, since the slice's bounds are fixed).
+        let fb = unsafe { core::slice::from_raw_parts_mut(self.fb_addr as *mut u8, len) };
+        let page_size = len.next_multiple_of(4).max(4);
+        let mut pages = [fb];
+        let mut target = planecompose::Target {
+            data: planecompose::PagedMut {
+                pages: &mut pages,
+                page_size,
+            },
+            width: self.width,
+            height: self.height,
+            pitch: self.pitch,
+        };
+        planecompose::compose(&mut target, damage, layers, super::compose::BACKGROUND)
+            .map_err(super::compose::map_err)
+    }
+
     /// Page flip: copy GEM backing to the Limine framebuffer.
     pub fn page_flip(
         &mut self,
@@ -312,10 +374,24 @@ impl LimineBackend {
         fb: &DrmFramebuffer,
         gem: &GemObject,
     ) -> KernelResult<()> {
+        self.check_mode(mode)?;
+        self.page_flip(crtc_id, fb, gem)
+    }
+
+    /// Whether [`Self::set_mode`] would accept `mode`, touching nothing. A
+    /// composed scene programs its mode with this and then composes, rather
+    /// than first flipping a framebuffer it is about to draw over
+    /// (design-decisions §976). There is no timing to program: the firmware's
+    /// is the only one this backend has.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` if `mode` is not the boot mode.
+    pub fn check_mode(&self, mode: &DrmMode) -> KernelResult<()> {
         if mode.hdisplay != self.width || mode.vdisplay != self.height {
             return Err(KernelError::InvalidArgument);
         }
-        self.page_flip(crtc_id, fb, gem)
+        Ok(())
     }
 
     /// Turn this CRTC off.
@@ -420,6 +496,34 @@ pub struct VirtioGpuBackend {
     width: u32,
     /// Display height from GET_DISPLAY_INFO.
     height: u32,
+    /// What the device's own cursor is showing (design-decisions §976 item
+    /// 2), so that a sync sends only what changed.
+    cursor: HwCursorState,
+}
+
+/// A cursor as the device shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HwCursor {
+    /// Where its hot spot is on the display.
+    pub x: u32,
+    pub y: u32,
+    /// The hot spot within the image.
+    pub hot_x: u32,
+    pub hot_y: u32,
+    /// Which image it was drawn from (`CursorState::image`).
+    pub image: u64,
+}
+
+/// What the device's cursor is showing, as far as the driver knows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HwCursorState {
+    /// Nothing: the state the device starts in.
+    Hidden,
+    /// This cursor.
+    Shown(HwCursor),
+    /// A command failed part-way, so the device's state is not known and the
+    /// next sync sends everything again.
+    Unknown,
 }
 
 impl VirtioGpuBackend {
@@ -434,10 +538,57 @@ impl VirtioGpuBackend {
                 available: true,
                 width: w,
                 height: h,
+                cursor: HwCursorState::Hidden,
             })
         } else {
             None
         }
+    }
+
+    /// Whether the device came up.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.available
+    }
+
+    /// What the device's cursor is showing, as far as the driver knows.
+    #[must_use]
+    pub fn hw_cursor(&self) -> HwCursorState {
+        self.cursor
+    }
+
+    /// Bring the device's cursor to `want` (`None`: hidden), sending only
+    /// what changed: nothing if it is already so, a move if only the position
+    /// differs, the image (drawn by `draw`, see
+    /// [`crate::virtio::gpu::cursor_update`]) if the image or its hot spot
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// The device's. The recorded state then becomes
+    /// [`HwCursorState::Unknown`], so the next sync starts over.
+    pub fn sync_cursor(
+        &mut self,
+        want: Option<HwCursor>,
+        draw: impl FnOnce(&mut [u8]) -> KernelResult<()>,
+    ) -> KernelResult<()> {
+        let result = match (self.cursor, want) {
+            (HwCursorState::Hidden, None) => return Ok(()),
+            (HwCursorState::Shown(h), Some(w)) if h == w => return Ok(()),
+            (_, None) => crate::virtio::gpu::cursor_hide(),
+            (HwCursorState::Shown(h), Some(w))
+                if h.image == w.image && h.hot_x == w.hot_x && h.hot_y == w.hot_y =>
+            {
+                crate::virtio::gpu::cursor_move(w.x, w.y)
+            }
+            (_, Some(w)) => crate::virtio::gpu::cursor_update(w.x, w.y, w.hot_x, w.hot_y, draw),
+        };
+        self.cursor = match (&result, want) {
+            (Ok(()), None) => HwCursorState::Hidden,
+            (Ok(()), Some(w)) => HwCursorState::Shown(w),
+            (Err(_), _) => HwCursorState::Unknown,
+        };
+        result
     }
 
     /// Driver name.
@@ -533,6 +684,55 @@ impl VirtioGpuBackend {
         gem.virt_addr()
     }
 
+    /// Compose `layers` into the scanout inside `damage`, then flush that
+    /// region to the host (design-decisions §976).
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` without the device; `planecompose`'s refusals mapped by
+    /// [`super::compose::map_err`]; whatever the flush returns.
+    pub fn compose(
+        &mut self,
+        damage: planecompose::Rect,
+        layers: &[planecompose::Layer<'_>],
+    ) -> KernelResult<()> {
+        if !self.available {
+            return Err(KernelError::NotSupported);
+        }
+        crate::virtio::gpu::with_scanout_mut(|sc| {
+            let (width, height) = (sc.width(), sc.height());
+            // A pitch too large for u32 cannot be described to `planecompose`;
+            // 0 is one it refuses (`BufferTooSmall`), which is what that is.
+            let pitch = u32::try_from(sc.pitch()).unwrap_or(0);
+            // SAFETY: inside `with_scanout_mut`, which holds the device lock
+            // for the whole closure, and `pages` is dropped before the closure
+            // returns. The one lock-free path to the scanout,
+            // `first_frame_addr`, is never written through: `kshell` prints
+            // it, and the virtio self-test reads one pixel through it at init,
+            // before this DRM device exists.
+            let mut pages = unsafe { sc.pages_mut() };
+            let mut target = planecompose::Target {
+                data: planecompose::PagedMut {
+                    pages: &mut pages,
+                    page_size: FRAME_SIZE,
+                },
+                width,
+                height,
+                pitch,
+            };
+            planecompose::compose(&mut target, damage, layers, super::compose::BACKGROUND)
+        })
+        .ok_or(KernelError::NotSupported)?
+        .map_err(super::compose::map_err)?;
+        // Flushed after `with_scanout` returns: the flush takes the same lock.
+        match damage.intersect(planecompose::Rect::new(0, 0, self.width, self.height)) {
+            Some(r) => {
+                crate::virtio::gpu::flush_rect(r.x.unsigned_abs(), r.y.unsigned_abs(), r.w, r.h)
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Page flip via virtio-gpu: bulk memcpy + host transfer.
     ///
     /// Since virtio-gpu is paravirtualized, "page flip" means copying
@@ -618,13 +818,28 @@ impl VirtioGpuBackend {
         fb: &DrmFramebuffer,
         gem: &GemObject,
     ) -> KernelResult<()> {
+        self.check_mode(mode)?;
+        self.page_flip(crtc_id, fb, gem)
+    }
+
+    /// Whether [`Self::set_mode`] would accept `mode`, touching nothing. A
+    /// composed scene programs its mode with this and then composes, rather
+    /// than first flipping a framebuffer it is about to draw over
+    /// (design-decisions §976). Until this driver can recreate its scanout
+    /// resource there is no timing to program: the boot mode is the only one.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` if the device is absent, `InvalidArgument` if `mode` is
+    /// not the boot mode.
+    pub fn check_mode(&self, mode: &DrmMode) -> KernelResult<()> {
         if !self.available {
             return Err(KernelError::NotSupported);
         }
         if mode.hdisplay != self.width || mode.vdisplay != self.height {
             return Err(KernelError::InvalidArgument);
         }
-        self.page_flip(crtc_id, fb, gem)
+        Ok(())
     }
 
     /// Turn this CRTC off.

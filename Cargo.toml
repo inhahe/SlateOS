@@ -174,6 +174,12 @@ members = [
     # unlike `netproto`, because every one of those consumers is in this
     # workspace, so it can inherit `[lints] workspace = true`.
     "net80211",
+    # Composes DRM planes -- cropped, scaled, placed, blended -- into a
+    # scanout image for the kernel's software display backends
+    # (design-decisions §976). Its own crate so the pixel arithmetic is tested
+    # on the host rather than only through a boot; a member so it inherits the
+    # workspace lints, like `net80211`.
+    "planecompose",
     # HMAC (RFC 2104) and PBKDF2 (RFC 8018) over `sha1` and `sha2`. The keyed
     # hash underneath every part of WPA2/WPA3: turning the passphrase into the
     # PMK, expanding the PMK into session keys, and the MIC on every handshake

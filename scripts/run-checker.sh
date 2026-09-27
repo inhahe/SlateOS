@@ -358,6 +358,25 @@ run_checker() {
 
     _rc_before=
     if [ -n "${CHECKER_REPO_GUARD:-}" ]; then _rc_before=$(_rc_repo_state); fi
+    # The gate cache (design-decisions 979; scripts/gate-cache.py), when the
+    # caller turned it on with GATE_CACHE=1 and GATE_CACHE_DRIVER -- the boot
+    # test does, the push hook does not.  Only `<python> [-u] <script.py> ...`
+    # is routed through it; anything else runs exactly as before.  After
+    # `_rc_cmd` above on purpose: the "re-run it directly" advice names the
+    # checker, not the cache.  A hit replays the checker's last passing output
+    # and exit status, and ends it with a `gate-cache: HIT` line.
+    if [ "${GATE_CACHE:-0}" = "1" ] && [ -n "${GATE_CACHE_DRIVER:-}" ] &&
+       [ -f "$GATE_CACHE_DRIVER" ]; then
+        case "$(basename -- "$1")" in
+        python|python3|python.exe|python3.exe|py|py.exe)
+            _rc_script=$2
+            [ "$_rc_script" = "-u" ] && _rc_script=${3:-}
+            case $_rc_script in
+            *.py) set -- "$1" "$GATE_CACHE_DRIVER" --label "$_rc_label" -- "$@" ;;
+            esac
+            ;;
+        esac
+    fi
     PYTHONUNBUFFERED=1 "$@" >"$_rc_log" 2>&1
     _rc=$?
     if [ -n "${CHECKER_REPO_GUARD:-}" ]; then

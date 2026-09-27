@@ -52,11 +52,12 @@ than silently believing there are no bands.
 | §600–§699 | **lane A** | closed early at §679 — 20 numbers unused | interleaved with C's §500s |
 | §700–§799 | **lane B** | closed early at §779 — 20 numbers unused | interleaved before C's §800s |
 | §800–§899 | **lane C** | **open** | immediately after §579; C's own run ascends |
-| §900–§999 | **lane A** | **open** | immediately after §679; A's own run ascends |
+| §900–§999 | **lane A** | closed early at §979 — 20 numbers unused | immediately after §679; A's own run ascends |
 | §1000–§1099 | **lane B** | **open** | the tail — B alone still appends at EOF |
 | §1100–§1199 | **lane D** | **open** | immediately after §360, the end of lane B's first band; D's own run ascends from there |
 | §1200–§1299 | **lane E** | **open** | immediately after §498, the end of lane C's first band; E's own run ascends from there |
 | §1300–§1399 | **lane F** | **open** | immediately after §127, the end of the single-agent history; F's own run ascends from there |
+| §1400–§1499 | **lane A** | **open** | immediately after §979, the end of lane A's §900 band; A's own run ascends from there (allotted 2026-09-27, when the gate warned at 80%) |
 
 Bands 200–499 are closed but **not free**: every number in them is spent, and
 spent numbers are never reissued (see §217–§220 and §626 below). A new entry
@@ -12282,6 +12283,154 @@ checked against HarfBuzz's to the last bit.
 **How to reverse.** A quirk is one branch in `glyf.rs` (`contour_end`'s
 reset, `Builder::place`'s anchor, `Decycler`); dropping it changes only the
 glyphs that meet it. The cache reading is `gvar::Scalars`.
+
+## 1330. File names on an application's command line are read as bytes, by a type beside `Args`
+
+**Date:** 2026-09-27
+**Lane:** F
+**Decided by:** Claude (autonomous) -- answering lane E's request
+`e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`, which proposed
+changing `Args::rest` to `Vec<OsString>`.
+
+**In short:** a program opened on a file whose name is not valid text used to
+crash before its window appeared. Programs now read file names as raw bytes
+through a new `ArgsOs`, and the old `Args` refuses such a name with a message
+instead of crashing. The old type was kept, rather than changed as asked, so
+that no program stopped building while the others were being moved over.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| `ArgsOs` beside `Args` (chosen) | nothing breaks; each application moves when its lane does | two types for a while |
+| `Args::rest` becomes `Vec<OsString>` (asked) | one type | `main` fails to build for every lane until lane E's callers follow |
+
+**How to reverse.** Once every file-taking application reads `ArgsOs`,
+`Args` can be narrowed to the programs whose arguments are text, or removed.
+
+## 1331. Wrapping shapes a paragraph once but confirms every line, keeping the old lines exactly
+
+**Date:** 2026-09-27
+**Lane:** F
+**Decided by:** Claude (autonomous) -- answering lane E's request
+`e-f-wrap-reshapes-the-whole-line-for-every-word.md`, which asked for the
+same lines, faster.
+
+**In short:** breaking a paragraph into lines used to measure the whole line
+again for every word added. Now the paragraph is measured once to guess each
+line's end, and each guess is checked by measuring that line on its own, so
+the lines come out exactly as before at about a sixth of the cost.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| Propose from one shaping, confirm each line (chosen) | the old lines exactly, whatever the font's shaping does at a space | two shapings per line: about 6x, not 20x |
+| Break from the paragraph run's advances alone | one shaping in all | a line can come out a kern wider or narrower than it is drawn, so a break can move |
+
+**How to reverse.** `Paragraph::extend` in `gui/font/src/shape.rs`: dropping
+the two `fits` checks trusts the run.
+
+## 1332. Remote desktop's video fallback is VP9: hardware where it can be found, and a CPU codec that uses every core
+
+**Date:** 2026-09-27
+**Lane:** F
+**Decided by:** Operator — answering `open-questions.md` F-Q2. Claude
+recommended D (VP8 first, VP9 later); the operator chose VP9 directly, and
+added the hardware and threading requirements.
+
+**In short:** when a game or a video is on screen, remote desktop will film
+the screen and send it as VP9 video. VP9 is a free (no patent fees) format that
+needs about half the bandwidth of H.264 at the same quality. Where the
+computer's graphics chip can encode or decode VP9 itself, it does; everywhere
+else a software codec does it, split across as many threads as the machine has
+cores. The operator's words: "do vp9. if possible, find or write hardware
+encoders and decoders for it (preferably find), and also have cpu fallback
+either way - multithreaded according to the number of cores in a user's
+system."
+
+**What that means in practice.**
+
+- **Software: port libvpx**, Google's reference VP9 encoder and decoder (BSD
+  licence, so no conditions beyond keeping the notice). It is the codec every
+  browser's VP9 was checked against, and it is the "find" the operator
+  prefers to "write". It threads by tile columns and rows, and the thread
+  count is the machine's core count. SIMD (vector instructions) comes with it.
+- **Hardware: find, not write.** Graphics chips expose their video engines
+  through drivers. The open ones that do VP9 are Intel's media driver (MIT
+  licence) and AMD's through Mesa (MIT). Both need the GPU stack (lane A's
+  kernel driver, lane F's Mesa port), so they come when it does. NVIDIA's video
+  engines are reachable only through its closed driver, so they are out of
+  reach until that changes.
+- **Both directions.** The encoder runs where the screen is filmed (the
+  compositor's capture stream). The decoder runs in SlateOS's own remote
+  viewer, and anywhere else VP9 is played.
+
+**Alternatives.**
+
+| | For | Against |
+|---|---|---|
+| VP9 (chosen) | half H.264's bandwidth at the same quality; no patent fees; plays in browsers | the most work of the three; slower to encode than VP8 |
+| VP8 first, VP9 later (Claude's recommendation) | a working fallback soonest, extending the WebP decoder already here | two codecs to maintain, and the worse one first |
+| H.264 | decoded in hardware almost everywhere | patent-pooled; the basic profile's patents mostly expired, not all |
+
+**How to reverse.** The capture stream names its codec; a second codec
+is an addition beside libvpx, not a replacement of it.
+
+## 1333. AVIF pictures open, through a port of rav1d
+
+**Date:** 2026-09-27
+**Lane:** F
+**Decided by:** Operator ("AVIF: yes"), answering the AVIF half of
+`open-questions.md` F-Q1 — Claude's recommendation. The HEIC half stays open
+in F-Q1, rewritten to answer the operator's question about its licence.
+
+**In short:** AVIF, the picture format more and more websites serve, will open
+everywhere a picture opens, and get thumbnails. An AVIF file is one frame of
+AV1 video in a HEIF container (a file layout of nested boxes). Decoding it
+means an AV1 decoder, and the one to port is `rav1d`: a Rust translation of
+dav1d, the AV1 decoder Chrome and Firefox use, under a permissive BSD licence.
+AV1 decoding is defined to the bit, so the pixels will be the browsers' own.
+
+**What that means in practice.** `gui/imagecodec` gains a HEIF container
+reader and an AVIF format beside PNG, JPEG, WebP and the rest. `rav1d` is
+vendored and kept current as its own crate. The container reader is written
+once and later serves HEIC too, if that is ever decided.
+
+**Alternatives.** Writing an AV1 decoder from scratch would buy nothing
+dav1d's translation does not already have. It would lose the bit-exactness
+checked against every browser.
+
+## 1334. The mouse pointer is always shown: drawn on the presenter's copy today, by the display's cursor plane when a screen is shown without copying
+
+**Date:** 2026-09-27
+**Lane:** F
+**Decided by:** Operator ("Claude's recommendation"), answering
+`open-questions.md` C-Q18, which lane C filed and lane F acts on; lane F's
+code since 2026-09-24 (§1301) already drew the pointer everywhere. The
+recommendation was C, built as B first: the display controller's hardware
+cursor, with software as the fallback.
+
+**In short:** the mouse pointer never disappears, including over fullscreen
+video and games (unless the program itself hides it over its own window).
+Today every way SlateOS shows a picture copies it to the screen, and the
+pointer is painted onto that copy for free. When a future display path shows
+a fullscreen program's picture without copying it, the pointer moves to the
+graphics chip's own cursor layer (the kernel's `SYS_DRM_CURSOR_SET`/`MOVE`).
+The software pointer stays as the fallback wherever there is no such layer.
+Neither costs a fullscreen program its shortcut.
+
+**Pointers that show on light and on dark.** The operator also asked for a
+pointer set visible on both light and dark scenes. Every pointer already has a
+body and an outline of the opposite shade, and the outline is the body grown by
+a pixel or two, so it stays exactly around it at every size. The Default scheme
+is a white body with a black outline (Windows' convention); Inverted is a black
+body with a white outline (the Mac's). Both show on either background. The
+operator also named, as an alternative, a pointer XORed with what is behind it.
+That is not built, because the outlined schemes already do what it is for.
+
+**How to reverse.** The policy is one condition in the compositor's
+`Server::show` and one per presenter.
 
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 
@@ -82745,3 +82894,417 @@ A-Q15's "if this is never answered" describes. The known consequences:
 - `D-NETSOCK-SYNC` cannot be proven;
 - a windowed program that opens a second socket loses its display connection.
 The last is why this is lane A's next networking task, not a background one.
+
+**Status, 2026-09-27: steps 1 and 2 are built** (A-Q15 increments 1-3,
+`roadmap.md`). Two sockets at once work in both designs, and the head-of-line
+and late-data witnesses run in every boot, once per design. That makes the
+"until then" list above history, and it retired §941's declaration. Steps 3
+and 4, the full measurement and its reading, are increment 4.
+
+## 973. Every file has one owner, and a gate refuses a tracked file with none
+
+**Date:** 2026-09-27 · **Decided by:** Operator (the operator left the choice of lanes to Claude; the assignments below are Claude's and Claude's to revisit) · **Lane:** A
+
+Answering A-Q11. Relayed by lane F from the operator's answers in lane F's
+session, 2026-09-27; verbatim:
+
+> Assign it to whatever lane you want, if another lane wants to change it too
+> they can request the original lane to do it. And pick a lane for each of the
+> remaining files without lanes, and make a rule somewhere that we don't leave
+> files with ambiguous ownership.
+
+**In short:** the tool that says which agent may edit which file left about a
+thousand files to nobody:
+- the scripts;
+- the request notes;
+- a few dozen small shared libraries;
+- the files at the top of the tree.
+
+Two agents once edited one of them, the push hook, on the same night. The
+operator decided that every file gets exactly one owning lane, and that another
+lane wanting a change asks the owner. A rule stops files from being left
+without an owner again. Which lane gets which file was left to Claude.
+
+**What it obliges.**
+1. **`scripts/hooks/pre-push` is lane A's**, and so are `scripts/run-checker.sh`
+   and `scripts/which-lane.py`. The hook and `scripts/boot-test.sh` run the same
+   gates through one `run_checker`, and A-Q13's answer (§974) moves gates from
+   the boot into the hook, which is lane A's work. One owner for the gate
+   machinery keeps its two call sites consistent. Lane B's claim to the hook
+   dates from the three-lane table; lane B's scope has been userland since
+   2026-09-22.
+2. **The rest of `scripts/`** follows three rules:
+   - a script belongs to the lane whose code it judges or serves;
+   - a test suite goes with the script it tests;
+   - a gate that judges every lane's files belongs to lane A, as part of the
+     gate machinery. Examples are line endings, gates that can refuse, and
+     gates that are wired.
+
+   The result is written into `which-lane.py`'s table, script by script where
+   the directory does not decide it.
+3. **`requests/`: a request belongs to its sender**, the first letter of its
+   name (`a-bc-...` is lane A's). The addressee's status stamp stays allowed,
+   as roadmap.md rule 3's exception already says.
+4. **A root leaf crate goes to the lane whose code depends on it most**,
+   counted from the manifests rather than guessed. This is how `randrange`
+   went to lane E.
+5. **The files at the top of the tree.**
+   - The shared documents stay shared, each under the per-lane rule it already
+     has: `roadmap.md`, `known-issues.md`, `known-issues-resolved.md`,
+     `design-decisions.md`, `open-questions.md`, `deferred-questions.md` and
+     `todo.txt`. A rule that says who writes which part is an owner, not an
+     ambiguity.
+   - The operator's own files are the operator's: `CLAUDE.md`, the design
+     texts, `backups/` and the personal notes.
+   - Everything else gets a lane.
+6. **The rule.** `which-lane.py` answers every tracked path with one of:
+   - a lane;
+   - `operator`;
+   - a named shared-document rule.
+
+   It never answers "nobody". A gate in both the boot test and the push hook
+   refuses a tracked file with no owner, so a new file or directory at the top
+   of the tree gets one in the commit that creates it. `roadmap.md`'s
+   six-agent section states the rule.
+
+## 974. Fast checks run at push time, and a check that raises false alarms is fixed before it is moved there
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended this option) · **Lane:** A
+
+Answering A-Q13. Relayed by lane F, 2026-09-27; verbatim:
+
+> The first, and see if you can "fix the checks" too.
+
+**In short:** when one agent pushed something broken, the fault was found only
+by another agent's full test run. That run was 20 to 40 minutes when the
+question was filed and is over three hours now. The operator chose to move the
+quick checks into the check every push must pass, so the agent who wrote a
+fault sees it within minutes. The checks themselves are to be fixed wherever
+they raise false alarms, since a check that cries wolf teaches agents to
+ignore it.
+
+**What it obliges.**
+1. **An inventory.** It lists every gate the boot test runs that the push hook
+   does not (72 against 48 on 2026-09-27). For each it gives:
+   - its measured cost, from the per-run gate-timing files;
+   - whether it judges the commit being pushed or the working tree.
+2. **Each fast, deterministic gate moves into the hook**, scoped to the paths a
+   push touches, the way the hook's other gates are. The slow ones stay in the
+   boot and are what the gate cache (C-Q11 idea 2) is for.
+3. **"Fix the checks."**
+   - Every recorded false alarm is found in `known-issues.md` and the boot
+     history, and confirmed fixed. A false alarm is a gate refusing a correct
+     tree.
+   - A gate moves into the hook only with a self-test that proves it refuses
+     what it should and passes what it should. The hook already runs those
+     self-tests before it trusts a verdict.
+4. **Cost against catches, as the operator's C-Q11 answer asked.** For each
+   gate, record its cost per run against the faults it has actually caught, so
+   a gate that costs much and catches nothing is visible rather than assumed
+   useful.
+
+**Measured, 2026-09-27**, with `scripts/gate-cost-report.py`. It reads
+every boot's per-gate timing file in all six worktrees, and it counts only
+the boot test's own gates, so fixture rows are excluded.
+- **Total.** Across 395 boots, the gates `run_checker` times cost 133.9
+  gate-hours.
+- **Never refused.** 98 of the 131 gates never refused once, and they cost
+  73.4 of those hours (55%).
+- **The most expensive.** `check-live-counter-reads` cost 11.2 hours over 335
+  boots, and `check-selftest-reach` 9.3 hours over 267. Neither ever refused.
+
+Two limits on what that says:
+- **A refusal is a catch or a false alarm.** The report lists the dates so a
+  person can tell which.
+- **Zero refusals is not zero value.** A gate can prevent faults its authors
+  fixed before any boot.
+
+So this retires nothing. It says where the gate cache (C-Q11 idea 2) earns
+most: these gates' inputs rarely change between boots. The tooling suites,
+about 5800 s a boot, do not run through `run_checker` and are not in these
+numbers.
+
+**Done 2026-09-27: the first half.**
+- 22 of the 53 boot-only gates, those with a median of 15 s or less that judge
+  source, are push gates 52-73.
+- Each runs only where the working tree is the push.
+
+## 975. A lock that has another lock taken under it is watched by the deadlock detector; a conversion that costs more than it is worth is reverted, by measurement
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended this option) · **Lane:** A
+
+Answering A-Q16. Relayed by lane F, 2026-09-27; verbatim:
+
+> A, and I think you're also saying to "convert, read the arm, and revert any
+> conversion that costs more than it is worth. The arm now exists to read," so
+> do that.
+
+**In short:** the kernel has a cheap kind of lock that the deadlock detector
+does not watch. The stated reason was that nothing is ever locked while one is
+held. That was measured false: it happens 1256 times per boot, across 89 pairs
+of locks. The operator chose to convert those locks to the watched kind, then
+measure what each conversion costs and undo the ones that cost more than they
+are worth.
+
+**What it obliges.**
+1. **Convert the outer locks.** Every `PreemptSpinMutex` that §949's leaf check
+   finds held while another lock is taken becomes `crate::sync::Mutex`. A lock
+   taken in interrupt context must stay interrupt-safe under its new type, and
+   that is checked per lock before converting, not discovered after.
+2. **Price each conversion.** The price is acquisitions per boot, from the
+   statistics `crate::sync::Mutex` keeps, times the extra cost per acquire,
+   about 235 ns in `bench_lock_primitives`. A conversion that is material on a
+   hot path (syscall entry, the scheduler, an interrupt) is reverted. Its
+   lock order is then pinned another way: written down and checked by a
+   targeted self-test, never left unwatched and undocumented again.
+3. **End state.** The cheap type holds only true leaves. §949's check then
+   reports nothing rather than 24 findings at its cap, so it can fail the boot
+   on a new nesting instead of printing one more line. §70's reason is
+   corrected to say so.
+
+## 976. The display planes' source and destination rectangles are honoured in the scanout path
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended refusing the request instead; the operator chose to make it work) · **Lane:** A
+
+Answering A-Q17. Relayed by lane F, 2026-09-27; the answer was one word, "B".
+
+**In short:** a program can ask the display system to place or stretch a layer,
+such as a video overlay or the mouse pointer, anywhere on the screen. The
+kernel accepted the request, reported success, and ignored it. The operator
+chose to make it work: each layer is drawn where it was asked, at the size it
+was asked.
+
+**What it obliges.**
+1. **Composition on the software backends.** The bootloader framebuffer and
+   virtio-gpu's 2D path compose the enabled planes into the scanout image at
+   flip time, in z-order. For each plane:
+   - its source rectangle is cropped from its framebuffer;
+   - the crop is scaled to its destination rectangle;
+   - the result is clipped to the CRTC (the scanout engine for one display).
+2. **virtio-gpu's cursor plane uses the device's own cursor queue**, so moving
+   the pointer does not recompose the frame.
+3. **Validation at commit time, as Linux does it.** A rectangle outside its
+   framebuffer, or a scale the backend cannot do, is refused with an error. A
+   request is honoured or refused, never accepted and ignored.
+4. **Tests.**
+   - Composition is checked pixel-exactly against a reference scaler.
+   - A boot self-test commits a moved plane and a scaled plane, and reads the
+     scanout back.
+
+   Real GPU backends, such as §263's iGPU, get it as they are written.
+
+## 977. `known-issues.md` gets a section per lane for new entries; the entries already in it stay where they are
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended this option) · **Lane:** A
+
+Answering A-Q18. Relayed by lane F, 2026-09-27; the answer was one word, "A".
+
+**In short:** every agent added new bug entries at the bottom of one shared
+file, so any two that wrote between merges collided there. It happened eleven
+times in one day. The operator chose per-lane sections: each lane adds new
+entries at the end of its own section, so two lanes never write the same
+lines.
+
+**What it obliges.**
+1. **Six sections at the end of `known-issues.md`**, `## Lane A: new entries`
+   through `## Lane F: new entries`. A lane appends at the end of its own
+   section. There are six, not the three the question named, because the tree
+   has had six lanes since 2026-09-22.
+2. **The existing entries do not move.** Moving them would conflict with every
+   lane at once and would need a halt. Left where they are, they cause no
+   conflicts, because nobody appends there any more. An amendment still goes
+   directly under the entry it amends, wherever that is.
+3. **roadmap.md's shared-document row for `known-issues.md` says so**, replacing
+   "new entries go at the end". `check-known-issues-index` walks the headings,
+   and is re-run to prove it still does.
+4. **Every lane is told directly**, since the row they follow today says the
+   opposite.
+
+## 978. The security modules nothing calls are wired in, each one fixed before it is connected
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended documenting them as staged first; the operator chose to make them live) · **Lane:** A
+
+Answering A-Q21. Relayed by lane F, 2026-09-27; the answer was one word, "B".
+
+**In short:** several pieces of kernel code whose job is to say "no" are
+written and tested. They check passwords, unlock encrypted disks, decide who
+may reach a file, refuse writes to sealed files and check boot images. Nothing
+uses them except commands typed by hand into the kernel's own shell. The
+operator chose to make them live. Each one is fixed first and then connected,
+because several have faults that are harmless only while nothing calls them.
+
+**What it obliges, module by module.** Each connection is its own change with
+its own test. Each module's `/proc` counters then start to move, which is how
+a boot shows that a module is live.
+- **`secureboot`.** `verify_image` ignores the image's fingerprint and passes
+  everything.
+  - Fix first: a real check against allow and deny lists of image
+    fingerprints. These are UEFI's `db` and `dbx`, and need no certificate
+    code in the kernel.
+  - Then the syscall door that lane B's parked request asks for
+    (`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`).
+  - `userspace/sbctl` no longer claims success, as A-Q21's text had it. Its
+    commands have refused since 2026-09-15, per lane B's correction of
+    2026-09-27. Under the operator's B-Q17 answer, lane B is deleting the
+    four that need RSA/X.509. `enroll-keys` and `reset` stay as refusals
+    until this door lands.
+- **`diskencrypt`.** `unlock_volume` ignores the passphrase. Fix first: real key
+  derivation with a ported, vetted password hash (§539). Then connect it to
+  the mount path.
+- **`sealing`, `capsettings`, `secpolicy`.** Several key their tables by path
+  name, so two names for one file get two answers. Fix first: re-key them by
+  file identity. Then connect them to the VFS permission and write paths.
+- **`authbroker`.** Connected to the login path, once lane B's login has a door
+  to call.
+- **The per-file metadata tables:** `acl`, `fcomment`, `queryable` and `tags`.
+  The question named them as the same shape. They get syscall-layer doors as
+  part of the same work.
+
+## 979. A gate whose every input is unchanged replays its last pass, and the cache must never be the reason a gate passes or fails
+
+**Date:** 2026-09-27 · **Decided by:** Claude (operator-approved scope: C-Q11's
+answer, "do what you want", and lane A's reply taking idea 2) · **Lane:** A
+
+**In short:** the boot test spends most of its three-plus hours re-running
+checks on files nobody changed. §974 measured it: 133.9 gate-hours across 395
+boots, 55% of it in gates that never once refused. The gate cache watches
+what each check reads the first time it passes. On a later boot it replays
+that pass instantly, but only if every one of those things is exactly as it
+was, and it says out loud that it did. Anything it cannot see, it does not
+cache. A random tenth of its would-be replays run for real anyway, as a
+continuous check on the cache itself.
+
+**What is built** (`scripts/gate-cache.py`, `gatecache_trace.py`,
+`gatecache_tee.py`, `gatecache_site/sitecustomize.py`; 45 tests in
+`test-gate-cache.py`):
+- `run_checker` routes a Python gate through the driver when the boot test
+  turns the cache on. So does the tooling-suite sweep.
+- The traced run is watched by Python audit hooks plus patched `stat`-like
+  functions, in every Python process it starts.
+- What it records:
+  - files read, hashed when opened, with git-style size/mtime/id stamps so a
+    lookup need not re-read them;
+  - directories listed;
+  - paths asked about;
+  - environment variables read by name;
+  - read-only git answers, taken through a tee that sees the exact bytes;
+  - git's version and configuration, for git confined to scratch
+    repositories.
+- A hit replays the stored output byte for byte and ends it with a
+  `gate-cache: HIT` line.
+
+**The rules, each one tested:**
+
+| rule | why |
+|---|---|
+| only passes are stored | a failing gate always runs again |
+| any input it cannot see makes the run uncacheable | covers other executables, shell lines, sockets, native code, writes outside run-created directories, directories left behind, untraced children, and walks over the whole environment. A miss costs a normal run; a wrong hit is a gate that did not run |
+| every input is re-checked at every lookup, and the miss names the first that moved | a replay rests on evidence taken today, not on a decision made once |
+| entries last one UTC day | bounds any verdict that depends on the date, and re-checks every gate daily |
+| a random 10% of would-be hits run fresh and are compared | if they disagree, `DISABLED` is written to the shared store and the cache is off for every lane until someone reads it |
+| a traced run that fails is re-run untraced, and the untraced verdict stands | the tracer must never be why a gate fails; a disagreement is logged separately, since it means a tracer fault or a flaky gate |
+| off for release and bench boots, and with `--no-gate-cache` | the full, uncached check always exists |
+
+**Known limits.** Accepted with eyes open, and each is also where to look first
+if a verification ever fails:
+- **mtime restored.** A file edited to the same size with its old mtime put
+  back (`touch -r`) passes the stamp check unread. git's index makes the same
+  bet, and it guards "racy" files the same way: anything modified within 2 s
+  of the recording is always re-hashed.
+- **Symlink resolution.** `os.path.realpath`'s resolution is not recorded, and
+  neither is a listing made through a directory file descriptor (`os.fwalk`).
+  No gate here uses either.
+- **Time of day.** Logic that depends on the time within a day, rather than
+  the date, is bounded only by the verification sample.
+- **Store keyed by worktree path.** Lanes do not share entries, which is safe
+  but saves less than sharing would.
+
+**Measured on this machine before any boot used it:**
+- `check-selftest-skips`: 49.9 s to 0.5 s.
+- `check-eol`: 14 s to 0.7 s, after the stamp check. It reads every tracked
+  file, so without stamps a hit cost what the gate did.
+- `check-text-mode-writes`: 6.5 s to 0.6 s.
+
+The first boot with the cache populates it. Its first real measure is the boot
+after that, whose end-of-gates summary counts hits, misses, skips,
+verifications and traced-run disagreements.
+
+**Rejected:**
+- **A hand-kept map from paths to gates.** It goes stale the day a checker
+  learns to read one more directory; a trace follows the code.
+- **"Check once a day."** The operator's first idea in C-Q11. It trades
+  catching a fault for time, where the cache trades only time.
+- **Caching nothing that runs git.** Most checkers list their files through
+  `git ls-files`, so almost nothing would be cached.
+
+## 1400. How §976 is built: a change is validated as the state it leaves, and a cursor the device cannot draw is composed
+
+**Date:** 2026-09-27 · **Decided by:** Claude (operator-approved scope: the operator decided in §976 that plane rectangles are honoured and virtio-gpu's cursor goes on its cursor queue; the choices below are how) · **Lane:** A
+
+**In short:** when a program asks the display to show something, the kernel
+now works out the whole picture that would result, checks that picture, and
+only then changes the screen. If any part cannot be shown exactly as asked,
+nothing changes and the program gets an error saying whether its request was
+malformed or just not possible on this display. The mouse pointer is drawn by
+the virtual display device itself when it fits the device's 64x64 pointer, and
+by the kernel otherwise, so every pointer is shown.
+
+**1. Validate the resulting state, not the request.** `set_crtc`, `page_flip`
+and an atomic commit take a snapshot of the object model, record the change,
+validate every scene it changes (`DrmDevice::validate_scene`), and only then
+program or draw; any refusal puts the snapshot back. `atomic_check` is the same
+code with the snapshot always put back.
+- *Rejected: check the request, then apply it.* That is two implementations of
+  what a commit does -- one to check, one to apply -- and they drift. The
+  concrete case: a commit that sets a mode re-fits the primary plane to it,
+  and a request-level check would judge the plane by its old rectangles.
+- *Cost:* a snapshot clones the CRTC and plane lists (a handful of small
+  structs) per mode-set, flip or commit. Not on the cursor path.
+
+**2. Two error codes, in a fixed order.** A malformed layer -- source outside
+its buffer, scale beyond 16x, a format its plane does not list -- is
+`InvalidArgument` on every backend, and is checked first. A well-formed scene
+this backend cannot show -- anything composed, on the ATI backend -- is
+`NotSupported`. A client can tell "never valid" from "not here", and a buffer
+too small for the mode stays `InvalidArgument` everywhere, as before.
+- *Rejected: per-backend scale limits* (`Limits::UNSCALED` on ATI). A scaled
+  plane on ATI would then be "malformed" there and fine elsewhere.
+
+**3. A plane's format list is enforced.** Every primary plane lists XRGB8888
+and ARGB8888, and nothing checked it: an RGB565 or BGR buffer was byte-copied
+into the scanout. It is `InvalidArgument` now, as in Linux, rather than
+converted. Converting would be a second pixel path to keep correct, for
+formats no client here uses.
+
+**4. `flush_region` redraws only where its buffer is shown**, mapped through
+each plane that shows it (`planecompose::source_to_dest`), as Linux's
+`DIRTYFB`. A buffer nobody shows is a successful no-op. Before, a flush copied
+the region onto the scanout whatever was being shown.
+
+**5. The hardware cursor.** virtio-gpu draws the legacy cursor itself
+(`UPDATE_CURSOR`/`MOVE_CURSOR` on queue 1) when the image is at most 64x64,
+its hot spot is inside it, and the hot spot's position is not negative; the
+device shows it only while the DRM owns the screen (a mode and a primary
+framebuffer), as a composed cursor is only drawn then. A cursor the device
+cannot take is composed, so every cursor is shown.
+- *Rejected: refuse a cursor the device cannot take.* §976 asks for
+  requests to be honoured, and composition honours it.
+- One sync, `DrmDevice::sync_hw_cursor`, compares what the device is showing
+  with what the model says and sends only the difference. It runs after every
+  change that can affect it: the cursor calls, a mode-set, a flip, a commit, a
+  framebuffer's destruction. The alternative -- each path sending its own
+  commands -- is how a cursor gets left on a screen that was turned off.
+- The image goes to the device as the client wrote it, premultiplied, as
+  Linux's virtio-gpu driver sends it. QEMU's display back-ends draw it
+  unpremultiplied, so a half-transparent edge pixel comes out slightly dark.
+  Only anti-aliased edges are affected.
+- The move is synchronous: each `MOVE_CURSOR` waits for the device to consume
+  it, like every other command in this driver. A queue of in-flight moves
+  would save that wait at the cost of a second command path; it is the thing
+  to build if pointer latency is ever measured to matter.
+
+**6. On a device failure after validation**, the snapshot is restored and the
+touched CRTCs are redrawn from it (`DrmDevice::reshow`), and the device's
+cursor re-synced, so the screen agrees with the model again. It is not a second
+mode-set: a backend that has just failed to program one is not asked to program
+another from inside its own error path.

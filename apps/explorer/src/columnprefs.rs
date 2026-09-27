@@ -228,10 +228,8 @@ const ON_CONFLICT: [&str; 2] = ["paste", "on_conflict"];
 
 /// The choices the folder menu offers for a taken name, in its order: the
 /// policy, how the settings file spells it, and how the menu says it.
-///
-/// "Ask" is not offered: the executor can pause on a conflict, and nothing in
-/// the window asks yet (`todo.txt`).
-pub const CONFLICT_CHOICES: [(ConflictPolicy, &str, &str); 4] = [
+pub const CONFLICT_CHOICES: [(ConflictPolicy, &str, &str); 5] = [
+    (ConflictPolicy::Ask, "ask", "Ask each time"),
     (
         ConflictPolicy::Rename,
         "keep-both",
@@ -246,8 +244,12 @@ pub const CONFLICT_CHOICES: [(ConflictPolicy, &str, &str); 4] = [
     (ConflictPolicy::Overwrite, "replace", "Replace it"),
 ];
 
-/// The saved choice -- Keep both when there is none, or one this does not
-/// know, which is what a paste did before there was a choice.
+/// The saved choice -- Ask when there is none, or one this does not know.
+///
+/// Asking is the default because it is the one choice that decides nothing
+/// on the user's behalf: keep both leaves numbered copies to sort out later,
+/// and the other two lose one file or the other. Until 2026-09-27 a paste
+/// kept both, always, because nothing could ask.
 #[must_use]
 pub fn conflict_policy(doc: &Document) -> ConflictPolicy {
     doc.get_str(&ON_CONFLICT)
@@ -257,7 +259,7 @@ pub fn conflict_policy(doc: &Document) -> ConflictPolicy {
                 .find(|(_, spelled, _)| *spelled == name)
                 .map(|(policy, _, _)| *policy)
         })
-        .unwrap_or(ConflictPolicy::Rename)
+        .unwrap_or(ConflictPolicy::Ask)
 }
 
 /// Remember `policy` as what a paste does with a taken name.

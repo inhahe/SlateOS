@@ -57,8 +57,9 @@ use dropzone::{
     DragModifiers, DropOperation, DropResult, DropZone, DropZoneEvent, DropZoneManager, Rect,
 };
 use fileops::{
-    ConflictPolicy, ErrorPolicy, FileOpEvent, FileOperation, OperationExecutor, OperationPlan,
-    OperationProgress, OperationSummary, RecycleBin, UndoStack, UndoTarget,
+    ConflictAnswer, ConflictPolicy, ConflictQuestion, ErrorPolicy, FileOpEvent, FileOperation,
+    OperationExecutor, OperationPlan, OperationProgress, OperationSummary, RecycleBin, UndoStack,
+    UndoTarget,
 };
 use thumbs::{
     ThumbCategory, ThumbConfig, Thumbnail, ThumbnailCache, ThumbnailGenerator, ThumbnailRequest,
@@ -600,6 +601,9 @@ enum Modal {
     NewFolder { dialog: InputDialog },
     /// A search awaiting the text to look for.
     Search { dialog: InputDialog },
+    /// A paste, move or link stopped at a name the folder already has, under
+    /// "Ask each time", waiting to be told what to do with it.
+    Conflict { prompt: ConflictPrompt },
     /// A rename in progress, awaiting the new name.
     Rename {
         dialog: InputDialog,
@@ -626,6 +630,221 @@ enum PendingAction {
     /// Erase the selection outright. There is no undo for this one, which is
     /// why its dialog says so.
     DeletePermanently,
+}
+
+/// The question a paste, move or link stopped at: a name the folder already
+/// has, under "Ask each time" (`ConflictPolicy::Ask`).
+///
+/// Drawn here rather than by `guitk::modal::AlertDialog`, whose answers are
+/// OK, Cancel, Yes and No: four ways to deal with a file do not map onto
+/// those without two of them meaning something they do not say.
+struct ConflictPrompt {
+    /// The operation that asked, by its plan's id: the answer goes back to
+    /// the operation that stopped, whatever has started or finished since.
+    plan: u64,
+    /// "“notes.txt” is already in Documents".
+    title: String,
+    /// The one there and the one arriving: size, and when each last changed
+    /// -- what somebody choosing between them wants to compare.
+    there: String,
+    arriving: String,
+    /// Whether the answer is for every later taken name in the operation.
+    for_the_rest: bool,
+    /// Where each control was drawn, for clicks. Empty until the first frame.
+    hits: Vec<(PromptControl, Rect)>,
+}
+
+/// A control on the taken-name prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptControl {
+    Answer(ConflictAnswer),
+    ForTheRest,
+}
+
+/// The prompt's answers, left to right, with the words and the key each is
+/// drawn with. Keep both is first and is Enter's: of the four it is the one
+/// that loses nothing and changes nothing that is already there.
+const CONFLICT_BUTTONS: [(ConflictAnswer, &str, Key); 4] = [
+    (ConflictAnswer::KeepBoth, "Keep both (K)", Key::K),
+    (ConflictAnswer::Replace, "Replace (R)", Key::R),
+    (ConflictAnswer::Skip, "Skip (S)", Key::S),
+    (ConflictAnswer::Stop, "Stop (Esc)", Key::Escape),
+];
+
+/// The prompt's "the same for the rest" line, with its key.
+const FOR_THE_REST: &str = "Do the same for every other taken name (A)";
+
+/// The prompt's size, before a narrow window takes some of its width.
+const PROMPT_W: f32 = 520.0;
+const PROMPT_H: f32 = 190.0;
+
+impl ConflictPrompt {
+    fn new(plan: u64, question: &ConflictQuestion) -> Self {
+        let name = question.dest.file_name().map_or_else(
+            || question.dest.shown().to_string(),
+            |n| n.shown().to_string(),
+        );
+        let folder = question.dest.parent().map_or_else(String::new, |p| {
+            p.file_name()
+                .map_or_else(|| p.shown().to_string(), |n| n.shown().to_string())
+        });
+        Self {
+            plan,
+            title: format!("\u{201c}{name}\u{201d} is already in {folder}"),
+            there: describe_for_prompt("The one there", &question.dest),
+            arriving: describe_for_prompt("The one arriving", &question.src),
+            for_the_rest: false,
+            hits: Vec::new(),
+        }
+    }
+
+    /// What an event does to the prompt: whether it was the prompt's, and
+    /// the answer it gave, if it gave one.
+    ///
+    /// Every key and every click is the prompt's while it is up -- it is
+    /// modal -- except a tick, which the work behind it still needs.
+    fn handle(&mut self, event: &Event) -> (bool, Option<ConflictAnswer>) {
+        match event {
+            Event::Key(key) if key.pressed => {
+                if key.key == Key::A {
+                    self.for_the_rest = !self.for_the_rest;
+                    return (true, None);
+                }
+                if key.key == Key::Enter {
+                    return (true, Some(ConflictAnswer::KeepBoth));
+                }
+                let answer = CONFLICT_BUTTONS
+                    .iter()
+                    .find(|(_, _, k)| *k == key.key)
+                    .map(|(answer, _, _)| *answer);
+                (true, answer)
+            }
+            Event::Key(_) => (true, None),
+            Event::Mouse(m) => {
+                if m.kind != MouseEventKind::Press(MouseButton::Left) {
+                    return (true, None);
+                }
+                match self.hits.iter().find(|(_, r)| r.contains(m.x, m.y)) {
+                    Some((PromptControl::Answer(answer), _)) => (true, Some(*answer)),
+                    Some((PromptControl::ForTheRest, _)) => {
+                        self.for_the_rest = !self.for_the_rest;
+                        (true, None)
+                    }
+                    None => (true, None),
+                }
+            }
+            _ => (false, None),
+        }
+    }
+
+    /// Draw the prompt over the window, dimming what is behind it, and note
+    /// where each control went.
+    fn render(&mut self, pal: &Palette, w: f32, h: f32, tree: &mut RenderTree) {
+        tree.fill_rect(0.0, 0.0, w, h, with_alpha(pal.crust, 140));
+        let card_w = PROMPT_W.min(w - 32.0).max(0.0);
+        let x = ((w - card_w) / 2.0).max(0.0);
+        let y = ((h - PROMPT_H) / 2.0).max(0.0);
+        pal.push_surface(
+            &mut tree.commands,
+            x,
+            y,
+            card_w,
+            PROMPT_H,
+            8.0,
+            appearance::Surface::Card,
+        );
+        let inner = (card_w - 40.0).max(0.0);
+        let left = x + 20.0;
+        tree.text_in_weighted(
+            left,
+            y + 18.0,
+            inner,
+            &self.title,
+            pal.text,
+            14.0,
+            guitk::render::FontWeightHint::Bold,
+        );
+        tree.text_in(left, y + 48.0, inner, &self.there, pal.subtext1, 12.0);
+        tree.text_in(left, y + 68.0, inner, &self.arriving, pal.subtext1, 12.0);
+
+        self.hits.clear();
+
+        // "The same for the rest": a box and its words, both clickable.
+        let tick_y = y + 98.0;
+        let tick = Rect::new(left, tick_y, 14.0, 14.0);
+        tree.stroke_rect(tick.x, tick.y, tick.w, tick.h, pal.subtext0, 1.0);
+        if self.for_the_rest {
+            tree.fill_rect(tick.x + 3.0, tick.y + 3.0, 8.0, 8.0, pal.blue);
+        }
+        let words_w = (inner - 22.0).max(0.0);
+        tree.text_in(left + 22.0, tick_y, words_w, FOR_THE_REST, pal.text, 12.0);
+        self.hits.push((
+            PromptControl::ForTheRest,
+            Rect::new(left, tick_y - 2.0, inner, 18.0),
+        ));
+
+        // The answers, left to right. Measured, so a label never runs past
+        // its button; the first is drawn as the one Enter chooses.
+        let button_y = y + PROMPT_H - 50.0;
+        let mut bx = left;
+        for (i, (answer, label, _)) in CONFLICT_BUTTONS.iter().enumerate() {
+            let bw = guitk::text::padded_width(
+                label,
+                12.0,
+                12.0,
+                guitk::render::FontWeightHint::Regular,
+            );
+            let rect = Rect::new(bx, button_y, bw, 30.0);
+            let (surface, ink) = if i == 0 {
+                (appearance::Surface::Selected, pal.ink(pal.blue))
+            } else {
+                (appearance::Surface::Card, pal.text)
+            };
+            pal.push_surface(
+                &mut tree.commands,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                4.0,
+                surface,
+            );
+            tree.text_in(
+                rect.x + 12.0,
+                rect.y + 8.0,
+                (bw - 20.0).max(0.0),
+                label,
+                ink,
+                12.0,
+            );
+            self.hits.push((PromptControl::Answer(*answer), rect));
+            bx += bw + 8.0;
+        }
+    }
+}
+
+/// One side of a taken name, for the prompt: its size and when it last
+/// changed, or why it cannot be said.
+fn describe_for_prompt(label: &str, path: &Path) -> String {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            let size = if meta.is_dir() {
+                "a folder".to_string()
+            } else {
+                format_size(meta.len())
+            };
+            let changed = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| columns::format_datetime(d.as_secs()));
+            match changed {
+                Some(when) => format!("{label}: {size}, changed {when}"),
+                None => format!("{label}: {size}"),
+            }
+        }
+        Err(e) => format!("{label}: cannot be read ({e})"),
+    }
 }
 
 /// File operation pending in clipboard.
@@ -1969,14 +2188,73 @@ impl ExplorerState {
             // reading -- one action this frame rather than an unbounded slice.
             let now = std::time::Instant::now();
             let deadline = now.checked_add(share).unwrap_or(now);
-            while !running.executor.is_done() && std::time::Instant::now() < deadline {
+            // An operation stopped at a question does nothing until it is
+            // answered, so stepping it would spin out the slice for nothing.
+            while !running.executor.is_done()
+                && running.executor.waiting_on().is_none()
+                && std::time::Instant::now() < deadline
+            {
                 running.executor.step();
             }
             running.events.append(&mut running.executor.take_events());
         }
         self.retire_finished();
         self.update_operation_status();
+        self.ask_about_a_taken_name();
         true
+    }
+
+    /// Put up the question an operation has stopped at, when nothing else is
+    /// up -- and take down one nobody is waiting on any more.
+    fn ask_about_a_taken_name(&mut self) {
+        if let Some(Modal::Conflict { prompt }) = &self.modal {
+            let plan = prompt.plan;
+            let still_asking = self
+                .operations
+                .iter()
+                .any(|op| op.executor.plan_id() == plan && op.executor.waiting_on().is_some());
+            if !still_asking {
+                self.modal = None;
+            }
+            return;
+        }
+        if self.modal.is_some() {
+            return;
+        }
+        let prompt = self.operations.iter().find_map(|op| {
+            op.executor
+                .waiting_on()
+                .map(|question| ConflictPrompt::new(op.executor.plan_id(), question))
+        });
+        if let Some(prompt) = prompt {
+            self.modal = Some(Modal::Conflict { prompt });
+        }
+    }
+
+    /// Give `answer` to the operation that asked, found by its plan's id.
+    fn answer_conflict(&mut self, plan: u64, answer: ConflictAnswer, for_the_rest: bool) {
+        if let Some(running) = self
+            .operations
+            .iter_mut()
+            .find(|op| op.executor.plan_id() == plan)
+        {
+            running.executor.answer(answer, for_the_rest);
+        }
+        if answer == ConflictAnswer::Stop {
+            self.status_message = "Stopped: what was already done stays done".to_string();
+        }
+    }
+
+    /// Whether a file operation can get on without being told something: one
+    /// running and not stopped at a question.
+    ///
+    /// What the clock is asked for by. An operation waiting on an answer needs
+    /// no tick -- the answer is an event, and an event wakes the window.
+    fn work_moving(&self) -> bool {
+        self.operations
+            .iter()
+            .any(|op| op.executor.waiting_on().is_none())
+            || (self.operations.is_empty() && !self.pending.is_empty())
     }
 
     /// Retire every finished operation: summary, undo entries, fresh listing.
@@ -2223,12 +2501,19 @@ impl ExplorerState {
             .operations
             .iter()
             .map(|op| {
-                format!(
+                let done = format!(
                     "{} {} of {}",
                     op.verb,
                     op.executor.progress().completed_files,
                     op.total_files
-                )
+                );
+                match op.executor.waiting_on().and_then(|q| q.dest.file_name()) {
+                    Some(name) => format!(
+                        "{done} \u{2014} asking about \u{201c}{}\u{201d}",
+                        name.shown()
+                    ),
+                    None => done,
+                }
             })
             .collect();
         let waiting_for = self.operations.first().map_or_else(
@@ -3453,7 +3738,7 @@ impl ExplorerState {
                 Ok(OperationPlan::plan_link(
                     &result.sources,
                     &result.target_dir,
-                    ConflictPolicy::Rename,
+                    self.conflict_policy,
                     // The same policy the other two use, and for a reason
                     // specific to links: a filesystem that refuses them
                     // refuses each one separately -- Windows needs a
@@ -3564,6 +3849,7 @@ impl ExplorerState {
             ) => {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
+            Some(Modal::Conflict { prompt }) => prompt.render(&self.palette, w, h, &mut tree),
             None => {}
         }
 
@@ -5093,7 +5379,7 @@ impl oswindow::app::App for ExplorerState {
         // should move as smoothly as anything else on screen. Named first
         // because it is the shorter of the two and this returns the one it
         // finds.
-        if self.work_in_flight() {
+        if self.work_moving() {
             return Some(OPERATION_TICK);
         }
         let working = self.thumb_gen.pending_count() > 0 || self.thumb_gen.completed_count() > 0;
@@ -5681,6 +5967,9 @@ impl ExplorerState {
     }
 
     fn handle_modal_event(&mut self, event: &Event) -> bool {
+        if matches!(self.modal, Some(Modal::Conflict { .. })) {
+            return self.handle_conflict_prompt(event);
+        }
         let Some(modal) = self.modal.as_mut() else {
             return false;
         };
@@ -5690,6 +5979,8 @@ impl ExplorerState {
             Modal::Rename { dialog, .. }
             | Modal::NewFolder { dialog }
             | Modal::Search { dialog } => dialog.handle_event(event),
+            // Answered above, and never reaches here.
+            Modal::Conflict { .. } => EventResult::Ignored,
         } == EventResult::Consumed;
 
         let answer = match modal {
@@ -5697,6 +5988,7 @@ impl ExplorerState {
             Modal::Rename { dialog, .. }
             | Modal::NewFolder { dialog }
             | Modal::Search { dialog } => dialog.result().cloned(),
+            Modal::Conflict { .. } => None,
         };
 
         let Some(answer) = answer else {
@@ -5708,6 +6000,21 @@ impl ExplorerState {
         // it drawn over a listing that no longer matches what it asked about.
         let modal = self.modal.take();
         self.apply_modal_answer(modal, answer);
+        true
+    }
+
+    /// Route an event to the taken-name prompt, and carry out its answer.
+    fn handle_conflict_prompt(&mut self, event: &Event) -> bool {
+        let Some(Modal::Conflict { prompt }) = self.modal.as_mut() else {
+            return false;
+        };
+        let (consumed, answer) = prompt.handle(event);
+        let Some(answer) = answer else {
+            return consumed;
+        };
+        let (plan, for_the_rest) = (prompt.plan, prompt.for_the_rest);
+        self.modal = None;
+        self.answer_conflict(plan, answer, for_the_rest);
         true
     }
 
@@ -5756,7 +6063,9 @@ impl ExplorerState {
             },
             // Dismissing a notice is the whole of what a notice does. It
             // has already been reported; there is nothing left to carry out.
-            Some(Modal::Notice { .. }) | None => {}
+            // A notice has been reported already; a taken-name prompt is
+            // answered through `handle_conflict_prompt` and never here.
+            Some(Modal::Notice { .. } | Modal::Conflict { .. }) | None => {}
         }
     }
 
@@ -8523,8 +8832,10 @@ mod tests {
         let scratch = temp_dir("tick_behind_modal");
         let root = scratch.dir().to_path_buf();
 
-        // The control: no modal, ticks finish the paste.
-        let mut control = paste_of(&root, 6);
+        // The control: no modal, ticks finish the paste. Each half pastes
+        // into a folder of its own: the second into the first's would meet
+        // six taken names and, asking about them, wait for an answer.
+        let mut control = paste_of(&root.join("control"), 6);
         control.paste();
         assert!(control.work_in_flight(), "nothing to make progress on");
         settle(&mut control);
@@ -8534,7 +8845,7 @@ mod tests {
         );
 
         // The case: the same paste, with a confirmation up throughout.
-        let mut state = paste_of(&root, 6);
+        let mut state = paste_of(&root.join("case"), 6);
         state.paste();
         assert!(state.work_in_flight(), "nothing to make progress on");
         // Put a modal up directly rather than through `ask_delete`, which
@@ -12181,15 +12492,18 @@ mod tests {
     // ---- what a paste does with a taken name (2026-09-27, C-Q26) ----
 
     #[test]
-    fn a_taken_name_is_kept_both_until_the_user_chooses_otherwise_and_the_choice_is_remembered() {
+    fn a_taken_name_is_asked_about_until_the_user_chooses_otherwise_and_the_choice_is_remembered() {
         settingsfile::testing::with_scratch_config("explorer-conflict", |_root| {
             let scratch = temp_dir("conflict_choice");
             let root = scratch.dir().to_path_buf();
             write(&root.join("a.txt"), "x");
             let mut state = state_at(&root);
-            assert_eq!(state.conflict_policy, ConflictPolicy::Rename);
-            // "Skip it" is the second row.
-            state.activate_menu_item(MENU_CONFLICT_BASE + 1);
+            assert_eq!(state.conflict_policy, ConflictPolicy::Ask);
+            let skip = columnprefs::CONFLICT_CHOICES
+                .iter()
+                .position(|(p, _, _)| *p == ConflictPolicy::Skip)
+                .expect("Skip is offered");
+            state.activate_menu_item(MENU_CONFLICT_BASE + skip as u64);
             assert_eq!(state.conflict_policy, ConflictPolicy::Skip);
             let again = state_at(&root);
             assert_eq!(
@@ -12264,5 +12578,185 @@ mod tests {
             state.status_message
         );
         assert!(state.clipboard.is_some(), "the cut was spent on nothing");
+    }
+
+    // ---- asking about a taken name (2026-09-27) ----
+
+    /// Tick until nothing is moving: the operations are finished, or every one
+    /// left is waiting on a question.
+    fn settle_until_asked(state: &mut ExplorerState) {
+        for _ in 0..100_000 {
+            if !state.work_moving() {
+                return;
+            }
+            let _ = state.handle_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        panic!("the file operation neither finished nor asked");
+    }
+
+    fn prompt_of(state: &ExplorerState) -> Option<&ConflictPrompt> {
+        match state.modal.as_ref() {
+            Some(Modal::Conflict { prompt }) => Some(prompt),
+            _ => None,
+        }
+    }
+
+    /// A paste of `f0.txt` onto a folder that already has one, asking.
+    fn paste_onto_a_taken_name(scratch: &Path) -> ExplorerState {
+        let mut state = paste_of(scratch, 2);
+        write(&scratch.join("dst").join("f0.txt"), "already here");
+        state.conflict_policy = ConflictPolicy::Ask;
+        state.paste();
+        settle_until_asked(&mut state);
+        state
+    }
+
+    #[test]
+    fn a_paste_onto_a_taken_name_asks_and_waits() {
+        let scratch = temp_dir("ask_prompt");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_onto_a_taken_name(&root);
+        let prompt = prompt_of(&state).expect("nobody was asked");
+        assert!(prompt.title.contains("f0.txt"), "{}", prompt.title);
+        assert!(prompt.there.contains("The one there"), "{}", prompt.there);
+        assert!(
+            state.work_in_flight(),
+            "the paste finished without an answer"
+        );
+        assert!(
+            !state.work_moving(),
+            "a paste waiting on an answer still wants the clock"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("dst").join("f0.txt")).unwrap(),
+            "already here"
+        );
+        // Drawn over the window, with its answers.
+        let drawn = state.render();
+        let texts: Vec<String> = drawn
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for (_, label, _) in CONFLICT_BUTTONS {
+            assert!(
+                texts.iter().any(|t| t == label),
+                "{label} is not drawn: {texts:?}"
+            );
+        }
+        assert!(texts.iter().any(|t| t == FOR_THE_REST), "{texts:?}");
+        // Keys that mean something elsewhere mean nothing behind it.
+        assert!(state.handle_event(&Event::Key(key_press(Key::Delete))));
+        assert!(prompt_of(&state).is_some());
+    }
+
+    #[test]
+    fn each_answer_to_the_prompt_does_what_it_says() {
+        for (key, expect_f0, expect_copy) in [
+            (Key::R, "some content", false),
+            (Key::S, "already here", false),
+            (Key::K, "already here", true),
+            (Key::Enter, "already here", true),
+        ] {
+            let scratch = temp_dir(&format!("ask_answer_{key:?}"));
+            let root = scratch.dir().to_path_buf();
+            let mut state = paste_onto_a_taken_name(&root);
+            assert!(prompt_of(&state).is_some(), "{key:?}: nobody was asked");
+            assert!(state.handle_event(&Event::Key(key_press(key))));
+            assert!(prompt_of(&state).is_none(), "{key:?}: the prompt stayed up");
+            settle(&mut state);
+            let dst = root.join("dst");
+            assert_eq!(
+                fs::read_to_string(dst.join("f0.txt")).unwrap(),
+                expect_f0,
+                "{key:?}"
+            );
+            assert_eq!(dst.join("f0 (2).txt").exists(), expect_copy, "{key:?}");
+            assert!(
+                dst.join("f1.txt").exists(),
+                "{key:?}: the free name was not pasted"
+            );
+        }
+    }
+
+    #[test]
+    fn stop_on_the_prompt_ends_the_paste_where_it_is() {
+        let scratch = temp_dir("ask_answer_stop");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_onto_a_taken_name(&root);
+        assert!(state.handle_event(&Event::Key(key_press(Key::Escape))));
+        settle(&mut state);
+        assert!(!state.work_in_flight());
+        assert_eq!(
+            fs::read_to_string(root.join("dst").join("f0.txt")).unwrap(),
+            "already here"
+        );
+    }
+
+    #[test]
+    fn the_same_for_the_rest_is_asked_once() {
+        let scratch = temp_dir("ask_rest_window");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 3);
+        for n in 0..3 {
+            write(&root.join("dst").join(format!("f{n}.txt")), "already here");
+        }
+        state.conflict_policy = ConflictPolicy::Ask;
+        state.paste();
+        settle_until_asked(&mut state);
+        assert!(state.handle_event(&Event::Key(key_press(Key::A))));
+        assert!(prompt_of(&state).is_some_and(|p| p.for_the_rest));
+        assert!(state.handle_event(&Event::Key(key_press(Key::R))));
+        settle(&mut state);
+        for n in 0..3 {
+            assert_eq!(
+                fs::read_to_string(root.join("dst").join(format!("f{n}.txt"))).unwrap(),
+                "some content",
+                "f{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prompt_answers_a_click_on_its_buttons() {
+        let scratch = temp_dir("ask_click");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_onto_a_taken_name(&root);
+        let _ = state.render();
+        let skip = prompt_of(&state)
+            .and_then(|p| {
+                p.hits
+                    .iter()
+                    .find(|(c, _)| *c == PromptControl::Answer(ConflictAnswer::Skip))
+                    .map(|(_, r)| *r)
+            })
+            .expect("Skip was not drawn");
+        let click = Event::Mouse(MouseEvent {
+            x: skip.x + skip.w / 2.0,
+            y: skip.y + skip.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert!(state.handle_event(&click));
+        settle(&mut state);
+        assert_eq!(
+            fs::read_to_string(root.join("dst").join("f0.txt")).unwrap(),
+            "already here"
+        );
+        assert!(!root.join("dst").join("f0 (2).txt").exists());
+    }
+
+    #[test]
+    fn ask_is_offered_first_and_is_what_a_paste_does_until_told_otherwise() {
+        assert_eq!(
+            columnprefs::CONFLICT_CHOICES.first().map(|(p, _, _)| *p),
+            Some(ConflictPolicy::Ask)
+        );
+        assert_eq!(
+            columnprefs::conflict_policy(&yamldoc::Document::new()),
+            ConflictPolicy::Ask
+        );
     }
 }

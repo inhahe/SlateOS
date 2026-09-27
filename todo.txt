@@ -56565,7 +56565,11 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
-## explorer: Ask when a pasted name is taken (lane E, 2026-09-27)
+## ~~explorer: Ask when a pasted name is taken (lane E, 2026-09-27)~~ -- DONE 2026-09-27
+
+**Done:** the executor waits at a taken name and the window asks; "Ask each
+time" is the menu's first choice and the default (design-decisions §1221).
+The original entry, for the record:
 
 The folder menu offers keep both / skip / replace if newer / replace for a
 paste or a drop onto a name the folder already has (C-Q26), and not "Ask",

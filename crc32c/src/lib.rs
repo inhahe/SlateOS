@@ -168,10 +168,7 @@ mod tests {
         let data = *b"abcdefghij";
         let mut zeroed = data;
         zeroed[3..7].fill(0);
-        assert_eq!(
-            crc32c_raw_exclude(!0, &data, 3, 4),
-            crc32c_raw(!0, &zeroed)
-        );
+        assert_eq!(crc32c_raw_exclude(!0, &data, 3, 4), crc32c_raw(!0, &zeroed));
         // Nothing excluded is the plain CRC; a range past the end zeroes the
         // tail that exists.
         assert_eq!(crc32c_raw_exclude(!0, &data, 3, 0), crc32c_raw(!0, &data));

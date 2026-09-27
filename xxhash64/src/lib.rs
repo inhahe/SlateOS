@@ -108,13 +108,19 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
     while tail.len() >= 8 {
         let (word, rest) = tail.split_at(8);
         h ^= round(0, le64(word));
-        h = h.rotate_left(27).wrapping_mul(PRIME64_1).wrapping_add(PRIME64_4);
+        h = h
+            .rotate_left(27)
+            .wrapping_mul(PRIME64_1)
+            .wrapping_add(PRIME64_4);
         tail = rest;
     }
     if tail.len() >= 4 {
         let (word, rest) = tail.split_at(4);
         h ^= u64::from(le32(word)).wrapping_mul(PRIME64_1);
-        h = h.rotate_left(23).wrapping_mul(PRIME64_2).wrapping_add(PRIME64_3);
+        h = h
+            .rotate_left(23)
+            .wrapping_mul(PRIME64_2)
+            .wrapping_add(PRIME64_3);
         tail = rest;
     }
     for &byte in tail {

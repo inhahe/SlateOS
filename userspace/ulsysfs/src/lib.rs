@@ -105,7 +105,10 @@ pub fn minor(dev: u64) -> u32 {
 #[must_use]
 pub fn majmin(dev: u64) -> String {
     // The `as` casts are C's: an `unsigned int` passed to `%d`.
-    #[allow(clippy::cast_possible_wrap, reason = "C prints the unsigned halves with %d")]
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "C prints the unsigned halves with %d"
+    )]
     let (ma, mi) = (major(dev) as i32, minor(dev) as i32);
     format!("{ma}:{mi}")
 }

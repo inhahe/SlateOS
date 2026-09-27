@@ -441,8 +441,12 @@ impl Run<'_> {
     /// `decode`: one input, from its `begin` line to its end.
     fn decode(&mut self, inname: &[u8], input: &mut Lines) -> Result<i32, Exit> {
         let mut buf = vec![0u8; LINE_BUF];
-        let bad_beginning =
-            |r: &Run<'_>| r.invalid(&[&autoopts::shown(inname), b": Invalid or missing 'begin' line\n"]);
+        let bad_beginning = |r: &Run<'_>| {
+            r.invalid(&[
+                &autoopts::shown(inname),
+                b": Invalid or missing 'begin' line\n",
+            ])
+        };
         let (mode, do_base64, encoded) = loop {
             if input.fgets(&mut buf).is_none() {
                 return Err(bad_beginning(self));

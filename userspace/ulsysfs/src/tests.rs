@@ -5,7 +5,10 @@
 )]
 
 use crate::path::{scan_int, scan_long, scan_majmin, scan_ulong};
-use crate::{PathCxt, devname_dev_to_sys, devname_sys_to_dev, major, makedev, majmin, minor, stripoff_last_component};
+use crate::{
+    PathCxt, devname_dev_to_sys, devname_sys_to_dev, majmin, major, makedev, minor,
+    stripoff_last_component,
+};
 
 #[test]
 fn device_numbers_are_glibcs() {
@@ -30,7 +33,10 @@ fn numbers_scan_as_fscanf_does() {
     assert_eq!(scan_ulong(b"1024\n", &mut 0), Some(1024));
     // strtoul's `-`: modulo 2^64.
     assert_eq!(scan_ulong(b"-1", &mut 0), Some(u64::MAX));
-    assert_eq!(scan_ulong(b"99999999999999999999999", &mut 0), Some(u64::MAX));
+    assert_eq!(
+        scan_ulong(b"99999999999999999999999", &mut 0),
+        Some(u64::MAX)
+    );
     assert_eq!(scan_ulong(b"x1", &mut 0), None);
     assert_eq!(scan_long(b"-9223372036854775809", &mut 0), Some(i64::MIN));
     assert_eq!(scan_long(b"-9223372036854775808", &mut 0), Some(i64::MIN));
@@ -124,7 +130,10 @@ fn a_partition_reads_its_disks_attributes_and_finds_its_disk() {
         std::fs::write(full, text).unwrap();
     };
     w("sys/devices/virtual/block/sda/dev", "8:0\n");
-    w("sys/devices/virtual/block/sda/queue/logical_block_size", "512\n");
+    w(
+        "sys/devices/virtual/block/sda/queue/logical_block_size",
+        "512\n",
+    );
     w("sys/devices/virtual/block/sda/sda1/dev", "8:1\n");
     w("sys/devices/virtual/block/sda/sda1/partition", "1\n");
     w("sys/devices/virtual/block/sda/sda1/start", "2048\n");
@@ -134,10 +143,26 @@ fn a_partition_reads_its_disks_attributes_and_finds_its_disk() {
     std::fs::create_dir_all(root.join("sys/devices/virtual/block/dm-0/slaves/sdb")).unwrap();
     std::fs::create_dir_all(root.join("sys/dev/block")).unwrap();
     std::fs::create_dir_all(root.join("sys/block")).unwrap();
-    symlink("../../devices/virtual/block/sda", root.join("sys/dev/block/8:0")).unwrap();
-    symlink("../../devices/virtual/block/sda/sda1", root.join("sys/dev/block/8:1")).unwrap();
-    symlink("../../devices/virtual/block/sdb", root.join("sys/dev/block/8:16")).unwrap();
-    symlink("../../devices/virtual/block/dm-0", root.join("sys/dev/block/253:0")).unwrap();
+    symlink(
+        "../../devices/virtual/block/sda",
+        root.join("sys/dev/block/8:0"),
+    )
+    .unwrap();
+    symlink(
+        "../../devices/virtual/block/sda/sda1",
+        root.join("sys/dev/block/8:1"),
+    )
+    .unwrap();
+    symlink(
+        "../../devices/virtual/block/sdb",
+        root.join("sys/dev/block/8:16"),
+    )
+    .unwrap();
+    symlink(
+        "../../devices/virtual/block/dm-0",
+        root.join("sys/dev/block/253:0"),
+    )
+    .unwrap();
     symlink("../devices/virtual/block/sda", root.join("sys/block/sda")).unwrap();
     symlink("../devices/virtual/block/sdb", root.join("sys/block/sdb")).unwrap();
     symlink("../devices/virtual/block/dm-0", root.join("sys/block/dm-0")).unwrap();
@@ -151,17 +176,38 @@ fn a_partition_reads_its_disks_attributes_and_finds_its_disk() {
     assert_eq!(part.read_u64(b"start"), Some(2048));
     // Not in the partition's directory: read from the disk's.
     assert_eq!(part.read_u64(b"queue/logical_block_size"), Some(512));
-    assert_eq!(part.blkdev_wholedisk(32), Some((b"sda".to_vec(), makedev(8, 0))));
-    assert_eq!(part.blkdev_wholedisk(3), Some((b"sd".to_vec(), makedev(8, 0))));
-    assert_eq!(disk.blkdev_wholedisk(32), Some((b"sda".to_vec(), makedev(8, 0))));
+    assert_eq!(
+        part.blkdev_wholedisk(32),
+        Some((b"sda".to_vec(), makedev(8, 0)))
+    );
+    assert_eq!(
+        part.blkdev_wholedisk(3),
+        Some((b"sd".to_vec(), makedev(8, 0)))
+    );
+    assert_eq!(
+        disk.blkdev_wholedisk(32),
+        Some((b"sda".to_vec(), makedev(8, 0)))
+    );
     assert_eq!(disk.blkdev_count_partitions(Some(b"sda")), 1);
     assert_eq!(disk.blkdev_partno_to_devno(1), makedev(8, 1));
     assert_eq!(disk.blkdev_partno_to_devno(2), 0);
     let dm = crate::new_sysfs_path(makedev(253, 0), None, Some(&prefix)).unwrap();
     assert_eq!(dm.blkdev_slave(), Some(b"sdb".to_vec()));
-    assert_eq!(dm.blkdev_wholedisk(32), Some((b"sdb".to_vec(), makedev(8, 16))));
-    assert_eq!(crate::devname_to_devno_in(Some(&prefix), b"sda", None), makedev(8, 0));
-    assert_eq!(crate::devname_to_devno_in(Some(&prefix), b"sda1", Some(b"sda")), makedev(8, 1));
-    assert_eq!(crate::devname_to_devno_in(Some(&prefix), b"nosuch", None), 0);
+    assert_eq!(
+        dm.blkdev_wholedisk(32),
+        Some((b"sdb".to_vec(), makedev(8, 16)))
+    );
+    assert_eq!(
+        crate::devname_to_devno_in(Some(&prefix), b"sda", None),
+        makedev(8, 0)
+    );
+    assert_eq!(
+        crate::devname_to_devno_in(Some(&prefix), b"sda1", Some(b"sda")),
+        makedev(8, 1)
+    );
+    assert_eq!(
+        crate::devname_to_devno_in(Some(&prefix), b"nosuch", None),
+        0
+    );
     assert!(crate::new_sysfs_path(makedev(9, 9), None, Some(&prefix)).is_none());
 }

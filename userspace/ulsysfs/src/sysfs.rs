@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::path::{Blkdev, DirEntry, PathCxt};
 use crate::{
-    PATH_MAX, PATH_SYS_BLOCK, PATH_SYS_DEVBLOCK, PATH_SYS_DEVCHAR, R_OK, c_str, major, majmin,
+    PATH_MAX, PATH_SYS_BLOCK, PATH_SYS_DEVBLOCK, PATH_SYS_DEVCHAR, R_OK, c_str, majmin, major,
     minor, path_of,
 };
 
@@ -29,7 +29,10 @@ pub fn devname_dev_to_sys(name: &[u8]) -> Vec<u8> {
 /// what followed it; `None` (and `path` untouched) with no `/`.
 pub fn stripoff_last_component(path: &mut Vec<u8>) -> Option<Vec<u8>> {
     let slash = path.iter().rposition(|&b| b == b'/')?;
-    let last = path.get(slash.saturating_add(1)..).unwrap_or_default().to_vec();
+    let last = path
+        .get(slash.saturating_add(1)..)
+        .unwrap_or_default()
+        .to_vec();
     path.truncate(slash);
     Some(last)
 }
@@ -46,7 +49,11 @@ fn xstrncpy(src: &[u8], n: usize) -> Vec<u8> {
 /// (under `prefix`), which must open, with the `sysfs_blkdev` dialect
 /// attached. `None` when the directory does not open.
 #[must_use]
-pub fn new_sysfs_path(devno: u64, parent: Option<Rc<PathCxt>>, prefix: Option<&[u8]>) -> Option<PathCxt> {
+pub fn new_sysfs_path(
+    devno: u64,
+    parent: Option<Rc<PathCxt>>,
+    prefix: Option<&[u8]>,
+) -> Option<PathCxt> {
     let mut pc = PathCxt::new(None);
     pc.set_prefix(prefix);
     pc.blkdev_init(devno, parent).ok()?;
@@ -206,7 +213,9 @@ impl PathCxt {
             let prefix = uuid
                 .as_deref()
                 .map(|u| u.split(|&b| b == b'-').next().unwrap_or_default());
-            if prefix.is_some_and(|p| p.len() >= 4 && p.get(..4).is_some_and(|h| h.eq_ignore_ascii_case(b"part"))) {
+            if prefix.is_some_and(|p| {
+                p.len() >= 4 && p.get(..4).is_some_and(|h| h.eq_ignore_ascii_case(b"part"))
+            }) {
                 is_part = true;
             }
             if is_part && let Some((name, devno)) = self.dm_wholedisk(len) {
@@ -228,7 +237,11 @@ impl PathCxt {
         stripoff_last_component(&mut link);
         let name = stripoff_last_component(&mut link)?;
         let name = devname_sys_to_dev(&name);
-        let diskname = if len > 0 { xstrncpy(&name, len) } else { Vec::new() };
+        let diskname = if len > 0 {
+            xstrncpy(&name, len)
+        } else {
+            Vec::new()
+        };
         let devno = devname_to_devno_in(self.prefix(), &name, None);
         if devno == 0 {
             return None;

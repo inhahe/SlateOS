@@ -250,9 +250,7 @@ impl PathCxt {
     ///
     /// The `errno`: the directory's open, or `openat`'s.
     pub fn open(&self, path: &[u8]) -> Result<File, i32> {
-        self.with_redirect(path, |p| {
-            File::open(path_of(p)).map_err(|e| errno_of(&e))
-        })
+        self.with_redirect(path, |p| File::open(path_of(p)).map_err(|e| errno_of(&e)))
     }
 
     /// `ul_path_readlink(pc, buf, PATH_MAX, path)`: the link `path` names
@@ -402,7 +400,9 @@ impl PathCxt {
 fn open_dir(path: &[u8]) -> Result<(), i32> {
     #[cfg(unix)]
     {
-        File::open(path_of(path)).map(drop).map_err(|e| errno_of(&e))
+        File::open(path_of(path))
+            .map(drop)
+            .map_err(|e| errno_of(&e))
     }
     #[cfg(not(unix))]
     {
@@ -456,7 +456,10 @@ pub(crate) fn scan_long(text: &[u8], pos: &mut usize) -> Option<i64> {
 /// `fscanf`'s `%d`: `%ld`'s value cut to an `int`, as glibc stores it.
 pub(crate) fn scan_int(text: &[u8], pos: &mut usize) -> Option<i32> {
     // Truncation is the point: `*ARG (int *) = num.l`.
-    #[allow(clippy::cast_possible_truncation, reason = "C stores the long in an int")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "C stores the long in an int"
+    )]
     scan_long(text, pos).map(|v| v as i32)
 }
 

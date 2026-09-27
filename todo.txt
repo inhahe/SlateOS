@@ -58772,6 +58772,20 @@ test of the fixture, not of the bound.
   hex_text`). Then each copy goes; files written afterwards carry lowercase
   hex, which the old readers already accept, so old and new files both load.
 
+- **A file named on the command line may be any bytes.** Lane F landed
+  `oswindow::app::ArgsOs` -- `display: Option<String>`, `rest: Vec<OsString>`,
+  `ArgsOs::from_env()` over `args_os()` -- on lane-f as 21c0b3614
+  (`requests/e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`); `Args`
+  keeps its type and now refuses a non-UTF-8 argument by name instead of
+  panicking. **Trigger:** it is on `origin/main` (`git show
+  origin/main:gui/window/src/app.rs | grep "pub struct ArgsOs"`). Then the eight
+  programs that open files named on the command line -- archivemanager, editor,
+  explorer, hexeditor, imageviewer, musicplayer, pdfviewer, videoplayer -- move
+  to `ArgsOs` and take their paths as `PathBuf::from(OsString)`, each with a
+  test opening a file whose name is not UTF-8 (match3 and pinball take text
+  options and stay on `Args`); `known-issues.md` -> `[E] "Open with" opened
+  nothing...` is then FIXED, and the request closes.
+
 - **The terminal has never run on SlateOS.** Its real child -- `forkpty` plus
   `execve` through `libcall::pty` -- is tested only on a Linux host against
   glibc, because no graphical application runs on SlateOS yet (nothing puts a

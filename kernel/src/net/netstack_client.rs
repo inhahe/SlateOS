@@ -152,6 +152,26 @@ pub enum RingMode {
 /// [`set_ring_mode`]'s override: 0 none, 1 shared, 2 per-socket.
 static RING_MODE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
+/// Rings alive now: the shared one once created, plus one per socket opened in
+/// per-socket mode and not yet closed. See [`rings_live`].
+static RINGS_LIVE: AtomicU32 = AtomicU32::new(0);
+
+/// Bytes of shared memory one ring takes, once a ring has been created.
+static RING_BYTES: AtomicU32 = AtomicU32::new(0);
+
+/// How many rings are alive, and the shared memory they hold in all.
+///
+/// The memory half of A-Q15's measurement is exact rather than sampled: under
+/// design A this stays at one ring whatever the number of sockets, under B it
+/// grows by one ring per socket. A ring is mapped by the daemon too, but it is
+/// the same pages, so the bytes are counted once.
+#[must_use]
+pub fn rings_live() -> (u32, u64) {
+    let n = RINGS_LIVE.load(Ordering::Acquire);
+    let each = RING_BYTES.load(Ordering::Acquire);
+    (n, u64::from(n).saturating_mul(u64::from(each)))
+}
+
 /// The mode a socket opened now gets.
 ///
 /// [`set_ring_mode`]'s override if one is set, else the `net.ring` boot switch
@@ -224,6 +244,10 @@ impl Drop for RingHandle {
     /// already stopped the daemon's session for it.
     fn drop(&mut self) {
         shm::close(self.handle);
+        // Saturating: an unbalanced decrement must not wrap the count.
+        let _ = RINGS_LIVE.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            Some(n.saturating_sub(1))
+        });
     }
 }
 
@@ -259,6 +283,8 @@ impl RingHandle {
             shm::close(handle);
             return Err(KernelError::InternalError);
         };
+        RINGS_LIVE.fetch_add(1, Ordering::AcqRel);
+        RING_BYTES.store(size, Ordering::Release);
         Ok(Self {
             handle,
             size,

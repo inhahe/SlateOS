@@ -52,6 +52,7 @@ pub mod ntp;
 pub mod pcap;
 pub mod qos;
 pub mod raw;
+pub mod ring_bench;
 pub mod smtp;
 pub mod snmp;
 pub mod socket;

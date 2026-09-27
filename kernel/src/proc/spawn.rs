@@ -5166,6 +5166,28 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         }
     }
 
+    // A-Q15's load harness, small: two connections, both loads, both designs.
+    // The full harness runs in the bench suite; this keeps it from rotting
+    // between bench boots. Loopback, so a failure is a real break.
+    match crate::net::ring_bench::self_test() {
+        // The harness prints its own result lines and OK line.
+        Ok(Some(())) => {}
+        Ok(None) => {
+            serial_println!("[spawn]   ring-bench self-test: no IPv4 lease -- check skipped");
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: ring-bench self-test ({:?}) — A-Q15's load harness no longer runs",
+                e
+            );
+            crate::selftest::dispatch_debug(
+                "ring-bench self-test",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
     // IPv6 connect parity (D-NETSOCK-SYNC, final gap): OP_CONNECT6 over the daemon.
     // Slirp offers no IPv6 peer or router, so this too drives the in-process
     // loopback — a non-blocking connect to the daemon's own link-local (me.ip6,

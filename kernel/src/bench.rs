@@ -4280,6 +4280,18 @@ pub fn run_all() {
     bench_dashboard_api_health();
     bench_dashboard_api_metrics();
 
+    // --- A-Q15's load harness: ring design A against B, same loads ---
+    //
+    // Before the ISR benchmark below, which can take the machine down under
+    // QEMU. The harness prints its own `[ring-bench]` lines; a failure stops it
+    // and is said so, and the suite carries on.
+    if let Err(e) = crate::net::ring_bench::run() {
+        serial_println!(
+            "[ring-bench] the harness stopped early: {:?} -- the lines above it stand",
+            e
+        );
+    }
+
     // --- ISR latency (timer interrupt hard-IRQ phase) ---
     //
     // Measures the time interrupts are disabled during the timer ISR:

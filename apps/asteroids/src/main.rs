@@ -1931,8 +1931,11 @@ impl App for AsteroidsApp {
         (INITIAL_WINDOW_W, INITIAL_WINDOW_H)
     }
 
+    /// Only while something moves. A paused or finished game has nothing to
+    /// advance, and a clock asked for anyway woke the machine every frame for
+    /// as long as the window stayed open.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(TICK)
+        (self.state == GameState::Playing).then_some(TICK)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -4388,8 +4391,13 @@ mod tests {
     fn the_window_asks_to_be_woken_for_the_animation() {
         // Without a tick interval nothing moves: every asteroid in the game
         // is where it was when the window opened.
-        let app = test_app();
+        let mut app = test_app();
         assert_eq!(app.tick_interval(), Some(TICK));
+        // And none once nothing moves.
+        for still in [GameState::Paused, GameState::GameOver] {
+            app.state = still;
+            assert_eq!(app.tick_interval(), None, "{still:?} asked for a clock");
+        }
     }
 
     #[test]

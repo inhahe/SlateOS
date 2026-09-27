@@ -1768,8 +1768,12 @@ impl App for NonogramApp {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
+    /// Only while a puzzle is being played, which is when the timer runs:
+    /// the selection screen and a solved puzzle have nothing to advance, and a
+    /// clock asked for anyway woke the machine five times a second for as long
+    /// as the window stayed open.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(TICK)
+        (self.screen == Screen::Playing).then_some(TICK)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -1837,6 +1841,26 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The timer's clock runs while a puzzle is played, and not on the
+    /// selection screen or over a solved puzzle.
+    #[test]
+    fn the_clock_runs_only_while_a_puzzle_is_played() {
+        let mut app = NonogramApp::new();
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "the selection screen asked for a clock"
+        );
+        app.start_puzzle(0);
+        assert_eq!(app.tick_interval(), Some(TICK));
+        app.screen = Screen::Won;
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a solved puzzle asked for a clock"
+        );
+    }
     use guitk::probe;
 
     const SIZE: (f32, f32) = <NonogramApp as Probe>::SIZE;
@@ -2510,8 +2534,10 @@ mod tests {
     #[test]
     fn the_window_is_asked_for_the_ticks_the_clock_runs_on() {
         // The clock counted ticks it was never sent: nothing in the program
-        // asked for them, so the header read 0:00 for the whole game.
-        let app = NonogramApp::new();
+        // asked for them, so the header read 0:00 for the whole game. Asked
+        // for while a puzzle is played, which is when the header shows it.
+        let mut app = NonogramApp::new();
+        app.start_puzzle(0);
         let every = App::tick_interval(&app).expect("the clock asks for no ticks");
         assert!(
             every <= Duration::from_secs(1),

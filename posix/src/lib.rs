@@ -486,7 +486,6 @@ pub mod sys_prctl;
 pub mod sys_ptrace;
 pub mod sys_quota;
 pub mod sys_random;
-pub mod sys_reboot;
 pub mod sys_resource;
 pub mod sys_select;
 pub mod sys_sendfile;

@@ -2390,50 +2390,38 @@ pub fn reboot_cmd_known(cmd: u32) -> bool {
 
 /// Reboot the system.
 ///
-/// Stub: validates `cmd` against the Linux-recognised reboot commands,
-/// then checks `CAP_SYS_BOOT`, then surfaces `ENOSYS` because our
-/// microkernel does not export a reboot path yet.  Real implementation
-/// will hand off to the platform power-management driver once it lands.
+/// Stub: answers as Linux's `sys_reboot` would, in Linux's order, then
+/// `ENOSYS`, because this microkernel exports no reboot path yet.  The real
+/// implementation will hand off to the platform power-management driver.
 ///
 /// # glibc / Linux model
 ///
-/// The glibc wrapper `reboot(int howto)` hard-codes both magic values
-/// and the optional `arg` pointer, leaving only `cmd` as a user-visible
-/// argument.  The kernel's argument validation therefore reduces to:
+/// glibc's `reboot(int howto)` supplies both magic values itself and calls
+/// the kernel straight away -- it checks nothing first -- and the kernel
+/// (`kernel/reboot.c`) checks, in this order:
 ///
-/// 1. `magic1 != LINUX_REBOOT_MAGIC1`               → `EINVAL`
-/// 2. `magic2` not in the accepted set              → `EINVAL`
-/// 3. `cmd` not in the known set                    → `EINVAL`
-/// 4. Caller lacks `CAP_SYS_BOOT`                   → `EPERM`
-/// 5. Otherwise: dispatch to the platform handler.
+/// 1. the caller lacks `CAP_SYS_BOOT`               → `EPERM`
+/// 2. `magic1`/`magic2` wrong                       → `EINVAL`
+/// 3. `cmd` not one it knows (the switch's default) → `EINVAL`
+/// 4. otherwise: the command runs.
 ///
-/// Since the wrapper supplies (1) and (2) itself, our visible checks
-/// are (3) and (4); step (5) becomes `ENOSYS` here.  This matches the
-/// pattern used by `swapon`/`swapoff` and `ptrace`: validate the same
-/// errno classes a real kernel would, then return `ENOSYS` once
-/// nothing is left to reject.
-///
-/// # Validation order
-///
-/// `EINVAL` precedes `EPERM` here because the glibc wrapper's magic
-/// values are always correct, so the only `EINVAL` path the user can
-/// trigger is "unknown cmd".  Linux's kernel does the capability check
-/// before the cmd-switch, but in glibc-mediated calls the cmd value
-/// determines whether the syscall is even worth issuing — pre-syscall
-/// validation surfacing `EINVAL` first matches what portable userspace
-/// observes when the kernel rejects a bad cmd.
+/// (2) cannot happen through the wrapper, so what a program can see is (1),
+/// then (3), then -- here -- `ENOSYS` for (4).  Until 2026-09-27 this checked
+/// `cmd` first, so an unknown command without the capability was `EINVAL`
+/// where Linux says `EPERM`; a comment argued glibc filters commands before
+/// the call, which it does not.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn reboot(cmd: i32) -> i32 {
     // Reinterpret the signed C `int` as u32 so the magic constants
     // (some of which have the high bit set, e.g. CMD_HALT 0xCDEF0123)
     // compare equal regardless of sign-extension on the caller side.
     let cmd_u = cmd as u32;
-    if !reboot_cmd_known(cmd_u) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
     if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_BOOT) {
         errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    if !reboot_cmd_known(cmd_u) {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     errno::set_errno(errno::ENOSYS);
@@ -4963,27 +4951,128 @@ mod tests {
         assert_eq!(getsid(0), 42);
     }
 
-    // -- reboot stub --
+    // -- reboot: Linux's checks, in Linux's order, then ENOSYS --
+    //
+    // These came from sys_reboot.rs (its "Phase 77" set), a facade nothing
+    // reached, on 2026-09-27 -- when the order they certified, EINVAL before
+    // EPERM, was found to be backwards (see `reboot`'s doc).
+
+    /// Restores the thread's effective capabilities when dropped, so a test
+    /// that drops `CAP_SYS_BOOT` does not leave it dropped.  (On the host the
+    /// capability sets are per thread, so tests cannot see each other's.)
+    struct CapGuard {
+        lo: u32,
+        hi: u32,
+    }
+
+    impl CapGuard {
+        fn snapshot() -> Self {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            Self { lo, hi }
+        }
+    }
+
+    impl Drop for CapGuard {
+        fn drop(&mut self) {
+            set_effective_caps(self.lo, self.hi);
+        }
+    }
+
+    fn set_effective_caps(lo: u32, hi: u32) {
+        let mut hdr = crate::sys_capability::CapUserHeader {
+            version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let data = [
+            crate::sys_capability::CapUserData {
+                effective: lo,
+                permitted: u32::MAX,
+                inheritable: 0,
+            },
+            crate::sys_capability::CapUserData {
+                effective: hi,
+                permitted: u32::MAX,
+                inheritable: 0,
+            },
+        ];
+        assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0);
+    }
+
+    fn drop_cap_sys_boot() {
+        use crate::sys_capability::{CAP_SYS_BOOT, has_capability};
+        let (lo, hi) = crate::sys_capability::current_caps_effective();
+        if CAP_SYS_BOOT < 32 {
+            set_effective_caps(lo & !(1u32 << CAP_SYS_BOOT), hi);
+        } else {
+            set_effective_caps(lo, hi & !(1u32 << (CAP_SYS_BOOT - 32)));
+        }
+        assert!(!has_capability(CAP_SYS_BOOT));
+    }
+
+    /// Every command Linux knows -- the high-bit ones (HALT is 0xCDEF0123)
+    /// through the `int` round trip, and CAD_OFF, which is 0.
+    const REBOOT_CMDS: [u32; 8] = [
+        LINUX_REBOOT_CMD_RESTART,
+        LINUX_REBOOT_CMD_HALT,
+        LINUX_REBOOT_CMD_POWER_OFF,
+        LINUX_REBOOT_CMD_CAD_ON,
+        LINUX_REBOOT_CMD_CAD_OFF,
+        LINUX_REBOOT_CMD_RESTART2,
+        LINUX_REBOOT_CMD_SW_SUSPEND,
+        LINUX_REBOOT_CMD_KEXEC,
+    ];
 
     #[test]
     fn test_reboot_returns_enosys_when_capable() {
-        // The default process holds CAP_SYS_BOOT, so a well-formed
-        // reboot call surfaces ENOSYS (no reboot subsystem yet) rather
-        // than EPERM.  EPERM is exercised by Phase 77 tests in
-        // sys_reboot::tests with CAP_SYS_BOOT explicitly dropped.
+        // The default process holds CAP_SYS_BOOT, so every well-formed call
+        // reaches the end and surfaces ENOSYS (no reboot subsystem yet).
+        let _g = CapGuard::snapshot();
+        for cmd in REBOOT_CMDS {
+            crate::errno::set_errno(0);
+            assert_eq!(reboot(cmd as i32), -1, "cmd {cmd:#010x}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS, "cmd {cmd:#010x}");
+        }
+    }
+
+    #[test]
+    fn test_reboot_unknown_cmd_is_einval() {
+        let _g = CapGuard::snapshot();
+        // Nothing near a command is one; -1 and 1 look tempting and are not;
+        // and the magic numbers, passed as the command by a caller who swapped
+        // the arguments, are not either.
+        for cmd in [0xDEAD_BEEF, 0x0123_4566, 0x0123_4568, 0xCDEF_0124, 0xFFFF_FFFF, 1, 0x1_0000,
+                    LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2] {
+            crate::errno::set_errno(0);
+            assert_eq!(reboot(cmd as i32), -1, "cmd {cmd:#010x}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "cmd {cmd:#010x}");
+            assert!(!reboot_cmd_known(cmd), "cmd {cmd:#010x}");
+        }
+        for cmd in REBOOT_CMDS {
+            assert!(reboot_cmd_known(cmd), "cmd {cmd:#010x}");
+        }
+    }
+
+    #[test]
+    fn test_reboot_without_cap_sys_boot_is_eperm() {
+        let _g = CapGuard::snapshot();
+        drop_cap_sys_boot();
+        for cmd in REBOOT_CMDS {
+            crate::errno::set_errno(0);
+            assert_eq!(reboot(cmd as i32), -1, "cmd {cmd:#010x}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM, "cmd {cmd:#010x}");
+        }
+    }
+
+    /// Linux checks the capability before it looks at the command, so without
+    /// CAP_SYS_BOOT even an unknown command is EPERM.  (This test asserted
+    /// the opposite until 2026-09-27.)
+    #[test]
+    fn test_reboot_eperm_precedes_einval() {
+        let _g = CapGuard::snapshot();
+        drop_cap_sys_boot();
         crate::errno::set_errno(0);
-        assert_eq!(reboot(LINUX_REBOOT_CMD_RESTART as i32), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_reboot_halt() {
-        assert_eq!(reboot(LINUX_REBOOT_CMD_HALT as i32), -1);
-    }
-
-    #[test]
-    fn test_reboot_power_off() {
-        assert_eq!(reboot(LINUX_REBOOT_CMD_POWER_OFF as i32), -1);
+        assert_eq!(reboot(0xDEAD_BEEFu32 as i32), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
     }
 
     // -- reboot constants --
@@ -4991,14 +5080,19 @@ mod tests {
     #[test]
     fn test_reboot_magic_values() {
         assert_eq!(LINUX_REBOOT_MAGIC1, 0xfee1_dead);
-        assert_eq!(LINUX_REBOOT_MAGIC2, 672274793);
+        assert_eq!(LINUX_REBOOT_MAGIC2, 672_274_793);
+        assert_eq!(LINUX_REBOOT_MAGIC2A, 85_072_278);
+        assert_eq!(LINUX_REBOOT_MAGIC2B, 369_367_448);
+        assert_eq!(LINUX_REBOOT_MAGIC2C, 537_993_216);
     }
 
     #[test]
     fn test_reboot_cmd_constants_distinct() {
-        assert_ne!(LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_HALT);
-        assert_ne!(LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF);
-        assert_ne!(LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_POWER_OFF);
+        for (i, a) in REBOOT_CMDS.iter().enumerate() {
+            for b in REBOOT_CMDS.iter().skip(i + 1) {
+                assert_ne!(a, b);
+            }
+        }
     }
 
     // -- wait (convenience wrapper) --
@@ -9116,8 +9210,8 @@ mod tests {
         use super::*;
         use crate::sys_mount::{MNT_DETACH, MNT_EXPIRE, MNT_FORCE};
 
-        /// Snapshot/restore-on-drop guard mirroring sys_reboot
-        /// Phase 77 and unistd swap_cap_phase164.
+        /// Snapshot/restore-on-drop guard mirroring the reboot tests'
+        /// (above) and unistd swap_cap_phase164.
         struct CapGuard {
             lo: u32,
             hi: u32,

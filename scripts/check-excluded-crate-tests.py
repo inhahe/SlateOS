@@ -72,6 +72,7 @@ NOT_SUBJECTS: dict[str, str] = {
     "init/.cargo": "a cargo config directory caught by the `init/*` glob, not a crate",
     "net/.cargo": "a cargo config directory caught by the `net/*` glob, not a crate",
     "userspace/.cargo": "a cargo config directory caught by the `userspace/*` glob, not a crate",
+    "rustcrypto": "vetted cryptography vendored byte-for-byte from crates.io (rustcrypto/README.md, design-decisions 1218); upstream's own suites want upstream's dev-dependencies and rewrite the published Cargo.lock files, so their published vectors run instead in rustcrypto/seal, a workspace member",
 }
 
 # A `#[test]` on its own line. Anchored so a commented-out one, a doc-comment

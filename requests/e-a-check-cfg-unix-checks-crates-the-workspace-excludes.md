@@ -39,3 +39,23 @@ count members only, which is what it means.
 `cargo clippy -p <crate> --all-targets --target x86_64-unknown-linux-gnu --
 -D warnings` for every lane E crate in the push -- `ebook`, `seal`,
 `systemrestore` -- clean, and their tests run on Linux under WSL.
+
+## The same crates reach two more gates, handled additively
+
+For the record, since both touch lane A's gates:
+
+- **`check-control-bytes.py`** read `rustcrypto/digest/tests/data/fixed_hash_serialization.bin`
+  (a 32-byte binary test fixture, too short for its binary test) as text with
+  control bytes. Baselined in `scripts/control-bytes-baseline.txt` with a note,
+  as lane F's ICO fixture is.
+- **`check-excluded-crate-tests.py`** derives its subjects from the root
+  `exclude` list, so it began running every vendored crate's own suite -- with
+  upstream's dev-dependencies, from the network, rewriting the published
+  `Cargo.lock` files as it went, for over half an hour before lane E stopped
+  it. `rustcrypto` is now in its `NOT_SUBJECTS` table with the reason, beside
+  `nushell` (the same kind of entry); the published vectors run in
+  `rustcrypto/seal`'s own tests instead.
+
+If lane A would rather vendored code be named once, in one list every gate
+reads, that would replace the per-gate entries; lane E has no preference as
+long as it stays byte-identical to what crates.io serves.

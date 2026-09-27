@@ -52,6 +52,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 #[cfg(test)]
@@ -153,6 +154,22 @@ enum Target {
     ConfirmPassword,
     /// First run: the button that makes the vault.
     CreateVault,
+    /// Settings: back the vault up.
+    BackUp,
+    /// Settings: restore from a backup.
+    RestoreBackup,
+    /// Settings: export as plain text.
+    ExportCsv,
+    /// The export warning: go on.
+    ExportAnyway,
+    /// The restore dialog's password field.
+    RestoreInput,
+    /// The restore dialog: open the backup with the password typed.
+    RestoreOpen,
+    /// The restore dialog: replace this vault's entries with the backup's.
+    RestoreReplace,
+    /// Any vault dialog: leave it, doing nothing.
+    DialogCancel,
     /// New-entry form: the type chooser, indexing [`EntryType::all`].
     NewKind(usize),
     /// New-entry form: field `n`, indexing [`fields_for`].
@@ -2561,134 +2578,139 @@ fn audit_vault(vault: &Vault, now: u64) -> Vec<AuditIssue> {
 // Import / Export
 // =============================================================================
 
-/// Export vault entries to CSV format.
-/// The vault as CSV, for moving it to another password manager.
+/// The vault as CSV with every password in plain text, for moving to another
+/// password manager -- the operator's option A of C-Q25 (`design-decisions.md`
+/// §1417), offered only behind a warning that says what the file is.
 ///
-/// Advertised in the module doc and reachable from nothing: there is no
-/// control that calls it, and no filesystem to write the result to. See
-/// `todo.txt` -- the clipboard is the sink this can have today.
-#[allow(dead_code, reason = "no export control yet -- see todo.txt")]
+/// **Every field is quoted, always**, and a `"` inside one is doubled
+/// (RFC 4180). A password may hold any character at all -- a comma, a quote, a
+/// line break, a tab, a leading space or `=` -- and quoting only the fields
+/// that "need" it is how an exporter splits one password into two columns, or
+/// loses the space it began with to a reader that trims. Records end in CRLF,
+/// as RFC 4180 says. Nothing is altered to defend spreadsheets from formulas:
+/// the file is for importing, and a password changed on the way out is a
+/// password that no longer works.
+///
+/// Columns: `type`, `name`, `username`, `password`, `url`, `notes`,
+/// `one-time code secret`, `tags` (`;` between), `folder`, `favourite`. A card,
+/// an identity and an SSH key have no columns of their own in any importer's
+/// CSV, so their fields are written into `notes`, one `label: value` a line.
 fn export_csv(vault: &Vault) -> String {
-    let mut csv = String::from("type,name,username,password,url,notes,tags,folder,starred\n");
+    fn quoted(s: &str) -> String {
+        let mut out = String::with_capacity(s.len().saturating_add(2));
+        out.push('"');
+        for c in s.chars() {
+            if c == '"' {
+                out.push('"');
+            }
+            out.push(c);
+        }
+        out.push('"');
+        out
+    }
+    fn lines(pairs: &[(&str, &str)], notes: &str) -> String {
+        let mut out: Vec<String> = pairs
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| format!("{k}: {v}"))
+            .collect();
+        if !notes.is_empty() {
+            out.push(notes.to_string());
+        }
+        out.join("\n")
+    }
+    let header = [
+        "type",
+        "name",
+        "username",
+        "password",
+        "url",
+        "notes",
+        "one-time code secret",
+        "tags",
+        "folder",
+        "favourite",
+    ];
+    let mut csv = header.map(quoted).join(",");
+    csv.push_str("\r\n");
     for entry in &vault.entries {
-        let etype = entry.entry_type().label();
-        let name = escape_csv(entry.display_name());
-        let subtitle = escape_csv(entry.subtitle());
-        let password = match &entry.data {
-            EntryData::Login(d) => escape_csv(&d.password),
-            _ => String::new(),
+        let (username, password, url, notes, totp) = match &entry.data {
+            EntryData::Login(d) => (
+                d.username.clone(),
+                d.password.clone(),
+                d.url.clone(),
+                d.notes.clone(),
+                d.totp_secret.clone().unwrap_or_default(),
+            ),
+            EntryData::SecureNote(d) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                d.content.clone(),
+                String::new(),
+            ),
+            EntryData::CreditCard(d) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                lines(
+                    &[
+                        ("Number", &d.number_masked),
+                        ("Expiry", &d.expiry),
+                        ("Cardholder", &d.cardholder),
+                    ],
+                    &d.notes,
+                ),
+                String::new(),
+            ),
+            EntryData::Identity(d) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                lines(
+                    &[
+                        ("Email", &d.email),
+                        ("Phone", &d.phone),
+                        ("Address", &d.address),
+                    ],
+                    "",
+                ),
+                String::new(),
+            ),
+            EntryData::SshKey(d) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                lines(
+                    &[
+                        ("Fingerprint", &d.fingerprint),
+                        ("Public key", &d.public_key),
+                    ],
+                    "",
+                ),
+                String::new(),
+            ),
         };
-        let url = match &entry.data {
-            EntryData::Login(d) => escape_csv(&d.url),
-            _ => String::new(),
-        };
-        let notes = match &entry.data {
-            EntryData::Login(d) => escape_csv(&d.notes),
-            EntryData::CreditCard(d) => escape_csv(&d.notes),
-            _ => String::new(),
-        };
-        // Tag and folder names are free-form user text just like the other
-        // columns, so they need the same quoting; before this they were the
-        // only two fields interpolated raw.
-        let tags = escape_csv(&entry.tags.join(";"));
-        let folder = escape_csv(
-            &entry
-                .folder_id
-                .and_then(|fid| vault.get_folder(fid))
-                .map_or(String::new(), |f| f.name.clone()),
-        );
-        let starred = if entry.starred { "true" } else { "false" };
-
-        csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{}\n",
-            etype, name, subtitle, password, url, notes, tags, folder, starred,
-        ));
+        let folder = entry
+            .folder_id
+            .and_then(|fid| vault.get_folder(fid))
+            .map_or(String::new(), |f| f.name.clone());
+        let row = [
+            entry.entry_type().label().to_string(),
+            entry.display_name().to_string(),
+            username,
+            password,
+            url,
+            notes,
+            totp,
+            entry.tags.join(";"),
+            folder,
+            if entry.starred { "yes" } else { "no" }.to_string(),
+        ];
+        csv.push_str(&row.map(|field| quoted(&field)).join(","));
+        csv.push_str("\r\n");
     }
     csv
-}
-
-/// Escape a value for CSV output.
-/// Quote a CSV field per RFC 4180.
-///
-/// Delegates to the shared escaper so this app cannot drift from the other
-/// CSV writers again. The local version this replaced omitted `\r` from its
-/// trigger set; since RFC 4180 records are CRLF-terminated, a bare CR in an
-/// unquoted field splits the record for most readers.
-#[allow(
-    dead_code,
-    reason = "only `export_csv` calls it, and that has no caller yet"
-)]
-fn escape_csv(s: &str) -> String {
-    guitk::csv::field(s)
-}
-
-/// Serialize vault to a backup string (simplified JSON-like format).
-/// The vault in a form that could be written out and read back. Same story as
-/// `export_csv`: advertised, and nothing calls it.
-#[allow(dead_code, reason = "no backup control yet -- see todo.txt")]
-fn serialize_backup(vault: &Vault) -> String {
-    let mut out = String::from("{\n  \"vault_name\": ");
-    // Every string below is user-chosen (vault/entry/folder/tag names). None
-    // of them was escaped before, so a `"` in any one of them produced a
-    // backup file that no JSON reader could load -- i.e. a silently
-    // unrestorable backup, which is the worst possible failure for a
-    // credential vault.
-    out.push_str(&format!(
-        "\"{}\",\n",
-        guitk::escape::json_string(&vault.name)
-    ));
-    out.push_str(&format!("  \"entry_count\": {},\n", vault.entries.len()));
-    out.push_str("  \"entries\": [\n");
-    // Index of the last element, so the "is this the final one?" test inside
-    // the loop is a comparison rather than an `i + 1` that has to be argued
-    // safe. `saturating_sub` covers the empty case, where the loop body never
-    // runs and the value is unused.
-    let last_entry = vault.entries.len().saturating_sub(1);
-    for (i, entry) in vault.entries.iter().enumerate() {
-        out.push_str("    {\n");
-        out.push_str(&format!("      \"id\": {},\n", entry.id));
-        out.push_str(&format!(
-            "      \"type\": \"{}\",\n",
-            entry.entry_type().label()
-        ));
-        out.push_str(&format!(
-            "      \"name\": \"{}\",\n",
-            guitk::escape::json_string(entry.display_name())
-        ));
-        out.push_str(&format!("      \"starred\": {},\n", entry.starred));
-        out.push_str(&format!("      \"compromised\": {},\n", entry.compromised));
-        out.push_str(&format!("      \"created_at\": {},\n", entry.created_at));
-        out.push_str(&format!("      \"modified_at\": {},\n", entry.modified_at));
-        let tags_str: Vec<String> = entry
-            .tags
-            .iter()
-            .map(|t| format!("\"{}\"", guitk::escape::json_string(t)))
-            .collect();
-        out.push_str(&format!("      \"tags\": [{}]\n", tags_str.join(", ")));
-        if i < last_entry {
-            out.push_str("    },\n");
-        } else {
-            out.push_str("    }\n");
-        }
-    }
-    out.push_str("  ],\n");
-    out.push_str("  \"folders\": [\n");
-    let last_folder = vault.folders.len().saturating_sub(1);
-    for (i, folder) in vault.folders.iter().enumerate() {
-        out.push_str(&format!(
-            "    {{ \"id\": {}, \"name\": \"{}\" }}",
-            folder.id,
-            guitk::escape::json_string(&folder.name)
-        ));
-        if i < last_folder {
-            out.push_str(",\n");
-        } else {
-            out.push('\n');
-        }
-    }
-    out.push_str("  ]\n");
-    out.push_str("}\n");
-    out
 }
 
 // =============================================================================
@@ -3032,6 +3054,36 @@ struct NewVault {
     error: Option<String>,
 }
 
+/// A question the vault's own controls ask before they act.
+#[derive(Clone, Debug)]
+enum VaultDialog {
+    /// Plain-text export: what the file will be, before a place is chosen.
+    ExportWarning,
+    /// A backup to restore from, waiting for the master password it was
+    /// made with.
+    RestorePassword {
+        path: PathBuf,
+        backup: Box<Vault>,
+        input: String,
+        error: Option<String>,
+    },
+    /// The backup is open: replace this vault's entries with its own?
+    RestoreConfirm { path: PathBuf, backup: Box<Vault> },
+}
+
+/// What the file dialog that is up was opened to do with the file chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickFor {
+    Backup,
+    Restore,
+    Export,
+}
+
+/// The largest file Restore reads as a vault. A vault of ten thousand entries
+/// is a few MiB; this is room for far more, and a stop for a file that is
+/// plainly something else.
+const MAX_VAULT_BYTES: usize = 256 << 20;
+
 /// Where the vault is kept: `<config>/credmanager/vault`, beside every other
 /// program's settings and data (`settingsfile::config_dir`).
 fn vault_path() -> Option<PathBuf> {
@@ -3125,6 +3177,13 @@ struct AppState {
     close_anyway: bool,
     /// Why the last unlock did not.
     unlock_message: String,
+    /// The question a vault control is asking, while it is up.
+    dialog: Option<VaultDialog>,
+    /// The file dialog, and what it was opened for.
+    picker: FilePicker,
+    pick_for: Option<PickFor>,
+    /// What the last back-up, restore or export did, or why it did not.
+    vault_message: Option<String>,
     sidebar_selection: SidebarSelection,
     selected_entry_id: Option<u64>,
     detail_view: DetailView,
@@ -3201,6 +3260,10 @@ impl AppState {
             save_error: None,
             close_anyway: false,
             unlock_message: String::new(),
+            dialog: None,
+            picker: FilePicker::new(),
+            pick_for: None,
+            vault_message: None,
             sidebar_selection: SidebarSelection::AllItems,
             selected_entry_id: None,
             detail_view: DetailView::EntryDetail,
@@ -3305,6 +3368,154 @@ impl AppState {
         self.keep_if_changed();
         self.vault.lock();
         self.saved = None;
+        self.dialog = None;
+        self.picker.close();
+        self.pick_for = None;
+    }
+
+    /// Put the file dialog up: where to back up to, what to restore, or where
+    /// to export to.
+    fn open_picker(&mut self, purpose: PickFor) {
+        match purpose {
+            PickFor::Backup => self.picker.open_to_write("credmanager-backup.vault"),
+            PickFor::Export => self.picker.open_to_write("credentials.csv"),
+            PickFor::Restore => self.picker.open_to_read(),
+        }
+        self.pick_for = Some(purpose);
+    }
+
+    /// Do with `path` what the file dialog was opened for.
+    fn picked(&mut self, purpose: PickFor, path: &Path) {
+        match purpose {
+            PickFor::Backup => self.back_up(path),
+            PickFor::Restore => self.start_restore(path),
+            PickFor::Export => self.export_to(path),
+        }
+    }
+
+    /// Back the vault up to `path`: the vault sealed as it is now, under a new
+    /// nonce -- the operator's option B of C-Q25. It opens with the master
+    /// password the vault has now, and restores everything in it; to anyone
+    /// without that password it is as closed as the vault itself.
+    fn back_up(&mut self, path: &Path) {
+        let mut nonce = [0u8; seal::NONCE_LEN];
+        if !(self.entropy)(&mut nonce) {
+            self.vault_message = Some(
+                "Not backed up: this system's secure random source cannot be reached.".to_string(),
+            );
+            return;
+        }
+        if let Err(why) = self.vault.reseal(nonce) {
+            self.vault_message = Some(format!("Not backed up: {why}."));
+            return;
+        }
+        self.vault_message = Some(match write_vault(path, &self.vault.sealed) {
+            Ok(()) => format!(
+                "Backed up to {}. It opens with the master password you have now.",
+                path.shown()
+            ),
+            Err(e) => format!("Not backed up: {} could not be written: {e}", path.shown()),
+        });
+    }
+
+    /// Read the backup at `path`, and ask for the master password it was made
+    /// with.
+    fn start_restore(&mut self, path: &Path) {
+        let bytes = match safeio::read_capped(path, MAX_VAULT_BYTES) {
+            Ok(read) if read.truncated => {
+                self.vault_message = Some(format!("{} is too large to be a vault.", path.shown()));
+                return;
+            }
+            Ok(read) => read.bytes,
+            Err(e) => {
+                self.vault_message = Some(format!("{} could not be read: {e}", path.shown()));
+                return;
+            }
+        };
+        match Vault::from_file(bytes) {
+            Ok(backup) => {
+                self.dialog = Some(VaultDialog::RestorePassword {
+                    path: path.to_path_buf(),
+                    backup: Box::new(backup),
+                    input: String::new(),
+                    error: None,
+                });
+            }
+            Err(why) => {
+                self.vault_message = Some(format!("{} cannot be restored: {why}.", path.shown()));
+            }
+        }
+    }
+
+    /// Open the backup with the password typed into the restore dialog.
+    fn restore_open(&mut self) {
+        match self.dialog.take() {
+            Some(VaultDialog::RestorePassword {
+                path,
+                mut backup,
+                input,
+                ..
+            }) => match backup.open(&input, self.now) {
+                Ok(()) => self.dialog = Some(VaultDialog::RestoreConfirm { path, backup }),
+                Err(why) => {
+                    self.dialog = Some(VaultDialog::RestorePassword {
+                        path,
+                        backup,
+                        input: String::new(),
+                        error: Some(capitalised(&why.to_string())),
+                    });
+                }
+            },
+            other => self.dialog = other,
+        }
+    }
+
+    /// Replace this vault's entries with the opened backup's. The vault keeps
+    /// its own master password: what is restored is sealed under it.
+    fn restore_replace(&mut self) {
+        match self.dialog.take() {
+            Some(VaultDialog::RestoreConfirm { path, backup }) => {
+                let mut backup = *backup;
+                let entries = std::mem::take(&mut backup.entries);
+                let folders = std::mem::take(&mut backup.folders);
+                let name = std::mem::take(&mut backup.name);
+                let (id_gen, auto_lock) = (backup.id_gen, backup.auto_lock_minutes);
+                // Its key, overwritten, and nothing of it left behind.
+                backup.lock();
+                let count = entries.len();
+                self.vault.name = name;
+                self.vault.entries = entries;
+                self.vault.folders = folders;
+                self.vault.id_gen = id_gen;
+                self.vault.auto_lock_minutes = auto_lock;
+                self.selected_entry_id = None;
+                self.refresh_filter();
+                self.keep_if_changed();
+                self.vault_message = Some(format!(
+                    "Restored {count} {} from {}. It opens with your master password.",
+                    if count == 1 { "entry" } else { "entries" },
+                    path.shown()
+                ));
+            }
+            other => self.dialog = other,
+        }
+    }
+
+    /// Write every entry to `path` as CSV, passwords in plain text -- the
+    /// operator's option A of C-Q25, reached only through the warning.
+    fn export_to(&mut self, path: &Path) {
+        let count = self.vault.entries.len();
+        self.vault_message = Some(
+            match write_vault(path, export_csv(&self.vault).as_bytes()) {
+                Ok(()) => format!(
+                    "Exported {count} {} to {} in plain text: anyone who can open it can read \
+                 every password in it. Delete it once it is imported.",
+                    if count == 1 { "entry" } else { "entries" },
+                    path.shown()
+                ),
+                Err(e) => format!("Not exported: {} could not be written: {e}", path.shown()),
+            },
+        );
     }
 
     /// Where the panes go at the size the window is currently believed to be.
@@ -3749,7 +3960,9 @@ impl AppState {
                     "Kept in {}, encrypted with your master password.",
                     path.shown()
                 ),
-                "Every change is saved as it is made. Ctrl+L locks the vault.".to_string(),
+                self.vault_message.clone().unwrap_or_else(|| {
+                    "Every change is saved as it is made. Ctrl+L locks the vault.".to_string()
+                }),
             ],
             false,
         )
@@ -5833,41 +6046,58 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
     );
     y += 16.0;
 
-    // Export section
+    // Your vault: back it up, restore it, or take everything out of it. The
+    // two buttons drawn here before 2026-09-27 -- "Export CSV" and "Backup" --
+    // recorded no target, so pressing them did nothing at all.
     draw_text(
         frame,
         x_start + pad,
         y,
-        "DATA",
-        state.palette.overlay0,
+        "YOUR VAULT",
+        state.palette.subtext0,
         SMALL_FONT_SIZE,
         FontWeightHint::Bold,
         None,
     );
     y += 24.0;
-
-    draw_button(
-        frame,
-        x_start + pad,
-        y,
-        120.0,
-        32.0,
-        "Export CSV",
-        state.palette.surface1,
-        state.palette.text,
-        false,
-    );
-    draw_button(
-        frame,
-        x_start + pad + 132.0,
-        y,
-        120.0,
-        32.0,
-        "Backup",
-        state.palette.surface1,
-        state.palette.text,
-        false,
-    );
+    let explain = [
+        "A backup is this vault, sealed: it opens with your master password, restores everything,",
+        "and is as closed as the vault to anyone else. An export is every password in plain text.",
+    ];
+    for line in explain {
+        draw_text(
+            frame,
+            x_start + pad,
+            y,
+            line,
+            state.palette.subtext0,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(panel_width - pad * 2.0),
+        );
+        y += SMALL_FONT_SIZE + 6.0;
+    }
+    y += 6.0;
+    let mut bx = x_start + pad;
+    for (label, target, width) in [
+        ("Back up...", Target::BackUp, 110.0),
+        ("Restore from a backup...", Target::RestoreBackup, 200.0),
+        ("Export as plain text...", Target::ExportCsv, 190.0),
+    ] {
+        draw_button(
+            frame,
+            bx,
+            y,
+            width,
+            32.0,
+            label,
+            state.palette.surface1,
+            state.palette.text,
+            false,
+        );
+        frame.hit(target, Rect::new(bx, y, width, 32.0));
+        bx += width + 12.0;
+    }
 
     let _ = y;
 }
@@ -6289,6 +6519,162 @@ fn render_unreadable_panel(
     );
 }
 
+/// A line of a vault dialog and its colour.
+type DialogLine = (String, Color);
+/// A vault dialog's button: its label, what it presses, and whether it is
+/// the one Enter presses.
+type DialogButton = (&'static str, Target, bool);
+
+/// A vault dialog, over everything else, with nothing behind it clickable.
+fn render_vault_dialog(
+    frame: &mut Frame,
+    state: &AppState,
+    dialog: &VaultDialog,
+    width: f32,
+    height: f32,
+) {
+    // Modal: the window behind stays painted, and none of it can be pressed.
+    frame.discard_hits();
+    draw_rect(
+        frame,
+        0.0,
+        0.0,
+        width,
+        height,
+        Color::rgba(0, 0, 0, 120),
+        0.0,
+    );
+    let (w, h) = (520.0, 250.0);
+    let (px, py) = lock_card(frame, state, width, height, w, h);
+    let cx = px + w / 2.0;
+    let small = |text: &str, color: Color| (text.to_string(), color);
+    let (title, lines, buttons): (&str, Vec<DialogLine>, [DialogButton; 2]) = match dialog {
+        VaultDialog::ExportWarning => (
+            "Export every password as plain text?",
+            vec![
+                small(
+                    "The file will hold every login and password in this vault,",
+                    state.palette.ink(state.palette.red),
+                ),
+                small(
+                    "readable by anyone -- and any program -- that can open it.",
+                    state.palette.ink(state.palette.red),
+                ),
+                small(
+                    "Use it only to move to another password manager, and delete it after.",
+                    state.palette.subtext0,
+                ),
+            ],
+            [
+                ("Export anyway", Target::ExportAnyway, true),
+                ("Cancel", Target::DialogCancel, false),
+            ],
+        ),
+        VaultDialog::RestorePassword { path, error, .. } => (
+            "Restore from a backup",
+            vec![
+                small(&path.shown().to_string(), state.palette.subtext0),
+                small(
+                    "Type the master password this backup was made with.",
+                    state.palette.subtext0,
+                ),
+                small(
+                    error.as_deref().unwrap_or(""),
+                    state.palette.ink(state.palette.red),
+                ),
+            ],
+            [
+                ("Open", Target::RestoreOpen, true),
+                ("Cancel", Target::DialogCancel, false),
+            ],
+        ),
+        VaultDialog::RestoreConfirm { path, backup } => (
+            "Replace this vault's entries?",
+            vec![
+                small(
+                    &format!(
+                        "{} holds {} {}; this vault holds {}.",
+                        path.file_name()
+                            .map_or_else(|| path.shown().to_string(), |n| n.shown().to_string()),
+                        backup.entries.len(),
+                        if backup.entries.len() == 1 {
+                            "entry"
+                        } else {
+                            "entries"
+                        },
+                        state.vault.entries.len()
+                    ),
+                    state.palette.text,
+                ),
+                small(
+                    "Everything here now is replaced. Back it up first if you may want it.",
+                    state.palette.subtext0,
+                ),
+                small(
+                    "The vault keeps your master password.",
+                    state.palette.subtext0,
+                ),
+            ],
+            [
+                ("Replace", Target::RestoreReplace, true),
+                ("Keep mine", Target::DialogCancel, false),
+            ],
+        ),
+    };
+    draw_text(
+        frame,
+        text::center_x(title, cx, HEADING_FONT_SIZE, FontWeightHint::Bold).max(px + 16.0),
+        py + 22.0,
+        title,
+        state.palette.text,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+        Some(w - 32.0),
+    );
+    let mut y = py + 58.0;
+    for (line, color) in &lines {
+        if line.is_empty() {
+            continue;
+        }
+        draw_text(
+            frame,
+            px + 24.0,
+            y,
+            line,
+            *color,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(w - 48.0),
+        );
+        y += SMALL_FONT_SIZE + 8.0;
+    }
+    if let VaultDialog::RestorePassword { input, error, .. } = dialog {
+        masked_field(
+            frame,
+            state,
+            Rect::new(px + 24.0, py + h - 100.0, w - 48.0, 36.0),
+            input,
+            "",
+            true,
+            error.is_some(),
+            Target::RestoreInput,
+        );
+    }
+    let mut bx = px + w - 24.0;
+    for (label, target, primary) in buttons.iter().rev() {
+        let bw = 130.0;
+        bx -= bw;
+        let (bg, fg) = if *primary {
+            (state.palette.blue, state.palette.base)
+        } else {
+            (state.palette.surface1, state.palette.text)
+        };
+        draw_button(frame, bx, py + h - 52.0, bw, 34.0, label, bg, fg, false);
+        frame.hit(*target, Rect::new(bx, py + h - 52.0, bw, 34.0));
+        bx -= 12.0;
+    }
+}
+
 /// There is a vault: its name, the master-password field and Unlock.
 fn render_unlock_panel(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
     let center_x = width / 2.0;
@@ -6545,6 +6931,16 @@ impl AppState {
             DetailView::Settings => render_settings_panel(&mut frame, self, w, h),
             DetailView::AuditReport => render_audit_panel(&mut frame, self, w, h),
             DetailView::NewEntry => render_new_entry_panel(&mut frame, self, w, h),
+        }
+        if let Some(dialog) = &self.dialog {
+            render_vault_dialog(&mut frame, self, dialog, w, h);
+        }
+        if self.picker.is_open() {
+            // Modal like the dialog: nothing behind it may be clicked.
+            frame.discard_hits();
+            for command in self.picker.render(&self.palette, w, h) {
+                frame.push(command);
+            }
         }
 
         debug_assert!(frame.is_balanced(), "a clip was pushed and not popped");
@@ -6819,6 +7215,11 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         return EventResult::Consumed;
     }
 
+    // A vault dialog is modal: its keys, and nothing behind it.
+    if state.dialog.is_some() {
+        return dialog_key(state, key);
+    }
+
     // The new-entry form takes the keyboard while it is up: every printable
     // key goes into a field rather than into the search box behind it.
     if state.detail_view == DetailView::NewEntry && state.new_entry.is_some() {
@@ -7031,6 +7432,37 @@ fn act_on(state: &mut AppState, target: Target) -> EventResult {
             create_vault(state);
             EventResult::Consumed
         }
+        Target::BackUp => {
+            state.open_picker(PickFor::Backup);
+            EventResult::Consumed
+        }
+        Target::RestoreBackup => {
+            state.open_picker(PickFor::Restore);
+            EventResult::Consumed
+        }
+        Target::ExportCsv => {
+            state.dialog = Some(VaultDialog::ExportWarning);
+            EventResult::Consumed
+        }
+        Target::ExportAnyway => {
+            state.dialog = None;
+            state.open_picker(PickFor::Export);
+            EventResult::Consumed
+        }
+        Target::RestoreOpen => {
+            state.restore_open();
+            EventResult::Consumed
+        }
+        Target::RestoreReplace => {
+            state.restore_replace();
+            EventResult::Consumed
+        }
+        Target::DialogCancel => {
+            state.dialog = None;
+            EventResult::Consumed
+        }
+        // The field is where typing already goes.
+        Target::RestoreInput => EventResult::Consumed,
         Target::NewPassword | Target::ConfirmPassword => {
             if let Gate::Create(form) = &mut state.gate {
                 form.confirming = target == Target::ConfirmPassword;
@@ -7191,6 +7623,48 @@ fn capitalised(text: &str) -> String {
     })
 }
 
+/// Keys while a vault dialog is up: Escape leaves it, Enter does what its
+/// first button does, and typing goes into the restore dialog's field.
+fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
+    /// What a key asks of the dialog, decided before anything is done, so the
+    /// dialog is not still borrowed when the doing needs the whole state.
+    enum Then {
+        Close,
+        Export,
+        Open,
+        Replace,
+        Nothing,
+    }
+    let then = match (&mut state.dialog, key.key) {
+        (_, Key::Escape) => Then::Close,
+        (Some(VaultDialog::ExportWarning), Key::Enter) => Then::Export,
+        (Some(VaultDialog::RestorePassword { .. }), Key::Enter) => Then::Open,
+        (Some(VaultDialog::RestoreConfirm { .. }), Key::Enter) => Then::Replace,
+        (Some(VaultDialog::RestorePassword { input, error, .. }), Key::Backspace) => {
+            input.pop();
+            *error = None;
+            Then::Nothing
+        }
+        (Some(VaultDialog::RestorePassword { input, error, .. }), _) if key.types_text() => {
+            input.extend(key.typed());
+            *error = None;
+            Then::Nothing
+        }
+        _ => Then::Nothing,
+    };
+    match then {
+        Then::Close => state.dialog = None,
+        Then::Export => {
+            state.dialog = None;
+            state.open_picker(PickFor::Export);
+        }
+        Then::Open => state.restore_open(),
+        Then::Replace => state.restore_replace(),
+        Then::Nothing => {}
+    }
+    EventResult::Consumed
+}
+
 /// Make the first vault from the form, and save it.
 fn create_vault(state: &mut AppState) {
     let Gate::Create(form) = &mut state.gate else {
@@ -7262,6 +7736,23 @@ impl App for AppState {
             && key.modifiers.ctrl
         {
             return Response::Exit;
+        }
+        // The file dialog first: while it is up it takes the keyboard and the
+        // mouse, so a key meant for a file name cannot reach the vault behind.
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                if let Some(purpose) = self.pick_for.take() {
+                    self.picked(purpose, &path);
+                }
+                self.keep_if_changed();
+                return Response::Redraw;
+            }
+            Picked::Cancelled => {
+                self.pick_for = None;
+                return Response::Redraw;
+            }
+            Picked::Handled => return Response::Redraw,
+            Picked::Ignored => {}
         }
         if matches!(event, Event::CloseRequested) {
             // Every change is saved as it is made, so this is the last chance
@@ -8431,110 +8922,289 @@ mod tests {
         assert_eq!(AuditIssueKind::Compromised.label(), "Compromised");
     }
 
-    // == Export tests ===========================================================
+    // == Export, backup and restore (2026-09-27; C-Q25, §1417) ===================
+    //
+    // The operator's answer: a plain-text export made totally clear to be
+    // insecure (A), and an encrypted backup that restores everything (B). The
+    // backup is the sealed vault itself; the old JSON-ish "backup" that left
+    // every password out is gone, never having been connected.
 
+    /// Every character a password can hold comes back out of the CSV exactly
+    /// (B-Q12: the export must not mangle a password that holds the
+    /// characters CSV itself uses).
     #[test]
-    fn test_export_csv_header() {
-        let v = Vault::for_test("V", "pw");
-        let csv = export_csv(&v);
-        assert!(csv.starts_with("type,name,username,password,url,notes,tags,folder,starred\n"));
-    }
-
-    #[test]
-    fn test_export_csv_entry() {
-        let mut v = Vault::for_test("V", "pw");
-        v.add_entry(
-            EntryData::Login(LoginData::new("site", "user", "pass")),
-            100,
-        );
-        let csv = export_csv(&v);
-        assert!(csv.contains("Login"));
-        assert!(csv.contains("site"));
-        assert!(csv.contains("user"));
-    }
-
-    #[test]
-    fn test_escape_csv_no_special() {
-        assert_eq!(escape_csv("hello"), "hello");
-    }
-
-    #[test]
-    fn test_escape_csv_with_comma() {
-        assert_eq!(escape_csv("a,b"), "\"a,b\"");
-    }
-
-    #[test]
-    fn test_escape_csv_with_quotes() {
-        assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
-    }
-
-    #[test]
-    fn a_carriage_return_forces_a_quoted_csv_field() {
-        // RFC 4180 records are CRLF-terminated, so a bare CR in an unquoted
-        // field splits the record for most readers.
-        assert_eq!(escape_csv("a\rb"), "\"a\rb\"");
-    }
-
-    #[test]
-    fn a_hostile_entry_name_cannot_forge_a_backup_field() {
-        let mut v = Vault::for_test("My \"Vault\"", "pw");
-        v.add_entry(
-            EntryData::Login(LoginData::new(
-                "svc\",\n      \"starred\": true,\n      \"x\": \"",
-                "u",
-                "p",
-            )),
-            100,
-        );
-        v.add_folder("Home\\Work");
-        let backup = serialize_backup(&v);
-        // The forged key must not appear as a second `starred` field.
-        assert_eq!(
-            backup.matches("\"starred\":").count(),
-            1,
-            "entry name forged a key: {backup}"
-        );
-        // Quotes in the vault name and backslashes in a folder name survive
-        // as data rather than terminating their strings.
-        assert!(
-            backup.contains("\"vault_name\": \"My \\\"Vault\\\"\""),
-            "vault name not escaped: {backup}"
-        );
-        assert!(
-            backup.contains("\"name\": \"Home\\\\Work\""),
-            "folder name not escaped: {backup}"
-        );
-    }
-
-    #[test]
-    fn a_hostile_tag_cannot_forge_a_backup_tag() {
-        let mut v = Vault::for_test("V", "pw");
-        v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
-        if let Some(e) = v.entries.first_mut() {
-            e.tags.push("a\", \"injected".to_string());
+    fn an_export_keeps_every_character_of_every_password() {
+        let mut v = unlocked_vault();
+        let every: String = (1u8..=127)
+            .map(char::from)
+            .chain("\u{e9}\u{1F512}".chars())
+            .collect();
+        let hostile = [
+            "plain",
+            "a,b",
+            "say \"hi\"",
+            "\"",
+            "line\nbreak",
+            "cr\rand\r\ncrlf",
+            " leading and trailing ",
+            "=1+1",
+            "tab\there",
+            every.as_str(),
+            "",
+        ];
+        for (i, pw) in hostile.iter().enumerate() {
+            let mut login = LoginData::new(&format!("site{i}"), "user", pw);
+            login.notes = (*pw).to_string();
+            v.add_entry(EntryData::Login(login), 1);
         }
-        let backup = serialize_backup(&v);
-        let tags_line = backup
-            .lines()
-            .find(|l| l.contains("\"tags\":"))
-            .expect("tags line");
-        // One tag in, one tag out: the comma inside it must stay inert.
-        assert_eq!(
-            tags_line.matches("\", \"").count(),
-            0,
-            "tag forged a second array element: {tags_line}"
+        let csv = export_csv(&v);
+        assert!(csv.ends_with("\r\n"), "records end in CRLF");
+        let records = textfmt::csv::parse_records(&csv);
+        assert_eq!(records.len(), hostile.len() + 1, "{csv:?}");
+        assert_eq!(records[0][3].text, "password");
+        for (i, pw) in hostile.iter().enumerate() {
+            let row = &records[i + 1];
+            assert_eq!(row.len(), 10, "row {i} split: {row:?}");
+            assert_eq!(row[3].text, *pw, "password {i}");
+            assert_eq!(row[5].text, *pw, "notes {i}");
+            assert!(row.iter().all(|f| f.quoted), "row {i} has a bare field");
+        }
+    }
+
+    #[test]
+    fn every_kind_of_entry_reaches_the_export() {
+        let mut v = unlocked_vault();
+        v.add_entry(
+            EntryData::CreditCard(CreditCardData::new("Visa", "****4242", "12/30", "Ann")),
+            1,
+        );
+        v.add_entry(
+            EntryData::Identity(IdentityData::new("Ann", "ann@example.org")),
+            1,
+        );
+        v.add_entry(
+            EntryData::SshKey(SshKeyData::new("deploy", "SHA256:xyz", "ssh-ed25519 AAAA")),
+            1,
+        );
+        v.add_entry(
+            EntryData::SecureNote(SecureNoteData::new("Wifi", "the code")),
+            1,
+        );
+        let records = textfmt::csv::parse_records(&export_csv(&v));
+        let notes: Vec<&str> = records[1..].iter().map(|r| r[5].text.as_str()).collect();
+        assert!(
+            notes[0].contains("****4242") && notes[0].contains("12/30"),
+            "{notes:?}"
+        );
+        assert!(notes[1].contains("ann@example.org"), "{notes:?}");
+        assert!(notes[2].contains("SHA256:xyz"), "{notes:?}");
+        assert_eq!(notes[3], "the code");
+    }
+
+    #[test]
+    fn export_comes_only_after_the_warning_says_what_it_is() {
+        let mut state = unlocked_app();
+        act_on(&mut state, Target::ExportCsv);
+        assert!(matches!(state.dialog, Some(VaultDialog::ExportWarning)));
+        assert!(
+            !state.picker.is_open(),
+            "the file dialog came up before the warning"
+        );
+        let shown = drawn(&state);
+        assert!(shown.contains("plain text"), "{shown}");
+        assert!(shown.contains("readable by anyone"), "{shown}");
+        act_on(&mut state, Target::DialogCancel);
+        assert!(state.dialog.is_none() && !state.picker.is_open());
+
+        act_on(&mut state, Target::ExportCsv);
+        act_on(&mut state, Target::ExportAnyway);
+        assert!(state.picker.is_open());
+        assert_eq!(state.pick_for, Some(PickFor::Export));
+    }
+
+    #[test]
+    fn an_export_is_written_where_chosen_and_says_what_it_is() {
+        let scratch = scratchdir::ScratchDir::new("credmanager_export");
+        let mut state = unlocked_app();
+        state.vault.add_entry(
+            EntryData::Login(LoginData::new("bank", "ann", "hunter2")),
+            1,
+        );
+        let path = scratch.dir().join("out").join("credentials.csv");
+        state.picked(PickFor::Export, &path);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"hunter2\""), "{text}");
+        assert!(
+            state
+                .vault_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("plain text"),
+            "{:?}",
+            state.vault_message
         );
     }
 
     #[test]
-    fn test_serialize_backup() {
-        let mut v = Vault::for_test("Test", "pw");
-        v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
-        v.add_folder("Work");
-        let backup = serialize_backup(&v);
-        assert!(backup.contains("\"vault_name\": \"Test\""));
-        assert!(backup.contains("\"entry_count\": 1"));
-        assert!(backup.contains("\"name\": \"Work\""));
+    fn a_backup_is_the_vault_sealed_and_opens_with_its_master_password() {
+        let (scratch, mut state) = first_run("backup");
+        make_vault(&mut state, MASTER, MASTER);
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        let backup = scratch.dir().join("elsewhere").join("vault.backup");
+        state.picked(PickFor::Backup, &backup);
+        assert!(
+            state
+                .vault_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("Backed up"),
+            "{:?}",
+            state.vault_message
+        );
+        let bytes = std::fs::read(&backup).unwrap();
+        assert!(
+            !bytes.windows(14).any(|w| w == b"hunter2-secret"),
+            "the backup holds a password in the clear"
+        );
+        let mut opened = Vault::from_file(bytes).unwrap();
+        assert!(!opened.unlock("not it", 0));
+        assert!(opened.unlock(MASTER, 0));
+        assert_eq!(opened.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_restore_needs_the_backups_password_and_asks_before_replacing() {
+        // A backup of one vault...
+        let (scratch, mut old) = first_run("restore_from");
+        make_vault(&mut old, MASTER, MASTER);
+        add_login(&mut old, "old.example", "old-secret");
+        add_login(&mut old, "older.example", "older-secret");
+        let backup = scratch.dir().join("vault.backup");
+        old.picked(PickFor::Backup, &backup);
+
+        // ...restored into another, with a different master password.
+        let other = "another master password";
+        let (scratch2, mut state) = first_run("restore_into");
+        make_vault(&mut state, other, other);
+        add_login(&mut state, "new.example", "new-secret");
+        state.picked(PickFor::Restore, &backup);
+        assert!(
+            matches!(state.dialog, Some(VaultDialog::RestorePassword { .. })),
+            "{:?}",
+            state.dialog
+        );
+
+        type_in(&mut state, "wrong password");
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(
+            matches!(
+                state.dialog,
+                Some(VaultDialog::RestorePassword { error: Some(_), .. })
+            ),
+            "{:?}",
+            state.dialog
+        );
+        assert_eq!(state.vault.entries.len(), 1);
+
+        type_in(&mut state, MASTER);
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(
+            matches!(state.dialog, Some(VaultDialog::RestoreConfirm { .. })),
+            "{:?}",
+            state.dialog
+        );
+        assert!(
+            drawn(&state).contains("Replace this vault"),
+            "{}",
+            drawn(&state)
+        );
+        assert_eq!(state.vault.entries.len(), 1, "replaced before being asked");
+
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(state.dialog.is_none());
+        assert_eq!(state.vault.entries.len(), 2);
+
+        // Kept, under this vault's own master password and not the backup's.
+        let mut again = reopen(&scratch2);
+        assert!(!again.vault.unlock(MASTER, 0));
+        assert!(again.vault.unlock(other, 0));
+        assert_eq!(again.vault.entries.len(), 2);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_backup_is_said_to_be_so() {
+        let scratch = scratchdir::ScratchDir::new("credmanager_not_a_backup");
+        let path = scratch.dir().join("notes.txt");
+        std::fs::write(&path, "shopping").unwrap();
+        let mut state = unlocked_app();
+        state.picked(PickFor::Restore, &path);
+        assert!(state.dialog.is_none());
+        assert!(
+            state
+                .vault_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("cannot be restored"),
+            "{:?}",
+            state.vault_message
+        );
+    }
+
+    fn ctrl_l() -> Event {
+        Event::Key(KeyEvent {
+            key: Key::L,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                ctrl: true,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    #[test]
+    fn a_vault_dialog_is_modal() {
+        let mut state = unlocked_app();
+        act_on(&mut state, Target::ExportCsv);
+        handle_event(&mut state, &ctrl_l());
+        assert!(
+            state.vault.is_unlocked(),
+            "a key reached the window behind the dialog"
+        );
+        assert!(
+            !probe::is_visible(&state, Target::Add),
+            "the toolbar behind can be clicked"
+        );
+        assert!(probe::is_visible(&state, Target::ExportAnyway));
+        handle_event(&mut state, &key(Key::Escape));
+        assert!(state.dialog.is_none());
+    }
+
+    #[test]
+    fn the_settings_buttons_can_be_pressed() {
+        let mut state = unlocked_app();
+        state.detail_view = DetailView::Settings;
+        for target in [Target::BackUp, Target::RestoreBackup, Target::ExportCsv] {
+            assert!(
+                probe::is_visible(&state, target),
+                "{target:?} is drawn and cannot be pressed"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_dialog_takes_the_keys_while_it_is_up() {
+        let mut state = unlocked_app();
+        act_on(&mut state, Target::BackUp);
+        assert!(state.picker.is_open());
+        state.on_event(&ctrl_l());
+        assert!(
+            state.vault.is_unlocked(),
+            "a key reached the vault behind the file dialog"
+        );
+        state.on_event(&key(Key::Escape));
+        assert!(!state.picker.is_open());
+        assert_eq!(state.pick_for, None);
     }
 
     // == SortOrder tests =======================================================

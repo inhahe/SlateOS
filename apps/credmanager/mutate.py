@@ -13,6 +13,9 @@ Two tables:
   entry, every change is sealed under a new nonce and written, a save without
   secure randomness is refused, a file that is not a vault is never written
   over, and a close waits once for a save that failed.
+  And its doors out (2026-09-27, C-Q25): Export only after the warning says
+  what the file is, and every field quoted; a backup is the vault sealed,
+  restored only with its master password and only after asking.
 * **vaultfile.rs** -- the file itself: a header that asks for too much work is
   refused before any is done, and contents are read whole or not at all.
 
@@ -42,6 +45,12 @@ ENTROPY = "without_secure_randomness_nothing_is_sealed_and_the_window_says_so"
 CLOSE = "a_close_that_could_not_save_says_so_once"
 REFUSED_WHOLE = "contents_that_are_not_understood_are_refused_whole"
 COSTLY = "a_file_asking_too_much_work_is_refused_before_any_is_done"
+EXPORT_CHARS = "an_export_keeps_every_character_of_every_password"
+EXPORT_WARNING = "export_comes_only_after_the_warning_says_what_it_is"
+RESTORE = "a_restore_needs_the_backups_password_and_asks_before_replacing"
+MODAL = "a_vault_dialog_is_modal"
+BUTTONS = "the_settings_buttons_can_be_pressed"
+PICKER_KEYS = "the_file_dialog_takes_the_keys_while_it_is_up"
 
 MAIN = [
     (
@@ -82,14 +91,14 @@ MAIN = [
     ),
     (
         "every save reuses one nonce",
-        "        if !(self.entropy)(&mut nonce) {",
-        "        if !(self.entropy)(&mut [0u8; seal::NONCE_LEN]) {",
+        "        if !(self.entropy)(&mut nonce) {\n            self.save_error = Some(",
+        "        if !(self.entropy)(&mut [0u8; seal::NONCE_LEN]) {\n            self.save_error = Some(",
         [NONCE],
     ),
     (
         "a save without secure randomness goes ahead",
-        "        if !(self.entropy)(&mut nonce) {",
-        "        if false && !(self.entropy)(&mut nonce) {",
+        "        if !(self.entropy)(&mut nonce) {\n            self.save_error = Some(",
+        "        if false && !(self.entropy)(&mut nonce) {\n            self.save_error = Some(",
         [ENTROPY],
     ),
     (
@@ -115,6 +124,51 @@ MAIN = [
         "            if self.save_error.is_some() && self.vault.is_unlocked() && !self.close_anyway {",
         "            if false {",
         [CLOSE],
+    ),
+    (
+        "export skips the warning",
+        "        Target::ExportCsv => {\n            state.dialog = Some(VaultDialog::ExportWarning);",
+        "        Target::ExportCsv => {\n            state.open_picker(PickFor::Export);",
+        [EXPORT_WARNING],
+    ),
+    (
+        "a quote in an exported field is not doubled",
+        "            if c == '\"' {\n                out.push('\"');\n            }\n",
+        "",
+        [EXPORT_CHARS],
+    ),
+    (
+        "a restore replaces without asking",
+        "                Ok(()) => self.dialog = Some(VaultDialog::RestoreConfirm { path, backup }),",
+        "                Ok(()) => {\n"
+        "                    self.dialog = Some(VaultDialog::RestoreConfirm { path, backup });\n"
+        "                    self.restore_replace();\n"
+        "                }",
+        [RESTORE],
+    ),
+    (
+        "a restore opens with any password",
+        "            }) => match backup.open(&input, self.now) {",
+        "            }) => match Ok::<(), vaultfile::OpenError>(()) {",
+        [RESTORE],
+    ),
+    (
+        "a vault dialog lets keys through",
+        "    if state.dialog.is_some() {\n        return dialog_key(state, key);\n    }\n",
+        "",
+        [MODAL],
+    ),
+    (
+        "the settings buttons are decoration again",
+        "        frame.hit(target, Rect::new(bx, y, width, 32.0));\n",
+        "",
+        [BUTTONS],
+    ),
+    (
+        "the file dialog lets keys through",
+        "            Picked::Handled => return Response::Redraw,",
+        "            Picked::Handled => {}",
+        [PICKER_KEYS],
     ),
 ]
 

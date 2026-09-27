@@ -56579,10 +56579,9 @@ In rough order of how much a user would miss it:
   credential and cannot change one, so a password that has been rotated cannot
   be recorded.
 * **Delete** — `Vault::remove_entry`.
-* **Export and backup** — `export_csv`, `escape_csv`, `serialize_backup`, all
-  advertised in the module doc. There is no filesystem to write to; the
-  clipboard is the sink these can have today, which is what `/copy` already
-  uses.
+* ~~**Export and backup**~~ — DONE 2026-09-27 (lane E): Settings has Back
+  up, Restore and Export (C-Q25, §1417); `serialize_backup`, which left every
+  password out, is deleted.
 * **Favourites** — `Vault::toggle_star`. The sidebar filters by favourites and
   nothing can set one, so that filter is always empty. Same shape for
   **tags** (`add_tag`/`remove_tag`, and the sidebar's tag list) and
@@ -56594,8 +56593,9 @@ In rough order of how much a user would miss it:
   and never read.
 * **Breach flagging** — `Vault::set_compromised`, which needs a feed to learn
   from as well as a control.
-* **Persistence** — `Vault::from_stored` is the door a loader would come in
-  through. Every launch opens an empty vault, as the module doc says.
+* ~~**Persistence**~~ — DONE 2026-09-27 (lane E): the vault is kept sealed
+  on disk (`src/vaultfile.rs`). Which makes **Edit** and **Delete** above
+  matter more: an entry kept is an entry that cannot be taken back out.
 
 One duplicate to resolve rather than build: `Vault::search_entries` is a second
 full-text search beside the toolbar's, which filters through

@@ -634,7 +634,7 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
-        crate::unistd::Mntent,
+        crate::mntent::Mntent,
         "struct mntent",
         "mntent.h",
         mnt_fsname,

@@ -3913,75 +3913,6 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// mntent — mount table parsing
-// ---------------------------------------------------------------------------
-
-/// Mount table entry (matches `struct mntent`).
-#[repr(C)]
-pub struct Mntent {
-    /// Name of mounted filesystem.
-    pub mnt_fsname: *mut u8,
-    /// Filesystem path prefix (mount point).
-    pub mnt_dir: *mut u8,
-    /// Mount type.
-    pub mnt_type: *mut u8,
-    /// Mount options.
-    pub mnt_opts: *mut u8,
-    /// Dump frequency.
-    pub mnt_freq: i32,
-    /// Pass number for fsck.
-    pub mnt_passno: i32,
-}
-
-/// Open a mount table file for reading.
-///
-/// Stub: returns null (our OS doesn't have /etc/mtab or /proc/mounts
-/// yet).  Programs that need mount information should query the kernel
-/// directly via our mount-list syscall (when implemented).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setmntent(_filename: *const u8, _type: *const u8) -> *mut u8 {
-    // Return null "FILE*" — signals no mount table available.
-    core::ptr::null_mut()
-}
-
-/// Read the next mount table entry.
-///
-/// Stub: returns null (no mount table).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getmntent(_stream: *mut u8) -> *mut Mntent {
-    core::ptr::null_mut()
-}
-
-/// Thread-safe version of `getmntent`.
-///
-/// Stub: returns null (no mount table).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getmntent_r(
-    _stream: *mut u8,
-    _mntbuf: *mut Mntent,
-    _buf: *mut u8,
-    _buflen: i32,
-) -> *mut Mntent {
-    core::ptr::null_mut()
-}
-
-/// Close a mount table file.
-///
-/// Stub: returns 1 (success) even though we never open anything.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn endmntent(_stream: *mut u8) -> i32 {
-    1 // glibc always returns 1.
-}
-
-/// Check if a mount option is present.
-///
-/// Stub: returns null (option not found).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn hasmntopt(_mnt: *const Mntent, _opt: *const u8) -> *mut u8 {
-    core::ptr::null_mut()
-}
-
-// ---------------------------------------------------------------------------
 // personality — process execution domain
 // ---------------------------------------------------------------------------
 
@@ -9956,56 +9887,6 @@ mod tests {
         let _ = sysinfo(info.as_mut_ptr());
         let info = unsafe { info.assume_init() };
         assert_eq!(info.procs, 1, "host fallback should report procs == 1");
-    }
-
-    // ------------------------------------------------------------------
-    // mntent stubs
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_setmntent_returns_null() {
-        let ret = setmntent(b"/etc/mtab\0".as_ptr(), b"r\0".as_ptr());
-        assert!(
-            ret.is_null(),
-            "setmntent should return null (no mount table)"
-        );
-    }
-
-    #[test]
-    fn test_getmntent_returns_null() {
-        let ret = getmntent(core::ptr::null_mut());
-        assert!(ret.is_null(), "getmntent should return null");
-    }
-
-    #[test]
-    fn test_getmntent_r_returns_null() {
-        let mut mntbuf = core::mem::MaybeUninit::<Mntent>::zeroed();
-        let mut buf = [0u8; 256];
-        let ret = getmntent_r(
-            core::ptr::null_mut(),
-            mntbuf.as_mut_ptr(),
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert!(ret.is_null(), "getmntent_r should return null");
-    }
-
-    #[test]
-    fn test_endmntent_returns_one() {
-        assert_eq!(endmntent(core::ptr::null_mut()), 1);
-    }
-
-    #[test]
-    fn test_hasmntopt_returns_null() {
-        let ret = hasmntopt(core::ptr::null(), b"rw\0".as_ptr());
-        assert!(ret.is_null(), "hasmntopt should return null");
-    }
-
-    #[test]
-    fn test_mntent_size() {
-        let size = core::mem::size_of::<Mntent>();
-        // 4 pointers + 2 i32 = 4*8 + 2*4 = 40 on 64-bit.
-        assert!(size >= 40, "Mntent should be at least 40 bytes, got {size}");
     }
 
     // ------------------------------------------------------------------

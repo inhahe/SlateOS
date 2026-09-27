@@ -58841,17 +58841,11 @@ is already waiting, not whether the setter exists.
   check.  The kernel's record has the MAC (`sys_net_if_info` bytes 16..22);
   the counters are in `/proc/net/dev` (`kernel/src/fs/netdev.rs`).  Needs
   `sockaddr_ll` and `rtnl_link_stats` checked against musl (§1011, §1119).
-- **The mntent family is a stub on a premise that is no longer true**
-  (`posix/src/unistd.rs`: `setmntent`, `getmntent`, `getmntent_r`,
-  `addmntent`, `endmntent`, `hasmntopt`).  `setmntent` returns NULL "until
-  /etc/mtab or /proc/mounts exists" -- and `kernel/src/fs/procfs.rs` serves
-  `/proc/mounts`, `/proc/self/mounts` and `/proc/<pid>/mounts` in Linux's
-  format, with its octal escapes.  So `df`, `mount -l`, `findmnt` and every
-  gnulib `read_file_system_list` see no filesystems.  Port glibc's
-  `misc/mntent_r.c`: `setmntent` is `fopen` (with `e`), `getmntent_r` skips
-  blank and `#` lines, splits on blanks and tabs, decodes `\040`, `\011`,
-  `\012` and `\134`, and defaults the missing numbers to 0; `addmntent`
-  escapes the same four; `endmntent` closes and returns 1; `hasmntopt` finds
-  an option as a whole comma-separated word or `word=`.  And `/etc/mtab`
-  (glibc's `MOUNTED`) should be the symlink to `/proc/self/mounts` it is on
-  every Linux: the rootfs recipe's.
+- **`/etc/mtab` does not exist** (glibc's `MOUNTED`, `_PATH_MOUNTED`).  The
+  mntent calls read mount tables since 2026-09-27, and `/proc/mounts` and
+  `/proc/self/mounts` are there to read (`kernel/src/fs/procfs.rs`) -- but a
+  program that opens `MOUNTED`, as older ones and some gnulib paths do, gets
+  `ENOENT`.  On Linux it is a symlink to `/proc/self/mounts`.  Whoever builds
+  `/` at boot should make it: the kernel's root is not the rootfs image
+  (that is mounted at `/mnt`), so this is a request to the lane that owns the
+  root filesystem's layout, not a change to the rootfs recipe.

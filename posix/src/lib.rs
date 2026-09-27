@@ -406,6 +406,7 @@ pub mod linux_utsname_types;
 pub mod locale;
 pub mod lowlevellock;
 pub mod malloc;
+pub mod mntent;
 pub mod math;
 pub mod md5;
 pub mod mman;

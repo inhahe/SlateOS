@@ -112,10 +112,7 @@ const LONGS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 /// Each long option's `val`, in [`LONGS`]' order.
-const LONG_VALS: [u8; 27] = [
-    b'c', b'x', b'h', b'J', b'L', b'o', b'c', b's', b't', b'N', b'C', b'l', b'H', b'n', b'm', b'E',
-    b'd', b'O', b'R', b'T', b'W', b'L', b'e', b'r', b'i', b'p', b'V',
-];
+const LONG_VALS: [u8; 27] = *b"cxhJLocstNClHnmEdORTWLeripV";
 
 /// `excl[]`: rows and members in ASCII order, as `err_exclusive_options`
 /// requires.

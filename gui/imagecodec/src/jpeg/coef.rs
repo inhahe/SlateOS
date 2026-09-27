@@ -19,6 +19,12 @@
 //! a file cut off or damaged. It estimates the missing coefficients of each
 //! block from the DC values of the 5x5 blocks around it, and is transcribed
 //! with its sliding window of DC registers and its edge rules intact.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdcoefct.c` (copyright (C) 1994-1997 Thomas G. Lane; (C) 2009 Pierre
+//! Ossman for Cendio AB; (C) 2010, 2015-2016, 2019-2020, 2022-2024 D. R.
+//! Commander; (C) 2015, 2020 Google, Inc.), and changed for this project;
+//! used under the IJG License (`licenses/README.md` says how).
 
 use alloc::vec;
 use alloc::vec::Vec;

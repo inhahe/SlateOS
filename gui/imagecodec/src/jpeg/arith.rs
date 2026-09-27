@@ -11,6 +11,12 @@
 //! run past the end of the band -- after which libjpeg sets the decoder's
 //! counter to -1 and decodes nothing more in the scan (until a restart), with
 //! a warning rather than an error. Both are reproduced.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdarith.c` (copyright (C) 1997-2015 Guido Vollbeding; (C) 2015-2020, 2022
+//! D. R. Commander) and `jaricom.c` (copyright (C) 1997-2009 Guido
+//! Vollbeding; (C) 2015, 2018 D. R. Commander), and changed for this project;
+//! used under the IJG License (`licenses/README.md` says how).
 
 use super::coef::Coefficients;
 use super::error::{Error, jerr};

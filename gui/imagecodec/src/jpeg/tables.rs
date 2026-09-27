@@ -9,6 +9,12 @@
 //! strip that does redefine a table leaves the new one in place for the strips
 //! after it. [`Tables`] is that permanent state; everything else is per
 //! datastream and lives with the decode.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jutils.c` (copyright (C) 1991-1996 Thomas G. Lane; (C) 2022 D. R.
+//! Commander) and `jdapimin.c` (copyright (C) 1994-1998 Thomas G. Lane; (C)
+//! 1999 Ken Murchison; (C) 2016, 2022, 2024 D. R. Commander), and changed for
+//! this project; used under the IJG License (`licenses/README.md` says how).
 
 /// `jpeg_natural_order`: where the `i`th coefficient in zig-zag order sits in
 /// the block, with sixteen extra entries of 63 so that a run length in a

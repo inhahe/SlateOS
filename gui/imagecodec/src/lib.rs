@@ -120,6 +120,17 @@
 //! [`decode_scaled`] and [`dimensions`] all describe the picture as it is shown.
 //! See [`orientation`].
 //!
+//! # Where the code comes from
+//!
+//! Most of the decoders are ports of the libraries the browsers and Pillow
+//! run -- libjpeg-turbo, libtiff, libwebp, libavif, Chromium's and image-rs's
+//! BMP and icon readers, Skia's EXIF reader -- because producing exactly their
+//! pixels is the point. Their notices travel with the code: each ported file
+//! names what it was translated or adapted from, and `licenses/` holds the
+//! licences and a table of what derives from where. Their licences also ask
+//! that a *program* containing this code carry the notices, which
+//! `licenses/README.md` spells out.
+//!
 //! # Picture files for *other* crates' tests
 //!
 //! [`testing`] emits real, small PNGs. It is public rather than `#[cfg(test)]`

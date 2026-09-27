@@ -26,6 +26,11 @@
 //! `exp` in double-double arithmetic, and glibc's 21 answers where they
 //! differ -- checked against glibc for every argument (a test holds the
 //! hash of all of glibc's results).
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_luv.c` (copyright (c) 1997 Greg Ward Larson; (c) 1997 Silicon
+//! Graphics, Inc.), and changed for this project; used under libtiff's
+//! licence, `licenses/libtiff-LICENSE.md`.
 
 use alloc::vec::Vec;
 use core::f64::consts::LN_2;

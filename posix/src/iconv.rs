@@ -21,6 +21,7 @@
 //! | `UNICODE` | UCS-2 behind `UTF-16`'s mark |
 //! | `UCS-4` | big-endian, no mark, up to U+7FFFFFFF; `UCS-4LE` |
 //! | `WCHAR_T` | what a `wchar_t` holds: glibc's own form, UCS-4 in the machine's order, unchecked |
+//! | `UTF-7`, `UTF-7-IMAP` | RFC 2152's mail-safe Unicode, and IMAP's variant for folder names: ASCII, with runs of base64-coded UTF-16 opened by `+` (`&`); stateful, the state kept from call to call |
 //!
 //! A name is read as glibc reads one: options peeled off the end -- the last
 //! `/`- or `,`-separated word, while there are two slashes -- then every
@@ -69,8 +70,11 @@
 //!   `iconv` returns.
 //! - A mark is read from the first two (four) bytes of the first call, and
 //!   written when the first character reaches the target -- or at once, from
-//!   `WCHAR_T`, input or none.  The reset, `iconv(cd, NULL, ...)`, writes
-//!   nothing and makes the next call read (write) a mark again.
+//!   `WCHAR_T`, input or none.  The reset, `iconv(cd, NULL, ...)`, makes the
+//!   next call read (write) a mark again, and writes nothing -- but a UTF-7
+//!   target's close of an open run, when there is an output buffer to write
+//!   it to (`E2BIG` if it does not fit; without a buffer, the run is
+//!   dropped).
 //!
 //! Probed against Ubuntu 24.04's glibc 2.39 on 2026-09-26, and read from its
 //! source.
@@ -182,6 +186,9 @@ enum Charset {
     Utf16(Form),
     /// `UTF-32//` and its `LE` and `BE`.
     Utf32(Form),
+    /// `UTF-7//`, or `imap`, `UTF-7-IMAP//`: stateful -- runs of base64
+    /// between ASCII, with state kept between calls (see [`decode_utf7`]).
+    Utf7 { imap: bool },
     /// `WCHAR_T//`: glibc's INTERNAL, the form every other set is converted
     /// through, so a conversion to or from it has one step, not two.
     Internal,
@@ -201,7 +208,11 @@ impl Charset {
     /// step writing it asks room for, and a substitute's unit.
     fn unit(self) -> usize {
         match self {
-            Charset::Utf8 | Charset::Ascii | Charset::Latin1 | Charset::Table8(_) => 1,
+            Charset::Utf8
+            | Charset::Ascii
+            | Charset::Latin1
+            | Charset::Table8(_)
+            | Charset::Utf7 { .. } => 1,
             Charset::Ucs2 { .. } | Charset::Unicode | Charset::Utf16(_) => 2,
             Charset::Ucs4 | Charset::Ucs4Le | Charset::Utf32(_) | Charset::Internal => 4,
         }
@@ -316,6 +327,9 @@ const NAMES: &[(&[u8], Charset)] = &[
     (b"UTF-32BE//", Charset::Utf32(Form::Big)),
     (b"UTF32BE//", Charset::Utf32(Form::Big)),
     (b"WCHAR_T//", Charset::Internal),
+    (b"UTF-7//", Charset::Utf7 { imap: false }),
+    (b"UTF7//", Charset::Utf7 { imap: false }),
+    (b"UTF-7-IMAP//", Charset::Utf7 { imap: true }),
 ];
 
 /// Room for a stripped name: longer than any in [`NAMES`], so one that does
@@ -680,7 +694,14 @@ fn decode_utf16(s: &[u8], swap: bool) -> Decoded {
 }
 
 /// The first step: `input` in `from`, into glibc's INTERNAL form in `out`.
-fn decode_loop(from: Charset, swap: bool, ignore: bool, input: &[u8], out: &mut [u8]) -> Pass {
+fn decode_loop(
+    from: Charset,
+    swap: bool,
+    ignore: bool,
+    utf7: &mut Utf7Decoder,
+    input: &[u8],
+    out: &mut [u8],
+) -> Pass {
     match from {
         Charset::Utf8 => generic_decode(input, out, ignore, 1, decode_utf8),
         Charset::Ascii => generic_decode(input, out, ignore, 1, |s| match s.first() {
@@ -719,6 +740,7 @@ fn decode_loop(from: Charset, swap: bool, ignore: bool, input: &[u8], out: &mut 
         }),
         Charset::Ucs4 => decode_ucs4(input, out, ignore, true),
         Charset::Ucs4Le => decode_ucs4(input, out, ignore, false),
+        Charset::Utf7 { imap } => decode_utf7(input, out, ignore, imap, utf7),
         // [`Descriptor::convert`] runs no step for WCHAR_T; this is never
         // reached, and would fail rather than pass bytes through unread.
         Charset::Internal => Pass::stopped(Status::IllegalInput),
@@ -947,8 +969,11 @@ fn encode_char(target: Target, c: u32, out: &mut [u8]) -> Encoded {
                 Encoded::NoRoom
             }
         }
-        // UCS-4 has a loop of its own ([`encode_ucs4`]), and WCHAR_T no step.
-        Charset::Ucs4 | Charset::Ucs4Le | Charset::Internal => Encoded::Unwritable,
+        // UCS-4 and UTF-7 have loops of their own ([`encode_ucs4`],
+        // [`encode_utf7`]), and WCHAR_T no step.
+        Charset::Ucs4 | Charset::Ucs4Le | Charset::Utf7 { .. } | Charset::Internal => {
+            Encoded::Unwritable
+        }
     }
 }
 
@@ -996,11 +1021,7 @@ fn encode_utf8(c: u32, out: &mut [u8]) -> Encoded {
 /// writes by running the step's own loop over it -- so any target can write
 /// it, in its own encoding and byte order.
 fn transliterate(target: Target, c: u32, out: &mut [u8]) -> Option<usize> {
-    let table = crate::iconv_translit::C_TRANSLIT;
-    let substitute: &[u8] = match table.binary_search_by_key(&c, |&(k, _)| k) {
-        Ok(at) => table.get(at).map_or(b"?", |&(_, r)| r.as_bytes()),
-        Err(_) => b"?",
-    };
+    let substitute = substitute_for(c);
     if substitute.len() * target.set.unit() > out.len() {
         return None;
     }
@@ -1014,6 +1035,16 @@ fn transliterate(target: Target, c: u32, out: &mut [u8]) -> Option<usize> {
         }
     }
     Some(o)
+}
+
+/// glibc's C-locale substitute for `c` -- `"EUR"` for the euro sign -- or `?`
+/// for a character its table does not list.  ASCII, always.
+fn substitute_for(c: u32) -> &'static [u8] {
+    let table = crate::iconv_translit::C_TRANSLIT;
+    match table.binary_search_by_key(&c, |&(k, _)| k) {
+        Ok(at) => table.get(at).map_or(b"?", |&(_, r)| r.as_bytes()),
+        Err(_) => b"?",
+    }
 }
 
 /// The last step: glibc's INTERNAL form in `input`, into the target in `out`.
@@ -1146,6 +1177,421 @@ fn encode_ucs4(input: &[u8], out: &mut [u8], big: bool) -> Pass {
 }
 
 // ---------------------------------------------------------------------------
+// UTF-7
+// ---------------------------------------------------------------------------
+
+/// The byte that opens a base64 run: `+` in UTF-7, `&` in UTF-7-IMAP.
+fn utf7_shift(imap: bool) -> u8 {
+    if imap { b'&' } else { b'+' }
+}
+
+/// RFC 2152's direct characters (UTF-7), or IMAP's printable ASCII but `&`:
+/// written as themselves.
+fn utf7_is_direct(c: u32, imap: bool) -> bool {
+    if imap {
+        c != u32::from(b'&') && (0x20..=0x7E).contains(&c)
+    } else {
+        matches!(c, 0x41..=0x5A | 0x61..=0x7A | 0x30..=0x39 | 0x2C..=0x2F)
+            || matches!(
+                c,
+                0x27 | 0x28 | 0x29 | 0x3A | 0x3F | 0x20 | 0x09 | 0x0A | 0x0D
+            )
+    }
+}
+
+/// The direct characters and, in UTF-7, the optional direct ones
+/// (`!"#$%&*;<=>@[]^_`{|}`): read as themselves.
+fn utf7_is_xdirect(c: u32, imap: bool) -> bool {
+    utf7_is_direct(c, imap)
+        || (!imap
+            && (matches!(c, 0x21..=0x26 | 0x2A | 0x3B..=0x40 | 0x7B..=0x7D)
+                || ((0x5B..=0x60).contains(&c) && c != 0x5C)))
+}
+
+/// A character that would be read as part of a base64 run, so the run has
+/// to be closed with `-` before it (UTF-7).
+fn utf7_needs_explicit_shift(c: u32) -> bool {
+    matches!(c, 0x41..=0x5A | 0x61..=0x7A | 0x2F..=0x39)
+        || c == u32::from(b'+')
+        || c == u32::from(b'-')
+}
+
+/// Base64 digit `i` (below 64): `+` and then `/` (UTF-7) or `,` (IMAP) after
+/// the letters and digits.
+fn base64_digit(i: u32, imap: bool) -> u8 {
+    match i {
+        0..=25 => b'A' + i as u8,
+        26..=51 => b'a' + (i - 26) as u8,
+        52..=61 => b'0' + (i - 52) as u8,
+        62 => b'+',
+        _ if imap => b',',
+        _ => b'/',
+    }
+}
+
+/// The value of base64 digit `ch`, if it is one.
+fn base64_value(ch: u8, imap: bool) -> Option<u32> {
+    match ch {
+        b'A'..=b'Z' => Some(u32::from(ch - b'A')),
+        b'a'..=b'z' => Some(u32::from(ch - b'a') + 26),
+        b'0'..=b'9' => Some(u32::from(ch - b'0') + 52),
+        b'+' => Some(62),
+        b'/' if !imap => Some(63),
+        b',' if imap => Some(63),
+        _ => None,
+    }
+}
+
+/// The UTF-7 decoder's state, glibc's layout: `shift` 0 outside a base64
+/// run; inside one, 1 to 32, with `32 - shift` bits of the next UTF-16 unit
+/// (or pair) in the top of `bits`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Utf7Decoder {
+    shift: u32,
+    bits: u32,
+}
+
+/// glibc's UTF-7 decoder (`from_utf7_loop`), over glibc's generic loop.
+///
+/// Outside a run, a direct or optional direct character is itself; `+-` is
+/// `+`; `+` opens a run -- `EINVAL` if it is the input's last byte, as the
+/// next decides; anything else is invalid.  Inside, base64 digits build
+/// UTF-16 units, a pair's low half checked as soon as six of its bits are
+/// in; anything else ends the run -- invalid if bits are left over or a pair
+/// is half done (IMAP: unless it is `-`), and consumed if it is `-`.  An
+/// invalid byte inside a run is skipped under `//IGNORE` with the run
+/// forgotten; without it the run stays open, as glibc leaves it.
+fn decode_utf7(
+    input: &[u8],
+    out: &mut [u8],
+    ignore: bool,
+    imap: bool,
+    st: &mut Utf7Decoder,
+) -> Pass {
+    let (mut i, mut o, mut irreversible) = (0, 0, 0);
+    let mut status = Status::EmptyInput;
+    let put = |out: &mut [u8], o: &mut usize, c: u32| {
+        if put32(out.get_mut(*o..).unwrap_or_default(), c, false) {
+            *o += 4;
+        }
+    };
+    while let Some(&ch) = input.get(i) {
+        if out.len() - o < 4 {
+            status = Status::FullOutput;
+            break;
+        }
+        if st.shift == 0 {
+            if utf7_is_xdirect(u32::from(ch), imap) {
+                put(out, &mut o, u32::from(ch));
+                i += 1;
+            } else if ch == utf7_shift(imap) {
+                let Some(&next) = input.get(i + 1) else {
+                    status = Status::IncompleteInput;
+                    break;
+                };
+                if next == b'-' {
+                    put(out, &mut o, u32::from(ch));
+                    i += 2;
+                } else {
+                    *st = Utf7Decoder { shift: 32, bits: 0 };
+                    i += 1;
+                }
+            } else {
+                status = Status::IllegalInput;
+                if !ignore {
+                    break;
+                }
+                i += 1;
+                irreversible += 1;
+            }
+            continue;
+        }
+        let Some(v) = base64_value(ch, imap) else {
+            // The run ends here.
+            if st.bits != 0 || st.shift <= 26 || (imap && ch != b'-') {
+                status = Status::IllegalInput;
+                if !ignore {
+                    break;
+                }
+                st.shift = 0;
+                i += 1;
+                irreversible += 1;
+                continue;
+            }
+            if ch == b'-' {
+                i += 1;
+            }
+            st.shift = 0;
+            continue;
+        };
+        let mut shift = st.shift;
+        if shift > 6 {
+            shift -= 6;
+            let mut bits = st.bits | (v << shift);
+            if shift <= 16 && shift > 10 {
+                // A UTF-16 unit is complete; a high surrogate waits for its
+                // low half.
+                let unit = bits >> 16;
+                if !(0xD800..0xDC00).contains(&unit) {
+                    bits <<= 16;
+                    shift += 16;
+                    put(out, &mut o, unit);
+                }
+            } else if shift <= 10 && shift > 4 {
+                // Six bits of the low half are in: it must be one.
+                let low = bits & 0xFFFF;
+                if !(0xDC00..0xE000).contains(&low) {
+                    status = Status::IllegalInput;
+                    if !ignore {
+                        break;
+                    }
+                    st.shift = 0;
+                    i += 1;
+                    irreversible += 1;
+                    continue;
+                }
+            }
+            st.bits = bits;
+        } else {
+            // The pair is complete.
+            let high = st.bits >> 16;
+            let low = (st.bits & 0xFFFF) | (v >> (6 - shift));
+            st.bits = (v << shift) << 26;
+            shift += 26;
+            let c = 0x1_0000 + (high.wrapping_sub(0xD800) << 10) + low.wrapping_sub(0xDC00);
+            put(out, &mut o, c);
+        }
+        st.shift = shift;
+        i += 1;
+    }
+    Pass {
+        read: i,
+        wrote: o,
+        status,
+        irreversible,
+    }
+}
+
+/// The UTF-7 encoder's state, glibc's layout: bits 3-4 are 0 outside a
+/// base64 run, and inside one 1, 2 or 3 for 0, 2 or 4 bits waiting for the
+/// next digit, which are bits 5-8.
+const UTF7_RUN: u32 = 0x18;
+
+/// One character into UTF-7 at the start of `out`, as glibc's
+/// `to_utf7_loop` writes it, `st` updated only if it is written: the byte
+/// count, or `None` if it does not fit; `Err` for a character above U+10FFFF.
+fn utf7_put(c: u32, imap: bool, st: &mut u32, out: &mut [u8]) -> Result<Option<usize>, ()> {
+    let digit = |i: u32| base64_digit(i & 0x3F, imap);
+    let state = *st;
+    let mut w: [u8; 8] = [0; 8];
+    let mut n = 0;
+    let mut push = |b: u8| {
+        if let Some(slot) = w.get_mut(n) {
+            *slot = b;
+            n += 1;
+        }
+    };
+    let next;
+    if state & UTF7_RUN == 0 {
+        if utf7_is_direct(c, imap) {
+            push(c as u8);
+            next = state;
+        } else if c == u32::from(utf7_shift(imap)) {
+            push(utf7_shift(imap));
+            push(b'-');
+            next = state;
+        } else if c < 0x1_0000 {
+            push(utf7_shift(imap));
+            push(digit(c >> 10));
+            push(digit(c >> 4));
+            next = ((c & 15) << 5) | (3 << 3);
+        } else if c < 0x11_0000 {
+            let pair =
+                ((0xD800 + ((c - 0x1_0000) >> 10)) << 16) | (0xDC00 + ((c - 0x1_0000) & 0x3FF));
+            push(utf7_shift(imap));
+            for s in [26, 20, 14, 8, 2] {
+                push(digit(pair >> s));
+            }
+            next = ((pair & 3) << 7) | (2 << 3);
+        } else {
+            return Err(());
+        }
+    } else if (imap && c == u32::from(b'&')) || utf7_is_direct(c, imap) {
+        // Close the run.
+        if state & UTF7_RUN >= 0x10 {
+            push(base64_digit((state >> 3) & !3, imap));
+        }
+        if imap || utf7_needs_explicit_shift(c) {
+            push(b'-');
+        }
+        push(c as u8);
+        if imap && c == u32::from(b'&') {
+            push(b'-');
+        }
+        next = 0;
+    } else if c < 0x11_0000 {
+        let pending = (state >> 3) & !3;
+        let mode = (state >> 3) & 3;
+        if c < 0x1_0000 {
+            match mode {
+                1 => {
+                    push(digit(c >> 10));
+                    push(digit(c >> 4));
+                    next = ((c & 15) << 5) | (3 << 3);
+                }
+                2 => {
+                    push(base64_digit(pending | (c >> 12), imap));
+                    push(digit(c >> 6));
+                    push(digit(c));
+                    next = 1 << 3;
+                }
+                _ => {
+                    push(base64_digit(pending | (c >> 14), imap));
+                    push(digit(c >> 8));
+                    push(digit(c >> 2));
+                    next = ((c & 3) << 7) | (2 << 3);
+                }
+            }
+        } else {
+            let pair =
+                ((0xD800 + ((c - 0x1_0000) >> 10)) << 16) | (0xDC00 + ((c - 0x1_0000) & 0x3FF));
+            match mode {
+                1 => {
+                    for s in [26, 20, 14, 8, 2] {
+                        push(digit(pair >> s));
+                    }
+                    next = ((pair & 3) << 7) | (2 << 3);
+                }
+                2 => {
+                    push(base64_digit(pending | (pair >> 28), imap));
+                    for s in [22, 16, 10, 4] {
+                        push(digit(pair >> s));
+                    }
+                    next = ((pair & 15) << 5) | (3 << 3);
+                }
+                _ => {
+                    push(base64_digit(pending | (pair >> 30), imap));
+                    for s in [24, 18, 12, 6, 0] {
+                        push(digit(pair >> s));
+                    }
+                    next = 1 << 3;
+                }
+            }
+        }
+    } else {
+        return Err(());
+    }
+    let Some(dst) = out.get_mut(..n) else {
+        return Ok(None);
+    };
+    dst.copy_from_slice(w.get(..n).unwrap_or_default());
+    *st = next;
+    Ok(Some(n))
+}
+
+/// glibc's UTF-7 encoder (`to_utf7_loop`), over glibc's generic loop: each
+/// character through [`utf7_put`]; one above U+10FFFF is the error --
+/// substituted under `//TRANSLIT`, through the same state, or skipped under
+/// `//IGNORE`.  (UTF-7 writes every other character, surrogates and tag
+/// characters included, as glibc's does.)
+fn encode_utf7(
+    input: &[u8],
+    out: &mut [u8],
+    translit: bool,
+    ignore: bool,
+    imap: bool,
+    st: &mut u32,
+) -> Pass {
+    let (mut i, mut o, mut irreversible) = (0, 0, 0);
+    let mut status = Status::EmptyInput;
+    while i < input.len() {
+        let Some(c) = get32(input, i, false) else {
+            status = Status::IncompleteInput;
+            break;
+        };
+        if out.len() == o {
+            status = Status::FullOutput;
+            break;
+        }
+        let rest = out.get_mut(o..).unwrap_or_default();
+        match utf7_put(c, imap, st, rest) {
+            Ok(Some(n)) => {
+                o += n;
+                i += 4;
+            }
+            Ok(None) => {
+                status = Status::FullOutput;
+                break;
+            }
+            Err(()) => {
+                status = Status::IllegalInput;
+                if translit {
+                    match utf7_substitute(c, imap, st, rest) {
+                        Some(n) => {
+                            o += n;
+                            i += 4;
+                            irreversible += 1;
+                            status = Status::Ok;
+                            continue;
+                        }
+                        None => {
+                            status = Status::FullOutput;
+                            break;
+                        }
+                    }
+                }
+                if !ignore {
+                    break;
+                }
+                irreversible += 1;
+                i += 4;
+            }
+        }
+    }
+    Pass {
+        read: i,
+        wrote: o,
+        status,
+        irreversible,
+    }
+}
+
+/// `//TRANSLIT`'s substitute for `c` in UTF-7, written through the encoder's
+/// state -- all of it, or none and the state as it was.
+fn utf7_substitute(c: u32, imap: bool, st: &mut u32, out: &mut [u8]) -> Option<usize> {
+    let mut state = *st;
+    let mut o = 0;
+    for &b in substitute_for(c) {
+        match utf7_put(u32::from(b), imap, &mut state, out.get_mut(o..)?) {
+            Ok(Some(n)) => o += n,
+            _ => return None,
+        }
+    }
+    *st = state;
+    Some(o)
+}
+
+/// glibc's `EMIT_SHIFT_TO_INIT` for the UTF-7 encoder: an open run's waiting
+/// bits and the `-` that closes it, written at the start of `out`; `Err`
+/// (`E2BIG`), with the run still open, if they do not fit.
+fn utf7_flush(imap: bool, st: &mut u32, out: &mut [u8]) -> Result<usize, Status> {
+    let state = *st;
+    if state & UTF7_RUN == 0 {
+        *st = 0;
+        return Ok(0);
+    }
+    let pending = (state & UTF7_RUN >= 0x10).then(|| base64_digit((state >> 3) & !3, imap));
+    let w: [u8; 2] = [pending.unwrap_or(b'-'), b'-'];
+    let n = if pending.is_some() { 2 } else { 1 };
+    let Some(dst) = out.get_mut(..n) else {
+        return Err(Status::FullOutput);
+    };
+    dst.copy_from_slice(w.get(..n).unwrap_or_default());
+    *st = 0;
+    Ok(n)
+}
+
+// ---------------------------------------------------------------------------
 // Descriptors
 // ---------------------------------------------------------------------------
 
@@ -1175,6 +1621,10 @@ struct Descriptor {
     /// An 8-bit table target's [`reverse_index`], `reverse_len` pairs of it.
     reverse: [(u16, u8); 256],
     reverse_len: usize,
+    /// A UTF-7 source's decoder state, kept between calls.
+    utf7_dec: Utf7Decoder,
+    /// A UTF-7 target's encoder state ([`UTF7_RUN`]), kept between calls.
+    utf7_enc: u32,
 }
 
 impl Descriptor {
@@ -1234,12 +1684,17 @@ impl Descriptor {
             mark = width;
         }
         let rest = out.get_mut(mark..).unwrap_or_default();
-        let target = Target {
-            set: self.to,
-            swap: self.to.target_swap(),
-            reverse: self.reverse.get(..self.reverse_len).unwrap_or_default(),
+        let pass = if let Charset::Utf7 { imap } = self.to {
+            let state = &mut self.utf7_enc;
+            encode_utf7(input, rest, self.translit, self.ignore, imap, state)
+        } else {
+            let target = Target {
+                set: self.to,
+                swap: self.to.target_swap(),
+                reverse: self.reverse.get(..self.reverse_len).unwrap_or_default(),
+            };
+            encode_loop(target, self.translit, self.ignore, input, rest)
         };
-        let pass = encode_loop(target, self.translit, self.ignore, input, rest);
         self.mark_pending = false;
         Pass {
             wrote: mark + pass.wrote,
@@ -1255,7 +1710,7 @@ impl Descriptor {
             Err(status) => return Pass::stopped(status),
         };
         let rest = input.get(skip..).unwrap_or_default();
-        let pass = decode_loop(self.from, swap, self.ignore, rest, out);
+        let pass = decode_loop(self.from, swap, self.ignore, &mut self.utf7_dec, rest, out);
         Pass {
             read: skip + pass.read,
             ..pass
@@ -1267,7 +1722,9 @@ impl Descriptor {
     /// made; where the target stops short, the round is decoded again into
     /// just the part it took, so the input stops where the output did.  A
     /// round that filled the buffer and was emptied goes on; any other end is
-    /// the call's -- the target's if it stopped, the source's if not.
+    /// the call's -- the target's if it stopped, the source's if not.  A
+    /// stateful source (UTF-7) is decoded again from the state it had when
+    /// the round began (glibc's `SAVE_RESET_STATE`).
     fn convert_two(&mut self, input: &[u8], out: &mut [u8]) -> Pass {
         let (skip, swap) = match self.source_order(input) {
             Ok(order) => order,
@@ -1283,10 +1740,12 @@ impl Descriptor {
         let (mut i, mut o, mut irreversible) = (skip, 0, 0);
         loop {
             let round = i;
+            let saved = self.utf7_dec;
             let first = decode_loop(
                 self.from,
                 swap,
                 self.ignore,
+                &mut self.utf7_dec,
                 input.get(i..).unwrap_or_default(),
                 chunk,
             );
@@ -1299,10 +1758,12 @@ impl Descriptor {
                 irreversible += last.irreversible;
                 if last.status != Status::EmptyInput {
                     if last.read != first.wrote {
+                        self.utf7_dec = saved;
                         let again = decode_loop(
                             self.from,
                             swap,
                             self.ignore,
+                            &mut self.utf7_dec,
                             input.get(round..).unwrap_or_default(),
                             chunk.get_mut(..last.read).unwrap_or_default(),
                         );
@@ -1333,10 +1794,27 @@ impl Descriptor {
         }
     }
 
-    /// The reset: the next call reads (writes) a mark again.
-    fn reset(&mut self) {
+    /// The reset, as glibc's flush runs it, step by step: the first step's
+    /// state cleared (a UTF-7 source's run dropped); then a UTF-7 target's
+    /// open run closed into `out` -- or, with no `out`, dropped; and, if that
+    /// went through, the marks due again.  Returns the bytes written into
+    /// `out`, and `FullOutput` (`E2BIG`) if the close did not fit, when
+    /// nothing else is reset.
+    fn reset(&mut self, out: Option<&mut [u8]>) -> (usize, Status) {
+        self.utf7_dec = Utf7Decoder::default();
+        let mut wrote = 0;
+        if let Charset::Utf7 { imap } = self.to {
+            match out {
+                Some(out) => match utf7_flush(imap, &mut self.utf7_enc, out) {
+                    Ok(n) => wrote = n,
+                    Err(status) => return (0, status),
+                },
+                None => self.utf7_enc = 0,
+            }
+        }
         self.from_swap = None;
         self.mark_pending = true;
+        (wrote, Status::Ok)
     }
 }
 
@@ -1376,6 +1854,8 @@ fn allocate(from: Charset, to: Charset, translit: bool, ignore: bool) -> Option<
             chunk,
             reverse,
             reverse_len,
+            utf7_dec: Utf7Decoder::default(),
+            utf7_enc: 0,
         });
     }
     Some(d)
@@ -1594,8 +2074,11 @@ pub extern "C" fn iconv_open(tocode: *const u8, fromcode: *const u8) -> IconvT {
 /// conversions, or `(size_t)-1` with `errno`.
 ///
 /// With `inbuf` or `*inbuf` NULL it resets the conversion -- the next call
-/// reads (writes) a byte-order mark again -- writing nothing and returning 0,
-/// after checking the descriptor (`EBADF`), as glibc does.
+/// reads (writes) a byte-order mark again -- after checking the descriptor
+/// (`EBADF`), as glibc does.  It writes only a UTF-7 target's close of an open
+/// base64 run, into `*outbuf` if that is not NULL (`E2BIG`, and nothing reset,
+/// if the close does not fit; dropped if there is no `*outbuf`), and returns
+/// 0.
 ///
 /// Where glibc reads through a NULL pointer -- `inbytesleft`, `outbuf` or
 /// `outbytesleft` on a conversion, or `outbytesleft` beside a non-NULL
@@ -1642,10 +2125,35 @@ pub unsafe extern "C" fn iconv(
         let Some(desc) = lock().get(cd) else {
             return fail(errno::EBADF);
         };
+        // Only a non-NULL `*outbuf` is somewhere to write: glibc flushes
+        // without one, dropping what a UTF-7 target had not written.
+        let out_left = if out_start.is_null() {
+            0
+        } else {
+            // SAFETY: non-NULL beside a non-NULL `*outbuf` (checked above).
+            unsafe { *outbytesleft }
+        };
+        let out = if out_start.is_null() {
+            None
+        } else {
+            // SAFETY: the caller's buffer, for the length its count gives.
+            Some(unsafe { core::slice::from_raw_parts_mut(out_start, out_left) })
+        };
         // SAFETY: a live descriptor, handed to this call alone (the module
         // docs: one descriptor, one thread at a time).
-        unsafe { (*desc).reset() };
-        return 0;
+        let (wrote, status) = unsafe { (*desc).reset(out) };
+        if !out_start.is_null() {
+            // SAFETY: the caller's pointers, checked non-NULL; `wrote` is
+            // within the buffer.
+            unsafe {
+                *outbuf = out_start.add(wrote);
+                *outbytesleft = out_left - wrote;
+            }
+        }
+        return match status {
+            Status::FullOutput => fail(errno::E2BIG),
+            _ => 0,
+        };
     }
 
     if inbytesleft.is_null() || outbuf.is_null() || outbytesleft.is_null() {
@@ -2527,6 +3035,8 @@ mod tests {
             (&["UTF-32", "UTF32"], 0, "fffe000041000000e9000000"),
             (&["UTF-32LE", "UTF32LE"], 0, "41000000e9000000"),
             (&["UTF-32BE", "UTF32BE"], 0, "00000041000000e9"),
+            (&["UTF-7", "UTF7"], 0, "412b414f"),
+            (&["UTF-7-IMAP"], 0, "4126414f"),
         ];
         let mut count = 0;
         for &(names, r, out) in sets {
@@ -3017,5 +3527,251 @@ mod tests {
             run("ASCII//TRANSLIT", "UTF-8", "a\u{200b}b".as_bytes(), 32),
             (1, OK, 0, b"ab".to_vec())
         );
+    }
+
+    // -- UTF-7 and UTF-7-IMAP (probed on Ubuntu's glibc, 2026-09-26) --
+
+    /// UTF-8 text into UTF-7 (or UTF-7-IMAP), then the reset's flush.
+    fn utf7_out(to: &str, text: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let cd = open(to, "UTF-8");
+        let (r, e, left, out) = call(cd, text, 128);
+        assert_eq!((r, e, left), (0, OK, 0), "{to} {text:x?}");
+        let mut tail = [0u8; 16];
+        let mut op = tail.as_mut_ptr();
+        let mut ol = tail.len();
+        let r = unsafe {
+            iconv(
+                cd,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut op,
+                &raw mut ol,
+            )
+        };
+        assert_eq!(r, 0);
+        assert_eq!(iconv_close(cd), 0);
+        (out, tail[..16 - ol].to_vec())
+    }
+
+    #[test]
+    fn utf7_is_written_as_glibc_writes_it() {
+        #[rustfmt::skip]
+        let cases: &[(&[u8], &str, &str, &str, &str)] = &[
+            // (UTF-8, UTF-7, its flush, UTF-7-IMAP, its flush)
+            (b"Hi Mom -\xe2\x98\xba-!", "Hi Mom -+Jjo--+AC", "E-", "Hi Mom -&Jjo--!", ""),
+            (b"A\xe2\x89\xa2\xce\x91.", "A+ImIDkQ.", "", "A&ImIDkQ-.", ""),
+            (b"\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e", "+ZeVnLIqe", "-", "&ZeVnLIqe", "-"),
+            (b"a+b", "a+-b", "", "a+b", ""),
+            (b"a&b", "a+ACY-b", "", "a&-b", ""),
+            (b"\xf0\x9f\x98\x80", "+2D3eA", "A-", "&2D3eA", "A-"),
+            (b"~\\", "+AH4AX", "A-", "~\\", ""),
+            (b"x\xc3\xa9y", "x+AOk-y", "", "x&AOk-y", ""),
+            (b"\xc3\xa9-", "+AOk--", "", "&AOk--", ""),
+            (b"\xc3\xa9a", "+AOk-a", "", "&AOk-a", ""),
+            (b"\xc3\xa9.", "+AOk.", "", "&AOk-.", ""),
+            (b"\xc3\xa9\xc3\xa9\xc3\xa9", "+AOkA6QDp", "-", "&AOkA6QDp", "-"),
+            (b"\t\r\n", "\t\r\n", "", "&AAkADQAK", "-"),
+            (b"!\"#$%*;<=>@[]^_`{|}",
+             "+ACEAIgAjACQAJQAqADsAPAA9AD4AQABbAF0AXgBfAGAAewB8AH", "0-",
+             "!\"#$%*;<=>@[]^_`{|}", ""),
+            (b"a\xf3\xa0\x81\x81b", "a+20DcQQ-b", "", "a&20DcQQ-b", ""),
+        ];
+        for &(text, utf7, flush7, imap, flush_imap) in cases {
+            assert_eq!(
+                utf7_out("UTF-7", text),
+                (utf7.as_bytes().to_vec(), flush7.as_bytes().to_vec()),
+                "UTF-7 {text:x?}"
+            );
+            assert_eq!(
+                utf7_out("UTF-7-IMAP", text),
+                (imap.as_bytes().to_vec(), flush_imap.as_bytes().to_vec()),
+                "UTF-7-IMAP {text:x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn utf7_is_read_as_glibc_reads_it() {
+        #[rustfmt::skip]
+        let cases: &[OneWay] = &[
+            ("UTF-7", b"Hi Mom -+Jjo--!", 0, OK, 0, "4869204d6f6d202de298ba2d21"),
+            ("UTF-7", b"A+ImIDkQ.", 0, OK, 0, "41e289a2ce912e"),
+            ("UTF-7", b"+ZeVnLIqe-", 0, OK, 0, "e697a5e69cace8aa9e"),
+            ("UTF-7", b"a+-b", 0, OK, 0, "612b62"),
+            ("UTF-7", b"+AGE-", 0, OK, 0, "61"),
+            ("UTF-7", b"+AGEAYg-", 0, OK, 0, "6162"),
+            ("UTF-7", b"+AGE", 0, OK, 0, "61"),
+            ("UTF-7", b"+AG", 0, OK, 0, ""),
+            ("UTF-7", b"+A", 0, OK, 0, ""),
+            ("UTF-7", b"+", -1, EINVAL, 1, ""),
+            ("UTF-7", b"+-", 0, OK, 0, "2b"),
+            ("UTF-7", b"+2D3eAA-", 0, OK, 0, "f09f9880"),
+            ("UTF-7", b"+2D3eAA", 0, OK, 0, "f09f9880"),
+            ("UTF-7", b"+2D0-", -1, EILSEQ, 1, ""),
+            ("UTF-7", b"+AGEA-", -1, EILSEQ, 1, "61"),
+            ("UTF-7", b"+AGH-", -1, EILSEQ, 1, "61"),
+            ("UTF-7", b"~", -1, EILSEQ, 1, ""),
+            ("UTF-7", b"\\", -1, EILSEQ, 1, ""),
+            ("UTF-7", b"\x80", -1, EILSEQ, 1, ""),
+            ("UTF-7", b"+AGE.", 0, OK, 0, "612e"),
+            ("UTF-7", b"a&b", 0, OK, 0, "612662"),
+            ("UTF-7", b"&AGE-", 0, OK, 0, "26414745 2d"),
+            ("UTF-7-IMAP", b"&AGE-", 0, OK, 0, "61"),
+            ("UTF-7-IMAP", b"&AGE", 0, OK, 0, "61"),
+            ("UTF-7-IMAP", b"&AGE.", -1, EILSEQ, 1, "61"),
+            ("UTF-7-IMAP", b"&-", 0, OK, 0, "26"),
+            ("UTF-7-IMAP", b"a+b", 0, OK, 0, "612b62"),
+            ("UTF-7-IMAP", b"&ZeVnLIqe-", 0, OK, 0, "e697a5e69cace8aa9e"),
+            ("UTF-7-IMAP", b"&2D3eAA-", 0, OK, 0, "f09f9880"),
+            ("UTF-7-IMAP", b"~\\", 0, OK, 0, "7e5c"),
+            ("UTF-7-IMAP", b"&Jjo,-", -1, EILSEQ, 1, "e298ba"),
+            ("UTF7", b"+AGE-", 0, OK, 0, "61"),
+        ];
+        for &(from, input, r, e, left, out) in cases {
+            assert_eq!(
+                run("UTF-8", from, input, 64),
+                (r, e, left, hex(&out.replace(' ', ""))),
+                "{from} {:?}",
+                std::string::String::from_utf8_lossy(input)
+            );
+        }
+        assert_eq!(
+            run("UTF-8//IGNORE", "UTF-7", b"+AGH-x", 64),
+            (-1, EILSEQ, 0, b"ax".to_vec())
+        );
+        assert_eq!(
+            run("UTF-8//IGNORE", "UTF-7", b"\x80x", 64),
+            (-1, EILSEQ, 0, b"x".to_vec())
+        );
+        // glibc skips the character that ended a bad run -- a '.' too, which
+        // is then lost -- and only under //IGNORE forgets the run.
+        assert_eq!(
+            run("UTF-8", "UTF-7", b"+AGH.", 64),
+            (-1, EILSEQ, 1, b"a".to_vec())
+        );
+        assert_eq!(
+            run("UTF-8//IGNORE", "UTF-7", b"+AGH.", 64),
+            (-1, EILSEQ, 0, b"a".to_vec())
+        );
+        let cd = open("UTF-8", "UTF-7");
+        assert_eq!(call(cd, b"+AGH-", 64), (-1, EILSEQ, 1, b"a".to_vec()));
+        assert_eq!(
+            call(cd, b"-", 64),
+            (-1, EILSEQ, 1, Vec::new()),
+            "without //IGNORE the run is still open"
+        );
+        assert_eq!(iconv_close(cd), 0);
+        assert_eq!(
+            run("UTF-16", "UTF-7", b"+AGE-", 64),
+            (0, OK, 0, hex("fffe6100"))
+        );
+        assert_eq!(
+            run("UTF-7", "UTF-7", b"+AOk-a", 64),
+            (0, OK, 0, b"+AOk-a".to_vec())
+        );
+    }
+
+    #[test]
+    fn utf7_keeps_its_state_across_calls() {
+        let cd = open("UTF-8", "UTF-7");
+        assert_eq!(call(cd, b"+AG", 64), (0, OK, 0, Vec::new()));
+        assert_eq!(call(cd, b"E-", 64), (0, OK, 0, b"a".to_vec()));
+        assert_eq!(iconv_close(cd), 0);
+
+        let cd = open("UTF-8", "UTF-7");
+        assert_eq!(call(cd, b"+AGE", 64), (0, OK, 0, b"a".to_vec()));
+        reset(cd);
+        assert_eq!(
+            call(cd, b"AGI-", 64),
+            (0, OK, 0, b"AGI-".to_vec()),
+            "the reset ends the base64 run"
+        );
+        assert_eq!(iconv_close(cd), 0);
+
+        let cd = open("UTF-7", "UTF-8");
+        assert_eq!(call(cd, b"\xc3\xa9", 64), (0, OK, 0, b"+AO".to_vec()));
+        assert_eq!(call(cd, b"A", 64), (0, OK, 0, b"k-A".to_vec()));
+        assert_eq!(call(cd, b"\xc3\xa9", 64), (0, OK, 0, b"+AO".to_vec()));
+        assert_eq!(iconv_close(cd), 0);
+    }
+
+    #[test]
+    fn the_reset_flushes_utf7s_last_bits() {
+        let flush = |cd: IconvT, cap: usize| {
+            let mut out = [0u8; 8];
+            let mut op = out.as_mut_ptr();
+            let mut ol = cap;
+            errno::set_errno(0);
+            let r = unsafe {
+                iconv(
+                    cd,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    &raw mut op,
+                    &raw mut ol,
+                )
+            };
+            #[allow(clippy::cast_possible_wrap)]
+            (r as isize, errno::get_errno(), out[..cap - ol].to_vec())
+        };
+        let cd = open("UTF-7", "UTF-8");
+        assert_eq!(call(cd, b"\xc3\xa9", 64), (0, OK, 0, b"+AO".to_vec()));
+        assert_eq!(flush(cd, 0), (-1, E2BIG, Vec::new()));
+        assert_eq!(flush(cd, 1), (-1, E2BIG, Vec::new()), "k- is two bytes");
+        assert_eq!(flush(cd, 8), (0, OK, b"k-".to_vec()));
+        assert_eq!(flush(cd, 8), (0, OK, Vec::new()), "nothing pending");
+        assert_eq!(iconv_close(cd), 0);
+
+        let cd = open("UTF-7", "UTF-8");
+        assert_eq!(call(cd, b"\xc3\xa9", 64), (0, OK, 0, b"+AO".to_vec()));
+        reset(cd);
+        assert_eq!(
+            call(cd, b"A", 64),
+            (0, OK, 0, b"A".to_vec()),
+            "a reset without an output buffer drops the bits"
+        );
+        assert_eq!(iconv_close(cd), 0);
+    }
+
+    #[test]
+    fn utf7_and_a_full_buffer() {
+        #[rustfmt::skip]
+        let cases: &[Case] = &[
+            ("UTF-7", "UTF-8", b"\xc3\xa9", 2, -1, E2BIG, 2, ""),
+            ("UTF-7", "UTF-8", b"\xc3\xa9", 3, 0, OK, 0, "2b414f"),
+            ("UTF-7", "UTF-8", b"\xc3\xa9a", 5, -1, E2BIG, 1, "2b414f"),
+            ("UTF-7", "UTF-8", b"\xc3\xa9a", 4, -1, E2BIG, 1, "2b414f"),
+            ("UTF-8", "UTF-7", b"+AGEAYg-", 1, -1, E2BIG, 4, "61"),
+        ];
+        for &(to, from, input, cap, r, e, left, out) in cases {
+            assert_eq!(
+                run(to, from, input, cap),
+                (r, e, left, hex(out)),
+                "{to} <- {from} {input:x?} in {cap}"
+            );
+        }
+        // Stopped mid-run, the decoder's state is where the input stopped:
+        // the rest decodes.
+        let cd = open("UTF-8", "UTF-7");
+        assert_eq!(call(cd, b"+AGEAYg-", 1), (-1, E2BIG, 4, b"a".to_vec()));
+        assert_eq!(call(cd, b"AYg-", 8), (0, OK, 0, b"b".to_vec()));
+        assert_eq!(iconv_close(cd), 0);
+    }
+
+    #[test]
+    fn utf7_writes_every_character_up_to_u_10ffff() {
+        #[rustfmt::skip]
+        let cases: &[Case] = &[
+            ("UTF-7", "WCHAR_T", b"\0\0\x11\0", 16, -1, EILSEQ, 4, ""),
+            ("UTF-7//TRANSLIT", "WCHAR_T", b"\0\0\x11\0", 16, 1, OK, 0, "3f"),
+            ("UTF-7", "WCHAR_T", b"\0\xd8\0\0", 16, 0, OK, 0, "2b3241"),
+        ];
+        for &(to, from, input, cap, r, e, left, out) in cases {
+            assert_eq!(
+                run(to, from, input, cap),
+                (r, e, left, hex(out)),
+                "{to} <- {from} {input:x?}"
+            );
+        }
     }
 }

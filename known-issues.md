@@ -170963,3 +170963,15 @@ glibc (design-decisions.md §1117). CP1252, hand-written above, is one of
 them now. Still missing: UTF-7, the 8-bit sets glibc writes by hand (CP1255
 and CP1258, whose combining marks make them stateful, and a dozen more), and
 the East Asian multibyte sets.
+
+**Addendum (2026-09-26): UTF-7 and UTF-7-IMAP convert too** -- RFC 2152's
+mail-safe Unicode and IMAP's variant for folder names, from glibc's
+iconvdata/utf-7.c. They are the first sets here with state that lasts from
+call to call -- an open base64 run and the bits waiting in it -- kept per
+descriptor, decoded again from the round's start when the output stops short
+(glibc's `SAVE_RESET_STATE`), and closed by the reset, `iconv(cd, NULL, ...)`,
+into the caller's buffer when there is one (`E2BIG` if the close does not
+fit). glibc's answers were probed on Ubuntu and are pinned in the tests --
+among them that an invalid byte inside a run leaves the run open unless
+`//IGNORE` skips it, and that `//IGNORE` then skips the byte that ended the
+run as well, even a `.`.

@@ -238,7 +238,7 @@ def main():
             "\n"
             "/// State 0 is dead — nothing leaves it — and state 1 is the\n"
             "/// start. A row is indexed by\n"
-            "/// [`Category`](crate::universal::Category) cast to `usize`, so\n"
+            "/// [`Category`] cast to `usize`, so\n"
             "/// the enum's variant order is part of this table. The width is\n"
             "/// written as `Category::COUNT` rather than as a literal so that\n"
             "/// a category added to the enum without regenerating this file\n"

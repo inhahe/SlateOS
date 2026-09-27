@@ -156,10 +156,14 @@ fn futex_key(uaddr: u64) -> FutexKey {
 /// would prove nothing.
 #[must_use]
 pub fn waiters_on_shared_word(phys: u64) -> usize {
-    let key = FutexKey {
+    waiters_on(FutexKey {
         addr: phys,
         space: SHARED_KEY_SPACE,
-    };
+    })
+}
+
+/// How many tasks are queued (plain or bitset waits) under `key`.
+fn waiters_on(key: FutexKey) -> usize {
     let table = FUTEX_TABLE.lock();
     // SAFETY: bucket() is masked to NUM_BUCKETS - 1.
     #[allow(clippy::indexing_slicing)]
@@ -974,8 +978,14 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
     // Collect (task, multi_index) pairs to wake while holding the table
     // lock, then record indices + wake outside the lock to respect lock
     // ordering.  `multi_index` is `Some` only for a `futex_waitv` parker.
-    let mut to_wake: [(TaskId, Option<u32>); 32] = [(0, None); 32];
-    let mut wake_count: usize = 0;
+    //
+    // A Vec, not an array: until 2026-09-27 this was a 32-slot array and a
+    // wake stopped at 32 whatever it was asked for, so FUTEX_WAKE(INT_MAX) --
+    // a condition variable's broadcast, a barrier's release -- left every
+    // waiter past the 32nd asleep.  Allocating under the table lock adds no
+    // new lock order: the wait path's push_back already does.  A reservation
+    // that fails ends the wake early, and the count returned says so.
+    let mut to_wake: alloc::vec::Vec<(TaskId, Option<u32>)> = alloc::vec::Vec::new();
 
     {
         let mut table = FUTEX_TABLE.lock();
@@ -990,19 +1000,18 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
         // words (a process can only wake tasks queued in its own address
         // space) and allows them exactly where the word is shared, and the
         // bitset honours FUTEX_WAKE_BITSET's selective wakeup.
+        let limit = max_wake as usize;
         let mut i = 0;
-        while i < bucket.len() && wake_count < max_wake as usize && wake_count < to_wake.len() {
-            if let Some(waiter) = bucket.get(i)
-                && waiter.key == key
-                && waiter.bitset & bitset != 0
-                && let Some(removed) = bucket.remove(i)
+        while i < bucket.len() && to_wake.len() < limit {
+            if bucket
+                .get(i)
+                .is_some_and(|w| w.key == key && w.bitset & bitset != 0)
             {
-                if let Some(slot) = to_wake.get_mut(wake_count) {
-                    *slot = (removed.task_id, removed.multi_index);
+                if to_wake.try_reserve(1).is_err() {
+                    break;
                 }
-                #[allow(clippy::arithmetic_side_effects)]
-                {
-                    wake_count += 1;
+                if let Some(removed) = bucket.remove(i) {
+                    to_wake.push((removed.task_id, removed.multi_index));
                 }
                 // Don't increment i — the next element shifted down.
                 continue;
@@ -1018,19 +1027,18 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
     // *before* waking it, so the parker observes its index once it resumes.
     // First-writer-wins: a concurrent waker on another of the parker's keys
     // may also try to record — keep the earliest (either index is valid).
-    for (task_id, multi_index) in to_wake.get(..wake_count).unwrap_or(&[]) {
+    for &(task_id, multi_index) in &to_wake {
         if let Some(index) = multi_index {
-            MULTI_WOKEN.lock().entry(*task_id).or_insert(*index);
+            MULTI_WOKEN.lock().entry(task_id).or_insert(index);
         }
     }
 
     // Wake the collected tasks outside the FUTEX_TABLE lock.
-    for (task_id, _) in to_wake.get(..wake_count).unwrap_or(&[]) {
-        sched::wake(*task_id);
+    for &(task_id, _) in &to_wake {
+        sched::wake(task_id);
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    let result = wake_count as u32;
+    let result = u32::try_from(to_wake.len()).unwrap_or(u32::MAX);
     super::stats::futex_wake(result);
     // Safe here: the comment above records that the FUTEX_TABLE lock was
     // already dropped before the wake loop.
@@ -1116,8 +1124,9 @@ fn requeue_inner(
 
     // Collect task IDs to wake while holding the table lock, then wake
     // them outside the lock to respect lock ordering (FUTEX_TABLE → SCHED).
-    let mut to_wake: [TaskId; 32] = [0; 32];
-    let mut wake_count: usize = 0;
+    // A Vec for the reason given in futex_wake_bitset: a fixed 32 capped the
+    // wake phase at 32 whatever nr_wake said.
+    let mut to_wake: alloc::vec::Vec<TaskId> = alloc::vec::Vec::new();
     let mut requeued: u32 = 0;
 
     {
@@ -1145,18 +1154,15 @@ fn requeue_inner(
             // SAFETY: idx1 is masked to NUM_BUCKETS-1 by bucket_index.
             #[allow(clippy::indexing_slicing)]
             let bucket = &mut table.buckets[idx1];
+            let limit = max_wake as usize;
             let mut i = 0;
-            while i < bucket.len() && wake_count < max_wake as usize && wake_count < to_wake.len() {
-                if let Some(waiter) = bucket.get(i)
-                    && waiter.key == key1
-                    && let Some(removed) = bucket.remove(i)
-                {
-                    if let Some(slot) = to_wake.get_mut(wake_count) {
-                        *slot = removed.task_id;
+            while i < bucket.len() && to_wake.len() < limit {
+                if bucket.get(i).is_some_and(|w| w.key == key1) {
+                    if to_wake.try_reserve(1).is_err() {
+                        break;
                     }
-                    #[allow(clippy::arithmetic_side_effects)]
-                    {
-                        wake_count += 1;
+                    if let Some(removed) = bucket.remove(i) {
+                        to_wake.push(removed.task_id);
                     }
                     // Don't increment i — the next element shifted down.
                     continue;
@@ -1205,12 +1211,11 @@ fn requeue_inner(
     }
 
     // Wake the collected tasks outside the FUTEX_TABLE lock.
-    for task_id in to_wake.get(..wake_count).unwrap_or(&[]) {
-        sched::wake(*task_id);
+    for &task_id in &to_wake {
+        sched::wake(task_id);
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    let woken = wake_count as u32;
+    let woken = u32::try_from(to_wake.len()).unwrap_or(u32::MAX);
     super::stats::futex_wake(woken);
     // Safe here: the comment above records that the FUTEX_TABLE lock was
     // dropped before the wake loop.  Attributed to `addr1`, which is the
@@ -2946,8 +2951,120 @@ pub fn self_test() -> KernelResult<()> {
     test_priority_inheritance()?;
     test_accounting_reaches_futexstat()?;
     test_keys_follow_the_mapping()?;
+    test_wake_many()?;
 
     serial_println!("[futex] Futex self-test PASSED");
+    Ok(())
+}
+
+/// The word [`test_wake_many`]'s waiters park on.  Static, not on the test's
+/// stack: a waiter must never outlive its word, even when the test fails and
+/// returns early.
+static WAKE_MANY_WORD: AtomicU32 = AtomicU32::new(0);
+
+/// How many of [`test_wake_many`]'s waiters have been woken and finished.
+static WAKE_MANY_DONE: AtomicU32 = AtomicU32::new(0);
+
+/// More than the 32 a wake used to stop at.
+const WAKE_MANY_WAITERS: u32 = 40;
+
+/// A [`test_wake_many`] waiter: parks while the word is 1, then counts itself
+/// done.  The loop re-checks the word, so a waiter the test starts late, or
+/// wakes spuriously, still finishes once the word is 0.
+extern "C" fn wake_many_waiter(_arg: u64) {
+    let addr = (&raw const WAKE_MANY_WORD) as u64;
+    while WAKE_MANY_WORD.load(Ordering::Acquire) == 1 {
+        // A mismatch or a wake both end in the re-check above.
+        let _ = futex_wait(addr, 1);
+    }
+    WAKE_MANY_DONE.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Release every [`test_wake_many`] waiter, however the test went: set the
+/// word to 0 and wake until all have finished (bounded).  A wake capped
+/// below the waiter count is exactly the bug being tested for, so one wake
+/// is not enough to clean up after it.
+fn release_wake_many(addr: u64) {
+    WAKE_MANY_WORD.store(0, Ordering::Release);
+    for _ in 0..200 {
+        if WAKE_MANY_DONE.load(Ordering::Acquire) >= WAKE_MANY_WAITERS {
+            return;
+        }
+        let _ = futex_wake(addr, u32::MAX);
+        sched::yield_now();
+    }
+}
+
+/// A wake wakes every waiter it is asked to, not the first 32.
+///
+/// Forty kernel tasks park on one word, and `futex_wake(addr, u32::MAX)` --
+/// what FUTEX_WAKE(INT_MAX) becomes, a condition variable's broadcast -- must
+/// report forty woken, and all forty must finish.  Until 2026-09-27 the wake
+/// collected its wakees in a 32-slot array and stopped there, leaving eight
+/// asleep and reporting 32 as if that were everyone.
+fn test_wake_many() -> KernelResult<()> {
+    let addr = (&raw const WAKE_MANY_WORD) as u64;
+    let key = FutexKey { addr, space: 0 };
+    WAKE_MANY_DONE.store(0, Ordering::Release);
+    WAKE_MANY_WORD.store(1, Ordering::Release);
+
+    let mut spawned = 0u32;
+    for _ in 0..WAKE_MANY_WAITERS {
+        if let Err(e) = sched::spawn(b"futex-wake-many", 16, wake_many_waiter, 0, 0) {
+            serial_println!(
+                "[futex]   FAIL: wake-many could start only {} of {} waiters ({:?})",
+                spawned,
+                WAKE_MANY_WAITERS,
+                e
+            );
+            // Count the ones that never started as done, so the release
+            // below waits for the started ones only.
+            WAKE_MANY_DONE.fetch_add(WAKE_MANY_WAITERS.saturating_sub(spawned), Ordering::AcqRel);
+            release_wake_many(addr);
+            return Err(e);
+        }
+        spawned = spawned.saturating_add(1);
+    }
+
+    // Every waiter parked: the wake below must find all forty queued.
+    let mut parked = 0;
+    for _ in 0..4000 {
+        parked = waiters_on(key);
+        if parked == WAKE_MANY_WAITERS as usize {
+            break;
+        }
+        sched::yield_now();
+    }
+
+    WAKE_MANY_WORD.store(0, Ordering::Release);
+    let woken = futex_wake(addr, u32::MAX);
+    for _ in 0..4000 {
+        if WAKE_MANY_DONE.load(Ordering::Acquire) >= WAKE_MANY_WAITERS {
+            break;
+        }
+        sched::yield_now();
+    }
+    let done = WAKE_MANY_DONE.load(Ordering::Acquire);
+    release_wake_many(addr);
+
+    if parked != WAKE_MANY_WAITERS as usize
+        || woken != WAKE_MANY_WAITERS
+        || done != WAKE_MANY_WAITERS
+    {
+        serial_println!(
+            "[futex]   FAIL: wake-many: {} parked, a wake of u32::MAX woke {}, {} finished \
+             (want {} each)",
+            parked,
+            woken,
+            done,
+            WAKE_MANY_WAITERS
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[futex]   a wake of u32::MAX woke all {} parked waiters (not the first 32): OK",
+        WAKE_MANY_WAITERS
+    );
     Ok(())
 }
 

@@ -1859,6 +1859,14 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The address bar is the reference's crumbs** -- done 2026-09-27
+  (`design-decisions.md` §1411). `guitk::pathbar`, which the explorer and
+  the file-types program use, draws the path as plain names in an input's
+  well with drawn chevrons between them and the current folder bold, and
+  keeps the folder you are in on screen however narrow the bar. Fixed with
+  it: a crumb after the "..." of a long path went to the wrong folder, and a
+  click in the typed path put the caret half a character off.
+
 - `[C]` **A theme dresses the terminal too** -- done 2026-09-27
   (`design-decisions.md` §1410). The palette every program is handed carries a
   terminal's colours -- background, foreground, cursor and the sixteen by

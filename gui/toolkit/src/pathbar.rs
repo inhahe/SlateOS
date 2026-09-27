@@ -1,7 +1,9 @@
 //! Path bar widget — combined breadcrumb display / text input with autocomplete.
 //!
 //! Operates in two modes:
-//! - **Breadcrumb mode** (default): shows the path as clickable segments separated by ">"
+//! - **Breadcrumb mode** (default): shows the path as clickable crumbs separated by chevrons
+//!   -- the reference desktop's address bar (`aero-crumbs`): plain names in an input's
+//!   well, the folder you are in set bold
 //! - **Edit mode**: full text input with autocomplete dropdown for directory navigation
 //!
 //! The widget does not perform filesystem I/O. It emits `PathBarEvent::RequestAutoComplete`
@@ -37,31 +39,44 @@ const COLOR_SHADOW: Color = Color::rgba(0, 0, 0, 100);
 // Constants
 // ---------------------------------------------------------------------------
 
-const FONT_SIZE: f32 = 14.0;
-const SEGMENT_PADDING_H: f32 = 8.0;
-const SEGMENT_PADDING_V: f32 = 4.0;
-const SEGMENT_GAP: f32 = 2.0;
-const SEGMENT_RADIUS: f32 = 4.0;
-const SEPARATOR_WIDTH: f32 = 16.0;
-const BAR_PADDING: f32 = 4.0;
+/// The crumbs' and the typed path's size: the toolkit's body text. The
+/// reference sets its crumbs at 12.5px beside 13px body text; one size keeps
+/// the path from jumping when the bar turns into a text field.
+const FONT_SIZE: f32 = 13.0;
+/// Room either side of a crumb's name inside its click target: the
+/// reference's `padding: 0 2px`, and a pixel more, since the target is what a
+/// pointer has to land in.
+const CRUMB_PADDING_H: f32 = 3.0;
+/// The slot the chevron between two crumbs sits in: the reference's 14px
+/// separator glyph.
+const SEPARATOR_WIDTH: f32 = 14.0;
+/// How far the chevron reaches above and below the bar's centre line, and how
+/// far it points: the reference's `M6 4l4 4-4 4`, in a 16-unit box drawn 14
+/// wide.
+const CHEVRON_REACH: f32 = 3.5;
+/// The chevron's stroke: the reference's 1.5, at the same scale.
+const CHEVRON_STROKE: f32 = 1.3;
+/// The field's inside margin before the first crumb: the reference's
+/// `padding: 0 4px 0 9px`.
+const FIELD_PADDING_LEFT: f32 = 9.0;
+/// The field's inside margin after the last crumb.
+const FIELD_PADDING_RIGHT: f32 = 4.0;
+/// The field's corners, and the dropdown's: the reference's 3px.
+const FIELD_RADIUS: f32 = 3.0;
+/// Where typed text starts in edit mode: where the first crumb's name was
+/// drawn, so turning the trail into text leaves the path's first character
+/// where it was.
+///
+/// One constant for the drawing and for the click that places the caret. They
+/// were two numbers before, four pixels apart -- the text drawn at 8, the click
+/// measured from 4 -- so a click put the caret half a character to the right
+/// of where it was aimed.
+const EDIT_TEXT_X: f32 = FIELD_PADDING_LEFT + CRUMB_PADDING_H;
 const DROPDOWN_ITEM_HEIGHT: f32 = 24.0;
 const DROPDOWN_MAX_VISIBLE: usize = 8;
 const DROPDOWN_PADDING: f32 = 4.0;
-/// The height of a breadcrumb pill: one line of text with padding above and
-/// below it.
-///
-/// Named because three places want it, and one of them had spelled it out
-/// again inside a halving — `y_center - (FONT_SIZE + SEGMENT_PADDING_V * 2.0)
-/// / 2.0` — where it read as the midpoint between a font size and a padding,
-/// two quantities that have no midpoint.
-const SEGMENT_HEIGHT: f32 = FONT_SIZE + SEGMENT_PADDING_V * 2.0;
 /// Stands for the segments that did not fit and were dropped from the left.
 const ELLIPSIS: &str = "...";
-/// Room held back for [`ELLIPSIS`] when deciding how many segments fit.
-///
-/// Held back rather than measured, because whether the marker is drawn at all
-/// depends on how many segments fit — which is the question being answered.
-const ELLIPSIS_RESERVE: f32 = 20.0;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -148,8 +163,23 @@ pub struct PathBar {
     pending_events: Vec<PathBarEvent>,
 
     // --- Layout cache (computed during render) ---
-    /// Cached segment x-positions for hit testing.
-    segment_rects: Vec<(f32, f32, f32, f32)>, // (x, y, w, h)
+    /// Where each drawn crumb is, and which segment it stands for.
+    crumb_hits: Vec<CrumbHit>,
+}
+
+/// Where one crumb was drawn, and which segment of the trail it stands for.
+///
+/// The segment is carried rather than implied by the crumb's position among
+/// the drawn ones. When the trail overflows, its leading segments are not
+/// drawn, so the first crumb on screen is not the first segment -- and while
+/// the position stood in for the segment, clicking the first crumb after the
+/// "..." went to the root, and every other crumb to the wrong folder.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CrumbHit {
+    /// Index into [`PathBar::segments`].
+    segment: usize,
+    /// `(x, y, w, h)` in the bar's own space.
+    rect: (f32, f32, f32, f32),
 }
 
 impl PathBar {
@@ -171,7 +201,7 @@ impl PathBar {
             dropdown_scroll: 0,
             path_invalid: false,
             pending_events: Vec::new(),
-            segment_rects: Vec::new(),
+            crumb_hits: Vec::new(),
         }
     }
 
@@ -252,17 +282,22 @@ impl PathBar {
         let h = height as f32;
         let mut cmds = Vec::new();
 
-        // Background fill.
+        // The field: the well every text input sinks into (`crust`), with a
+        // quiet edge round it -- the reference's white field and its pale
+        // line, in the palette's words. The same field in both modes, because
+        // it is one field: clicking the trail turns it into the text it stands
+        // for, in place, and a box that changed colour as it did so would read
+        // as a second control appearing over the first.
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: w,
             height: h,
-            color: palette.base,
-            corner_radii: CornerRadii::all(SEGMENT_RADIUS),
+            color: palette.crust,
+            corner_radii: CornerRadii::all(FIELD_RADIUS),
         });
 
-        // Border (red if invalid in edit mode).
+        // The edge turns red while a typed path is known not to exist.
         let border_color = if self.mode == Mode::Edit && self.path_invalid {
             palette.red
         } else {
@@ -275,7 +310,7 @@ impl PathBar {
             height: h,
             color: border_color,
             line_width: 1.0,
-            corner_radii: CornerRadii::all(SEGMENT_RADIUS),
+            corner_radii: CornerRadii::all(FIELD_RADIUS),
         });
 
         match self.mode {
@@ -682,21 +717,26 @@ impl PathBar {
     fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
         match self.mode {
             Mode::Breadcrumb => {
-                // Check if click is on a segment.
-                for (i, &(sx, sy, sw, sh)) in self.segment_rects.iter().enumerate() {
-                    if x >= sx && x <= sx + sw && y >= sy && y <= sy + sh {
-                        self.navigate_to_segment(i);
-                        return EventResult::Consumed;
-                    }
+                // A crumb goes to the segment it stands for -- carried by the
+                // hit, not read off its position among the drawn crumbs (see
+                // `CrumbHit`).
+                let crumb = self.crumb_hits.iter().find_map(|hit| {
+                    let (sx, sy, sw, sh) = hit.rect;
+                    (x >= sx && x <= sx + sw && y >= sy && y <= sy + sh).then_some(hit.segment)
+                });
+                if let Some(segment) = crumb {
+                    self.navigate_to_segment(segment);
+                    return EventResult::Consumed;
                 }
-                // Click on empty area enters edit mode.
+                // Anywhere else in the field -- past the last crumb, on a
+                // chevron -- turns the trail into text to type over.
                 self.enter_edit_mode();
                 EventResult::Consumed
             }
             Mode::Edit => {
                 // Click in dropdown?
                 // For now, position cursor based on x.
-                let text_x = BAR_PADDING;
+                let text_x = EDIT_TEXT_X;
                 // Hit-tested against the drawn glyphs rather than a nominal
                 // cell, so a click lands on the character under the pointer
                 // instead of one several letters away. The affinity the click
@@ -727,31 +767,39 @@ impl PathBar {
         width: f32,
         height: f32,
     ) {
-        self.segment_rects.clear();
+        self.crumb_hits.clear();
         let y_center = height / 2.0;
+        // The folder the bar is showing: the one crumb set bold.
+        let current = self.segments.len().saturating_sub(1);
 
-        // The whole trail: every pill, with a gap and a separator between each
-        // neighbouring pair, inside the bar's padding.
-        let mut total_width = BAR_PADDING * 2.0;
+        // The whole trail: every crumb, with a chevron between each
+        // neighbouring pair, inside the field's padding.
+        let mut total_width = FIELD_PADDING_LEFT + FIELD_PADDING_RIGHT;
         for (i, seg) in self.segments.iter().enumerate() {
             if i > 0 {
-                total_width += SEGMENT_GAP + SEPARATOR_WIDTH;
+                total_width += SEPARATOR_WIDTH;
             }
-            total_width += pill_width(&seg.label);
+            total_width += crumb_width(&seg.label, crumb_weight(i == current));
         }
 
         // When the trail is too long the leading segments are dropped, so the
-        // deepest — the one the user is actually in — always survives. Walk
-        // back from the end taking segments while they fit; `first_visible`
-        // ends at `len` if not even the last one does, and the "..." then
-        // stands for the lot.
+        // deepest -- the one the user is actually in -- always survives. Walk
+        // back from the end taking segments while they fit beside the "..."
+        // that will stand for the rest; each one taken brings the chevron in
+        // front of it. The marker's room is its measured width rather than a
+        // guess: it is drawn whenever a segment is dropped, and this is the
+        // room it is drawn in.
         let overflow = total_width > width;
         let first_visible = if overflow {
-            let available = width - BAR_PADDING * 2.0 - SEPARATOR_WIDTH - ELLIPSIS_RESERVE;
+            let available = width
+                - FIELD_PADDING_LEFT
+                - FIELD_PADDING_RIGHT
+                - crumb_width(ELLIPSIS, FontWeightHint::Regular);
             let mut accum = 0.0f32;
             let mut first = self.segments.len();
             for (i, seg) in self.segments.iter().enumerate().rev() {
-                let seg_total = pill_width(&seg.label) + SEGMENT_GAP + SEPARATOR_WIDTH;
+                let seg_total =
+                    SEPARATOR_WIDTH + crumb_width(&seg.label, crumb_weight(i == current));
                 if accum + seg_total > available {
                     break;
                 }
@@ -763,28 +811,51 @@ impl PathBar {
             0
         };
 
-        // A separator belongs between two pills, so it is drawn before a pill
-        // that has one in front of it rather than after a pill that has one
-        // behind it — which is the same set of separators without having to
-        // ask whether an index is the last.
-        let mut x = BAR_PADDING;
+        // A chevron belongs between two crumbs, so it is drawn before a crumb
+        // that has one in front of it rather than after a crumb that has one
+        // behind it -- which is the same set of chevrons without having to ask
+        // whether an index is the last.
+        let mut x = FIELD_PADDING_LEFT;
         let mut preceded = false;
 
-        if overflow && first_visible > 0 {
-            let (_, _, ellipsis_w, _) =
-                push_pill(palette, cmds, x, y_center, ELLIPSIS, palette.subtext0);
-            x += ellipsis_w + SEGMENT_GAP;
+        // Never a trail with no folder in it: when not even the current
+        // folder fits beside the marker it is drawn anyway, cut short to the
+        // room there is. The folder you are in is the one crumb that must be
+        // on screen. The marker is drawn only when something was actually
+        // left out -- a lone "/" too wide for its field is cut short, not
+        // announced as a longer path.
+        let first_drawn = first_visible.min(current);
+        if first_drawn > 0 {
+            let (_, _, marker_w, _) = push_crumb(
+                cmds,
+                x,
+                height,
+                ELLIPSIS,
+                palette.subtext0,
+                FontWeightHint::Regular,
+                f32::INFINITY,
+            );
+            x += marker_w;
             preceded = true;
         }
 
-        for seg in self.segments.get(first_visible..).unwrap_or_default() {
+        for (i, seg) in self.segments.iter().enumerate().skip(first_drawn) {
             if preceded {
-                push_separator(palette, cmds, x, y_center);
+                push_chevron(palette, cmds, x, y_center);
                 x += SEPARATOR_WIDTH;
             }
-            let (rx, ry, rw, rh) = push_pill(palette, cmds, x, y_center, &seg.label, palette.text);
-            self.segment_rects.push((rx, ry, rw, rh));
-            x += rw + SEGMENT_GAP;
+            let room = (width - FIELD_PADDING_RIGHT - x).max(0.0);
+            let rect = push_crumb(
+                cmds,
+                x,
+                height,
+                &seg.label,
+                palette.text,
+                crumb_weight(i == current),
+                room,
+            );
+            self.crumb_hits.push(CrumbHit { segment: i, rect });
+            x += rect.2;
             preceded = true;
         }
     }
@@ -802,18 +873,9 @@ impl PathBar {
     ) {
         let y_center = height / 2.0;
         let text_y = y_center - FONT_SIZE / 2.0;
-        let text_x = BAR_PADDING + 4.0;
-
-        // Inner background (slightly darker for input feel).
-        palette.push_surface(
-            cmds,
-            2.0,
-            2.0,
-            width - 4.0,
-            height - 4.0,
-            SEGMENT_RADIUS - 1.0,
-            Surface::Card,
-        );
+        // The field `render` drew is already the input's well; the text goes
+        // where the first crumb's name was.
+        let text_x = EDIT_TEXT_X;
 
         // Selection highlight.
         if let Some(anchor) = self.selection_anchor {
@@ -856,7 +918,7 @@ impl PathBar {
             color: palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(width - BAR_PADDING * 2.0 - 8.0),
+            max_width: Some((width - EDIT_TEXT_X - FIELD_PADDING_RIGHT).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -915,7 +977,7 @@ impl PathBar {
             blur: 8.0,
             spread: 0.0,
             color: COLOR_SHADOW,
-            corner_radii: CornerRadii::all(SEGMENT_RADIUS),
+            corner_radii: CornerRadii::all(FIELD_RADIUS),
         });
 
         // Background.
@@ -925,7 +987,7 @@ impl PathBar {
             dropdown_y,
             dropdown_w,
             dropdown_h,
-            SEGMENT_RADIUS,
+            FIELD_RADIUS,
             Surface::Panel,
         );
 
@@ -998,68 +1060,87 @@ impl PathBar {
 // Breadcrumb geometry
 // ---------------------------------------------------------------------------
 //
-// The breadcrumb draws one shape — a rounded box with a label in it — three
-// times over: once notionally, to measure the trail; once for the "..." that
-// stands for the segments scrolled off the left; and once per visible segment.
-// Each had its own copy of the same four numbers, and the copies had drifted:
-// the measuring pass summed a width the drawing pass then recomputed, so the
-// two agreed only by both being edited together.
+// The trail is measured once to decide what fits and drawn once, and the two
+// passes must agree on every width or a crumb is drawn in one place and
+// clicked in another. So both ask the same two functions.
 //
 // These are free functions rather than methods because the drawing loop holds
-// a shared borrow of `segments` while pushing to `segment_rects`, and only a
+// a shared borrow of `segments` while pushing to `crumb_hits`, and only a
 // disjoint field borrow may coexist with that.
 
-/// The width of the rounded box drawn behind `label`.
-fn pill_width(label: &str) -> f32 {
-    crate::text::width(label, FONT_SIZE) + SEGMENT_PADDING_H * 2.0
+/// The weight a crumb is set in: bold for the folder the bar is showing, as
+/// the reference marks its current crumb (`is-current`).
+fn crumb_weight(is_current: bool) -> FontWeightHint {
+    if is_current {
+        FontWeightHint::Bold
+    } else {
+        FontWeightHint::Regular
+    }
 }
 
-/// Draw one pill — `label` in a rounded box, centred vertically on `y_center`
-/// — and return the rectangle it occupies, for hit testing.
-fn push_pill(
-    palette: &Palette,
+/// How wide a crumb is: its name in `weight`, with its padding either side.
+fn crumb_width(label: &str, weight: FontWeightHint) -> f32 {
+    crate::text::padded_width(label, CRUMB_PADDING_H, FONT_SIZE, weight)
+}
+
+/// Draw one crumb -- `label` in `weight`, centred on the bar's height, cut
+/// short with an ellipsis if it is wider than `room` -- and return the
+/// rectangle a click on it lands in: the name and its padding, the bar's full
+/// height.
+///
+/// The full height rather than the text's: a crumb is a target in a strip, and
+/// a click just above or below a name is aimed at that name.
+fn push_crumb(
     cmds: &mut Vec<RenderCommand>,
     x: f32,
-    y_center: f32,
+    height: f32,
     label: &str,
-    text_color: Color,
+    color: Color,
+    weight: FontWeightHint,
+    room: f32,
 ) -> (f32, f32, f32, f32) {
-    let width = pill_width(label);
-    let y = y_center - SEGMENT_HEIGHT / 2.0;
-    palette.push_surface(
-        cmds,
-        x,
-        y,
-        width,
-        SEGMENT_HEIGHT,
-        SEGMENT_RADIUS,
-        Surface::Card,
-    );
+    let full = crumb_width(label, weight);
+    let (width, max_width, overflow) = if full <= room {
+        (full, None, TextOverflow::Clip)
+    } else {
+        let text_room = (room - CRUMB_PADDING_H * 2.0).max(0.0);
+        (room, Some(text_room), TextOverflow::Ellipsis)
+    };
     cmds.push(RenderCommand::Text {
-        x: x + SEGMENT_PADDING_H,
-        y: y_center - FONT_SIZE / 2.0,
+        x: x + CRUMB_PADDING_H,
+        y: height / 2.0 - FONT_SIZE / 2.0,
         text: label.to_string(),
-        color: text_color,
+        color,
         font_size: FONT_SIZE,
-        font_weight: FontWeightHint::Regular,
-        max_width: None,
-        overflow: TextOverflow::Clip,
+        font_weight: weight,
+        max_width,
+        overflow,
     });
-    (x, y, width, SEGMENT_HEIGHT)
+    (x, 0.0, width, height)
 }
 
-/// Draw the ">" that stands between two pills.
-fn push_separator(palette: &Palette, cmds: &mut Vec<RenderCommand>, x: f32, y_center: f32) {
-    cmds.push(RenderCommand::Text {
-        x,
-        y: y_center - FONT_SIZE / 2.0,
-        text: ">".to_string(),
-        color: palette.subtext0,
-        font_size: FONT_SIZE,
-        font_weight: FontWeightHint::Regular,
-        max_width: None,
-        overflow: TextOverflow::Clip,
-    });
+/// Draw the chevron between two crumbs, centred in the slot that starts at
+/// `x`.
+///
+/// Two strokes rather than a `>` glyph, as the tree view draws its disclosure
+/// arrows (`treeview::push_arrow`): the reference's separator is a drawn
+/// chevron, and a glyph's shape and weight depend on the font a user
+/// installed. In `overlay0`, the palette's role for separators -- the faintest
+/// mark that is still seen, as the reference's is a pale blue beside its ink.
+fn push_chevron(palette: &Palette, cmds: &mut Vec<RenderCommand>, x: f32, y_center: f32) {
+    let centre = x + SEPARATOR_WIDTH / 2.0;
+    let open = centre - CHEVRON_REACH / 2.0;
+    let tip = centre + CHEVRON_REACH / 2.0;
+    for end in [y_center - CHEVRON_REACH, y_center + CHEVRON_REACH] {
+        cmds.push(RenderCommand::Line {
+            x1: open,
+            y1: end,
+            x2: tip,
+            y2: y_center,
+            color: palette.overlay0,
+            width: CHEVRON_STROKE,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,7 +1190,7 @@ fn normalize_path(path: &OsStr) -> PathBuf {
 /// One breadcrumb: the bytes it navigates to, and the text drawn on it.
 ///
 /// Two fields rather than one because they answer different questions and only
-/// one of them may be a rendering. `label` is what the pill shows, and a pill is
+/// one of them may be a rendering. `label` is what the crumb shows, and a crumb is
 /// text -- bytes that are not text cannot be drawn as themselves, so the label
 /// spells them as `pathcodec::display_os` does, which is correct *for
 /// drawing*. `exact` is what a click navigates to, and must be the original
@@ -1132,12 +1213,12 @@ impl Segment {
         }
     }
 
-    /// The leading `"/"` pill of an absolute path.
+    /// The leading `"/"` crumb of an absolute path.
     fn root() -> Self {
         Self::new(OsStr::new("/"))
     }
 
-    /// Whether this is the root pill.
+    /// Whether this is the root crumb.
     fn is_root(&self) -> bool {
         self.exact == OsStr::new("/")
     }
@@ -1233,6 +1314,15 @@ mod tests {
 
     use super::*;
     use crate::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    /// How many chevrons a breadcrumb render drew: each is two strokes, and
+    /// nothing else in breadcrumb mode is a line.
+    fn chevrons(cmds: &[RenderCommand]) -> usize {
+        cmds.iter()
+            .filter(|cmd| matches!(cmd, RenderCommand::Line { .. }))
+            .count()
+            / 2
+    }
 
     /// The drawn labels of a trail, for tests about the split rather than
     /// about the bytes.
@@ -1426,14 +1516,10 @@ mod tests {
             })
             .collect();
 
-        // Should have 4 segment texts: "/", "home", "user", "Documents"
-        // plus 3 separator ">" texts.
-        assert!(text_cmds.contains(&"/"));
-        assert!(text_cmds.contains(&"home"));
-        assert!(text_cmds.contains(&"user"));
-        assert!(text_cmds.contains(&"Documents"));
-        let separator_count = text_cmds.iter().filter(|&&t| t == ">").count();
-        assert_eq!(separator_count, 3);
+        // Four crumbs: "/", "home", "user", "Documents", and a chevron
+        // between each neighbouring pair.
+        assert_eq!(text_cmds, vec!["/", "home", "user", "Documents"]);
+        assert_eq!(chevrons(&cmds), 3);
     }
 
     #[test]
@@ -1454,9 +1540,8 @@ mod tests {
             .collect();
 
         assert!(text_cmds.contains(&"/"));
-        // No separators for root-only.
-        let separator_count = text_cmds.iter().filter(|&&t| t == ">").count();
-        assert_eq!(separator_count, 0);
+        // No chevrons for root-only.
+        assert_eq!(chevrons(&cmds), 0);
     }
 
     // --- Edit mode entry/exit tests ---
@@ -1747,14 +1832,13 @@ mod tests {
     fn test_navigate_via_segment_click() {
         let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home/user/Documents");
-        // Render to populate segment_rects.
+        // Render to lay the crumbs out.
         bar.render(&palette, 800, 32);
 
-        // We need to find the rect for "home" (index 1).
-        // The segment_rects are populated after render.
-        assert!(bar.segment_rects.len() >= 2);
-
-        let (sx, sy, sw, sh) = bar.segment_rects[1];
+        // "home" is the second crumb, and stands for segment 1.
+        let hit = bar.crumb_hits[1];
+        assert_eq!(hit.segment, 1);
+        let (sx, sy, sw, sh) = hit.rect;
         let click = MouseEvent {
             x: sx + sw / 2.0,
             y: sy + sh / 2.0,
@@ -1776,7 +1860,7 @@ mod tests {
         bar.render(&palette, 800, 32);
 
         // Click on "/" (index 0).
-        let (sx, sy, sw, sh) = bar.segment_rects[0];
+        let (sx, sy, sw, sh) = bar.crumb_hits[0].rect;
         let click = MouseEvent {
             x: sx + sw / 2.0,
             y: sy + sh / 2.0,
@@ -1882,79 +1966,74 @@ mod tests {
 
     // --- Breadcrumb geometry ---
 
-    /// The rectangles the click handler tests against are the rectangles that
-    /// were drawn. These used to be two separate calculations of the same
-    /// four numbers — the measuring pass summed a width the drawing pass then
-    /// recomputed — so they agreed only for as long as both were edited
-    /// together, and nothing said so.
+    /// The rectangles the click handler tests against are the rectangles the
+    /// names were drawn in: each crumb's name sits one padding inside its
+    /// target, and the target spans the bar's height. The measuring pass and
+    /// the drawing pass used to be two calculations of the same numbers,
+    /// agreeing only for as long as both were edited together.
     #[test]
     fn every_segment_is_clickable_exactly_where_it_was_drawn() {
         let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home/user/Documents");
         let cmds = bar.render(&palette, 800, 32);
 
-        // The bar's own background is a box too; the pills are the ones one
-        // line of text tall.
-        //
-        // Either command kind, because a pill is `Surface::Card` and what
-        // that draws depends on the theme -- a border under the default
-        // style, a fill under Cards. This test is about *where* the pills
-        // are, which is what the hit boxes have to agree with, and the
-        // colour was never part of the claim.
-        //
-        // A 1px stroke is emitted half a pixel inside its box, so a pill
-        // drawn as a border reports `SEGMENT_HEIGHT - 1.0`; the arm below
-        // puts the box back so both styles produce the same rectangle.
-        let pills: Vec<(f32, f32, f32, f32)> = cmds
+        let names: Vec<(f32, &str, FontWeightHint)> = cmds
             .iter()
             .filter_map(|cmd| match cmd {
-                RenderCommand::FillRect {
+                RenderCommand::Text {
                     x,
-                    y,
-                    width,
-                    height,
+                    text,
+                    font_weight,
                     ..
-                } if *height == SEGMENT_HEIGHT => Some((*x, *y, *width, *height)),
-                RenderCommand::StrokeRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    ..
-                } if *height == SEGMENT_HEIGHT - 1.0 => {
-                    Some((*x - 0.5, *y - 0.5, *width + 1.0, *height + 1.0))
-                }
+                } => Some((*x, text.as_str(), *font_weight)),
                 _ => None,
             })
             .collect();
-
-        assert_eq!(bar.segment_rects, pills, "hit boxes are the drawn boxes");
-        assert_eq!(bar.segment_rects.len(), 4);
+        assert_eq!(names.len(), 4);
+        assert_eq!(bar.crumb_hits.len(), 4);
+        for (i, (hit, (text_x, label, weight))) in bar.crumb_hits.iter().zip(&names).enumerate() {
+            assert_eq!(hit.segment, i, "crumb {i} stands for another segment");
+            let (x, y, w, h) = hit.rect;
+            assert!(
+                (x + CRUMB_PADDING_H - text_x).abs() < 0.01,
+                "{label} is not drawn where it is clicked"
+            );
+            assert!(
+                (w - crumb_width(label, *weight)).abs() < 0.01,
+                "{label}'s target is not its name and padding"
+            );
+            assert_eq!(
+                (y, h),
+                (0.0, 32.0),
+                "{label}'s target is not the bar's height"
+            );
+        }
     }
 
-    /// Consecutive pills are one gap and one separator apart — the spacing the
-    /// measuring pass charges for each join. A separator is drawn *before* a
-    /// pill that has one in front of it rather than after a pill that is not
+    /// Consecutive crumbs are one chevron's slot apart -- the spacing the
+    /// measuring pass charges for each join. A chevron is drawn *before* a
+    /// crumb that has one in front of it rather than after a crumb that is not
     /// the last, and the two must lay out identically.
     #[test]
-    fn neighbouring_segments_are_a_gap_and_a_separator_apart() {
+    fn neighbouring_segments_are_a_chevron_apart() {
         let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home/user/Documents");
         bar.render(&palette, 800, 32);
 
-        for pair in bar.segment_rects.windows(2) {
-            let (left, right) = (pair[0], pair[1]);
-            let expected = left.0 + left.2 + SEGMENT_GAP + SEPARATOR_WIDTH;
+        for pair in bar.crumb_hits.windows(2) {
+            let (left, right) = (pair[0].rect, pair[1].rect);
+            let expected = left.0 + left.2 + SEPARATOR_WIDTH;
             assert!(
                 (right.0 - expected).abs() < 0.01,
-                "segment at {} should follow the one ending at {left:?}",
+                "crumb at {} should follow the one ending at {left:?}",
                 right.0
             );
         }
     }
 
     /// The trail is laid out inside the width it was measured against: when
-    /// nothing overflows, the last pill ends within the bar's padding.
+    /// nothing overflows, the first crumb starts at the field's left padding
+    /// and the last ends within its right one.
     #[test]
     fn a_trail_that_fits_stays_inside_the_bar() {
         let palette = Palette::for_mode(false);
@@ -1962,18 +2041,22 @@ mod tests {
         let width = 800.0;
         bar.render(&palette, 800, 32);
 
-        let last = *bar.segment_rects.last().expect("four segments were drawn");
-        assert!(last.0 + last.2 <= width - BAR_PADDING);
+        let last = bar
+            .crumb_hits
+            .last()
+            .expect("four segments were drawn")
+            .rect;
+        assert!(last.0 + last.2 <= width - FIELD_PADDING_RIGHT);
         assert_eq!(
-            bar.segment_rects.first().map(|r| r.0),
-            Some(BAR_PADDING),
-            "with no overflow the first pill starts at the padding"
+            bar.crumb_hits.first().map(|hit| hit.rect.0),
+            Some(FIELD_PADDING_LEFT),
+            "with no overflow the first crumb starts at the padding"
         );
     }
 
-    /// When the trail overflows, the ellipsis is followed by one separator and
-    /// then only the segments that fit — never a separator with nothing on one
-    /// side of it.
+    /// When the trail overflows, the ellipsis is followed by one chevron and
+    /// then only the segments that fit -- never a chevron with nothing on one
+    /// side of it -- and the last of them still fits in the field.
     #[test]
     fn an_overflowing_trail_draws_one_separator_per_join() {
         let palette = Palette::for_mode(false);
@@ -1989,14 +2072,246 @@ mod tests {
             .collect();
 
         assert!(texts.contains(&ELLIPSIS), "the dropped segments are marked");
-        let separators = texts.iter().filter(|t| **t == ">").count();
         // One join per visible segment: each is preceded by the ellipsis or by
         // another segment.
-        assert_eq!(separators, bar.segment_rects.len());
+        assert_eq!(chevrons(&cmds), bar.crumb_hits.len());
+        let last = bar
+            .crumb_hits
+            .last()
+            .expect("the current folder is drawn")
+            .rect;
+        assert!(
+            last.0 + last.2 <= 150.0 - FIELD_PADDING_RIGHT,
+            "the trail ran out of its field"
+        );
+        // And every crumb the measuring pass let in is drawn whole. The pass
+        // charged each its chevron, so none has to be cut to fit; one that
+        // under-charged would let in a crumb too many and squeeze the last --
+        // which the cut above would otherwise quietly hide.
+        assert!(
+            cmds.iter().all(|cmd| !matches!(
+                cmd,
+                RenderCommand::Text {
+                    max_width: Some(_),
+                    ..
+                }
+            )),
+            "a crumb was cut short: the measuring pass let in more than fits"
+        );
+    }
+
+    /// **A crumb after the "..." goes to its own folder.** The drawn crumbs
+    /// were numbered from the first one on screen, so once the trail
+    /// overflowed, clicking the first crumb after the marker went to the root
+    /// and every other crumb one folder too high.
+    #[test]
+    fn clicking_a_crumb_after_the_ellipsis_goes_to_that_folder() {
+        let palette = Palette::for_mode(false);
+        let long = "/very/long/path/with/many/segments/that/will/overflow";
+        let mut bar = PathBar::new(long);
+        bar.render(&palette, 150, 32);
+
+        let first = bar.crumb_hits[0];
+        assert!(
+            first.segment > 0,
+            "the trail did not overflow, so this proves nothing"
+        );
+        let expected = rebuild_path(&bar.segments, first.segment);
+        let (x, y, w, h) = first.rect;
+        bar.handle_mouse_event(&MouseEvent {
+            x: x + w / 2.0,
+            y: y + h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        let events = bar.drain_events();
+        assert_eq!(events, vec![PathBarEvent::Navigate(expected.clone())]);
+        assert_ne!(expected, Path::new("/"));
+        assert!(long.starts_with(expected.to_str().expect("a text path")));
+    }
+
+    /// **The folder you are in is on screen however narrow the bar**: a name
+    /// too long for the field beside the marker is cut short with an ellipsis
+    /// of its own, not dropped, and it is still the crumb a click reaches.
+    #[test]
+    fn a_folder_too_long_for_the_bar_is_cut_short_not_dropped() {
+        let palette = Palette::for_mode(false);
+        let leaf = "a-folder-whose-name-is-much-longer-than-the-bar-it-is-shown-in";
+        let mut bar = PathBar::new(format!("/home/{leaf}"));
+        let cmds = bar.render(&palette, 160, 32);
+
+        let drawn = cmds.iter().find_map(|cmd| match cmd {
+            RenderCommand::Text {
+                text,
+                max_width,
+                overflow,
+                ..
+            } if text == leaf => Some((*max_width, *overflow)),
+            _ => None,
+        });
+        let (max_width, overflow) = drawn.expect("the current folder was not drawn at all");
+        assert!(max_width.is_some(), "the name was not cut to its room");
+        assert_eq!(overflow, TextOverflow::Ellipsis, "the cut is not marked");
+        let hit = bar
+            .crumb_hits
+            .last()
+            .expect("the current folder has no target");
+        assert_eq!(hit.segment, bar.segments.len() - 1);
+        assert!(hit.rect.0 + hit.rect.2 <= 160.0 - FIELD_PADDING_RIGHT + 0.01);
+    }
+
+    /// A lone "/" in a field too narrow for it is cut short, not announced as
+    /// a longer path with segments left out.
+    #[test]
+    fn a_lone_root_is_never_announced_as_a_longer_path() {
+        let palette = Palette::for_mode(false);
+        let mut bar = PathBar::new("/");
+        let cmds = bar.render(&palette, 12, 32);
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["/"]);
+        assert_eq!(bar.crumb_hits.len(), 1);
+    }
+
+    /// **The folder you are in is set bold, the rest regular**, as the
+    /// reference marks its current crumb; the names are ink and the chevrons
+    /// between them the palette's quiet separator mark.
+    #[test]
+    fn the_current_folder_is_the_one_crumb_set_bold() {
+        for light in [false, true] {
+            let palette = Palette::for_mode(light);
+            let mut bar = PathBar::new("/home/user/Documents");
+            let cmds = bar.render(&palette, 800, 32);
+            let weights: Vec<(&str, FontWeightHint, Color)> = cmds
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::Text {
+                        text,
+                        font_weight,
+                        color,
+                        ..
+                    } => Some((text.as_str(), *font_weight, *color)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                weights,
+                vec![
+                    ("/", FontWeightHint::Regular, palette.text),
+                    ("home", FontWeightHint::Regular, palette.text),
+                    ("user", FontWeightHint::Regular, palette.text),
+                    ("Documents", FontWeightHint::Bold, palette.text),
+                ],
+                "light = {light}"
+            );
+            assert!(
+                cmds.iter().all(|cmd| match cmd {
+                    RenderCommand::Line { color, .. } => *color == palette.overlay0,
+                    _ => true,
+                }),
+                "a chevron is not drawn in the separator colour, light = {light}"
+            );
+        }
+    }
+
+    /// **One field in both modes**: the input's well (`crust`) with a quiet
+    /// edge, whether it shows the trail or the typed path -- and a red edge
+    /// only while a typed path is known not to exist.
+    #[test]
+    fn the_field_is_an_inputs_well_in_both_modes() {
+        let palette = Palette::for_mode(false);
+        let field = |cmds: &[RenderCommand]| -> (Color, Color) {
+            let fill = cmds.iter().find_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (*x, *y, *width, *height) == (0.0, 0.0, 400.0, 28.0) => Some(*color),
+                _ => None,
+            });
+            let edge = cmds.iter().find_map(|cmd| match cmd {
+                RenderCommand::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            });
+            (
+                fill.expect("no field was drawn"),
+                edge.expect("the field has no edge"),
+            )
+        };
+
+        let mut bar = PathBar::new("/home/user");
+        assert_eq!(
+            field(&bar.render(&palette, 400, 28)),
+            (palette.crust, palette.surface1)
+        );
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        assert!(bar.is_editing());
+        let editing = bar.render(&palette, 400, 28);
+        assert_eq!(field(&editing), (palette.crust, palette.surface1));
+        // Nothing but the field is a box the width of the bar -- its fill and
+        // its edge. The inner card edit mode used to draw over the field,
+        // outlined or filled depending on the theme, is gone.
+        let boxes = editing
+            .iter()
+            .filter_map(crate::surface::logical_rect)
+            .filter(|(_, _, width, _)| *width >= 390.0)
+            .count();
+        assert_eq!(
+            boxes, 2,
+            "a second box is drawn over the field while editing"
+        );
+        bar.set_path_valid(false);
+        assert_eq!(field(&bar.render(&palette, 400, 28)).1, palette.red);
+    }
+
+    /// **A click in the typed path puts the caret where it was aimed.** The
+    /// text was drawn four pixels further right than the click was measured
+    /// from, so a click just past a narrow character landed after the next.
+    #[test]
+    fn a_click_in_the_typed_path_puts_the_caret_where_it_was_aimed() {
+        let palette = Palette::for_mode(false);
+        let mut bar = PathBar::new("/home/user/lib");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        let cmds = bar.render(&palette, 400, 28);
+        let drawn_at = cmds
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text { x, text, .. } if text == "/home/user/lib" => Some(*x),
+                _ => None,
+            })
+            .expect("the typed path was not drawn");
+        assert_eq!(drawn_at, EDIT_TEXT_X);
+
+        // Just past each boundary: before the narrow "/" and "l" and "i",
+        // where half a character's error is enough to land on the next one.
+        for boundary in [5, 10, 11, 12] {
+            let at = crate::text::caret_x(
+                &bar.edit_text,
+                TextCursor::from(boundary),
+                FONT_SIZE,
+                FontWeightHint::Regular,
+            );
+            bar.handle_mouse_event(&MouseEvent {
+                x: drawn_at + at + 0.5,
+                y: 14.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            assert_eq!(
+                bar.cursor.byte, boundary,
+                "a click just past byte {boundary}"
+            );
+        }
     }
 
     /// An index past the last segment names the whole trail. It reaches
-    /// `rebuild_path` from a click test against a stale `segment_rects`, so it
+    /// `rebuild_path` from a click test against stale `crumb_hits`, so it
     /// must not be a panic.
     #[test]
     fn rebuilding_past_the_end_yields_the_whole_path() {
@@ -2107,14 +2422,14 @@ mod tests {
         );
     }
 
-    /// The pill is drawn escaped and navigated to exactly.
+    /// The crumb is drawn escaped and navigated to exactly.
     ///
-    /// Both halves matter: a pill is text, so the label *must* be a rendering
+    /// Both halves matter: a crumb is text, so the label *must* be a rendering
     /// -- the lone surrogate as its three bytes in octal; the click target is a
     /// path, so `exact` must not be.
     #[cfg(windows)]
     #[test]
-    fn a_pill_is_drawn_escaped_and_navigated_to_exactly() {
+    fn a_crumb_is_drawn_escaped_and_navigated_to_exactly() {
         use std::os::windows::ffi::OsStringExt;
 
         let name = OsString::from_wide(&[u16::from(b'z'), 0xD800]);
@@ -2128,7 +2443,7 @@ mod tests {
         let last = bar.segments.last().expect("the trail has a leaf");
         assert_eq!(
             last.label, r"z\355\240\200",
-            "the pill is not drawn as the terminal would spell the name"
+            "the crumb is not drawn as the terminal would spell the name"
         );
         assert_eq!(
             last.exact, name,

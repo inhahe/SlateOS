@@ -204,9 +204,9 @@ pub fn get_swap_prober(short: &[u8], devname: &[u8]) -> Option<Probe> {
                     warnx(
                         short,
                         &format!(
-                            "{}: unsupported swap version '{}'",
+                            "{}: unsupported swap version {}",
                             shown(devname),
-                            shown(&v)
+                            quoting::escaped_in_quotes(&v)
                         ),
                     );
                     None

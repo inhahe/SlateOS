@@ -3221,6 +3221,11 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
+ "snapstore",
 ]
 
 [[package]]

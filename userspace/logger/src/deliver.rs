@@ -259,17 +259,21 @@ pub fn send(conn: &mut Conn, wire: &[u8], parts: Parts<'_>, claim: Option<i32>) 
         },
         Conn::Udp(s) => s.send(wire).map(drop),
         Conn::Tcp(s) => s.write_all(wire),
-        Conn::Journal => append_record(&journal_record(parts, now_secs())?),
+        Conn::Journal => {
+            let (record, extra) = journal_record(parts, now_secs())?;
+            append_record(&record, &extra)
+        }
     }
 }
 
-/// The record a syslog daemon would file for `parts`, stamped `ts`.
+/// The record a syslog daemon would file for `parts`, stamped `ts`, and
+/// the fields after it (the facility, when it has a name).
 ///
 /// # Errors
 ///
 /// `InvalidData` when the tag or the message is not UTF-8: a record is JSON,
 /// JSON is UTF-8, and a message is never silently altered to fit.
-pub fn journal_record(parts: Parts<'_>, ts: u64) -> io::Result<journalrec::Record> {
+pub fn journal_record(parts: Parts<'_>, ts: u64) -> io::Result<(journalrec::Record, Extra)> {
     let text = |b: &[u8]| {
         std::str::from_utf8(b)
             .map(str::to_string)
@@ -281,7 +285,7 @@ pub fn journal_record(parts: Parts<'_>, ts: u64) -> io::Result<journalrec::Recor
         .copied()
         .unwrap_or("notice");
     let facility = crate::priority::facility_name(parts.pri & crate::priority::LOG_FACMASK);
-    Ok(journalrec::Record {
+    let record = journalrec::Record {
         ts,
         level: level.to_string(),
         service: text(parts.tag)?,
@@ -292,11 +296,15 @@ pub fn journal_record(parts: Parts<'_>, ts: u64) -> io::Result<journalrec::Recor
             .ok()
             .filter(|&p| p != 0)
             .or(Some(std::process::id())),
-        extra: facility
-            .map(|f| vec![("facility".to_string(), f.to_string())])
-            .unwrap_or_default(),
-    })
+    };
+    let extra = facility
+        .map(|f| vec![("facility".to_string(), f.to_string())])
+        .unwrap_or_default();
+    Ok((record, extra))
 }
+
+/// Fields written after a record's own, in order.
+pub type Extra = Vec<(String, String)>;
 
 /// Append one record, as one write, to the file `journalctl` reads, under
 /// the journal's lock (design-decisions §1037), so that a vacuum or a
@@ -305,8 +313,8 @@ pub fn journal_record(parts: Parts<'_>, ts: u64) -> io::Result<journalrec::Recor
 /// # Errors
 ///
 /// The file cannot be opened, locked or written.
-pub fn append_record(record: &journalrec::Record) -> io::Result<()> {
-    let mut line = record.to_json_line().into_bytes();
+pub fn append_record(record: &journalrec::Record, extra: &[(String, String)]) -> io::Result<()> {
+    let mut line = record.to_json_line_with(extra).into_bytes();
     line.push(b'\n');
     journalio::append(std::path::Path::new(journalrec::MAIN_LOG_PATH), &line)
 }
@@ -367,7 +375,7 @@ mod tests {
 
     #[test]
     fn a_journal_record_is_what_a_daemon_would_file() {
-        let r = journal_record(
+        let (r, extra) = journal_record(
             Parts {
                 pri: (3 << 3) | 3,
                 tag: b"ntpd",
@@ -378,14 +386,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            r.to_json_line(),
+            r.to_json_line_with(&extra),
             r#"{"ts":1700000000,"level":"err","service":"ntpd","msg":"step","pid":42,"facility":"daemon"}"#
         );
     }
 
     #[test]
     fn a_record_without_a_frame_pid_is_attributed_to_the_sender() {
-        let r = journal_record(
+        let (r, _) = journal_record(
             Parts {
                 pri: 13,
                 tag: b"t",
@@ -396,7 +404,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.pid, Some(std::process::id()));
-        let r = journal_record(
+        let (r, _) = journal_record(
             Parts {
                 pri: 13,
                 tag: b"t",

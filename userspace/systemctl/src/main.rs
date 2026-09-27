@@ -1458,7 +1458,6 @@ fn cat_records(
             service: opts.identifier.clone(),
             msg: line,
             pid: Some(opts.pid),
-            extra: Vec::new(),
         };
         let mut line = record.to_json_line().into_bytes();
         line.push(b'\n');

@@ -783,7 +783,7 @@ fn journald_entry(ctl: &Ctl, source: Input) -> Result<(), Exit> {
     let written = if ctl.noact {
         Ok(())
     } else {
-        journald_record(&lines).and_then(|r| deliver::append_record(&r))
+        journald_record(&lines).and_then(|(r, extra)| deliver::append_record(&r, &extra))
     };
     if ctl.stderr_printout {
         for line in &lines {
@@ -796,16 +796,17 @@ fn journald_entry(ctl: &Ctl, source: Input) -> Result<(), Exit> {
     written.map_err(|_| die("journald entry could not be written"))
 }
 
-/// The record `sd_journal_sendv` would have made of `fields`.
-fn journald_record(fields: &[Vec<u8>]) -> io::Result<journalrec::Record> {
+/// The record `sd_journal_sendv` would have made of `fields`, and the
+/// fields it does not interpret, to follow it.
+fn journald_record(fields: &[Vec<u8>]) -> io::Result<(journalrec::Record, deliver::Extra)> {
     let mut record = journalrec::Record {
         ts: u64::try_from(now().sec).unwrap_or(0),
         level: "info".to_string(),
         service: String::new(),
         msg: String::new(),
         pid: Some(std::process::id()),
-        extra: Vec::new(),
     };
+    let mut extra = deliver::Extra::new();
     for field in fields {
         let text =
             std::str::from_utf8(field).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
@@ -823,10 +824,10 @@ fn journald_record(fields: &[Vec<u8>]) -> io::Result<journalrec::Record> {
                     .and_then(|p| journalrec::PRIORITY_NAMES.get(p))
                     .map_or_else(|| value.to_string(), |n| (*n).to_string());
             }
-            _ => record.extra.push((key.to_string(), value.to_string())),
+            _ => extra.push((key.to_string(), value.to_string())),
         }
     }
-    Ok(record)
+    Ok((record, extra))
 }
 
 #[cfg(test)]
@@ -918,12 +919,12 @@ mod tests {
         .iter()
         .map(|s| s.as_bytes().to_vec())
         .collect();
-        let r = journald_record(&fields).unwrap();
+        let (r, extra) = journald_record(&fields).unwrap();
         assert_eq!(
             (r.level.as_str(), r.service.as_str(), r.msg.as_str()),
             ("err", "app", "hello\nworld")
         );
-        assert_eq!(r.extra, [("CODE_LINE".to_string(), "12".to_string())]);
+        assert_eq!(extra, [("CODE_LINE".to_string(), "12".to_string())]);
         assert!(journald_record(&[b"NOEQUALS".to_vec()]).is_err());
     }
 

@@ -93,20 +93,27 @@ pub struct Record {
     pub msg: String,
     /// The process the line is attributed to, when one is known.
     pub pid: Option<u32>,
-    /// Further fields, in order, as `"key":"value"` after the ones above --
-    /// a syslog message's facility, or the fields `logger --journald` was
-    /// given. `journalctl` keeps and shows keys it does not interpret.
-    ///
-    /// A key that repeats one of the fields above would make the record
-    /// ambiguous, so the writer is expected not to supply one; `to_json_line`
-    /// writes what it is given.
-    pub extra: Vec<(String, String)>,
 }
 
 impl Record {
     /// The record as one JSON-lines entry, without the trailing newline.
     #[must_use]
     pub fn to_json_line(&self) -> String {
+        self.to_json_line_with(&[])
+    }
+
+    /// As [`Record::to_json_line`], with further fields after the ones
+    /// above, in order, as `"key":"value"` -- a syslog message's facility,
+    /// or the fields `logger --journald` was given. `journalctl` keeps and
+    /// shows keys it does not interpret.
+    ///
+    /// They are an argument rather than a field of `Record` so that every
+    /// writer that builds a `Record` literal -- other lanes' among them --
+    /// is unaffected by writers that need more. A key that repeats one of
+    /// the fields above would make the record ambiguous, so the writer is
+    /// expected not to supply one; this writes what it is given.
+    #[must_use]
+    pub fn to_json_line_with(&self, extra: &[(String, String)]) -> String {
         let mut parts: Vec<String> = Vec::new();
         parts.push(format!("\"ts\":{}", self.ts));
         parts.push(format!("\"level\":\"{}\"", escape(&self.level)));
@@ -115,7 +122,7 @@ impl Record {
         if let Some(pid) = self.pid {
             parts.push(format!("\"pid\":{pid}"));
         }
-        for (key, value) in &self.extra {
+        for (key, value) in extra {
             parts.push(format!("\"{}\":\"{}\"", escape(key), escape(value)));
         }
         let mut out = String::from("{");
@@ -165,7 +172,6 @@ mod tests {
             service: "net.dhcp".to_string(),
             msg: "lease renewed".to_string(),
             pid: Some(42),
-            extra: Vec::new(),
         };
         assert_eq!(
             r.to_json_line(),
@@ -216,7 +222,6 @@ mod tests {
             service: "x".to_string(),
             msg: "y".to_string(),
             pid: None,
-            extra: Vec::new(),
         };
         assert!(!r.to_json_line().contains("pid"));
     }
@@ -230,13 +235,13 @@ mod tests {
             service: "logger".to_string(),
             msg: "m".to_string(),
             pid: Some(7),
-            extra: vec![
-                ("facility".to_string(), "user".to_string()),
-                ("CODE_LINE".to_string(), "a\"b\nc".to_string()),
-            ],
         };
+        let extra = vec![
+            ("facility".to_string(), "user".to_string()),
+            ("CODE_LINE".to_string(), "a\"b\nc".to_string()),
+        ];
         assert_eq!(
-            r.to_json_line(),
+            r.to_json_line_with(&extra),
             r#"{"ts":1,"level":"err","service":"logger","msg":"m","pid":7,"facility":"user","CODE_LINE":"a\"b\nc"}"#
         );
     }

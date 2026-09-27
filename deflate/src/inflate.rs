@@ -165,6 +165,33 @@ impl<'a> Bits<'a> {
     fn resume_at(&mut self, pos: usize) {
         self.pos = pos;
     }
+
+    /// The bits not yet consumed, counted exactly: those accounted for in
+    /// the buffer and every byte not yet loaded into it. (Bytes a word load
+    /// brought in above `count` were not counted into `pos`, so they are
+    /// counted here once, as the unloaded bytes they still are.)
+    pub(crate) fn remaining_bits(&self) -> usize {
+        self.data
+            .len()
+            .saturating_sub(self.pos)
+            .saturating_mul(8)
+            .saturating_add(self.count as usize)
+    }
+
+    /// The four bytes at the next byte boundary, big-endian: a zlib stream's
+    /// Adler-32 trailer, after its final block.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnexpectedEnd`] if fewer than four bytes follow.
+    pub(crate) fn aligned_u32_be(&mut self) -> Result<u32> {
+        let pos = self.align_to_byte();
+        let Some(&[a, b, c, d]) = self.data.get(pos..pos.wrapping_add(4)) else {
+            return Err(Error::UnexpectedEnd);
+        };
+        self.resume_at(pos.wrapping_add(4));
+        Ok(u32::from_be_bytes([a, b, c, d]))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -654,23 +681,56 @@ pub(crate) fn inflate_vec(data: &[u8], limit: usize) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(data.len().saturating_mul(2).min(limit));
     let mut tables = Tables::new();
     loop {
-        let bfinal = bits.take(1)?;
-        match bits.take(2)? {
-            0 => stored_vec(&mut bits, &mut out, limit)?,
-            1 => {
-                tables.load_fixed()?;
-                codes_vec(&mut bits, &tables, &mut out, limit)?;
-            }
-            2 => {
-                tables.read_dynamic(&mut bits)?;
-                codes_vec(&mut bits, &tables, &mut out, limit)?;
-            }
-            _ => return Err(Error::ReservedBlockType),
-        }
-        if bfinal != 0 {
+        if block_vec(&mut bits, &mut tables, &mut out, limit)? {
             return Ok(out);
         }
     }
+}
+
+/// Inflate blocks onto `out` -- which may already hold earlier output, for
+/// back-references to reach into -- keeping `out` to at most `limit` bytes,
+/// until a final block or until the input ends exactly where a block does.
+/// `Ok(true)` when the final block was read.
+///
+/// This is [`PiecewiseInflater`](crate::PiecewiseInflater)'s loop: a flushed
+/// piece ends where a block does, and the next piece carries on the stream.
+/// Leftover bits after a block -- a piece that did not end on a block
+/// boundary -- are read as the start of another block, and fail as one.
+///
+/// # Errors
+///
+/// As [`inflate_limited`](crate::inflate_limited).
+pub(crate) fn inflate_blocks_vec(
+    bits: &mut Bits<'_>,
+    out: &mut Vec<u8>,
+    limit: usize,
+) -> Result<bool> {
+    let mut tables = Tables::new();
+    while bits.remaining_bits() > 0 {
+        if block_vec(bits, &mut tables, out, limit)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// One block onto `out`: its header, then its contents. `Ok(true)` for the
+/// final block.
+fn block_vec(bits: &mut Bits<'_>, tables: &mut Tables, out: &mut Vec<u8>, limit: usize) -> Result<bool> {
+    let bfinal = bits.take(1)?;
+    match bits.take(2)? {
+        0 => stored_vec(bits, out, limit)?,
+        1 => {
+            tables.load_fixed()?;
+            codes_vec(bits, tables, out, limit)?;
+        }
+        2 => {
+            tables.read_dynamic(bits)?;
+            codes_vec(bits, tables, out, limit)?;
+        }
+        _ => return Err(Error::ReservedBlockType),
+    }
+    Ok(bfinal != 0)
 }
 
 /// The failure a run of `len` bytes meets when the output has `room` left and

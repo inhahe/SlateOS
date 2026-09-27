@@ -743,7 +743,8 @@ impl ZlibInflateStream<'_> {
 /// cannot go on: the bits already read are gone, so every later piece is
 /// refused with the same error.
 pub struct PiecewiseInflater {
-    /// The last [`WINDOW_SIZE`] bytes produced, for back-references.
+    /// The last 32 KiB produced (DEFLATE's window, `inflate::WINDOW_SIZE`),
+    /// for back-references.
     history: Vec<u8>,
     /// A zlib stream whose two-byte header has not been read yet.
     header_pending: bool,
@@ -821,8 +822,9 @@ impl PiecewiseInflater {
     }
 
     fn decode(&mut self, piece: &[u8], limit: usize) -> Result<Vec<u8>> {
-        let mut reader = BitReader::new(piece);
+        let mut body = piece;
         if self.header_pending {
+            let mut reader = BitReader::new(piece);
             let cmf = reader.read_byte()?;
             let flg = reader.read_byte()?;
             let check = u16::from(cmf)
@@ -835,37 +837,25 @@ impl PiecewiseInflater {
                 return Err(Error::PresetDictionary);
             }
             self.header_pending = false;
+            body = piece.get(reader.byte_pos()..).unwrap_or_default();
         }
         let base = self.history.len();
         let cap = base.saturating_add(limit);
         let mut output = core::mem::take(&mut self.history);
-        while reader.remaining() > 0 {
-            let bfinal = reader.read_bits(1)?;
-            let btype = reader.read_bits(2)?;
-            match btype {
-                0 => inflate_stored(&mut reader, &mut output, cap)?,
-                1 => inflate_fixed(&mut reader, &mut output, cap)?,
-                2 => inflate_dynamic(&mut reader, &mut output, cap)?,
-                _ => return Err(Error::ReservedBlockType),
-            }
-            if bfinal != 0 {
-                self.finished = true;
-                break;
-            }
+        // The block decoders are the table decoder's (`inflate.rs`); the
+        // history already in `output` is what a back-reference reaches into.
+        let mut bits = inflate::Bits::new(body);
+        if inflate::inflate_blocks_vec(&mut bits, &mut output, cap)? {
+            self.finished = true;
         }
         let produced = output.split_off(base.min(output.len()));
         output.extend_from_slice(&produced);
-        let keep_from = output.len().saturating_sub(WINDOW_SIZE);
+        let keep_from = output.len().saturating_sub(inflate::WINDOW_SIZE);
         self.history = output.split_off(keep_from);
         if let Some(adler) = self.adler.as_mut() {
             adler.update(&produced);
             if self.finished {
-                reader.align();
-                let mut trailer = [0_u8; 4];
-                for slot in &mut trailer {
-                    *slot = reader.read_byte()?;
-                }
-                let expected = u32::from_be_bytes(trailer);
+                let expected = bits.aligned_u32_be()?;
                 let actual = adler.finish();
                 if expected != actual {
                     return Err(Error::ChecksumMismatch { expected, actual });

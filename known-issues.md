@@ -24404,6 +24404,15 @@ checks glibc does not make.
   accepts it there and refuses it as the pipe is made, `ENOPKG` from a kernel
   built without watch queues -- which is what this one is.
 
+**Forty-first pass, 2026-09-26 — `poll.rs` (1 site), lane D.** Against
+glibc 2.39's `select`, `pselect` and `ppoll` and Linux 6.6's fs/select.c.
+
+- **`poll(NULL, n, …)`** was right: `EFAULT` after the `nfds` check, as
+  `do_sys_poll` copies.
+- Beside it, the finding of the pass: every timeout but `poll`'s was judged
+  in an order of its own, or not at all --
+  `B-D-SELECT-AND-PPOLL-TIMEOUTS-WERE-NOT-LINUXS` (new, fixed with it).
+
 **What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. **No dense cluster is left.**
@@ -24426,10 +24435,10 @@ thirty-eight swept `ioctl.rs`, `semaphore.rs`, `time.rs`, `aio.rs`,
 finishes every file the sweep counted at four, three and two, the three the
 recount of 2026-09-26 added among them: `pwd.rs`, `dirent.rs` and `signal.rs`
 needed nothing at their NULLs -- `pwd.rs`'s database did
-(`B-D-PWD-KNEW-ONLY-ROOT`). Of the ten it counted at one, `pipe.rs` is
-done (the fortieth pass); next are `linux_bpf.rs`, `linux_perf_event.rs`,
-`malloc.rs`, `ndbm.rs`, `poll.rs`, `shadow.rs`, `uio.rs` (new, and already
-right), `utmpx.rs` and `utsname.rs`. The thirty-ninth pass was across files,
+(`B-D-PWD-KNEW-ONLY-ROOT`). Of the ten it counted at one, `pipe.rs` and
+`poll.rs` are done (the fortieth and forty-first passes); next are
+`linux_bpf.rs`, `linux_perf_event.rs`, `malloc.rs`, `ndbm.rs`, `shadow.rs`,
+`uio.rs` (new, and already right), `utmpx.rs` and `utsname.rs`. The thirty-ninth pass was across files,
 not at a count: the callbacks.
 
 One item is not a site count: `read`, `write`, `pread` and `pwrite`
@@ -170162,6 +170171,30 @@ process now, where they were "not found" or "nothing to do".
 goes on. The ones that end it are one line each, a call of `libc_fatal`
 where glibc would make the call, and are there to be read: a test cannot
 take its own process down.
+
+### [D] B-D-SELECT-AND-PPOLL-TIMEOUTS-WERE-NOT-LINUXS — 2026-09-26 — FIXED 2026-09-26
+
+**Where:** `posix/src/poll.rs` -- `select`, `pselect`, `ppoll`.
+
+**In short:** `select`, `pselect` and `ppoll` wait for input on several
+descriptors at once, up to a timeout. Ours judged the timeout after
+everything else, never refused a bad one -- a negative `ppoll` timeout
+waited a millisecond instead of failing -- and `select` never told the
+caller how much of the timeout was left, which Linux does and event loops
+written for Linux use to keep a deadline.
+
+**What was wrong, against glibc 2.39 and Linux 6.6 (fs/select.c):**
+
+| | was | Linux, and now |
+|---|---|---|
+| `select`'s negative seconds or microseconds | treated as zero | `EINVAL`, before `nfds` is looked at (glibc's own check) |
+| `select`'s microseconds past a second | added in as nanoseconds | carried into the seconds; read as a 32-bit `int`, as glibc reads them |
+| `select`'s `*timeout` on return | untouched | what is left of the wait, on every return -- the kernel's update, which glibc hands back; a zero timeout stays zero |
+| `pselect` / `ppoll` with a `timespec` outside `timespec64_valid` | converted without a check: a negative `ppoll` timeout waited 1 ms | `EINVAL`, before `nfds` and `fds` |
+| `ppoll` past `i32::MAX` milliseconds | cut to about 24 days | the whole wait |
+
+`pselect` and `ppoll` still do not write their timeout back: glibc passes
+the kernel a copy, and POSIX makes it `const`.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 

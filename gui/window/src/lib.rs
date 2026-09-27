@@ -620,6 +620,45 @@ impl<T: Transport> WindowHandle<'_, T> {
         })
     }
 
+    /// Replace a `width` by `height` rectangle of the image uploaded under
+    /// `image_id`, at `(x, y)` in it, leaving the rest of the picture as it
+    /// was.
+    ///
+    /// [`upload_image`](Self::upload_image) again would do, and re-send the
+    /// whole picture: for a picture that changes a little at a time -- a
+    /// remote screen, whose far end reports what changed as rectangles -- that
+    /// is most of a screenful of bytes for a caret's blink. `bytes` are the
+    /// rectangle's rows, `stride` bytes apart, in the format the image was
+    /// uploaded in.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A refusal means this window holds no image
+    /// under `image_id`, or the rectangle is empty, not wholly inside the
+    /// image, or not covered by the bytes -- and in every case *nothing
+    /// changed*: no pixel of the image is written.
+    pub fn patch_image(
+        &mut self,
+        image_id: u64,
+        (x, y): (u32, u32),
+        (width, height): (u32, u32),
+        stride: u32,
+        bytes: guitk::canvas::WireBytes,
+    ) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::PatchImage {
+            window: self.id,
+            image_id,
+            x,
+            y,
+            width,
+            height,
+            stride,
+            // Unwrapped here, as `upload_image` unwraps an upload's: the last
+            // point before the bytes go on the wire.
+            bytes: bytes.into_vec(),
+        })
+    }
+
     /// Release an uploaded image, giving its bytes back to this link's budget.
     ///
     /// Dropping an id that was never uploaded succeeds: "there is no such
@@ -2395,6 +2434,7 @@ pub mod testing {
                 RequestBody::SwitchWorkspace { .. } => "SwitchWorkspace",
                 RequestBody::SetWindowWorkspace { .. } => "SetWindowWorkspace",
                 RequestBody::UploadImage { .. } => "UploadImage",
+                RequestBody::PatchImage { .. } => "PatchImage",
                 RequestBody::GrabModifierChord { .. } => "GrabModifierChord",
                 RequestBody::UngrabModifierChord { .. } => "UngrabModifierChord",
                 RequestBody::DropImage { .. } => "DropImage",
@@ -2714,6 +2754,37 @@ mod tests {
             server.borrow().seen.last().unwrap().body,
             RequestBody::SetTitle { .. }
         ));
+    }
+
+    #[test]
+    fn a_patch_reaches_the_compositor_as_its_rectangle_and_nothing_more() {
+        let (mut events, server) = wired();
+        let id = open(&mut events, "Remote screen");
+        let pixels = [0xFF11_2233u32, 0xFF44_5566];
+        events
+            .window_mut(id)
+            .unwrap()
+            .patch_image(
+                9,
+                (3, 4),
+                (2, 1),
+                8,
+                guitk::canvas::WireBytes::from_le_argb(&pixels),
+            )
+            .unwrap();
+        assert_eq!(
+            server.borrow().seen.last().unwrap().body,
+            RequestBody::PatchImage {
+                window: id,
+                image_id: 9,
+                x: 3,
+                y: 4,
+                width: 2,
+                height: 1,
+                stride: 8,
+                bytes: guitk::canvas::WireBytes::from_le_argb(&pixels).into_vec(),
+            }
+        );
     }
 
     #[test]

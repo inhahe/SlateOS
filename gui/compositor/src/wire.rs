@@ -717,6 +717,28 @@ fn to_compositor_request(
             format,
             bytes,
         },
+        // Resolved like an upload, and past the budget gate unweighed: a
+        // patch writes pixels the image already holds, so the link holds as
+        // many after it as before.
+        RequestBody::PatchImage {
+            window,
+            image_id,
+            x,
+            y,
+            width,
+            height,
+            stride,
+            bytes,
+        } => CompositorRequest::PatchImage {
+            window_id: link.resolve(window)?,
+            image_id,
+            x,
+            y,
+            width,
+            height,
+            stride,
+            bytes,
+        },
         RequestBody::DropImage { window, image_id } => CompositorRequest::UnregisterImage {
             window_id: link.resolve(window)?,
             image_id,
@@ -2976,6 +2998,126 @@ mod tests {
         assert_eq!(comp.image_count(id), Some(1));
         assert_eq!(comp.window_image_bytes(id), Some(4 * 4 * 4));
         assert_eq!(comp.image_size_bytes(id, 1), Some(4 * 4 * 4));
+    }
+
+    /// A `PatchImage` for `window` of a `w × h` rectangle at `(x, y)`, every
+    /// pixel `px`.
+    fn patch(
+        window: u64,
+        image_id: u64,
+        (x, y): (u32, u32),
+        (w, h): (u32, u32),
+        px: u32,
+    ) -> RequestBody {
+        RequestBody::PatchImage {
+            window,
+            image_id,
+            x,
+            y,
+            width: w,
+            height: h,
+            stride: w * 4,
+            bytes: (0..w * h).flat_map(|_| px.to_le_bytes()).collect(),
+        }
+    }
+
+    /// The stored pixel of `window`'s image `image_id` at `(x, y)`.
+    fn stored(comp: &Compositor, window: u64, image_id: u64, (x, y): (u32, u32)) -> Option<u32> {
+        comp.window_ref(WindowId::from_raw(window))?
+            .images
+            .get(&image_id)?
+            .pixel(x, y)
+    }
+
+    #[test]
+    fn a_patch_over_the_wire_writes_its_rectangle_into_the_stored_image() {
+        // What a remote screen needs: the far end changed a few pixels, and
+        // only those go over the wire.
+        let (mut comp, mut link) = wired();
+        let window = open(&mut comp, &mut link, "Remote");
+        exchange(&mut comp, &mut link, vec![upload(window, 1, 4, 4)]);
+
+        let responses = exchange(
+            &mut comp,
+            &mut link,
+            vec![patch(window, 1, (1, 2), (2, 1), 0xFF12_3456)],
+        );
+        assert!(
+            matches!(
+                responses.as_slice(),
+                [Response {
+                    body: ResponseBody::Ok,
+                    ..
+                }]
+            ),
+            "patch was not accepted: {responses:?}"
+        );
+        assert_eq!(stored(&comp, window, 1, (1, 2)), Some(0xFF12_3456));
+        assert_eq!(stored(&comp, window, 1, (2, 2)), Some(0xFF12_3456));
+        assert_eq!(
+            stored(&comp, window, 1, (0, 2)),
+            Some(0xFFFF_FFFF),
+            "left of it"
+        );
+        assert_eq!(
+            stored(&comp, window, 1, (3, 2)),
+            Some(0xFFFF_FFFF),
+            "right of it"
+        );
+        assert_eq!(
+            stored(&comp, window, 1, (1, 1)),
+            Some(0xFFFF_FFFF),
+            "above it"
+        );
+    }
+
+    #[test]
+    fn a_patch_is_not_weighed_against_the_links_image_budget() {
+        // A patch writes pixels the image already holds, so a link at its
+        // ceiling -- a remote screen as big as the budget allows -- must still
+        // be able to update it. Weighing the patch as an upload would refuse
+        // every change to the one picture the client exists to show.
+        let (mut comp, mut link) = wired_with_small_budget();
+        let window = open(&mut comp, &mut link, "Remote");
+        let id = WindowId::from_raw(window);
+        // The whole budget: two 8x8 pictures' worth in one.
+        exchange(&mut comp, &mut link, vec![upload(window, 1, 16, 8)]);
+        assert_eq!(
+            comp.window_image_bytes(id).map(|n| n as u64),
+            Some(link.image_budget())
+        );
+        let responses = exchange(
+            &mut comp,
+            &mut link,
+            vec![patch(window, 1, (0, 0), (16, 8), 0xFF00_00FF)],
+        );
+        assert!(
+            matches!(
+                responses.as_slice(),
+                [Response {
+                    body: ResponseBody::Ok,
+                    ..
+                }]
+            ),
+            "a patch at the budget's ceiling was refused: {responses:?}"
+        );
+        assert_eq!(stored(&comp, window, 1, (15, 7)), Some(0xFF00_00FF));
+    }
+
+    #[test]
+    fn a_patch_of_an_image_never_uploaded_is_refused_and_says_so() {
+        let (mut comp, mut link) = wired();
+        let window = open(&mut comp, &mut link, "Remote");
+        let responses = exchange(
+            &mut comp,
+            &mut link,
+            vec![patch(window, 5, (0, 0), (1, 1), 0xFF00_0000)],
+        );
+        let ResponseBody::Error { message } = &responses[0].body else {
+            panic!("a patch of nothing was accepted: {responses:?}");
+        };
+        assert!(message.contains("no image 5"), "{message}");
+        assert_eq!(comp.image_count(WindowId::from_raw(window)), Some(0));
     }
 
     #[test]

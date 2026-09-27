@@ -317,6 +317,15 @@ pub enum CompositorError {
     /// ever satisfy. Stored, it would be a shortcut that silently never fires,
     /// which is the failure this whole mechanism was built to end.
     InvalidModifierChord,
+    /// A window holds no image under the id a request named.
+    ImageNotFound(u64),
+    /// A patch's rectangle is empty, or does not lie wholly inside its image.
+    PatchOutsideImage {
+        /// The rectangle, as `(x, y, width, height)`.
+        rect: (u32, u32, u32, u32),
+        /// The image's width and height.
+        image: (u32, u32),
+    },
 }
 
 impl std::fmt::Display for CompositorError {
@@ -369,6 +378,15 @@ impl std::fmt::Display for CompositorError {
             Self::InvalidModifierChord => {
                 write!(f, "a modifier chord must name at least one modifier")
             }
+            Self::ImageNotFound(id) => write!(f, "this window holds no image {id}"),
+            Self::PatchOutsideImage {
+                rect: (x, y, width, height),
+                image: (image_width, image_height),
+            } => write!(
+                f,
+                "a {width}x{height} patch at ({x}, {y}) does not lie inside the \
+                 {image_width}x{image_height} image"
+            ),
         }
     }
 }
@@ -3528,6 +3546,19 @@ pub enum CompositorRequest {
         height: u32,
         stride: u32,
         format: BufferFormat,
+        bytes: Vec<u8>,
+    },
+    /// Write a rectangle of pixels into one of a window's images, leaving the
+    /// rest of it as it was. Answered with [`CompositorResponse::Ok`], or an
+    /// error that changed nothing. See [`Compositor::patch_image`].
+    PatchImage {
+        window_id: WindowId,
+        image_id: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        stride: u32,
         bytes: Vec<u8>,
     },
     /// Forget one of a window's images. Answered with
@@ -7553,6 +7584,46 @@ impl Compositor {
         Ok(())
     }
 
+    /// Write a `width` by `height` rectangle of pixels into image `image_id`
+    /// of `window_id`, at `(x, y)` in it, leaving the rest of the image as it
+    /// was.
+    ///
+    /// The partial counterpart of [`register_image`](Self::register_image),
+    /// for a picture that changes a little at a time -- a remote screen, whose
+    /// far end reports what changed as rectangles -- which re-registering
+    /// would re-send whole on every change. The bytes are in the image's own
+    /// format. The window is damaged whole, as for a registration: where the
+    /// image is drawn, and at what scale, is in its render commands, which a
+    /// finer damage would have to replay.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window is gone,
+    /// [`CompositorError::ImageNotFound`] if it holds no image under
+    /// `image_id`, and those of [`ImageAsset::patch`] -- all of them before a
+    /// pixel is written, so a refused patch leaves the image as it was.
+    pub fn patch_image(
+        &mut self,
+        window_id: WindowId,
+        image_id: u64,
+        at: (u32, u32),
+        size: (u32, u32),
+        stride: u32,
+        bytes: &[u8],
+    ) -> CompositorResult<()> {
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        let image = window
+            .images
+            .get_mut(&image_id)
+            .ok_or(CompositorError::ImageNotFound(image_id))?;
+        image.patch(at, size, stride, bytes)?;
+        window.dirty = true;
+        self.damage_window(window_id);
+        Ok(())
+    }
+
     /// Drop one of a window's images. Returns whether an image was there.
     ///
     /// The window is damaged either way when one was removed: commands still
@@ -10523,6 +10594,24 @@ impl Compositor {
                     message: e.to_string(),
                 },
             },
+            CompositorRequest::PatchImage {
+                window_id,
+                image_id,
+                x,
+                y,
+                width,
+                height,
+                stride,
+                bytes,
+            } => {
+                match self.patch_image(window_id, image_id, (x, y), (width, height), stride, &bytes)
+                {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
+                }
+            }
             CompositorRequest::UnregisterImage {
                 window_id,
                 image_id,
@@ -16757,6 +16846,54 @@ mod tests {
         assert_eq!(at(4, 0), IMG_G, "first pixel of the top-right quadrant");
         assert_eq!(at(0, 4), IMG_B, "first pixel of the bottom-left quadrant");
         assert_eq!(at(7, 7), IMG_W, "far corner of the bottom-right quadrant");
+    }
+
+    #[test]
+    fn a_patched_image_draws_its_new_pixels_and_only_there() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+        // The bottom-right quadrant, white, patched to a new colour.
+        const NEW: u32 = 0xFF12_3456;
+        comp.patch_image(id, 1, (1, 1), (1, 1), 4, &NEW.to_le_bytes())
+            .expect("patch");
+        assert!(comp.compose_frame(), "a patch must damage the window");
+        let front = comp.backend.presented_pixels();
+        let at =
+            |dx: usize, dy: usize| -> u32 { front[(cy as usize + dy) * 400 + (cx as usize + dx)] };
+        assert_eq!(at(4, 4), NEW, "the patched pixel's first screen pixel");
+        assert_eq!(at(7, 7), NEW, "and its last");
+        assert_eq!(at(0, 0), IMG_R, "the rest of the image is as it was");
+        assert_eq!(at(4, 0), IMG_G);
+        assert_eq!(at(0, 4), IMG_B);
+    }
+
+    #[test]
+    fn a_patch_names_the_window_and_the_image_it_could_not_find() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        let px = 0xFF00_0000u32.to_le_bytes();
+        let gone = WindowId::from_raw(id.raw().wrapping_add(1000));
+        assert!(matches!(
+            comp.patch_image(gone, 1, (0, 0), (1, 1), 4, &px),
+            Err(CompositorError::WindowNotFound(w)) if w == gone
+        ));
+        let err = comp
+            .patch_image(id, 2, (0, 0), (1, 1), 4, &px)
+            .expect_err("no image 2");
+        assert!(matches!(err, CompositorError::ImageNotFound(2)));
+        assert_eq!(err.to_string(), "this window holds no image 2");
+        let err = comp
+            .patch_image(id, 1, (1, 1), (2, 1), 8, &[0; 8])
+            .expect_err("past the edge");
+        assert_eq!(
+            err.to_string(),
+            "a 2x1 patch at (1, 1) does not lie inside the 2x2 image"
+        );
     }
 
     #[test]

@@ -7444,6 +7444,9 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
 /// | `0x57` | `socketpair_send` (301) | 2 GiB | `65536` |
 /// | `0x58` | `socketpair_recv` (302) | 2 GiB | `65536` |
 /// | `0x59` | `socketpair_send` | `2^63` | `-101` |
+/// | `0x5A` | `pty_create` (544) | -- | two handles |
+/// | `0x5B` | `pty_master_write` (545) | 2 GiB | `1..=4096`: one input queue |
+/// | `0x5C` | `pty_master_try_read` (547) | 2 GiB | `1..=65536`: the echo of `0x5B` |
 #[must_use]
 #[allow(
     clippy::indexing_slicing,
@@ -7464,6 +7467,8 @@ pub fn build_callmax_abi_test_elf() -> alloc::vec::Vec<u8> {
     const TWO_GIB: u64 = 2 * 1024 * 1024 * 1024;
     const PAST_USER_SPACE: u64 = 1 << 63;
     const ONE_BUFFER: i32 = 64 * 1024;
+    // A pty master write takes at most the input queue (`tty::INPUT_QUEUE_CAPACITY`).
+    const PTY_INPUT_QUEUE: i32 = 4096;
     const EFAULT: i32 = -101;
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
@@ -7513,6 +7518,32 @@ pub fn build_callmax_abi_test_elf() -> alloc::vec::Vec<u8> {
         code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
         code.extend_from_slice(&(expect as u32).to_le_bytes());
         exit_unless(code, 0x74, fail); // je
+    }
+
+    /// `nr(handle, rsi, rdx)`; `exit(fail)` unless `0 < rax <= max`: a call
+    /// that succeeds and moves no more than one call's worth.
+    fn bounded(
+        code: &mut alloc::vec::Vec<u8>,
+        handle: [u8; 3],
+        nr: u32,
+        buf: u64,
+        len: u64,
+        max: i32,
+        fail: u32,
+    ) {
+        code.extend_from_slice(&handle); // mov rdi, <handle>
+        code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, imm64
+        code.extend_from_slice(&buf.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xBA]); // movabs rdx, imm64
+        code.extend_from_slice(&len.to_le_bytes());
+        code.push(0xB8); // mov eax, nr
+        code.extend_from_slice(&nr.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+        exit_unless(code, 0x7F, fail); // jg: a positive count
+        code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
+        code.extend_from_slice(&(max as u32).to_le_bytes());
+        exit_unless(code, 0x7E, fail); // jle: no more than `max`
     }
 
     const MOV_RBX_RAX: [u8; 3] = [0x48, 0x89, 0xC3];
@@ -7591,6 +7622,35 @@ pub fn build_callmax_abi_test_elf() -> alloc::vec::Vec<u8> {
         PAST_USER_SPACE,
         EFAULT,
         0x59,
+    );
+
+    // --- a pty: r13 = master, r14 = slave ------------------------------------
+    // The segment's first 4 KiB become ordinary keystrokes ('a'), so what the
+    // probes see does not hang on how the line discipline treats NUL: each 'a'
+    // takes one input-queue slot and echoes one byte.
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, DATA_VADDR
+    code.extend_from_slice(&DATA_VADDR.to_le_bytes());
+    code.extend_from_slice(&[0xB9, 0x00, 0x10, 0x00, 0x00]); // mov ecx, 4096
+    code.extend_from_slice(&[0xB0, b'a']); // mov al, 'a'
+    code.extend_from_slice(&[0xF3, 0xAA]); // rep stosb
+    create(&mut code, 544, [MOV_R13_RAX, MOV_R14_RDX], 0x5A);
+    bounded(
+        &mut code,
+        RDI_FROM_R13,
+        545,
+        DATA_VADDR,
+        TWO_GIB,
+        PTY_INPUT_QUEUE,
+        0x5B,
+    );
+    bounded(
+        &mut code,
+        RDI_FROM_R13,
+        547,
+        DATA_VADDR,
+        TWO_GIB,
+        ONE_BUFFER,
+        0x5C,
     );
 
     // --- every probe agreed -------------------------------------------------

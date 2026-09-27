@@ -6098,6 +6098,24 @@ pub fn sys_pty_master_try_write(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// Body shared by the blocking and non-blocking master writes.
+/// The most bytes one pty master write takes: the terminal's input queue,
+/// [`crate::tty::INPUT_QUEUE_CAPACITY`] (4 KiB, Linux's `N_TTY_BUF_SIZE`).
+///
+/// Not a strict per-call maximum the way a pipe's buffer is: bytes the line
+/// discipline consumes without queueing -- an erase, a signal character --
+/// take no room, so an uncapped call could push any number of them through
+/// `tty::receive` while holding the device and pty tables. Capping the copy
+/// bounds that work, as Linux's own tty layer does by writing in chunks, and
+/// costs nothing a caller does not already handle: a write that fills the
+/// queue returns short anyway. See known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`.
+const PTY_WRITE_CALL_MAX: usize = crate::tty::INPUT_QUEUE_CAPACITY;
+
+/// The most bytes one pty master read returns: the output ring's capacity,
+/// [`crate::tty::pty::OUTPUT_CAPACITY`] -- a read never returns more than the
+/// ring holds.
+const PTY_READ_CALL_MAX: usize = crate::tty::pty::OUTPUT_CAPACITY;
+
 fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResult {
     let handle = match owned_pty_handle(args.arg0) {
         Ok(h) => h,
@@ -6113,7 +6131,7 @@ fn pty_master_write_common(args: &SyscallArgs, non_blocking: bool) -> SyscallRes
     // not "optimised away" for it: the pty table lock is held across the
     // transfer either way, and a fault taken there is just as unrecoverable as
     // one taken across a park.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    let data = match read_call_buffer(args.arg1, len, PTY_WRITE_CALL_MAX) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
@@ -6166,7 +6184,7 @@ fn pty_master_read_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResu
     if args.arg1 == 0 && cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    let result = crate::mm::user::with_user_out_buf(args.arg1, cap, usize::MAX, |buf| {
+    let result = with_call_out_buf(args.arg1, cap, PTY_READ_CALL_MAX, |buf| {
         if non_blocking {
             crate::tty::pty::master_try_read(handle, buf)
         } else {

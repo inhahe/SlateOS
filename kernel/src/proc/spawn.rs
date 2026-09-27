@@ -24281,9 +24281,10 @@ pub fn self_test_callmax_abi() -> KernelResult<()> {
     }
 
     serial_println!(
-        "[spawn]   per-call copy bound (ring 3: 9 probes — 2 GiB pipe and socketpair \
-         transfers move one 64 KiB buffer from a 1 MiB segment; a claim past user \
-         space is still InvalidAddress): OK"
+        "[spawn]   per-call copy bound (ring 3: 12 probes — 2 GiB pipe and socketpair \
+         transfers move one 64 KiB buffer from a 1 MiB segment, a pty master write \
+         takes one 4 KiB input queue and its read one ring; a claim past user space \
+         is still InvalidAddress): OK"
     );
     Ok(())
 }

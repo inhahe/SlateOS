@@ -89,7 +89,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 ///
 /// Larger than the input queue because a program printing a screenful at once
 /// is the normal case, and every byte that does not fit blocks the program.
-const OUTPUT_CAPACITY: usize = 64 * 1024;
+pub(crate) const OUTPUT_CAPACITY: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Ids and handles

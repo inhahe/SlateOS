@@ -2829,14 +2829,92 @@ pub fn sys_shm_close(args: &SyscallArgs) -> SyscallResult {
 /// netstack forwarders and the ring-3 `netstack` daemon) share one region: the
 /// last reference dropped frees the frames, in any order.
 pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
-    use super::number::{MAP_READ, MAP_WRITE};
+    shm_map_into(ShmHandle::from_raw(args.arg0), args.arg1, None)
+}
+
+/// `SYS_SHM_MAP_AT` — map a shared memory region at the address the caller
+/// chooses (System V `shmat` with a non-null address; lane D's
+/// `d-a-shm-map-at-an-address`).
+///
+/// `arg0`: shared memory handle.  `arg1`: flags, as for [`sys_shm_map`], plus
+/// `MAP_FIXED` to replace whatever is mapped in the range.  `arg2`: the
+/// address, or 0 to let the kernel choose.  An address must be 16 KiB-
+/// aligned and, with the region's length, inside the general mmap window
+/// (`shm_reserve_at` says why).
+pub fn sys_shm_map_at(args: &SyscallArgs) -> SyscallResult {
+    let at = if args.arg2 == 0 {
+        None
+    } else {
+        Some(args.arg2)
+    };
+    shm_map_into(ShmHandle::from_raw(args.arg0), args.arg1, at)
+}
+
+/// Reserve `[addr, addr + size)` for a shared-memory mapping at the caller's
+/// chosen address, registering its `Fixed` VMA, and return `addr`.
+///
+/// The address must be frame-aligned, and the range must lie inside the
+/// VMA-tracked general mmap window, `USER_MMAP_BASE..USER_MMAP_END`.  Every
+/// mapping there has a VMA, so the VMA list answers "is anything there"
+/// completely; and nothing the kernel places on its own -- the device window's
+/// bump allocator, the image, the stack -- can land on the range later unseen.
+///
+/// An occupied range is `InvalidArgument`, as Linux's `shmat` answers `EINVAL`
+/// for an overlap -- unless `replace` (the caller's `MAP_FIXED`, Linux's
+/// `SHM_REMAP`): then whatever is mapped there is unmapped first, as
+/// `mmap(MAP_FIXED)` does.  The VMA is inserted by `pcb::add_vma`, which checks
+/// for an overlap under the process-table lock, so two threads mapping over
+/// one range cannot both succeed.
+fn shm_reserve_at(
+    pid: crate::proc::pcb::ProcessId,
+    pml4_phys: u64,
+    addr: u64,
+    size: u64,
+    page_flags: crate::mm::page_table::PageFlags,
+    replace: bool,
+) -> crate::error::KernelResult<u64> {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::vma::{Vma, VmaKind};
+    use crate::proc::pcb;
+
+    let frame_size = FRAME_SIZE as u64;
+    if !addr.is_multiple_of(frame_size) {
+        return Err(KernelError::InvalidArgument);
+    }
+    let end = addr.checked_add(size).ok_or(KernelError::InvalidArgument)?;
+    if addr < USER_MMAP_BASE || end > USER_MMAP_END {
+        return Err(KernelError::InvalidArgument);
+    }
+    if replace {
+        // The count of pages unmapped is not needed: whatever was there is
+        // being replaced.
+        let _unmapped = crate::mm::user::unmap_user_range(pml4_phys, addr, end);
+        pcb::remove_vma_range(pid, addr, end)?;
+    }
+    match pcb::add_vma(
+        pid,
+        Vma {
+            start: addr,
+            end,
+            kind: VmaKind::Fixed,
+            flags: page_flags,
+        },
+    ) {
+        Ok(()) => Ok(addr),
+        Err(KernelError::AlreadyExists) => Err(KernelError::InvalidArgument),
+        Err(e) => Err(e),
+    }
+}
+
+/// The body of [`sys_shm_map`] and [`sys_shm_map_at`]: map every frame of
+/// `handle`'s region, at `at` if given (see [`shm_reserve_at`]) or at an
+/// address the kernel chooses.
+fn shm_map_into(handle: ShmHandle, flags: u64, at: Option<u64>) -> SyscallResult {
+    use super::number::{MAP_FIXED, MAP_READ, MAP_WRITE};
     use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::mm::vma::VmaKind;
     use crate::proc::{pcb, thread};
-
-    let handle = ShmHandle::from_raw(args.arg0);
-    let flags = args.arg1;
 
     // Enforce region authorization: a userspace caller must be the region's
     // creator or have been granted access at a kernel→daemon handoff. Kernel
@@ -2884,13 +2962,26 @@ pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
     let size_aligned = (frame_addrs.len() as u64) * frame_size;
 
-    // Reserve a VA gap with a Fixed VMA (frames are pre-backed — a fault in
-    // this range is a bug, not demand paging). The reservation inserts the
-    // VMA atomically, so a rollback below must `remove_vma`.
-    let base = alloc_user_mmap_reserve(pid, size_aligned, VmaKind::Fixed, page_flags);
-    if base == 0 {
-        return SyscallResult::err(KernelError::OutOfMemory);
-    }
+    // Reserve the VA range with a Fixed VMA (frames are pre-backed — a fault
+    // in this range is a bug, not demand paging): at the caller's address, or
+    // at a gap the kernel finds.  Either way the VMA is inserted atomically, so
+    // a rollback below must `remove_vma`.
+    let base = match at {
+        Some(addr) => {
+            let replace = flags & MAP_FIXED != 0;
+            match shm_reserve_at(pid, pml4_phys, addr, size_aligned, page_flags, replace) {
+                Ok(b) => b,
+                Err(e) => return SyscallResult::err(e),
+            }
+        }
+        None => {
+            let b = alloc_user_mmap_reserve(pid, size_aligned, VmaKind::Fixed, page_flags);
+            if b == 0 {
+                return SyscallResult::err(KernelError::OutOfMemory);
+            }
+            b
+        }
+    };
 
     // Roll back frames [0, up_to): unmap each and drop the ref we added.
     let rollback = |up_to: usize| {

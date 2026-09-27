@@ -984,6 +984,27 @@ pub const SYS_SHM_MAP: u64 = 233;
 /// present is not an error.
 pub const SYS_SHM_UNMAP: u64 = 234;
 
+/// Map a shared memory region at an address the caller chooses -- what
+/// System V `shmat` does with a non-null address.
+///
+/// `arg0`: shared memory handle.
+/// `arg1`: flags: `MAP_READ` | `MAP_WRITE`, as for [`SYS_SHM_MAP`]; with
+///         `MAP_FIXED`, whatever is already mapped in the range is unmapped
+///         first (Linux's `SHM_REMAP`), and without it an occupied range is
+///         refused.
+/// `arg2`: the address.  0 lets the kernel choose, exactly as `SYS_SHM_MAP`
+///         does.  Anything else must be 16 KiB-aligned and, with the region's
+///         length, lie inside the general mmap window
+///         (`0x60_0000_0000..0x6f_0000_0000`); otherwise `InvalidArgument`,
+///         which is also the answer for an occupied range (Linux's `EINVAL`).
+///
+/// Returns: the address mapped.
+///
+/// A number of its own rather than a third argument to [`SYS_SHM_MAP`]:
+/// that call's callers pass two arguments, and a two-argument syscall wrapper
+/// leaves `arg2`'s register holding whatever it last held.
+pub const SYS_SHM_MAP_AT: u64 = 235;
+
 /// Create a new eventfd counter.
 ///
 /// `arg0`: initial counter value (typically 0).

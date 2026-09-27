@@ -3692,6 +3692,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         proc::spawn::self_test_shm_futex(),
     );
+    // SYS_SHM_MAP_AT: a region mapped at the address the caller chooses
+    // (lane D's d-a-shm-map-at-an-address, System V shmat's address).
+    selftest::dispatch_debug(
+        "SYS_SHM_MAP_AT (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_shm_map_at(),
+    );
     // File reads and writes stream through a bounded bounce buffer
     // (known-issues.md A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC, class 3).
     selftest::dispatch_debug(

@@ -7251,6 +7251,106 @@ pub fn build_shm_futex_waker_elf(shm_handle: u64) -> alloc::vec::Vec<u8> {
     single_segment_test_elf(&code)
 }
 
+/// Build the ring-3 probe for `SYS_SHM_MAP_AT`
+/// (`proc::spawn::self_test_shm_map_at`).
+///
+/// It first maps the shared-memory region `shm_handle` with `SYS_SHM_MAP`,
+/// retrying until the harness's authorization lands (see
+/// `emit_shm_map_retry`), and keeps that mapping in `rbx`.  Then it exits
+/// with the code of the first probe that disagrees; `exit(0)` means all did.
+///
+/// | Code | Call | Expect |
+/// |---|---|---|
+/// | `0xA1` | `shm_map_at(h, RW, 0x66_0000_0000)` | that address |
+/// | `0xA2` | write through `rbx`, read through `0x66_0000_0000` | the same word: one region |
+/// | `0xA3` | `shm_map_at` at that address again | `-3`: occupied |
+/// | `0xA4` | again with `MAP_FIXED` | the address: replaced |
+/// | `0xA5` | read through it | still the word `0xA2` wrote: the region, not a fresh page |
+/// | `0xA6` | at `0x66_0000_1000` | `-3`: not 16 KiB-aligned |
+/// | `0xA7` | at `0xFFFF_8000_0000_0000` | `-3`: the kernel half |
+/// | `0xA8` | at `0x50_0000_0000` | `-3`: below the mmap window |
+/// | `0xA9` | at `0` | a positive address the kernel chose... |
+/// | `0xAA` | | ...and not `0x66_0000_0000` |
+#[must_use]
+pub fn build_shm_map_at_probe_elf(shm_handle: u64) -> alloc::vec::Vec<u8> {
+    const SYS_SHM_MAP_AT: u32 = 235;
+    const RW: u32 = 0x3; // MAP_READ | MAP_WRITE
+    const MAP_FIXED: u32 = 0x20;
+    const FIXED: u64 = 0x0000_0066_0000_0000;
+    const EINVAL: u32 = 0xFFFF_FFFD; // -3, sign-extended by `cmp rax, imm32`
+    const WORD: u32 = 0x5A5A_5A5A;
+
+    /// `rax = shm_map_at(handle, flags, addr)`.
+    fn map_at(code: &mut alloc::vec::Vec<u8>, handle: u64, flags: u32, addr: u64) {
+        code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, handle
+        code.extend_from_slice(&handle.to_le_bytes());
+        code.push(0xBE); // mov esi, flags
+        code.extend_from_slice(&flags.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xBA]); // movabs rdx, addr
+        code.extend_from_slice(&addr.to_le_bytes());
+        code.push(0xB8); // mov eax, SYS_SHM_MAP_AT
+        code.extend_from_slice(&SYS_SHM_MAP_AT.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    }
+    /// `exit(fail)` unless `rax == value`.
+    fn expect_rax_u64(code: &mut alloc::vec::Vec<u8>, value: u64, fail: u32) {
+        code.extend_from_slice(&[0x48, 0xB9]); // movabs rcx, value
+        code.extend_from_slice(&value.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+        code.extend_from_slice(&[0x74, 0x0D]); // je +13 -- over the exit
+        emit_exit(code, fail);
+    }
+    /// `exit(fail)` unless `rax == value` (sign-extended from 32 bits).
+    fn expect_rax_i32(code: &mut alloc::vec::Vec<u8>, value: u32, fail: u32) {
+        code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32
+        code.extend_from_slice(&value.to_le_bytes());
+        code.extend_from_slice(&[0x74, 0x0D]); // je +13 -- over the exit
+        emit_exit(code, fail);
+    }
+    /// `exit(fail)` unless the word at `FIXED` is `WORD`.
+    fn expect_word_at_fixed(code: &mut alloc::vec::Vec<u8>, fail: u32) {
+        code.extend_from_slice(&[0x48, 0xB9]); // movabs rcx, FIXED
+        code.extend_from_slice(&FIXED.to_le_bytes());
+        code.extend_from_slice(&[0x8B, 0x01]); // mov eax, [rcx]
+        code.push(0x3D); // cmp eax, WORD
+        code.extend_from_slice(&WORD.to_le_bytes());
+        code.extend_from_slice(&[0x74, 0x0D]); // je +13 -- over the exit
+        emit_exit(code, fail);
+    }
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    emit_shm_map_retry(&mut code, shm_handle, 0xA0);
+    code.extend_from_slice(&[0x48, 0x89, 0xC3]); // mov rbx, rax -- the first mapping
+
+    map_at(&mut code, shm_handle, RW, FIXED);
+    expect_rax_u64(&mut code, FIXED, 0xA1);
+    code.extend_from_slice(&[0xC7, 0x03]); // mov dword [rbx], WORD
+    code.extend_from_slice(&WORD.to_le_bytes());
+    expect_word_at_fixed(&mut code, 0xA2);
+    map_at(&mut code, shm_handle, RW, FIXED);
+    expect_rax_i32(&mut code, EINVAL, 0xA3);
+    map_at(&mut code, shm_handle, RW | MAP_FIXED, FIXED);
+    expect_rax_u64(&mut code, FIXED, 0xA4);
+    expect_word_at_fixed(&mut code, 0xA5);
+    map_at(&mut code, shm_handle, RW, FIXED + 0x1000);
+    expect_rax_i32(&mut code, EINVAL, 0xA6);
+    map_at(&mut code, shm_handle, RW, 0xFFFF_8000_0000_0000);
+    expect_rax_i32(&mut code, EINVAL, 0xA7);
+    map_at(&mut code, shm_handle, RW, 0x0000_0050_0000_0000);
+    expect_rax_i32(&mut code, EINVAL, 0xA8);
+    map_at(&mut code, shm_handle, RW, 0);
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x7F, 0x0D]); // jg +13 -- over the exit
+    emit_exit(&mut code, 0xA9);
+    code.extend_from_slice(&[0x48, 0xB9]); // movabs rcx, FIXED
+    code.extend_from_slice(&FIXED.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+    code.extend_from_slice(&[0x75, 0x0D]); // jne +13 -- over the exit
+    emit_exit(&mut code, 0xAA);
+    emit_exit(&mut code, 0);
+    single_segment_test_elf(&code)
+}
+
 /// Build the ring-3 probe for native `SYS_MUNMAP`'s argument checks.
 ///
 /// Until 2026-09-26 `sys_munmap` unmapped and freed whatever canonical range a

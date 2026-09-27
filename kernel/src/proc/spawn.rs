@@ -24112,9 +24112,10 @@ pub fn self_test_shm_futex() -> KernelResult<()> {
     outcome
 }
 
-/// Spawn one side of [`self_test_shm_futex`] and authorize it to map
-/// `region`.  Its program retries the map until the authorization lands.
-fn spawn_shm_futex_side(
+/// Spawn a shared-memory probe -- a side of [`self_test_shm_futex`], or
+/// [`self_test_shm_map_at`]'s -- and authorize it to map `region`.  Its
+/// program retries the map until the authorization lands.
+fn spawn_shm_probe(
     region: crate::ipc::shm::ShmHandle,
     image: &[u8],
     name: &'static str,
@@ -24134,14 +24135,14 @@ fn spawn_shm_futex_side(
     };
     let side = spawn_process(image, &options)?;
     if let Err(e) = crate::ipc::shm::authorize(region, side.pid) {
-        stop_shm_futex_side(&side);
+        stop_shm_probe(&side);
         return Err(e);
     }
     Ok(side)
 }
 
 /// Yield until `pid` is a zombie, up to `rounds` times; whether it got there.
-fn shm_futex_side_exited(pid: ProcessId, rounds: u32) -> bool {
+fn shm_probe_exited(pid: ProcessId, rounds: u32) -> bool {
     for _ in 0..rounds {
         if pcb::state(pid) == Some(pcb::ProcessState::Zombie) {
             return true;
@@ -24151,9 +24152,9 @@ fn shm_futex_side_exited(pid: ProcessId, rounds: u32) -> bool {
     pcb::state(pid) == Some(pcb::ProcessState::Zombie)
 }
 
-/// Force one side of [`self_test_shm_futex`] down and reclaim it, as the
-/// other runners here do, so a parked probe cannot outlive its test.
-fn stop_shm_futex_side(side: &SpawnResult) {
+/// Force a shared-memory probe down and reclaim it, as the other runners
+/// here do, so a parked probe cannot outlive its test.
+fn stop_shm_probe(side: &SpawnResult) {
     if pcb::state(side.pid) != Some(pcb::ProcessState::Zombie) {
         // A forced exit's code is not what anything reads: the caller has
         // already decided the outcome.  Ignoring a failure is safe for the
@@ -24164,7 +24165,7 @@ fn stop_shm_futex_side(side: &SpawnResult) {
             "[spawn]   (killed {} thread(s) of a shm-futex probe)",
             killed
         );
-        let _ = shm_futex_side_exited(side.pid, 2000);
+        let _ = shm_probe_exited(side.pid, 2000);
     }
     thread::on_thread_exit(side.task_id);
     pcb::destroy(side.pid);
@@ -24176,7 +24177,7 @@ fn shm_futex_between_processes(region: crate::ipc::shm::ShmHandle) -> KernelResu
         .first()
         .ok_or(KernelError::InternalError)?;
 
-    let waiter = spawn_shm_futex_side(
+    let waiter = spawn_shm_probe(
         region,
         &elf::build_shm_futex_waiter_elf(region.raw()),
         "spawn-test-shm-futex-waiter",
@@ -24200,7 +24201,7 @@ fn shm_futex_between_processes(region: crate::ipc::shm::ShmHandle) -> KernelResu
     }
     if !queued {
         let code = pcb::exit_code(waiter.pid);
-        stop_shm_futex_side(&waiter);
+        stop_shm_probe(&waiter);
         serial_println!(
             "[spawn]   FAIL: shm futex (ring 3) -- the waiter never queued under the word's \
              physical key (exit {:?}; 0x81: it could not map the region)",
@@ -24209,24 +24210,24 @@ fn shm_futex_between_processes(region: crate::ipc::shm::ShmHandle) -> KernelResu
         return Err(KernelError::InternalError);
     }
 
-    let waker = match spawn_shm_futex_side(
+    let waker = match spawn_shm_probe(
         region,
         &elf::build_shm_futex_waker_elf(region.raw()),
         "spawn-test-shm-futex-waker",
     ) {
         Ok(w) => w,
         Err(e) => {
-            stop_shm_futex_side(&waiter);
+            stop_shm_probe(&waiter);
             return Err(e);
         }
     };
 
-    let waker_done = shm_futex_side_exited(waker.pid, 4000);
-    let waiter_done = shm_futex_side_exited(waiter.pid, 4000);
+    let waker_done = shm_probe_exited(waker.pid, 4000);
+    let waiter_done = shm_probe_exited(waiter.pid, 4000);
     let waker_code = pcb::exit_code(waker.pid);
     let waiter_code = pcb::exit_code(waiter.pid);
-    stop_shm_futex_side(&waker);
-    stop_shm_futex_side(&waiter);
+    stop_shm_probe(&waker);
+    stop_shm_probe(&waiter);
 
     if !waker_done || waker_code != Some(0) {
         serial_println!(
@@ -24249,6 +24250,47 @@ fn shm_futex_between_processes(region: crate::ipc::shm::ShmHandle) -> KernelResu
     serial_println!(
         "[spawn]   shm futex across processes (ring 3): a waiter parked on a shared word \
          was woken by another process through a different mapping of it: OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of `SYS_SHM_MAP_AT`: a shared-memory region mapped at the
+/// address the caller chooses (lane D's `d-a-shm-map-at-an-address`, what
+/// System V `shmat` does with a non-null address).  The probe program is
+/// [`elf::build_shm_map_at_probe_elf`]; its doc has the table of exit codes.
+pub fn self_test_shm_map_at() -> KernelResult<()> {
+    use crate::ipc::shm;
+
+    serial_println!("[spawn] Running SYS_SHM_MAP_AT (ring 3) test...");
+    let region = shm::create(FRAME_SIZE)?;
+    let outcome = (|| -> KernelResult<()> {
+        let probe = spawn_shm_probe(
+            region,
+            &elf::build_shm_map_at_probe_elf(region.raw()),
+            "spawn-test-shm-map-at",
+        )?;
+        let done = shm_probe_exited(probe.pid, 4000);
+        let code = pcb::exit_code(probe.pid);
+        stop_shm_probe(&probe);
+        if !done || code != Some(0) {
+            serial_println!(
+                "[spawn]   FAIL: SYS_SHM_MAP_AT (ring 3) -- probe {:#04x} disagreed (exit {:?}, \
+                 finished: {}); see build_shm_map_at_probe_elf's table",
+                code.unwrap_or(-1),
+                code,
+                done
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    })();
+    shm::close(region);
+    outcome?;
+    serial_println!(
+        "[spawn]   SYS_SHM_MAP_AT (ring 3: 10 probes -- a region mapped at a chosen address is \
+         the region, an occupied range is refused and replaced only with MAP_FIXED, a \
+         misaligned, kernel-half or out-of-window address is refused, 0 lets the kernel \
+         choose): OK"
     );
     Ok(())
 }

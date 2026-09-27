@@ -621,6 +621,37 @@ fn the_bar_is_redrawn_when_a_tile_lights_up() {
     );
 }
 
+/// **A launch that could not start is said on the screen**: reported to the
+/// session by whoever tried to start it, it is in the notifications, and the
+/// bar -- whose bell now has something to show -- is drawn again at the next
+/// pump rather than whenever something else happens.
+#[test]
+fn a_launch_that_could_not_start_is_said_on_the_screen() {
+    settingsfile::testing::with_scratch_config("session-launch-failed", |_root| {
+        let (mut session, desktop, _turn) = session();
+        session.pump().expect("pump");
+        let panel = session.panel().window();
+        let frames = frames_on(&desktop, panel);
+
+        let launch = crate::hotkeys::Launch::program("/usr/bin/fierfox");
+        session.report_failed_launch(&launch, &std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(
+            session
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .any(|n| n.title == "Cannot start fierfox"),
+            "nothing was said"
+        );
+        session.pump().expect("pump");
+        assert!(
+            frames_on(&desktop, panel) > frames,
+            "the bar was not drawn again for it"
+        );
+    });
+}
+
 /// **The start menu is redrawn when a row lights up under the pointer**: the
 /// light is on the popup surface, which is repainted only when told.
 #[test]

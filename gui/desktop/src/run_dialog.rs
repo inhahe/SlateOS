@@ -493,6 +493,15 @@ impl RunDialog {
         self.command_exact = None;
     }
 
+    /// Show the dialog again on a line that could not be started: the line in
+    /// the field, exactly as it was typed, and `message` under it -- so a
+    /// typo is corrected rather than typed again.
+    pub fn show_failed(&mut self, line: &OsStr, message: String) {
+        self.show();
+        self.fill_exact(line);
+        self.error_message = Some(message);
+    }
+
     /// Hide the dialog.
     pub fn hide(&mut self) {
         self.visible = false;

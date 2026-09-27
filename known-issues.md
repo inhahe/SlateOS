@@ -97568,7 +97568,21 @@ either round.
 
 ---
 
-### TD-C-THE-RUN-BOX-ACCEPTS-ANY-ABSOLUTE-PATH-WITHOUT-CHECKING-IT — 2026-09-03 — OPEN
+### TD-C-THE-RUN-BOX-ACCEPTS-ANY-ABSOLUTE-PATH-WITHOUT-CHECKING-IT — 2026-09-03 — FIXED 2026-09-27
+
+**Fixed 2026-09-27, by the proper fix below's "cheaper alternative", which
+turned out to be the better one:** whoever starts the programs the shell
+names reports a launch that could not start (`ShellSession::report_failed_launch`,
+called by `gui/desktop/src/main.rs` beside the error it already printed), and
+the shell answers it (`DesktopShell::launch_failed`). A launch the Run box
+asked for brings the box back on the line as it was typed, with why under
+it -- `"/usr/bin/fierfox" could not be started: there is no such program.` --
+and anything else, a pin or a start menu row or an icon, says so in a
+notification. The box still passes an absolute path through unchecked, and
+should: the launcher is what knows whether it runs, and asking the disk
+first would answer a different question (whether it exists, not whether it
+starts).
+
 
 **In short:** type a path into the Run box that starts with `/` and press Enter
 and the box always closes, whether or not anything is there. Mistype

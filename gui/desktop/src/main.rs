@@ -202,6 +202,10 @@ fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) {
         // alone would read the same for four of them.
         if let Err(e) = Command::new(&launch.program).args(&launch.args).spawn() {
             eprintln!("desktop: cannot start {}: {e}", launch.display_line());
+            // And on the screen, which is where the person who asked is
+            // looking: the Run box comes back on the line, anything else is
+            // a notification.
+            session.report_failed_launch(&launch, &e);
         }
     }
     // An installed program's entry that could not be used is a program

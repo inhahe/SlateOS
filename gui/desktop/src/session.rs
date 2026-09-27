@@ -3174,6 +3174,22 @@ impl<T: Transport> ShellSession<T> {
             || self.autohide.needs_tick()
     }
 
+    /// Say that `launch` -- one [`take_launches`](Self::take_launches) handed
+    /// out -- could not be started, and why: for whoever starts the programs
+    /// the shell names, which is the one place that finds out. The Run box
+    /// comes back on the line if the launch was its own, and anything else is
+    /// said in a notification ([`crate::DesktopShell::launch_failed`]); either is on
+    /// screen at the next pump.
+    pub fn report_failed_launch(
+        &mut self,
+        launch: &crate::hotkeys::Launch,
+        error: &std::io::Error,
+    ) {
+        self.shell
+            .launch_failed(launch, &crate::launch_failure_reason(error));
+        self.dirty = true;
+    }
+
     /// One pointer event, already in screen coordinates.
     fn pointer(&mut self, event: &MouseEvent) -> Result<(), Error<T>> {
         self.autohide_pointer(event);

@@ -1859,6 +1859,14 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **A program that cannot start is said, not swallowed** -- done
+  2026-09-27. A launch that failed was printed to the desktop's standard
+  error and nowhere else, so a mistyped Run box line, a pin to a program
+  since removed, or a start menu row naming nothing closed on nothing
+  having happened. Now the Run box comes back on the line with why, and
+  anything else says so in a notification (`known-issues.md`
+  `TD-C-THE-RUN-BOX-ACCEPTS-ANY-ABSOLUTE-PATH-WITHOUT-CHECKING-IT`, fixed).
+
 - `[C]` **The start menu glows, as the reference's glass** -- done
   2026-09-26. With shadows on, the menu casts the reference's glow in the
   accent (`aero-start-menu`'s `0 0 38px 4px`) as well as the shadow every

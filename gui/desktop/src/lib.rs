@@ -250,6 +250,21 @@ fn shadow(tree: &mut RenderTree, rect: Rect, radii: CornerRadii) {
     tree.box_shadow(rect.x, rect.y, rect.w, rect.h, WINDOW_SHADOW, radii);
 }
 
+/// Why a program could not be started, in words for the person who asked --
+/// for [`DesktopShell::launch_failed`], from the error the operating system
+/// gave whoever tried.
+///
+/// The two a user can act on are said plainly; anything else is the system's
+/// own words, which are at least the truth.
+#[must_use]
+pub fn launch_failure_reason(error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => "there is no such program".to_string(),
+        std::io::ErrorKind::PermissionDenied => "it is not allowed to run".to_string(),
+        _ => error.to_string(),
+    }
+}
+
 /// How many whole rows a wheel event of `dy` **notches** moves a list of
 /// fixed-height rows, carrying the fraction in `acc`.
 ///
@@ -1800,6 +1815,11 @@ pub struct DesktopShell {
     /// What in the tray the pointer is over -- a program's icon, the
     /// chevron, the bell or the clock -- which is drawn lit.
     tray_lit: Option<Hit>,
+    /// The launch the Run box last asked for, and the exact line it was
+    /// typed as -- so that if it cannot start, the box opens again on that
+    /// line with why ([`launch_failed`](Self::launch_failed)), instead of the
+    /// box closing on nothing having happened.
+    run_box_launch: Option<(hotkeys::Launch, std::ffi::OsString)>,
     /// What in the open start menu the pointer is over, which is drawn lit.
     /// Forgotten when the menu closes (`close_start_menu`), so a menu opened
     /// again lights nothing until the pointer moves over it.
@@ -2533,6 +2553,7 @@ impl DesktopShell {
             show_desktop_lit: false,
             start_button_lit: false,
             tray_lit: None,
+            run_box_launch: None,
             start_lit: None,
             desktop_shown: None,
             ending: None,
@@ -7161,6 +7182,17 @@ impl DesktopShell {
     /// `None` when nothing is to start: a path whose kind nothing opens (and
     /// which has said so in a notification), or a line with no words.
     fn run_request(&mut self, request: run_dialog::RunRequest) -> Option<hotkeys::Launch> {
+        let line = request.whole.clone();
+        let launch = self.resolve_run_request(request)?;
+        // Remembered, so that a launch that cannot start brings the box back
+        // on this line rather than leaving the user at a desktop where nothing
+        // happened (`launch_failed`).
+        self.run_box_launch = Some((launch.clone(), line));
+        Some(launch)
+    }
+
+    /// What a Run box line starts: see [`run_request`](Self::run_request).
+    fn resolve_run_request(&mut self, request: run_dialog::RunRequest) -> Option<hotkeys::Launch> {
         let whole = Path::new(&request.whole);
         if whole.is_absolute() && std::fs::metadata(whole).is_ok() {
             let label = whole.display().to_string();
@@ -7175,6 +7207,47 @@ impl DesktopShell {
             program: PathBuf::from(program),
             args: words.collect(),
         })
+    }
+
+    /// Say that `launch` could not be started, and `why` -- the answer from
+    /// whoever starts the programs the shell names, which is the one place
+    /// that knows (`ShellSession::report_failed_launch`).
+    ///
+    /// A launch the Run box asked for brings the box back, on the line that
+    /// was typed and with why under it, so a typo is corrected rather than
+    /// typed again. Anything else -- a pin, a start menu row, an icon -- says
+    /// so in a notification, as a document that cannot be opened does
+    /// ([`say_cannot_open`](Self::say_cannot_open)). Until this, both closed
+    /// on nothing having happened, and only the host's standard error said
+    /// otherwise.
+    pub fn launch_failed(&mut self, launch: &hotkeys::Launch, why: &str) {
+        if let Some((_, line)) = self.run_box_launch.take_if(|(sent, _)| sent == launch) {
+            let message = format!(
+                "\"{}\" could not be started: {why}.",
+                pathcodec::display_os(launch.program.as_os_str())
+            );
+            self.dismiss_popups();
+            self.run_dialog.show_failed(&line, message);
+            self.centre_run_dialog();
+            return;
+        }
+        let name = launch
+            .program
+            .file_name()
+            .map_or_else(|| launch.display_line(), pathcodec::display_os);
+        let title = format!("Cannot start {name}");
+        // The id is discarded: this is a message, not something to update.
+        let _ = self.notify(notif_pane::Notification {
+            id: 0,
+            app_name: "Desktop".to_string(),
+            title,
+            body: format!("{}: {why}", launch.display_line()),
+            timestamp: Self::unix_now(),
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            silent: false,
+        });
     }
 
     /// Answer whatever the Run box has asked for since it was last emptied, and
@@ -17568,6 +17641,124 @@ mod run_box_wiring_tests {
                 program: PathBuf::from("terminal"),
                 args: vec!["--title".into(), "two words".into()],
             }]
+        );
+    }
+
+    /// **A Run box line that cannot start brings the box back**, on the line
+    /// as it was typed and with why under it, so a typo is corrected rather
+    /// than typed again. It used to close on nothing having happened.
+    #[test]
+    fn a_run_box_line_that_cannot_start_brings_the_box_back() {
+        appearance::config::testing::with_scratch_config("run-box-failed", |_root| {
+            let mut s = shell();
+            drop(s.handle_hotkey(&super_r()));
+            let launches = run_line(&mut s, "/usr/bin/fierfox --new");
+            assert!(!s.run_dialog.is_visible(), "the box stayed up for a launch");
+            let [launch] = launches.as_slice() else {
+                panic!("not one launch: {launches:?}");
+            };
+            s.launch_failed(launch, "there is no such program");
+            assert!(s.run_dialog.is_visible(), "the box did not come back");
+            let drawn = format!("{:?}", s.render_run_dialog().expect("drawn"));
+            assert!(
+                drawn.contains("/usr/bin/fierfox --new"),
+                "the line is not back: {drawn}"
+            );
+            assert!(
+                drawn.contains("could not be started: there is no such program"),
+                "no word why: {drawn}"
+            );
+            assert!(
+                s.notifications.notifications().is_empty(),
+                "a notification as well as the box"
+            );
+        });
+    }
+
+    /// **Anything else that cannot start says so in a notification** -- a
+    /// pin, a start menu row, an icon -- naming the program and why. The Run
+    /// box stays shut: it asked for nothing.
+    #[test]
+    fn a_launch_that_cannot_start_says_so_in_a_notification() {
+        appearance::config::testing::with_scratch_config("launch-failed", |_root| {
+            let mut s = shell();
+            let launch = crate::hotkeys::Launch::program("/usr/bin/fierfox");
+            s.launch_failed(&launch, "there is no such program");
+            assert!(!s.run_dialog.is_visible(), "the Run box came up for a pin");
+            let said: Vec<(String, String)> = s
+                .notifications
+                .notifications()
+                .iter()
+                .map(|n| (n.title.clone(), n.body.clone()))
+                .collect();
+            assert_eq!(
+                said,
+                [(
+                    "Cannot start fierfox".to_string(),
+                    "/usr/bin/fierfox: there is no such program".to_string()
+                )]
+            );
+            assert_eq!(
+                s.notifications.attention_count(),
+                1,
+                "nothing to see on the bell"
+            );
+        });
+    }
+
+    /// **Only the box's own launch brings it back**, and only once: another
+    /// program failing is a notification even just after the box ran
+    /// something, and the box's launch failing a second time -- a report
+    /// that came twice -- does not open the box again over what the user is
+    /// now typing.
+    #[test]
+    fn only_the_run_boxs_own_launch_brings_it_back_and_only_once() {
+        appearance::config::testing::with_scratch_config("run-box-failed-once", |_root| {
+            let mut s = shell();
+            drop(s.handle_hotkey(&super_r()));
+            let launches = run_line(&mut s, "fierfox");
+            let [ran] = launches.as_slice() else {
+                panic!("not one launch: {launches:?}");
+            };
+            let other = crate::hotkeys::Launch::program("/usr/bin/calculator");
+            s.launch_failed(&other, "there is no such program");
+            assert!(
+                !s.run_dialog.is_visible(),
+                "another program's failure opened the box"
+            );
+            assert_eq!(s.notifications.notifications().len(), 1);
+
+            s.launch_failed(ran, "there is no such program");
+            assert!(
+                s.run_dialog.is_visible(),
+                "the box's own failure did not bring it back"
+            );
+            s.run_dialog.hide();
+            s.launch_failed(ran, "there is no such program");
+            assert!(
+                !s.run_dialog.is_visible(),
+                "the same failure opened the box twice"
+            );
+            assert_eq!(s.notifications.notifications().len(), 2);
+        });
+    }
+
+    /// **Why, in words for the person who asked**: the two a user can act on
+    /// said plainly, anything else in the system's own words.
+    #[test]
+    fn a_failed_launch_is_said_in_words_a_person_can_act_on() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            super::launch_failure_reason(&Error::from(ErrorKind::NotFound)),
+            "there is no such program"
+        );
+        assert_eq!(
+            super::launch_failure_reason(&Error::from(ErrorKind::PermissionDenied)),
+            "it is not allowed to run"
+        );
+        assert_eq!(
+            super::launch_failure_reason(&Error::other("the table is full")),
+            "the table is full"
         );
     }
 

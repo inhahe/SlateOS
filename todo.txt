@@ -56565,6 +56565,44 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
+## C-Q17: what is left of "wire the five up" (lane E, 2026-09-27)
+
+The operator answered C-Q17 (lane C's design-decisions §1423): the five
+finished-but-unreachable features are wired up, and where a live twin exists
+the survivor takes everything both could do. State, measured 2026-09-27:
+
+* installer bootloader setup -- wired (known-issues
+  `TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS`, fixed 09-25).
+* system information's hardware queries -- wired (fixed 09-15).
+* image viewer's video -- the code is gone; `apps/videoplayer` is the live
+  twin and had everything it did.
+* process explorer's six tools -- two wired (Environment, Memory); window
+  picker, wait analyzer and affinity wait on lanes F, A and A/D
+  (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`), priority
+  on `requests/e-ad-renicing-another-process-renices-the-caller.md`.
+* **settings' remote page (`apps/settings/src/remote.rs`, still under
+  `#![allow(dead_code)]`)** -- the one lane E can move now, in two halves:
+  - *Dynamic DNS.* The live page reads `/proc/dyndns` and cannot change
+    anything (`TD-C-DYNDNS-PAGE-IS-READ-ONLY`). The kernel's
+    `kernel/src/fs/dyndns.rs` only keeps state -- `update_now(id, ip)` records
+    "success" with an address it is handed; nothing in the kernel can make
+    the HTTP call a provider needs, and by the microkernel rule it should
+    not. So the fix is not the syscalls that entry proposed: a userspace
+    service (lane D) that reads a YAML config, asks the providers, and
+    publishes its status; Settings edits that config, with `remote.rs`'s
+    `ProviderSettings` (per-provider credential shapes) as the editor's model,
+    and the kernel module goes (lane A). Filed 2026-09-27 as
+    `requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`;
+    the editor follows once the shape is agreed.
+  - *Remote desktop access* (let others connect to this machine: port,
+    authentication, encryption, firewall/UPnP). No server exists to
+    configure: `apps/remotedesktop` is a VNC *client*, and the kernel's
+    `kernel/src/fs/remotedesktop.rs` is a settings-and-sessions model under
+    `#![allow(dead_code)]` with no encoder behind it. Wiring the page now
+    would be a panel of settings nothing reads. Needs: the server (whose?
+    the compositor's frames are lane F's), or an operator follow-up on
+    whether "wire it up" meant building one.
+
 ## ~~explorer: Ask when a pasted name is taken (lane E, 2026-09-27)~~ -- DONE 2026-09-27
 
 **Done:** the executor waits at a taken name and the window asks; "Ask each

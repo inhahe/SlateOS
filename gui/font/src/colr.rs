@@ -136,12 +136,11 @@ pub fn has_colour(face: &Face, gid: u16) -> bool {
         .is_some_and(|t| t.base_v1(gid).is_some() || t.base_v0(gid).is_some())
 }
 
-mod extents;
-
-/// The box HarfBuzz reports for a colour glyph -- its clip box, or its paint
-/// measured -- which it asks `COLR` for before any outline table: see
-/// [`extents`].
-pub(crate) use extents::glyph_extents;
+// The box HarfBuzz reports for a colour glyph -- its clip box, or its paint
+// measured -- which it asks `COLR` for before any outline table. A plain
+// comment, not a doc: an outer doc here would make rustdoc resolve the links
+// in the module's own `//!` doc from this scope instead of the module's.
+pub(crate) mod extents;
 
 /// Glyph `gid` of `face` painted in colour at `scale` pixels per font unit,
 /// at variation instance `coords`, with `foreground` (straight `0xAARRGGBB`)

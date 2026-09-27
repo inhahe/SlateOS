@@ -170800,7 +170800,7 @@ nested one).
 ### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26 -- **FIXED 2026-09-27**
 
 **Status:** FIXED 2026-09-27 (lane F). `Face::glyph_extents_at` asks `COLR`
-first, as HarfBuzz does (`colr::glyph_extents`). A glyph the `ClipList` covers
+first, as HarfBuzz does (`colr::extents::glyph_extents`). A glyph the `ClipList` covers
 reports its clip box, varied and rounded as `ClipBoxFormat2` does; any other
 colour glyph has its paint measured as `hb_paint_extents` measures it
 (`gui/font/src/colr/extents.rs`) -- a version-1 graph once HarfBuzz's bounded

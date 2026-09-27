@@ -2737,7 +2737,7 @@ impl Face {
     ///   for first: a bitmap glyph the box of its picture in the biggest
     ///   `sbix` or `CBDT` strike ([`crate::bitmap::glyph_extents`]), then a
     ///   `COLR` glyph its clip box, or else its paint measured
-    ///   ([`crate::colr::glyph_extents`]);
+    ///   ([`crate::colr::extents::glyph_extents`]);
     /// * in a face of pictures alone, a glyph neither table answers for has
     ///   no box at all -- there is no outline to measure -- which is `None`,
     ///   as HarfBuzz's is no answer;
@@ -2764,7 +2764,7 @@ impl Face {
         if let Some(extents) = crate::bitmap::glyph_extents(self, gid) {
             return Some(extents);
         }
-        if let Some(extents) = crate::colr::glyph_extents(self, gid, coords) {
+        if let Some(extents) = crate::colr::extents::glyph_extents(self, gid, coords) {
             return Some(extents);
         }
         if matches!(self.outlines, Outlines::Pictures) {

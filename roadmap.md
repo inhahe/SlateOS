@@ -4365,6 +4365,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] getifaddrs/freeifaddrs: interface address enumeration (eth0 + lo with IFF_UP/LOOPBACK/MULTICAST/BROADCAST flags)
   - [x] getpeername kernel fallback: queries SYS_TCP_PEER_ADDR when cached metadata unavailable (dup'd fds)
   - [x] getifaddrs real IP: queries SYS_NET_IF_INFO to populate eth0 address and netmask (was INADDR_ANY)
+  - [x] getifaddrs as glibc's (lane D, 2026-09-27): an `AF_PACKET` entry per link (`sockaddr_ll`, broadcast MAC, `rtnl_link_stats` from `SYS_NET_STAT`), `IFF_LOWER_UP`, `lo`'s point-to-point address, a down `eth0` keeps its address
   - [x] getservbyname/getservbyport: built-in service database (27 entries: http, https, ssh, ftp, smtp, dns, mysql, postgresql, redis, etc.)
   - [x] netdb databases as glibc's `nss_files` (lane D, 2026-09-27): `/etc/services`, `/etc/protocols`, `/etc/networks`, `/etc/ethers` read by `files-parse.c`'s rules, built-in copies when missing (§1127); every `_r` form; per-thread results and enumerations
   - [x] hosts database as glibc's `files dns` (lane D, 2026-09-27): numbers, `/etc/hosts` and `/etc/host.conf` (`multi`/`reorder`/`trim`), then the kernel's resolver (§1128); `gethostbyname{,2}{,_r}`, `gethostbyaddr{,_r}`, `gethostent` family, glibc's `herror`/`hstrerror`

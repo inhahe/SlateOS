@@ -53,6 +53,8 @@ pub const AF_LOCAL: i32 = AF_UNIX;
 pub const AF_INET: i32 = 2;
 /// IPv6 Internet protocols.
 pub const AF_INET6: i32 = 10;
+/// Link-level addresses (`sockaddr_ll`), as `getifaddrs` gives a link's.
+pub const AF_PACKET: i32 = 17;
 /// Protocol family aliases.
 pub const PF_UNIX: i32 = AF_UNIX;
 /// IPv4 (alias).
@@ -4180,14 +4182,15 @@ pub struct Ifaddrs {
     pub ifa_addr: *const Sockaddr,
     /// Network mask.
     pub ifa_netmask: *const Sockaddr,
-    /// Broadcast address (the union's other member is a point-to-point
-    /// link's destination, which neither interface here is).
+    /// Broadcast address -- or the union's other member, the far end of a
+    /// point-to-point link, which is how glibc reads the loopback's.
     pub ifa_broadaddr: *const Sockaddr,
-    /// Interface-specific data: NULL for an `AF_INET` entry, as in glibc.
+    /// A link entry's counters, an [`RtnlLinkStats`]; NULL for an address
+    /// entry, as in glibc.
     pub ifa_data: *const u8,
 }
 
-// Interface flags.
+// Interface flags, as Linux numbers them.
 /// Interface is up.
 pub const IFF_UP: u32 = 1;
 /// Interface is a loopback.
@@ -4198,15 +4201,141 @@ pub const IFF_MULTICAST: u32 = 0x1000;
 pub const IFF_RUNNING: u32 = 0x40;
 /// Interface supports broadcast.
 pub const IFF_BROADCAST: u32 = 2;
+/// The link has carrier.  Past the sixteen bits `SIOCGIFFLAGS` carries, but
+/// in the flags `getifaddrs` reports, which glibc takes from netlink.
+pub const IFF_LOWER_UP: u32 = 0x1_0000;
 
-/// One `getifaddrs` entry: the list node and everything it points at.
+/// `sll_hatype` of an Ethernet link (`net/if_arp.h`).
+pub const ARPHRD_ETHER: u16 = 1;
+/// `sll_hatype` of the loopback (`net/if_arp.h`).
+pub const ARPHRD_LOOPBACK: u16 = 772;
+
+/// `struct sockaddr_ll` (`netpacket/packet.h`): a link-level address, as a
+/// link's [`getifaddrs`] entry gives its hardware and broadcast addresses.
 #[repr(C)]
-struct IfaddrsEntry {
+#[derive(Clone, Copy)]
+pub struct SockaddrLl {
+    /// `AF_PACKET`.
+    pub sll_family: u16,
+    /// Link-level protocol, network byte order: 0 in a `getifaddrs` entry.
+    pub sll_protocol: u16,
+    /// The interface's index.
+    pub sll_ifindex: i32,
+    /// The link's type: an `ARPHRD_*` number.
+    pub sll_hatype: u16,
+    /// Packet type: 0 in a `getifaddrs` entry.
+    pub sll_pkttype: u8,
+    /// How many bytes of `sll_addr` are the address.
+    pub sll_halen: u8,
+    /// The address, zero-padded.
+    pub sll_addr: [u8; 8],
+}
+
+/// `struct rtnl_link_stats` (`linux/if_link.h`): a link's counters, which a
+/// link's [`getifaddrs`] entry points `ifa_data` at.  Thirty-two bits wide,
+/// as Linux's are: a count past 2^32 shows its low half.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RtnlLinkStats {
+    /// Packets received.
+    pub rx_packets: u32,
+    /// Packets sent.
+    pub tx_packets: u32,
+    /// Bytes received.
+    pub rx_bytes: u32,
+    /// Bytes sent.
+    pub tx_bytes: u32,
+    /// Bad packets received.
+    pub rx_errors: u32,
+    /// Packets that could not be sent.
+    pub tx_errors: u32,
+    /// Packets received and dropped.
+    pub rx_dropped: u32,
+    /// Packets dropped before they were sent.
+    pub tx_dropped: u32,
+    /// Multicast packets received.
+    pub multicast: u32,
+    /// Collisions.
+    pub collisions: u32,
+    /// Receive errors: a bad length.
+    pub rx_length_errors: u32,
+    /// Receive errors: the ring overflowed.
+    pub rx_over_errors: u32,
+    /// Receive errors: a bad CRC.
+    pub rx_crc_errors: u32,
+    /// Receive errors: a misaligned frame.
+    pub rx_frame_errors: u32,
+    /// Receive errors: the FIFO overran.
+    pub rx_fifo_errors: u32,
+    /// Receive errors: missed by the receiver.
+    pub rx_missed_errors: u32,
+    /// Send errors: aborted.
+    pub tx_aborted_errors: u32,
+    /// Send errors: the carrier was lost.
+    pub tx_carrier_errors: u32,
+    /// Send errors: the FIFO underran.
+    pub tx_fifo_errors: u32,
+    /// Send errors: no heartbeat.
+    pub tx_heartbeat_errors: u32,
+    /// Send errors: a late collision.
+    pub tx_window_errors: u32,
+    /// Compressed packets received.
+    pub rx_compressed: u32,
+    /// Compressed packets sent.
+    pub tx_compressed: u32,
+    /// Packets received and dropped for want of a protocol to take them.
+    pub rx_nohandler: u32,
+}
+
+/// A link's `getifaddrs` entry: the node and everything it points at.
+#[repr(C)]
+struct LinkEntry {
+    node: Ifaddrs,
+    addr: SockaddrLl,
+    broadaddr: SockaddrLl,
+    stats: RtnlLinkStats,
+    name: [u8; IF_NAMESIZE],
+}
+
+/// An address's `getifaddrs` entry: the node and everything it points at.
+#[repr(C)]
+struct InetEntry {
     node: Ifaddrs,
     addr: SockaddrIn,
     netmask: SockaddrIn,
     broadaddr: SockaddrIn,
     name: [u8; IF_NAMESIZE],
+}
+
+/// One `getifaddrs` list, in one allocation so that [`freeifaddrs`] is
+/// `free`: each link's entry, then each address's.  The list's head, the
+/// first link's node, is at offset 0.
+#[repr(C)]
+struct IfaddrsBlock {
+    links: [LinkEntry; INTERFACES.len()],
+    inet: [InetEntry; INTERFACES.len()],
+}
+
+/// A link's `getifaddrs` entry, before it is laid out.
+struct LinkRow {
+    name: &'static [u8],
+    index: i32,
+    flags: u32,
+    hatype: u16,
+    /// Its hardware address, and the one that reaches every station.
+    addr: [u8; 6],
+    broadcast: [u8; 6],
+    stats: RtnlLinkStats,
+}
+
+/// An address's `getifaddrs` entry, before it is laid out.
+struct InetRow {
+    name: &'static [u8],
+    flags: u32,
+    /// Address, mask and broadcast address, network byte order.
+    addr: u32,
+    mask: u32,
+    broadcast: u32,
 }
 
 /// An IPv4 address or mask, in network byte order, as a `sockaddr_in`.
@@ -4219,122 +4348,335 @@ fn inet_sockaddr(s_addr: u32) -> SockaddrIn {
     }
 }
 
-/// One `getifaddrs` entry's contents, before it is laid out.
-#[derive(Clone, Copy)]
-struct InetRow {
-    name: &'static [u8],
-    flags: u32,
-    /// Address, mask and broadcast address, network byte order.
-    addr: u32,
-    mask: u32,
-    broadcast: Option<u32>,
+/// One of `link`'s hardware addresses, as a `sockaddr_ll`.
+fn link_sockaddr(link: &LinkRow, hw: [u8; 6]) -> SockaddrLl {
+    let mut sll_addr = [0u8; 8];
+    for (to, from) in sll_addr.iter_mut().zip(hw) {
+        *to = from;
+    }
+    SockaddrLl {
+        sll_family: AF_PACKET as u16,
+        sll_protocol: 0,
+        sll_ifindex: link.index,
+        sll_hatype: link.hatype,
+        sll_pkttype: 0,
+        sll_halen: 6,
+        sll_addr,
+    }
 }
 
-/// `getifaddrs`'s list, in one allocation: `lo`, then `eth0` if it has an
-/// address -- `Some((address, mask))`, network byte order.  NULL if memory
-/// ran out.
-fn build_ifaddrs(eth0: Option<(u32, u32)>) -> *mut Ifaddrs {
-    let lo = InetRow {
-        name: b"lo",
-        flags: IFF_UP | IFF_LOOPBACK | IFF_RUNNING,
-        addr: u32::to_be(INADDR_LOOPBACK),
-        mask: u32::to_be(0xFF00_0000),
-        broadcast: None,
-    };
-    let (count, second) = match eth0 {
-        Some((addr, mask)) => (
-            2,
-            InetRow {
-                name: b"eth0",
-                flags: IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST,
-                addr,
-                mask,
-                broadcast: Some(addr | !mask),
-            },
-        ),
-        None => (1, lo),
-    };
-    let rows = [lo, second];
-    let block = crate::malloc::calloc(count, size_of::<IfaddrsEntry>()).cast::<IfaddrsEntry>();
+/// The loopback's flags, as Linux reports them.
+const LO_FLAGS: u32 = IFF_UP | IFF_LOOPBACK | IFF_RUNNING | IFF_LOWER_UP;
+
+/// `eth0`'s flags: an Ethernet link's, and up, running and with carrier
+/// while the kernel has it up -- the kernel reports no carrier of its own.
+fn eth0_flags(up: bool) -> u32 {
+    let link = IFF_BROADCAST | IFF_MULTICAST;
+    if up {
+        link | IFF_UP | IFF_RUNNING | IFF_LOWER_UP
+    } else {
+        link
+    }
+}
+
+/// The broadcast address glibc reports for `eth0`'s address and mask
+/// (network byte order).  The kernel keeps none, so this is what a Linux
+/// system configured the same way reports: the subnet's all-ones address --
+/// except for a /31 or /32, which Linux gives no broadcast address (RFC
+/// 3021; `ip addr ... brd +` sets none), and then glibc, reading the netlink
+/// answer as a point-to-point link's, reports the address itself.
+fn broadcast_for(addr: u32, mask: u32) -> u32 {
+    if mask.count_ones() >= 31 {
+        addr
+    } else {
+        addr | !mask
+    }
+}
+
+/// Write a link's entry at `e`, ahead of `next`; answer its node.
+///
+/// # Safety
+///
+/// `e` is valid to write a `LinkEntry`, is zeroed, and lives as long as the
+/// list does.
+unsafe fn write_link(e: *mut LinkEntry, row: &LinkRow, next: *mut Ifaddrs) -> *mut Ifaddrs {
+    // SAFETY: the caller's contract.  Each field is written through its own
+    // place; the name fits with the NUL the zeroed entry already holds
+    // (`IF_NAMESIZE` counts it, and no name here is longer than four).
+    unsafe {
+        core::ptr::addr_of_mut!((*e).addr).write(link_sockaddr(row, row.addr));
+        core::ptr::addr_of_mut!((*e).broadaddr).write(link_sockaddr(row, row.broadcast));
+        core::ptr::addr_of_mut!((*e).stats).write(row.stats);
+        let name = core::ptr::addr_of_mut!((*e).name).cast::<u8>();
+        core::ptr::copy_nonoverlapping(row.name.as_ptr(), name, row.name.len());
+        core::ptr::addr_of_mut!((*e).node).write(Ifaddrs {
+            ifa_next: next,
+            ifa_name: name,
+            ifa_flags: row.flags,
+            ifa_addr: core::ptr::addr_of!((*e).addr).cast::<Sockaddr>(),
+            ifa_netmask: core::ptr::null(),
+            ifa_broadaddr: core::ptr::addr_of!((*e).broadaddr).cast::<Sockaddr>(),
+            ifa_data: core::ptr::addr_of!((*e).stats).cast::<u8>(),
+        });
+        core::ptr::addr_of_mut!((*e).node)
+    }
+}
+
+/// Write an address's entry at `e`, ahead of `next`; answer its node.
+///
+/// # Safety
+///
+/// As for [`write_link`], with an `InetEntry`.
+unsafe fn write_inet(e: *mut InetEntry, row: &InetRow, next: *mut Ifaddrs) -> *mut Ifaddrs {
+    // SAFETY: as in `write_link`.
+    unsafe {
+        core::ptr::addr_of_mut!((*e).addr).write(inet_sockaddr(row.addr));
+        core::ptr::addr_of_mut!((*e).netmask).write(inet_sockaddr(row.mask));
+        core::ptr::addr_of_mut!((*e).broadaddr).write(inet_sockaddr(row.broadcast));
+        let name = core::ptr::addr_of_mut!((*e).name).cast::<u8>();
+        core::ptr::copy_nonoverlapping(row.name.as_ptr(), name, row.name.len());
+        core::ptr::addr_of_mut!((*e).node).write(Ifaddrs {
+            ifa_next: next,
+            ifa_name: name,
+            ifa_flags: row.flags,
+            ifa_addr: core::ptr::addr_of!((*e).addr).cast::<Sockaddr>(),
+            ifa_netmask: core::ptr::addr_of!((*e).netmask).cast::<Sockaddr>(),
+            ifa_broadaddr: core::ptr::addr_of!((*e).broadaddr).cast::<Sockaddr>(),
+            ifa_data: core::ptr::null(),
+        });
+        core::ptr::addr_of_mut!((*e).node)
+    }
+}
+
+/// `getifaddrs`'s list for this `eth0`, whose counters are `stats`: `lo`'s
+/// link and `eth0`'s, then `lo`'s address and `eth0`'s if it has one --
+/// glibc's order, which is netlink's.  NULL if memory ran out.
+fn build_ifaddrs(nic: Nic, stats: RtnlLinkStats) -> *mut Ifaddrs {
+    let eth0 = eth0_flags(nic.up);
+    let links: [LinkRow; INTERFACES.len()] = [
+        LinkRow {
+            name: b"lo",
+            index: 1,
+            flags: LO_FLAGS,
+            hatype: ARPHRD_LOOPBACK,
+            addr: [0; 6],
+            broadcast: [0; 6],
+            // The kernel counts no loopback traffic.
+            stats: RtnlLinkStats::default(),
+        },
+        LinkRow {
+            name: b"eth0",
+            index: 2,
+            flags: eth0,
+            hatype: ARPHRD_ETHER,
+            addr: nic.mac,
+            broadcast: [0xff; 6],
+            stats,
+        },
+    ];
+    let loopback = u32::to_be(INADDR_LOOPBACK);
+    let addresses: [Option<InetRow>; INTERFACES.len()] = [
+        Some(InetRow {
+            name: b"lo",
+            flags: LO_FLAGS,
+            addr: loopback,
+            mask: u32::to_be(0xFF00_0000),
+            // Linux gives the loopback's address no broadcast address, and
+            // glibc reads the netlink answer as a point-to-point link's.
+            broadcast: loopback,
+        }),
+        // An address stays on a link that is down, and Linux lists it.
+        (nic.ip != 0).then(|| InetRow {
+            name: b"eth0",
+            flags: eth0,
+            addr: nic.ip,
+            mask: nic.mask,
+            broadcast: broadcast_for(nic.ip, nic.mask),
+        }),
+    ];
+    let block = crate::malloc::calloc(1, size_of::<IfaddrsBlock>()).cast::<IfaddrsBlock>();
     if block.is_null() {
         return core::ptr::null_mut();
     }
-    // SAFETY: `block` is a fresh, zeroed allocation of `count` entries
-    // (malloc's alignment suits them), used by nothing else; each pointer
-    // written points into the same block, which lives until `freeifaddrs`.
+    // SAFETY: `block` is a fresh, zeroed allocation of one `IfaddrsBlock`
+    // (malloc's alignment suits it), used by nothing else.  `links` and
+    // `addresses` have as many rows as the block has entries of each kind,
+    // so every index is in bounds, and each entry is written once.
     unsafe {
+        let link_at = core::ptr::addr_of_mut!((*block).links).cast::<LinkEntry>();
+        let inet_at = core::ptr::addr_of_mut!((*block).inet).cast::<InetEntry>();
         // Last entry first, so each node's `ifa_next` is the one just written.
         let mut next: *mut Ifaddrs = core::ptr::null_mut();
-        for (k, row) in rows.iter().take(count).enumerate().rev() {
-            let e = block.add(k);
-            core::ptr::addr_of_mut!((*e).addr).write(inet_sockaddr(row.addr));
-            core::ptr::addr_of_mut!((*e).netmask).write(inet_sockaddr(row.mask));
-            let broadaddr = match row.broadcast {
-                Some(b) => {
-                    core::ptr::addr_of_mut!((*e).broadaddr).write(inet_sockaddr(b));
-                    core::ptr::addr_of!((*e).broadaddr).cast::<Sockaddr>()
-                }
-                None => core::ptr::null(),
-            };
-            let slot = core::ptr::addr_of_mut!((*e).name).cast::<u8>();
-            core::ptr::copy_nonoverlapping(row.name.as_ptr(), slot, row.name.len());
-            core::ptr::addr_of_mut!((*e).node).write(Ifaddrs {
-                ifa_next: next,
-                ifa_name: slot,
-                ifa_flags: row.flags,
-                ifa_addr: core::ptr::addr_of!((*e).addr).cast::<Sockaddr>(),
-                ifa_netmask: core::ptr::addr_of!((*e).netmask).cast::<Sockaddr>(),
-                ifa_broadaddr: broadaddr,
-                ifa_data: core::ptr::null(),
-            });
-            next = core::ptr::addr_of_mut!((*e).node);
+        for (k, row) in addresses.iter().enumerate().rev() {
+            if let Some(row) = row {
+                next = write_inet(inet_at.add(k), row, next);
+            }
+        }
+        for (k, row) in links.iter().enumerate().rev() {
+            next = write_link(link_at.add(k), row, next);
         }
         next
     }
 }
 
-/// `eth0`'s address, mask and gateway, network byte order, when it is up and
-/// has an address.  The kernel's record: [0..4] address, [4..8] mask and
-/// [8..12] gateway, in network byte order, [22] bit 0 up
-/// (`sys_net_if_info`).
-fn eth0_info() -> Option<(u32, u32, u32)> {
+/// `eth0` as the kernel describes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Nic {
+    /// The kernel found a NIC, and nothing has set it down.
+    up: bool,
+    /// Its hardware address: all zero when the kernel found no NIC.
+    mac: [u8; 6],
+    /// Address, mask and gateway, network byte order.  The address is 0
+    /// until DHCP has answered.
+    ip: u32,
+    mask: u32,
+    gateway: u32,
+}
+
+impl Nic {
+    /// What the kernel describes when it found no NIC.
+    const NONE: Self = Self {
+        up: false,
+        mac: [0; 6],
+        ip: 0,
+        mask: 0,
+        gateway: 0,
+    };
+}
+
+/// `eth0`, from the kernel's record: [0..4] address, [4..8] mask, [8..12]
+/// gateway, [12..16] DNS server -- network byte order -- [16..22] hardware
+/// address, [22] bit 0 up (`sys_net_if_info`).  A kernel that does not
+/// answer is taken for a machine with no NIC.
+fn nic() -> Nic {
     #[cfg(test)]
     {
         // SAFETY: this thread's stand-in.
-        unsafe { *test_eth0() }
+        unsafe { *test_nic() }
     }
     #[cfg(not(test))]
     {
         let mut info = [0u8; 24];
-        let answered = syscall2(SYS_NET_IF_INFO, info.as_mut_ptr() as u64, info.len() as u64) == 0;
+        if syscall2(SYS_NET_IF_INFO, info.as_mut_ptr() as u64, info.len() as u64) != 0 {
+            return Nic::NONE;
+        }
         let word = |range: core::ops::Range<usize>| {
             info.get(range)
                 .and_then(|b| <[u8; 4]>::try_from(b).ok())
                 .map_or(0, u32::from_ne_bytes)
         };
-        let (ip, mask, gw) = (word(0..4), word(4..8), word(8..12));
-        let up = info.get(22).is_some_and(|&f| f & 1 != 0);
-        (answered && up && ip != 0).then_some((ip, mask, gw))
+        Nic {
+            up: info.get(22).is_some_and(|&f| f & 1 != 0),
+            mac: info
+                .get(16..22)
+                .and_then(|b| <[u8; 6]>::try_from(b).ok())
+                .unwrap_or_default(),
+            ip: word(0..4),
+            mask: word(4..8),
+            gateway: word(8..12),
+        }
+    }
+}
+
+/// The kernel's six counters for the NIC (`SYS_NET_STAT`, source 1): bytes,
+/// packets and errors sent, bytes and packets received, and received
+/// packets dropped.  `None` if it does not answer.
+fn nic_counters() -> Option<[u64; 6]> {
+    #[cfg(test)]
+    {
+        // SAFETY: this thread's stand-in.
+        unsafe { *test_nic_counters() }
+    }
+    #[cfg(not(test))]
+    {
+        let mut raw = [0u8; 48];
+        if syscall2(SYS_NET_STAT, raw.as_mut_ptr() as u64, 1) != 0 {
+            return None;
+        }
+        let mut counters = [0u64; 6];
+        for (counter, bytes) in counters.iter_mut().zip(raw.chunks_exact(8)) {
+            *counter = <[u8; 8]>::try_from(bytes).map_or(0, u64::from_le_bytes);
+        }
+        Some(counters)
+    }
+}
+
+/// A 64-bit counter's low half, as Linux's `copy_rtnl_link_stats` keeps it
+/// when it fills the 32-bit `rtnl_link_stats`.
+#[allow(clippy::cast_possible_truncation)] // the truncation is the point
+fn low32(count: u64) -> u32 {
+    count as u32
+}
+
+/// `eth0`'s counters as `rtnl_link_stats` carries them: the kernel's own
+/// for the NIC, each cut to 32 bits; zero where the kernel keeps no count,
+/// and all zero if it does not answer.
+fn nic_stats() -> RtnlLinkStats {
+    let Some(
+        [
+            tx_bytes,
+            tx_packets,
+            tx_errors,
+            rx_bytes,
+            rx_packets,
+            rx_drops,
+        ],
+    ) = nic_counters()
+    else {
+        return RtnlLinkStats::default();
+    };
+    RtnlLinkStats {
+        rx_packets: low32(rx_packets),
+        tx_packets: low32(tx_packets),
+        rx_bytes: low32(rx_bytes),
+        tx_bytes: low32(tx_bytes),
+        tx_errors: low32(tx_errors),
+        rx_dropped: low32(rx_drops),
+        ..RtnlLinkStats::default()
     }
 }
 
 #[cfg(test)]
 crate::perprocess::process_global! {
-    /// The host tests' `eth0`: none unless a test gives one.
-    fn test_eth0() -> Option<(u32, u32, u32)> = None;
+    /// The host tests' NIC: none unless a test gives one.
+    fn test_nic() -> Nic = Nic::NONE;
+    /// The host tests' NIC counters: none unless a test gives them.
+    fn test_nic_counters() -> Option<[u64; 6]> = None;
 }
 
-/// Give this host test thread an `eth0` (address, mask, gateway; network
-/// byte order), or none.
+/// Give this host test thread a NIC, and counters for it.
+#[cfg(test)]
+fn set_test_nic(nic: Nic, counters: Option<[u64; 6]>) {
+    // SAFETY: this thread's stand-ins.
+    unsafe {
+        *test_nic() = nic;
+        *test_nic_counters() = counters;
+    }
+}
+
+/// Give this host test thread an `eth0` that is up, with QEMU's MAC and
+/// this address, mask and gateway (network byte order) -- or, for `None`,
+/// no address yet.
 #[cfg(test)]
 pub(crate) fn set_test_eth0(eth0: Option<(u32, u32, u32)>) {
-    // SAFETY: this thread's stand-in.
-    unsafe { *test_eth0() = eth0 };
+    let (ip, mask, gateway) = eth0.unwrap_or((0, 0, 0));
+    set_test_nic(
+        Nic {
+            up: true,
+            mac: [0x52, 0x54, 0, 0x12, 0x34, 0x56],
+            ip,
+            mask,
+            gateway,
+        },
+        None,
+    );
 }
 
-/// `eth0`'s address and mask, when it is up and has an address.
-fn eth0_address() -> Option<(u32, u32)> {
-    eth0_info().map(|(ip, mask, _)| (ip, mask))
+/// `eth0`'s address, mask and gateway, network byte order, when it can
+/// carry traffic: up, and with an address.
+fn eth0_info() -> Option<(u32, u32, u32)> {
+    let nic = nic();
+    (nic.up && nic.ip != 0).then_some((nic.ip, nic.mask, nic.gateway))
 }
 
 /// The address a connection to `peer` (network byte order) goes out from,
@@ -4358,22 +4700,38 @@ pub(crate) fn route_source(peer: u32) -> Option<u32> {
 }
 
 /// Each interface's IPv4 address and mask, network byte order, as
-/// `getifaddrs` lists them: the loopback, then `eth0` when it is up.
+/// `getifaddrs` lists them: the loopback's, then `eth0`'s if it has one --
+/// up or not, as Linux keeps an address on a link that is down and lists it
+/// (glibc's `check_pf`, and `SIOCGIFCONF`, count it).
 pub(crate) fn for_each_ipv4_interface(mut f: impl FnMut(u32, u32)) {
     f(u32::to_be(INADDR_LOOPBACK), u32::to_be(0xFF00_0000));
-    if let Some((ip, mask)) = eth0_address() {
-        f(ip, mask);
+    let nic = nic();
+    if nic.ip != 0 {
+        f(nic.ip, nic.mask);
     }
 }
 
 /// Retrieve a linked list of network interface addresses.
 ///
-/// Each call allocates its own list, freed with [`freeifaddrs`]: the
-/// loopback, `lo`, 127.0.0.1/8, and then `eth0` with the address and mask
-/// the kernel reports -- if it is up and has one -- and its broadcast
-/// address. `AF_INET` entries only: glibc also lists an `AF_PACKET` entry per
-/// interface (its hardware address, and link statistics in `ifa_data`), which
-/// this does not (`todo.txt`, lane D).
+/// Each call allocates its own list, freed with [`freeifaddrs`], in glibc's
+/// order -- which is netlink's: each link's `AF_PACKET` entry, then each
+/// address's `AF_INET` entry.
+///
+/// | Entry | `ifa_addr` | `ifa_broadaddr` | `ifa_data` |
+/// |---|---|---|---|
+/// | `lo`, `AF_PACKET` | `ARPHRD_LOOPBACK`, a zero address | the same | its [`RtnlLinkStats`]: zero, as the kernel counts no loopback traffic |
+/// | `eth0`, `AF_PACKET` | `ARPHRD_ETHER`, the NIC's MAC | `ff:ff:ff:ff:ff:ff` | the NIC's counters |
+/// | `lo`, `AF_INET` | 127.0.0.1, mask 255.0.0.0 | 127.0.0.1: glibc reads the loopback as a point-to-point link | NULL |
+/// | `eth0`, `AF_INET`, while it has an address, up or not | its address and mask | the subnet's broadcast address ([`broadcast_for`]) | NULL |
+///
+/// A link entry's `ifa_addr` and `ifa_broadaddr` are `sockaddr_ll`s
+/// ([`SockaddrLl`]) and its `ifa_netmask` is NULL.  `eth0`'s flags are an
+/// Ethernet link's, `IFF_BROADCAST | IFF_MULTICAST`, with `IFF_UP |
+/// IFF_RUNNING | IFF_LOWER_UP` while the kernel has it up; `lo`'s are
+/// `IFF_UP | IFF_LOOPBACK | IFF_RUNNING | IFF_LOWER_UP`.  `eth0` is listed
+/// even when the kernel found no NIC -- down, with a zero MAC -- as
+/// [`if_nameindex`] lists it.  No `AF_INET6` entries: this system has no
+/// IPv6.
 ///
 /// Returns 0, or -1 with `EFAULT` for a NULL `ifap` or `ENOMEM`.
 ///
@@ -4386,7 +4744,7 @@ pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    let list = build_ifaddrs(eth0_address());
+    let list = build_ifaddrs(nic(), nic_stats());
     if list.is_null() {
         errno::set_errno(errno::ENOMEM);
         return -1;
@@ -5216,75 +5574,287 @@ mod tests {
         unsafe { if_freenameindex(core::ptr::null_mut()) };
     }
 
-    // -- getifaddrs / freeifaddrs --
+    // -- getifaddrs / freeifaddrs, against glibc --
 
-    /// The `sockaddr_in` at `sa`, as (family, address in network order).
-    fn inet_of(sa: *const Sockaddr) -> (u16, u32) {
-        assert!(!sa.is_null());
-        // SAFETY: every address getifaddrs hands out is a `SockaddrIn`.
-        let sin = unsafe { &*sa.cast::<SockaddrIn>() };
-        (sin.sin_family, sin.sin_addr.s_addr)
+    /// What `dlm/oracle/ifaddrs_oracle.c` printed for glibc 2.39's
+    /// `getifaddrs` in network sandboxes shaped like this system -- `lo`,
+    /// and a veth named `eth0` with QEMU's MAC and DHCP address
+    /// (`dlm/oracle/ifaddrs_run.sh`; the veth's peer left out, IPv6 off).
+    /// `eth0` up, 10.0.2.15/24 with its broadcast address:
+    const GLIBC_UP: &[&str] = &[
+        "name=lo family=17 flags=0x10049 addr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) netmask=- broadaddr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) data=stats",
+        "name=eth0 family=17 flags=0x11043 addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=52:54:00:12:34:56:00:00) netmask=- broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) data=stats",
+        "name=lo family=2 flags=0x10049 addr=in(127.0.0.1,port=0,zero=0000000000000000) netmask=in(255.0.0.0,port=0,zero=0000000000000000) broadaddr=in(127.0.0.1,port=0,zero=0000000000000000) data=-",
+        "name=eth0 family=2 flags=0x11043 addr=in(10.0.2.15,port=0,zero=0000000000000000) netmask=in(255.255.255.0,port=0,zero=0000000000000000) broadaddr=in(10.0.2.255,port=0,zero=0000000000000000) data=-",
+    ];
+
+    /// The same, with `eth0` then set down: it keeps its address.
+    const GLIBC_DOWN: &[&str] = &[
+        "name=lo family=17 flags=0x10049 addr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) netmask=- broadaddr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) data=stats",
+        "name=eth0 family=17 flags=0x1002 addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=52:54:00:12:34:56:00:00) netmask=- broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) data=stats",
+        "name=lo family=2 flags=0x10049 addr=in(127.0.0.1,port=0,zero=0000000000000000) netmask=in(255.0.0.0,port=0,zero=0000000000000000) broadaddr=in(127.0.0.1,port=0,zero=0000000000000000) data=-",
+        "name=eth0 family=2 flags=0x1002 addr=in(10.0.2.15,port=0,zero=0000000000000000) netmask=in(255.255.255.0,port=0,zero=0000000000000000) broadaddr=in(10.0.2.255,port=0,zero=0000000000000000) data=-",
+    ];
+
+    /// `eth0` up, before DHCP has answered.
+    const GLIBC_NO_ADDRESS: &[&str] = &[
+        "name=lo family=17 flags=0x10049 addr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) netmask=- broadaddr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) data=stats",
+        "name=eth0 family=17 flags=0x11043 addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=52:54:00:12:34:56:00:00) netmask=- broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) data=stats",
+        "name=lo family=2 flags=0x10049 addr=in(127.0.0.1,port=0,zero=0000000000000000) netmask=in(255.0.0.0,port=0,zero=0000000000000000) broadaddr=in(127.0.0.1,port=0,zero=0000000000000000) data=-",
+    ];
+
+    /// `eth0` up with 10.0.2.15/31, which Linux gives no broadcast address.
+    const GLIBC_SLASH_31: &[&str] = &[
+        "name=lo family=17 flags=0x10049 addr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) netmask=- broadaddr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) data=stats",
+        "name=eth0 family=17 flags=0x11043 addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=52:54:00:12:34:56:00:00) netmask=- broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) data=stats",
+        "name=lo family=2 flags=0x10049 addr=in(127.0.0.1,port=0,zero=0000000000000000) netmask=in(255.0.0.0,port=0,zero=0000000000000000) broadaddr=in(127.0.0.1,port=0,zero=0000000000000000) data=-",
+        "name=eth0 family=2 flags=0x11043 addr=in(10.0.2.15,port=0,zero=0000000000000000) netmask=in(255.255.255.254,port=0,zero=0000000000000000) broadaddr=in(10.0.2.15,port=0,zero=0000000000000000) data=-",
+    ];
+
+    /// QEMU's MAC, which the oracle's `eth0` was given.
+    const QEMU_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+    /// An `eth0` as QEMU's user network makes it: 10.0.2.15, gateway
+    /// 10.0.2.2, with this mask.
+    fn qemu_nic(up: bool, mask: [u8; 4]) -> Nic {
+        Nic {
+            up,
+            mac: QEMU_MAC,
+            ip: u32::from_ne_bytes([10, 0, 2, 15]),
+            mask: u32::from_ne_bytes(mask),
+            gateway: u32::from_ne_bytes([10, 0, 2, 2]),
+        }
     }
 
-    /// With the NIC down (as on the host, where the kernel's record is not
-    /// there to read), the list is the loopback alone.
-    #[test]
-    fn getifaddrs_lists_the_loopback() {
+    /// A `sockaddr`, as the oracle prints it, onto `out`.
+    fn oracle_sockaddr(out: &mut String, tag: &str, sa: *const Sockaddr) {
+        use core::fmt::Write as _;
+        // `write!` to a `String` cannot fail.
+        if sa.is_null() {
+            let _ = write!(out, " {tag}=-");
+            return;
+        }
+        let family = i32::from(unsafe { (*sa).sa_family });
+        if family == AF_INET {
+            let sin = unsafe { &*sa.cast::<SockaddrIn>() };
+            let [a, b, c, d] = sin.sin_addr.s_addr.to_ne_bytes();
+            let port = u16::from_be(sin.sin_port);
+            let _ = write!(out, " {tag}=in({a}.{b}.{c}.{d},port={port},zero=");
+            for z in sin.sin_zero {
+                let _ = write!(out, "{z:02x}");
+            }
+        } else if family == AF_PACKET {
+            let ll = unsafe { &*sa.cast::<SockaddrLl>() };
+            let _ = write!(
+                out,
+                " {tag}=ll(proto={},ifindex={},hatype={},pkttype={},halen={},addr=",
+                u16::from_be(ll.sll_protocol),
+                ll.sll_ifindex,
+                ll.sll_hatype,
+                ll.sll_pkttype,
+                ll.sll_halen
+            );
+            for (k, x) in ll.sll_addr.iter().enumerate() {
+                let _ = write!(out, "{}{x:02x}", if k == 0 { "" } else { ":" });
+            }
+        } else {
+            let _ = write!(out, " {tag}=family{family}");
+            return;
+        }
+        out.push(')');
+    }
+
+    /// A list as the oracle prints it, one line per entry; the list freed.
+    fn oracle_lines(list: *mut Ifaddrs) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut at = list;
+        while !at.is_null() {
+            let a = unsafe { &*at };
+            let name = core::str::from_utf8(unsafe { c_str_to_slice(a.ifa_name) }).unwrap_or("?");
+            let family = if a.ifa_addr.is_null() {
+                0
+            } else {
+                unsafe { (*a.ifa_addr).sa_family }
+            };
+            let mut line = format!("name={name} family={family} flags={:#x}", a.ifa_flags);
+            oracle_sockaddr(&mut line, "addr", a.ifa_addr);
+            oracle_sockaddr(&mut line, "netmask", a.ifa_netmask);
+            oracle_sockaddr(&mut line, "broadaddr", a.ifa_broadaddr);
+            line.push_str(if a.ifa_data.is_null() {
+                " data=-"
+            } else {
+                " data=stats"
+            });
+            lines.push(line);
+            at = a.ifa_next;
+        }
+        unsafe { freeifaddrs(list) };
+        lines
+    }
+
+    /// `getifaddrs` for this NIC, as the oracle prints a list.
+    fn listed(nic: Nic) -> Vec<String> {
+        set_test_nic(nic, None);
         let mut list: *mut Ifaddrs = core::ptr::null_mut();
         assert_eq!(unsafe { getifaddrs(&mut list) }, 0);
         assert!(!list.is_null());
+        oracle_lines(list)
+    }
+
+    #[test]
+    fn getifaddrs_is_glibcs_with_eth0_up() {
+        assert_eq!(listed(qemu_nic(true, [255, 255, 255, 0])), GLIBC_UP);
+    }
+
+    #[test]
+    fn getifaddrs_is_glibcs_with_eth0_down_and_keeps_its_address() {
+        assert_eq!(listed(qemu_nic(false, [255, 255, 255, 0])), GLIBC_DOWN);
+    }
+
+    #[test]
+    fn getifaddrs_is_glibcs_before_dhcp_answers() {
+        let nic = Nic {
+            ip: 0,
+            mask: 0,
+            gateway: 0,
+            ..qemu_nic(true, [0; 4])
+        };
+        assert_eq!(listed(nic), GLIBC_NO_ADDRESS);
+    }
+
+    #[test]
+    fn getifaddrs_is_glibcs_for_a_31_bit_mask() {
+        assert_eq!(listed(qemu_nic(true, [255, 255, 255, 254])), GLIBC_SLASH_31);
+    }
+
+    /// No NIC found: `eth0` is still there, as `if_nameindex` says -- down,
+    /// with a zero MAC, and no address.
+    #[test]
+    fn getifaddrs_without_a_nic_lists_eth0_down() {
+        let lines = listed(Nic::NONE);
+        let lo_link = GLIBC_UP.first().copied().unwrap_or("");
+        let lo_address = GLIBC_NO_ADDRESS.get(2).copied().unwrap_or("");
+        let eth0_link = concat!(
+            "name=eth0 family=17 flags=0x1002 ",
+            "addr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) ",
+            "netmask=- ",
+            "broadaddr=ll(proto=0,ifindex=2,hatype=1,pkttype=0,halen=6,addr=ff:ff:ff:ff:ff:ff:00:00) ",
+            "data=stats"
+        );
+        assert_eq!(lines, [lo_link, eth0_link, lo_address]);
+    }
+
+    /// `eth0`'s link entry carries the kernel's counters for the NIC, each
+    /// cut to its low 32 bits as Linux cuts them; the loopback's are zero.
+    #[test]
+    fn getifaddrs_link_entries_carry_the_counters() {
+        // tx bytes, tx packets, tx errors, rx bytes, rx packets, rx drops
+        let counters = [0x1_0000_0005, 7, 1, 900, 11, 2];
+        set_test_nic(qemu_nic(true, [255, 255, 255, 0]), Some(counters));
+        let mut list: *mut Ifaddrs = core::ptr::null_mut();
+        assert_eq!(unsafe { getifaddrs(&mut list) }, 0);
         let lo = unsafe { &*list };
-        assert_eq!(unsafe { c_str_to_slice(lo.ifa_name) }, b"lo");
-        assert_eq!(lo.ifa_flags, IFF_UP | IFF_LOOPBACK | IFF_RUNNING);
-        let af = AF_INET as u16;
-        assert_eq!(inet_of(lo.ifa_addr), (af, u32::to_be(INADDR_LOOPBACK)));
-        assert_eq!(inet_of(lo.ifa_netmask), (af, u32::to_be(0xFF00_0000)));
-        assert!(lo.ifa_broadaddr.is_null());
-        assert!(lo.ifa_data.is_null());
+        assert!(!lo.ifa_next.is_null());
+        let eth0 = unsafe { &*lo.ifa_next };
+        let stats = |a: &Ifaddrs| unsafe { *a.ifa_data.cast::<RtnlLinkStats>() };
+        assert_eq!(stats(lo), RtnlLinkStats::default());
+        let want = RtnlLinkStats {
+            rx_packets: 11,
+            tx_packets: 7,
+            rx_bytes: 900,
+            tx_bytes: 5,
+            tx_errors: 1,
+            rx_dropped: 2,
+            ..RtnlLinkStats::default()
+        };
+        assert_eq!(stats(eth0), want);
         unsafe { freeifaddrs(list) };
     }
 
-    /// `eth0`, when it has an address: after `lo`, with its mask and the
-    /// broadcast address they make.
+    /// The two structures are the size, and `sockaddr_ll` the shape, glibc's
+    /// headers give them (the oracle's `layout` line).
     #[test]
-    fn getifaddrs_lists_eth0_with_its_broadcast_address() {
+    fn sockaddr_ll_and_rtnl_link_stats_have_glibcs_layout() {
+        assert_eq!(size_of::<SockaddrLl>(), 20);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_protocol), 2);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_ifindex), 4);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_hatype), 8);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_pkttype), 10);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_halen), 11);
+        assert_eq!(core::mem::offset_of!(SockaddrLl, sll_addr), 12);
+        assert_eq!(size_of::<RtnlLinkStats>(), 96);
+    }
+
+    /// The links' names and indices are the ones `if_nametoindex` answers.
+    #[test]
+    fn getifaddrs_links_are_the_interfaces_if_nameindex_lists() {
+        set_test_nic(Nic::NONE, None);
+        let mut list: *mut Ifaddrs = core::ptr::null_mut();
+        assert_eq!(unsafe { getifaddrs(&mut list) }, 0);
+        let mut links: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut at = list;
+        while !at.is_null() {
+            let a = unsafe { &*at };
+            if i32::from(unsafe { (*a.ifa_addr).sa_family }) == AF_PACKET {
+                let ll = unsafe { &*a.ifa_addr.cast::<SockaddrLl>() };
+                let index = u32::try_from(ll.sll_ifindex).unwrap_or(0);
+                links.push((index, unsafe { c_str_to_slice(a.ifa_name) }.to_vec()));
+            }
+            at = a.ifa_next;
+        }
+        unsafe { freeifaddrs(list) };
+        let want: Vec<(u32, Vec<u8>)> = INTERFACES.iter().map(|&(i, n)| (i, n.to_vec())).collect();
+        assert_eq!(links, want);
+    }
+
+    /// A /31 or /32 reports the address itself, as glibc does where Linux
+    /// sets no broadcast address; a wider subnet its all-ones address.
+    #[test]
+    fn broadcast_for_is_the_subnets_or_the_address_for_31_and_32() {
+        let ip = u32::from_ne_bytes([10, 0, 2, 15]);
+        let mask = |m: [u8; 4]| u32::from_ne_bytes(m);
+        assert_eq!(
+            broadcast_for(ip, mask([255, 255, 255, 0])),
+            u32::from_ne_bytes([10, 0, 2, 255])
+        );
+        assert_eq!(
+            broadcast_for(ip, mask([255, 255, 0, 0])),
+            u32::from_ne_bytes([10, 0, 255, 255])
+        );
+        assert_eq!(broadcast_for(ip, mask([255, 255, 255, 254])), ip);
+        assert_eq!(broadcast_for(ip, mask([255, 255, 255, 255])), ip);
+        assert_eq!(broadcast_for(ip, 0), u32::MAX);
+    }
+
+    /// A down `eth0` keeps its address in the interface list -- as Linux
+    /// lists it, and `AI_ADDRCONFIG` counts it -- but routes nothing.
+    #[test]
+    fn a_down_eth0_is_listed_but_routes_nothing() {
+        let peer = u32::from_ne_bytes([10, 0, 2, 2]);
         let ip = u32::from_ne_bytes([10, 0, 2, 15]);
         let mask = u32::from_ne_bytes([255, 255, 255, 0]);
-        let list = build_ifaddrs(Some((ip, mask)));
-        assert!(!list.is_null());
-        let lo = unsafe { &*list };
-        assert_eq!(unsafe { c_str_to_slice(lo.ifa_name) }, b"lo");
-        assert!(!lo.ifa_next.is_null());
-        let eth0 = unsafe { &*lo.ifa_next };
-        assert_eq!(unsafe { c_str_to_slice(eth0.ifa_name) }, b"eth0");
-        assert_eq!(
-            eth0.ifa_flags,
-            IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST
-        );
-        let af = AF_INET as u16;
-        assert_eq!(inet_of(eth0.ifa_addr), (af, ip));
-        assert_eq!(inet_of(eth0.ifa_netmask), (af, mask));
-        let broadcast = u32::from_ne_bytes([10, 0, 2, 255]);
-        assert_eq!(inet_of(eth0.ifa_broadaddr), (af, broadcast));
-        assert!(eth0.ifa_next.is_null());
-        unsafe { freeifaddrs(list) };
+        let lo = (u32::to_be(INADDR_LOOPBACK), u32::to_be(0xFF00_0000));
+        set_test_nic(qemu_nic(false, [255, 255, 255, 0]), None);
+        let mut seen = Vec::new();
+        for_each_ipv4_interface(|a, m| seen.push((a, m)));
+        assert_eq!(seen, [lo, (ip, mask)]);
+        assert_eq!(route_source(peer), None);
+        set_test_nic(qemu_nic(true, [255, 255, 255, 0]), None);
+        assert_eq!(route_source(peer), Some(ip));
     }
 
     /// Each call's list is its own: a second call does not rewrite the first,
     /// which it did while the list lived in static storage.
     #[test]
     fn getifaddrs_gives_each_caller_its_own_list() {
-        let first = build_ifaddrs(Some((u32::from_ne_bytes([10, 0, 2, 15]), !0)));
-        let second = build_ifaddrs(None);
+        let first = build_ifaddrs(qemu_nic(true, [255, 255, 255, 0]), RtnlLinkStats::default());
+        let second = build_ifaddrs(Nic::NONE, RtnlLinkStats::default());
         assert!(!first.is_null() && !second.is_null());
         assert_ne!(first, second);
-        // The first list still has both entries after the second call.
-        let lo = unsafe { &*first };
-        assert!(!lo.ifa_next.is_null());
-        unsafe { freeifaddrs(second) };
-        let eth0 = unsafe { &*lo.ifa_next };
-        assert_eq!(unsafe { c_str_to_slice(eth0.ifa_name) }, b"eth0");
-        unsafe { freeifaddrs(first) };
+        let second_lines = oracle_lines(second);
+        let first_lines = oracle_lines(first);
+        assert_eq!(first_lines, GLIBC_UP);
+        assert_eq!(second_lines.len(), 3);
     }
 
     #[test]

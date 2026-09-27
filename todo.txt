@@ -58996,15 +58996,6 @@ is already waiting, not whether the setter exists.
   of a module that exports C symbols whose name musl's headers define --
   with §1119's table of eleven as its allowlist, each with its reason.
   Scoped like check-libc-abi.py to pushes that touch `posix/src/`.
-- **`getifaddrs`: the `AF_PACKET` entries** (`posix/src/socket.rs`,
-  `D-POSIX-GETIFADDRS-SHARED-ONE-STATIC-LIST`).  glibc lists, before the
-  `AF_INET` ones, an `AF_PACKET` entry per interface: `ifa_addr` a
-  `sockaddr_ll` with the hardware address (`sll_hatype` `ARPHRD_ETHER`, or
-  `ARPHRD_LOOPBACK` for lo), `ifa_broadaddr` the broadcast MAC, and
-  `ifa_data` a `struct rtnl_link_stats` -- which programs read without a NULL
-  check.  The kernel's record has the MAC (`sys_net_if_info` bytes 16..22);
-  the counters are in `/proc/net/dev` (`kernel/src/fs/netdev.rs`).  Needs
-  `sockaddr_ll` and `rtnl_link_stats` checked against musl (§1011, §1119).
 - **`/etc/mtab` does not exist** (glibc's `MOUNTED`, `_PATH_MOUNTED`).  The
   mntent calls read mount tables since 2026-09-27, and `/proc/mounts` and
   `/proc/self/mounts` are there to read (`kernel/src/fs/procfs.rs`) -- but a

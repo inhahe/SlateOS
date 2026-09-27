@@ -44,7 +44,6 @@ userspace/arp
 userspace/at
 userspace/audit  # bare deny(clippy::all)
 userspace/backup
-userspace/blockdev  # bare deny(clippy::all)
 userspace/bootctl  # bare deny(clippy::all)
 userspace/capsh  # bare deny(clippy::all)
 userspace/cgroup  # bare deny(clippy::all)

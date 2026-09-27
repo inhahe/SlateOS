@@ -40,7 +40,10 @@
 //! value, byte for byte, with the system's libblkid on the util-linux test
 //! corpus and on images made for the purpose.
 
-mod blkdev;
+/// `lib/blkdev.c` -- util-linux's shared block-device helpers, which its
+/// programs use as well as libblkid: public so a port (`blockdev`) calls the
+/// one copy rather than carrying its own request numbers.
+pub mod blkdev;
 pub mod cache;
 pub mod devno;
 pub mod encode;

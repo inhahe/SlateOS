@@ -12,6 +12,31 @@ use std::io::{Read, Seek, SeekFrom};
 #[cfg(not(unix))]
 pub const ENOTTY: i32 = 25;
 
+/// `BLKROSET`: `_IO(0x12, 93)`, set the read-only flag from an `int`.
+pub const BLKROSET: u64 = 0x125d;
+/// `BLKROGET`: `_IO(0x12, 94)`, the read-only flag as an `int`.
+pub const BLKROGET: u64 = 0x125e;
+/// `BLKRRPART`: `_IO(0x12, 95)`, re-read the partition table.
+pub const BLKRRPART: u64 = 0x125f;
+/// `BLKFLSBUF`: `_IO(0x12, 97)`, flush the buffer cache.
+pub const BLKFLSBUF: u64 = 0x1261;
+/// `BLKRASET`: `_IO(0x12, 98)`, set read-ahead; the argument is the value.
+pub const BLKRASET: u64 = 0x1262;
+/// `BLKRAGET`: `_IO(0x12, 99)`, read-ahead as a `long`.
+pub const BLKRAGET: u64 = 0x1263;
+/// `BLKFRASET`: `_IO(0x12, 100)`, set filesystem read-ahead; by value.
+pub const BLKFRASET: u64 = 0x1264;
+/// `BLKFRAGET`: `_IO(0x12, 101)`, filesystem read-ahead as a `long`.
+pub const BLKFRAGET: u64 = 0x1265;
+/// `BLKSECTGET`: `_IO(0x12, 103)`, max sectors per request, an `unsigned short`.
+pub const BLKSECTGET: u64 = 0x1267;
+/// `BLKBSZGET`: `_IOR(0x12, 112, size_t)`, the block size -- as an `int`,
+/// whatever the encoded size says.
+pub const BLKBSZGET: u64 = 0x8008_1270;
+/// `BLKBSZSET`: `_IOW(0x12, 113, size_t)`, set the block size from an `int`.
+pub const BLKBSZSET: u64 = 0x4008_1271;
+/// `BLKDISCARDZEROES`: `_IO(0x12, 124)`, an `unsigned int`.
+pub const BLKDISCARDZEROES: u64 = 0x127c;
 /// `BLKGETSIZE64`: `_IOR(0x12, 114, size_t)`.
 pub const BLKGETSIZE64: u64 = 0x8008_1272;
 /// `BLKGETSIZE`: `_IO(0x12, 96)`, the size in 512-byte sectors.
@@ -190,6 +215,15 @@ pub fn get_size(f: &File) -> Result<u64, i32> {
     let mut dup = f.try_clone().map_err(|e| crate::errno_of(&e))?;
     const EFBIG: i32 = 27;
     find_size(&mut dup).ok_or(EFBIG)
+}
+
+/// `blkdev_get_sectors(fd, &sectors)`: [`get_size`] in 512-byte sectors.
+///
+/// # Errors
+///
+/// As [`get_size`].
+pub fn get_sectors(f: &File) -> Result<u64, i32> {
+    get_size(f).map(|bytes| bytes >> 9)
 }
 
 /// `blkdev_get_sector_size(fd, &size)`: `BLKSSZGET`.

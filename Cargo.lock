@@ -239,7 +239,11 @@ name = "blockdev"
 version = "0.1.0"
 dependencies = [
  "quoting",
- "usageerror",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulstrutils",
+ "ulsysfs",
 ]
 
 [[package]]

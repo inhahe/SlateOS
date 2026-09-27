@@ -37,7 +37,10 @@ enum Answer {
 }
 
 fn answers() -> Vec<(String, Answer)> {
-    let path = format!("{}/tests/data/avif_container.txt", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/tests/data/avif_container.txt",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     text.lines()
         .map(|line| {
@@ -90,7 +93,9 @@ fn every_fixture_is_read_or_refused_as_libavif_reads_or_refuses_it() {
             Answer::Refused(result) => {
                 let got = dimensions(&bytes).expect_err(&name);
                 let expected = match result.as_str() {
-                    "BMFF parsing failed" | "Invalid image grid" | "Invalid tone mapped image item" => {
+                    "BMFF parsing failed"
+                    | "Invalid image grid"
+                    | "Invalid tone mapped image item" => {
                         matches!(got, ImageError::Malformed(_))
                     }
                     "Not implemented" => matches!(got, ImageError::Unsupported(_)),
@@ -107,9 +112,15 @@ fn every_fixture_is_read_or_refused_as_libavif_reads_or_refuses_it() {
 fn the_depth_and_the_channels_are_the_av1_configuration_s() {
     // A 12-bit sequence with an alpha track; an 8-bit picture without alpha.
     let format = pixel_format(&read("avif_colors_animated_12bpc_keyframes_0_2_3")).unwrap();
-    assert_eq!((format.bits_per_channel, format.channels, format.has_alpha), (12, 4, true));
+    assert_eq!(
+        (format.bits_per_channel, format.channels, format.has_alpha),
+        (12, 4, true)
+    );
     let format = pixel_format(&read("avif_white_1x1")).unwrap();
-    assert_eq!((format.bits_per_channel, format.channels, format.has_alpha), (8, 3, false));
+    assert_eq!(
+        (format.bits_per_channel, format.channels, format.has_alpha),
+        (8, 3, false)
+    );
 }
 
 #[test]

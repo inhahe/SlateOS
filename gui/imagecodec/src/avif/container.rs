@@ -513,7 +513,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<File<'_>, Error> {
 }
 
 /// The boxes a `meta` box may hold at most one of (`avifUniqueBoxFlag`).
-const UNIQUE: [FourCc; 7] = [*b"iloc", *b"pitm", *b"idat", *b"iprp", *b"iinf", *b"iref", *b"grpl"];
+const UNIQUE: [FourCc; 7] = [
+    *b"iloc", *b"pitm", *b"idat", *b"iprp", *b"iinf", *b"iref", *b"grpl",
+];
 
 /// `avifParseMetaBox`, into `meta`: a track may hold more than one `meta`
 /// box, and libavif reads each into the same `avifMeta`, so the rules that
@@ -590,7 +592,11 @@ pub(super) fn parse_hdlr(payload: &[u8]) -> Result<FourCc, Truncated> {
 
 /// `avifCheckItemID`: item 0 names nothing.
 fn check_item_id(id: u32, what: &'static str) -> Result<u32, Error> {
-    if id == 0 { Err(Error::Parse(what)) } else { Ok(id) }
+    if id == 0 {
+        Err(Error::Parse(what))
+    } else {
+        Ok(id)
+    }
 }
 
 /// `avifParseItemLocationBox`.
@@ -1316,7 +1322,12 @@ mod tests {
         // unsupported.
         let mut twice = vec![0; 4];
         twice.extend(hdlr());
-        twice.extend(full(b"iref", 0, 0, &boxed(b"dimg", &[0, 1, 0, 2, 0, 7, 0, 7])));
+        twice.extend(full(
+            b"iref",
+            0,
+            0,
+            &boxed(b"dimg", &[0, 1, 0, 2, 0, 7, 0, 7]),
+        ));
         assert!(matches!(meta_of(&twice), Err(Error::Grid(_))));
         let mut shared = vec![0; 4];
         shared.extend(hdlr());

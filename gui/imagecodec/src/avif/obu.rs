@@ -285,7 +285,8 @@ fn parse_sequence_header(bits: &mut Bits<'_>) -> Option<SequenceColour> {
     };
     let full_range = if monochrome {
         bits.flag()
-    } else if primaries == PRIMARIES_BT709 && transfer == TRANSFER_SRGB && matrix == MATRIX_IDENTITY {
+    } else if primaries == PRIMARIES_BT709 && transfer == TRANSFER_SRGB && matrix == MATRIX_IDENTITY
+    {
         true
     } else {
         let full_range = bits.flag();

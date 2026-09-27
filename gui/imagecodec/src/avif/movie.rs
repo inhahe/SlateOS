@@ -143,7 +143,9 @@ impl<'a> SampleTable<'a> {
 
     /// `avifSampleTableGetCodecType`: whether any sample entry is AV1.
     pub(super) fn is_av1(&self) -> bool {
-        self.descriptions.iter().any(|d| container::is_av1(&d.format))
+        self.descriptions
+            .iter()
+            .any(|d| container::is_av1(&d.format))
     }
 
     /// `avifSampleTableGetProperties`: the first AV1 sample entry's
@@ -428,7 +430,9 @@ fn parse_stbl(payload: &[u8]) -> Result<SampleTable<'_>, Error> {
         let (kind, size) = s.box_header().map_err(bad("AVIF stbl box"))?;
         let body = s.bytes(size).map_err(bad("AVIF stbl box"))?;
         match &kind {
-            b"stco" => parse_chunk_offsets(&mut table, body, false).map_err(bad("AVIF stco box"))?,
+            b"stco" => {
+                parse_chunk_offsets(&mut table, body, false).map_err(bad("AVIF stco box"))?
+            }
             b"co64" => parse_chunk_offsets(&mut table, body, true).map_err(bad("AVIF co64 box"))?,
             b"stsc" => parse_stsc(&mut table, body)?,
             b"stsz" => parse_stsz(&mut table, body).map_err(bad("AVIF stsz box"))?,
@@ -455,7 +459,11 @@ fn reserve<T>(list: &mut Vec<T>, s: &Stream<'_>, count: u32, size: usize) {
 }
 
 /// `avifParseChunkOffsetBox`.
-fn parse_chunk_offsets(table: &mut SampleTable<'_>, payload: &[u8], large: bool) -> Result<(), Truncated> {
+fn parse_chunk_offsets(
+    table: &mut SampleTable<'_>,
+    payload: &[u8],
+    large: bool,
+) -> Result<(), Truncated> {
     let mut s = Stream::new(payload);
     s.enforce_version(0)?;
     let count = s.u32()?;
@@ -562,7 +570,9 @@ fn parse_stsd<'a>(table: &mut SampleTable<'a>, payload: &'a [u8]) -> Result<(), 
                 .ok_or(Error::Parse("AVIF sample entry too short"))?;
             container::parse_ipco(&mut properties, children, true)?;
         }
-        table.descriptions.push(SampleDescription { format, properties });
+        table
+            .descriptions
+            .push(SampleDescription { format, properties });
     }
     Ok(())
 }
@@ -681,7 +691,10 @@ mod tests {
         );
         // One size for all; a later entry for chunks from 2 on.
         let t = table(&[0, 64], &[(1, 1), (2, 3)], &[], 8);
-        assert_eq!(walk(&t, 0, 0).unwrap(), [at(0, 8), at(64, 8), at(72, 8), at(80, 8)]);
+        assert_eq!(
+            walk(&t, 0, 0).unwrap(),
+            [at(0, 8), at(64, 8), at(72, 8), at(80, 8)]
+        );
     }
 
     #[test]

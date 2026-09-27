@@ -33,7 +33,10 @@ use crate::{ImageError, ImageResult, Limits};
 
 /// The URNs an `auxC` property names an alpha plane by (`AVIF_URN_ALPHA0`,
 /// `AVIF_URN_ALPHA1`).
-const ALPHA_URNS: [&[u8]; 2] = [b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha", b"urn:mpeg:hevc:2015:auxid:1"];
+const ALPHA_URNS: [&[u8]; 2] = [
+    b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha",
+    b"urn:mpeg:hevc:2015:auxid:1",
+];
 
 fn is_alpha_urn(urn: &[u8]) -> bool {
     ALPHA_URNS.contains(&urn)
@@ -226,7 +229,12 @@ impl<'a> Picture<'a> {
 
     /// The bytes of a tile's frame `frame`, or the first `partial` of them
     /// (all, for 0): `avifDecoderPrepareSample`.
-    pub(crate) fn sample(&self, tile: &Tile, frame: u32, partial: usize) -> Result<Cow<'a, [u8]>, Error> {
+    pub(crate) fn sample(
+        &self,
+        tile: &Tile,
+        frame: u32,
+        partial: usize,
+    ) -> Result<Cow<'a, [u8]>, Error> {
         match tile.input {
             TileInput::Item { position, size, .. } => {
                 let want = if partial > 0 { partial.min(size) } else { size };
@@ -234,7 +242,8 @@ impl<'a> Picture<'a> {
             }
             TileInput::Track { track } => {
                 let sample = track_sample(&self.file, track, frame)?;
-                let size = usize::try_from(sample.size).map_err(|_| Error::Parse("AVIF sample size"))?;
+                let size =
+                    usize::try_from(sample.size).map_err(|_| Error::Parse("AVIF sample size"))?;
                 let want = if partial > 0 { partial.min(size) } else { size };
                 read_file(self.file.bytes, sample.offset, want)
             }
@@ -271,7 +280,10 @@ fn file_size(bytes: &[u8]) -> u64 {
 fn read_file(bytes: &[u8], offset: u64, size: usize) -> Result<Cow<'_, [u8]>, Error> {
     let start = usize::try_from(offset).map_err(|_| Error::Parse("AVIF offset"))?;
     let end = start.checked_add(size).ok_or(Error::Truncated)?;
-    bytes.get(start..end).map(Cow::Borrowed).ok_or(Error::Truncated)
+    bytes
+        .get(start..end)
+        .map(Cow::Borrowed)
+        .ok_or(Error::Truncated)
 }
 
 /// `avifDecoderItemRead`: `partial` bytes (all of them, for 0) of the item at
@@ -292,7 +304,11 @@ pub(crate) fn read_item<'a>(
     let idat = if item.idat_stored {
         match meta.idat {
             Some(idat) if !idat.is_empty() => Some(idat),
-            _ => return Err(Error::NoContent("AVIF item in an idat box that is not there")),
+            _ => {
+                return Err(Error::NoContent(
+                    "AVIF item in an idat box that is not there",
+                ));
+            }
         }
     } else {
         None
@@ -305,7 +321,11 @@ pub(crate) fn read_item<'a>(
         return Err(Error::Truncated);
     }
     let most = item.size.saturating_sub(offset);
-    let wanted = if partial > 0 && partial < most { partial } else { most };
+    let wanted = if partial > 0 && partial < most {
+        partial
+    } else {
+        most
+    };
     let total = offset.saturating_add(wanted);
 
     let mut joined: Vec<u8> = Vec::new();
@@ -321,7 +341,8 @@ pub(crate) fn read_item<'a>(
             if extent.size > idat.len().saturating_sub(at) {
                 return Err(Error::Parse("AVIF extent outside idat"));
             }
-            idat.get(at..at.saturating_add(take)).ok_or(Error::Truncated)?
+            idat.get(at..at.saturating_add(take))
+                .ok_or(Error::Truncated)?
         } else {
             if size_hint > 0 && extent.offset > file_size(file.bytes) {
                 return Err(Error::Parse("AVIF extent past the end of the file"));
@@ -344,7 +365,10 @@ pub(crate) fn read_item<'a>(
         return Err(Error::Truncated);
     }
     match single {
-        Some(bytes) => bytes.get(offset..total).map(Cow::Borrowed).ok_or(Error::Truncated),
+        Some(bytes) => bytes
+            .get(offset..total)
+            .map(Cow::Borrowed)
+            .ok_or(Error::Truncated),
         None => {
             joined.truncate(total);
             if offset > 0 {
@@ -369,14 +393,16 @@ fn harvest_ispe(meta: &mut Meta<'_>) -> Result<(), Error> {
         let (width, height) = match meta.find_property(item, b"ispe") {
             Some(&Property::Ispe { width, height }) => (width, height),
             _ => {
-                return Err(if matches!(
-                    meta.find_property(item, b"auxC"),
-                    Some(Property::Aux { aux_type, .. }) if is_alpha_urn(aux_type)
-                ) {
-                    Error::Parse("AVIF alpha item without ispe")
-                } else {
-                    Error::Parse("AVIF item without ispe")
-                });
+                return Err(
+                    if matches!(
+                        meta.find_property(item, b"auxC"),
+                        Some(Property::Aux { aux_type, .. }) if is_alpha_urn(aux_type)
+                    ) {
+                        Error::Parse("AVIF alpha item without ispe")
+                    } else {
+                        Error::Parse("AVIF item without ispe")
+                    },
+                );
             }
         };
         if width == 0 || height == 0 {
@@ -415,7 +441,11 @@ fn reset(mut file: File<'_>) -> Result<Picture<'_>, Error> {
     };
 
     // Every sample must have some data.
-    for tile in color.tiles.iter().chain(alpha.iter().flat_map(|a| a.tiles.iter())) {
+    for tile in color
+        .tiles
+        .iter()
+        .chain(alpha.iter().flat_map(|a| a.tiles.iter()))
+    {
         match tile.input {
             TileInput::Item { size, .. } => {
                 if size == 0 {
@@ -423,7 +453,8 @@ fn reset(mut file: File<'_>) -> Result<Picture<'_>, Error> {
                 }
             }
             TileInput::Track { track } => {
-                let Some(table) = file.tracks.get(track).and_then(|t| t.sample_table.as_ref()) else {
+                let Some(table) = file.tracks.get(track).and_then(|t| t.sample_table.as_ref())
+                else {
                     continue;
                 };
                 let mut empty = false;
@@ -529,7 +560,9 @@ fn reset_tracks<'a>(file: &File<'a>) -> Result<Reset<'a>, Error> {
         .tracks
         .iter()
         .position(|t| usable(t) && t.aux_for == 0)
-        .ok_or(Error::NoContent("AVIF sequence without an AV1 colour track"))?;
+        .ok_or(Error::NoContent(
+            "AVIF sequence without an AV1 colour track",
+        ))?;
     let color_track = file.tracks.get(color_index).ok_or(Error::MissingImage)?;
     let props = color_track
         .sample_table
@@ -543,12 +576,15 @@ fn reset_tracks<'a>(file: &File<'a>) -> Result<Reset<'a>, Error> {
         }
         // An `auxi` that is present must name alpha; one that is absent is
         // taken to (libavif before 2022 wrote none).
-        let alpha_aux = t.sample_table.as_ref().and_then(|t| t.av1_properties()).is_none_or(|props| {
-            props
-                .iter()
-                .find(|p| p.kind() == *b"auxi")
-                .is_none_or(|p| matches!(p, Property::Aux { aux_type, .. } if is_alpha_urn(aux_type)))
-        });
+        let alpha_aux = t
+            .sample_table
+            .as_ref()
+            .and_then(|t| t.av1_properties())
+            .is_none_or(|props| {
+                props.iter().find(|p| p.kind() == *b"auxi").is_none_or(
+                    |p| matches!(p, Property::Aux { aux_type, .. } if is_alpha_urn(aux_type)),
+                )
+            });
         alpha_aux && t.aux_for == color_track.id
     });
 
@@ -690,9 +726,15 @@ fn read_and_parse(
     let grid = if in_input {
         let data = read_item(file, position, 0, 0)?;
         let grid = parse_grid(&data).ok_or(Error::Grid("AVIF grid box"))?;
-        let inputs = meta.items.iter().filter(|other| other.dimg_for == item.id).count();
+        let inputs = meta
+            .items
+            .iter()
+            .filter(|other| other.dimg_for == item.id)
+            .count();
         if inputs != grid.tiles() {
-            return Err(Error::Grid("AVIF grid whose tile count is not rows times columns"));
+            return Err(Error::Grid(
+                "AVIF grid whose tile count is not rows times columns",
+            ));
         }
         grid
     } else {
@@ -738,7 +780,10 @@ fn parse_grid(data: &[u8]) -> Option<Grid> {
 /// whose every tile has its own alpha item -- an alpha grid made up of those,
 /// laid out as the colour grid is. Returns the alpha item's position, whether
 /// it is in the file (a made-up grid is not), and a made-up grid's layout.
-fn find_alpha(meta: &mut Meta<'_>, color: &Category) -> Result<Option<(usize, bool, Option<Grid>)>, Error> {
+fn find_alpha(
+    meta: &mut Meta<'_>,
+    color: &Category,
+) -> Result<Option<(usize, bool, Option<Grid>)>, Error> {
     let color_item = meta.items.get(color.position).ok_or(Error::MissingImage)?;
     let color_id = color_item.id;
     let found = meta
@@ -792,7 +837,9 @@ fn find_alpha(meta: &mut Meta<'_>, color: &Category) -> Result<Option<(usize, bo
         return Err(Error::Grid("AVIF grid whose alpha tiles do not match"));
     }
     if u32::try_from(meta.items.len()).map_or(true, |n| n >= u32::MAX - 1) {
-        return Err(Error::Alpha("AVIF file with no item ID left for its alpha grid"));
+        return Err(Error::Alpha(
+            "AVIF file with no item ID left for its alpha grid",
+        ));
     }
     // The first unused ID.
     let mut id = 1u32;
@@ -807,7 +854,10 @@ fn find_alpha(meta: &mut Meta<'_>, color: &Category) -> Result<Option<(usize, bo
     made.height = height;
     for (index, alpha) in by_tile.iter().enumerate() {
         let alpha = alpha.ok_or(Error::Grid("AVIF grid alpha tile"))?;
-        let item = meta.items.get_mut(alpha).ok_or(Error::Grid("AVIF grid alpha tile"))?;
+        let item = meta
+            .items
+            .get_mut(alpha)
+            .ok_or(Error::Grid("AVIF grid alpha tile"))?;
         item.dimg_for = id;
         item.dimg_idx = u16::try_from(index).map_err(|_| Error::Grid("AVIF grid alpha tile"))?;
     }
@@ -843,16 +893,24 @@ fn adopt_grid_codec(meta: &mut Meta<'_>, category: &Category) -> Result<(), Erro
     let Some(grid) = category.grid else {
         return Ok(());
     };
-    let grid_item = meta.items.get(category.position).ok_or(Error::MissingImage)?;
+    let grid_item = meta
+        .items
+        .get(category.position)
+        .ok_or(Error::MissingImage)?;
     let positions = tile_positions(meta, grid_item.id, grid.tiles())?;
     let mut adopted = None;
     for position in positions {
-        let tile = meta.items.get(position).ok_or(Error::Grid("AVIF grid tile"))?;
+        let tile = meta
+            .items
+            .get(position)
+            .ok_or(Error::Grid("AVIF grid tile"))?;
         if !container::is_av1(&tile.kind) {
             return Err(Error::Grid("AVIF grid tile that is not AV1"));
         }
         if tile.unsupported_essential {
-            return Err(Error::Grid("AVIF grid tile with an unknown essential property"));
+            return Err(Error::Grid(
+                "AVIF grid tile with an unknown essential property",
+            ));
         }
         if adopted.is_none() {
             let index = tile
@@ -873,14 +931,20 @@ fn adopt_grid_codec(meta: &mut Meta<'_>, category: &Category) -> Result<(), Erro
 /// `avifDecoderGenerateImageTiles`.
 fn generate_tiles(file: &File<'_>, category: &Category) -> Result<Vec<Tile>, Error> {
     let meta = &file.meta;
-    let item = meta.items.get(category.position).ok_or(Error::MissingImage)?;
+    let item = meta
+        .items
+        .get(category.position)
+        .ok_or(Error::MissingImage)?;
     match category.grid {
         Some(grid) => {
             let positions = tile_positions(meta, item.id, grid.tiles())?;
             positions
                 .into_iter()
                 .map(|position| {
-                    let tile = meta.items.get(position).ok_or(Error::Grid("AVIF grid tile"))?;
+                    let tile = meta
+                        .items
+                        .get(position)
+                        .ok_or(Error::Grid("AVIF grid tile"))?;
                     if !container::is_av1(&tile.kind) {
                         return Err(Error::Grid("AVIF grid tile that is not AV1"));
                     }
@@ -965,11 +1029,15 @@ fn tile_of_item(file: &File<'_>, position: usize) -> Result<Tile, Error> {
 /// `avifDecoderItemValidateProperties` with `AVIF_STRICT_PIXI_REQUIRED` and
 /// `AVIF_STRICT_CLAP_VALID` off, as Chrome and Pillow turn them off.
 fn validate_properties(meta: &Meta<'_>, category: &Category) -> Result<(), Error> {
-    let item = meta.items.get(category.position).ok_or(Error::MissingImage)?;
+    let item = meta
+        .items
+        .get(category.position)
+        .ok_or(Error::MissingImage)?;
     let config = av1_config(meta, item).ok_or(Error::Parse("AVIF item without av1C"))?;
     if &item.kind == b"grid" {
         for tile in meta.items.iter().filter(|tile| tile.dimg_for == item.id) {
-            let tile_config = av1_config(meta, tile).ok_or(Error::Parse("AVIF grid tile without av1C"))?;
+            let tile_config =
+                av1_config(meta, tile).ok_or(Error::Parse("AVIF grid tile without av1C"))?;
             if tile_config != config {
                 return Err(Error::Parse("AVIF grid tiles of different av1C"));
             }
@@ -985,7 +1053,9 @@ fn validate_properties(meta: &Meta<'_>, category: &Category) -> Result<(), Error
 
 /// `avifReadColorProperties` without the reading: the ICC profile and the
 /// `nclx` code points, each of which may appear at most once.
-fn colour_properties<'a>(props: &[Property<'a>]) -> Result<(Option<&'a [u8]>, Option<container::Cicp>), Error> {
+fn colour_properties<'a>(
+    props: &[Property<'a>],
+) -> Result<(Option<&'a [u8]>, Option<container::Cicp>), Error> {
     let mut icc = None;
     let mut nclx = None;
     for property in props {
@@ -1058,12 +1128,19 @@ fn find_gain_map(file: &File<'_>, color_position: usize) -> Result<Option<usize>
     let mut inputs: BTreeMap<u32, Vec<(u16, u32)>> = BTreeMap::new();
     for item in &meta.items {
         if item.dimg_for != 0 {
-            inputs.entry(item.dimg_for).or_default().push((item.dimg_idx, item.id));
+            inputs
+                .entry(item.dimg_for)
+                .or_default()
+                .push((item.dimg_idx, item.id));
         }
     }
     let mut found = None;
     for (position, item) in meta.items.iter().enumerate() {
-        if item.size == 0 || item.unsupported_essential || item.thumbnail_for != 0 || &item.kind != b"tmap" {
+        if item.size == 0
+            || item.unsupported_essential
+            || item.thumbnail_for != 0
+            || &item.kind != b"tmap"
+        {
             continue;
         }
         let mut ids = [0u32; 2];
@@ -1093,8 +1170,13 @@ fn find_gain_map(file: &File<'_>, color_position: usize) -> Result<Option<usize>
     if !preferred_alternative(meta, tmap.id, color.id) {
         return Ok(None);
     }
-    let gain_position = meta.position(gain_id).ok_or(Error::ToneMap("AVIF gain map item"))?;
-    let gain = meta.items.get(gain_position).ok_or(Error::ToneMap("AVIF gain map item"))?;
+    let gain_position = meta
+        .position(gain_id)
+        .ok_or(Error::ToneMap("AVIF gain map item"))?;
+    let gain = meta
+        .items
+        .get(gain_position)
+        .ok_or(Error::ToneMap("AVIF gain map item"))?;
     if skipped(gain) {
         return Err(Error::ToneMap("AVIF gain map that is not a picture"));
     }
@@ -1107,13 +1189,18 @@ fn find_gain_map(file: &File<'_>, color_position: usize) -> Result<Option<usize>
     colour_properties(&tmap_props)?;
     match meta.find_property(tmap, b"ispe") {
         None => return Err(Error::Parse("AVIF tmap without ispe")),
-        Some(&Property::Ispe { width, height }) if (width, height) != (color.width, color.height) => {
+        Some(&Property::Ispe { width, height })
+            if (width, height) != (color.width, color.height) =>
+        {
             return Err(Error::Parse("AVIF tmap of another size than its picture"));
         }
         Some(_) => {}
     }
     const TRANSFORMS: [FourCc; 4] = [*b"pasp", *b"clap", *b"irot", *b"imir"];
-    if TRANSFORMS.iter().any(|kind| meta.find_property(tmap, kind).is_some()) {
+    if TRANSFORMS
+        .iter()
+        .any(|kind| meta.find_property(tmap, kind).is_some())
+    {
         return Err(Error::ToneMap("AVIF tmap with a transform of its own"));
     }
     Ok(Some(tmap_position))
@@ -1179,12 +1266,27 @@ fn parse_tmap(data: &[u8]) -> Result<(), Error> {
     // avifGainMapValidateMetadata, over three channels, the missing ones
     // copied from the first.
     for index in 0..3 {
-        let [min_n, min_d, max_n, max_d, gamma_n, gamma_d, _, base_d, _, alternate_d] =
-            *fields.get(if index < channels { index } else { 0 }).ok_or(Error::ToneMap(WHAT))?;
+        let [
+            min_n,
+            min_d,
+            max_n,
+            max_d,
+            gamma_n,
+            gamma_d,
+            _,
+            base_d,
+            _,
+            alternate_d,
+        ] = *fields
+            .get(if index < channels { index } else { 0 })
+            .ok_or(Error::ToneMap(WHAT))?;
         if [min_d, max_d, gamma_d, base_d, alternate_d].contains(&0) {
             return Err(Error::ToneMap(WHAT));
         }
-        let (min_n, max_n) = (i64::from(min_n.cast_signed()), i64::from(max_n.cast_signed()));
+        let (min_n, max_n) = (
+            i64::from(min_n.cast_signed()),
+            i64::from(max_n.cast_signed()),
+        );
         if max_n.saturating_mul(i64::from(min_d)) < min_n.saturating_mul(i64::from(max_d)) {
             return Err(Error::ToneMap(WHAT));
         }
@@ -1239,9 +1341,12 @@ impl Fraction {
             let adn = ad.saturating_mul(bd);
             let bn = i64::from(b.n).saturating_mul(ad);
             let bdn = bd.saturating_mul(ad);
-            let (Ok(an), Ok(adn), Ok(bn), Ok(bdn)) =
-                (i32::try_from(an), i32::try_from(adn), i32::try_from(bn), i32::try_from(bdn))
-            else {
+            let (Ok(an), Ok(adn), Ok(bn), Ok(bdn)) = (
+                i32::try_from(an),
+                i32::try_from(adn),
+                i32::try_from(bn),
+                i32::try_from(bdn),
+            ) else {
                 return false;
             };
             *a = Self { n: an, d: adn };
@@ -1282,7 +1387,12 @@ fn center(dim: i32) -> Fraction {
 /// `avifCropRectConvertCleanApertureBox`: the crop a `clap` box describes,
 /// if it describes one -- whole pixels, inside the picture, and starting on a
 /// chroma sample.
-pub(crate) fn crop_rect(clap: &Clap, image_w: u32, image_h: u32, format: YuvFormat) -> Option<CropRect> {
+pub(crate) fn crop_rect(
+    clap: &Clap,
+    image_w: u32,
+    image_h: u32,
+    format: YuvFormat,
+) -> Option<CropRect> {
     let signed = u32::cast_signed;
     let (width_n, width_d) = (signed(clap.width_n), signed(clap.width_d));
     let (height_n, height_d) = (signed(clap.height_n), signed(clap.height_d));
@@ -1301,8 +1411,22 @@ pub(crate) fn crop_rect(clap: &Clap, image_w: u32, image_h: u32, format: YuvForm
     let clap_h = height_n.checked_div(height_d)?;
     let image_w = i32::try_from(image_w).ok()?;
     let image_h = i32::try_from(image_h).ok()?;
-    let center_x = Fraction::combine(center(image_w), Fraction { n: horiz_n, d: horiz_d }, 1)?;
-    let center_y = Fraction::combine(center(image_h), Fraction { n: vert_n, d: vert_d }, 1)?;
+    let center_x = Fraction::combine(
+        center(image_w),
+        Fraction {
+            n: horiz_n,
+            d: horiz_d,
+        },
+        1,
+    )?;
+    let center_y = Fraction::combine(
+        center(image_h),
+        Fraction {
+            n: vert_n,
+            d: vert_d,
+        },
+        1,
+    )?;
     let crop_x = Fraction::combine(center_x, Fraction { n: clap_w, d: 2 }, -1)?;
     if crop_x.n.checked_rem(crop_x.d)? != 0 {
         return None;
@@ -1331,7 +1455,8 @@ pub(crate) fn crop_rect(clap: &Clap, image_w: u32, image_h: u32, format: YuvForm
     }
     // avifCropRectRequiresUpsampling: a subsampled picture's crop starts on a
     // chroma sample.
-    let odd_x = !rect.x.is_multiple_of(2) && matches!(format, YuvFormat::Yuv420 | YuvFormat::Yuv422);
+    let odd_x =
+        !rect.x.is_multiple_of(2) && matches!(format, YuvFormat::Yuv420 | YuvFormat::Yuv422);
     let odd_y = !rect.y.is_multiple_of(2) && format == YuvFormat::Yuv420;
     if odd_x || odd_y {
         return None;
@@ -1368,7 +1493,12 @@ mod tests {
         let rect = |c: Clap, w, h, f| crop_rect(&c, w, h, f);
         // The centre 60x40 of 100x80.
         assert_eq!(
-            rect(clap((60, 1), (40, 1), (0, 1), (0, 1)), 100, 80, YuvFormat::Yuv444),
+            rect(
+                clap((60, 1), (40, 1), (0, 1), (0, 1)),
+                100,
+                80,
+                YuvFormat::Yuv444
+            ),
             Some(CropRect {
                 x: 20,
                 y: 20,
@@ -1378,7 +1508,12 @@ mod tests {
         );
         // Offset to the top left, which Chrome keeps.
         assert_eq!(
-            rect(clap((60, 1), (40, 1), (-20, 1), (-20, 1)), 100, 80, YuvFormat::Yuv420),
+            rect(
+                clap((60, 1), (40, 1), (-20, 1), (-20, 1)),
+                100,
+                80,
+                YuvFormat::Yuv420
+            ),
             Some(CropRect {
                 x: 0,
                 y: 0,
@@ -1387,14 +1522,62 @@ mod tests {
             })
         );
         // Fractions that are whole, and fractions that are not.
-        assert!(rect(clap((120, 2), (80, 2), (0, 1), (0, 1)), 100, 80, YuvFormat::Yuv444).is_some());
-        assert!(rect(clap((61, 2), (40, 1), (0, 1), (0, 1)), 100, 80, YuvFormat::Yuv444).is_none());
+        assert!(
+            rect(
+                clap((120, 2), (80, 2), (0, 1), (0, 1)),
+                100,
+                80,
+                YuvFormat::Yuv444
+            )
+            .is_some()
+        );
+        assert!(
+            rect(
+                clap((61, 2), (40, 1), (0, 1), (0, 1)),
+                100,
+                80,
+                YuvFormat::Yuv444
+            )
+            .is_none()
+        );
         // Outside the picture; a zero or negative denominator.
-        assert!(rect(clap((60, 1), (40, 1), (40, 1), (0, 1)), 100, 80, YuvFormat::Yuv444).is_none());
-        assert!(rect(clap((60, 0), (40, 1), (0, 1), (0, 1)), 100, 80, YuvFormat::Yuv444).is_none());
+        assert!(
+            rect(
+                clap((60, 1), (40, 1), (40, 1), (0, 1)),
+                100,
+                80,
+                YuvFormat::Yuv444
+            )
+            .is_none()
+        );
+        assert!(
+            rect(
+                clap((60, 0), (40, 1), (0, 1), (0, 1)),
+                100,
+                80,
+                YuvFormat::Yuv444
+            )
+            .is_none()
+        );
         // An odd origin in a subsampled picture.
-        assert!(rect(clap((60, 1), (40, 1), (1, 1), (0, 1)), 100, 80, YuvFormat::Yuv422).is_none());
-        assert!(rect(clap((60, 1), (40, 1), (1, 1), (0, 1)), 100, 80, YuvFormat::Yuv444).is_some());
+        assert!(
+            rect(
+                clap((60, 1), (40, 1), (1, 1), (0, 1)),
+                100,
+                80,
+                YuvFormat::Yuv422
+            )
+            .is_none()
+        );
+        assert!(
+            rect(
+                clap((60, 1), (40, 1), (1, 1), (0, 1)),
+                100,
+                80,
+                YuvFormat::Yuv444
+            )
+            .is_some()
+        );
     }
 
     #[test]
@@ -1409,7 +1592,8 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_grid(&[0, 1, 0, 0, 0, 0, 0, 7, 0, 0, 0, 9]).map(|g| (g.output_width, g.output_height)),
+            parse_grid(&[0, 1, 0, 0, 0, 0, 0, 7, 0, 0, 0, 9])
+                .map(|g| (g.output_width, g.output_height)),
             Some((7, 9))
         );
         assert_eq!(parse_grid(&[1, 0, 1, 2, 0, 100, 0, 50]), None);

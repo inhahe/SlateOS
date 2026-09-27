@@ -103,7 +103,9 @@ pub(crate) const IMAGE_COUNT_LIMIT: u32 = 12 * 3600 * 60;
 /// be 0, as at every caller in libavif.
 pub(crate) fn too_large(width: u32, height: u32) -> bool {
     match IMAGE_SIZE_LIMIT.checked_div(height) {
-        Some(most) if width <= most => width > IMAGE_DIMENSION_LIMIT || height > IMAGE_DIMENSION_LIMIT,
+        Some(most) if width <= most => {
+            width > IMAGE_DIMENSION_LIMIT || height > IMAGE_DIMENSION_LIMIT
+        }
         _ => true,
     }
 }

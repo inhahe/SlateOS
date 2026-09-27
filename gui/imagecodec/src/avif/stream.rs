@@ -137,7 +137,8 @@ impl<'a> Stream<'a> {
             left = left.saturating_sub(take);
             // `take` is 1 to 8 and `left` below 32: neither shift can lose a
             // bit it should keep.
-            let shifted = u32::from(packed).wrapping_shr(u32::from(8u8.saturating_sub(self.used_bits)));
+            let shifted =
+                u32::from(packed).wrapping_shr(u32::from(8u8.saturating_sub(self.used_bits)));
             let mask = 1u32.wrapping_shl(u32::from(take)).wrapping_sub(1);
             value |= (shifted & mask).wrapping_shl(u32::from(left));
             if self.used_bits == 8 {
@@ -167,7 +168,11 @@ impl<'a> Stream<'a> {
     /// version must be `version`.
     pub(super) fn enforce_version(&mut self, version: u8) -> Result<u32, Truncated> {
         let (got, flags) = self.version_and_flags()?;
-        if got == version { Ok(flags) } else { Err(Truncated) }
+        if got == version {
+            Ok(flags)
+        } else {
+            Err(Truncated)
+        }
     }
 
     /// `avifROStreamReadBoxHeaderPartial`: a box header, `top_level` saying
@@ -213,7 +218,10 @@ impl<'a> Stream<'a> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, reason = "tests fail loudly on malformed fixtures")]
+    #![allow(
+        clippy::unwrap_used,
+        reason = "tests fail loudly on malformed fixtures"
+    )]
 
     use super::*;
 
@@ -260,7 +268,9 @@ mod tests {
         );
         assert!(Stream::new(&zero).box_header().is_err());
         // A 64-bit size, and a size smaller than its own header.
-        let large = [0, 0, 0, 1, b'f', b'r', b'e', b'e', 0, 0, 0, 0, 0, 0, 0, 17, 9];
+        let large = [
+            0, 0, 0, 1, b'f', b'r', b'e', b'e', 0, 0, 0, 0, 0, 0, 0, 17, 9,
+        ];
         assert_eq!(Stream::new(&large).box_header().unwrap(), (*b"free", 1));
         assert!(
             Stream::new(&[0, 0, 0, 7, b'f', b'r', b'e', b'e'])
@@ -292,7 +302,10 @@ mod tests {
     #[test]
     fn a_full_box_version_is_enforced_and_its_flags_kept() {
         assert_eq!(Stream::new(&[0, 0, 1, 2]).enforce_version(0), Ok(0x102));
-        assert_eq!(Stream::new(&[1, 0, 0, 0]).enforce_version(0), Err(Truncated));
+        assert_eq!(
+            Stream::new(&[1, 0, 0, 0]).enforce_version(0),
+            Err(Truncated)
+        );
         assert_eq!(
             Stream::new(&[3, 0xAA, 0xBB, 0xCC]).version_and_flags(),
             Ok((3, 0x00AA_BBCC))

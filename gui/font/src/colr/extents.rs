@@ -37,6 +37,7 @@
 //! sanitizer leaves such a record: a null paint, which paints nothing but
 //! still counts as an edge.
 
+use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -56,12 +57,14 @@ use crate::var::Coords;
 pub(crate) fn glyph_extents(face: &Face, gid: u16, coords: &Coords) -> Option<[i32; 4]> {
     let tables = Tables::of(face, coords)?;
     if let Some([x_min, y_min, x_max, y_max]) = tables.clip_corners(gid) {
-        return Some([
+        // `COLR::get_extents` hands the clip box to `scale_glyph_extents`,
+        // whose edges pass through `int16_t`.
+        return Some(crate::hbcalc::scale_glyph_extents_at_upem([
             x_min,
             y_max,
-            x_max.saturating_sub(x_min),
-            y_min.saturating_sub(y_max),
-        ]);
+            x_max.wrapping_sub(x_min),
+            y_min.wrapping_sub(y_max),
+        ]));
     }
     let mut sink = ExtentsSink::new();
     if let Some(paint) = tables.base_paint(gid) {
@@ -517,6 +520,50 @@ struct ExtentsSink {
     transforms: Vec<HbTransform>,
     clips: Vec<HbBounds>,
     groups: Vec<HbBounds>,
+    /// Each glyph clipped to so far, and the box it draws.
+    drawn: BTreeMap<u16, HbExtents>,
+}
+
+/// The box around glyph `gid` at `coords` as HarfBuzz draws it into
+/// `hb_draw_extents`: every point a segment is drawn to, control points too,
+/// and the point each contour starts from -- which the draw session hands on
+/// only when a segment follows it, so a contour that draws no segment adds
+/// nothing. Void, for a glyph that draws nothing.
+fn drawn_extents(face: &Face, gid: u16, coords: &Coords) -> HbExtents {
+    let mut e = HbExtents::VOID;
+    let Ok(outline) = face.outline_at(gid, coords) else {
+        return e;
+    };
+    // `hb_draw_state_t`: whether a path is open, and where the pen is.
+    let mut open = false;
+    let (mut x, mut y) = (0.0f32, 0.0f32);
+    for cmd in &outline.commands {
+        let (to, controls): (_, &[_]) = match cmd {
+            PathCmd::MoveTo(p) => {
+                open = false;
+                (x, y) = (p.x, p.y);
+                continue;
+            }
+            PathCmd::Close => {
+                open = false;
+                (x, y) = (0.0, 0.0);
+                continue;
+            }
+            PathCmd::LineTo(p) => (p, &[]),
+            PathCmd::QuadTo(c, p) => (p, core::slice::from_ref(c)),
+            PathCmd::CurveTo(a, b, p) => (p, &[*a, *b]),
+        };
+        if !open {
+            e.add_point(x, y);
+            open = true;
+        }
+        for c in controls {
+            e.add_point(c.x, c.y);
+        }
+        e.add_point(to.x, to.y);
+        (x, y) = (to.x, to.y);
+    }
+    e
 }
 
 impl ExtentsSink {
@@ -525,6 +572,7 @@ impl ExtentsSink {
             transforms: vec![HbTransform::IDENTITY],
             clips: vec![HbBounds::of(Status::Unbounded)],
             groups: vec![HbBounds::of(Status::Empty)],
+            drawn: BTreeMap::new(),
         }
     }
 
@@ -560,44 +608,15 @@ impl Sink for ExtentsSink {
         self.transforms.pop();
     }
 
-    /// The box around glyph `gid` as HarfBuzz draws it into
-    /// `hb_draw_extents`: every point a segment is drawn to, control points
-    /// too, and the point each contour starts from -- which the draw session
-    /// hands on only when a segment follows it, so a contour that draws no
-    /// segment adds nothing. Void, for a glyph that draws nothing.
+    /// The box glyph `gid` draws ([`drawn_extents`]), as a clip -- drawn
+    /// once per walk, however many times the graph clips to it: the box
+    /// depends on nothing but the glyph and the instance, and an emoji's
+    /// graph clips to the same few glyphs again and again.
     fn push_clip_glyph(&mut self, face: &Face, gid: u16, coords: &Coords) {
-        let mut e = HbExtents::VOID;
-        if let Ok(outline) = face.outline_at(gid, coords) {
-            // `hb_draw_state_t`: whether a path is open, and where the pen is.
-            let mut open = false;
-            let (mut x, mut y) = (0.0f32, 0.0f32);
-            for cmd in &outline.commands {
-                let (to, controls): (_, &[_]) = match cmd {
-                    PathCmd::MoveTo(p) => {
-                        open = false;
-                        (x, y) = (p.x, p.y);
-                        continue;
-                    }
-                    PathCmd::Close => {
-                        open = false;
-                        (x, y) = (0.0, 0.0);
-                        continue;
-                    }
-                    PathCmd::LineTo(p) => (p, &[]),
-                    PathCmd::QuadTo(c, p) => (p, core::slice::from_ref(c)),
-                    PathCmd::CurveTo(a, b, p) => (p, &[*a, *b]),
-                };
-                if !open {
-                    e.add_point(x, y);
-                    open = true;
-                }
-                for c in controls {
-                    e.add_point(c.x, c.y);
-                }
-                e.add_point(to.x, to.y);
-                (x, y) = (to.x, to.y);
-            }
-        }
+        let e = *self
+            .drawn
+            .entry(gid)
+            .or_insert_with(|| drawn_extents(face, gid, coords));
         self.push_clip(&e);
     }
 
@@ -1113,5 +1132,37 @@ mod tests {
         assert!(!s.bounded);
         s.pop_group(mode::SRC_OVER);
         assert!(s.bounded);
+    }
+
+    #[test]
+    fn a_mutated_table_measures_something_or_nothing_but_never_panics() {
+        let range = crate::sfnt::tests::table_range(&COLR_FACE, *b"COLR").unwrap();
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..400 {
+            let mut bytes = COLR_FACE.to_vec();
+            for _ in 0..=(next() % 4) {
+                let i = range.start + (next() % range.len() as u64) as usize;
+                bytes[i] = next() as u8;
+            }
+            let Ok(face) = Face::parse(bytes) else {
+                continue;
+            };
+            let varied = face
+                .variation_axes()
+                .map(|axes| axes.normalize_tags(&[(*b"wght", COLR_WGHT)]))
+                .unwrap_or_default();
+            for gid in 0..face.num_glyphs() {
+                let _ = face.glyph_extents_at(gid, &Coords::default());
+                if round % 4 == 0 {
+                    let _ = face.glyph_extents_at(gid, &varied);
+                }
+            }
+        }
     }
 }

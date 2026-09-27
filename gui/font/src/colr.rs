@@ -3237,6 +3237,7 @@ pub(crate) mod tests {
                     ColourPalette::Normal,
                 );
                 let _ = has_colour(&face, gid);
+                let _ = face.glyph_extents_at(gid, &Coords::default());
             }
         }
         for len in 0..good.len() {
@@ -3250,6 +3251,7 @@ pub(crate) mod tests {
                     0xFF00_0000,
                     ColourPalette::Normal,
                 );
+                let _ = face.glyph_extents_at(gid, &Coords::default());
             }
         }
         // A version-0 table too.

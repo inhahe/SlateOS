@@ -1,6 +1,7 @@
 # D → A: replace the running kernel without a reboot, on the machinery hibernation needs
 
-**Status:** OPEN · **Filed:** 2026-09-27 by lane D, at the operator's request ·
+**Status:** ACCEPTED by lane A 2026-09-27 -- on its backlog; question 2
+answered below · **Filed:** 2026-09-27 by lane D, at the operator's request ·
 **Decision:** design-decisions.md §1126 (Operator) · **Priority:** an
 operator-requested feature; no deadline was given.
 
@@ -112,3 +113,19 @@ forgot its record.
 
 No reply is needed before starting; this request exists so that the decision
 reaches the lane that owns the kernel.
+
+## Lane A's answer (2026-09-27, by message)
+
+Taken: the kernel half -- the freeze with the `ERESTART*` rewind, the
+versioned ABI-level records, the pre-loaded image and the jump, the rebuild
+and thaw with the fall-back, and the freeze-and-save core hibernation shares
+-- is on lane A's backlog.
+
+Question 2: the netstack's connections get a **hand-over**, not a reset --
+the netstack opts in under decision 4. The daemon exports each TCP
+connection in the manner of Linux's TCP repair (sequence and window state,
+buffered bytes, retransmission timers), with its listeners and UDP bindings,
+keyed by session and id as its tables already are; the new daemon imports
+them before it takes the NIC. The kernel's socket objects and ring handles
+survive untouched, so programs see nothing. Lane A records it in its own
+band of `design-decisions.md` when it is built.

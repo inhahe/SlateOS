@@ -41334,7 +41334,9 @@ libraries (the C library, the toolkit), written once, not in every program.
 | **Services: restart; hand-over by opt-in (chosen)** | one path for updates and crashes | visible for a few services -- which is what the opt-in is for |
 
 **Who builds what.** Lane A: the freezer, the records, the swap, hibernation,
-and whether the netstack's connections get a hand-over. Lane B: "restart with
+and whether the netstack's connections get a hand-over -- which lane A
+answered the same day: they do, exported and imported in the manner of
+Linux's TCP repair (the request file has the detail). Lane B: "restart with
 the new version" in the service manager. Lanes C, D and F: reconnecting in
 the toolkit, the C library and the compositor, as the services they talk to
 become restartable. As designed, the C library needs nothing for the kernel

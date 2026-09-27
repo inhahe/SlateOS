@@ -6,13 +6,10 @@
 //! their carried context, the block-at-a-time driver, `--wrap`, and the option
 //! table each program sees. The bins are one call each.
 //!
-//! Two of the three are bins today, `base32` and `basenc`. `base64` is
-//! ported here too -- [`Program::Base64`], tested, and reachable as
-//! `basenc --base64` -- but its bin waits: `userspace/base64` still builds a
-//! `base64` for the sake of the two tools that share that crate, `uuencode`
-//! and `uudecode`, and two programs of one name is the collision
-//! `scripts/check-bin-collisions.py` exists to refuse. See `known-issues.md`
-//! -> `TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES`.
+//! All three are bins: `base64` joined `base32` and `basenc` on 2026-09-27,
+//! when `uuencode` and `uudecode` became ports of their own
+//! (`userspace/uuencode`, `userspace/uudecode`) and the old
+//! `userspace/base64` crate that had built all three names was deleted.
 //!
 //! # Why the decoders are transcriptions
 //!
@@ -141,7 +138,12 @@ impl Encoding {
 
 // ------------------------------------------------------------ gnulib base64 ---
 
-const B64C: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+// gnulib's base64.c is its own crate, shared with sharutils' uuencode and
+// uudecode, which bundle an older copy of the same code. `is_base64` and
+// `base64_encode` stay reachable here because `cksum` (`digest.rs`) calls them
+// through this module, as upstream's `digest.c` includes `base64.h`.
+use gnubase64::{Ctx as B64Ctx, Out, decode_ctx};
+pub use gnubase64::{encode as base64_encode, is_base64};
 
 /// `c - from + to`, for a `c` the caller's match arm has already bounded to
 /// `from..`: every use below is inside such an arm, so the result is exact
@@ -150,205 +152,11 @@ fn shift(c: u8, from: u8, to: u8) -> u8 {
     c.wrapping_sub(from).wrapping_add(to)
 }
 
-/// gnulib's `b64[]`: a character's value, or `None` outside the alphabet.
-fn b64(c: u8) -> Option<u8> {
-    match c {
-        b'A'..=b'Z' => Some(shift(c, b'A', 0)),
-        b'a'..=b'z' => Some(shift(c, b'a', 26)),
-        b'0'..=b'9' => Some(shift(c, b'0', 52)),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    }
-}
-
-/// gnulib's `isbase64`: is `c` in the base64 alphabet (padding excluded)?
-///
-/// Public because `cksum --check` uses it to recognise a base64 digest, as
-/// upstream's `digest.c` includes `base64.h` for.
-#[must_use]
-pub fn is_base64(c: u8) -> bool {
-    b64(c).is_some()
-}
-
-/// A character's value, for one already checked with [`is_base64`].
-fn v64(c: u8) -> u32 {
-    u32::from(b64(c).unwrap_or(0))
-}
-
-/// `base64_encode` with `outlen == BASE64_LENGTH (inlen)`: every group of three
-/// bytes to four characters, the last group padded with `=`.
-///
-/// Public because `cksum --base64` prints its digests through it, as upstream's
-/// `digest.c` calls gnulib's.
-#[must_use]
-pub fn base64_encode(input: &[u8]) -> Vec<u8> {
-    let sym = |v: u32| {
-        B64C.get(usize::try_from(v & 0x3f).unwrap_or(0))
-            .copied()
-            .unwrap_or(b'A')
-    };
-    let mut out = Vec::with_capacity(Encoding::Base64.length(input.len()));
-    for group in input.chunks(3) {
-        let a = u32::from(group.first().copied().unwrap_or(0));
-        let b = group.get(1).map(|&x| u32::from(x));
-        let c = group.get(2).map(|&x| u32::from(x));
-        out.push(sym(a >> 2));
-        out.push(sym((a << 4) | b.map_or(0, |b| b >> 4)));
-        out.push(b.map_or(b'=', |b| sym((b << 2) | c.map_or(0, |c| c >> 6))));
-        out.push(c.map_or(b'=', sym));
-    }
-    out
-}
-
-/// The carried state between calls: up to one quantum, gathered past newlines.
-#[derive(Default)]
-struct B64Ctx {
-    i: usize,
-    buf: [u8; 4],
-}
-
-/// Room left in the output block, and the block. `decode_4` and `decode_8`
-/// write only while there is room, exactly as upstream's `*outleft` does.
-struct Out<'a> {
-    buf: &'a mut Vec<u8>,
-    left: usize,
-}
-
-impl Out<'_> {
-    fn push(&mut self, byte: u32) {
-        if self.left > 0 {
-            // A char-sized store truncates, as the C assignment does.
-            self.buf.push(u8::try_from(byte & 0xff).unwrap_or(0));
-            self.left = self.left.saturating_sub(1);
-        }
-    }
-}
-
-/// gnulib's `decode_4`. `input` is everything from the quantum to the end of
-/// what the caller has, which is how the length tests below can tell "the
-/// last quantum" from "a quantum in the middle".
-fn decode_4(input: &[u8], out: &mut Out<'_>) -> bool {
-    let at = |i: usize| input.get(i).copied().unwrap_or(0);
-    let inlen = input.len();
-    if inlen < 2 {
-        return false;
-    }
-    if !is_base64(at(0)) || !is_base64(at(1)) {
-        return false;
-    }
-    out.push((v64(at(0)) << 2) | (v64(at(1)) >> 4));
-    if inlen == 2 {
-        return false;
-    }
-    if at(2) == b'=' {
-        if inlen != 4 || at(3) != b'=' {
-            return false;
-        }
-    } else {
-        if !is_base64(at(2)) {
-            return false;
-        }
-        out.push(((v64(at(1)) << 4) & 0xf0) | (v64(at(2)) >> 2));
-        if inlen == 3 {
-            return false;
-        }
-        if at(3) == b'=' {
-            if inlen != 4 {
-                return false;
-            }
-        } else {
-            if !is_base64(at(3)) {
-                return false;
-            }
-            out.push(((v64(at(2)) << 6) & 0xc0) | v64(at(3)));
-        }
-    }
-    true
-}
-
-/// gnulib's `get_4`: the next quantum, as a copy -- straight from the input when
-/// it is four newline-free bytes and nothing is carried, else gathered into the
-/// context past newlines. Returns the characters and how many there are.
-fn get_4(ctx: &mut B64Ctx, input: &[u8], pos: &mut usize, end: usize) -> ([u8; 4], usize) {
-    if ctx.i == 4 {
-        ctx.i = 0;
-    }
-    if ctx.i == 0
-        && let Some(t) = input
-            .get(*pos..pos.saturating_add(4))
-            .filter(|_| end.saturating_sub(*pos) >= 4)
-        && !t.contains(&b'\n')
-    {
-        let mut quad = [0u8; 4];
-        quad.copy_from_slice(t);
-        *pos = pos.saturating_add(4);
-        return (quad, 4);
-    }
-    while *pos < end {
-        let c = input.get(*pos).copied().unwrap_or(0);
-        *pos = pos.saturating_add(1);
-        if c != b'\n' {
-            if let Some(slot) = ctx.buf.get_mut(ctx.i) {
-                *slot = c;
-            }
-            ctx.i = ctx.i.saturating_add(1);
-            if ctx.i == 4 {
-                break;
-            }
-        }
-    }
-    (ctx.buf, ctx.i)
-}
-
-/// gnulib's `base64_decode_ctx`: decode `input` onto `out`, carrying a partial
-/// quantum in `ctx`. An empty `input` is the request to flush what is carried.
-/// True when the input was valid.
+/// gnulib's `base64_decode_ctx`, always with a context here: decode `input`
+/// onto `out`, carrying a partial quantum in `ctx`; an empty `input` is the
+/// request to flush what is carried. True when the input was valid.
 fn base64_decode_ctx(ctx: &mut B64Ctx, input: &[u8], out: &mut Out<'_>) -> bool {
-    let flush_ctx = input.is_empty();
-    // A snapshot: the fast path runs, or does not, for the whole call.
-    let ctx_i = ctx.i;
-    let mut pos = 0usize;
-    let mut inlen = input.len();
-    loop {
-        let mut left_save = out.left;
-        if ctx_i == 0 && !flush_ctx {
-            loop {
-                left_save = out.left;
-                if !decode_4(input.get(pos..).unwrap_or_default(), out) {
-                    break;
-                }
-                pos = pos.saturating_add(4);
-                inlen = inlen.saturating_sub(4);
-            }
-        }
-        if inlen == 0 && !flush_ctx {
-            break;
-        }
-        // "the common case of 72-byte wrapped lines".
-        if inlen > 0 && input.get(pos) == Some(&b'\n') {
-            pos = pos.saturating_add(1);
-            inlen = inlen.saturating_sub(1);
-            continue;
-        }
-        // Rewind whatever a failed fast-path quantum wrote.
-        let wrote = left_save.saturating_sub(out.left);
-        out.buf.truncate(out.buf.len().saturating_sub(wrote));
-        out.left = left_save;
-
-        let end = pos.saturating_add(inlen);
-        let (quad, n) = get_4(ctx, input, &mut pos, end);
-        inlen = n;
-        if inlen == 0 || (inlen < 4 && !flush_ctx) {
-            inlen = 0;
-            break;
-        }
-        if !decode_4(quad.get(..inlen).unwrap_or_default(), out) {
-            break;
-        }
-        inlen = end.saturating_sub(pos);
-    }
-    inlen == 0
+    decode_ctx(Some(ctx), input, out)
 }
 
 // ------------------------------------------------------------ gnulib base32 ---
@@ -614,7 +422,7 @@ fn decode_block(
     match encoding {
         Encoding::Base64 => {
             let ok = base64_decode_ctx(&mut ctx.b64, input, &mut o);
-            ctx.i = ctx.b64.i;
+            ctx.i = ctx.b64.pending();
             ok
         }
         Encoding::Base64Url => {
@@ -632,7 +440,7 @@ fn decode_block(
                 })
                 .collect();
             let ok = base64_decode_ctx(&mut ctx.b64, &translated, &mut o);
-            ctx.i = ctx.b64.i;
+            ctx.i = ctx.b64.pending();
             ok
         }
         Encoding::Base32 => {

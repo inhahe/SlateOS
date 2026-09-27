@@ -1,6 +1,10 @@
 //! Handing a command line to the shell, the one way every utility that does it
 //! must do it.
 //!
+//! Callers: coreutils (as `coreutils::shell` -- `awk`, `sed`, `split`) and
+//! `autoopts` (`--more-help`'s pager). It was `coreutils/src/shell.rs` until
+//! 2026-09-27.
+//!
 //! Several utilities take a *shell command* as data rather than as an argv:
 //! `awk`'s `system()`, `print | "cmd"` and `"cmd" | getline`, and `split
 //! --filter=COMMAND`. None of them may split the string themselves — the
@@ -70,5 +74,36 @@ pub fn shell_bytes(text: &[u8]) -> Command {
     #[cfg(not(unix))]
     {
         shell(String::from_utf8_lossy(text).into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shell, shell_bytes};
+
+    #[test]
+    fn the_text_is_one_argument_after_dash_c() {
+        let command = shell("sort > out file");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["-c", "sort > out file"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shell_is_named_by_absolute_path() {
+        assert_eq!(shell("true").get_program(), "/bin/sh");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn the_host_finds_sh_on_path_and_never_cmd() {
+        assert_eq!(shell("true").get_program(), "sh");
+    }
+
+    #[test]
+    fn bytes_reach_the_shell_as_given() {
+        let command = shell_bytes(b"printf '%s' abc");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["-c", "printf '%s' abc"]);
     }
 }

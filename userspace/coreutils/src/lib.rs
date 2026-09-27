@@ -531,7 +531,10 @@ pub use quoting as quote;
 pub mod remove;
 pub mod rename;
 pub mod setfields;
-pub mod shell;
+// Handing a command line to `sh -c`. This was `src/shell.rs` until 2026-09-27;
+// it became the `shellcmd` crate so that GNU AutoGen's libopts (`autoopts`,
+// whose `--more-help` runs `$PAGER`) runs its pager the same way.
+pub use shellcmd as shell;
 pub mod stdfd;
 /// `coreutils::guard_std_fds!()`, as every binary here writes it: the
 /// `stdfdguard` crate's since 2026-09-26, when it moved out of `stdfd` so the

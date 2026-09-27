@@ -26,8 +26,6 @@ audit:auditd
 audit:aureport
 audit:ausearch
 audit:autrace
-base64:uudecode
-base64:uuencode
 blkid:findfs
 capsh:captest
 capsh:getcap

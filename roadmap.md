@@ -4251,9 +4251,9 @@ _Port ext4 first. Don't write a custom filesystem._
     upstream shares `set-fields.c`), `sum` (both algorithms; it reads its files through the same
     `coreutils::digest::feed_file` the hash programs do, as upstream builds it from `digest.c`), `base32` and
     `basenc` (`coreutils::basenc`, which is `basenc.c` over gnulib's `base64.c` and `base32.c`, their decoders
-    transcribed so an invalid input prints exactly what GNU's does before `invalid input`; `base64` is ported too
-    but its bin waits on `uuencode`/`uudecode` leaving `userspace/base64` --
-    TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES), `factor` (any size: `u128` Montgomery
+    transcribed so an invalid input prints exactly what GNU's does before `invalid input` -- the base64 half in
+    the `gnubase64` crate, shared with sharutils -- and `base64`, whose bin landed 2026-09-27 when `uuencode` and
+    `uudecode` left `userspace/base64`), `factor` (any size: `u128` Montgomery
     arithmetic below 2^127 as upstream's single-precision path, `coreutils::bignat` above it as its GMP path,
     and upstream's two output paths kept, down to which one a full disk is reported through), the rest of the
     `digest.c` family -- `sha224sum`, `sha384sum`, `sha512sum`, `b2sum` and `cksum`, the last with all eleven of
@@ -4424,7 +4424,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] make: build automation tool (recursive/simple/conditional variables, pattern rules, automatic vars, DAG topological sort, conditionals, include)
   - [x] iconv: character encoding conversion (UTF-8/16/32, ASCII, ISO-8859-1/15, Windows-1252, KOI8-R, streaming, name normalization)
   - [x] ar/ranlib/strip: archive and object file tools (ar format with BSD/GNU extended names, ELF symbol table, strip debug sections)
-  - [x] base64/base32/uuencode/uudecode: encoding tools (RFC 4648 base64/base32, URL-safe, base32hex, traditional uuencoding)
+  - [x] base64/base32/uuencode/uudecode: encoding tools. `base64` and `base32` are coreutils 9.4's (above). `uuencode`
+    and `uudecode` are GNU sharutils 4.15.2's, each a crate of its own, on `autoopts` -- a port of the libopts 41.1
+    that sharutils bundles, so `~/.sharrc`, `--save-opts`/`--load-opts`, `--more-help` and `AUTOOPTS_USAGE` all work
+    as upstream's -- and checked against Ubuntu's build by `scripts/uu-diff.sh` (433 cases), 2026-09-27.
   - [x] install: copy files with attributes (octal/symbolic mode parsing, backup, compare, strip, ownership, -D parent creation)
   - [x] shuf/factor/numfmt: randomization and number tools (Fisher-Yates shuffle, prime factorization, SI/IEC unit conversion)
   - [x] tput/reset/clear: terminal capability tools (built-in terminfo database, parameterized string expansion, terminal reset)

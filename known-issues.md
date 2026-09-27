@@ -2305,7 +2305,7 @@ three gone is `getopt` alone), `truncate` and `shred` (from `pv`, which with bot
 gone is `pv` alone),
 `arch`, `pathchk` and `users` (from `nproc`), `numfmt` and `factor` (from
 `shuf`, which with both gone is `shuf` alone), `base32` (from `base64`,
-whose own `base64` waits on TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES),
+whose own `base64` followed on 2026-09-27 -- TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES),
 and `pinky` (from `finger`, which with it gone is `finger` alone).
 None of the deleted branches was worth keeping: `nproc`'s `users` read the
 terminal field as the user name, from wtmp instead of utmp; its `pathchk -p`
@@ -168765,7 +168765,30 @@ handles; lane D names them), then set `FD_CLOEXEC` on the master in
 `Pty::open`, and add a boot rung that opens an `sshd` pty session and reads a
 prompt back.
 
-## TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES (lane B, 2026-09-25) — **open**
+## TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES (lane B, 2026-09-25) — FIXED 2026-09-27
+
+**Fixed** as the four steps below say, with one step more than they foresaw.
+`uuencode` and `uudecode` are ports of GNU sharutils 4.15.2's, crates of their
+own, and `scripts/uu-diff.sh` compares them against Ubuntu 24.04's build
+(unpacked by `scripts/sharutils-ref.sh`) in 433 cases: 433 agree. The step
+more: sharutils does not parse its own options -- AutoGen generates a table and
+GNU's libopts 41.1 does the rest, `~/.sharrc`, `--save-opts`, `--load-opts`,
+`--more-help` through `$PAGER`, `--version[=MODE]` and `AUTOOPTS_USAGE`'s
+computed layouts included -- so libopts is ported too, as `userspace/autoopts`,
+with its surprises kept and listed in that crate's docs. `userspace/base64` is
+deleted, `coreutils` has its `base64` bin, and `base64` is back in
+`scripts/basenc-diff.sh`, run as itself as well as `basenc --base64`. gnulib's
+base64, which coreutils and sharutils both bundle (2023's and 2015's copies,
+the same decoder), is one crate, `userspace/gnubase64`, rather than two
+transcriptions. The ledger's `base64:uuencode` and `base64:uudecode` lines are
+gone, and `userspace/base64`'s `argv-as-string` and workspace-lints lines with
+them.
+
+Where upstream's behaviour is undefined, the port had to choose, and says so:
+`--save-opts`' warnings pass one argument to a two-`%s` format (upstream prints
+a register's leftovers, the port nothing -- the harness normalises exactly those
+three messages), and `uudecode` reads bytes no line wrote as zero where
+upstream reads its stack (`userspace/uudecode/src/main.rs`, module docs).
 
 **In short:** `coreutils` now has a port of GNU 9.4's `base64` -- it is
 `src/basenc.rs`, reachable today as `basenc --base64` and checked against GNU

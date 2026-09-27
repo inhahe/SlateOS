@@ -6,9 +6,9 @@
 #
 # Upstream builds the three from one file, `src/basenc.c`, and so does this
 # port (`userspace/coreutils/src/basenc.rs`); one harness covers the family.
-# `base64` is not a coreutils bin yet (see the module's documentation), so
-# its cases run as `basenc --base64` -- the same code, with `basenc`'s decode
-# block size rather than `base64`'s. When the bin lands, it joins DIFF_BINS.
+# The base64 cases run twice, as `base64` and as `basenc --base64`: the same
+# code, but each program decodes in blocks of its own size (4096 characters
+# and 8192), and a fault's position against that block is visible.
 #
 #   * **encoding**, every padding shape (one to five trailing bytes), binary
 #     input, and input longer than one 30720-byte encode block, under `-w`
@@ -34,7 +34,7 @@ export MSYS2_ARG_CONV_EXCL='*'
 
 DIFF_PROG='basenc'
 DIFF_GNU_SOURCE=9.4
-DIFF_BINS="base32 basenc"
+DIFF_BINS="base32 basenc base64"
 DIFF_NO_REF=1
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
@@ -124,8 +124,11 @@ xfail_case() {
 enc() { env PATH="$bindir/gnu" "$@"; }
 
 # --- encoding --------------------------------------------------------------------------
-for p in b64 base32; do
-  if [ "$p" = b64 ]; then prog=basenc; pre=--base64; else prog=base32; pre=; fi
+for p in base64 b64 base32; do
+  case $p in
+    b64) prog=basenc; pre=--base64 ;;
+    *) prog=$p; pre= ;;
+  esac
   for f in empty b1 b2 b3 b4 b5 hello bytes big exact; do
     run_case "$prog" ${pre:+"$pre"} "$f"
   done
@@ -176,6 +179,8 @@ printf 'YWJj\n\n\nZGVm\n' > blanklines.b64
 printf 'Y\nW\nJ\nj\n' > onecharlines.b64
 
 for f in big.b64 big.b64w0 bytes.b64 late-fault.b64 block.b64 crlf.b64 spaced.b64 blanklines.b64 onecharlines.b64; do
+  run_case base64 -d "$f"
+  run_case base64 -d -i "$f"
   run_case basenc --base64 -d "$f"
   run_case basenc --base64 -d -i "$f"
 done
@@ -185,6 +190,8 @@ for f in big.b32 bytes.b32 block.b32; do
 done
 for s in 'YQ==' 'YQ==YQ==' 'YQ=x' 'YQ' 'YQ=' 'Y' '=YQ=' 'YWJj=' 'YW Jj' 'YWJ*j' '****' 'YQ==\n' 'YWJjZA==ZQ=='; do
   printf "$s" > s.b64
+  run_case base64 -d s.b64
+  run_case base64 -d -i s.b64
   run_case basenc --base64 -d s.b64
   run_case basenc --base64 -d -i s.b64
   run_case basenc --base64url -d s.b64
@@ -221,6 +228,11 @@ run_case basenc --base64 --base32 hello
 run_case basenc --z85 --base16 b4
 run_case basenc --base64 hello b1
 run_case base32 nosuch
+run_case base64 nosuch
+run_case base64 hello b1
+run_case base64 dir
+run_case base64 -x
+run_case base64 --dec bytes.b64
 run_case basenc --base64 dir
 run_case basenc --base64 -d dir
 run_case basenc --base16 nosuch
@@ -230,8 +242,9 @@ run_case basenc --base65
 run_case basenc --base hello
 run_case basenc --base64 --dec bytes.b64
 TO_FULL=1; run_case base32 hello
+TO_FULL=1; run_case base64 bytes
 TO_FULL=1; run_case basenc --base16 bytes
-for p in base32 basenc; do
+for p in base32 basenc base64; do
   xfail_case 'our --help omits the GNU ancillary block' "$p" --help
   xfail_case 'our --version names SlateOS' "$p" --version
 done

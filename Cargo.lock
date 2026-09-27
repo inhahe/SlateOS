@@ -137,6 +137,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "autoopts"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "localtime",
+ "scratchdir",
+ "shellcmd",
+ "ulclosestream",
+]
+
+[[package]]
 name = "backup"
 version = "0.1.0"
 dependencies = [
@@ -155,13 +166,6 @@ dependencies = [
  "sha2",
  "textfmt",
  "tzrules",
-]
-
-[[package]]
-name = "base64"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -460,6 +464,7 @@ dependencies = [
  "ere",
  "errmsg",
  "getoptlong",
+ "gnubase64",
  "localtime",
  "md5",
  "modechange",
@@ -471,6 +476,7 @@ dependencies = [
  "scratchdir",
  "sha1",
  "sha2",
+ "shellcmd",
  "sm3",
  "stdfdguard",
  "sysroot-dep",
@@ -1153,6 +1159,10 @@ dependencies = [
 
 [[package]]
 name = "globmatch"
+version = "0.1.0"
+
+[[package]]
+name = "gnubase64"
 version = "0.1.0"
 
 [[package]]
@@ -2944,6 +2954,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "shellcmd"
+version = "0.1.0"
+
+[[package]]
 name = "shuf"
 version = "0.1.0"
 dependencies = [
@@ -3672,6 +3686,30 @@ dependencies = [
 [[package]]
 name = "utmpfile"
 version = "0.1.0"
+
+[[package]]
+name = "uudecode"
+version = "0.1.0"
+dependencies = [
+ "autoopts",
+ "errmsg",
+ "gnubase64",
+ "pwdb",
+ "scratchdir",
+ "stdfdguard",
+ "ulclosestream",
+]
+
+[[package]]
+name = "uuencode"
+version = "0.1.0"
+dependencies = [
+ "autoopts",
+ "errmsg",
+ "gnubase64",
+ "stdfdguard",
+ "ulclosestream",
+]
 
 [[package]]
 name = "vi"

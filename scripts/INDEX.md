@@ -343,6 +343,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/seq-probe.sh` | One side of the `seq` differential test. |
 | `scripts/setup-toolchain.sh` | Install the Rust toolchain and other dependencies needed to build the kernel. |
 | `scripts/sh-diff.sh` | Differential test: our sh against dash. |
+| `scripts/sharutils-ref.sh` | Unpacks Ubuntu's sharutils package, without root, as the uuencode/uudecode harness reference. |
 | `scripts/shellcheck-all.sh` | Run shellcheck over every script in this directory and below it. |
 | `scripts/shred-diff.sh` | shred-diff.sh — compare our `shred` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/snapshot-todo2.sh` | Commit the current todo2.txt to local-only history on the orphan branch |
@@ -430,6 +431,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/users-diff.sh` | users-diff.sh — compare our `users` against GNU's, inside WSL. |
 | `scripts/util-linux-extra.sh` | Unpacks Ubuntu's util-linux-extra and rfkill packages, without root, as harness references. |
 | `scripts/util-linux-source.sh` | Fetches util-linux 2.39.3's source and test data, for harnesses that need them. |
+| `scripts/uu-diff.sh` | Differential test: our `uuencode` and `uudecode` against GNU sharutils 4.15.2's. |
 | `scripts/verify_mutations.py` | Check a `mutate.py` table against the source it claims to break. |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
@@ -443,4 +445,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_433 scripts._
+_435 scripts._

@@ -1,0 +1,24 @@
+[package]
+name = "autoopts"
+version = "0.1.0"
+edition = "2024"
+description = "GNU AutoGen's libopts 41.1, as GNU sharutils 4.15.2 bundles it: the option processing, rc files, usage, version and save/load of uuencode and uudecode"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Usage and version text to stdout buffered as glibc buffers it, with the
+# stream's error flag that libopts checks after its fflush; diagnostics to
+# stderr unbuffered, with ferror(stderr) remembered.
+ulclosestream = { path = "../ulclosestream" }
+# strerror, for "error %d (%s) calling %s for '%s'" and its relatives.
+errmsg = { path = "../errmsg" }
+# ctime(3) for the date line --save-opts writes: local time as TZ says, the
+# one resolution of TZ in the tree.
+localtime = { path = "../localtime" }
+# system(3) for --more-help's pager: `sh -c`, the one way the tree does it.
+shellcmd = { path = "../shellcmd" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

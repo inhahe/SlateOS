@@ -40,6 +40,14 @@ ulstrutils = { path = "../ulstrutils" }
 # strerror(3)'s wording for an io::Error, which lived here as src/errmsg.rs
 # until 2026-09-26; `coreutils::errmsg` re-exports it.
 errmsg = { path = "../errmsg" }
+# gnulib's base64.c, which `basenc`, `base64` and `cksum --base64` build on --
+# its own crate since 2026-09-27, shared with sharutils' uuencode and uudecode,
+# which bundle an older copy of the same decoder.
+gnubase64 = { path = "../gnubase64" }
+# `sh -c` the one way (`coreutils::shell` re-exports it): `awk`'s `system()`
+# and pipes, `sed`'s `e`, `split --filter`. It lived here as `src/shell.rs`
+# until 2026-09-27 and moved out when autoopts' pager needed it too.
+shellcmd = { path = "../shellcmd" }
 # The `.init_array` guard that sees a standard descriptor the process started
 # without, before the runtime reopens it on /dev/null -- `guard_std_fds!` and
 # `stdfd::restore`, which lived in src/stdfd.rs until 2026-09-26 and are

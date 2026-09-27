@@ -171289,6 +171289,17 @@ PARTLABEL) -- and have `ulmount::blkid::probe_file` call it. `blkid`,
 all of them; each prober gets the differential treatment the programs got,
 on disk images built by `mkfs.*` in WSL.
 
+**Progress (2026-09-27):** the crate exists -- `userspace/ulblkid`, the whole
+of libblkid 2.39.3's probing: `probe.c`, all 79 superblock probers, all 13
+partition-table probers (nested BSD, Minix, Solaris and UnixWare tables
+included) and the topology chain. It builds clippy-clean and passes 27 unit
+tests on synthetic images. Still to do, in order: the differential harness
+against WSL's libblkid over util-linux's own test images
+(`scripts/blkid-diff.sh`), then `ulmount::blkid::probe_file` switched to it,
+then the `blkid` and `findfs` programs ported onto it. Until the harness has
+run, treat its answers as unverified; nothing calls it yet, so nothing a
+user runs has changed.
+
 ## TD-B-UTIL-LINUX-PORTS-WRITE-THROUGH-RUST-STDIO (lane B, 2026-09-26) — ✅ FIXED 2026-09-26 (lane B)
 
 **In short:** util-linux programs end with `close_stdout`, which decides the

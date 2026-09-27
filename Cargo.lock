@@ -3588,6 +3588,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ulblkid"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "crc32c",
+ "crc64",
+ "md5",
+ "quoting",
+ "scratchdir",
+ "sha2",
+ "ulstrutils",
+ "ulsysfs",
+ "xxhash64",
+]
+
+[[package]]
 name = "ulclosestream"
 version = "0.1.0"
 dependencies = [

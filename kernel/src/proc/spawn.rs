@@ -8915,6 +8915,20 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
         return Ok(());
     };
 
+    // The fixture execs /mnt/bin/python3, which reads its standard library out
+    // of the zip archive: an image with the C fixtures but no interpreter can
+    // run the fixture and nothing it exists to test.  Skip, as the CPython rung
+    // does on the same two paths.  Until 2026-09-27 this rung failed with exit 8
+    // on such an image, and the legend's "it IS on the image" below was text,
+    // not a check (lane C, requests/c-a-the-python-repl-rung-fails-instead-of-
+    // skipping-when-the-image-has-no-python3.md).  With this gate it is a fact.
+    if pathz_missing(
+        "CPython interactive REPL over a pty (ring 3)",
+        &["/mnt/bin/python3", "/mnt/usr/local/lib/python312.zip"],
+    ) {
+        return Ok(());
+    }
+
     serial_println!(
         "[spawn] Running CPython interactive REPL over a pty (ring 3, C, native \
          ABI) integration test ({} bytes ELF)...",

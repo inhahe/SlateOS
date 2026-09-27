@@ -4296,7 +4296,7 @@ pub fn try_get_rlimit(pid: ProcessId, resource: u32) -> Option<(u64, u64)> {
 }
 
 /// Charge `bytes` to the process's Linux address-space accounting and
-/// enforce [`RLIMIT_AS`] (resource index 9).
+/// enforce `RLIMIT_AS` (resource index [`RLIMIT_AS_INDEX`], 9).
 ///
 /// Called from the Linux `mmap` translation layer with the *aligned*
 /// mapping size before delegating to the native mmap path.  Returns

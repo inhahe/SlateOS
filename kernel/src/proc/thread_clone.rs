@@ -18,8 +18,8 @@
 //! kernel-spawned task.  Its entry point is [`clone_thread_trampoline`],
 //! which:
 //!
-//!   1. Reclaims the heap-allocated register image (see
-//!      [`CloneThreadImage`]).
+//!   1. Reclaims the heap-allocated register image (a boxed
+//!      `[u64; REG_IMAGE_LEN]`; see [`REG_IMAGE_LEN`]).
 //!   2. If `CLONE_SETTLS` was requested, writes the new FS base into
 //!      `IA32_FS_BASE` (MSR 0xC000_0100) so the child sees its own TLS
 //!      block immediately on the first ring-3 instruction.

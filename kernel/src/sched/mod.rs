@@ -85,7 +85,7 @@ use self::task::{Context, NUM_PRIORITIES, Task, TaskId, TaskState};
 /// Trait for scheduler implementations.
 ///
 /// The scheduler decides which task runs next.  It does NOT own the
-/// tasks — tasks are stored in the global [`TASKS`] table.  The
+/// tasks — tasks are stored in the scheduler's global state (`SCHED`).  The
 /// scheduler only holds `TaskId` values and priority information.
 #[allow(dead_code)] // Trait interface for pluggable scheduler implementations (EEVDF, deadline).
 pub trait Scheduler {

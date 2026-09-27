@@ -3114,7 +3114,7 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 /// the two cannot drift.
 ///
 /// `ino` is the backing filesystem's inode number for the object the name
-/// refers to, and is the same value [`SYS_FS_GET_META`] reports as `st_ino`
+/// refers to, and is the same value [`SYS_FS_STAT`] reports as `st_ino`
 /// for that object; `0` means the filesystem has no stable per-object
 /// identity (FAT files with no allocated cluster, `procfs`, `sysfs`,
 /// `devfs`, `iso9660`), not that the entry is deleted. It was appended
@@ -3811,7 +3811,7 @@ pub const SYS_FS_TRASH: u64 = 618;
 
 /// List items in the recycle bin.
 ///
-/// `arg0`: pointer to output buffer for [`TrashListEntry`] array.
+/// `arg0`: pointer to an output buffer of [`FS_TRASH_ENTRY_SIZE`]-byte records.
 /// `arg1`: buffer capacity (max number of entries).
 ///
 /// Each entry is 528 bytes: 256 (trash name) + 256 (original path) + 8 (size) + 8 (flags).

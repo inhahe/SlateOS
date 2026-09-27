@@ -8284,7 +8284,11 @@ check_kernel_docs() {
     # links qualified, 11 TaskState variants, and 9 smaller defects. Lowered
     # because a ratchet nobody lowers is just a ceiling, and 22 links of
     # slack is 22 new broken links that could land without the gate moving.
-    local ceiling=274
+    #
+    # 274 -> 260 on 2026-09-26: the eleven dead links lane B's
+    # check-doc-links.py found in the kernel, plus proc/elf.rs's link to
+    # ExceptionContext, which is in scope only in proc/exception.rs.
+    local ceiling=260
     local log start rc unresolved tags secs
 
     echo "=== Checking the kernel's intra-doc links (nothing else runs rustdoc) ==="

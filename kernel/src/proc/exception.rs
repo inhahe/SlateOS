@@ -10,7 +10,7 @@
 //! `SYS_SET_EXCEPTION_HANDLER(addr)`.  When an exception occurs:
 //!
 //! 1. Kernel saves the full CPU context (registers, flags, faulting address).
-//! 2. Kernel pushes an [`ExceptionRecord`] onto the user stack.
+//! 2. Kernel pushes an [`ExceptionContext`] onto the user stack.
 //! 3. Kernel redirects execution to the handler.
 //! 4. The handler examines the exception and either:
 //!    - Fixes the issue (e.g., guard page commit) and calls

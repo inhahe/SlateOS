@@ -7386,7 +7386,8 @@ pub fn build_seh_exit_test_elf() -> alloc::vec::Vec<u8> {
 ///   int3                        ; unreachable
 /// ```
 ///
-/// The handler receives a pointer to [`ExceptionContext`] in RDI.
+/// The handler receives a pointer to
+/// [`ExceptionContext`](crate::proc::exception::ExceptionContext) in RDI.
 /// `ExceptionContext.rip` is at byte offset 16 (after `code: u64` and
 /// `aux: u64`).  The handler adds 2 to skip past the 2-byte `ud2`,
 /// then calls `SYS_EXCEPTION_RETURN` which restores the CPU state

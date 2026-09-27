@@ -7395,7 +7395,7 @@ fn mprotect_flush_range(start: u64, end: u64) {
 
 /// `madvise(addr, len, advice)` — advisory hint about future access.
 ///
-/// All [`MADV_*`](madv) hints we recognise are advisory: telling the
+/// All `MADV_*` hints we recognise are advisory: telling the
 /// kernel "I'll touch this soon" / "I won't touch this for a while" /
 /// "you can drop these pages and re-zero on next fault" / etc.  Linux
 /// is allowed to silently ignore any advisory hint, and most glibc

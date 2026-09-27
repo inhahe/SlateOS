@@ -1742,7 +1742,7 @@ pub fn self_test_udp_dns(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
 /// looped-back datagram is delivered to the very socket that sent it. A received
 /// datagram whose source header reports `AF_INET6`, the local link-local address,
 /// and the sent payload proves: kernel client → `OP_UDP_SEND6` → daemon v6 TX →
-/// loopback → daemon v6 RX classify (`recv_udp_any` IPv6 arm) → `OP_UDP_RECV` with
+/// loopback → daemon v6 RX classify (`parse_udp` IPv6 arm) → `OP_UDP_RECV` with
 /// the `UDP_AF_INET6` in-band header → kernel client.
 ///
 /// The EUI-64 link-local derivation is inlined (the kernel crate cannot depend on

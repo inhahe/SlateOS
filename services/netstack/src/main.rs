@@ -1167,11 +1167,12 @@ enum RawRx {
     Seg6([u8; 16], u16, u16, TcpRx),
 }
 
-/// Read one frame off the NIC without filtering to a specific connection's
-/// 4-tuple, so the caller can *route* it to whichever connection owns it. This is
-/// the shared-RX-demux counterpart to [`recv_tcp_seg`]: where that function drops
-/// any frame not matching one connection, this one hands back the peer identity so
-/// a sibling connection's frames are delivered to *it* instead of being lost.
+/// Classify one frame [`recv_any`] read off the NIC, if it is a TCP segment
+/// addressed to us, without filtering to a specific connection's 4-tuple, so the
+/// caller can *route* it to whichever connection owns it. This is the
+/// shared-RX-demux counterpart to [`recv_tcp_seg`]: where that function drops any
+/// frame not matching one connection, this one hands back the peer identity so a
+/// sibling connection's frames are delivered to *it* instead of being lost.
 fn parse_tcp(me: &IfInfo, bytes: &[u8], pl: &mut [u8]) -> RawRx {
     let eth = match ethernet::Frame::parse(bytes) {
         Some(eth) => eth,
@@ -1240,7 +1241,7 @@ fn parse_tcp(me: &IfInfo, bytes: &[u8], pl: &mut [u8]) -> RawRx {
     }
 }
 
-/// A received UDP datagram's routing identity, produced by [`recv_udp_any`]: the
+/// A received UDP datagram's routing identity, produced by [`parse_udp`]: the
 /// sender's address (`family` + fixed 16-byte `src_ip`, IPv4 in `src_ip[0..4]`)
 /// and port, plus our local `dst_port`. The payload has been copied into the
 /// caller's `pl` buffer (`payload_len` bytes; a longer datagram is truncated to
@@ -1253,17 +1254,15 @@ struct UdpRx {
     payload_len: usize,
 }
 
-/// Read one frame off the NIC and, if it is a UDP datagram (IPv4 *or* IPv6)
-/// addressed to us, return its routing identity (the [`recv_tcp_any`] sibling for
-/// UDP). A non-UDP frame — or no frame at all (`WOULD_BLOCK`) — yields `None`.
+/// Classify one frame [`recv_any`] read off the NIC: if it is a UDP datagram
+/// (IPv4 *or* IPv6) addressed to us, return its routing identity (the
+/// [`parse_tcp`] sibling for UDP). Any other frame yields `None`.
 ///
-/// Like [`recv_tcp_any`] this consumes exactly one NIC frame, so a caller
-/// draining for UDP datagrams also consumes any interleaved TCP frames and, in
-/// the current single-active-phase model, drops them — the same shared-RX-demux
-/// limitation the TCP pump already carries (`known-issues.md`
-/// D-NETSTACK-RX-DEMUX). Both IPv4 (`ETHERTYPE_IPV4` → [`ipv4::Packet`]) and IPv6
-/// (`ETHERTYPE_IPV6` → [`ipv6::Packet`]) UDP datagrams are classified; the family
-/// is reported so `OP_UDP_RECV` can report the correct `sockaddr` family.
+/// [`recv_any`] reads each frame once and offers it to both parsers, so a
+/// datagram is never consumed by a TCP drain or a segment by a UDP one. Both IPv4
+/// (`ETHERTYPE_IPV4` → [`ipv4::Packet`]) and IPv6 (`ETHERTYPE_IPV6` →
+/// [`ipv6::Packet`]) UDP datagrams are classified; the family is reported so
+/// `OP_UDP_RECV` can report the correct `sockaddr` family.
 fn parse_udp(me: &IfInfo, bytes: &[u8], pl: &mut [u8]) -> Option<UdpRx> {
     let eth = ethernet::Frame::parse(bytes)?;
     match eth.ethertype {
@@ -1429,7 +1428,7 @@ impl TcpConn {
     /// Receive one TCP segment addressed to this connection, dispatching on the
     /// address family. The single-connection RX counterpart to [`emit`]; used by
     /// [`recv`](Self::recv) and [`close`](Self::close), which each service exactly
-    /// one connection (the multiplexed ring path uses [`recv_tcp_any`] instead).
+    /// one connection (the multiplexed ring path reads through [`pump`] instead).
     fn recv_one_seg(&self, me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> Option<TcpRx> {
         match self.dst6 {
             Some(ref dst6) => recv_tcp_seg6(me, dst6, self.local_port, self.dst_port, frame, pl),
@@ -1954,7 +1953,7 @@ impl TcpConn {
     /// in-order payload into `rx_buf`, advance the cumulative ACK point, honor a
     /// FIN or RST, and emit an ACK as needed. This is the single point of TCP
     /// receive logic, shared by the one-connection [`recv`](Self::recv) loop and
-    /// the multiplexed [`ring_pump`] — so a segment routed here by the shared RX
+    /// the multiplexed [`pump`] — so a segment routed here by the shared RX
     /// demux is processed identically whether or not this connection is the one
     /// currently blocked in a receive. `payload` is the segment's data bytes
     /// (length equals `rx.payload_len`).
@@ -2093,7 +2092,7 @@ impl TcpConn {
     /// the connection timed out once every resend has gone unanswered -- the
     /// policy is `netproto::tcp_rtx`. Returns `true` if it resent.
     ///
-    /// Run for every live connection by [`ring_pump`], and by the one-shot
+    /// Run for every live connection by [`pump`], and by the one-shot
     /// [`recv`](Self::recv), so the timer advances whenever the daemon serves
     /// the connection at all -- including for a kernel that waits by asking
     /// without blocking. It used to run only inside the blocking receive and
@@ -2133,7 +2132,7 @@ impl TcpConn {
     ///
     /// This is the single-connection path (used by the one-shot [`tcp_fetch`]
     /// control op, where no sibling connections exist to demux for). The ring
-    /// socket path uses [`ring_tcp_recv`] + [`ring_pump`], which route to multiple
+    /// socket path uses [`ring_tcp_recv`] + [`pump`], which route to multiple
     /// connections but share the same [`ingest_seg`](Self::ingest_seg) core.
     fn recv(&mut self, me: &IfInfo, out: &mut [u8]) -> usize {
         let mut frame = [0u8; MAX_FRAME];
@@ -3015,8 +3014,8 @@ impl RingConns {
     }
 
     /// Run every live connection's retransmission timer at `now`
-    /// ([`TcpConn::service_retransmit`]). Called by [`ring_pump`] after each
-    /// drain, so the timers advance whenever the ring is served.
+    /// ([`TcpConn::service_retransmit`]). Called by [`pump`] after each drain,
+    /// so the timers advance whenever any ring is served.
     fn service_retransmits(&mut self, me: &IfInfo, now: u64) {
         for (_, c) in self.slots.iter_mut().flatten() {
             c.service_retransmit(me, now);
@@ -3072,7 +3071,7 @@ impl UdpDatagram {
 
 /// A bound connectionless UDP datagram socket. Holds its local port and a small
 /// FIFO of received datagrams (each tagged with its source), filled by
-/// [`udp_pump`] and drained by `OP_UDP_RECV`.
+/// [`pump`] and drained by `OP_UDP_RECV`.
 struct UdpSock {
     local_port: u16,
     /// Fixed-capacity FIFO ring of buffered datagrams.
@@ -3205,7 +3204,7 @@ impl UdpSocks {
             .map(|(_, s)| s)
     }
 
-    /// Borrow the socket bound to local `port` (the routing lookup [`udp_pump`]
+    /// Borrow the socket bound to local `port` (the routing lookup [`pump`]
     /// uses to deliver an inbound datagram to its owner).
     fn by_port(&mut self, port: u16) -> Option<&mut UdpSock> {
         self.slots
@@ -3719,9 +3718,9 @@ impl Sessions {
 ///   and send it; completion `result` = bytes accepted, or `-1` (no such conn /
 ///   window error).
 /// - [`netipc::ring::OP_RECV`]: receive for `sqe.conn_id` via the shared RX pump
-///   ([`ring_pump`]) — so sibling connections' frames are routed to *them* rather
-///   than dropped — then copy the response into the SQE's data window; completion
-///   `result` = bytes received, or `-1`.
+///   ([`pump`]) — so sibling connections' frames, on this ring or any other, are
+///   routed to *them* rather than dropped — then copy the response into the SQE's
+///   data window; completion `result` = bytes received, or `-1`.
 /// - [`netipc::ring::OP_POLL`]: non-destructively report `sqe.conn_id`'s readiness
 ///   via [`ring_tcp_poll`]; completion `result` is a
 ///   [`POLL_READABLE`](netipc::ring::POLL_READABLE)/
@@ -3732,18 +3731,24 @@ impl Sessions {
 /// - [`netipc::ring::OP_STOP`]: complete with `result = 0` and request session
 ///   teardown (return flag) once the current batch is drained.
 /// - [`netipc::ring::OP_UDP_BIND`]/[`OP_UDP_SEND`](netipc::ring::OP_UDP_SEND)/
+///   [`OP_UDP_SEND6`](netipc::ring::OP_UDP_SEND6)/
 ///   [`OP_UDP_RECV`](netipc::ring::OP_UDP_RECV): connectionless UDP datagram
-///   sockets against the session's [`UdpSocks`] table (IPv4). Bind installs a
-///   socket under `conn_id`; send transmits from it to `aux`'s endpoint; recv
-///   drains the NIC ([`udp_pump`]) and dequeues one datagram, prepending the
-///   24-byte source-address header. `OP_CLOSE` unbinds a UDP socket too.
+///   sockets in the daemon's [`UdpSocks`] table. Bind installs a socket under
+///   `conn_id`; `OP_UDP_SEND` transmits from it to `aux`'s IPv4 endpoint, and
+///   `OP_UDP_SEND6` to the IPv6 address at the front of the data window; recv
+///   drains the NIC ([`pump`]) and dequeues one datagram of either family,
+///   prepending the 24-byte source-address header. `OP_CLOSE` unbinds a UDP
+///   socket too.
 /// - any unknown opcode: `result = -1`.
 ///
-/// `conns` and `ipid` are the *persistent* session state (see [`RingSession`]), so
-/// connections opened in an earlier call are still addressable here. Returns
+/// `net` is every socket the daemon holds ([`Net`]) and `ipid` this ring's IPv4
+/// identification seed ([`Session`]); both outlive the call, so connections
+/// opened in an earlier call are still addressable here. `id_space` is this
+/// ring's session number: what it creates is keyed by it ([`key`]), so two rings
+/// using the same `conn_id` address different sockets. Returns
 /// `(processed, stop)`: `processed` is true iff at least one SQE was handled and
 /// the CQ never overflowed; `stop` is true iff an `OP_STOP` was seen (the caller
-/// then tears the session down).
+/// then closes the session).
 fn ring_tcp_process(
     ring: &netring::Ring,
     net: &mut Net,
@@ -4136,8 +4141,9 @@ fn ring_tcp_process(
 /// geometry error.
 ///
 /// The window is *full* while a prior segment is still unacknowledged
-/// ([`TcpConn::send_window_full`]). We drain pending ACKs via [`ring_pump`] (which
-/// also serves sibling connections, so one blocked sender never starves another).
+/// ([`TcpConn::send_window_full`]). We drain pending ACKs via [`pump`] (which also
+/// serves sibling connections, on every ring, so one blocked sender never starves
+/// another).
 /// - [`netipc::ring::SEND_NONBLOCK`] set: pump once; if the window is still full,
 ///   report `ERR_WOULD_BLOCK` (kernel → `EAGAIN`) rather than waiting.
 /// - Blocking: pump/sleep up to the send deadline until the window drains, then
@@ -4176,7 +4182,7 @@ fn ring_tcp_send(
             return netipc::ring::ERR_WOULD_BLOCK; // kernel → EAGAIN
         }
         // Blocking send: wait for the outstanding segment to be ACKed, driving its
-        // retransmit while we wait -- `ring_pump` runs the retransmission timers.
+        // retransmit while we wait -- `pump` runs the retransmission timers.
         // Bounded by the send deadline.
         let mut idle = 0u32;
         loop {
@@ -4235,8 +4241,9 @@ fn ring_tcp_send(
 /// returned instead of polling — this is how the kernel honours `O_NONBLOCK`.
 ///
 /// Unlike the single-connection [`TcpConn::recv`], this routes through
-/// [`ring_pump`] rather than a 4-tuple-filtered read, so concurrent connections on
-/// the same ring can all receive without starving one another (D-NETSTACK-RX-DEMUX).
+/// [`pump`] rather than a 4-tuple-filtered read, so concurrent connections, on this
+/// ring or any other, can all receive without starving one another
+/// (D-NETSTACK-RX-DEMUX).
 fn ring_tcp_recv(
     ring: &netring::Ring,
     net: &mut Net,

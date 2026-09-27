@@ -171388,7 +171388,8 @@ would never be resent.
    12.6 s.
 2. The daemon runs each connection's timer whenever it serves the ring at all.
    `ring_pump` services every live connection, and `service_retransmit`
-   replaces `maybe_retransmit`.
+   replaces `maybe_retransmit`. (`ring_pump` is `pump` since A-Q15's
+   increment 2, 2026-09-27: one pump for TCP and UDP over every session.)
 3. A connection whose resends all went unanswered is `timed_out`: receive and
    send answer the new `netipc::ring::ERR_TIMED_OUT` (-110), and poll reports
    `POLL_ERR`.

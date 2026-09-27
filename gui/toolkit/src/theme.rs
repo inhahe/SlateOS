@@ -52,14 +52,69 @@ use crate::color::Color;
 /// `appearance::relative_luminance` is this function, re-exported.
 #[must_use]
 pub fn relative_luminance(c: Color) -> f32 {
+    let [r, g, b] = linear_rgb(c);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/// `c`'s three channels on the linear light scale, through the same table
+/// [`relative_luminance`] reads -- the one sRGB transfer function in the tree.
+#[must_use]
+pub(crate) fn linear_rgb(c: Color) -> [f32; 3] {
     let t = channel_table();
     // SAFETY-of-indexing note: `u8` has 256 values and the table has 256
     // entries, so `usize::from(u8)` is in range by construction. `get` with a
     // fallback would be dead code that can never be taken and would hide that.
     #[allow(clippy::indexing_slicing)]
     {
-        0.2126 * t[usize::from(c.r)] + 0.7152 * t[usize::from(c.g)] + 0.0722 * t[usize::from(c.b)]
+        [
+            t[usize::from(c.r)],
+            t[usize::from(c.g)],
+            t[usize::from(c.b)],
+        ]
     }
+}
+
+/// How different two colours look, as the CIE 1976 colour difference (Delta E*ab):
+/// the distance between them in CIELAB, the space built so that equal
+/// distances look roughly equally different.
+///
+/// About 2.3 is the smallest difference a practised eye notices side by side;
+/// two colours tens apart are plainly two colours even at the same lightness,
+/// which is what [`contrast_ratio`] cannot see -- it measures light only, so a
+/// red and a blue of equal lightness score 1:1 though nobody mistakes one for
+/// the other. Alpha is ignored, as for [`relative_luminance`].
+///
+/// The 1976 formula rather than CIEDE2000: this answers "clearly different, or
+/// not?", and at the distances that question turns on the two agree; the
+/// later formula's corrections matter for fine differences between near
+/// neighbours.
+#[must_use]
+pub fn perceptual_difference(a: Color, b: Color) -> f32 {
+    let [l1, a1, b1] = cielab(a);
+    let [l2, a2, b2] = cielab(b);
+    let (dl, da, db) = (l1 - l2, a1 - a2, b1 - b2);
+    (dl * dl + da * da + db * db).sqrt()
+}
+
+/// `c` in CIELAB, against the D65 white sRGB is defined by.
+fn cielab(c: Color) -> [f32; 3] {
+    let [r, g, b] = linear_rgb(c);
+    // Linear sRGB to CIE XYZ (the sRGB matrix), each over D65's white.
+    let x = (0.412_456_4 * r + 0.357_576_1 * g + 0.180_437_5 * b) / 0.950_47;
+    let y = 0.212_672_9 * r + 0.715_152_2 * g + 0.072_175_0 * b;
+    let z = (0.019_333_9 * r + 0.119_192 * g + 0.950_304_1 * b) / 1.088_83;
+    // The CIELAB companding: a cube root, with a straight segment near black
+    // where the root's slope runs away.
+    let f = |t: f32| {
+        const DELTA: f32 = 6.0 / 29.0;
+        if t > DELTA * DELTA * DELTA {
+            t.cbrt()
+        } else {
+            t / (3.0 * DELTA * DELTA) + 4.0 / 29.0
+        }
+    };
+    let (fx, fy, fz) = (f(x), f(y), f(z));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
 }
 
 /// The sRGB transfer function, evaluated once for each of its 256 inputs.

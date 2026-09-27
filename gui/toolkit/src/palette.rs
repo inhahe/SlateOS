@@ -21,7 +21,7 @@
 //! spelling at 458 call sites without this crate knowing what a setting is.
 
 use crate::color::Color;
-use crate::theme::{contrast_ratio, relative_luminance, with_alpha};
+use crate::theme::{contrast_ratio, perceptual_difference, relative_luminance, with_alpha};
 use std::collections::BTreeMap;
 
 pub const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -295,6 +295,44 @@ pub fn emphasized(color: Color) -> Color {
 
 /// The contrast a body-text ink owes its background: WCAG SC 1.4.3, level AA.
 pub const TEXT_CONTRAST_FLOOR: f32 = 4.5;
+
+/// The contrast a mark that is not text owes what it sits on -- a dot, an
+/// icon, a focus ring: WCAG SC 1.4.11, 3:1.
+pub const NON_TEXT_CONTRAST_FLOOR: f32 = 3.0;
+
+/// How far apart two colours must be, as a [`perceptual_difference`], to be
+/// told apart by colour alone when their lightness does not separate them.
+///
+/// A judgment, recorded in `design-decisions.md` §1424. It is set *above* the
+/// roughly thirty lightness units that [`NON_TEXT_CONTRAST_FLOOR`]'s 3:1 takes,
+/// so that each half of [`hard_to_tell_apart`] decides something: a pair far
+/// enough apart in light is seen however alike its hues, and a pair of one
+/// lightness must be this far apart in colour -- a clearly different hue, not a
+/// neighbouring shade -- to be seen at a glance on a six-pixel dot. At 25 the
+/// light half could never decide anything, since 25 units of colour cannot
+/// hold 30 of lightness. A warning that errs this way costs a glance; one that
+/// errs the other way leaves an invisible dot unexplained.
+pub const DISTINCT_COLOUR_DIFFERENCE: f32 = 40.0;
+
+/// Whether a mark in one of these colours, drawn on the other, is too close to
+/// see.
+///
+/// Both halves have to fail: too little light between them for a mark that is
+/// not text (under [`NON_TEXT_CONTRAST_FLOOR`]) *and* too little colour between
+/// them (a [`perceptual_difference`] under [`DISTINCT_COLOUR_DIFFERENCE`]). A red
+/// dot on a blue disc of the same lightness is plainly visible by its hue, and
+/// is not flagged; a teal a shade off the accent's teal fails both, and is what
+/// the calendar's and Settings' warnings exist for (`design-decisions.md`
+/// §1424, the operator's answer to C-Q19). Symmetric: which colour is the mark
+/// does not change the answer.
+///
+/// A test, never a correction: nothing here moves either colour. The two
+/// warnings that ask it leave the user's colours exactly as chosen.
+#[must_use]
+pub fn hard_to_tell_apart(a: Color, b: Color) -> bool {
+    contrast_ratio(a, b) < NON_TEXT_CONTRAST_FLOOR
+        && perceptual_difference(a, b) < DISTINCT_COLOUR_DIFFERENCE
+}
 
 /// `ink`, moved away from `bg` only as far as the contrast floor requires.
 ///

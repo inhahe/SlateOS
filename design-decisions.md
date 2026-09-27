@@ -82622,6 +82622,14 @@ changing the event color(s)."
 | The warning in Settings' accent picker, naming the clashing events, with a way to each | lane E, `apps/settings` |
 | The desktop's calendar drawing | unchanged: it draws the colour chosen (`gui/desktop/src/calendar.rs`) |
 
+**The test, as built (2026-09-27):** `guitk::palette::hard_to_tell_apart`,
+re-exported by `appearance` -- true only when the pair is both under WCAG's 3:1
+for marks that are not text *and* under 40 apart as a CIE 1976 colour
+difference, so a red dot on a blue disc of the same lightness is not flagged
+while a lavender one is. The 40 is a judgment: it is set above the roughly 30
+lightness units that 3:1 takes, so each half decides something; a warning that
+errs toward warning costs a glance.
+
 ## 1425. One list of the installed programs, in userspace; nothing it holds is lost on the way
 
 **Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A or B; the operator chose B, with a condition) &middot; **Lane:** C (the library), A (the kernel's registry), E (the programs that read it)

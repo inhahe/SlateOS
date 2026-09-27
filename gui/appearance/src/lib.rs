@@ -1832,7 +1832,7 @@ impl AppearanceSettings {
 ///
 /// The re-export is deliberate rather than a wrapper: a wrapper would be a
 /// place where the two could drift apart.
-pub use guitk::theme::{contrast_ratio, relative_luminance};
+pub use guitk::theme::{contrast_ratio, perceptual_difference, relative_luminance};
 
 /// Every colour used to draw a window's frame, and the emptiness behind it.
 ///
@@ -5619,6 +5619,72 @@ mod tests {
             p.accent,
             "this fixture is only meaningful if the ink *would* have moved"
         );
+    }
+
+    /// "Too close to see one on the other" (`design-decisions.md` §1424)
+    /// needs both the light and the colour between them to be too small. A
+    /// shade off the accent is; a different hue of the same lightness is not,
+    /// and neither is anything far apart in lightness.
+    #[test]
+    fn hard_to_tell_apart_needs_both_the_light_and_the_colour_to_be_close() {
+        let teal = Color::rgb(0x00, 0x68, 0x8B);
+        let near_teal = Color::rgb(0x00, 0x72, 0x96);
+        assert!(hard_to_tell_apart(teal, near_teal));
+        assert!(
+            hard_to_tell_apart(near_teal, teal),
+            "the answer depends on the order"
+        );
+        assert!(hard_to_tell_apart(teal, teal));
+
+        let red = Color::rgb(0xD2, 0x0F, 0x39);
+        let blue = Color::rgb(0x1E, 0x66, 0xF5);
+        assert!(
+            contrast_ratio(red, blue) < NON_TEXT_CONTRAST_FLOOR,
+            "fixture: the lightness alone must not separate these two"
+        );
+        assert!(
+            !hard_to_tell_apart(red, blue),
+            "a red dot on a blue disc is seen by its hue"
+        );
+
+        let dark = Color::rgb(0x00, 0x2A, 0x38);
+        let pale = Color::rgb(0x9C, 0xE4, 0xFF);
+        assert!(
+            !hard_to_tell_apart(dark, pale),
+            "one hue, far apart in light"
+        );
+        assert!(!hard_to_tell_apart(
+            Color::rgb(0, 0, 0),
+            Color::rgb(255, 255, 255)
+        ));
+
+        // The light half deciding on its own: two greys just past 3:1 are
+        // seen by their lightness, though as colours they are close.
+        let (grey, lighter) = (Color::rgb(64, 64, 64), Color::rgb(140, 140, 140));
+        assert!(contrast_ratio(grey, lighter) >= NON_TEXT_CONTRAST_FLOOR);
+        assert!(perceptual_difference(grey, lighter) < DISTINCT_COLOUR_DIFFERENCE);
+        assert!(
+            !hard_to_tell_apart(grey, lighter),
+            "3:1 apart in light is seen"
+        );
+
+        // Neighbouring hues of nearly one lightness: a lavender dot on a blue
+        // disc is the calendar's case in another colour.
+        let lavender = Color::rgb(0x72, 0x87, 0xFD);
+        assert!(hard_to_tell_apart(blue, lavender));
+    }
+
+    /// The colour difference is the CIE 1976 one: nothing between a colour and
+    /// itself, the same both ways, and black to white the whole lightness
+    /// scale, 100.
+    #[test]
+    fn the_perceptual_difference_is_the_cielab_distance() {
+        let (black, white) = (Color::rgb(0, 0, 0), Color::rgb(255, 255, 255));
+        assert!(perceptual_difference(white, white) < 1e-3);
+        let across = perceptual_difference(black, white);
+        assert!((across - 100.0).abs() < 0.5, "black to white is {across}");
+        let (x, y) = (Color::rgb(200, 30, 90), Color::rgb(20, 180, 60));
+        assert!((perceptual_difference(x, y) - perceptual_difference(y, x)).abs() < 1e-4);
     }
 
     /// An ink that already clears the floor is returned untouched.

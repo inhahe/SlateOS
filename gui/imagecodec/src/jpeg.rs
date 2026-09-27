@@ -15,21 +15,21 @@
 //!
 //! # The parts
 //!
-//! - [`source`]: the bytes, and past their end the fake end-of-image markers
+//! - `source`: the bytes, and past their end the fake end-of-image markers
 //!   every libjpeg data source supplies. How a cut-off file decodes -- the
 //!   rows that arrived, then grey -- follows from that.
-//! - [`marker`]: the datastream's markers (`jdmarker.c`).
-//! - [`huffman`], [`arith`]: entropy decoding, sequential and progressive
+//! - `marker`: the datastream's markers (`jdmarker.c`).
+//! - `huffman`, `arith`: entropy decoding, sequential and progressive
 //!   (`jdhuff.c`, `jdphuff.c`, `jdarith.c`).
-//! - [`coef`]: a multi-scan image's coefficients, kept compactly for
+//! - `coef`: a multi-scan image's coefficients, kept compactly for
 //!   thumbnails, and block smoothing (`jdcoefct.c`).
-//! - [`idct`]: the accurate integer transform and the reduced ones
+//! - `idct`: the accurate integer transform and the reduced ones
 //!   (`jidctint.c`, `jidctred.c`).
-//! - [`lossless`]: lossless JPEG -- its Huffman decoder, its predictors and
+//! - `lossless`: lossless JPEG -- its Huffman decoder, its predictors and
 //!   the buffers between them (`jdlhuff.c`, `jdlossls.c`, `jddiffct.c`).
-//! - [`upsample`], [`color`]: bringing chroma to full size and converting it
+//! - `upsample`, `color`: bringing chroma to full size and converting it
 //!   (`jdsample.c`, `jdcolor.c`).
-//! - [`decompress`]: the decompression object and its control flow
+//! - `decompress`: the decompression object and its control flow
 //!   (`jdapimin.c`, `jdapistd.c`, `jdinput.c`, `jdmaster.c`), with libjpeg's
 //!   interface -- header, start, rows, finish -- because TIFF's JPEG
 //!   compression drives it step by step and reacts to where it fails.
@@ -221,6 +221,43 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
 /// As [`decode`], for the header it does read.
 pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     Ok(orientation(bytes).shown(stored_dimensions(bytes)?))
+}
+
+/// How the picture stores its pixels: the frame's sample precision and
+/// components, and what libjpeg takes them for (`default_decompress_parms`:
+/// the JFIF and Adobe markers and the component ids).
+///
+/// # Errors
+///
+/// As [`dimensions`], and [`ImageError::Unsupported`] for components that are
+/// neither grey, colour nor CMYK.
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<crate::PixelFormat> {
+    use crate::ColourModel;
+    use color::ColorSpace;
+    if !is_jpeg(bytes) {
+        return Err(ImageError::UnknownFormat);
+    }
+    let mut tables = Tables::new();
+    let mut jpeg = Decompress::new(bytes, &mut tables);
+    jpeg.read_header(true)?;
+    let model = match jpeg.jpeg_color_space() {
+        ColorSpace::Grayscale => ColourModel::Grey,
+        ColorSpace::Rgb | ColorSpace::YCbCr => ColourModel::Colour,
+        ColorSpace::Cmyk | ColorSpace::Ycck => ColourModel::Cmyk,
+        ColorSpace::Unknown => {
+            return Err(ImageError::Unsupported(
+                "JPEG components of no known colour space",
+            ));
+        }
+    };
+    let channels = u16::try_from(jpeg.num_components()).unwrap_or(u16::MAX);
+    Ok(crate::PixelFormat::uniform(
+        jpeg.data_precision(),
+        channels,
+        model,
+        false,
+        false,
+    ))
 }
 
 /// The frame's own width and height, before any turning: read as libjpeg

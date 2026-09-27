@@ -431,6 +431,99 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     Err(ImageError::UnknownFormat)
 }
 
+/// How a picture stores its pixels, as its headers say: what
+/// [`pixel_format`] reads, for the file manager's colour-depth column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PixelFormat {
+    /// Bits of each channel: 8 for most pictures, 16 for a deep PNG or TIFF,
+    /// 1 for a fax; for a palette picture, the bits of each index. Where the
+    /// channels differ -- a 16-bit BMP's five, six and five -- the widest.
+    pub bits_per_channel: u8,
+    /// Bits of all a pixel's channels together: 24 for eight-bit colour, 32
+    /// with alpha, 16 for five, six and five, 8 for a 256-colour palette.
+    /// Padding a format stores beside the channels -- the unused fourth byte
+    /// of a 32-bit BMP without alpha -- is not counted.
+    pub bits_per_pixel: u32,
+    /// Channels a pixel holds, alpha counted: 1 for grey or a palette index,
+    /// 2 for grey and alpha, 3 for colour, 4 for colour and alpha or for CMYK
+    /// (see [`model`](Self::model)). A TIFF may hold more.
+    pub channels: u16,
+    /// What the channels are.
+    pub model: ColourModel,
+    /// Each pixel is an index into a palette of at most
+    /// `1 << bits_per_channel` colours.
+    pub palette: bool,
+    /// Some of the picture may be transparent: an alpha channel, a
+    /// transparent palette entry or colour key, or an icon's mask.
+    pub has_alpha: bool,
+}
+
+/// What a picture's channels are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColourModel {
+    /// Shades of grey.
+    Grey,
+    /// Red, green and blue, however the file codes them (`YCbCr` and Lab
+    /// included); a palette's colours are this.
+    Colour,
+    /// Cyan, magenta, yellow and black, for print.
+    Cmyk,
+}
+
+impl PixelFormat {
+    /// `channels` channels of `bits` bits each.
+    pub(crate) fn uniform(
+        bits: u8,
+        channels: u16,
+        model: ColourModel,
+        palette: bool,
+        has_alpha: bool,
+    ) -> Self {
+        Self {
+            bits_per_channel: bits,
+            bits_per_pixel: u32::from(bits).saturating_mul(u32::from(channels)),
+            channels,
+            model,
+            palette,
+            has_alpha,
+        }
+    }
+}
+
+/// Read how a picture stores its pixels without decoding them: the
+/// companion of [`dimensions`], from the same headers and as cheap -- a PNG's
+/// chunks up to its image data, for a transparent colour; a GIF's blocks up to
+/// its first image, for its palette and transparency.
+///
+/// # Errors
+///
+/// As [`dimensions`], and [`ImageError::Unsupported`] for a JPEG whose
+/// components are neither grey, colour nor CMYK.
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<PixelFormat> {
+    if png::is_png(bytes) {
+        return png::pixel_format(bytes);
+    }
+    if jpeg::is_jpeg(bytes) {
+        return jpeg::pixel_format(bytes);
+    }
+    if gif::is_gif(bytes) {
+        return gif::pixel_format(bytes);
+    }
+    if webp::is_webp(bytes) {
+        return webp::pixel_format(bytes);
+    }
+    if bmp::is_bmp(bytes) {
+        return bmp::pixel_format(bytes);
+    }
+    if ico::is_ico(bytes) {
+        return ico::pixel_format(bytes);
+    }
+    if tiff::is_tiff(bytes) {
+        return tiff::pixel_format(bytes);
+    }
+    Err(ImageError::UnknownFormat)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

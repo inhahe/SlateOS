@@ -5161,6 +5161,50 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         }
     }
 
+    // The loop every blocking netstack socket call waits in, on synthetic
+    // answers: no daemon involved, so a failure is the loop's and fails the run.
+    match crate::net::socket::self_test_wait_until() {
+        Ok(()) => serial_println!(
+            "[spawn]   netstack socket wait loop: asks through would-block to the answer, \
+             never waits on a non-blocking call, returns EOF and errors at once, backs off \
+             to 10 ms"
+        ),
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: netstack socket wait loop ({:?})", e);
+            crate::selftest::dispatch_debug(
+                "netstack socket wait loop",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
+    // A blocking datagram receive waits for a datagram that arrives after it
+    // asked (known-issues.md A-BLOCKING-UDP-RECV-DID-NOT-BLOCK): loopback, so an
+    // error is a real break and fails the run.
+    match crate::net::socket::self_test_dgram_blocking_recv() {
+        Ok(Some(())) => serial_println!(
+            "[spawn]   persistent netstack blocking udp recv: a blocking recvfrom waited for \
+             a datagram sent 50 ms after it asked, and a non-blocking one on the drained \
+             socket still said EAGAIN"
+        ),
+        Ok(None) => serial_println!(
+            "[spawn]   persistent netstack blocking udp recv: no NIC MAC — check skipped"
+        ),
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: persistent netstack blocking udp recv ({:?}) — a blocking \
+                 datagram receive did not wait",
+                e
+            );
+            crate::selftest::dispatch_debug(
+                "persistent netstack blocking udp recv",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
     // UDP connect() default-peer parity (D-NETSOCK-SYNC): drive the net::socket
     // SOCK_DGRAM object layer through the daemon loopback — a connect()ed socket's
     // send targets the default peer and its recv filters to that peer (Linux drops

@@ -3737,9 +3737,14 @@ fn ring_tcp_process(
                                 }
                             }
                             None if nonblock => netipc::ring::ERR_WOULD_BLOCK,
-                            // Blocking recv with nothing queued: report would-block
-                            // for now (the kernel client polls). A blocking wait loop
-                            // lands with the kernel-side UDP fd wiring.
+                            // Blocking recv with nothing queued: would-block too. The
+                            // daemon never holds a receive open (one client's wait
+                            // would stall every other client's requests); the kernel
+                            // waits instead -- net::socket::dgram_recv_from asks
+                            // again with a backoff until a datagram or a signal
+                            // arrives. (Until 2026-09-26 this comment said "the
+                            // kernel client polls" and nothing did: known-issues.md
+                            // A-BLOCKING-UDP-RECV-DID-NOT-BLOCK.)
                             None => netipc::ring::ERR_WOULD_BLOCK,
                         },
                     }

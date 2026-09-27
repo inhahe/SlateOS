@@ -1149,11 +1149,22 @@ pub fn dgram_send_to6(
 /// When `nonblock` is set (the fd's `O_NONBLOCK` status flag), a receive with no
 /// datagram queued returns [`KernelError::WouldBlock`] (→ `EAGAIN`).
 ///
+/// On a **blocking** socket a receive with nothing queued *waits* for a
+/// datagram, in [`wait_until`].
+///
+/// Until 2026-09-26 the daemon's would-block went straight back to the caller
+/// as `EAGAIN`, so a blocking `recvfrom` succeeded only if its datagram was
+/// already queued at the instant it asked: a DNS reply or a loopback echo one
+/// daemon loop late failed the receive (known-issues.md
+/// `A-BLOCKING-UDP-RECV-DID-NOT-BLOCK`). The daemon's comment said "the kernel
+/// client polls"; nothing did.
+///
 /// # Errors
 ///
 /// - `InvalidHandle` — closed handle.
 /// - `InvalidArgument` — not a datagram socket.
 /// - `WouldBlock` — `nonblock` was set and no datagram was ready.
+/// - `Interrupted` — a blocking wait was ended by a deliverable signal.
 /// - protocol faults propagated from [`NetstackConn::udp_recv_any`].
 pub fn dgram_recv_from(
     handle: SocketHandle,
@@ -1161,31 +1172,273 @@ pub fn dgram_recv_from(
     nonblock: bool,
 ) -> KernelResult<(i32, u16, [u8; 16], u16)> {
     let inner = inner_of(handle)?;
-    let mut guard = inner.lock();
-    if guard.kind != SockKind::Dgram {
-        return Err(KernelError::InvalidArgument);
-    }
-    ensure_bound(&mut guard)?;
-    let peer = guard.dgram_peer;
-    // An *unconnected* datagram socket delivers from any source. A *connected*
-    // one (a `connect(2)` set a default peer) only delivers datagrams from that
-    // peer — Linux drops the rest at input, so we discard non-matching datagrams
-    // here and keep receiving. On a non-blocking socket the discard loop drains to
-    // `WouldBlock` (→ `EAGAIN`) once the queue holds no matching datagram; on a
-    // blocking socket it waits for the next one, matching a connected UDP `recv`.
-    loop {
-        let got = guard.owned_conn_mut()?.udp_recv_any(buf, nonblock)?;
-        match peer {
-            None => return Ok(got),
-            Some(p) => {
-                let (_, family, ip16, port) = got;
-                if dgram_peer_matches(&p, family, &ip16, port) {
-                    return Ok(got);
+    wait_until(nonblock, || {
+        let mut guard = inner.lock();
+        if guard.kind != SockKind::Dgram {
+            return Err(KernelError::InvalidArgument);
+        }
+        ensure_bound(&mut guard)?;
+        let peer = guard.dgram_peer;
+        // An *unconnected* datagram socket delivers from any source. A
+        // *connected* one (a `connect(2)` set a default peer) only delivers
+        // datagrams from that peer -- Linux drops the rest at input -- so a
+        // non-matching datagram is discarded and the queue asked again at
+        // once: there may be a matching one behind it. An empty queue is the
+        // daemon's would-block, which `wait_until` waits out.
+        loop {
+            let got = guard.owned_conn_mut()?.udp_recv_any(buf, true)?;
+            let accepted = match peer {
+                None => true,
+                Some(p) => {
+                    let (_, family, ip16, port) = got;
+                    dgram_peer_matches(&p, family, &ip16, port)
                 }
-                // Source does not match the connected peer — drop and receive again.
+            };
+            if accepted {
+                return Ok(got);
             }
         }
+    })
+}
+
+/// How every blocking netstack socket call waits: `ask` once, and while it
+/// answers `WouldBlock` on a blocking socket, sleep and ask again.
+///
+/// `ask` makes one attempt that never blocks, locking the socket for that
+/// attempt only, so the socket is free while this task sleeps -- another task
+/// can use it meanwhile, including to send what this one is waiting for. The
+/// sleep backs off from 1 ms to 10 ms: an answer that is nearly there comes
+/// quickly, and a long wait costs a hundred daemon round trips a second
+/// rather than a thousand. A deliverable signal ends the wait with
+/// `Interrupted` (`EINTR`). Any answer other than `WouldBlock` -- data, an
+/// EOF's `0`, an error -- is returned as it came.
+///
+/// The waiting is done here because the daemon never holds a request open
+/// for a blocked client: it serves every client of a session in one loop, so
+/// one client's wait would stall all the others' requests.
+fn wait_until<T>(nonblock: bool, mut ask: impl FnMut() -> KernelResult<T>) -> KernelResult<T> {
+    let pid = crate::ipc::waiters::current_user_pid();
+    let mut backoff_ms: u64 = 1;
+    loop {
+        match ask() {
+            Err(KernelError::WouldBlock) if !nonblock => {}
+            other => return other,
+        }
+        if crate::ipc::waiters::deliverable_signal_pending(pid) {
+            return Err(KernelError::Interrupted);
+        }
+        crate::sched::sleep_ms_interruptible(backoff_ms);
+        backoff_ms = backoff_ms.saturating_mul(2).min(10);
     }
+}
+
+/// Self-test: [`wait_until`], driven by synthetic answers -- no daemon, no NIC.
+///
+/// Each property is one a blocking socket call relies on: it keeps asking
+/// through would-block and returns the eventual answer; a non-blocking call
+/// never waits; an EOF's `0` and an error are answers, returned at once, not
+/// taken for "nothing yet"; and the backoff is bounded, so a wait that goes on
+/// keeps asking every 10 ms instead of doubling away.
+pub fn self_test_wait_until() -> KernelResult<()> {
+    fn fail(what: &str) -> KernelResult<()> {
+        crate::serial_println!("[netsock]   FAIL: wait_until {}", what);
+        Err(KernelError::InternalError)
+    }
+
+    let mut asks = 0u32;
+    let got = wait_until(false, || {
+        asks = asks.saturating_add(1);
+        if asks < 4 {
+            Err(KernelError::WouldBlock)
+        } else {
+            Ok(7)
+        }
+    });
+    if got != Ok(7) || asks != 4 {
+        return fail("did not ask through three would-blocks to the answer");
+    }
+
+    asks = 0;
+    let got = wait_until(true, || {
+        asks = asks.saturating_add(1);
+        Err::<i32, _>(KernelError::WouldBlock)
+    });
+    if got != Err(KernelError::WouldBlock) || asks != 1 {
+        return fail("waited on a non-blocking call");
+    }
+
+    asks = 0;
+    let got = wait_until(false, || {
+        asks = asks.saturating_add(1);
+        Ok(0)
+    });
+    if got != Ok(0) || asks != 1 {
+        return fail("took an EOF's 0 for nothing-yet");
+    }
+
+    asks = 0;
+    let got = wait_until(false, || {
+        asks = asks.saturating_add(1);
+        Err::<i32, _>(KernelError::TimedOut)
+    });
+    if got != Err(KernelError::TimedOut) || asks != 1 {
+        return fail("did not pass an error straight through");
+    }
+
+    // Twelve would-blocks sleep 1+2+4+8 ms and then 10 ms each: about 0.1 s.
+    // Unbounded doubling would be about 4 s.
+    asks = 0;
+    let start = crate::hrtimer::now_ns();
+    let got = wait_until(false, || {
+        asks = asks.saturating_add(1);
+        if asks <= 12 {
+            Err(KernelError::WouldBlock)
+        } else {
+            Ok(1)
+        }
+    });
+    let elapsed_ms = crate::hrtimer::now_ns().saturating_sub(start) / 1_000_000;
+    if got != Ok(1) || asks != 13 {
+        return fail("lost count of a long wait");
+    }
+    if elapsed_ms < 50 || elapsed_ms > 2_000 {
+        crate::serial_println!(
+            "[netsock]   FAIL: wait_until: twelve backoff sleeps took {} ms (want about 100)",
+            elapsed_ms
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
+/// Port for [`self_test_dgram_blocking_recv`] -- distinct from the other
+/// loopback self-tests' (udp6 uses 9201).
+const LATE_DGRAM_PORT: u16 = 9207;
+
+/// The datagram [`late_dgram_sender`] sends.
+const LATE_DGRAM_PAYLOAD: &[u8] = b"slate-udp6:the-datagram-came-late";
+
+/// Set by [`late_dgram_sender`] once its send has returned (either way).
+static LATE_DGRAM_SENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The daemon's link-local IPv6 address, derived from the NIC's MAC the way the
+/// daemon seeds `me.ip6` (EUI-64, RFC 4291 App. A).
+fn netstack_link_local(mac: [u8; 6]) -> [u8; 16] {
+    [
+        0xFE,
+        0x80,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        mac[0] ^ 0x02,
+        mac[1],
+        mac[2],
+        0xFF,
+        0xFE,
+        mac[3],
+        mac[4],
+        mac[5],
+    ]
+}
+
+/// Helper task for [`self_test_dgram_blocking_recv`]: wait 50 ms, then send the
+/// datagram the main task is already blocked receiving, on that same socket.
+extern "C" fn late_dgram_sender(handle_raw: u64) {
+    crate::sched::sleep_ms(50);
+    let handle = SocketHandle::from_raw(handle_raw);
+    let ll = netstack_link_local(crate::net::interface::mac().0);
+    // Ignored on purpose: the main task judges the outcome by what it received.
+    let _ = dgram_send_to6(handle, &ll, LATE_DGRAM_PORT, LATE_DGRAM_PAYLOAD);
+    LATE_DGRAM_SENT.store(true, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Self-test: a **blocking** datagram receive waits for a datagram that arrives
+/// after it asked.
+///
+/// The main task binds an IPv6 datagram socket to [`LATE_DGRAM_PORT`] and
+/// blocks in [`dgram_recv_from`]; a helper sends to that socket's own address,
+/// through the same socket (the daemon holds one socket at a time, A-Q15),
+/// 50 ms later. Before 2026-09-26 the receive returned `WouldBlock` at once --
+/// the datagram did not exist yet -- which is exactly the failure this pins. A
+/// non-blocking receive on the drained socket afterwards must still be
+/// `WouldBlock`: the fix waits only where waiting was asked for.
+///
+/// `Ok(None)` with no NIC: the daemon then has no address to loop back to.
+pub fn self_test_dgram_blocking_recv() -> KernelResult<Option<()>> {
+    const AF_INET6: u16 = 10;
+    let mac = crate::net::interface::mac().0;
+    if mac == [0u8; 6] {
+        return Ok(None);
+    }
+    let ll = netstack_link_local(mac);
+    let handle = create_dgram(AF_INET6)?;
+    let bound = match dgram_bind(handle, LATE_DGRAM_PORT) {
+        Ok(p) => p,
+        Err(e) => {
+            close(handle);
+            return Err(e);
+        }
+    };
+    if bound != LATE_DGRAM_PORT {
+        close(handle);
+        crate::serial_println!("[netsock]   FAIL: late-datagram bind got port {}", bound);
+        return Err(KernelError::InternalError);
+    }
+
+    LATE_DGRAM_SENT.store(false, core::sync::atomic::Ordering::SeqCst);
+    if let Err(e) =
+        crate::sched::spawn(b"dgram-late-sender", 16, late_dgram_sender, handle.raw(), 0)
+    {
+        close(handle);
+        return Err(e);
+    }
+
+    let mut buf = [0u8; 64];
+    let blocking = dgram_recv_from(handle, &mut buf, false);
+    // The helper must be done with the socket before it is closed.
+    let mut spins = 0u32;
+    while !LATE_DGRAM_SENT.load(core::sync::atomic::Ordering::SeqCst) && spins < 10_000 {
+        crate::sched::yield_now();
+        spins = spins.saturating_add(1);
+    }
+    let drained = dgram_recv_from(handle, &mut buf[..], true);
+    close(handle);
+
+    let (n, family, src, _port) = match blocking {
+        Ok(got) => got,
+        Err(e) => {
+            crate::serial_println!(
+                "[netsock]   FAIL: a blocking recv on an empty socket returned {:?} instead of \
+                 waiting for the datagram sent 50 ms later",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let len = usize::try_from(n).unwrap_or(0);
+    if buf.get(..len) != Some(LATE_DGRAM_PAYLOAD)
+        || family != netipc::ring::UDP_AF_INET6
+        || src != ll
+    {
+        crate::serial_println!(
+            "[netsock]   FAIL: the late datagram came back wrong ({} bytes, family {})",
+            n,
+            family
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !matches!(drained, Err(KernelError::WouldBlock)) {
+        crate::serial_println!(
+            "[netsock]   FAIL: a non-blocking recv on the drained socket returned {:?}, not \
+             WouldBlock",
+            drained.map(|(n, ..)| n)
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(Some(()))
 }
 
 /// `connect(2)` a datagram (`SOCK_DGRAM`) socket to a default peer.

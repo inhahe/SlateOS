@@ -53,6 +53,10 @@ pub struct TextInput {
     selection_anchor: Option<usize>,
     /// Clipboard contents (internal; real clipboard would use IPC).
     clipboard: String,
+    /// The most characters typing and pasting may leave in the field -- a
+    /// form field's `maxlength` -- or `None` for no limit. See
+    /// [`set_capacity`](Self::set_capacity).
+    capacity: Option<usize>,
 }
 
 impl TextInput {
@@ -114,7 +118,24 @@ impl TextInput {
             cursor: TextCursor::default(),
             selection_anchor: None,
             clipboard: String::new(),
+            capacity: None,
         }
+    }
+
+    /// Hold typing and pasting to at most `capacity` characters -- a form
+    /// field's `maxlength` -- or lift the limit with `None`.
+    ///
+    /// Characters, not bytes, so a limit cannot cut a character in half.
+    /// A limit on what the *user* puts in: [`set_text`](Self::set_text) is
+    /// the program's, and is not cut.
+    pub fn set_capacity(&mut self, capacity: Option<usize>) {
+        self.capacity = capacity;
+    }
+
+    /// The field's limit, if it has one.
+    #[must_use]
+    pub const fn capacity(&self) -> Option<usize> {
+        self.capacity
     }
 
     pub fn clear(&mut self) {
@@ -282,10 +303,53 @@ impl TextInput {
         self.cursor = TextCursor::from(self.text.len());
     }
 
+    /// Put `ch` in place of the selection, or at the caret -- unless the field
+    /// is at its [capacity](Self::set_capacity) with nothing selected to make
+    /// room.
     pub fn insert_char(&mut self, ch: char) {
         let (start, end) = self.selection_range();
+        if self.room_over(start, end) == 0 {
+            return;
+        }
         let mut buf = [0u8; 4];
         self.replace_range(start, end, ch.encode_utf8(&mut buf));
+    }
+
+    /// Type `typed` over the selection, as typing or pasting does: its control
+    /// characters left out -- the field is one line, and a newline in a paste
+    /// has nowhere to go -- and no more of it than the
+    /// [capacity](Self::set_capacity) leaves room for. Text with nothing but
+    /// control characters in it types nothing, and so leaves the selection
+    /// where it was rather than deleting it for nothing.
+    pub fn insert_text(&mut self, typed: &str) {
+        if typed.chars().all(char::is_control) {
+            return;
+        }
+        let (start, end) = self.selection_range();
+        let room = self.room_over(start, end);
+        let fitting: String = typed
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(room)
+            .collect();
+        if fitting.is_empty() && start == end {
+            return;
+        }
+        self.replace_range(start, end, &fitting);
+    }
+
+    /// How many characters may go in place of the bytes `start..end`, under
+    /// the [capacity](Self::set_capacity): everything if there is none.
+    fn room_over(&self, start: usize, end: usize) -> usize {
+        let Some(capacity) = self.capacity else {
+            return usize::MAX;
+        };
+        let kept = self
+            .text
+            .get(..start)
+            .map_or(0, |s| s.chars().count())
+            .saturating_add(self.text.get(end..).map_or(0, |s| s.chars().count()));
+        capacity.saturating_sub(kept)
     }
 
     pub fn backspace(&mut self) {
@@ -326,13 +390,14 @@ impl TextInput {
         }
     }
 
+    /// Paste the clipboard over the selection, as [`insert_text`](Self::insert_text)
+    /// types: control characters left out, and cut to the capacity.
     pub fn paste(&mut self) {
         if self.clipboard.is_empty() {
             return;
         }
-        let (start, end) = self.selection_range();
         let clip = core::mem::take(&mut self.clipboard);
-        self.replace_range(start, end, &clip);
+        self.insert_text(&clip);
         self.clipboard = clip;
     }
 }
@@ -438,10 +503,11 @@ impl TextInput {
                 if !key.types_text() {
                     return KeyEdit::Unhandled;
                 }
-                for ch in key.typed() {
-                    self.insert_char(ch);
-                }
-                KeyEdit::Changed
+                let before = self.text.clone();
+                let typed: String = key.typed().collect();
+                self.insert_text(&typed);
+                // A field at its capacity took the key and changed nothing.
+                KeyEdit::of(&before, &self.text)
             }
         }
     }
@@ -667,6 +733,83 @@ mod tests {
 
     fn edit(input: &mut TextInput, k: crate::event::Key, ctrl: bool, text: &str) -> KeyEdit {
         input.edit_key(&key(k, ctrl, text), FONT_SIZE, FontWeightHint::Regular)
+    }
+
+    /// **A field holds at most its capacity**, counted in characters: typing
+    /// stops there, a key it cannot take changes nothing and says so, typing
+    /// over a selection makes room, and a paste is cut to fit -- never
+    /// through a character.
+    #[test]
+    fn a_field_holds_at_most_its_capacity() {
+        use crate::event::Key;
+        let mut input = TextInput::new();
+        input.set_capacity(Some(3));
+        assert_eq!(input.capacity(), Some(3));
+        for ch in ["a", "b", "c"] {
+            assert_eq!(edit(&mut input, Key::A, false, ch), KeyEdit::Changed);
+        }
+        assert_eq!(
+            edit(&mut input, Key::D, false, "d"),
+            KeyEdit::Handled,
+            "a full field reported a change"
+        );
+        assert_eq!(input.text(), "abc");
+        input.insert_char('z');
+        assert_eq!(input.text(), "abc", "insert_char went past the capacity");
+
+        // Over a selection there is room again.
+        assert_eq!(edit(&mut input, Key::A, true, ""), KeyEdit::Handled);
+        assert_eq!(edit(&mut input, Key::X, false, "x"), KeyEdit::Changed);
+        assert_eq!(input.text(), "x");
+
+        // A paste is cut to fit, by characters: each \u{e9} is two bytes.
+        input.set_clipboard("\u{e9}\u{e9}\u{e9}\u{e9}".to_string());
+        input.paste();
+        assert_eq!(input.text(), "x\u{e9}\u{e9}");
+
+        // And no limit at all without one.
+        input.set_capacity(None);
+        input.paste();
+        assert_eq!(input.text().chars().count(), 7);
+
+        // A key a full field cannot take leaves the caret exactly where it
+        // was -- on whichever side of a direction boundary it stood, which a
+        // caret rebuilt from its offset would forget.
+        let mut full = TextInput::new();
+        full.set_capacity(Some(2));
+        full.set_text("ab");
+        let caret = TextCursor {
+            byte: 1,
+            affinity: crate::text::Affinity::Upstream,
+        };
+        full.set_cursor(caret);
+        assert_eq!(edit(&mut full, Key::C, false, "c"), KeyEdit::Handled);
+        assert_eq!(
+            full.cursor(),
+            caret,
+            "a key that typed nothing moved the caret"
+        );
+    }
+
+    /// **A paste leaves control characters out**: the field is one line, so a
+    /// newline in what was copied has nowhere to go. A clipboard of nothing
+    /// else pastes nothing, and leaves the selection it would have replaced.
+    #[test]
+    fn a_paste_leaves_control_characters_out() {
+        let mut input = TextInput::new();
+        input.set_clipboard("one\ntwo\tthree".to_string());
+        input.paste();
+        assert_eq!(input.text(), "onetwothree");
+
+        input.set_text("keep");
+        input.select_all();
+        input.set_clipboard("\n\r".to_string());
+        input.paste();
+        assert_eq!(input.text(), "keep");
+        assert!(
+            input.has_selection(),
+            "a paste of nothing lost the selection"
+        );
     }
 
     #[test]

@@ -3602,6 +3602,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "ulstrutils",
+ "ulsysfs",
 ]
 
 [[package]]
@@ -3609,6 +3610,15 @@ name = "ulstrutils"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "ulsysfs"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+ "scratchdir",
+ "ulstrutils",
 ]
 
 [[package]]

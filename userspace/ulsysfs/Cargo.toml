@@ -1,0 +1,17 @@
+[package]
+name = "ulsysfs"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux 2.39.3's lib/path.c and lib/sysfs.c: a block device's /sys/dev/block directory, its attributes, and device numbers to names and back"
+
+[lints]
+workspace = true
+
+[dependencies]
+# strtol/strtoul's digit scan, for fscanf's %d, %u and %lu.
+ulstrutils = { path = "../ulstrutils" }
+# Paths from bytes.
+quoting = { path = "../quoting" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

@@ -16,27 +16,8 @@ pub const MNT_FS_KERNEL: u32 = 1 << 4;
 /// `MNT_FS_MERGED`: utab's options already merged in.
 pub const MNT_FS_MERGED: u32 = 1 << 5;
 
-/// glibc's `makedev(major, minor)`.
-#[must_use]
-pub fn makedev(major: u32, minor: u32) -> u64 {
-    let (ma, mi) = (u64::from(major), u64::from(minor));
-    ((ma & 0x0000_0fff) << 8)
-        | ((ma & 0xffff_f000) << 32)
-        | (mi & 0x0000_00ff)
-        | ((mi & 0xffff_ff00) << 12)
-}
-
-/// glibc's `major(dev)`.
-#[must_use]
-pub fn major(dev: u64) -> u32 {
-    (((dev >> 8) & 0x0000_0fff) | ((dev >> 32) & 0xffff_f000)) as u32
-}
-
-/// glibc's `minor(dev)`.
-#[must_use]
-pub fn minor(dev: u64) -> u32 {
-    ((dev & 0x0000_00ff) | ((dev >> 12) & 0xffff_ff00)) as u32
-}
+/// glibc's `makedev`, `major` and `minor`, from lib/sysfs.c's port.
+pub use ulsysfs::{major, makedev, minor};
 
 /// `struct libmnt_fs`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

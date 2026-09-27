@@ -551,41 +551,8 @@ fn path_to_tid(filename: &[u8]) -> i32 {
     }
 }
 
-/// `sysfs_devno_to_devpath(devno)`: `/dev/NAME` for a block device number,
-/// from where `/sys/dev/block/MAJ:MIN` links -- if that file is a block
-/// device with that number.
-pub(crate) fn devno_to_devpath(devno: u64) -> Option<Vec<u8>> {
-    // `"%d:%d"`: the two `unsigned int`s printed signed.
-    let link = format!(
-        "/sys/dev/block/{}:{}",
-        crate::fs::major(devno) as i32,
-        crate::fs::minor(devno) as i32
-    );
-    let target = std::fs::read_link(link).ok()?;
-    let target = quoting::os_bytes(target.as_os_str()).into_owned();
-    let slash = target.iter().rposition(|&b| b == b'/')?;
-    let name = target.get(slash.saturating_add(1)..)?;
-    let mut path = b"/dev/".to_vec();
-    // `sysfs_devname_sys_to_dev`: sysfs spells a `/` in a name `!`.
-    path.extend(name.iter().map(|&b| if b == b'!' { b'/' } else { b }));
-    is_block_device_numbered(&path, devno).then_some(path)
-}
-
-/// `stat(path)` is a block device and its `st_rdev` is `devno`.
-fn is_block_device_numbered(path: &[u8], devno: u64) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
-        std::fs::metadata(path_of(path))
-            .is_ok_and(|m| m.file_type().is_block_device() && m.rdev() == devno)
-    }
-    #[cfg(not(unix))]
-    {
-        // No block devices to find where there is no `/sys`.
-        let _ = (path, devno);
-        false
-    }
-}
+/// `sysfs_devno_to_devpath(devno)`: `/dev/NAME` for a block device number.
+pub(crate) use ulsysfs::devno_to_devpath;
 
 /// `mnt_get_kernel_cmdline_option(name)` for a `name=` option: its value
 /// on the kernel command line's first line, the last one given.

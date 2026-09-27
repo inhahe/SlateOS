@@ -12,6 +12,8 @@ workspace = true
 ulstrutils = { path = "../ulstrutils" }
 # Paths from bytes.
 quoting = { path = "../quoting" }
+# lib/sysfs.c: device numbers to /dev paths, and glibc's makedev.
+ulsysfs = { path = "../ulsysfs" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

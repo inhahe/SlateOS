@@ -13029,8 +13029,12 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
 
     // `tcp::send` queues into the socket's transmit buffer and can block on a
     // full window, so the payload has to be kernel-owned before it is handed
-    // over.  See `sys_fs_write_file` on why the unbounded copy is safe.
-    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+    // over. At most `MAX_TX_BUFFER` of it: that is all the stack keeps for
+    // retransmission, so a send past it could put bytes in flight that a loss
+    // would make unrecoverable, and a short count is a stream send's right.
+    // Before 2026-09-26 the whole request was copied, up to 1 GiB (known-issues.md
+    // `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`, class 2c).
+    let data = match read_call_buffer(args.arg1, len, crate::net::tcp::MAX_TX_BUFFER) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };

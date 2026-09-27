@@ -170,7 +170,7 @@ const MSS: usize = 1460;
 ///
 /// Stores copies of sent-but-unacknowledged data so that fast retransmit
 /// (3 dup ACKs) and timeout retransmit can resend lost segments.
-const MAX_TX_BUFFER: usize = 65536;
+pub(crate) const MAX_TX_BUFFER: usize = 65536;
 
 // ---------------------------------------------------------------------------
 // RTT estimation (Jacobson/Karels, RFC 6298)

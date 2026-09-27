@@ -2822,6 +2822,52 @@ impl WideStream {
     }
 }
 
+/// A stream held for one `scanf` call, byte-oriented: the engine in
+/// `scanf.rs` reads it with glibc's `inchar` and gives back the one
+/// character it looked at too far with `ungetc`.
+pub(crate) struct ScanStream {
+    f: *mut File,
+    _lock: Locked,
+}
+
+/// Lock `stream` for a `scanf` call and claim byte orientation, as glibc's
+/// `vfscanf` does: `None` (the call answers `EOF`) for a wide stream or NULL
+/// (`EBADF`).  A stream not open for reading is `EBADF` and a stream error,
+/// as glibc's `ARGCHECK` makes it.
+pub(crate) fn lock_scan_stream(stream: *mut u8) -> Option<ScanStream> {
+    let f = stream_to_file(stream)?;
+    // SAFETY: a non-null `FILE *` is a live stream.
+    let lock = unsafe { locked(f) };
+    // SAFETY: locked.
+    unsafe {
+        if orient(f, -1) > 0 {
+            return None;
+        }
+        if (*f).flags & F_NORD != 0 {
+            (*f).flags |= F_ERR;
+            errno::set_errno(errno::EBADF);
+            return None;
+        }
+    }
+    Some(ScanStream { f, _lock: lock })
+}
+
+impl ScanStream {
+    /// The next byte, or `EOF`.
+    pub(crate) fn getc(&self) -> i32 {
+        // SAFETY: held.
+        unsafe { getc_raw(self.f) }
+    }
+
+    /// Give back `c`, the byte `getc` last returned.  There is always room
+    /// for it: it came out of the window just now, or the pushback room is
+    /// empty.
+    pub(crate) fn unget(&self, c: u8) {
+        // SAFETY: held.
+        let _ = unsafe { unget_raw(i32::from(c), self.f) }; // see the doc
+    }
+}
+
 // ---------------------------------------------------------------------------
 // stdio_ext.h
 // ---------------------------------------------------------------------------

@@ -57,7 +57,7 @@ pub struct MbstateT {
 
 impl MbstateT {
     /// Create a zero-initialized (initial) shift state.
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { opaque: [0; 8] }
     }
 

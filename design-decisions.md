@@ -82016,6 +82016,94 @@ explorer can be asked. Lane C does not restyle its layout further -- it is to
 be replaced -- but keeps it working: the typed paths of §1412 and the buttons
 of §1414 stay.
 
+## 1416. The keyboard shortcuts on by default: the few everyone knows, and the rest one setting away
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended option B; the operator chose a set close to it, and added a few) &middot; **Lane:** C, with E
+
+**In short:** `design.txt` asks for very few shortcuts turned on, and the desktop
+turned on 31. The operator chose which stay on. On by default: closing a
+window (Alt+F4), switching windows (Alt+Tab), the Super key for the start menu,
+Super+R for the Run box, Print Screen and its variants, and the dedicated
+volume keys -- plus, inside programs, the editing keys everyone knows. The rest
+(window snapping, desktop switching, and the shell's other panels) stay
+available and are easy to find, but start unbound. Super+Tab goes: what it
+opened becomes a choice of what Alt+Tab shows.
+
+**The question:** `open-questions.md` C-Q24 (now resolved).
+
+| Group | Keys | Default |
+|---|---|---|
+| The window | Alt+F4 close, Alt+Tab and Alt+Shift+Tab switch | **on** |
+| The shell | Super (start menu), Super+R (Run box) | **on** |
+| Screenshots | Print Screen: the whole screen; Alt+Print Screen: the current window (both to the clipboard, as on Windows); Ctrl+Print Screen and Ctrl+Alt+Print Screen: the same two, asking where to save them as a file | **on** |
+| Dedicated keys | volume up, down, mute; brightness up, down where the hardware sends a key | **on** -- they are keys of their own, usually in the top row or behind Fn, where nobody presses one by accident |
+| Inside programs | Ctrl+C copy, Ctrl+X cut, Ctrl+V paste, Ctrl+Z undo, Ctrl+Shift+Z redo, Ctrl+F4 close the current tab or document | **on** -- each program's own, never a desktop-wide grab, since they mean something different in each program |
+| Available, off by default | snap left and right, maximise, minimise, show desktop, the zone overlay, next and previous desktop, notifications, task manager, settings, lock, the shortcut card, the keyboard-layout switch (Super+Space), the file explorer (Super+E), a region screenshot (Super+Shift+S), and a new one: put the monitor to sleep | off, one binding away in the shortcut settings |
+| Gone | Super+Tab | what it opens (the overview) becomes a setting: whether Alt+Tab shows the switcher or the overview |
+
+**Two additions the operator made, recorded as work:**
+- **A redo *tree* wherever something can be undone and redone:** an undo that
+  keeps the branches a user undid away from, rather than discarding them the
+  moment something new is done. Today each of 39 programs keeps its own
+  straight-line history, and the toolkit's text area its own; the toolkit gets
+  one tree the rest can adopt.
+- **Print Screen saving to a file**, one key for the window and one for the
+  screen, each asking where to save.
+
+**Judgment calls inside the operator's answer**, easy to change: the exact
+save-to-file keys (Ctrl+ and Ctrl+Alt+Print Screen), and treating the editing
+keys as each program's own rather than the desktop's.
+
+## 1417. Passwords leave the password manager two ways, and a program can ask for one -- only with a key for it, and your say-so
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended B, and A only if wanted; the operator chose both, and added a third way) &middot; **Lane:** C, with E and A
+
+**In short:** The password manager could not export at all. It will offer both
+ways out: a plain-text export for moving to another password manager, made
+unmistakably clear that it writes every password readable by anyone who gets
+the file, and an encrypted backup that restores everything and is useless to
+anyone else. And the operator added a third: a program may ask the password
+manager for a password directly, over a secure connection, only if it holds a
+capability (a system-issued key) for exactly that -- and when it asks, the
+password manager shows who is asking and lets you allow or refuse.
+
+**The question:** `open-questions.md` C-Q25 (now resolved).
+
+| Way | What it is | Whose |
+|---|---|---|
+| Plain-text export | every password, readable, in a file; a warning that says so plainly before it is written, not a checkbox to click through | lane E, `apps/credmanager` (`export_csv`, written and unused) |
+| Encrypted backup | a file only the password manager can read, with the vault's own password; restores everything | lane E, `apps/credmanager` -- the existing `serialize_backup` omits the passwords and is not to be connected as it stands |
+| A program asks for a password | through the credential service (`gui/credentials`), only with a capability granted for it, and with a prompt showing the asking program's identity, to allow or refuse | lane C, with lane A for the capability |
+
+**Not changed:** the backup writer that holds no passwords stays disconnected
+-- a file named like a backup that restores empty logins is the failure this
+lane keeps finding.
+
+## 1418. A program's settings are its own file; a service tells open windows when they change
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A; the operator chose A, with C added beside it) &middot; **Lane:** C, with E
+
+**In short:** Each program keeps its settings in a file of its own under the
+user's settings folder -- `~/.config/<program>.yaml`, in YAML as the design
+requires -- which the program writes itself. In addition, a settings service
+tells every open window when a setting changes, so a change shows at once
+without reopening anything. The service is *beside* the saving, not in front of
+it: saving a setting is the program writing its file, and the service being
+down or slow cannot lose one.
+
+**The question:** `open-questions.md` C-Q26 (now resolved).
+
+| Part | What | Whose |
+|---|---|---|
+| The file | one YAML file per program, written through `gui/settingsfile` (which already does this, comments preserved) | lane C (`settingsfile`, exists) |
+| The four programs that asked | the lock screen's clock and date, the markdown editor's autosave, the password generator's rules, the explorer's copy-onto-an-existing-name choice, kept across restarts | lane E |
+| Live changes | a service that watches the settings files and tells open programs what changed -- separate from the function that saves, as the operator specified | lane C |
+
+**How "not as the same function that saves" was read:** the service does not
+own the write path. A program saving its settings writes its own file whether
+or not the service is running; the service's job is to notice and tell others.
+If the operator meant something else, this is the entry to correct.
+
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 
 **Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text

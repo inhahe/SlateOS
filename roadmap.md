@@ -1859,6 +1859,35 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The default shortcuts become the operator's set** -- open (C-Q24,
+  `design-decisions.md` §1416). In `gui/desktop/src/hotkeys.rs`
+  `register_defaults`: keep Alt+F4, Alt+Tab/Alt+Shift+Tab, Super, Super+R, the
+  volume keys and Print Screen; move everything else to available-but-unbound;
+  drop Super+Tab and add a setting for whether Alt+Tab shows the switcher or the
+  overview; add Alt+Print Screen (the window), Ctrl+ and Ctrl+Alt+Print Screen
+  (save the screen or the window to a file, asking where), and a "put the
+  monitor to sleep" action.
+
+- `[C]` **A redo tree in the toolkit** -- open (§1416, the operator's
+  addition). One undo/redo history that keeps the branches a user undid away
+  from, for the toolkit's text area first; then offered to the 39 programs
+  that keep their own straight-line undo (lane E adopts).
+
+- `[C]` **A program may ask the password manager for a password -- with a key
+  for it, and the user's consent** -- open (C-Q25, §1417). In the credential
+  service (`gui/credentials`): the request over the service's IPC, refused
+  without a capability granted for it, and a prompt naming the asking program
+  to allow or refuse. The capability's shape may need lane A.
+
+- `[C]` **A settings service that tells open windows when a setting
+  changes** -- open (C-Q26, §1418). Beside `gui/settingsfile`, never in front
+  of it: saving stays a program writing its own file.
+
+- `[C]` **C-Q11: measure the whole-workspace check under the machine's normal
+  load, then decide the gate** -- open, waiting for the lanes to be running
+  again (`todo.txt`, lane C). The earlier figures (15 s to 49 s) were taken
+  with fewer lanes and fewer projects running.
+
 - `[C]` **One push button, the reference's** -- done 2026-09-27
   (`design-decisions.md` §1414). `guitk::button` draws the Aero reference's
   button in the theme's colours -- a face brighter above, an edge, the label

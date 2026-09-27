@@ -50,7 +50,7 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use getoptlong::{Opt, Program, Takes};
-use quoting::{escape_unprintable, os_bytes};
+use quoting::{escape_unprintable, escaped_in_quotes, os_bytes};
 use smartcols::{CellView, ColumnId, JsonType, LineId, Table};
 use ulclosestream::{Stdout, stderr_write, warn, warnx};
 use ulsysfs::PathCxt;
@@ -613,7 +613,7 @@ fn strtoul(s: &[u8]) -> Option<(u64, usize, bool)> {
 /// separated by commas, onto `list` -- 255 of them at most.
 fn parse_majors(str0: &[u8], list: &mut Vec<i32>, what: &str, short: &[u8]) -> Result<(), Fatal> {
     let failed = |range: bool| {
-        let msg = format!("failed to parse list '{}'", shown(str0));
+        let msg = format!("failed to parse list {}", escaped_in_quotes(str0));
         if range {
             warn_errno(short, &msg, ERANGE);
         } else {

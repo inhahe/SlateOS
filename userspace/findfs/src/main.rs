@@ -21,7 +21,7 @@
 //!   (design-decisions §370).
 
 use getoptlong::{Opt, Program, Takes};
-use quoting::{escape_unprintable, os_bytes};
+use quoting::{escape_unprintable, escaped_in_quotes, os_bytes};
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
 use ulclosestream::{Stdout, stderr_write, warnx};
@@ -129,7 +129,10 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
         .map(|a| os_bytes(a).into_owned())
         .unwrap_or_default();
     let Some(dev) = ulblkid::evaluate::evaluate_tag(&spec, None, None) else {
-        warnx(short, &format!("unable to resolve '{}'", shown(&spec)));
+        warnx(
+            short,
+            &format!("unable to resolve {}", escaped_in_quotes(&spec)),
+        );
         return FINDFS_NOT_FOUND;
     };
     // `puts(dev)`.

@@ -32,7 +32,7 @@
 //!   output runs on into whatever follows it in memory.
 
 use getoptlong::{Opt, Program, Takes};
-use quoting::{escape_unprintable, os_bytes};
+use quoting::{escape_unprintable, escaped_in_quotes, os_bytes};
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -715,8 +715,8 @@ fn list_to_usage(list: &[u8], flag: &mut u32, short: &[u8]) -> Result<u32, u8> {
         warnx(
             short,
             &format!(
-                "unknown keyword in -u <list> argument: '{}'",
-                shown(word.unwrap_or(list))
+                "unknown keyword in -u <list> argument: {}",
+                escaped_in_quotes(word.unwrap_or(list))
             ),
         );
         BLKID_EXIT_OTHER

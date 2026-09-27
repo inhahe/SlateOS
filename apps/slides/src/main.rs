@@ -43,12 +43,16 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
+use unsaved::{Choice, Question};
 
 use std::collections::VecDeque;
 
@@ -686,10 +690,15 @@ impl Slide {
 // ============================================================================
 
 /// A snapshot of the entire slide deck for undo/redo.
+///
+/// The theme is part of it: a theme change restyles every element, and an
+/// undo that brought the old colours back under the new theme would leave the
+/// deck in neither.
 #[derive(Clone, Debug)]
 struct Snapshot {
     slides: Vec<Slide>,
     current_index: usize,
+    theme: SlideTheme,
 }
 
 /// Undo/redo manager using a snapshot stack.
@@ -710,34 +719,25 @@ impl UndoManager {
     }
 
     /// Save the current state before a mutation. Clears the redo stack.
-    fn save(&mut self, slides: &[Slide], current_index: usize) {
+    fn save(&mut self, now: Snapshot) {
         if self.undo_stack.len() >= self.max_depth {
             self.undo_stack.pop_front();
         }
-        self.undo_stack.push_back(Snapshot {
-            slides: slides.to_vec(),
-            current_index,
-        });
+        self.undo_stack.push_back(now);
         self.redo_stack.clear();
     }
 
     /// Undo: return the previous snapshot, saving the current state to redo.
-    fn undo(&mut self, current_slides: &[Slide], current_index: usize) -> Option<Snapshot> {
+    fn undo(&mut self, now: Snapshot) -> Option<Snapshot> {
         let prev = self.undo_stack.pop_back()?;
-        self.redo_stack.push(Snapshot {
-            slides: current_slides.to_vec(),
-            current_index,
-        });
+        self.redo_stack.push(now);
         Some(prev)
     }
 
     /// Redo: return the next snapshot, saving the current state to undo.
-    fn redo(&mut self, current_slides: &[Slide], current_index: usize) -> Option<Snapshot> {
+    fn redo(&mut self, now: Snapshot) -> Option<Snapshot> {
         let next = self.redo_stack.pop()?;
-        self.undo_stack.push_back(Snapshot {
-            slides: current_slides.to_vec(),
-            current_index,
-        });
+        self.undo_stack.push_back(now);
         Some(next)
     }
 
@@ -791,28 +791,249 @@ enum Clipboard {
 /// walks it and asserts each one is taken. `apps/rssreader` shipped an
 /// overlay of twenty-one shortcuts of which about four worked, and the only
 /// thing that keeps a list and a handler together is a test that reads both.
+///
+/// Kept to what the card can show at the window's opening size without an
+/// "and N more" line: related keys share a row.
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("Left / Right", "Previous / next slide"),
+    ("PgUp / PgDn", "Previous / next slide"),
     ("Home / End", "First / last slide"),
-    ("1 / 2", "Edit view / sorter view"),
-    ("Tab", "Cycle the view"),
-    ("Ctrl+N", "New slide"),
+    (
+        "Arrows",
+        "Move the selected element; Left / Right change slides with none",
+    ),
+    ("Shift+Arrows", "Resize the selected element"),
+    ("Tab / Shift+Tab", "Select the next / previous element"),
+    ("Esc", "Select nothing"),
+    ("Enter / F2", "Type into the selected element"),
+    ("T / I", "Add a text box / an image placeholder"),
+    ("S / O / L / A", "Add a rectangle / ellipse / line / arrow"),
+    ("Ctrl+B / Ctrl+Shift+C", "Bold / centre the selected text"),
+    (
+        "Ctrl+] / Ctrl+[",
+        "Larger / smaller text, or a thicker / thinner outline",
+    ),
+    ("C", "Next colour for the selected element"),
+    (
+        "Delete / Shift+Delete",
+        "Delete the selected element (or the slide) / the slide",
+    ),
+    (
+        "Ctrl+N / Ctrl+M",
+        "New slide / new slide in a layout you choose",
+    ),
     ("Ctrl+D", "Duplicate this slide"),
     ("Ctrl+C / Ctrl+V", "Copy / paste a slide"),
-    ("Ctrl+PageUp / Ctrl+PageDown", "Move this slide up / down"),
-    ("T", "Add a text box"),
-    ("S / O / L / A", "Add a rectangle / ellipse / line / arrow"),
-    ("I", "Add an image placeholder"),
-    ("Enter / F2", "Type into the selected text box"),
-    ("Delete", "Delete the selected element, or the slide"),
-    ("Shift+Delete", "Delete the slide"),
+    ("Ctrl+PgUp / Ctrl+PgDn", "Move this slide up / down"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("G", "Next background for this slide"),
+    ("Ctrl+R", "Next transition into this slide"),
     ("Ctrl+T", "Next theme"),
     ("Ctrl+Shift+T", "Name the deck"),
-    ("Ctrl+R", "Next transition"),
-    ("B", "Show or hide the speaker notes"),
-    ("Ctrl+E", "Export"),
+    ("N / B", "Type / show or hide the speaker notes"),
+    ("1 / 2", "Edit view / sorter view"),
+    ("F5 / Shift+F5", "Present from the start / from this slide"),
+    (
+        "Space / Backspace",
+        "Next / previous slide while presenting; Esc stops",
+    ),
+    ("N / P", "Also next / previous slide while presenting"),
+    ("Ctrl+O / Ctrl+S", "Open a deck / save this one"),
+    ("Ctrl+Shift+S", "Save this deck under another name"),
+    ("Ctrl+E", "Export a web page"),
     ("F1 / ?", "This list"),
 ];
+
+/// A deck file's format, written under `slateos-slides` so that a file from
+/// a later format is recognised and refused rather than half-read.
+const DECK_FORMAT: i64 = 1;
+
+/// How long a transition between two slides takes.
+const TRANSITION_MS: u64 = 500;
+
+/// The grid a Dissolve reveals the arriving slide through, cell by cell.
+const DISSOLVE_COLS: usize = 16;
+const DISSOLVE_ROWS: usize = 9;
+
+/// A slide show in progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Show {
+    /// The slide on screen, or arriving.
+    index: usize,
+    /// The slide leaving while a transition plays, and how far the
+    /// transition has got, in milliseconds.
+    leaving: Option<(usize, u64)>,
+}
+
+/// What the file picker was opened for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerFor {
+    Export,
+    Save,
+    Open,
+    /// Where to save a deck that has no file yet, before what the
+    /// unsaved-changes question held up goes on.
+    SaveThen(Pending),
+}
+
+/// What the unsaved-changes question is holding up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pending {
+    /// Opening a deck, which would replace this one.
+    Open,
+    /// Closing the window.
+    Close,
+}
+
+/// The colours an element steps through with `C`, after the theme's own four.
+const EXTRA_COLOURS: [Color; 6] = [
+    Color::rgb(255, 255, 255),
+    Color::rgb(17, 17, 27),
+    Color::rgb(243, 139, 168),
+    Color::rgb(166, 227, 161),
+    Color::rgb(249, 226, 175),
+    Color::rgb(137, 180, 250),
+];
+
+/// The backgrounds a slide steps through with `G`: the theme's own first
+/// (`None`), then these.
+const BACKGROUNDS: [Option<Color>; 7] = [
+    None,
+    Some(Color::rgb(17, 17, 27)),
+    Some(Color::rgb(30, 58, 95)),
+    Some(Color::rgb(45, 74, 43)),
+    Some(Color::rgb(74, 29, 46)),
+    Some(Color::rgb(245, 245, 240)),
+    Some(Color::rgb(255, 255, 255)),
+];
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// The editor drew a toolbar, thumbnails, a slide with its elements, a
+/// property panel with six Insert buttons and a notes panel, and handled no
+/// pointer event (`known-issues.md` ->
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`). Slides
+/// are named by index and elements by id: an element's index moves when one
+/// before it is deleted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Tool(Tool),
+    /// A layout in the new-slide menu.
+    LayoutChoice(usize),
+    /// Around the new-slide menu: a press closes it.
+    MenuBackdrop,
+    /// The menu's own card, between its rows: a press does nothing.
+    Menu,
+    /// The thumbnail column, which scrolls.
+    Sidebar,
+    Thumb(usize),
+    /// The grey around the slide: a press selects nothing.
+    Canvas,
+    /// The slide itself, under its elements: a press selects nothing.
+    SlideArea,
+    Element(ElementId),
+    /// A corner of the selected element, which resizes it.
+    Handle(Corner),
+    Prop(Prop),
+    /// One of the Insert buttons, by `INSERT_KINDS` index.
+    Insert(usize),
+    /// The speaker notes: a press starts typing them.
+    Notes,
+    /// The sorter's grid, which scrolls.
+    SorterGrid,
+    SorterThumb(usize),
+    HelpCard,
+    /// The slide show: a press goes on to the next slide.
+    Show,
+}
+
+/// A toolbar button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    /// The deck's name: a press starts naming it.
+    Title,
+    Open,
+    Save,
+    NewSlide,
+    Duplicate,
+    DeleteSlide,
+    ToggleView,
+    Undo,
+    Redo,
+    Export,
+    Present,
+    Theme,
+}
+
+/// A property-panel button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prop {
+    Transition,
+    Background,
+    Smaller,
+    Larger,
+    Bold,
+    Centre,
+    Colour,
+    Edit,
+    Delete,
+}
+
+/// A corner of an element's box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// What a press held down is doing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Drag {
+    /// Moving an element: where the press was and where the element was, in
+    /// slide units. `edit` is a press on the element already selected, which
+    /// starts typing if the pointer comes up without having moved it.
+    Move {
+        id: ElementId,
+        from: (f32, f32),
+        origin: (f32, f32),
+        moved: bool,
+        edit: bool,
+    },
+    /// Resizing from a corner, from the box the element had at the press.
+    Resize {
+        id: ElementId,
+        corner: Corner,
+        from: (f32, f32),
+        bounds: (f32, f32, f32, f32),
+        moved: bool,
+    },
+    /// A thumbnail on its way to a new place in the deck. `was_current` is a
+    /// press on the slide already shown, which in the sorter opens it.
+    Slide {
+        from: usize,
+        at: (f32, f32),
+        moved: bool,
+        was_current: bool,
+    },
+}
+
+/// What the Insert buttons add, in their order.
+const INSERT_KINDS: [&str; 6] = ["Text Box", "Rectangle", "Ellipse", "Line", "Arrow", "Image"];
+
+/// How far one arrow press moves or resizes an element, in slide units; with
+/// Ctrl, one unit.
+const NUDGE: f32 = 10.0;
+
+/// The smallest box an element can be resized to. A line or an arrow may be
+/// flat in either direction, so it has none.
+const MIN_ELEMENT: f32 = 8.0;
+
+/// A resize handle's side, in window pixels.
+const HANDLE: f32 = 8.0;
+
+/// Where the toolbar's buttons start, right of the deck's name.
+const TOOLS_X: f32 = 216.0;
 
 /// What a typed string is going onto.
 ///
@@ -825,6 +1046,10 @@ pub enum EditTarget {
     Element(ElementId),
     /// The deck's name, which the window bar and every export use.
     DeckTitle,
+    /// The current slide's speaker notes. They were shown and exported and
+    /// could not be written: `set_current_notes` had one caller, the sample
+    /// deck.
+    Notes,
 }
 
 /// The main presentation application state.
@@ -881,6 +1106,40 @@ pub struct SlidesApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Where the deck was last opened from or saved to.
+    deck_path: Option<std::path::PathBuf>,
+    /// Whether the deck has changed since it was opened or saved.
+    dirty: bool,
+    /// What the file picker is up for.
+    picker_for: PickerFor,
+    /// Asking before Open or closing the window throws away unsaved changes:
+    /// what the question is holding up, while it is being asked.
+    ///
+    /// The toolkit's own dialog, asked the one way every editor here asks it
+    /// (`apps/unsaved`).
+    question: Option<Question<Pending>>,
+    /// Set once the window may close; the next answer to the loop is `Exit`.
+    quit: bool,
+    /// The slide show, while one is running.
+    ///
+    /// There was none: `ViewMode` had Edit and Sorter, so this program edited
+    /// decks and could not show one, and the transitions it let every slide
+    /// choose were stored, printed and exported as a class name nothing
+    /// animated. They play here, and in the export.
+    show: Option<Show>,
+    /// The new-slide menu, with the layout its keys have reached.
+    layout_menu: Option<usize>,
+    /// What a press held down is doing.
+    drag: Option<Drag>,
+    /// How far the thumbnail column and the sorter are scrolled, in pixels.
+    sidebar_scroll: f32,
+    sorter_scroll: f32,
+    /// The wheel's remainder.
+    wheel: wheel::Accumulator,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
 }
 
 impl SlidesApp {
@@ -911,6 +1170,19 @@ impl SlidesApp {
             show_help: false,
             editing: None,
             title: String::from("Untitled Presentation"),
+            deck_path: None,
+            dirty: false,
+            picker_for: PickerFor::Export,
+            question: None,
+            quit: false,
+            show: None,
+            layout_menu: None,
+            drag: None,
+            sidebar_scroll: 0.0,
+            sorter_scroll: 0.0,
+            wheel: wheel::Accumulator::default(),
+            hover: None,
+            last_hits: Vec::new(),
         }
     }
 
@@ -952,7 +1224,7 @@ impl SlidesApp {
 
     /// Insert a new slide with the given layout after the current position.
     pub fn add_slide(&mut self, layout: SlideLayout) {
-        self.undo_mgr.save(&self.slides, self.current_index);
+        self.checkpoint();
         let slide_id = self.id_gen.next_id();
         let slide = Slide::new(slide_id, layout, &self.theme, &mut self.id_gen);
         let insert_at = self.current_index.saturating_add(1).min(self.slides.len());
@@ -966,7 +1238,7 @@ impl SlidesApp {
         if self.slides.len() <= 1 || index >= self.slides.len() {
             return;
         }
-        self.undo_mgr.save(&self.slides, self.current_index);
+        self.checkpoint();
         self.slides.remove(index);
         if self.current_index >= self.slides.len() {
             self.current_index = self.slides.len().saturating_sub(1);
@@ -977,7 +1249,7 @@ impl SlidesApp {
     /// Duplicate the current slide, inserting the copy immediately after it.
     pub fn duplicate_current_slide(&mut self) {
         if let Some(slide) = self.slides.get(self.current_index).cloned() {
-            self.undo_mgr.save(&self.slides, self.current_index);
+            self.checkpoint();
             let mut dup = slide;
             dup.id = self.id_gen.next_id();
             // Give duplicated elements new IDs.
@@ -1002,7 +1274,7 @@ impl SlidesApp {
         if self.current_index == 0 {
             return;
         }
-        self.undo_mgr.save(&self.slides, self.current_index);
+        self.checkpoint();
         self.slides
             .swap(self.current_index, self.current_index.saturating_sub(1));
         self.current_index = self.current_index.saturating_sub(1);
@@ -1013,7 +1285,7 @@ impl SlidesApp {
         if self.current_index.saturating_add(1) >= self.slides.len() {
             return;
         }
-        self.undo_mgr.save(&self.slides, self.current_index);
+        self.checkpoint();
         let next = self.current_index.saturating_add(1);
         self.slides.swap(self.current_index, next);
         self.current_index = next;
@@ -1029,8 +1301,8 @@ impl SlidesApp {
     /// Paste the slide from the clipboard after the current position.
     pub fn paste_slide(&mut self) {
         if let Clipboard::Slide(slide) = &self.clipboard {
-            self.undo_mgr.save(&self.slides, self.current_index);
             let mut pasted = slide.clone();
+            self.checkpoint();
             pasted.id = self.id_gen.next_id();
             for elem in &mut pasted.elements {
                 match elem {
@@ -1052,7 +1324,7 @@ impl SlidesApp {
 
     /// Add a text box element to the current slide.
     pub fn add_textbox(&mut self) {
-        self.undo_mgr.save(&self.slides, self.current_index);
+        self.checkpoint();
         if let Some(slide) = self.slides.get_mut(self.current_index) {
             let eid = self.id_gen.next_id();
             slide.elements.push(SlideElement::TextBox {
@@ -1073,7 +1345,7 @@ impl SlidesApp {
 
     /// Add a shape element to the current slide.
     pub fn add_shape(&mut self, kind: ShapeKind) {
-        self.undo_mgr.save(&self.slides, self.current_index);
+        self.checkpoint();
         if let Some(slide) = self.slides.get_mut(self.current_index) {
             let eid = self.id_gen.next_id();
             slide.elements.push(SlideElement::Shape {
@@ -1093,7 +1365,7 @@ impl SlidesApp {
 
     /// Add an image placeholder to the current slide.
     pub fn add_image_placeholder(&mut self) {
-        self.undo_mgr.save(&self.slides, self.current_index);
+        self.checkpoint();
         if let Some(slide) = self.slides.get_mut(self.current_index) {
             let eid = self.id_gen.next_id();
             slide.elements.push(SlideElement::Image {
@@ -1111,7 +1383,7 @@ impl SlidesApp {
     /// Delete the currently selected element.
     pub fn delete_selected_element(&mut self) {
         if let Some(eid) = self.selected_element {
-            self.undo_mgr.save(&self.slides, self.current_index);
+            self.checkpoint();
             if let Some(slide) = self.slides.get_mut(self.current_index) {
                 slide.remove_element(eid);
             }
@@ -1121,21 +1393,45 @@ impl SlidesApp {
 
     // ---- Undo/Redo ---------------------------------------------------------
 
+    /// The deck as it is, for the undo stack.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            slides: self.slides.clone(),
+            current_index: self.current_index,
+            theme: self.theme.clone(),
+        }
+    }
+
+    /// Remember the deck before a change, so it can be undone -- and note
+    /// that it has changed since it was saved.
+    fn checkpoint(&mut self) {
+        let now = self.snapshot();
+        self.undo_mgr.save(now);
+        self.dirty = true;
+    }
+
+    /// Put a remembered deck back.
+    fn restore(&mut self, snap: Snapshot) {
+        self.dirty = true;
+        self.slides = snap.slides;
+        self.theme = snap.theme;
+        self.current_index = snap.current_index.min(self.slides.len().saturating_sub(1));
+        self.selected_element = None;
+    }
+
     /// Undo the last action.
     pub fn undo(&mut self) {
-        if let Some(snap) = self.undo_mgr.undo(&self.slides, self.current_index) {
-            self.slides = snap.slides;
-            self.current_index = snap.current_index.min(self.slides.len().saturating_sub(1));
-            self.selected_element = None;
+        let now = self.snapshot();
+        if let Some(snap) = self.undo_mgr.undo(now) {
+            self.restore(snap);
         }
     }
 
     /// Redo the last undone action.
     pub fn redo(&mut self) {
-        if let Some(snap) = self.undo_mgr.redo(&self.slides, self.current_index) {
-            self.slides = snap.slides;
-            self.current_index = snap.current_index.min(self.slides.len().saturating_sub(1));
-            self.selected_element = None;
+        let now = self.snapshot();
+        if let Some(snap) = self.undo_mgr.redo(now) {
+            self.restore(snap);
         }
     }
 
@@ -1168,25 +1464,84 @@ impl SlidesApp {
         let Some(eid) = self.selected_element else {
             return EventResult::Ignored;
         };
-        let Some(slide) = self.slides.get(self.current_index) else {
+        let Some(words) = self.element_words(eid) else {
             return EventResult::Ignored;
         };
-        let Some(SlideElement::TextBox { text, .. }) =
-            slide.elements.iter().find(|e| e.id() == eid)
-        else {
-            // Shapes and images hold no words; saying so beats a mode that
-            // silently does nothing.
-            return EventResult::Ignored;
-        };
+        self.editing = Some((EditTarget::Element(eid), words));
+        EventResult::Consumed
+    }
+
+    /// The words typing into element `eid` starts from, or `None` for an
+    /// element that holds no words.
+    ///
+    /// Also what a finished edit is compared with: words that come back as
+    /// they went in are no change. Every finished edit used to count as one,
+    /// so clicking into a box and out again marked the deck unsaved -- and,
+    /// for a box still showing its prompt, replaced the prompt with nothing.
+    fn element_words(&self, eid: ElementId) -> Option<String> {
+        let slide = self.slides.get(self.current_index)?;
         // A box still holding its prompt starts empty; one the user has
         // written in starts with what they wrote, because editing is usually
         // an edit and retyping it is not.
-        let seed = if Self::PLACEHOLDER_TEXT.contains(&text.as_str()) {
-            String::new()
-        } else {
-            text.clone()
+        //
+        // A bullet list is typed as one line per bullet, and an image
+        // placeholder's label as its words. Only text boxes could be typed
+        // into, so every Title + Content slide said "First point", "Second
+        // point" and "Third point" for good.
+        let words = match slide.elements.iter().find(|e| e.id() == eid)? {
+            SlideElement::TextBox { text, .. } => {
+                if Self::PLACEHOLDER_TEXT.contains(&text.as_str()) {
+                    String::new()
+                } else {
+                    text.clone()
+                }
+            }
+            SlideElement::BulletList { items, .. } => {
+                if items
+                    .iter()
+                    .all(|i| Self::PLACEHOLDER_BULLETS.contains(&i.as_str()))
+                {
+                    String::new()
+                } else {
+                    items.join("\n")
+                }
+            }
+            SlideElement::Image {
+                placeholder_label, ..
+            } => {
+                if Self::PLACEHOLDER_TEXT.contains(&placeholder_label.as_str())
+                    || placeholder_label == "Image"
+                    || placeholder_label == "Image Placeholder"
+                {
+                    String::new()
+                } else {
+                    placeholder_label.clone()
+                }
+            }
+            // A shape holds no words; saying so beats a mode that silently
+            // does nothing.
+            SlideElement::Shape { .. } => return None,
         };
-        self.editing = Some((EditTarget::Element(eid), seed));
+        Some(words)
+    }
+
+    /// The bullets a layout is born holding: prompts, like `PLACEHOLDER_TEXT`.
+    const PLACEHOLDER_BULLETS: &[&str] = &[
+        "First point",
+        "Second point",
+        "Third point",
+        "Left column point A",
+        "Left column point B",
+        "Right column point A",
+        "Right column point B",
+    ];
+
+    /// Begin typing this slide's speaker notes, seeded with what they say.
+    fn begin_notes(&mut self) -> EventResult {
+        let seed = self.current_notes().to_owned();
+        // Shown while they are typed, whether or not the panel was up.
+        self.show_notes = true;
+        self.editing = Some((EditTarget::Notes, seed));
         EventResult::Consumed
     }
 
@@ -1247,20 +1602,282 @@ impl SlidesApp {
             EditTarget::DeckTitle => {
                 // An empty name would leave the window bar blank and every
                 // export called ".pptx"; refusing keeps whatever it had.
-                if !buf.trim().is_empty() {
+                if !buf.trim().is_empty() && buf.trim() != self.title {
                     self.title = buf.trim().to_owned();
+                    self.dirty = true;
                 }
             }
+            EditTarget::Notes => {
+                if self.current_notes() == buf {
+                    return;
+                }
+                self.checkpoint();
+                self.set_current_notes(buf.to_owned());
+            }
             EditTarget::Element(eid) => {
-                self.undo_mgr.save(&self.slides, self.current_index);
+                // The words as they were when typing began: nothing changed.
+                if self.element_words(eid).as_deref() == Some(buf) {
+                    return;
+                }
+                self.checkpoint();
                 let Some(slide) = self.slides.get_mut(self.current_index) else {
                     return;
                 };
-                if let Some(SlideElement::TextBox { text, .. }) = slide.element_by_id_mut(eid) {
-                    *text = buf.to_owned();
+                match slide.element_by_id_mut(eid) {
+                    Some(SlideElement::TextBox { text, .. }) => *text = buf.to_owned(),
+                    // One bullet per line; a blank line is not a bullet.
+                    Some(SlideElement::BulletList { items, .. }) => {
+                        *items = buf
+                            .split('\n')
+                            .map(str::trim_end)
+                            .filter(|line| !line.trim().is_empty())
+                            .map(str::to_owned)
+                            .collect();
+                    }
+                    Some(SlideElement::Image {
+                        placeholder_label, ..
+                    }) => {
+                        *placeholder_label = buf.trim().to_owned();
+                    }
+                    Some(SlideElement::Shape { .. }) | None => {}
                 }
             }
         }
+    }
+
+    // ---- Element properties -------------------------------------------------
+
+    /// The selected element on the current slide.
+    fn selected(&self) -> Option<&SlideElement> {
+        let eid = self.selected_element?;
+        self.slides.get(self.current_index)?.element_by_id(eid)
+    }
+
+    /// Change the selected element, remembering it for undo first. Reports
+    /// whether there was one and `change` said it changed.
+    fn change_selected(&mut self, change: impl FnOnce(&mut SlideElement) -> bool) -> EventResult {
+        let Some(eid) = self.selected_element else {
+            return EventResult::Ignored;
+        };
+        let Some(mut element) = self.selected().cloned() else {
+            return EventResult::Ignored;
+        };
+        if !change(&mut element) {
+            return EventResult::Ignored;
+        }
+        self.checkpoint();
+        if let Some(slot) = self
+            .slides
+            .get_mut(self.current_index)
+            .and_then(|s| s.element_by_id_mut(eid))
+        {
+            *slot = element;
+        }
+        EventResult::Consumed
+    }
+
+    /// Select the next element on the slide, or the previous; the first (or
+    /// last) when none is selected.
+    ///
+    /// Nothing selected an element but adding one, so nothing a layout put on
+    /// a slide -- the first slide's title included -- could be selected, and
+    /// so none of it could be typed into, moved or deleted.
+    fn select_next_element(&mut self, forward: bool) -> EventResult {
+        let Some(slide) = self.slides.get(self.current_index) else {
+            return EventResult::Ignored;
+        };
+        let ids: Vec<ElementId> = slide.elements.iter().map(SlideElement::id).collect();
+        if ids.is_empty() {
+            return EventResult::Ignored;
+        }
+        let at = self
+            .selected_element
+            .and_then(|eid| ids.iter().position(|i| *i == eid));
+        let next = match (at, forward) {
+            (None, true) => 0,
+            (None, false) => ids.len().saturating_sub(1),
+            (Some(i), true) => i.saturating_add(1).checked_rem(ids.len()).unwrap_or(0),
+            (Some(0), false) => ids.len().saturating_sub(1),
+            (Some(i), false) => i.saturating_sub(1),
+        };
+        self.selected_element = ids.get(next).copied();
+        EventResult::Consumed
+    }
+
+    /// An arrow on the selected element: move it, or with Shift resize it;
+    /// with Ctrl by one unit instead of `NUDGE`.
+    fn arrow_on_element(&mut self, key: Key, shift: bool, ctrl: bool) -> EventResult {
+        let step = if ctrl { 1.0 } else { NUDGE };
+        let (dx, dy) = match key {
+            Key::Left => (-step, 0.0),
+            Key::Right => (step, 0.0),
+            Key::Up => (0.0, -step),
+            Key::Down => (0.0, step),
+            _ => return EventResult::Ignored,
+        };
+        self.change_selected(|e| {
+            let (x, y, w, h) = e.bounds();
+            if shift {
+                let min = min_size(e);
+                let (nw, nh) = ((w + dx).max(min), (h + dy).max(min));
+                if (nw - w).abs() < f32::EPSILON && (nh - h).abs() < f32::EPSILON {
+                    return false;
+                }
+                e.set_size(nw, nh);
+            } else {
+                let (nx, ny) = keep_on_slide(x + dx, y + dy, w, h);
+                if (nx - x).abs() < f32::EPSILON && (ny - y).abs() < f32::EPSILON {
+                    return false;
+                }
+                e.set_position(nx, ny);
+            }
+            true
+        })
+    }
+
+    /// Bold, for the selected text box.
+    fn toggle_bold(&mut self) -> EventResult {
+        self.change_selected(|e| match e {
+            SlideElement::TextBox { bold, .. } => {
+                *bold = !*bold;
+                true
+            }
+            _ => false,
+        })
+    }
+
+    /// Centred, for the selected text box.
+    fn toggle_centred(&mut self) -> EventResult {
+        self.change_selected(|e| match e {
+            SlideElement::TextBox { centered, .. } => {
+                *centered = !*centered;
+                true
+            }
+            _ => false,
+        })
+    }
+
+    /// Larger or smaller text, or a thicker or thinner outline.
+    fn step_weight(&mut self, up: bool) -> EventResult {
+        self.change_selected(|e| match e {
+            SlideElement::TextBox { font_size, .. }
+            | SlideElement::BulletList { font_size, .. } => {
+                let next = if up {
+                    *font_size + 2.0
+                } else {
+                    *font_size - 2.0
+                };
+                let next = next.clamp(8.0, 120.0);
+                let changed = (next - *font_size).abs() > f32::EPSILON;
+                *font_size = next;
+                changed
+            }
+            SlideElement::Shape { stroke_width, .. } => {
+                let next = if up {
+                    *stroke_width + 1.0
+                } else {
+                    *stroke_width - 1.0
+                };
+                let next = next.clamp(0.0, 20.0);
+                let changed = (next - *stroke_width).abs() > f32::EPSILON;
+                *stroke_width = next;
+                changed
+            }
+            SlideElement::Image { .. } => false,
+        })
+    }
+
+    /// The colours `C` steps through: the theme's roles, then `EXTRA_COLOURS`.
+    fn colour_choices(&self) -> Vec<Color> {
+        let mut out = vec![
+            self.theme.title_color,
+            self.theme.subtitle_color,
+            self.theme.body_color,
+            self.theme.accent,
+        ];
+        for c in EXTRA_COLOURS {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// The selected element's next colour. A shape's outline follows its
+    /// fill, which is how every shape here is made.
+    fn cycle_element_colour(&mut self) -> EventResult {
+        let choices = self.colour_choices();
+        let next = |c: Color| {
+            let at = choices.iter().position(|x| *x == c);
+            let i = at.map_or(0, |i| {
+                i.saturating_add(1).checked_rem(choices.len()).unwrap_or(0)
+            });
+            choices.get(i).copied().unwrap_or(c)
+        };
+        self.change_selected(|e| match e {
+            SlideElement::TextBox { color, .. } | SlideElement::BulletList { color, .. } => {
+                *color = next(*color);
+                true
+            }
+            SlideElement::Shape {
+                fill_color,
+                stroke_color,
+                ..
+            } => {
+                let c = next(*fill_color);
+                *fill_color = c;
+                *stroke_color = c;
+                true
+            }
+            SlideElement::Image { .. } => false,
+        })
+    }
+
+    /// The current slide's next background, from `BACKGROUNDS`.
+    ///
+    /// A slide's background was printed in the property panel as a hex value
+    /// and a swatch, and nothing could change it.
+    fn cycle_background(&mut self) -> EventResult {
+        let Some(now) = self.slides.get(self.current_index).map(|s| s.background) else {
+            return EventResult::Ignored;
+        };
+        let at = BACKGROUNDS.iter().position(|b| *b == now);
+        let i = at.map_or(0, |i| {
+            i.saturating_add(1)
+                .checked_rem(BACKGROUNDS.len())
+                .unwrap_or(0)
+        });
+        let next = BACKGROUNDS.get(i).copied().flatten();
+        self.checkpoint();
+        if let Some(slide) = self.slides.get_mut(self.current_index) {
+            slide.background = next;
+        }
+        EventResult::Consumed
+    }
+
+    /// Add what Insert button `index` names.
+    fn insert(&mut self, index: usize) -> EventResult {
+        match INSERT_KINDS.get(index).copied() {
+            Some("Text Box") => self.add_textbox(),
+            Some("Rectangle") => self.add_shape(ShapeKind::Rectangle),
+            Some("Ellipse") => self.add_shape(ShapeKind::Ellipse),
+            Some("Line") => self.add_shape(ShapeKind::Line),
+            Some("Arrow") => self.add_shape(ShapeKind::Arrow),
+            Some("Image") => self.add_image_placeholder(),
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// Add a slide in layout `index` of `SlideLayout::all`, and close the menu.
+    fn choose_layout(&mut self, index: usize) -> EventResult {
+        self.layout_menu = None;
+        let Some(&layout) = SlideLayout::all().get(index) else {
+            return EventResult::Consumed;
+        };
+        self.add_slide(layout);
+        self.keep_current_visible();
+        EventResult::Consumed
     }
 
     /// Move to the next theme in the set.
@@ -1302,16 +1919,73 @@ impl SlidesApp {
             .map_or(Transition::None, |s| s.transition)
     }
 
+    /// Its doc said it re-applied the theme to every slide; it replaced the
+    /// theme and nothing else. An element's colours are copied from the theme
+    /// when it is made, so moving from Mocha to Light put Mocha's pale text on
+    /// Light's pale background. Now every colour and size that came from the
+    /// old theme's roles moves to the new theme's; anything the user chose
+    /// stays.
     pub fn set_theme(&mut self, theme: SlideTheme) {
-        self.undo_mgr.save(&self.slides, self.current_index);
-        self.theme = theme;
+        self.checkpoint();
+        let old = std::mem::replace(&mut self.theme, theme);
+        let new = &self.theme;
+        let colour = |c: Color| {
+            if c == old.title_color {
+                new.title_color
+            } else if c == old.subtitle_color {
+                new.subtitle_color
+            } else if c == old.body_color {
+                new.body_color
+            } else if c == old.accent {
+                new.accent
+            } else {
+                c
+            }
+        };
+        let size = |s: f32| {
+            if (s - old.title_size).abs() < f32::EPSILON {
+                new.title_size
+            } else if (s - old.subtitle_size).abs() < f32::EPSILON {
+                new.subtitle_size
+            } else if (s - old.body_size).abs() < f32::EPSILON {
+                new.body_size
+            } else if (s - old.bullet_size).abs() < f32::EPSILON {
+                new.bullet_size
+            } else {
+                s
+            }
+        };
+        for slide in &mut self.slides {
+            for element in &mut slide.elements {
+                match element {
+                    SlideElement::TextBox {
+                        color, font_size, ..
+                    }
+                    | SlideElement::BulletList {
+                        color, font_size, ..
+                    } => {
+                        *color = colour(*color);
+                        *font_size = size(*font_size);
+                    }
+                    SlideElement::Shape {
+                        fill_color,
+                        stroke_color,
+                        ..
+                    } => {
+                        *fill_color = colour(*fill_color);
+                        *stroke_color = colour(*stroke_color);
+                    }
+                    SlideElement::Image { .. } => {}
+                }
+            }
+        }
     }
 
     // ---- Transition --------------------------------------------------------
 
     /// Set the transition for the current slide.
     pub fn set_current_transition(&mut self, transition: Transition) {
-        self.undo_mgr.save(&self.slides, self.current_index);
+        self.checkpoint();
         if let Some(slide) = self.slides.get_mut(self.current_index) {
             slide.transition = transition;
         }
@@ -1365,6 +2039,20 @@ impl SlidesApp {
             ".controls button { padding: 8px 16px; background: #313244; color: #CDD6F4; ",
             "border: 1px solid #45475A; border-radius: 4px; cursor: pointer; font-size: 14px; }\n",
             ".controls button:hover { background: #45475A; }\n",
+            // Each slide's transition, played as it becomes the one shown.
+            // They were exported as nothing at all: every slide switched with
+            // `display`, whatever it said it did.
+            ".slide.active.t-fade { animation: t-fade .5s; }\n",
+            "@keyframes t-fade { from { opacity: 0; } to { opacity: 1; } }\n",
+            ".slide.active.t-slide-left { animation: t-slide-left .5s; }\n",
+            "@keyframes t-slide-left { from { transform: translateX(100%); } to { transform: none; } }\n",
+            ".slide.active.t-slide-right { animation: t-slide-right .5s; }\n",
+            "@keyframes t-slide-right { from { transform: translateX(-100%); } to { transform: none; } }\n",
+            ".slide.active.t-wipe { animation: t-wipe .5s; }\n",
+            "@keyframes t-wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }\n",
+            ".slide.active.t-dissolve { animation: t-dissolve .5s steps(8); }\n",
+            "@keyframes t-dissolve { from { opacity: 0; } to { opacity: 1; } }\n",
+            ".line { position: absolute; overflow: visible; }\n",
         ));
         html.push_str("</style>\n</head>\n<body>\n");
 
@@ -1372,9 +2060,14 @@ impl SlidesApp {
         for (i, slide) in self.slides.iter().enumerate() {
             let bg = slide.effective_bg(&self.theme);
             let active = if i == 0 { " active" } else { "" };
+            let transition = match slide.transition {
+                Transition::None => String::new(),
+                other => format!(" t-{}", transition_name(other)),
+            };
             html.push_str(&format!(
-                "<div class=\"slide{}\" id=\"slide-{}\" style=\"background:{}\">\n",
+                "<div class=\"slide{}{}\" id=\"slide-{}\" style=\"background:{}\">\n",
                 active,
+                transition,
                 i,
                 color_to_css(bg),
             ));
@@ -1441,13 +2134,35 @@ impl SlidesApp {
                                     color_to_css(*stroke_color),
                                 ));
                             }
+                            // Along the line, from its box's top-left to its
+                            // bottom-right, as the editor draws it. It was a
+                            // flat two-pixel bar the width of the box, so
+                            // every diagonal came out horizontal and an arrow
+                            // lost its head.
                             ShapeKind::Line | ShapeKind::Arrow => {
-                                // Render as a thin div (line) — simplified.
+                                let stroke = color_to_css(*stroke_color);
+                                let sw = stroke_width.max(1.0);
                                 html.push_str(&format!(
-                                    "  <div class=\"shape\" style=\"left:{x}px;top:{y}px;width:{width}px;\
-                                     height:2px;background:{};\"></div>\n",
-                                    color_to_css(*stroke_color),
+                                    "  <svg class=\"line\" style=\"left:{x}px;top:{y}px;\" \
+                                     width=\"{}\" height=\"{}\">\
+                                     <line x1=\"0\" y1=\"0\" x2=\"{width}\" y2=\"{height}\" \
+                                     stroke=\"{stroke}\" stroke-width=\"{sw}\"/>",
+                                    width.max(1.0),
+                                    height.max(1.0),
                                 ));
+                                if *kind == ShapeKind::Arrow {
+                                    let len = width.hypot(*height).max(f32::EPSILON);
+                                    let (ux, uy) = (width / len, height / len);
+                                    for side in [-1.0_f32, 1.0] {
+                                        let bx = width - 10.0 * (ux + side * 0.5 * uy);
+                                        let by = height - 10.0 * (uy - side * 0.5 * ux);
+                                        html.push_str(&format!(
+                                            "<line x1=\"{width}\" y1=\"{height}\" x2=\"{bx}\" y2=\"{by}\" \
+                                             stroke=\"{stroke}\" stroke-width=\"{sw}\"/>",
+                                        ));
+                                    }
+                                }
+                                html.push_str("</svg>\n");
                             }
                         }
                     }
@@ -1547,6 +2262,7 @@ impl SlidesApp {
     /// the presentation does not open empty — a test cannot call `main`, so a
     /// seed that lives there is a blind spot. One of each layout, so every
     /// layout the renderer knows how to draw appears somewhere.
+    #[cfg(test)]
     pub fn seed_sample_deck(&mut self) {
         for layout in [
             SlideLayout::TitleContent,
@@ -1567,8 +2283,272 @@ impl SlidesApp {
 
     /// Route a compositor event into the app.
     /// Ask where to put the exported presentation.
+    ///
+    /// Named after the deck: it was always `presentation.html`, while the
+    /// comment on naming the deck said the export took its name from it.
     pub fn export_as(&mut self) {
-        self.picker.open_to_write("presentation.html");
+        self.picker_for = PickerFor::Export;
+        self.picker.open_to_write(self.file_name("html"));
+    }
+
+    /// The deck's name as a file name with `extension`: a character no file
+    /// name may hold becomes a hyphen.
+    fn file_name(&self, extension: &str) -> String {
+        let stem: String = self
+            .title
+            .trim()
+            .chars()
+            .map(|c| if c == '/' || c.is_control() { '-' } else { c })
+            .collect();
+        let stem = if stem.is_empty() {
+            String::from("presentation")
+        } else {
+            stem
+        };
+        format!("{stem}.{extension}")
+    }
+
+    /// What the picker chose, done with: an export, a save or an open.
+    fn picked(&mut self, path: &std::path::Path) -> String {
+        match self.picker_for {
+            PickerFor::Export => self.write_html(path),
+            PickerFor::Save => self.write_deck(path),
+            PickerFor::Open => self.read_deck(path),
+            PickerFor::SaveThen(pending) => {
+                let said = self.write_deck(path);
+                if !self.dirty {
+                    self.go_on(pending);
+                }
+                said
+            }
+        }
+    }
+
+    // ---- Decks on disk ------------------------------------------------------
+
+    /// Open a deck: ask which, after asking whether to lose unsaved changes.
+    ///
+    /// A deck lived exactly as long as the window did: the HTML export went
+    /// one way, and nothing read a deck back.
+    fn open_deck(&mut self) -> EventResult {
+        if self.dirty {
+            self.ask(Pending::Open);
+            return EventResult::Consumed;
+        }
+        self.go_on(Pending::Open);
+        EventResult::Consumed
+    }
+
+    /// Do what the unsaved-changes question held up.
+    fn go_on(&mut self, pending: Pending) {
+        match pending {
+            Pending::Open => {
+                self.picker_for = PickerFor::Open;
+                self.picker.open_to_read();
+            }
+            Pending::Close => self.quit = true,
+        }
+    }
+
+    /// Answer the unsaved-changes question put before `pending`.
+    ///
+    /// Save goes on only if the save worked: a deck that could not be written
+    /// is still the only copy, and a failure says why on the status line.
+    fn answer(&mut self, pending: Pending, choice: Choice) {
+        match choice {
+            Choice::Cancel => {}
+            Choice::Discard => self.go_on(pending),
+            Choice::Save => match self.deck_path.clone() {
+                Some(path) => {
+                    let said = self.write_deck(&path);
+                    self.status_message = Some(said);
+                    if !self.dirty {
+                        self.go_on(pending);
+                    }
+                }
+                None => {
+                    self.picker_for = PickerFor::SaveThen(pending);
+                    self.picker.open_to_write(self.file_name("slides"));
+                }
+            },
+        }
+    }
+
+    /// The window has been asked to close. Whether it may go now; if not,
+    /// the question is up.
+    fn request_close(&mut self) -> bool {
+        // Words being typed into a box are part of the deck.
+        if let Some((edit, buf)) = self.editing.take() {
+            self.commit_editing(edit, &buf);
+        }
+        if !self.dirty {
+            return true;
+        }
+        // The question replaces whatever is up: a show draws nothing but the
+        // slide, and a picker, menu or shortcut list would take the keys the
+        // question needs.
+        self.show = None;
+        self.picker.close();
+        self.layout_menu = None;
+        self.show_help = false;
+        self.ask(Pending::Close);
+        false
+    }
+
+    /// Put the unsaved-changes question up before `pending`.
+    fn ask(&mut self, pending: Pending) {
+        let prompt = match pending {
+            Pending::Open => "Save them before opening another deck?",
+            Pending::Close => "Save them before closing?",
+        };
+        self.question = Some(Question::new(
+            &unsaved::message_for(&[&self.title]),
+            prompt,
+            pending,
+        ));
+    }
+
+    /// Save the deck where it was last saved or opened, or ask where.
+    fn save_deck(&mut self) -> EventResult {
+        match self.deck_path.clone() {
+            Some(path) => {
+                self.status_message = Some(self.write_deck(&path));
+                EventResult::Consumed
+            }
+            None => self.save_deck_as(),
+        }
+    }
+
+    /// Ask where to save the deck.
+    fn save_deck_as(&mut self) -> EventResult {
+        self.picker_for = PickerFor::Save;
+        self.picker.open_to_write(self.file_name("slides"));
+        EventResult::Consumed
+    }
+
+    /// Write the deck to `path`, and say what happened.
+    pub fn write_deck(&mut self, path: &std::path::Path) -> String {
+        let text = self.deck_document().to_text();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => {
+                self.deck_path = Some(path.to_path_buf());
+                self.dirty = false;
+                format!("Saved {}", path.shown())
+            }
+            Err(err) => format!("Could not save {}: {err}", path.shown()),
+        }
+    }
+
+    /// Replace the deck with the one in `path`, and say what happened. A deck
+    /// that cannot be read leaves this one as it was.
+    pub fn read_deck(&mut self, path: &std::path::Path) -> String {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) => return format!("Could not open {}: {err}", path.shown()),
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            return format!("Could not open {}: it is not a text file", path.shown());
+        };
+        let doc = yamldoc::Document::parse(&text);
+        match deck_from_document(&doc, &self.palette, &mut self.id_gen) {
+            Ok((title, theme, slides)) => {
+                self.title = title;
+                self.theme = theme;
+                self.slides = slides;
+                self.current_index = 0;
+                self.selected_element = None;
+                self.editing = None;
+                self.undo_mgr = UndoManager::new(MAX_UNDO);
+                self.deck_path = Some(path.to_path_buf());
+                self.dirty = false;
+                self.view = ViewMode::Edit;
+                self.sidebar_scroll = 0.0;
+                self.sorter_scroll = 0.0;
+                format!("Opened {}", path.shown())
+            }
+            Err(why) => format!("Could not open {}: {why}", path.shown()),
+        }
+    }
+
+    /// The deck as a document: its name, its theme, and each slide under its
+    /// position with each of its elements under theirs.
+    fn deck_document(&self) -> yamldoc::Document {
+        let mut doc = yamldoc::Document::new();
+        doc.set_i64(&["slateos-slides"], DECK_FORMAT);
+        doc.set_str(&["title"], &self.title);
+        doc.set_str(&["theme"], &self.theme.name);
+        for (i, slide) in self.slides.iter().enumerate() {
+            let s = i.saturating_add(1).to_string();
+            let s = s.as_str();
+            doc.set_str(&["slides", s, "layout"], layout_name(slide.layout));
+            doc.set_str(
+                &["slides", s, "transition"],
+                transition_name(slide.transition),
+            );
+            if let Some(bg) = slide.background {
+                doc.set_str(&["slides", s, "background"], &colour_hex(bg));
+            }
+            if !slide.notes.is_empty() {
+                doc.set_str(&["slides", s, "notes"], &slide.notes);
+            }
+            for (j, element) in slide.elements.iter().enumerate() {
+                let e = j.saturating_add(1).to_string();
+                let at = |field: &'static str| ["slides", s, "elements", e.as_str(), field];
+                let (x, y, w, h) = element.bounds();
+                doc.set_f64(&at("x"), f64::from(x));
+                doc.set_f64(&at("y"), f64::from(y));
+                doc.set_f64(&at("width"), f64::from(w));
+                doc.set_f64(&at("height"), f64::from(h));
+                match element {
+                    SlideElement::TextBox {
+                        text,
+                        font_size,
+                        color,
+                        bold,
+                        centered,
+                        ..
+                    } => {
+                        doc.set_str(&at("kind"), "text");
+                        doc.set_str(&at("text"), text);
+                        doc.set_f64(&at("size"), f64::from(*font_size));
+                        doc.set_str(&at("colour"), &colour_hex(*color));
+                        doc.set_bool(&at("bold"), *bold);
+                        doc.set_bool(&at("centred"), *centered);
+                    }
+                    SlideElement::BulletList {
+                        items,
+                        font_size,
+                        color,
+                        ..
+                    } => {
+                        doc.set_str(&at("kind"), "bullets");
+                        let items: Vec<&str> = items.iter().map(String::as_str).collect();
+                        doc.set_seq(&at("items"), &items);
+                        doc.set_f64(&at("size"), f64::from(*font_size));
+                        doc.set_str(&at("colour"), &colour_hex(*color));
+                    }
+                    SlideElement::Shape {
+                        kind,
+                        fill_color,
+                        stroke_color,
+                        stroke_width,
+                        ..
+                    } => {
+                        doc.set_str(&at("kind"), shape_name(*kind));
+                        doc.set_str(&at("fill"), &colour_hex(*fill_color));
+                        doc.set_str(&at("stroke"), &colour_hex(*stroke_color));
+                        doc.set_f64(&at("outline"), f64::from(*stroke_width));
+                    }
+                    SlideElement::Image {
+                        placeholder_label, ..
+                    } => {
+                        doc.set_str(&at("kind"), "image");
+                        doc.set_str(&at("label"), placeholder_label);
+                    }
+                }
+            }
+        }
+        doc
     }
 
     /// Write the presentation to `path`, and say what happened.
@@ -1578,13 +2558,27 @@ impl SlidesApp {
             Ok(()) => format!(
                 "Exported {} slide(s) to {}",
                 self.slides.len(),
-                path.display()
+                path.shown()
             ),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The unsaved-changes question has every key and click while it is
+        // up: S saves, D goes on without saving, Escape keeps the deck, and
+        // any other key is swallowed -- a stray key must never be the one
+        // that loses the deck. Each is a redraw; focus and hover move inside.
+        if let Some(question) = self.question.as_mut()
+            && matches!(event, Event::Key(_) | Event::Mouse(_))
+        {
+            if let Some(choice) = question.handle(event) {
+                let pending = question.pending();
+                self.question = None;
+                self.answer(pending, choice);
+            }
+            return EventResult::Consumed;
+        }
         // The picker takes input first while it is up, or a filename is typed
         // into the slide behind it.
         match self
@@ -1592,7 +2586,7 @@ impl SlidesApp {
             .handle(event, self.window_width, self.window_height)
         {
             Picked::Chose(path) => {
-                self.status_message = Some(self.write_html(&path));
+                self.status_message = Some(self.picked(&path));
                 return EventResult::Consumed;
             }
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
@@ -1600,6 +2594,8 @@ impl SlidesApp {
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Tick { elapsed_ms } => self.tick(*elapsed_ms),
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -1618,9 +2614,6 @@ impl SlidesApp {
 
     /// Apply a key press.
     ///
-    /// The app had no input handling at all: slides, elements, the clipboard,
-    /// undo/redo and the presenter view were reachable only by a caller.
-    ///
     /// There is no presenting branch because there is no presenting view:
     /// `ViewMode` has `Edit` and `Sorter` and nothing else, so this program
     /// edits a deck and cannot show one. That is the largest thing missing
@@ -1629,29 +2622,86 @@ impl SlidesApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        if self.show.is_some() {
+            return self.handle_show_key(key);
+        }
         // Typing into a box takes every key while it is up, or a title
         // containing `s` would drop a rectangle on the slide behind it.
         if self.editing.is_some() {
             return self.handle_editing_key(key);
         }
-
         let ctrl = key.modifiers.ctrl;
+        let shift = key.modifiers.shift;
+        // The shortcut list is modal: a key behind it would change a slide
+        // nobody can see. What raised it puts it away, and so does Escape.
+        if self.show_help {
+            let closes =
+                matches!(key.key, Key::F1 | Key::Escape) || (key.key == Key::Slash && shift);
+            if closes {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+        if let Some(reached) = self.layout_menu {
+            return self.handle_layout_menu_key(key, reached);
+        }
+        // What the last save, open or export said stays up until the next
+        // thing is done.
+        let had_message = self.status_message.take().is_some();
+        let result = self.handle_command_key(key, ctrl, shift);
+        let result = if had_message {
+            EventResult::Consumed
+        } else {
+            result
+        };
+        if result == EventResult::Consumed {
+            self.keep_current_visible();
+        }
+        result
+    }
+
+    /// The keys of the window itself, with no box, list or menu up.
+    fn handle_command_key(&mut self, key: &KeyEvent, ctrl: bool, shift: bool) -> EventResult {
+        let editing_view = self.view == ViewMode::Edit;
         match key.key {
+            // The shortcut list. `F1` raises it in every app in this tree,
+            // including `apps/spreadsheet`, where `?` is a character the
+            // program has to be able to type into a cell -- so somebody who
+            // has learned one key is never stuck. `?` as well, wherever the
+            // program is not obliged to type one.
+            Key::F1 => {
+                self.show_help = true;
+                EventResult::Consumed
+            }
+            Key::Slash if shift => {
+                self.show_help = true;
+                EventResult::Consumed
+            }
             // The one key that lets a deck leave this window.
             Key::E if ctrl => {
                 self.export_as();
                 EventResult::Consumed
             }
+            // The show. F5 and Shift+F5 are what every presentation program
+            // uses for these two.
+            Key::F5 if shift => self.present(self.current_index),
+            Key::F5 => self.present(0),
+            // Before the plain `S` and `O`, which add shapes.
+            Key::S if ctrl && shift => self.save_deck_as(),
+            Key::S if ctrl => self.save_deck(),
+            Key::O if ctrl => self.open_deck(),
+            // Undo and redo. The undo stack was kept by every change and read
+            // by nothing: no key reached `undo` or `redo`, and the toolbar's
+            // two words lit up and could not be pressed.
+            Key::Z if ctrl && shift => self.redo_if_any(),
+            Key::Z if ctrl => self.undo_if_any(),
+            Key::Y if ctrl => self.redo_if_any(),
             // Views.
             Key::Num1 => self.set_view(ViewMode::Edit),
             Key::Num2 => self.set_view(ViewMode::Sorter),
-            Key::Tab => {
-                let next = match self.view {
-                    ViewMode::Edit => ViewMode::Sorter,
-                    ViewMode::Sorter => ViewMode::Edit,
-                };
-                self.set_view(next)
-            }
+            // In the sorter, Enter opens the slide it is on.
+            Key::Enter if self.view == ViewMode::Sorter => self.set_view(ViewMode::Edit),
             // Reordering, before the plain paging keys below: a guard narrows
             // only the arm it is on, so an unguarded `Key::PageUp` listed first
             // swallows the Ctrl case entirely — Ctrl+PageUp would page back
@@ -1665,13 +2715,38 @@ impl SlidesApp {
                 EventResult::Consumed
             }
             // Moving through the deck.
-            Key::Right | Key::PageDown => self.advance(1),
-            Key::Left | Key::PageUp => self.advance(-1),
+            Key::PageDown => self.advance(1),
+            Key::PageUp => self.advance(-1),
             Key::Home => self.jump_to(0),
             Key::End => self.jump_to(self.slides.len().saturating_sub(1)),
+            // The elements on the slide. Tab was the second key for switching
+            // views, beside `1` and `2`; it walks the elements now, as it does
+            // in every other slide editor, because nothing else reached them.
+            Key::Tab if editing_view => self.select_next_element(!shift),
+            Key::Escape if self.selected_element.is_some() => {
+                self.selected_element = None;
+                EventResult::Consumed
+            }
+            // With an element selected the arrows move it (Shift resizes),
+            // which is what they do in any slide editor; with none, Left and
+            // Right still change slides.
+            Key::Left | Key::Right | Key::Up | Key::Down
+                if editing_view && self.selected_element.is_some() =>
+            {
+                self.arrow_on_element(key.key, shift, ctrl)
+            }
+            Key::Right => self.advance(1),
+            Key::Left => self.advance(-1),
             // Editing the deck.
             Key::N if ctrl => {
                 self.add_slide(SlideLayout::TitleContent);
+                EventResult::Consumed
+            }
+            // Every other layout. Ctrl+N made a Title + Content slide and
+            // nothing made any other kind, so five of the six layouts were
+            // reachable only as the sample deck `main` opened with.
+            Key::M if ctrl => {
+                self.layout_menu = Some(1);
                 EventResult::Consumed
             }
             Key::D if ctrl => {
@@ -1684,20 +2759,13 @@ impl SlidesApp {
             // around it -- and erring towards the element is the safe half of
             // the ambiguity, since re-adding an element is cheap and re-making
             // a slide is not. `Shift+Delete` always means the slide.
-            Key::Delete if self.selected_element.is_some() && !key.modifiers.shift => {
+            Key::Delete if self.selected_element.is_some() && !shift => {
                 self.delete_selected_element();
                 EventResult::Consumed
             }
-            Key::Delete => {
-                if self.slides.len() < 2 {
-                    // Refusing to delete the last slide rather than leaving an
-                    // empty deck with nothing to draw or select.
-                    return EventResult::Ignored;
-                }
-                let index = self.current_index;
-                self.delete_slide(index);
-                EventResult::Consumed
-            }
+            Key::Delete => self.delete_current_slide(),
+            // Before the plain `C`, which would otherwise take these.
+            Key::C if ctrl && shift => self.toggle_centred(),
             Key::C if ctrl => {
                 self.copy_slide();
                 EventResult::Consumed
@@ -1711,12 +2779,15 @@ impl SlidesApp {
                     EventResult::Consumed
                 }
             }
+            Key::B if ctrl => self.toggle_bold(),
+            Key::RightBracket if ctrl => self.step_weight(true),
+            Key::LeftBracket if ctrl => self.step_weight(false),
             // Before the unguarded `Key::T` below, which would otherwise
             // take Ctrl+T and add a textbox. The deck's look and the slide's
             // transition are both already printed in the window.
             // Before the theme arm, which has no shift guard and would
             // otherwise take this and cycle the theme instead.
-            Key::T if ctrl && key.modifiers.shift => self.begin_deck_title(),
+            Key::T if ctrl && shift => self.begin_deck_title(),
             Key::T if ctrl => {
                 self.cycle_theme();
                 EventResult::Consumed
@@ -1740,11 +2811,11 @@ impl SlidesApp {
             // A key per shape rather than a mode with an armed kind: there are
             // four, they are all mnemonic, and a mode would need its own label
             // on screen to say which kind the next `S` would produce.
-            Key::S => {
+            Key::S if !ctrl => {
                 self.add_shape(ShapeKind::Rectangle);
                 EventResult::Consumed
             }
-            Key::O => {
+            Key::O if !ctrl => {
                 self.add_shape(ShapeKind::Ellipse);
                 EventResult::Consumed
             }
@@ -1760,31 +2831,172 @@ impl SlidesApp {
                 self.add_image_placeholder();
                 EventResult::Consumed
             }
+            Key::C => self.cycle_element_colour(),
+            Key::G => self.cycle_background(),
+            Key::N => self.begin_notes(),
             Key::B => {
                 self.show_notes = !self.show_notes;
                 EventResult::Consumed
             }
-            // `?`, which is Shift and the slash key. Escape closes it, because
-            // that is what Escape means over anything laid on top.
-            // The shortcut list. `F1` raises it in every app in this tree,
-            // including `apps/spreadsheet`, where `?` is a character the
-            // program has to be able to type into a cell -- so somebody who
-            // has learned one key is never stuck. `?` as well, wherever the
-            // program is not obliged to type one.
-            Key::F1 => {
-                self.show_help = !self.show_help;
-                EventResult::Consumed
-            }
-            Key::Slash if key.modifiers.shift => {
-                self.show_help = !self.show_help;
-                EventResult::Consumed
-            }
-            Key::Escape if self.show_help => {
-                self.show_help = false;
-                EventResult::Consumed
-            }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Keys while the new-slide menu is up: a layout by its arrow and Enter
+    /// or by its number, and Escape to close it.
+    fn handle_layout_menu_key(&mut self, key: &KeyEvent, reached: usize) -> EventResult {
+        let last = SlideLayout::all().len().saturating_sub(1);
+        let number = match key.key {
+            Key::Num1 => Some(0),
+            Key::Num2 => Some(1),
+            Key::Num3 => Some(2),
+            Key::Num4 => Some(3),
+            Key::Num5 => Some(4),
+            Key::Num6 => Some(5),
+            _ => None,
+        };
+        if let Some(index) = number {
+            return self.choose_layout(index);
+        }
+        match key.key {
+            Key::Escape => self.layout_menu = None,
+            Key::Up => self.layout_menu = Some(reached.saturating_sub(1)),
+            Key::Down => self.layout_menu = Some(reached.saturating_add(1).min(last)),
+            Key::Enter => return self.choose_layout(reached),
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// Start the show at slide `from`. What was being typed is kept, and
+    /// anything open over the editor is put away.
+    fn present(&mut self, from: usize) -> EventResult {
+        if let Some((edit, buf)) = self.editing.take() {
+            self.commit_editing(edit, &buf);
+        }
+        self.layout_menu = None;
+        self.show_help = false;
+        self.drag = None;
+        self.show = Some(Show {
+            index: from.min(self.slides.len().saturating_sub(1)),
+            leaving: None,
+        });
+        EventResult::Consumed
+    }
+
+    /// Go on to the next slide of the show, playing the transition into it.
+    /// At the last slide there is nowhere to go.
+    fn show_next(&mut self) -> EventResult {
+        let Some(show) = self.show else {
+            return EventResult::Ignored;
+        };
+        let next = show.index.saturating_add(1);
+        let Some(slide) = self.slides.get(next) else {
+            return EventResult::Ignored;
+        };
+        let leaving = (slide.transition != Transition::None).then_some((show.index, 0));
+        self.show = Some(Show {
+            index: next,
+            leaving,
+        });
+        EventResult::Consumed
+    }
+
+    /// Go back a slide. Going back is a cut: a transition is how a slide
+    /// arrives, and replaying it backwards shows the audience the seam.
+    fn show_previous(&mut self) -> EventResult {
+        let Some(show) = self.show else {
+            return EventResult::Ignored;
+        };
+        if show.index == 0 && show.leaving.is_none() {
+            return EventResult::Ignored;
+        }
+        self.show = Some(Show {
+            index: show.index.saturating_sub(1),
+            leaving: None,
+        });
+        EventResult::Consumed
+    }
+
+    /// End the show, back in the editor on the slide that was showing.
+    fn end_show(&mut self) -> EventResult {
+        let Some(show) = self.show.take() else {
+            return EventResult::Ignored;
+        };
+        self.go_to_slide(show.index);
+        self.keep_current_visible();
+        EventResult::Consumed
+    }
+
+    /// Keys during the show.
+    fn handle_show_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Right | Key::Down | Key::PageDown | Key::Space | Key::Enter | Key::N => {
+                self.show_next()
+            }
+            Key::Left | Key::Up | Key::PageUp | Key::Backspace | Key::P => self.show_previous(),
+            Key::Home => {
+                self.show = Some(Show {
+                    index: 0,
+                    leaving: None,
+                });
+                EventResult::Consumed
+            }
+            Key::End => {
+                self.show = Some(Show {
+                    index: self.slides.len().saturating_sub(1),
+                    leaving: None,
+                });
+                EventResult::Consumed
+            }
+            Key::Escape => self.end_show(),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Time passing: the transition on screen moves on, and finishes.
+    fn tick(&mut self, elapsed_ms: u64) -> EventResult {
+        let Some(Show {
+            index,
+            leaving: Some((from, done)),
+        }) = self.show
+        else {
+            return EventResult::Ignored;
+        };
+        let done = done.saturating_add(elapsed_ms);
+        self.show = Some(Show {
+            index,
+            leaving: (done < TRANSITION_MS).then_some((from, done)),
+        });
+        EventResult::Consumed
+    }
+
+    /// Delete the current slide, unless it is the last one.
+    fn delete_current_slide(&mut self) -> EventResult {
+        if self.slides.len() < 2 {
+            // Refusing to delete the last slide rather than leaving an empty
+            // deck with nothing to draw or select.
+            return EventResult::Ignored;
+        }
+        let index = self.current_index;
+        self.delete_slide(index);
+        EventResult::Consumed
+    }
+
+    fn undo_if_any(&mut self) -> EventResult {
+        if !self.undo_mgr.can_undo() {
+            return EventResult::Ignored;
+        }
+        self.undo();
+        EventResult::Consumed
+    }
+
+    fn redo_if_any(&mut self) -> EventResult {
+        if !self.undo_mgr.can_redo() {
+            return EventResult::Ignored;
+        }
+        self.redo();
+        EventResult::Consumed
     }
 
     /// Switch views, reporting whether anything changed.
@@ -1829,51 +3041,101 @@ impl SlidesApp {
     ///
     /// Renders the full application UI and returns the list of draw commands.
     pub fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds: Vec<RenderCommand> = Vec::with_capacity(256);
+        self.frame().into_tree().commands
+    }
+
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test.
+    pub fn frame(&self) -> Frame<Target> {
+        let (w, h) = (self.window_width, self.window_height);
+        let mut f = Frame::new(w, h);
+        // The show is the whole window, and nothing else is drawn under it.
+        if let Some(show) = self.show {
+            self.render_show(&mut f, show);
+            return f;
+        }
 
         // Background fill the entire window.
-        self.palette.push_surface(
-            &mut cmds,
-            0.0,
-            0.0,
-            self.window_width,
-            self.window_height,
-            0.0,
-            Surface::Card,
-        );
+        self.palette
+            .push_surface(&mut f, 0.0, 0.0, w, h, 0.0, Surface::Card);
 
         match self.view {
-            ViewMode::Edit => self.render_edit_mode(&mut cmds),
-            ViewMode::Sorter => self.render_sorter_mode(&mut cmds),
+            ViewMode::Edit => self.render_edit_mode(&mut f),
+            ViewMode::Sorter => self.render_sorter_mode(&mut f),
+        }
+        if let Some(reached) = self.layout_menu {
+            self.render_layout_menu(&mut f, reached);
         }
 
         // The picker over the slide rather than under it.
-        cmds.extend(
-            self.picker
-                .render(&self.palette, self.window_width, self.window_height),
-        );
+        f.extend(self.picker.render(&self.palette, w, h));
 
         // And the shortcut list over everything, because it is the one thing
-        // a reader asked for explicitly.
+        // a reader asked for explicitly. Modal: a press anywhere puts it away.
         if self.show_help {
             guitk::shortcut::render_card(
-                &mut cmds,
+                &mut f,
                 &self.palette,
-                (self.window_width, self.window_height),
+                (w, h),
                 TOOLBAR_HEIGHT,
                 SHORTCUTS,
                 "F1 or ? closes this",
             );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, w, h));
         }
+        f
+    }
 
-        cmds
+    /// A button, lit while the pointer is on it. One with nothing to do is
+    /// drawn dim and records no hit box, so it cannot be pressed.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface1
+            } else {
+                self.palette.surface0
+            },
+            corner_radii: CornerRadii::all(CORNER_R),
+        });
+        f.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + (rect.h - 12.0) / 2.0,
+            text: label.to_string(),
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 16.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
     }
 
     /// Render the toolbar at the top.
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
-        // Toolbar background.
+    ///
+    /// Its five buttons, and the Undo and Redo beside them, were drawn and
+    /// could not be pressed; the Undo and Redo lit up when there was
+    /// something to undo and nothing could reach it.
+    fn render_toolbar(&self, f: &mut Frame<Target>) {
         self.palette.push_surface(
-            cmds,
+            f,
             0.0,
             0.0,
             self.window_width,
@@ -1881,9 +3143,7 @@ impl SlidesApp {
             0.0,
             Surface::Strip(Edge::Bottom),
         );
-
-        // Separator line.
-        cmds.push(RenderCommand::Line {
+        f.push(RenderCommand::Line {
             x1: 0.0,
             y1: TOOLBAR_HEIGHT,
             x2: self.window_width,
@@ -1892,121 +3152,91 @@ impl SlidesApp {
             width: 1.0,
         });
 
-        // Presentation title.
-        cmds.push(RenderCommand::Text {
+        // The deck's name, which a press lets you change (Ctrl+Shift+T).
+        let title = Rect::new(6.0, 6.0, 202.0, 28.0);
+        if self.hover == Some(Target::Tool(Tool::Title)) {
+            f.push(RenderCommand::FillRect {
+                x: title.x,
+                y: title.y,
+                width: title.w,
+                height: title.h,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::all(CORNER_R),
+            });
+        }
+        f.push(RenderCommand::Text {
             x: 12.0,
             y: 12.0,
             text: self.title.clone(),
             color: self.palette.text,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
+            max_width: Some(192.0),
             overflow: TextOverflow::Ellipsis,
         });
+        f.hit(Target::Tool(Tool::Title), title);
 
-        // Toolbar buttons.
-        let buttons: &[(&str, f32)] = &[
-            ("+ Slide", 230.0),
-            ("Duplicate", 310.0),
-            ("Delete", 400.0),
-            ("Sorter", 470.0),
-            ("Export", 540.0),
-        ];
-        for &(label, bx) in buttons {
-            self.render_button(
-                cmds,
-                bx,
-                6.0,
-                70.0,
-                28.0,
-                label,
-                self.palette.surface0,
-                self.palette.text,
-            );
+        for (tool, rect, label, enabled) in self.tool_rects() {
+            self.button(f, rect, &label, Target::Tool(tool), enabled);
         }
-
-        // Undo/Redo indicators.
-        let undo_col = if self.undo_mgr.can_undo() {
-            self.palette.blue
-        } else {
-            self.palette.overlay0
-        };
-        let redo_col = if self.undo_mgr.can_redo() {
-            self.palette.blue
-        } else {
-            self.palette.overlay0
-        };
-        cmds.push(RenderCommand::Text {
-            x: 630.0,
-            y: 12.0,
-            text: String::from("Undo"),
-            color: undo_col,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::Text {
-            x: 680.0,
-            y: 12.0,
-            text: String::from("Redo"),
-            color: redo_col,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Theme label.
-        cmds.push(RenderCommand::Text {
-            x: 740.0,
-            y: 12.0,
-            text: format!("Theme: {} (Ctrl+T)", self.theme.name),
-            color: self.palette.subtext0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
     }
 
-    /// Render a simple button (rounded rect + label).
-    fn render_button(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        label: &str,
-        bg: Color,
-        fg: Color,
-    ) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: bg,
-            corner_radii: CornerRadii::all(CORNER_R),
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + 8.0,
-            y: y + 8.0,
-            text: label.to_string(),
-            color: fg,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+    /// The toolbar's buttons: each one's box, label, and whether it has
+    /// anything to do.
+    fn tool_rects(&self) -> Vec<(Tool, Rect, String, bool)> {
+        let other_view = match self.view {
+            ViewMode::Edit => "Sorter",
+            ViewMode::Sorter => "Edit",
+        };
+        let tools = [
+            (Tool::Open, String::from("Open"), 54.0, true),
+            (Tool::Save, String::from("Save"), 50.0, true),
+            (Tool::NewSlide, String::from("+ Slide"), 66.0, true),
+            (Tool::Duplicate, String::from("Duplicate"), 80.0, true),
+            (
+                Tool::DeleteSlide,
+                String::from("Delete"),
+                62.0,
+                self.slides.len() > 1,
+            ),
+            (Tool::ToggleView, String::from(other_view), 62.0, true),
+            (
+                Tool::Undo,
+                String::from("Undo"),
+                54.0,
+                self.undo_mgr.can_undo(),
+            ),
+            (
+                Tool::Redo,
+                String::from("Redo"),
+                54.0,
+                self.undo_mgr.can_redo(),
+            ),
+            (Tool::Export, String::from("Export"), 62.0, true),
+            (Tool::Present, String::from("Present"), 70.0, true),
+            (
+                Tool::Theme,
+                format!("Theme: {}", self.theme.name),
+                128.0,
+                true,
+            ),
+        ];
+        let mut x = TOOLS_X;
+        tools
+            .into_iter()
+            .map(|(tool, label, w, enabled)| {
+                let rect = Rect::new(x, 6.0, w, 28.0);
+                x += w + 6.0;
+                (tool, rect, label, enabled)
+            })
+            .collect()
     }
 
     /// Render the status bar at the bottom.
-    fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_status_bar(&self, f: &mut Frame<Target>) {
         let y = self.window_height - STATUS_BAR_HEIGHT;
         self.palette.push_surface(
-            cmds,
+            f,
             0.0,
             y,
             self.window_width,
@@ -2014,7 +3244,7 @@ impl SlidesApp {
             0.0,
             Surface::Strip(Edge::Top),
         );
-        cmds.push(RenderCommand::Line {
+        f.push(RenderCommand::Line {
             x1: 0.0,
             y1: y,
             x2: self.window_width,
@@ -2023,7 +3253,6 @@ impl SlidesApp {
             width: 1.0,
         });
 
-        // Slide position and transition info.
         // While typing, this line says so instead of counting slides. The
         // count is still in the window bar; the mode is nowhere else, and the
         // shape keys are captured in here -- so somebody pressing `S` for a
@@ -2031,6 +3260,9 @@ impl SlidesApp {
         let slide_pos = match &self.editing {
             Some((EditTarget::DeckTitle, _)) => {
                 String::from("Naming the deck -- Enter or Esc to finish")
+            }
+            Some((EditTarget::Notes, _)) => {
+                String::from("Typing the notes -- Shift+Enter for a new line, Esc to finish")
             }
             Some((EditTarget::Element(_), _)) => {
                 String::from("Typing -- Shift+Enter for a new line, Esc to finish")
@@ -2041,20 +3273,37 @@ impl SlidesApp {
                 self.slides.len(),
             ),
         };
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 12.0,
             y: y + 5.0,
             text: slide_pos,
             color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(320.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
-        if let Some(slide) = self.slides.get(self.current_index) {
+        // What the last save, open or export did. It was kept and never
+        // drawn, so a failed export failed in silence.
+        if self.editing.is_none()
+            && let Some(message) = &self.status_message
+        {
+            f.push(RenderCommand::Text {
+                x: 200.0,
+                y: y + 5.0,
+                text: message.clone(),
+                color: self.palette.text,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.window_width - 340.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else if self.editing.is_none()
+            && let Some(slide) = self.slides.get(self.current_index)
+        {
             let trans = format!("Transition: {} (Ctrl+R)", slide.transition.label());
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: 200.0,
                 y: y + 5.0,
                 text: trans,
@@ -2066,7 +3315,7 @@ impl SlidesApp {
             });
 
             let layout_info = format!("Layout: {}", slide.layout.label());
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: 400.0,
                 y: y + 5.0,
                 text: layout_info,
@@ -2078,12 +3327,11 @@ impl SlidesApp {
             });
         }
 
-        // View mode indicator.
         let view_label = match self.view {
             ViewMode::Edit => "Edit Mode",
             ViewMode::Sorter => "Sorter View",
         };
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: self.window_width - 120.0,
             y: y + 5.0,
             text: view_label.to_string(),
@@ -2098,74 +3346,89 @@ impl SlidesApp {
     // ---- Edit mode rendering -----------------------------------------------
 
     /// Render the full edit mode: toolbar, sidebar, canvas, properties, notes, status.
-    fn render_edit_mode(&self, cmds: &mut Vec<RenderCommand>) {
-        self.render_toolbar(cmds);
-        self.render_sidebar(cmds);
-        self.render_canvas(cmds);
-        self.render_properties_panel(cmds);
+    fn render_edit_mode(&self, f: &mut Frame<Target>) {
+        self.render_toolbar(f);
+        self.render_sidebar(f);
+        self.render_canvas(f);
+        self.render_properties_panel(f);
         if self.show_notes {
-            self.render_notes_panel(cmds);
+            self.render_notes_panel(f);
         }
-        self.render_status_bar(cmds);
+        self.render_status_bar(f);
+    }
+
+    /// The thumbnail column: its pane, a thumbnail's width and height, and
+    /// the pitch from one thumbnail to the next.
+    fn sidebar_pane(&self) -> (Rect, f32, f32, f32) {
+        let top = TOOLBAR_HEIGHT;
+        let bottom = self.window_height - STATUS_BAR_HEIGHT;
+        let thumb_w = SIDEBAR_WIDTH - THUMBNAIL_PAD * 2.0;
+        let thumb_h = thumb_w / SLIDE_ASPECT;
+        let pitch = thumb_h + THUMBNAIL_PAD + 20.0;
+        (
+            Rect::new(0.0, top, SIDEBAR_WIDTH, (bottom - top).max(0.0)),
+            thumb_w,
+            thumb_h,
+            pitch,
+        )
+    }
+
+    /// How far the thumbnail column can scroll.
+    fn sidebar_limit(&self) -> f32 {
+        let (pane, _, _, pitch) = self.sidebar_pane();
+        (self.slides.len() as f32 * pitch + THUMBNAIL_PAD - pane.h).max(0.0)
     }
 
     /// Render the slide thumbnail sidebar.
-    fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>) {
-        let top = TOOLBAR_HEIGHT;
-        let bot = self.window_height - STATUS_BAR_HEIGHT;
-        let panel_h = bot - top;
-
-        // Sidebar background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: top,
-            width: SIDEBAR_WIDTH,
-            height: panel_h,
+    ///
+    /// It clipped its thumbnails and never scrolled, so from the sixth slide
+    /// on a slide's thumbnail -- the current one's included -- was drawn
+    /// below the window.
+    fn render_sidebar(&self, f: &mut Frame<Target>) {
+        let (pane, thumb_w, thumb_h, pitch) = self.sidebar_pane();
+        f.push(RenderCommand::FillRect {
+            x: pane.x,
+            y: pane.y,
+            width: pane.w,
+            height: pane.h,
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // Separator.
-        cmds.push(RenderCommand::Line {
+        f.push(RenderCommand::Line {
             x1: SIDEBAR_WIDTH,
-            y1: top,
+            y1: pane.y,
             x2: SIDEBAR_WIDTH,
-            y2: bot,
+            y2: pane.bottom(),
             color: self.palette.surface0,
             width: 1.0,
         });
+        f.hit(Target::Sidebar, pane);
+        f.clip(pane);
 
-        // Clip to sidebar region.
-        cmds.push(RenderCommand::PushClip {
-            x: 0.0,
-            y: top,
-            width: SIDEBAR_WIDTH,
-            height: panel_h,
-        });
-
-        // Render each slide thumbnail.
-        let thumb_w = SIDEBAR_WIDTH - THUMBNAIL_PAD * 2.0;
-        let thumb_h = thumb_w / SLIDE_ASPECT;
         for (i, slide) in self.slides.iter().enumerate() {
-            let ty = top + THUMBNAIL_PAD + (i as f32) * (thumb_h + THUMBNAIL_PAD + 20.0);
+            let ty = pane.y + THUMBNAIL_PAD + (i as f32) * pitch - self.sidebar_scroll;
+            let cell = Rect::new(THUMBNAIL_PAD - 2.0, ty - 2.0, thumb_w + 4.0, thumb_h + 20.0);
+            if f.visible_part(cell).is_none() {
+                continue;
+            }
             let is_current = i == self.current_index;
-
-            // Selection highlight.
-            if is_current {
-                cmds.push(RenderCommand::StrokeRect {
+            if is_current || self.hover == Some(Target::Thumb(i)) {
+                f.push(RenderCommand::StrokeRect {
                     x: THUMBNAIL_PAD - 2.0,
                     y: ty - 2.0,
                     width: thumb_w + 4.0,
                     height: thumb_h + 4.0,
-                    color: self.palette.blue,
+                    color: if is_current {
+                        self.palette.blue
+                    } else {
+                        self.palette.surface2
+                    },
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(CORNER_R),
                 });
             }
-
-            // Thumbnail background.
             let bg = slide.effective_bg(&self.theme);
-            cmds.push(RenderCommand::FillRect {
+            f.push(RenderCommand::FillRect {
                 x: THUMBNAIL_PAD,
                 y: ty,
                 width: thumb_w,
@@ -2173,11 +3436,9 @@ impl SlidesApp {
                 color: bg,
                 corner_radii: CornerRadii::all(CORNER_R),
             });
-
-            // Mini title preview.
             let preview = slide_preview_text(slide);
             if !preview.is_empty() {
-                cmds.push(RenderCommand::Text {
+                f.push(RenderCommand::Text {
                     x: THUMBNAIL_PAD + 4.0,
                     y: ty + 8.0,
                     text: preview,
@@ -2188,9 +3449,7 @@ impl SlidesApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
-
-            // Slide number label.
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: THUMBNAIL_PAD,
                 y: ty + thumb_h + 2.0,
                 text: format!("Slide {}", i.saturating_add(1)),
@@ -2204,40 +3463,92 @@ impl SlidesApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
+            // A press goes to the slide; a drag moves it.
+            f.hit(Target::Thumb(i), cell);
         }
+        f.unclip();
+    }
 
-        cmds.push(RenderCommand::PopClip);
+    /// The grey area the slide sits in.
+    fn canvas_area(&self) -> Rect {
+        let top = TOOLBAR_HEIGHT;
+        let notes_h = if self.show_notes { NOTES_HEIGHT } else { 0.0 };
+        Rect::new(
+            SIDEBAR_WIDTH,
+            top,
+            (self.window_width - SIDEBAR_WIDTH - PROPERTIES_WIDTH).max(0.0),
+            (self.window_height - top - STATUS_BAR_HEIGHT - notes_h).max(0.0),
+        )
+    }
+
+    /// Where the slide is drawn in the edit view: its top-left corner in the
+    /// window, and the scale from slide units (960 by 540) to pixels.
+    ///
+    /// The drawing and every pointer conversion read this, so a press and the
+    /// picture cannot disagree about where an element is.
+    fn canvas_geometry(&self) -> (f32, f32, f32) {
+        let area = self.canvas_area();
+        let scale = ((area.w - 40.0) / SLIDE_W)
+            .min((area.h - 40.0) / SLIDE_H)
+            .max(0.1);
+        let cx = area.x + (area.w - SLIDE_W * scale) / 2.0;
+        let cy = area.y + (area.h - SLIDE_H * scale) / 2.0;
+        (cx, cy, scale)
+    }
+
+    /// A window point in slide units.
+    fn to_slide(&self, x: f32, y: f32) -> (f32, f32) {
+        let (cx, cy, scale) = self.canvas_geometry();
+        ((x - cx) / scale, (y - cy) / scale)
+    }
+
+    /// An element's box in the window, widened to a few pixels when it is a
+    /// flat line: an empty box records no hit, and a horizontal line has no
+    /// height.
+    fn element_rect(&self, element: &SlideElement) -> Rect {
+        let (cx, cy, scale) = self.canvas_geometry();
+        let (x, y, w, h) = element.bounds();
+        let mut r = Rect::new(cx + x * scale, cy + y * scale, w * scale, h * scale);
+        if r.w < 6.0 {
+            r.x -= (6.0 - r.w) / 2.0;
+            r.w = 6.0;
+        }
+        if r.h < 6.0 {
+            r.y -= (6.0 - r.h) / 2.0;
+            r.h = 6.0;
+        }
+        r
+    }
+
+    /// The four corner handles of a box, in the window.
+    fn handles(r: Rect) -> [(Corner, Rect); 4] {
+        let at = |x: f32, y: f32| Rect::new(x - HANDLE / 2.0, y - HANDLE / 2.0, HANDLE, HANDLE);
+        [
+            (Corner::TopLeft, at(r.x, r.y)),
+            (Corner::TopRight, at(r.right(), r.y)),
+            (Corner::BottomLeft, at(r.x, r.bottom())),
+            (Corner::BottomRight, at(r.right(), r.bottom())),
+        ]
     }
 
     /// Render the main slide canvas in the center.
-    fn render_canvas(&self, cmds: &mut Vec<RenderCommand>) {
-        let top = TOOLBAR_HEIGHT;
-        let notes_h = if self.show_notes { NOTES_HEIGHT } else { 0.0 };
-        let avail_w = self.window_width - SIDEBAR_WIDTH - PROPERTIES_WIDTH;
-        let avail_h = self.window_height - top - STATUS_BAR_HEIGHT - notes_h;
-
-        // Compute the slide display size to fit the available area while
-        // maintaining the 16:9 aspect ratio.
-        let scale_w = (avail_w - 40.0) / SLIDE_W;
-        let scale_h = (avail_h - 40.0) / SLIDE_H;
-        let scale = scale_w.min(scale_h).max(0.1);
+    fn render_canvas(&self, f: &mut Frame<Target>) {
+        let area = self.canvas_area();
+        let (cx, cy, scale) = self.canvas_geometry();
         let disp_w = SLIDE_W * scale;
         let disp_h = SLIDE_H * scale;
-        let cx = SIDEBAR_WIDTH + (avail_w - disp_w) / 2.0;
-        let cy = top + (avail_h - disp_h) / 2.0;
 
-        // Canvas background area (dark behind the slide).
-        cmds.push(RenderCommand::FillRect {
-            x: SIDEBAR_WIDTH,
-            y: top,
-            width: avail_w,
-            height: avail_h,
+        f.push(RenderCommand::FillRect {
+            x: area.x,
+            y: area.y,
+            width: area.w,
+            height: area.h,
             color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // Drop shadow behind the slide.
-        cmds.push(RenderCommand::BoxShadow {
+        // A press on the grey selects nothing.
+        f.hit(Target::Canvas, area);
+        f.push(RenderCommand::BoxShadow {
             x: cx,
             y: cy,
             width: disp_w,
@@ -2250,80 +3561,115 @@ impl SlidesApp {
             corner_radii: CornerRadii::all(CORNER_R),
         });
 
-        if let Some(slide) = self.slides.get(self.current_index) {
-            let bg = slide.effective_bg(&self.theme);
+        let Some(slide) = self.slides.get(self.current_index) else {
+            return;
+        };
+        let slide_rect = Rect::new(cx, cy, disp_w, disp_h);
+        f.push(RenderCommand::FillRect {
+            x: cx,
+            y: cy,
+            width: disp_w,
+            height: disp_h,
+            color: slide.effective_bg(&self.theme),
+            corner_radii: CornerRadii::all(CORNER_R),
+        });
+        f.hit(Target::SlideArea, slide_rect);
 
-            // Slide rectangle.
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: cy,
-                width: disp_w,
-                height: disp_h,
-                color: bg,
-                corner_radii: CornerRadii::all(CORNER_R),
-            });
-
-            // Clip to the slide area.
-            cmds.push(RenderCommand::PushClip {
-                x: cx,
-                y: cy,
-                width: disp_w,
-                height: disp_h,
-            });
-
-            // Render each element, scaled.
-            for elem in &slide.elements {
-                self.render_element(cmds, elem, cx, cy, scale);
-            }
-
-            cmds.push(RenderCommand::PopClip);
-
-            // Selection highlight around selected element.
-            if let Some(eid) = self.selected_element
-                && let Some(elem) = slide.element_by_id(eid)
-            {
-                let (ex, ey, ew, eh) = elem.bounds();
-                cmds.push(RenderCommand::StrokeRect {
-                    x: cx + ex * scale - 1.0,
-                    y: cy + ey * scale - 1.0,
-                    width: ew * scale + 2.0,
-                    height: eh * scale + 2.0,
-                    color: self.palette.sky,
-                    line_width: 1.5,
-                    corner_radii: CornerRadii::ZERO,
-                });
-            }
-
-            // Slide number overlay.
-            cmds.push(RenderCommand::Text {
-                x: cx + disp_w - 50.0,
-                y: cy + disp_h - 18.0,
-                text: format!(
-                    "{}/{}",
-                    self.current_index.saturating_add(1),
-                    self.slides.len(),
-                ),
-                color: self.palette.subtext0,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+        // The elements, clipped to the slide, each where it is drawn. Later
+        // elements are drawn over earlier ones, and their boxes are recorded
+        // after, so a press takes the one on top.
+        f.clip(slide_rect);
+        for element in &slide.elements {
+            self.render_element(f, element, cx, cy, scale);
+            f.hit(Target::Element(element.id()), self.element_rect(element));
         }
+        f.unclip();
+
+        // The selection, with a handle at each corner for resizing.
+        if let Some(element) = self.selected() {
+            let (ex, ey, ew, eh) = element.bounds();
+            let outline = Rect::new(cx + ex * scale, cy + ey * scale, ew * scale, eh * scale);
+            f.push(RenderCommand::StrokeRect {
+                x: outline.x - 1.0,
+                y: outline.y - 1.0,
+                width: outline.w + 2.0,
+                height: outline.h + 2.0,
+                color: self.palette.sky,
+                line_width: 1.5,
+                corner_radii: CornerRadii::ZERO,
+            });
+            if self.editing.is_none() {
+                for (corner, handle) in Self::handles(outline) {
+                    f.push(RenderCommand::FillRect {
+                        x: handle.x,
+                        y: handle.y,
+                        width: handle.w,
+                        height: handle.h,
+                        color: if self.hover == Some(Target::Handle(corner)) {
+                            self.palette.blue
+                        } else {
+                            self.palette.sky
+                        },
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                    f.hit(Target::Handle(corner), handle);
+                }
+            }
+        }
+
+        f.push(RenderCommand::Text {
+            x: cx + disp_w - 50.0,
+            y: cy + disp_h - 18.0,
+            text: format!(
+                "{}/{}",
+                self.current_index.saturating_add(1),
+                self.slides.len(),
+            ),
+            color: self.palette.subtext0,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+    }
+
+    /// `text`'s lines in a box `width` wide: one per line break, and a line
+    /// too wide for the box wrapped at its words.
+    ///
+    /// A text box was drawn as one `Text` command, which draws one line: a
+    /// box typed with Shift+Enter showed its lines run together, and a long
+    /// line was cut with an ellipsis instead of wrapping.
+    fn box_lines(text: &str, width: f32, size: f32, weight: FontWeightHint) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in text.split('\n') {
+            if line.is_empty() || guitk::text::measure(line, size, weight) <= width {
+                out.push(line.to_owned());
+            } else {
+                out.extend(guitk::text::wrap(line, width, size, weight));
+            }
+        }
+        out
     }
 
     /// Render a single slide element at the given offset and scale.
     fn render_element(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        f: &mut Frame<Target>,
         elem: &SlideElement,
         ox: f32,
         oy: f32,
         scale: f32,
     ) {
+        // While an element is being typed into, it draws the buffer and not
+        // what it holds: the commit happens when the mode is left, so drawing
+        // the element would leave the user typing at a slide that never
+        // changes.
+        let typing = match &self.editing {
+            Some((EditTarget::Element(eid), buf)) if *eid == elem.id() => Some(buf.as_str()),
+            _ => None,
+        };
         match elem {
             SlideElement::TextBox {
-                id,
                 x,
                 y,
                 width,
@@ -2343,34 +3689,47 @@ impl SlidesApp {
                 } else {
                     FontWeightHint::Regular
                 };
-
-                // For centered text, add a half-width offset (simplified).
-                let text_x = if *centered { fx + fw * 0.1 } else { fx };
-                let text_max = if *centered { Some(fw * 0.8) } else { Some(fw) };
-
-                // While this box is being typed into, draw the buffer and not
-                // the element: the commit happens when the mode is left, so
-                // the element still holds the old words until then, and
-                // drawing those would leave the user typing at a slide that
-                // never changes.
-                let live = match &self.editing {
-                    Some((EditTarget::Element(eid), buf)) if eid == id => buf.clone(),
-                    _ => text.clone(),
-                };
-                cmds.push(RenderCommand::Text {
-                    x: text_x,
-                    y: fy,
-                    text: live,
-                    color: *color,
-                    font_size: fs,
-                    font_weight: weight,
-                    max_width: text_max,
-                    // `text_max` is `Some` on both arms above — slide text is
-                    // always bounded by its box — so the cut is always
-                    // possible, and a slide that silently loses the end of a
-                    // bullet is worse than one that visibly runs out of room.
-                    overflow: TextOverflow::Ellipsis,
-                });
+                let words = typing.unwrap_or(text);
+                let line_h = fs * 1.25;
+                let lines = Self::box_lines(words, fw, fs, weight);
+                let mut line_y = fy;
+                let mut last_end = fx;
+                for line in &lines {
+                    // Centred on the box: it was nudged a tenth of the way in
+                    // and called centred, which no line of any length was.
+                    let lx = if *centered {
+                        guitk::text::center_x(line, fx + fw / 2.0, fs, weight).max(fx)
+                    } else {
+                        fx
+                    };
+                    last_end = lx + guitk::text::measure(line, fs, weight).min(fw);
+                    f.push(RenderCommand::Text {
+                        x: lx,
+                        y: line_y,
+                        text: line.clone(),
+                        color: *color,
+                        font_size: fs,
+                        font_weight: weight,
+                        max_width: Some(fw),
+                        // Slide text is bounded by its box, and a slide that
+                        // silently loses the end of a line is worse than one
+                        // that visibly runs out of room.
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    line_y += line_h;
+                }
+                if typing.is_some() {
+                    // Where the next character goes.
+                    let caret_y = (line_y - line_h).max(fy);
+                    f.push(RenderCommand::FillRect {
+                        x: last_end + 1.0,
+                        y: caret_y,
+                        width: 2.0,
+                        height: fs,
+                        color: self.palette.sky,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
             }
             SlideElement::Shape {
                 kind,
@@ -2391,7 +3750,7 @@ impl SlidesApp {
 
                 match kind {
                     ShapeKind::Rectangle => {
-                        cmds.push(RenderCommand::FillRect {
+                        f.push(RenderCommand::FillRect {
                             x: sx,
                             y: sy,
                             width: sw,
@@ -2400,7 +3759,7 @@ impl SlidesApp {
                             corner_radii: CornerRadii::ZERO,
                         });
                         if lw > 0.0 {
-                            cmds.push(RenderCommand::StrokeRect {
+                            f.push(RenderCommand::StrokeRect {
                                 x: sx,
                                 y: sy,
                                 width: sw,
@@ -2414,7 +3773,7 @@ impl SlidesApp {
                     ShapeKind::Ellipse => {
                         // Approximate ellipse with a heavily rounded rect.
                         let r = sw.min(sh) / 2.0;
-                        cmds.push(RenderCommand::FillRect {
+                        f.push(RenderCommand::FillRect {
                             x: sx,
                             y: sy,
                             width: sw,
@@ -2423,7 +3782,7 @@ impl SlidesApp {
                             corner_radii: CornerRadii::all(r),
                         });
                         if lw > 0.0 {
-                            cmds.push(RenderCommand::StrokeRect {
+                            f.push(RenderCommand::StrokeRect {
                                 x: sx,
                                 y: sy,
                                 width: sw,
@@ -2435,7 +3794,7 @@ impl SlidesApp {
                         }
                     }
                     ShapeKind::Line => {
-                        cmds.push(RenderCommand::Line {
+                        f.push(RenderCommand::Line {
                             x1: sx,
                             y1: sy,
                             x2: sx + sw,
@@ -2445,8 +3804,7 @@ impl SlidesApp {
                         });
                     }
                     ShapeKind::Arrow => {
-                        // Line body.
-                        cmds.push(RenderCommand::Line {
+                        f.push(RenderCommand::Line {
                             x1: sx,
                             y1: sy,
                             x2: sx + sw,
@@ -2454,26 +3812,23 @@ impl SlidesApp {
                             color: *stroke_color,
                             width: lw.max(1.0),
                         });
-                        // Simple arrowhead (two short lines).
-                        let head_len = 10.0 * scale;
-                        let ex = sx + sw;
-                        let ey = sy + sh;
-                        cmds.push(RenderCommand::Line {
-                            x1: ex,
-                            y1: ey,
-                            x2: ex - head_len,
-                            y2: ey - head_len,
-                            color: *stroke_color,
-                            width: lw.max(1.0),
-                        });
-                        cmds.push(RenderCommand::Line {
-                            x1: ex,
-                            y1: ey,
-                            x2: ex - head_len,
-                            y2: ey + head_len * 0.5,
-                            color: *stroke_color,
-                            width: lw.max(1.0),
-                        });
+                        // The head, along the line's own direction: it was two
+                        // strokes at fixed angles, which pointed the wrong way
+                        // on any arrow that was not drawn down and to the right.
+                        let (hx, hy) = (sx + sw, sy + sh);
+                        let len = sw.hypot(sh).max(f32::EPSILON);
+                        let (ux, uy) = (sw / len, sh / len);
+                        let head = 10.0 * scale;
+                        for side in [-1.0_f32, 1.0] {
+                            f.push(RenderCommand::Line {
+                                x1: hx,
+                                y1: hy,
+                                x2: hx - head * (ux + side * 0.5 * uy),
+                                y2: hy - head * (uy - side * 0.5 * ux),
+                                color: *stroke_color,
+                                width: lw.max(1.0),
+                            });
+                        }
                     }
                 }
             }
@@ -2489,9 +3844,7 @@ impl SlidesApp {
                 let iy = oy + y * scale;
                 let iw = width * scale;
                 let ih = height * scale;
-
-                // Dashed border placeholder.
-                cmds.push(RenderCommand::StrokeRect {
+                f.push(RenderCommand::StrokeRect {
                     x: ix,
                     y: iy,
                     width: iw,
@@ -2500,15 +3853,17 @@ impl SlidesApp {
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(CORNER_R),
                 });
-                // Placeholder label.
-                cmds.push(RenderCommand::Text {
-                    x: ix + iw * 0.25,
+                let label = typing.unwrap_or(placeholder_label);
+                let size = 14.0 * scale;
+                f.push(RenderCommand::Text {
+                    x: guitk::text::center_x(label, ix + iw / 2.0, size, FontWeightHint::Regular)
+                        .max(ix),
                     y: iy + ih * 0.45,
-                    text: placeholder_label.clone(),
+                    text: label.to_owned(),
                     color: self.palette.subtext0,
-                    font_size: 14.0 * scale,
+                    font_size: size,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(iw * 0.5),
+                    max_width: Some(iw),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
@@ -2526,42 +3881,62 @@ impl SlidesApp {
                 let bw = width * scale;
                 let fs = font_size * scale;
                 let line_h = fs * 1.6;
-                for (i, item) in items.iter().enumerate() {
-                    let iy = by + (i as f32) * line_h;
-                    let bullet_text = format!("\u{2022} {item}");
-                    cmds.push(RenderCommand::Text {
-                        x: bx,
-                        y: iy,
-                        text: bullet_text,
-                        color: *color,
-                        font_size: fs,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(bw),
-                        overflow: TextOverflow::Ellipsis,
-                    });
+                let indent = guitk::text::measure("\u{2022} ", fs, FontWeightHint::Regular);
+                let typed: Vec<String>;
+                let shown: &[String] = match typing {
+                    Some(buf) => {
+                        typed = buf.split('\n').map(str::to_owned).collect();
+                        &typed
+                    }
+                    None => items,
+                };
+                let mut line_y = by;
+                for item in shown {
+                    let lines =
+                        Self::box_lines(item, (bw - indent).max(1.0), fs, FontWeightHint::Regular);
+                    for (i, line) in lines.iter().enumerate() {
+                        let (lx, text) = if i == 0 {
+                            (bx, format!("\u{2022} {line}"))
+                        } else {
+                            (bx + indent, line.clone())
+                        };
+                        f.push(RenderCommand::Text {
+                            x: lx,
+                            y: line_y,
+                            text,
+                            color: *color,
+                            font_size: fs,
+                            font_weight: FontWeightHint::Regular,
+                            max_width: Some(bw),
+                            overflow: TextOverflow::Ellipsis,
+                        });
+                        line_y += line_h;
+                    }
                 }
             }
         }
     }
 
     /// Render the properties panel on the right side.
-    fn render_properties_panel(&self, cmds: &mut Vec<RenderCommand>) {
+    ///
+    /// Every value in it was printed and none could be changed: the
+    /// transition and the background of the slide, the size, weight,
+    /// alignment and colour of a text box, a shape's outline. And its six
+    /// Insert buttons were drawn and could not be pressed.
+    fn render_properties_panel(&self, f: &mut Frame<Target>) {
         let top = TOOLBAR_HEIGHT;
         let bot = self.window_height - STATUS_BAR_HEIGHT;
         let px = self.window_width - PROPERTIES_WIDTH;
-        let ph = bot - top;
 
-        // Background.
-        cmds.push(RenderCommand::FillRect {
+        f.push(RenderCommand::FillRect {
             x: px,
             y: top,
             width: PROPERTIES_WIDTH,
-            height: ph,
+            height: bot - top,
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-        // Separator.
-        cmds.push(RenderCommand::Line {
+        f.push(RenderCommand::Line {
             x1: px,
             y1: top,
             x2: px,
@@ -2574,8 +3949,7 @@ impl SlidesApp {
         let lx = px + 12.0;
         let val_w = PROPERTIES_WIDTH - 24.0;
 
-        // Properties header.
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: lx,
             y,
             text: String::from("Properties"),
@@ -2587,225 +3961,241 @@ impl SlidesApp {
         });
         y += 24.0;
 
-        // Slide properties.
-        if let Some(slide) = self.slides.get(self.current_index) {
-            // Layout.
-            self.render_property_row(cmds, lx, y, val_w, "Layout", slide.layout.label());
-            y += 22.0;
+        let Some(slide) = self.slides.get(self.current_index) else {
+            return;
+        };
+        self.render_property_row(f, lx, y, "Layout", slide.layout.label());
+        y += 22.0;
+        self.prop_button(
+            f,
+            lx,
+            y,
+            "Transition",
+            slide.transition.label(),
+            Prop::Transition,
+        );
+        y += 24.0;
+        let bg = slide.effective_bg(&self.theme);
+        let bg_name = match slide.background {
+            None => String::from("Theme"),
+            Some(c) => format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b),
+        };
+        self.prop_button(f, lx, y, "Background", &bg_name, Prop::Background);
+        f.push(RenderCommand::FillRect {
+            x: lx + val_w - 26.0,
+            y: y + 4.0,
+            width: 20.0,
+            height: 12.0,
+            color: bg,
+            corner_radii: CornerRadii::all(2.0),
+        });
+        y += 30.0;
 
-            // Transition.
-            self.render_property_row(
-                cmds,
+        f.push(RenderCommand::Line {
+            x1: lx,
+            y1: y,
+            x2: px + PROPERTIES_WIDTH - 12.0,
+            y2: y,
+            color: self.palette.surface0,
+            width: 1.0,
+        });
+        y += 12.0;
+
+        let Some(elem) = self.selected() else {
+            f.push(RenderCommand::Text {
+                x: lx,
+                y,
+                text: String::from("No element selected (Tab selects one)"),
+                color: self.palette.subtext0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(val_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            y += 24.0;
+            f.push(RenderCommand::Text {
+                x: lx,
+                y,
+                text: String::from("Insert Element:"),
+                color: self.palette.subtext1,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+            y += 20.0;
+            for (i, label) in INSERT_KINDS.iter().enumerate() {
+                self.button(
+                    f,
+                    Rect::new(lx, y, val_w - 4.0, 22.0),
+                    label,
+                    Target::Insert(i),
+                    true,
+                );
+                y += 26.0;
+            }
+            return;
+        };
+
+        f.push(RenderCommand::Text {
+            x: lx,
+            y,
+            text: String::from("Element"),
+            color: self.palette.ink(self.palette.blue),
+            font_size: 13.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        y += 20.0;
+        let (ex, ey, ew, eh) = elem.bounds();
+        self.render_property_row(f, lx, y, "Position", &format!("{ex:.0}, {ey:.0}"));
+        y += 18.0;
+        self.render_property_row(f, lx, y, "Size", &format!("{ew:.0} x {eh:.0}"));
+        y += 22.0;
+
+        let (kind, weight_label, weight, words, bold, centred, colour) = match elem {
+            SlideElement::TextBox {
+                font_size,
+                bold,
+                centered,
+                color,
+                ..
+            } => (
+                "Text box",
+                "Text size",
+                Some(format!("{font_size:.0}")),
+                Some("Edit text"),
+                Some(*bold),
+                Some(*centered),
+                Some(*color),
+            ),
+            SlideElement::BulletList {
+                font_size, color, ..
+            } => (
+                "Bullets",
+                "Text size",
+                Some(format!("{font_size:.0}")),
+                Some("Edit bullets"),
+                None,
+                None,
+                Some(*color),
+            ),
+            SlideElement::Shape {
+                kind,
+                stroke_width,
+                fill_color,
+                ..
+            } => (
+                kind.label(),
+                "Outline",
+                Some(format!("{stroke_width:.0}")),
+                None,
+                None,
+                None,
+                Some(*fill_color),
+            ),
+            SlideElement::Image { .. } => ("Image", "", None, Some("Edit label"), None, None, None),
+        };
+        self.render_property_row(f, lx, y, "Type", kind);
+        y += 22.0;
+        if let Some(value) = weight {
+            self.render_property_row(f, lx, y + 4.0, weight_label, "");
+            let minus = Rect::new(lx + 75.0, y, 26.0, 22.0);
+            let plus = Rect::new(lx + 145.0, y, 26.0, 22.0);
+            self.button(f, minus, "-", Target::Prop(Prop::Smaller), true);
+            f.push(RenderCommand::Text {
+                x: lx + 108.0,
+                y: y + 5.0,
+                text: value,
+                color: self.palette.text,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(34.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            self.button(f, plus, "+", Target::Prop(Prop::Larger), true);
+            y += 26.0;
+        }
+        if let Some(on) = bold {
+            self.prop_button(f, lx, y, "Bold", if on { "Yes" } else { "No" }, Prop::Bold);
+            y += 26.0;
+        }
+        if let Some(on) = centred {
+            self.prop_button(
+                f,
                 lx,
                 y,
-                val_w,
-                "Transition (Ctrl+R)",
-                slide.transition.label(),
+                "Centred",
+                if on { "Yes" } else { "No" },
+                Prop::Centre,
             );
-            y += 22.0;
-
-            // Background.
-            let bg = slide.effective_bg(&self.theme);
-            let bg_hex = format!("#{:02X}{:02X}{:02X}", bg.r, bg.g, bg.b);
-            self.render_property_row(cmds, lx, y, val_w, "Background", &bg_hex);
-            y += 22.0;
-
-            // Color swatch.
-            cmds.push(RenderCommand::FillRect {
-                x: lx + 80.0,
-                y: y - 16.0,
-                width: 40.0,
-                height: 14.0,
-                color: bg,
+            y += 26.0;
+        }
+        if let Some(c) = colour {
+            self.prop_button(f, lx, y, "Colour", "Next", Prop::Colour);
+            f.push(RenderCommand::FillRect {
+                x: lx + val_w - 26.0,
+                y: y + 4.0,
+                width: 20.0,
+                height: 12.0,
+                color: c,
                 corner_radii: CornerRadii::all(2.0),
             });
-            y += 12.0;
-
-            // Separator.
-            cmds.push(RenderCommand::Line {
-                x1: lx,
-                y1: y,
-                x2: px + PROPERTIES_WIDTH - 12.0,
-                y2: y,
-                color: self.palette.surface0,
-                width: 1.0,
-            });
-            y += 12.0;
-
-            // Selected element properties.
-            if let Some(eid) = self.selected_element {
-                if let Some(elem) = slide.element_by_id(eid) {
-                    cmds.push(RenderCommand::Text {
-                        x: lx,
-                        y,
-                        text: String::from("Element"),
-                        color: self.palette.ink(self.palette.blue),
-                        font_size: 13.0,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
-                    });
-                    y += 20.0;
-
-                    let (ex, ey, ew, eh) = elem.bounds();
-                    self.render_property_row(cmds, lx, y, val_w, "X", &format!("{ex:.0}"));
-                    y += 18.0;
-                    self.render_property_row(cmds, lx, y, val_w, "Y", &format!("{ey:.0}"));
-                    y += 18.0;
-                    self.render_property_row(cmds, lx, y, val_w, "Width", &format!("{ew:.0}"));
-                    y += 18.0;
-                    self.render_property_row(cmds, lx, y, val_w, "Height", &format!("{eh:.0}"));
-                    y += 18.0;
-
-                    match elem {
-                        SlideElement::TextBox {
-                            text,
-                            font_size,
-                            bold,
-                            centered,
-                            ..
-                        } => {
-                            self.render_property_row(cmds, lx, y, val_w, "Type", "TextBox");
-                            y += 18.0;
-                            self.render_property_row(
-                                cmds,
-                                lx,
-                                y,
-                                val_w,
-                                "Size",
-                                &format!("{font_size:.0}"),
-                            );
-                            y += 18.0;
-                            self.render_property_row(
-                                cmds,
-                                lx,
-                                y,
-                                val_w,
-                                "Bold",
-                                if *bold { "Yes" } else { "No" },
-                            );
-                            y += 18.0;
-                            self.render_property_row(
-                                cmds,
-                                lx,
-                                y,
-                                val_w,
-                                "Center",
-                                if *centered { "Yes" } else { "No" },
-                            );
-                            y += 18.0;
-                            let preview: String = text.chars().take(20).collect();
-                            self.render_property_row(cmds, lx, y, val_w, "Text", &preview);
-                        }
-                        SlideElement::Shape {
-                            kind, stroke_width, ..
-                        } => {
-                            self.render_property_row(cmds, lx, y, val_w, "Type", kind.label());
-                            y += 18.0;
-                            self.render_property_row(
-                                cmds,
-                                lx,
-                                y,
-                                val_w,
-                                "Stroke",
-                                &format!("{stroke_width:.1}"),
-                            );
-                        }
-                        SlideElement::Image {
-                            placeholder_label, ..
-                        } => {
-                            self.render_property_row(cmds, lx, y, val_w, "Type", "Image");
-                            y += 18.0;
-                            self.render_property_row(
-                                cmds,
-                                lx,
-                                y,
-                                val_w,
-                                "Label",
-                                placeholder_label,
-                            );
-                        }
-                        SlideElement::BulletList {
-                            items, font_size, ..
-                        } => {
-                            self.render_property_row(cmds, lx, y, val_w, "Type", "Bullets");
-                            y += 18.0;
-                            self.render_property_row(
-                                cmds,
-                                lx,
-                                y,
-                                val_w,
-                                "Items",
-                                &format!("{}", items.len()),
-                            );
-                            y += 18.0;
-                            self.render_property_row(
-                                cmds,
-                                lx,
-                                y,
-                                val_w,
-                                "Size",
-                                &format!("{font_size:.0}"),
-                            );
-                        }
-                    }
-                }
-            } else {
-                cmds.push(RenderCommand::Text {
-                    x: lx,
-                    y,
-                    text: String::from("No element selected"),
-                    color: self.palette.subtext0,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(val_w),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                y += 24.0;
-
-                // Layout buttons for quick insert.
-                cmds.push(RenderCommand::Text {
-                    x: lx,
-                    y,
-                    text: String::from("Insert Element:"),
-                    color: self.palette.subtext1,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                y += 20.0;
-
-                let insert_items: &[&str] =
-                    &["Text Box", "Rectangle", "Ellipse", "Line", "Arrow", "Image"];
-                for label in insert_items {
-                    self.render_button(
-                        cmds,
-                        lx,
-                        y,
-                        val_w - 4.0,
-                        22.0,
-                        label,
-                        self.palette.surface0,
-                        self.palette.text,
-                    );
-                    y += 26.0;
-                }
-            }
+            y += 26.0;
         }
+        if let Some(label) = words {
+            self.button(
+                f,
+                Rect::new(lx, y, val_w - 4.0, 22.0),
+                label,
+                Target::Prop(Prop::Edit),
+                true,
+            );
+            y += 26.0;
+        }
+        self.button(
+            f,
+            Rect::new(lx, y, val_w - 4.0, 22.0),
+            "Delete element",
+            Target::Prop(Prop::Delete),
+            true,
+        );
+    }
+
+    /// A property whose value is a button: a label, and the value pressed to
+    /// change it.
+    fn prop_button(
+        &self,
+        f: &mut Frame<Target>,
+        x: f32,
+        y: f32,
+        key: &str,
+        value: &str,
+        prop: Prop,
+    ) {
+        f.push(RenderCommand::Text {
+            x,
+            y: y + 4.0,
+            text: key.to_string(),
+            color: self.palette.subtext0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(70.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        self.button(
+            f,
+            Rect::new(x + 75.0, y, PROPERTIES_WIDTH - 24.0 - 79.0, 22.0),
+            value,
+            Target::Prop(prop),
+            true,
+        );
     }
 
     /// Render a key-value property row.
-    fn render_property_row(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        _max_w: f32,
-        key: &str,
-        value: &str,
-    ) {
-        cmds.push(RenderCommand::Text {
+    fn render_property_row(&self, f: &mut Frame<Target>, x: f32, y: f32, key: &str, value: &str) {
+        f.push(RenderCommand::Text {
             x,
             y,
             text: key.to_string(),
@@ -2815,7 +4205,7 @@ impl SlidesApp {
             max_width: Some(70.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: x + 75.0,
             y,
             text: value.to_string(),
@@ -2827,23 +4217,31 @@ impl SlidesApp {
         });
     }
 
-    /// Render the speaker notes area below the canvas.
-    fn render_notes_panel(&self, cmds: &mut Vec<RenderCommand>) {
+    /// Render the speaker notes area below the canvas: a press on it (or `N`)
+    /// starts typing them.
+    fn render_notes_panel(&self, f: &mut Frame<Target>) {
         let notes_y = self.window_height - STATUS_BAR_HEIGHT - NOTES_HEIGHT;
-        let notes_w = self.window_width - SIDEBAR_WIDTH - PROPERTIES_WIDTH;
+        let notes_w = (self.window_width - SIDEBAR_WIDTH - PROPERTIES_WIDTH).max(0.0);
         let nx = SIDEBAR_WIDTH;
+        let panel = Rect::new(nx, notes_y, notes_w, NOTES_HEIGHT);
+        let typing = match &self.editing {
+            Some((EditTarget::Notes, buf)) => Some(buf.as_str()),
+            _ => None,
+        };
 
-        // Background.
-        cmds.push(RenderCommand::FillRect {
+        f.push(RenderCommand::FillRect {
             x: nx,
             y: notes_y,
             width: notes_w,
             height: NOTES_HEIGHT,
-            color: self.palette.base,
+            color: if typing.is_some() || self.hover == Some(Target::Notes) {
+                self.palette.surface0
+            } else {
+                self.palette.base
+            },
             corner_radii: CornerRadii::ZERO,
         });
-        // Separator.
-        cmds.push(RenderCommand::Line {
+        f.push(RenderCommand::Line {
             x1: nx,
             y1: notes_y,
             x2: nx + notes_w,
@@ -2851,124 +4249,367 @@ impl SlidesApp {
             color: self.palette.surface0,
             width: 1.0,
         });
-        // Header.
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: nx + 10.0,
             y: notes_y + 6.0,
-            text: String::from("Speaker Notes"),
+            text: String::from("Speaker Notes (N)"),
             color: self.palette.subtext1,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        // Notes content.
-        let notes_text = self.current_notes();
-        let display = if notes_text.is_empty() {
-            "(No notes for this slide)"
-        } else {
-            notes_text
-        };
-        cmds.push(RenderCommand::Text {
-            x: nx + 10.0,
-            y: notes_y + 24.0,
-            text: display.to_string(),
-            color: if notes_text.is_empty() {
-                self.palette.subtext0
+
+        let words = typing.unwrap_or_else(|| self.current_notes());
+        let width = (notes_w - 20.0).max(1.0);
+        let lines = if words.is_empty() {
+            vec![String::from(if typing.is_some() {
+                ""
             } else {
-                self.palette.text
-            },
-            font_size: 12.0,
+                "(No notes for this slide -- press here or N to write some)"
+            })]
+        } else {
+            Self::box_lines(words, width, 12.0, FontWeightHint::Regular)
+        };
+        // Three lines fit. While typing, the last three -- where the words
+        // are going; otherwise the first three, the last of them marked if
+        // there is more.
+        const ROOM: usize = 3;
+        let skip = if typing.is_some() {
+            lines.len().saturating_sub(ROOM)
+        } else {
+            0
+        };
+        let more = typing.is_none() && lines.len() > ROOM;
+        for (i, line) in lines.iter().skip(skip).take(ROOM).enumerate() {
+            let last = i.saturating_add(1) == ROOM;
+            f.push(RenderCommand::Text {
+                x: nx + 10.0,
+                y: notes_y + 24.0 + i as f32 * 16.0,
+                text: if more && last {
+                    format!("{line}\u{2026}")
+                } else {
+                    line.clone()
+                },
+                color: if words.is_empty() {
+                    self.palette.subtext0
+                } else {
+                    self.palette.text
+                },
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        f.hit(Target::Notes, panel);
+    }
+
+    /// Where the show draws a slide: letterboxed in the window, its top-left
+    /// corner and its scale.
+    fn show_geometry(&self) -> (f32, f32, f32) {
+        let (w, h) = (self.window_width, self.window_height);
+        let scale = (w / SLIDE_W).min(h / SLIDE_H).max(0.01);
+        (
+            (w - SLIDE_W * scale) / 2.0,
+            (h - SLIDE_H * scale) / 2.0,
+            scale,
+        )
+    }
+
+    /// Draw slide `index` at `(x, y)` and `scale`: its background and its
+    /// elements, clipped to itself.
+    fn draw_slide(&self, f: &mut Frame<Target>, index: usize, x: f32, y: f32, scale: f32) {
+        let Some(slide) = self.slides.get(index) else {
+            return;
+        };
+        let rect = Rect::new(x, y, SLIDE_W * scale, SLIDE_H * scale);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: slide.effective_bg(&self.theme),
+            corner_radii: CornerRadii::ZERO,
+        });
+        f.clip(rect);
+        for element in &slide.elements {
+            self.render_element(f, element, x, y, scale);
+        }
+        f.unclip();
+    }
+
+    /// The show: the slide on screen, or two with a transition between them.
+    fn render_show(&self, f: &mut Frame<Target>, show: Show) {
+        let (w, h) = (self.window_width, self.window_height);
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+            color: Color::BLACK,
+            corner_radii: CornerRadii::ZERO,
+        });
+        f.hit(Target::Show, Rect::new(0.0, 0.0, w, h));
+        let (x, y, scale) = self.show_geometry();
+        let (sw, sh) = (SLIDE_W * scale, SLIDE_H * scale);
+        let Some((from, done)) = show.leaving else {
+            self.draw_slide(f, show.index, x, y, scale);
+            return;
+        };
+        let p = (done as f32 / TRANSITION_MS as f32).clamp(0.0, 1.0);
+        let transition = self
+            .slides
+            .get(show.index)
+            .map_or(Transition::None, |s| s.transition);
+        match transition {
+            Transition::None => self.draw_slide(f, show.index, x, y, scale),
+            // Through black: out for the first half, in for the second.
+            Transition::Fade => {
+                let (index, dark) = if p < 0.5 {
+                    (from, p * 2.0)
+                } else {
+                    (show.index, (1.0 - p) * 2.0)
+                };
+                self.draw_slide(f, index, x, y, scale);
+                let alpha = (dark * 255.0).round().clamp(0.0, 255.0) as u8;
+                f.push(RenderCommand::FillRect {
+                    x,
+                    y,
+                    width: sw,
+                    height: sh,
+                    color: Color::rgba(0, 0, 0, alpha),
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+            // The arriving slide pushes the leaving one out of the frame.
+            Transition::SlideLeft | Transition::SlideRight => {
+                let dir = if transition == Transition::SlideLeft {
+                    -1.0
+                } else {
+                    1.0
+                };
+                f.clip(Rect::new(x, y, sw, sh));
+                f.translate(dir * p * sw, 0.0);
+                self.draw_slide(f, from, x, y, scale);
+                f.untranslate();
+                f.translate(-dir * (1.0 - p) * sw, 0.0);
+                self.draw_slide(f, show.index, x, y, scale);
+                f.untranslate();
+                f.unclip();
+            }
+            // Revealed from the left edge.
+            Transition::Wipe => {
+                self.draw_slide(f, from, x, y, scale);
+                f.clip(Rect::new(x, y, sw * p, sh));
+                self.draw_slide(f, show.index, x, y, scale);
+                f.unclip();
+            }
+            // Revealed a cell at a time, in an order that looks scattered and
+            // is the same every time.
+            Transition::Dissolve => {
+                self.draw_slide(f, from, x, y, scale);
+                let cells = DISSOLVE_COLS.saturating_mul(DISSOLVE_ROWS);
+                let shown = ((p * cells as f32).round() as usize).min(cells);
+                let (cw, ch) = (sw / DISSOLVE_COLS as f32, sh / DISSOLVE_ROWS as f32);
+                for order in 0..shown {
+                    // 97 is prime and does not divide 144, so stepping by it
+                    // visits every cell exactly once.
+                    let cell = order.saturating_mul(97).checked_rem(cells).unwrap_or(0);
+                    let (col, row) = (cell % DISSOLVE_COLS, cell / DISSOLVE_COLS);
+                    f.clip(Rect::new(x + col as f32 * cw, y + row as f32 * ch, cw, ch));
+                    self.draw_slide(f, show.index, x, y, scale);
+                    f.unclip();
+                }
+            }
+        }
+    }
+
+    /// The new-slide menu: every layout, under the + Slide button.
+    fn render_layout_menu(&self, f: &mut Frame<Target>, reached: usize) {
+        // A press anywhere but on the menu closes it.
+        f.hit(
+            Target::MenuBackdrop,
+            Rect::new(0.0, 0.0, self.window_width, self.window_height),
+        );
+        let row_h = 28.0;
+        // Under the + Slide button.
+        let left = self
+            .tool_rects()
+            .into_iter()
+            .find(|(tool, ..)| *tool == Tool::NewSlide)
+            .map_or(TOOLS_X, |(_, rect, ..)| rect.x);
+        let menu = Rect::new(
+            left,
+            TOOLBAR_HEIGHT + 2.0,
+            240.0,
+            36.0 + SlideLayout::all().len() as f32 * row_h,
+        );
+        self.palette
+            .push_surface(f, menu.x, menu.y, menu.w, menu.h, 8.0, Surface::Card);
+        f.hit(Target::Menu, menu);
+        f.push(RenderCommand::Text {
+            x: menu.x + 12.0,
+            y: menu.y + 10.0,
+            text: String::from("New slide -- 1-6, or Esc"),
+            color: self.palette.subtext0,
+            font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(notes_w - 20.0),
+            max_width: Some(menu.w - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
+        for (i, layout) in SlideLayout::all().iter().enumerate() {
+            let row = Rect::new(
+                menu.x + 6.0,
+                menu.y + 30.0 + i as f32 * row_h,
+                menu.w - 12.0,
+                row_h - 2.0,
+            );
+            if i == reached || self.hover == Some(Target::LayoutChoice(i)) {
+                f.push(RenderCommand::FillRect {
+                    x: row.x,
+                    y: row.y,
+                    width: row.w,
+                    height: row.h,
+                    color: self.palette.surface1,
+                    corner_radii: CornerRadii::all(CORNER_R),
+                });
+            }
+            f.push(RenderCommand::Text {
+                x: row.x + 8.0,
+                y: row.y + 7.0,
+                text: format!("{}   {}", i.saturating_add(1), layout.label()),
+                color: self.palette.text,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(row.w - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            f.hit(Target::LayoutChoice(i), row);
+        }
     }
 
     // ---- Slide sorter mode -------------------------------------------------
 
-    /// Render the slide sorter grid view.
-    fn render_sorter_mode(&self, cmds: &mut Vec<RenderCommand>) {
-        self.render_toolbar(cmds);
-        self.render_status_bar(cmds);
-
+    /// Where the sorter draws: its pane, how many columns, a thumbnail's size,
+    /// the grid's left edge and the pitch from one row to the next.
+    fn sorter_geometry(&self) -> SorterGeometry {
         let top = TOOLBAR_HEIGHT;
-        let bot = self.window_height - STATUS_BAR_HEIGHT;
-        let avail_w = self.window_width;
-        let avail_h = bot - top;
-
-        // How many columns can we fit?
+        let bottom = self.window_height - STATUS_BAR_HEIGHT;
+        let pane = Rect::new(0.0, top, self.window_width, (bottom - top).max(0.0));
         let thumb_w: f32 = 220.0;
         let thumb_h: f32 = thumb_w / SLIDE_ASPECT;
         let gap: f32 = 16.0;
-        let cols = guitk::grid::columns_across(avail_w - 2.0 * gap, thumb_w, gap);
-        let total_grid_w = (cols.get() as f32) * (thumb_w + gap) - gap;
-        let grid_x = (avail_w - total_grid_w) / 2.0;
+        let cols = guitk::grid::columns_across(pane.w - 2.0 * gap, thumb_w, gap);
+        let grid_w = (cols.get() as f32) * (thumb_w + gap) - gap;
+        SorterGeometry {
+            pane,
+            cols,
+            thumb_w,
+            thumb_h,
+            gap,
+            grid_x: (pane.w - grid_w) / 2.0,
+            pitch: thumb_h + gap + 24.0,
+        }
+    }
 
-        // Clip to the sorter area.
-        cmds.push(RenderCommand::PushClip {
-            x: 0.0,
-            y: top,
-            width: avail_w,
-            height: avail_h,
-        });
+    /// How far the sorter can scroll.
+    fn sorter_limit(&self) -> f32 {
+        let g = self.sorter_geometry();
+        let rows = self.slides.len().div_ceil(g.cols.get());
+        (rows as f32 * g.pitch + g.gap - g.pane.h).max(0.0)
+    }
+
+    /// Scroll the thumbnail column and the sorter so the current slide is in
+    /// view in both. The column clipped its thumbnails and never scrolled, so
+    /// from the sixth slide on the current one was drawn below the window.
+    fn keep_current_visible(&mut self) {
+        let (pane, _, thumb_h, pitch) = self.sidebar_pane();
+        let top = self.current_index as f32 * pitch;
+        let bottom = top + thumb_h + 20.0 + THUMBNAIL_PAD;
+        if top < self.sidebar_scroll {
+            self.sidebar_scroll = top;
+        } else if bottom > self.sidebar_scroll + pane.h {
+            self.sidebar_scroll = bottom - pane.h;
+        }
+        self.sidebar_scroll = self.sidebar_scroll.clamp(0.0, self.sidebar_limit());
+
+        let g = self.sorter_geometry();
+        let row = self.current_index / g.cols;
+        let top = row as f32 * g.pitch;
+        let bottom = top + g.pitch + g.gap;
+        if top < self.sorter_scroll {
+            self.sorter_scroll = top;
+        } else if bottom > self.sorter_scroll + g.pane.h {
+            self.sorter_scroll = bottom - g.pane.h;
+        }
+        self.sorter_scroll = self.sorter_scroll.clamp(0.0, self.sorter_limit());
+    }
+
+    /// Render the slide sorter grid view.
+    ///
+    /// It clipped its grid and never scrolled, and no thumbnail answered a
+    /// press: a slide could be chosen or moved here only by key.
+    fn render_sorter_mode(&self, f: &mut Frame<Target>) {
+        self.render_toolbar(f);
+        self.render_status_bar(f);
+
+        let g = self.sorter_geometry();
+        f.hit(Target::SorterGrid, g.pane);
+        f.clip(g.pane);
 
         for (i, slide) in self.slides.iter().enumerate() {
             // `cols` is a `NonZeroUsize`, so these use the `Rem`/`Div` impls
-            // that cannot divide by zero. The clamp used to be a `.max(1.0)`
-            // twenty lines up, with an `#[allow(arithmetic_side_effects)]` at
-            // each division vouching for it from a distance.
-            let col = i % cols;
-            let row = i / cols;
-            let tx = grid_x + (col as f32) * (thumb_w + gap);
-            let ty = top + gap + (row as f32) * (thumb_h + gap + 24.0);
-
+            // that cannot divide by zero.
+            let col = i % g.cols;
+            let row = i / g.cols;
+            let tx = g.grid_x + (col as f32) * (g.thumb_w + g.gap);
+            let ty = g.pane.y + g.gap + (row as f32) * g.pitch - self.sorter_scroll;
+            let cell = Rect::new(tx - 2.0, ty - 2.0, g.thumb_w + 4.0, g.thumb_h + 24.0);
+            if f.visible_part(cell).is_none() {
+                continue;
+            }
             let is_current = i == self.current_index;
-
-            // Selection highlight.
-            if is_current {
-                cmds.push(RenderCommand::StrokeRect {
+            if is_current || self.hover == Some(Target::SorterThumb(i)) {
+                f.push(RenderCommand::StrokeRect {
                     x: tx - 2.0,
                     y: ty - 2.0,
-                    width: thumb_w + 4.0,
-                    height: thumb_h + 4.0,
-                    color: self.palette.blue,
+                    width: g.thumb_w + 4.0,
+                    height: g.thumb_h + 4.0,
+                    color: if is_current {
+                        self.palette.blue
+                    } else {
+                        self.palette.surface2
+                    },
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(CORNER_R),
                 });
             }
-
-            // Thumbnail background.
-            let bg = slide.effective_bg(&self.theme);
-            cmds.push(RenderCommand::FillRect {
+            f.push(RenderCommand::FillRect {
                 x: tx,
                 y: ty,
-                width: thumb_w,
-                height: thumb_h,
-                color: bg,
+                width: g.thumb_w,
+                height: g.thumb_h,
+                color: slide.effective_bg(&self.theme),
                 corner_radii: CornerRadii::all(CORNER_R),
             });
-
-            // Preview text.
             let preview = slide_preview_text(slide);
             if !preview.is_empty() {
-                cmds.push(RenderCommand::Text {
+                f.push(RenderCommand::Text {
                     x: tx + 8.0,
                     y: ty + 12.0,
                     text: preview,
                     color: self.palette.text,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(thumb_w - 16.0),
+                    max_width: Some(g.thumb_w - 16.0),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
-
-            // Transition label.
             if slide.transition != Transition::None {
-                cmds.push(RenderCommand::Text {
+                f.push(RenderCommand::Text {
                     x: tx + 4.0,
-                    y: ty + thumb_h - 14.0,
+                    y: ty + g.thumb_h - 14.0,
                     text: slide.transition.label().to_string(),
                     color: self.palette.ink(self.palette.teal),
                     font_size: 8.0,
@@ -2977,11 +4618,9 @@ impl SlidesApp {
                     overflow: TextOverflow::Clip,
                 });
             }
-
-            // Slide number.
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: tx,
-                y: ty + thumb_h + 4.0,
+                y: ty + g.thumb_h + 4.0,
                 text: format!("{}. {}", i.saturating_add(1), slide.layout.label()),
                 color: if is_current {
                     self.palette.ink(self.palette.blue)
@@ -2990,15 +4629,699 @@ impl SlidesApp {
                 },
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(thumb_w),
+                max_width: Some(g.thumb_w),
                 overflow: TextOverflow::Ellipsis,
             });
+            // A press chooses the slide, a second opens it, and a drag moves it.
+            f.hit(Target::SorterThumb(i), cell);
         }
+        f.unclip();
+    }
 
-        cmds.push(RenderCommand::PopClip);
+    // ---- The pointer ------------------------------------------------------------
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // During the show a press goes on, and a right press goes back.
+        if self.show.is_some() {
+            return match event.kind {
+                MouseEventKind::Press(MouseButton::Left) => self.show_next(),
+                MouseEventKind::Press(MouseButton::Right) => self.show_previous(),
+                _ => EventResult::Ignored,
+            };
+        }
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let target = self.frame().hit_test(event.x, event.y);
+                // A press anywhere but on what is being typed into finishes
+                // the typing and keeps the words, as Escape does.
+                let mut finished = false;
+                if let Some((edit, buf)) = self.editing.clone() {
+                    let inside = match (edit, target) {
+                        (EditTarget::Element(eid), Some(Target::Element(on))) => eid == on,
+                        (EditTarget::Notes, Some(Target::Notes)) => true,
+                        _ => false,
+                    };
+                    if inside {
+                        return EventResult::Ignored;
+                    }
+                    self.commit_editing(edit, &buf);
+                    self.editing = None;
+                    finished = true;
+                }
+                let result = match target {
+                    Some(target) => self.press(target, event.x, event.y),
+                    None => EventResult::Ignored,
+                };
+                if finished {
+                    EventResult::Consumed
+                } else {
+                    result
+                }
+            }
+            MouseEventKind::Move => {
+                if self.drag.is_some() {
+                    return self.drag_to(event.x, event.y);
+                }
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Release(MouseButton::Left) => {
+                let result = self.release(event.x, event.y);
+                self.keep_current_visible();
+                result
+            }
+            // A release outside the window never arrives, so leaving it ends
+            // the drag where it had got to.
+            MouseEventKind::Leave => {
+                let dragged = self.drag.take().is_some();
+                let lit = self.hover.take().is_some();
+                if dragged || lit {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A left press on `target`.
+    fn press(&mut self, target: Target, x: f32, y: f32) -> EventResult {
+        let had_message = self.status_message.take().is_some();
+        let result = match target {
+            Target::HelpCard => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            Target::MenuBackdrop => {
+                self.layout_menu = None;
+                EventResult::Consumed
+            }
+            Target::Menu | Target::Sidebar | Target::SorterGrid => EventResult::Ignored,
+            Target::Show => self.show_next(),
+            Target::LayoutChoice(i) => self.choose_layout(i),
+            Target::Tool(tool) => self.use_tool(tool),
+            Target::Thumb(i) | Target::SorterThumb(i) => {
+                let was_current = i == self.current_index;
+                if !was_current {
+                    self.go_to_slide(i);
+                }
+                self.drag = Some(Drag::Slide {
+                    from: i,
+                    at: (x, y),
+                    moved: false,
+                    was_current,
+                });
+                EventResult::Consumed
+            }
+            Target::Element(id) => {
+                // A press on the element already selected types into it, if
+                // the pointer comes up where it went down.
+                let edit = self.selected_element == Some(id);
+                self.selected_element = Some(id);
+                let origin = self.selected().map_or((0.0, 0.0), |e| {
+                    let (ex, ey, _, _) = e.bounds();
+                    (ex, ey)
+                });
+                self.drag = Some(Drag::Move {
+                    id,
+                    from: self.to_slide(x, y),
+                    origin,
+                    moved: false,
+                    edit,
+                });
+                EventResult::Consumed
+            }
+            Target::Handle(corner) => {
+                let Some((id, bounds)) = self.selected().map(|e| (e.id(), e.bounds())) else {
+                    return EventResult::Ignored;
+                };
+                self.drag = Some(Drag::Resize {
+                    id,
+                    corner,
+                    from: self.to_slide(x, y),
+                    bounds,
+                    moved: false,
+                });
+                EventResult::Consumed
+            }
+            Target::Canvas | Target::SlideArea => {
+                if self.selected_element.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Target::Prop(prop) => self.use_prop(prop),
+            Target::Insert(i) => self.insert(i),
+            Target::Notes => self.begin_notes(),
+        };
+        if result == EventResult::Consumed {
+            self.keep_current_visible();
+        }
+        if had_message {
+            EventResult::Consumed
+        } else {
+            result
+        }
+    }
+
+    /// A toolbar button.
+    fn use_tool(&mut self, tool: Tool) -> EventResult {
+        match tool {
+            Tool::Title => self.begin_deck_title(),
+            Tool::Open => self.open_deck(),
+            Tool::Save => self.save_deck(),
+            Tool::NewSlide => {
+                self.layout_menu = Some(1);
+                EventResult::Consumed
+            }
+            Tool::Duplicate => {
+                self.duplicate_current_slide();
+                EventResult::Consumed
+            }
+            Tool::DeleteSlide => self.delete_current_slide(),
+            Tool::ToggleView => self.set_view(match self.view {
+                ViewMode::Edit => ViewMode::Sorter,
+                ViewMode::Sorter => ViewMode::Edit,
+            }),
+            Tool::Undo => self.undo_if_any(),
+            Tool::Redo => self.redo_if_any(),
+            Tool::Export => {
+                self.export_as();
+                EventResult::Consumed
+            }
+            Tool::Present => self.present(self.current_index),
+            Tool::Theme => {
+                self.cycle_theme();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// A property-panel button.
+    fn use_prop(&mut self, prop: Prop) -> EventResult {
+        match prop {
+            Prop::Transition => {
+                self.cycle_transition();
+                EventResult::Consumed
+            }
+            Prop::Background => self.cycle_background(),
+            Prop::Smaller => self.step_weight(false),
+            Prop::Larger => self.step_weight(true),
+            Prop::Bold => self.toggle_bold(),
+            Prop::Centre => self.toggle_centred(),
+            Prop::Colour => self.cycle_element_colour(),
+            Prop::Edit => self.begin_editing(),
+            Prop::Delete => {
+                if self.selected_element.is_none() {
+                    return EventResult::Ignored;
+                }
+                self.delete_selected_element();
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// The pointer moved with the button held.
+    fn drag_to(&mut self, x: f32, y: f32) -> EventResult {
+        let Some(drag) = self.drag else {
+            return EventResult::Ignored;
+        };
+        let (sx, sy) = self.to_slide(x, y);
+        let scale = self.canvas_geometry().2;
+        match drag {
+            Drag::Move {
+                id,
+                from,
+                origin,
+                moved,
+                edit,
+            } => {
+                let (dx, dy) = (sx - from.0, sy - from.1);
+                // A press that wanders a pixel or two is still a press.
+                if !moved && (dx.abs() + dy.abs()) * scale < 3.0 {
+                    return EventResult::Ignored;
+                }
+                if !moved {
+                    self.checkpoint();
+                }
+                self.drag = Some(Drag::Move {
+                    id,
+                    from,
+                    origin,
+                    moved: true,
+                    edit,
+                });
+                let Some(element) = self
+                    .slides
+                    .get_mut(self.current_index)
+                    .and_then(|s| s.element_by_id_mut(id))
+                else {
+                    return EventResult::Ignored;
+                };
+                let (_, _, w, h) = element.bounds();
+                let (nx, ny) = keep_on_slide(origin.0 + dx, origin.1 + dy, w, h);
+                element.set_position(nx, ny);
+                EventResult::Consumed
+            }
+            Drag::Resize {
+                id,
+                corner,
+                from,
+                bounds,
+                moved,
+            } => {
+                let (dx, dy) = (sx - from.0, sy - from.1);
+                if !moved && (dx.abs() + dy.abs()) * scale < 3.0 {
+                    return EventResult::Ignored;
+                }
+                if !moved {
+                    self.checkpoint();
+                }
+                self.drag = Some(Drag::Resize {
+                    id,
+                    corner,
+                    from,
+                    bounds,
+                    moved: true,
+                });
+                let Some(element) = self
+                    .slides
+                    .get_mut(self.current_index)
+                    .and_then(|s| s.element_by_id_mut(id))
+                else {
+                    return EventResult::Ignored;
+                };
+                let (nx, ny, nw, nh) = resized(bounds, corner, dx, dy, min_size(element));
+                element.set_position(nx, ny);
+                element.set_size(nw, nh);
+                EventResult::Consumed
+            }
+            Drag::Slide {
+                from,
+                at,
+                moved,
+                was_current,
+            } => {
+                if !moved && (x - at.0).abs() + (y - at.1).abs() < 6.0 {
+                    return EventResult::Ignored;
+                }
+                self.drag = Some(Drag::Slide {
+                    from,
+                    at,
+                    moved: true,
+                    was_current,
+                });
+                // The thumbnail it would land on is lit.
+                self.hover = self.target_at(x, y);
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// The button came up.
+    fn release(&mut self, x: f32, y: f32) -> EventResult {
+        let Some(drag) = self.drag.take() else {
+            return EventResult::Ignored;
+        };
+        match drag {
+            Drag::Move { moved, edit, .. } => {
+                if !moved && edit {
+                    return self.begin_editing();
+                }
+                EventResult::Consumed
+            }
+            Drag::Resize { .. } => EventResult::Consumed,
+            Drag::Slide {
+                from,
+                moved,
+                was_current,
+                ..
+            } => {
+                let onto = match self.target_at(x, y) {
+                    Some(Target::Thumb(j) | Target::SorterThumb(j)) => Some(j),
+                    _ => None,
+                };
+                match onto {
+                    Some(to) if moved && to != from => {
+                        self.move_slide(from, to);
+                        EventResult::Consumed
+                    }
+                    // In the sorter a second press on the slide opens it.
+                    Some(to)
+                        if !moved && to == from && was_current && self.view == ViewMode::Sorter =>
+                    {
+                        self.set_view(ViewMode::Edit)
+                    }
+                    _ => EventResult::Consumed,
+                }
+            }
+        }
+    }
+
+    /// Move slide `from` to position `to`.
+    fn move_slide(&mut self, from: usize, to: usize) {
+        let len = self.slides.len();
+        if from >= len || to >= len || from == to {
+            return;
+        }
+        self.checkpoint();
+        let slide = self.slides.remove(from);
+        self.slides.insert(to, slide);
+        self.current_index = to;
+        self.selected_element = None;
+    }
+
+    /// The wheel, over the thumbnail column or the sorter.
+    fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        let over = self.target_at(x, y);
+        let (before, pitch, limit, sidebar) = match over {
+            Some(Target::Sidebar | Target::Thumb(_)) => {
+                let (_, _, _, pitch) = self.sidebar_pane();
+                (self.sidebar_scroll, pitch, self.sidebar_limit(), true)
+            }
+            Some(Target::SorterGrid | Target::SorterThumb(_)) => {
+                let g = self.sorter_geometry();
+                (self.sorter_scroll, g.pitch, self.sorter_limit(), false)
+            }
+            _ => return EventResult::Ignored,
+        };
+        let rows = self.wheel.rows(dy);
+        let after = (before + rows as f32 * pitch).clamp(0.0, limit);
+        if (after - before).abs() < f32::EPSILON {
+            return EventResult::Ignored;
+        }
+        if sidebar {
+            self.sidebar_scroll = after;
+        } else {
+            self.sorter_scroll = after;
+        }
+        EventResult::Consumed
     }
 }
 
+/// Where the sorter draws; see `SlidesApp::sorter_geometry`.
+#[derive(Clone, Copy, Debug)]
+struct SorterGeometry {
+    pane: Rect,
+    cols: std::num::NonZeroUsize,
+    thumb_w: f32,
+    thumb_h: f32,
+    gap: f32,
+    grid_x: f32,
+    pitch: f32,
+}
+
+/// The word a deck file uses for a layout.
+fn layout_name(layout: SlideLayout) -> &'static str {
+    match layout {
+        SlideLayout::TitleSlide => "title",
+        SlideLayout::TitleContent => "title-content",
+        SlideLayout::SectionHeader => "section",
+        SlideLayout::Blank => "blank",
+        SlideLayout::TwoColumn => "two-column",
+        SlideLayout::ImageCaption => "image-caption",
+    }
+}
+
+/// The word a deck file uses for a transition.
+fn transition_name(transition: Transition) -> &'static str {
+    match transition {
+        Transition::None => "none",
+        Transition::Fade => "fade",
+        Transition::SlideLeft => "slide-left",
+        Transition::SlideRight => "slide-right",
+        Transition::Wipe => "wipe",
+        Transition::Dissolve => "dissolve",
+    }
+}
+
+/// The word a deck file uses for a shape.
+fn shape_name(kind: ShapeKind) -> &'static str {
+    match kind {
+        ShapeKind::Rectangle => "rectangle",
+        ShapeKind::Ellipse => "ellipse",
+        ShapeKind::Line => "line",
+        ShapeKind::Arrow => "arrow",
+    }
+}
+
+/// A colour as `#RRGGBB`, or `#RRGGBBAA` when it is not opaque.
+fn colour_hex(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour(text: &str) -> Option<Color> {
+    let hex = text.trim().strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+/// The keys under `path` that are positions, in order.
+fn positions(doc: &yamldoc::Document, path: &[&str]) -> Vec<String> {
+    let mut keys: Vec<(u64, String)> = doc
+        .keys(path)
+        .into_iter()
+        .filter_map(|k| k.parse::<u64>().ok().map(|n| (n, k)))
+        .collect();
+    keys.sort_unstable();
+    keys.into_iter().map(|(_, k)| k).collect()
+}
+
+/// A deck read back from its document: its name, theme and slides, or why it
+/// could not be. Values that cannot be read fall back to a default; an
+/// element of a kind this does not know is left out.
+fn deck_from_document(
+    doc: &yamldoc::Document,
+    palette: &Palette,
+    id_gen: &mut IdGen,
+) -> Result<(String, SlideTheme, Vec<Slide>), String> {
+    match doc.get_i64(&["slateos-slides"]) {
+        Some(DECK_FORMAT) => {}
+        Some(later) if later > DECK_FORMAT => {
+            return Err(format!("it was written in a later format ({later})"));
+        }
+        _ => return Err(String::from("it is not a SlateOS slide deck")),
+    }
+    let title = doc
+        .get_str(&["title"])
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| String::from("Untitled Presentation"));
+    let theme = match doc.get_str(&["theme"]).as_deref() {
+        Some("Light") => SlideTheme::light(),
+        Some("Vibrant") => SlideTheme::vibrant(),
+        _ => SlideTheme::mocha(palette),
+    };
+    let number = |path: &[&str], default: f32| {
+        doc.get_f64(path)
+            .map(|v| v as f32)
+            .filter(|v| v.is_finite())
+            .unwrap_or(default)
+    };
+    let colour = |path: &[&str], default: Color| {
+        doc.get_str(path)
+            .and_then(|c| parse_colour(&c))
+            .unwrap_or(default)
+    };
+    let mut slides = Vec::new();
+    for s in positions(doc, &["slides"]) {
+        let s = s.as_str();
+        let layout = doc
+            .get_str(&["slides", s, "layout"])
+            .and_then(|name| {
+                SlideLayout::all()
+                    .iter()
+                    .copied()
+                    .find(|l| layout_name(*l) == name)
+            })
+            .unwrap_or(SlideLayout::Blank);
+        let transition = doc
+            .get_str(&["slides", s, "transition"])
+            .and_then(|name| {
+                Transition::all()
+                    .iter()
+                    .copied()
+                    .find(|t| transition_name(*t) == name)
+            })
+            .unwrap_or(Transition::None);
+        let mut slide = Slide {
+            id: id_gen.next_id(),
+            layout,
+            background: doc
+                .get_str(&["slides", s, "background"])
+                .and_then(|c| parse_colour(&c)),
+            title: String::new(),
+            subtitle: String::new(),
+            elements: Vec::new(),
+            transition,
+            notes: doc.get_str(&["slides", s, "notes"]).unwrap_or_default(),
+        };
+        for e in positions(doc, &["slides", s, "elements"]) {
+            let at = |field: &'static str| ["slides", s, "elements", e.as_str(), field];
+            let id = id_gen.next_id();
+            let (x, y) = (number(&at("x"), 0.0), number(&at("y"), 0.0));
+            let width = number(&at("width"), 100.0).max(0.0);
+            let height = number(&at("height"), 100.0).max(0.0);
+            let kind = doc.get_str(&at("kind")).unwrap_or_default();
+            let element = match kind.as_str() {
+                "text" => SlideElement::TextBox {
+                    id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    text: doc.get_str(&at("text")).unwrap_or_default(),
+                    font_size: number(&at("size"), theme.body_size).clamp(8.0, 120.0),
+                    color: colour(&at("colour"), theme.body_color),
+                    bold: doc.get_bool(&at("bold")).unwrap_or(false),
+                    centered: doc.get_bool(&at("centred")).unwrap_or(false),
+                },
+                "bullets" => SlideElement::BulletList {
+                    id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    items: doc.get_seq(&at("items")).unwrap_or_default(),
+                    font_size: number(&at("size"), theme.bullet_size).clamp(8.0, 120.0),
+                    color: colour(&at("colour"), theme.body_color),
+                },
+                "image" => SlideElement::Image {
+                    id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    placeholder_label: doc.get_str(&at("label")).unwrap_or_default(),
+                },
+                other => {
+                    let Some(shape) = [
+                        ShapeKind::Rectangle,
+                        ShapeKind::Ellipse,
+                        ShapeKind::Line,
+                        ShapeKind::Arrow,
+                    ]
+                    .into_iter()
+                    .find(|k| shape_name(*k) == other) else {
+                        continue;
+                    };
+                    SlideElement::Shape {
+                        id,
+                        kind: shape,
+                        x,
+                        y,
+                        width,
+                        height,
+                        fill_color: colour(&at("fill"), theme.accent),
+                        stroke_color: colour(&at("stroke"), theme.accent),
+                        stroke_width: number(&at("outline"), 2.0).clamp(0.0, 20.0),
+                    }
+                }
+            };
+            slide.elements.push(element);
+        }
+        slides.push(slide);
+    }
+    if slides.is_empty() {
+        return Err(String::from("it holds no slides"));
+    }
+    Ok((title, theme, slides))
+}
+
+/// The smallest an element may be resized to: none for a line or an arrow,
+/// which may be flat.
+fn min_size(element: &SlideElement) -> f32 {
+    match element {
+        SlideElement::Shape {
+            kind: ShapeKind::Line | ShapeKind::Arrow,
+            ..
+        } => 0.0,
+        _ => MIN_ELEMENT,
+    }
+}
+
+/// A position that keeps at least a sliver of a `w` by `h` element on the
+/// slide, so a move cannot lose it off an edge where nothing can reach it.
+fn keep_on_slide(x: f32, y: f32, w: f32, h: f32) -> (f32, f32) {
+    const KEEP: f32 = 16.0;
+    (
+        x.clamp(KEEP - w.max(KEEP), SLIDE_W - KEEP),
+        y.clamp(KEEP - h.max(KEEP), SLIDE_H - KEEP),
+    )
+}
+
+/// A box `b` with its `corner` dragged by `(dx, dy)`: the corner's two edges
+/// move, stopping at `min` from the edges opposite, which stay put.
+fn resized(
+    b: (f32, f32, f32, f32),
+    corner: Corner,
+    dx: f32,
+    dy: f32,
+    min: f32,
+) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = b;
+    let (mut left, mut top, mut right, mut bottom) = (x, y, x + w, y + h);
+    let moves_left = matches!(corner, Corner::TopLeft | Corner::BottomLeft);
+    let moves_top = matches!(corner, Corner::TopLeft | Corner::TopRight);
+    if moves_left {
+        left += dx;
+    } else {
+        right += dx;
+    }
+    if moves_top {
+        top += dy;
+    } else {
+        bottom += dy;
+    }
+    if right - left < min {
+        if moves_left {
+            left = right - min;
+        } else {
+            right = left + min;
+        }
+    }
+    if bottom - top < min {
+        if moves_top {
+            top = bottom - min;
+        } else {
+            bottom = top + min;
+        }
+    }
+    (left, top, right - left, bottom - top)
+}
+
+// ============================================================================
+// Helper functions
 // ============================================================================
 // Helper functions
 // ============================================================================
@@ -3074,9 +5397,11 @@ impl App for SlidesApp {
         self.palette = *palette;
     }
 
+    /// A leading `*` while there are changes that are not saved.
     fn title(&self) -> String {
         format!(
-            "{} — slide {} of {}",
+            "{}{} — slide {} of {}",
+            if self.dirty { "*" } else { "" },
             self.title,
             self.current_index.saturating_add(1),
             self.slides.len()
@@ -3094,21 +5419,34 @@ impl App for SlidesApp {
         }
     }
 
-    /// No clock.
+    /// A clock only while a transition plays.
     ///
-    /// Slides advance when the speaker advances them. There are no transitions
-    /// and no timed rehearsal mode, so a tick would redraw an identical frame —
-    /// and this is a program that runs full-screen in front of an audience,
-    /// where a needless wake-up is a dropped frame someone can see.
+    /// Slides advance when the speaker advances them; the one thing that moves
+    /// by itself is the half-second between two of them. Any other tick would
+    /// redraw an identical frame -- and this is a program that runs in front
+    /// of an audience, where a needless wake-up is a dropped frame someone can
+    /// see.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        self.show
+            .and_then(|s| s.leaving)
+            .map(|_| Duration::from_millis(16))
     }
 
+    /// Closing over unsaved changes asks first, and the window waits for the
+    /// answer: `KeepOpen` declines the close and draws the question.
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            return if self.request_close() {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        let result = self.handle_event(event);
+        if self.quit {
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -3120,15 +5458,24 @@ impl App for SlidesApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.window_width = width;
         self.window_height = height;
-        RenderTree {
-            commands: self.render_commands(),
+        let frame = self.frame();
+        self.last_hits = frame.hits().to_vec();
+        let mut tree = frame.into_tree();
+        // Over everything the frame drew. A dialog places its buttons as it
+        // draws them, which `frame` -- `&self` -- cannot do.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
         }
+        tree
     }
 }
 
 fn main() -> ExitCode {
+    // A new deck: one title slide. It opened on a six-slide sample, because
+    // that was the only way five of the six layouts could appear at all;
+    // Ctrl+M and the + Slide button reach every layout now.
     let mut app = SlidesApp::new(1280.0, 720.0);
-    app.seed_sample_deck();
     app::launch("slides", &mut app)
 }
 
@@ -3141,7 +5488,9 @@ fn main() -> ExitCode {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    // Sizes stepped by whole numbers from whole numbers are exact.
+    clippy::float_cmp
 )]
 mod tests {
     use super::*;
@@ -3298,8 +5647,9 @@ mod tests {
         app.handle_event(&press(Key::Enter));
 
         assert_eq!(app.title, "Q3", "the deck was not renamed");
+        // A rename is a change that is not saved yet, which the bar marks.
         assert!(
-            app.title().starts_with("Q3"),
+            app.title().starts_with("*Q3"),
             "the window bar still says {:?}",
             app.title()
         );
@@ -3381,7 +5731,7 @@ mod tests {
 
         // The other view, so `1` has somewhere to return from.
         let mut sorter = seeded();
-        sorter.handle_event(&press(Key::Tab));
+        sorter.handle_event(&press(Key::Num2));
 
         // Mid-deck, holding a copied slide and a selected text box: what the
         // paging, paste and element keys each need before they will act.
@@ -3392,7 +5742,17 @@ mod tests {
         working.handle_event(&press_ctrl(Key::C));
         working.handle_event(&press(Key::T));
 
-        vec![plain, sorter, working]
+        // A change undone, so redo has something to do.
+        let mut undone = seeded();
+        undone.handle_event(&press(Key::T));
+        undone.handle_event(&press_ctrl(Key::Z));
+
+        // Presenting, a slide in from either end.
+        let mut presenting = seeded();
+        presenting.handle_event(&press(Key::F5));
+        presenting.handle_event(&press(Key::Right));
+
+        vec![plain, sorter, working, undone, presenting]
     }
 
     /// **The shortcut list reaches the window.**
@@ -3818,7 +6178,9 @@ mod tests {
         assert_eq!(app.view, ViewMode::Sorter);
         // Asking for the view already shown is not a redraw.
         assert_eq!(app.handle_event(&press(Key::Num2)), EventResult::Ignored);
-        assert_eq!(app.handle_event(&press(Key::Tab)), EventResult::Consumed);
+        // Tab walks a slide's elements now, and in the sorter there are none.
+        assert_eq!(app.handle_event(&press(Key::Tab)), EventResult::Ignored);
+        assert_eq!(app.handle_event(&press(Key::Num1)), EventResult::Consumed);
         assert_eq!(app.view, ViewMode::Edit);
     }
 
@@ -4202,6 +6564,16 @@ mod tests {
 
     // ---- UndoManager tests -------------------------------------------------
 
+    /// A snapshot of `slides` at `current_index`, in the Mocha theme.
+    fn snap(slides: &[Slide], current_index: usize) -> Snapshot {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        Snapshot {
+            slides: slides.to_vec(),
+            current_index,
+            theme: SlideTheme::mocha(&pal),
+        }
+    }
+
     #[test]
     fn test_undo_redo_basic() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
@@ -4215,19 +6587,19 @@ mod tests {
         assert!(!mgr.can_redo());
 
         // Save state [s1], then mutate to [s1, s2].
-        mgr.save(std::slice::from_ref(&s1), 0);
+        mgr.save(snap(std::slice::from_ref(&s1), 0));
         let slides_after = vec![s1.clone(), s2];
 
         // Undo: should restore [s1].
-        let snap = mgr.undo(&slides_after, 1);
-        assert!(snap.is_some());
-        let snap = snap.unwrap();
-        assert_eq!(snap.slides.len(), 1);
-        assert_eq!(snap.current_index, 0);
+        let back = mgr.undo(snap(&slides_after, 1));
+        assert!(back.is_some());
+        let back = back.unwrap();
+        assert_eq!(back.slides.len(), 1);
+        assert_eq!(back.current_index, 0);
 
         // Can redo now.
         assert!(mgr.can_redo());
-        let redo_snap = mgr.redo(&snap.slides, snap.current_index);
+        let redo_snap = mgr.redo(snap(&back.slides, back.current_index));
         assert!(redo_snap.is_some());
         let redo_snap = redo_snap.unwrap();
         assert_eq!(redo_snap.slides.len(), 2);
@@ -4242,7 +6614,7 @@ mod tests {
         let mut mgr = UndoManager::new(3);
 
         for _ in 0..5 {
-            mgr.save(std::slice::from_ref(&s), 0);
+            mgr.save(snap(std::slice::from_ref(&s), 0));
         }
         // Only 3 saved (max depth).
         assert_eq!(mgr.undo_stack.len(), 3);
@@ -4255,10 +6627,10 @@ mod tests {
         let mut id_gen = IdGen::new(900);
         let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         let mut mgr = UndoManager::new(10);
-        mgr.save(std::slice::from_ref(&s), 0);
-        let _ = mgr.undo(std::slice::from_ref(&s), 0);
+        mgr.save(snap(std::slice::from_ref(&s), 0));
+        let _ = mgr.undo(snap(std::slice::from_ref(&s), 0));
         assert!(mgr.can_redo());
-        mgr.save(std::slice::from_ref(&s), 0);
+        mgr.save(snap(std::slice::from_ref(&s), 0));
         assert!(!mgr.can_redo());
     }
 
@@ -4765,6 +7137,1524 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+    // ── The pointer, and what nothing reached ───────────────────────
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for SlidesApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (1280.0, 720.0);
+
+        /// Drawn at the app's own size, which these tests leave at `SIZE`.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame()
+        }
+
+        /// A click: the button goes down and comes up where it went down.
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            let down = self.handle_event(&mouse(x, y, MouseEventKind::Press(button)));
+            let up = self.handle_event(&mouse(x, y, MouseEventKind::Release(button)));
+            if down == EventResult::Consumed || up == EventResult::Consumed {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy })))
+        }
+    }
+
+    fn mouse(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// A new deck: one title slide, as the window opens.
+    fn fresh() -> SlidesApp {
+        SlidesApp::new(1280.0, 720.0)
+    }
+
+    /// The middle of `target`'s box.
+    fn centre(app: &SlidesApp, target: Target) -> (f32, f32) {
+        let r = probe::rect_of(app, target).unwrap_or_else(|| panic!("{target:?} is not drawn"));
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// A press at `from`, a drag to `to` in two steps, and a release there.
+    fn drag(app: &mut SlidesApp, from: (f32, f32), to: (f32, f32)) {
+        app.handle_event(&mouse(
+            from.0,
+            from.1,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        app.handle_event(&mouse(
+            f32::midpoint(from.0, to.0),
+            f32::midpoint(from.1, to.1),
+            MouseEventKind::Move,
+        ));
+        app.handle_event(&mouse(to.0, to.1, MouseEventKind::Move));
+        app.handle_event(&mouse(
+            to.0,
+            to.1,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+    }
+
+    /// Element `id`'s box on the current slide.
+    fn bounds_of(app: &SlidesApp, id: ElementId) -> (f32, f32, f32, f32) {
+        app.slides[app.current_index]
+            .element_by_id(id)
+            .expect("the element is on the slide")
+            .bounds()
+    }
+
+    /// Every toolbar button does what it says. The five buttons and the Undo
+    /// and Redo beside them were drawn and could not be pressed.
+    #[test]
+    fn every_toolbar_button_answers_the_pointer() {
+        let mut app = seeded();
+        let count = app.slide_count();
+        probe::click(&mut app, Target::Tool(Tool::NewSlide));
+        assert!(app.layout_menu.is_some(), "+ Slide opened no menu");
+        probe::click(&mut app, Target::LayoutChoice(3));
+        assert_eq!(app.slide_count(), count + 1);
+        assert_eq!(app.slides[app.current_index].layout, SlideLayout::Blank);
+        probe::click(&mut app, Target::Tool(Tool::Duplicate));
+        assert_eq!(app.slide_count(), count + 2);
+        probe::click(&mut app, Target::Tool(Tool::DeleteSlide));
+        assert_eq!(app.slide_count(), count + 1);
+        probe::click(&mut app, Target::Tool(Tool::Undo));
+        assert_eq!(app.slide_count(), count + 2);
+        probe::click(&mut app, Target::Tool(Tool::Redo));
+        assert_eq!(app.slide_count(), count + 1);
+        let theme = app.theme.name.clone();
+        probe::click(&mut app, Target::Tool(Tool::Theme));
+        assert_ne!(app.theme.name, theme);
+        probe::click(&mut app, Target::Tool(Tool::ToggleView));
+        assert_eq!(app.view, ViewMode::Sorter);
+        probe::click(&mut app, Target::Tool(Tool::ToggleView));
+        assert_eq!(app.view, ViewMode::Edit);
+        probe::click(&mut app, Target::Tool(Tool::Title));
+        assert!(matches!(app.editing, Some((EditTarget::DeckTitle, _))));
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Tool(Tool::Export));
+        assert!(app.picker.is_open());
+    }
+
+    /// Undo and redo have keys. The stack was kept by every change and read
+    /// by nothing.
+    #[test]
+    fn undo_and_redo_have_keys() {
+        let mut app = fresh();
+        let before = element_count(&app);
+        app.handle_event(&press(Key::T));
+        assert_eq!(element_count(&app), before + 1);
+        assert_eq!(app.handle_event(&press_ctrl(Key::Z)), EventResult::Consumed);
+        assert_eq!(element_count(&app), before);
+        assert_eq!(app.handle_event(&press_ctrl(Key::Y)), EventResult::Consumed);
+        assert_eq!(element_count(&app), before + 1);
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(
+            app.handle_event(&press_ctrl_shift(Key::Z)),
+            EventResult::Consumed
+        );
+        assert_eq!(element_count(&app), before + 1);
+        // With nothing left to redo, the key is not a redraw.
+        assert_eq!(app.handle_event(&press_ctrl(Key::Y)), EventResult::Ignored);
+    }
+
+    /// Undo cannot be pressed with nothing to undo: it is drawn dim and
+    /// records no box.
+    #[test]
+    fn undo_cannot_be_pressed_with_nothing_to_undo() {
+        let mut app = fresh();
+        assert!(probe::rect_of(&app, Target::Tool(Tool::Undo)).is_none());
+        app.handle_event(&press(Key::T));
+        assert!(probe::rect_of(&app, Target::Tool(Tool::Undo)).is_some());
+    }
+
+    /// The first slide's title can be selected and typed into. Nothing
+    /// selected an element but adding one, so what a layout put on a slide
+    /// could not be changed at all.
+    #[test]
+    fn a_layouts_title_can_be_selected_and_typed_into() {
+        let mut app = fresh();
+        let title = app.slides[0].elements[0].id();
+        assert_eq!(app.handle_event(&press(Key::Tab)), EventResult::Consumed);
+        assert_eq!(app.selected_element, Some(title));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types("Q3 plans"));
+        app.handle_event(&press(Key::Escape));
+        let SlideElement::TextBox { text, .. } = &app.slides[0].elements[0] else {
+            panic!("the title is not a text box");
+        };
+        assert_eq!(text, "Q3 plans");
+    }
+
+    /// Tab walks the elements and wraps; Shift+Tab walks back.
+    #[test]
+    fn tab_walks_the_elements_and_wraps() {
+        let mut app = fresh();
+        let ids: Vec<ElementId> = app.slides[0]
+            .elements
+            .iter()
+            .map(SlideElement::id)
+            .collect();
+        for id in &ids {
+            app.handle_event(&press(Key::Tab));
+            assert_eq!(app.selected_element, Some(*id));
+        }
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(app.selected_element, ids.first().copied());
+        app.handle_event(&press_shift(Key::Tab));
+        assert_eq!(app.selected_element, ids.last().copied());
+    }
+
+    /// A press selects an element, and a second press on it types into it.
+    #[test]
+    fn a_press_selects_and_a_second_types_into_the_element() {
+        let mut app = fresh();
+        let subtitle = app.slides[0].elements[1].id();
+        probe::click(&mut app, Target::Element(subtitle));
+        assert_eq!(app.selected_element, Some(subtitle));
+        assert!(app.editing.is_none());
+        probe::click(&mut app, Target::Element(subtitle));
+        assert!(matches!(app.editing, Some((EditTarget::Element(e), _)) if e == subtitle));
+        app.handle_event(&types("By the team"));
+        // A press anywhere else finishes and keeps the words.
+        let area = app.canvas_area();
+        app.handle_event(&mouse(
+            area.x + 4.0,
+            area.y + 4.0,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        assert!(app.editing.is_none());
+        let SlideElement::TextBox { text, .. } = &app.slides[0].elements[1] else {
+            panic!("the subtitle is not a text box");
+        };
+        assert_eq!(text, "By the team");
+    }
+
+    /// A press on the slide or the grey around it selects nothing.
+    #[test]
+    fn a_press_on_the_slide_or_around_it_selects_nothing() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::Tab));
+        let area = app.canvas_area();
+        assert_eq!(
+            app.frame().hit_test(area.x + 4.0, area.y + 4.0),
+            Some(Target::Canvas)
+        );
+        app.handle_event(&mouse(
+            area.x + 4.0,
+            area.y + 4.0,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        assert_eq!(app.selected_element, None);
+        app.handle_event(&press(Key::Tab));
+        let (cx, cy, _) = app.canvas_geometry();
+        assert_eq!(
+            app.frame().hit_test(cx + 4.0, cy + 4.0),
+            Some(Target::SlideArea)
+        );
+        app.handle_event(&mouse(
+            cx + 4.0,
+            cy + 4.0,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        assert_eq!(app.selected_element, None);
+    }
+
+    /// Dragging an element moves it by the distance dragged, in slide units,
+    /// and one undo puts it back.
+    #[test]
+    fn dragging_an_element_moves_it() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::S));
+        let id = app.selected_element.expect("the rectangle is selected");
+        let (_, _, scale) = app.canvas_geometry();
+        let from = centre(&app, Target::Element(id));
+        drag(&mut app, from, (from.0 + 100.0, from.1 + 50.0));
+        let (x, y, w, h) = bounds_of(&app, id);
+        assert!((x - (200.0 + 100.0 / scale)).abs() < 0.5, "x is {x}");
+        assert!((y - (200.0 + 50.0 / scale)).abs() < 0.5, "y is {y}");
+        assert_eq!((w, h), (200.0, 120.0));
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(bounds_of(&app, id), (200.0, 200.0, 200.0, 120.0));
+    }
+
+    /// A move cannot lose an element off the slide.
+    #[test]
+    fn a_drag_cannot_lose_an_element_off_the_slide() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::S));
+        let id = app.selected_element.unwrap();
+        let from = centre(&app, Target::Element(id));
+        drag(&mut app, from, (from.0 - 5000.0, from.1 - 5000.0));
+        let (x, y, w, h) = bounds_of(&app, id);
+        assert!(
+            x + w >= 16.0 - 0.01 && y + h >= 16.0 - 0.01,
+            "({x}, {y}) is off the slide"
+        );
+        let from = centre(&app, Target::Element(id));
+        drag(&mut app, from, (5000.0, 5000.0));
+        let (x, y, _, _) = bounds_of(&app, id);
+        assert!(x <= SLIDE_W - 16.0 + 0.01 && y <= SLIDE_H - 16.0 + 0.01);
+    }
+
+    /// A corner handle resizes, the opposite corner stays, and the box stops
+    /// at its smallest rather than turning inside out.
+    #[test]
+    fn a_corner_handle_resizes_and_the_opposite_corner_stays() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::S));
+        let id = app.selected_element.unwrap();
+        let from = centre(&app, Target::Handle(Corner::TopLeft));
+        drag(&mut app, from, (from.0 + 40.0, from.1 + 20.0));
+        let (x, y, w, h) = bounds_of(&app, id);
+        assert!(
+            (x + w - 400.0).abs() < 0.5 && (y + h - 320.0).abs() < 0.5,
+            "the far corner moved"
+        );
+        assert!(w < 200.0 && h < 120.0);
+        let from = centre(&app, Target::Handle(Corner::TopLeft));
+        drag(&mut app, from, (from.0 + 2000.0, from.1 + 2000.0));
+        let (_, _, w, h) = bounds_of(&app, id);
+        assert_eq!((w, h), (MIN_ELEMENT, MIN_ELEMENT));
+        let from = centre(&app, Target::Handle(Corner::BottomRight));
+        drag(&mut app, from, (from.0 + 30.0, from.1 + 30.0));
+        let (_, _, w, h) = bounds_of(&app, id);
+        assert!(w > MIN_ELEMENT && h > MIN_ELEMENT);
+    }
+
+    /// A flat line can be pressed: an empty box records no hit, and the title
+    /// slide's rule has no height.
+    #[test]
+    fn a_flat_line_can_be_pressed() {
+        let app = fresh();
+        let line = app.slides[0]
+            .elements
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    SlideElement::Shape {
+                        kind: ShapeKind::Line,
+                        ..
+                    }
+                )
+            })
+            .expect("the title slide has a rule")
+            .id();
+        let r = probe::rect_of(&app, Target::Element(line)).expect("a flat line has no hit box");
+        assert!(r.h >= 5.9, "{r:?}");
+    }
+
+    /// The Insert buttons add what they name. They were drawn and could not
+    /// be pressed.
+    #[test]
+    fn the_insert_buttons_add_what_they_name() {
+        for (i, name) in INSERT_KINDS.iter().enumerate() {
+            let mut app = fresh();
+            let before = element_count(&app);
+            assert_eq!(
+                probe::click(&mut app, Target::Insert(i)),
+                EventResult::Consumed,
+                "{name}"
+            );
+            assert_eq!(element_count(&app), before + 1, "{name}");
+        }
+    }
+
+    /// The property buttons change the selected text box: every value there
+    /// was printed and none could be changed.
+    #[test]
+    fn the_property_buttons_change_the_selected_text_box() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        let id = app.selected_element.unwrap();
+        let text_box = |app: &SlidesApp| match app.slides[0].element_by_id(id) {
+            Some(SlideElement::TextBox {
+                font_size,
+                bold,
+                centered,
+                color,
+                ..
+            }) => (*font_size, *bold, *centered, *color),
+            _ => panic!("not a text box"),
+        };
+        let (size, bold, centred, colour) = text_box(&app);
+        probe::click(&mut app, Target::Prop(Prop::Larger));
+        assert_eq!(text_box(&app).0, size + 2.0);
+        probe::click(&mut app, Target::Prop(Prop::Smaller));
+        assert_eq!(text_box(&app).0, size);
+        probe::click(&mut app, Target::Prop(Prop::Bold));
+        assert_eq!(text_box(&app).1, !bold);
+        probe::click(&mut app, Target::Prop(Prop::Centre));
+        assert_eq!(text_box(&app).2, !centred);
+        probe::click(&mut app, Target::Prop(Prop::Colour));
+        assert_ne!(text_box(&app).3, colour);
+        probe::click(&mut app, Target::Prop(Prop::Edit));
+        assert!(matches!(app.editing, Some((EditTarget::Element(e), _)) if e == id));
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Prop(Prop::Delete));
+        assert!(app.slides[0].element_by_id(id).is_none());
+    }
+
+    /// The slide's transition and background, and a shape's outline, change
+    /// from the panel too.
+    #[test]
+    fn the_panel_changes_the_slide_and_a_shapes_outline() {
+        let mut app = fresh();
+        let transition = app.slides[0].transition;
+        probe::click(&mut app, Target::Prop(Prop::Transition));
+        assert_ne!(app.slides[0].transition, transition);
+        assert_eq!(app.slides[0].background, None);
+        probe::click(&mut app, Target::Prop(Prop::Background));
+        assert!(app.slides[0].background.is_some());
+        app.handle_event(&press(Key::S));
+        let id = app.selected_element.unwrap();
+        let outline = |app: &SlidesApp| match app.slides[0].element_by_id(id) {
+            Some(SlideElement::Shape { stroke_width, .. }) => *stroke_width,
+            _ => panic!("not a shape"),
+        };
+        let before = outline(&app);
+        probe::click(&mut app, Target::Prop(Prop::Larger));
+        assert_eq!(outline(&app), before + 1.0);
+        probe::click(&mut app, Target::Prop(Prop::Smaller));
+        assert_eq!(outline(&app), before);
+    }
+
+    /// `N`, or a press on the panel, types the speaker notes. They were
+    /// shown and exported and could not be written.
+    #[test]
+    fn the_speaker_notes_can_be_written() {
+        let mut app = fresh();
+        assert_eq!(app.handle_event(&press(Key::N)), EventResult::Consumed);
+        app.handle_event(&types("Open with the numbers"));
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&types("then the plan"));
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(app.current_notes(), "Open with the numbers\nthen the plan");
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(app.current_notes(), "");
+        probe::click(&mut app, Target::Notes);
+        assert!(matches!(app.editing, Some((EditTarget::Notes, _))));
+    }
+
+    /// A bullet list is typed one line per bullet. Only text boxes could be
+    /// typed into, so every Title + Content slide said "First point" for good.
+    #[test]
+    fn a_bullet_list_is_typed_one_line_per_bullet() {
+        let mut app = fresh();
+        app.handle_event(&press_ctrl(Key::N));
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Tab));
+        assert!(matches!(
+            app.selected(),
+            Some(SlideElement::BulletList { .. })
+        ));
+        app.handle_event(&press(Key::Enter));
+        let Some((_, seed)) = &app.editing else {
+            panic!("Enter did not start typing into the list");
+        };
+        assert!(seed.is_empty(), "the list's prompts were kept: {seed:?}");
+        app.handle_event(&types("Alpha"));
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&types("Beta"));
+        app.handle_event(&press(Key::Escape));
+        let Some(SlideElement::BulletList { items, .. }) = app.selected() else {
+            panic!("the list is gone");
+        };
+        assert_eq!(items, &vec![String::from("Alpha"), String::from("Beta")]);
+        app.handle_event(&press(Key::Enter));
+        assert!(matches!(&app.editing, Some((_, words)) if words == "Alpha\nBeta"));
+    }
+
+    /// An image placeholder's label can be typed.
+    #[test]
+    fn an_image_label_can_be_typed() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::I));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types("Revenue chart"));
+        app.handle_event(&press(Key::Escape));
+        let Some(SlideElement::Image {
+            placeholder_label, ..
+        }) = app.selected()
+        else {
+            panic!("the image is gone");
+        };
+        assert_eq!(placeholder_label, "Revenue chart");
+    }
+
+    /// With an element selected the arrows move it and Shift resizes it; with
+    /// none, Left and Right change slides.
+    #[test]
+    fn the_arrows_move_the_selected_element_or_change_slides() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::T));
+        let id = app.selected_element.unwrap();
+        let (x, y, w, h) = bounds_of(&app, id);
+        app.handle_event(&press(Key::Right));
+        app.handle_event(&press_ctrl(Key::Down));
+        assert_eq!(bounds_of(&app, id), (x + NUDGE, y + 1.0, w, h));
+        app.handle_event(&press_shift(Key::Right));
+        app.handle_event(&press_shift(Key::Up));
+        assert_eq!(
+            bounds_of(&app, id),
+            (x + NUDGE, y + 1.0, w + NUDGE, h - NUDGE)
+        );
+        assert_eq!(
+            app.current_index, 0,
+            "an arrow on an element changed slides"
+        );
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(app.selected_element, None);
+        app.handle_event(&press(Key::Right));
+        assert_eq!(app.current_index, 1);
+    }
+
+    /// Ctrl+M, and the + Slide button, reach every layout: Ctrl+N made a
+    /// Title + Content slide and nothing made any other kind.
+    #[test]
+    fn every_layout_can_be_added() {
+        for (i, layout) in SlideLayout::all().iter().enumerate() {
+            let mut app = fresh();
+            app.handle_event(&press_ctrl(Key::M));
+            let digit = [
+                Key::Num1,
+                Key::Num2,
+                Key::Num3,
+                Key::Num4,
+                Key::Num5,
+                Key::Num6,
+            ][i];
+            app.handle_event(&press(digit));
+            assert_eq!(app.slides[app.current_index].layout, *layout);
+            assert!(app.layout_menu.is_none());
+        }
+        let mut app = fresh();
+        app.handle_event(&press_ctrl(Key::M));
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.slides[app.current_index].layout, SlideLayout::all()[3]);
+        app.handle_event(&press_ctrl(Key::M));
+        let count = app.slide_count();
+        // The card's own padding: its middle is a row.
+        let card = probe::rect_of(&app, Target::Menu).unwrap();
+        assert_eq!(
+            app.frame().hit_test(card.x + 3.0, card.y + 3.0),
+            Some(Target::Menu)
+        );
+        app.handle_event(&mouse(
+            card.x + 3.0,
+            card.y + 3.0,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        assert!(
+            app.layout_menu.is_some(),
+            "a press on the card closed the menu"
+        );
+        probe::click(&mut app, Target::MenuBackdrop);
+        assert!(app.layout_menu.is_none());
+        assert_eq!(app.slide_count(), count);
+    }
+
+    /// A theme change restyles what the old theme styled, and leaves what the
+    /// user chose; one undo brings both back.
+    #[test]
+    fn a_theme_change_restyles_what_the_theme_styled() {
+        let mut app = fresh();
+        let mocha = app.theme.clone();
+        app.handle_event(&press(Key::T));
+        let chosen = app.selected_element.unwrap();
+        if let Some(SlideElement::TextBox { color, .. }) = app.slides[0].element_by_id_mut(chosen) {
+            *color = EXTRA_COLOURS[2];
+        }
+        let title = app.slides[0].elements[0].id();
+        app.handle_event(&press_ctrl(Key::T));
+        let light = app.theme.clone();
+        assert_ne!(
+            light.title_color, mocha.title_color,
+            "the next theme has the same title colour"
+        );
+        let colour_of = |app: &SlidesApp, id| match app.slides[0].element_by_id(id) {
+            Some(SlideElement::TextBox { color, .. }) => *color,
+            _ => panic!("not a text box"),
+        };
+        assert_eq!(colour_of(&app, title), light.title_color);
+        assert_eq!(colour_of(&app, chosen), EXTRA_COLOURS[2]);
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(app.theme.name, mocha.name);
+        assert_eq!(colour_of(&app, title), mocha.title_color);
+    }
+
+    /// A text box draws each of its lines.
+    #[test]
+    fn a_text_box_draws_each_of_its_lines() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types("first"));
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&types("second"));
+        app.handle_event(&press(Key::Escape));
+        let texts: Vec<String> = app
+            .render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "first"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "second"), "{texts:?}");
+    }
+
+    /// Centred text is centred on its box. It was nudged a tenth of the way
+    /// in and called centred.
+    #[test]
+    fn centred_text_is_centred() {
+        let app = fresh();
+        let title = app.slides[0].elements[0].id();
+        let (bx, _, bw, _) = bounds_of(&app, title);
+        let (cx, _, scale) = app.canvas_geometry();
+        let Some(SlideElement::TextBox {
+            text, font_size, ..
+        }) = app.slides[0].element_by_id(title)
+        else {
+            panic!("not a text box");
+        };
+        let (text, size) = (text.clone(), font_size * scale);
+        let drawn = app
+            .render_commands()
+            .into_iter()
+            .find_map(|c| match c {
+                // At the slide's size: the thumbnail beside it shows the
+                // same words.
+                RenderCommand::Text {
+                    text: t,
+                    x,
+                    font_size: s,
+                    ..
+                } if t == text && (s - size).abs() < 0.01 => Some(x),
+                _ => None,
+            })
+            .expect("the title is drawn");
+        let width = guitk::text::measure(&text, size, FontWeightHint::Bold);
+        let middle = cx + (bx + bw / 2.0) * scale;
+        assert!(
+            (drawn + width / 2.0 - middle).abs() < 1.0,
+            "drawn at {drawn}"
+        );
+    }
+
+    /// The thumbnail column scrolls, and follows the current slide. It
+    /// clipped its thumbnails and never scrolled.
+    #[test]
+    fn the_thumbnail_column_scrolls_and_follows_the_current_slide() {
+        let mut app = fresh();
+        for _ in 0..19 {
+            app.handle_event(&press_ctrl(Key::N));
+        }
+        assert!(probe::rect_of(&app, Target::Thumb(19)).is_some());
+        app.handle_event(&press(Key::Home));
+        assert!(probe::rect_of(&app, Target::Thumb(0)).is_some());
+        assert!(probe::rect_of(&app, Target::Thumb(19)).is_none());
+        for _ in 0..40 {
+            probe::scroll_at_point(&mut app, Target::Sidebar, -3.0);
+        }
+        probe::click(&mut app, Target::Thumb(19));
+        assert_eq!(app.current_index, 19);
+    }
+
+    /// Dragging a thumbnail moves its slide, and one undo puts it back.
+    #[test]
+    fn dragging_a_thumbnail_moves_its_slide() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Home));
+        let moving = app.slide_id_at(0);
+        let (from, to) = (
+            centre(&app, Target::Thumb(0)),
+            centre(&app, Target::Thumb(2)),
+        );
+        drag(&mut app, from, to);
+        assert_eq!(app.slide_id_at(2), moving);
+        assert_eq!(app.current_index, 2);
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(app.slide_id_at(0), moving);
+    }
+
+    /// The sorter scrolls, a press chooses a slide, and a second opens it.
+    #[test]
+    fn the_sorter_scrolls_and_a_second_press_opens_a_slide() {
+        let mut app = fresh();
+        for _ in 0..30 {
+            app.handle_event(&press_ctrl(Key::N));
+        }
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Home));
+        assert!(probe::rect_of(&app, Target::SorterThumb(30)).is_none());
+        for _ in 0..60 {
+            probe::scroll_at_point(&mut app, Target::SorterGrid, -3.0);
+        }
+        probe::click(&mut app, Target::SorterThumb(30));
+        assert_eq!(app.current_index, 30);
+        assert_eq!(app.view, ViewMode::Sorter);
+        probe::click(&mut app, Target::SorterThumb(30));
+        assert_eq!(app.view, ViewMode::Edit);
+    }
+
+    /// The pointer lights what it is over.
+    #[test]
+    fn hovering_a_button_lights_it() {
+        let mut app = fresh();
+        let (x, y) = centre(&app, Target::Tool(Tool::Duplicate));
+        assert_eq!(
+            app.handle_event(&mouse(x, y, MouseEventKind::Move)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.hover, Some(Target::Tool(Tool::Duplicate)));
+        app.handle_event(&mouse(0.0, 0.0, MouseEventKind::Leave));
+        assert_eq!(app.hover, None);
+    }
+
+    /// The shortcut list is modal, and a press puts it away.
+    #[test]
+    fn the_shortcut_list_is_modal() {
+        let mut app = fresh();
+        let before = element_count(&app);
+        app.handle_event(&press(Key::F1));
+        assert_eq!(app.handle_event(&press(Key::T)), EventResult::Ignored);
+        assert_eq!(
+            element_count(&app),
+            before,
+            "a key reached the slide behind the list"
+        );
+        probe::click(&mut app, Target::HelpCard);
+        assert!(!app.show_help);
+    }
+
+    /// Leaving the window ends a drag: the release would never arrive.
+    #[test]
+    fn leaving_the_window_ends_a_drag() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::S));
+        let id = app.selected_element.unwrap();
+        let (x, y) = centre(&app, Target::Element(id));
+        app.handle_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left)));
+        app.handle_event(&mouse(x + 40.0, y, MouseEventKind::Move));
+        app.handle_event(&mouse(x + 40.0, y, MouseEventKind::Leave));
+        assert!(app.drag.is_none());
+        let moved = bounds_of(&app, id);
+        app.handle_event(&mouse(x + 200.0, y, MouseEventKind::Move));
+        assert_eq!(
+            bounds_of(&app, id),
+            moved,
+            "the element followed a pointer with no button down"
+        );
+    }
+
+    /// An arrow's head points back along its line. It was two strokes at
+    /// fixed angles, lopsided on anything but a diagonal.
+    #[test]
+    fn an_arrowhead_is_symmetric_about_its_line() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::A));
+        let id = app.selected_element.unwrap();
+        if let Some(e) = app.slides[0].element_by_id_mut(id) {
+            e.set_size(200.0, 0.0);
+        }
+        let (cx, cy, scale) = app.canvas_geometry();
+        let (x, y, w, _) = bounds_of(&app, id);
+        let (tip_x, tip_y) = (cx + (x + w) * scale, cy + y * scale);
+        let heads: Vec<f32> = app
+            .render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, y1, y2, .. }
+                    if (x1 - tip_x).abs() < 0.01 && (y1 - tip_y).abs() < 0.01 =>
+                {
+                    Some(y2 - tip_y)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(heads.len(), 2, "{heads:?}");
+        assert!((heads[0] + heads[1]).abs() < 0.01, "{heads:?}");
+    }
+    // ── Decks on disk ───────────────────────────────────────────────
+
+    /// A scratch directory for one test, empty.
+    fn scratch_dir(line: u32) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("slides-deck-{}-{line}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Everything a deck holds, with the ids -- which are this session's --
+    /// left out.
+    fn describe(app: &SlidesApp) -> String {
+        let mut out = format!("{} | {} |", app.title, app.theme.name);
+        for slide in &app.slides {
+            out.push_str(&format!(
+                "\n{:?} {:?} {:?} {:?}",
+                slide.layout, slide.transition, slide.background, slide.notes
+            ));
+            for element in &slide.elements {
+                let mut e = element.clone();
+                match &mut e {
+                    SlideElement::TextBox { id, .. }
+                    | SlideElement::Shape { id, .. }
+                    | SlideElement::Image { id, .. }
+                    | SlideElement::BulletList { id, .. } => *id = 0,
+                }
+                out.push_str(&format!("\n  {e:?}"));
+            }
+        }
+        out
+    }
+
+    /// A deck survives being saved and opened: its name, theme, every
+    /// slide's layout, transition, background and notes, and every element.
+    /// A deck lived exactly as long as the window did.
+    #[test]
+    fn a_deck_survives_being_saved_and_opened() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("talk.slides");
+        let mut app = seeded();
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types("Q3"));
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&types("plans: \"all of them\" # really"));
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press_ctrl(Key::B));
+        app.handle_event(&press(Key::G));
+        app.handle_event(&press_ctrl(Key::R));
+        app.handle_event(&press(Key::N));
+        app.handle_event(&types("Open with the numbers"));
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&types("then the plan"));
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press(Key::A));
+        let arrow = app.selected_element.unwrap();
+        let from = centre(&app, Target::Element(arrow));
+        drag(&mut app, from, (from.0 + 33.0, from.1 + 17.0));
+        app.handle_event(&press_ctrl(Key::T));
+        app.handle_event(&press_ctrl_shift(Key::T));
+        app.handle_event(&types("Quarterly"));
+        app.handle_event(&press(Key::Enter));
+
+        let said = app.write_deck(&path);
+        assert!(said.starts_with("Saved"), "{said}");
+        assert!(!app.dirty);
+
+        let mut other = fresh();
+        let said = other.read_deck(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert_eq!(describe(&other), describe(&app));
+        assert!(!other.dirty);
+        assert_eq!(other.current_index, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl+S asks where the first time and saves in place after.
+    #[test]
+    fn ctrl_s_asks_the_first_time_and_saves_in_place_after() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("deck.slides");
+        let mut app = fresh();
+        assert_eq!(app.handle_event(&press_ctrl(Key::S)), EventResult::Consumed);
+        assert!(app.picker.is_open(), "the first save did not ask where");
+        assert_eq!(app.picker_for, PickerFor::Save);
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.picker.is_open());
+        let said = app.picked(&path);
+        assert!(said.starts_with("Saved"), "{said}");
+
+        app.handle_event(&press(Key::T));
+        assert!(app.dirty);
+        app.handle_event(&press_ctrl(Key::S));
+        assert!(!app.picker.is_open(), "a deck with a place asked again");
+        assert!(!app.dirty);
+        let mut other = fresh();
+        other.read_deck(&path);
+        assert_eq!(element_count(&other), element_count(&app));
+
+        // Ctrl+Shift+S always asks.
+        app.handle_event(&press_ctrl_shift(Key::S));
+        assert!(app.picker.is_open());
+        assert_eq!(app.picker_for, PickerFor::Save);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The picker's answer goes where it was asked for.
+    #[test]
+    fn the_pickers_answer_goes_where_it_was_asked_for() {
+        let mut app = fresh();
+        app.handle_event(&press_ctrl(Key::E));
+        assert_eq!(app.picker_for, PickerFor::Export);
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press_ctrl(Key::O));
+        assert_eq!(app.picker_for, PickerFor::Open);
+        assert!(app.picker.is_open());
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Tool(Tool::Save));
+        assert_eq!(app.picker_for, PickerFor::Save);
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Tool(Tool::Open));
+        assert_eq!(app.picker_for, PickerFor::Open);
+    }
+
+    /// A file that is not a deck is reported, and the deck open stays as it
+    /// was.
+    #[test]
+    fn a_file_that_is_not_a_deck_is_refused() {
+        let dir = scratch_dir(line!());
+        let mut app = seeded();
+        let before = describe(&app);
+        let cases: [(&str, &[u8], &str); 3] = [
+            (
+                "settings.yaml",
+                b"fonts:\n  size: 13\n",
+                "it is not a SlateOS slide deck",
+            ),
+            (
+                "binary.slides",
+                b"\xff\xfe\x00junk",
+                "it is not a text file",
+            ),
+            (
+                "later.slides",
+                b"slateos-slides: 2\nslides:\n",
+                "later format",
+            ),
+        ];
+        for (name, bytes, why) in cases {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let said = app.read_deck(&path);
+            assert!(
+                said.starts_with("Could not open") && said.contains(why),
+                "{name}: {said}"
+            );
+            assert_eq!(describe(&app), before, "{name} changed the deck");
+        }
+        let said = app.read_deck(&dir.join("absent.slides"));
+        assert!(said.starts_with("Could not open"), "{said}");
+        let empty = dir.join("empty.slides");
+        std::fs::write(&empty, "slateos-slides: 1\ntitle: Nothing\n").unwrap();
+        assert!(app.read_deck(&empty).contains("holds no slides"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An element of a kind this does not know is left out, and the rest of
+    /// its slide is read.
+    #[test]
+    fn an_element_of_an_unknown_kind_is_left_out() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("future.slides");
+        let mut doc = yamldoc::Document::new();
+        doc.set_i64(&["slateos-slides"], DECK_FORMAT);
+        doc.set_str(&["slides", "1", "layout"], "blank");
+        doc.set_str(&["slides", "1", "elements", "1", "kind"], "hologram");
+        doc.set_str(&["slides", "1", "elements", "2", "kind"], "text");
+        doc.set_str(&["slides", "1", "elements", "2", "text"], "Kept");
+        std::fs::write(&path, doc.to_text()).unwrap();
+        let mut app = fresh();
+        let said = app.read_deck(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert_eq!(element_count(&app), 1);
+        assert!(
+            matches!(&app.slides[0].elements[0], SlideElement::TextBox { text, .. } if text == "Kept")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Open asks before it throws unsaved changes away: D (or its button)
+    /// opens without saving, Escape keeps the deck, and a key that answers
+    /// nothing is swallowed rather than taken as an answer.
+    #[test]
+    fn open_asks_before_losing_unsaved_changes() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press_ctrl(Key::O));
+        assert_eq!(asking(&app), Some(Pending::Open));
+        assert!(!app.picker.is_open());
+        app.handle_event(&press(Key::N));
+        assert_eq!(asking(&app), Some(Pending::Open), "a stray key answered it");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(asking(&app), None);
+        assert!(!app.picker.is_open(), "Escape went on to open");
+        app.handle_event(&press_ctrl(Key::O));
+        app.handle_event(&press(Key::D));
+        assert!(app.picker.is_open());
+        app.handle_event(&press(Key::Escape));
+
+        app.handle_event(&press_ctrl(Key::O));
+        choose(&mut app, Choice::Cancel);
+        assert!(app.question.is_none() && !app.picker.is_open());
+        app.handle_event(&press_ctrl(Key::O));
+        // A press beside the card answers nothing.
+        app.handle_event(&mouse(2.0, 2.0, MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(asking(&app), Some(Pending::Open));
+        choose(&mut app, Choice::Discard);
+        assert!(app.picker.is_open());
+    }
+
+    /// What the unsaved-changes question is holding up, while it is up.
+    fn asking(app: &SlidesApp) -> Option<Pending> {
+        app.question.as_ref().map(Question::pending)
+    }
+
+    /// Everything drawn, the question included -- which the frame alone
+    /// does not draw: `render` does, after it.
+    fn rendered_text(app: &mut SlidesApp) -> String {
+        let (w, h) = (app.window_width, app.window_height);
+        app.render(w, h)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Click the question's `choice` where it is drawn.
+    fn choose(app: &mut SlidesApp, choice: Choice) -> Response {
+        rendered_text(app);
+        let (x, y) = app
+            .question
+            .as_ref()
+            .and_then(|q| q.button_centre(choice))
+            .expect("the question is drawn");
+        app.on_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left)))
+    }
+
+    /// Open's question can save first, and then opens.
+    #[test]
+    fn open_can_save_the_deck_first() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("deck.slides");
+        let mut app = fresh();
+        app.write_deck(&path);
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press_ctrl(Key::O));
+        app.handle_event(&press(Key::S));
+        assert!(!app.dirty, "S did not save");
+        assert!(app.picker.is_open(), "and then did not go on to open");
+        assert_eq!(app.picker_for, PickerFor::Open);
+        let mut other = fresh();
+        other.read_deck(&path);
+        assert_eq!(element_count(&other), element_count(&app));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Closing the window over unsaved changes asks, and each answer is
+    /// kept.** The window closed on any close request, and the deck with it.
+    #[test]
+    fn closing_over_unsaved_changes_asks_and_each_answer_is_kept() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("deck.slides");
+        let mut clean = fresh();
+        assert_eq!(
+            clean.on_event(&Event::CloseRequested),
+            Response::Exit,
+            "nothing unsaved: the window just goes"
+        );
+
+        let mut app = fresh();
+        app.write_deck(&path);
+        app.handle_event(&press(Key::T));
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(asking(&app), Some(Pending::Close));
+        assert!(
+            rendered_text(&mut app).contains("Save them before closing?"),
+            "the question is not drawn"
+        );
+
+        // A key that answers nothing is swallowed: it neither answers nor
+        // reaches the slide.
+        let before = element_count(&app);
+        assert_eq!(app.on_event(&press(Key::T)), Response::Redraw);
+        assert_eq!(asking(&app), Some(Pending::Close));
+        assert_eq!(element_count(&app), before, "the key reached the slide");
+
+        // Escape keeps the deck and the window.
+        assert_eq!(app.on_event(&press(Key::Escape)), Response::Redraw);
+        assert_eq!(asking(&app), None);
+        assert!(app.dirty);
+
+        // S saves, and the window goes.
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(app.on_event(&press(Key::S)), Response::Exit);
+        let mut saved = fresh();
+        saved.read_deck(&path);
+        assert_eq!(element_count(&saved), element_count(&app));
+
+        // Close without saving, clicked: the window goes, the file does not
+        // change.
+        let mut app = fresh();
+        app.read_deck(&path);
+        app.handle_event(&press(Key::T));
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(choose(&mut app, Choice::Discard), Response::Exit);
+        let mut unchanged = fresh();
+        unchanged.read_deck(&path);
+        assert_eq!(element_count(&unchanged), element_count(&saved));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A deck with no file is saved where the picker says, and then the
+    /// window goes; one whose save fails keeps the window open.
+    #[test]
+    fn saving_on_close_asks_where_and_a_failure_keeps_the_window() {
+        let dir = scratch_dir(line!());
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        app.on_event(&Event::CloseRequested);
+        assert_eq!(
+            app.on_event(&press(Key::S)),
+            Response::Redraw,
+            "no file yet: the window waits while it asks where"
+        );
+        assert!(app.picker.is_open());
+        assert_eq!(app.picker_for, PickerFor::SaveThen(Pending::Close));
+        app.picker.close();
+        let said = app.picked(&dir.join("deck.slides"));
+        assert!(said.starts_with("Saved"), "{said}");
+        assert!(app.quit, "saved, so the window may go");
+
+        let mut failing = fresh();
+        failing.handle_event(&press(Key::T));
+        failing.deck_path = Some(dir.join("missing").join("deck.slides"));
+        failing.on_event(&Event::CloseRequested);
+        assert_eq!(failing.on_event(&press(Key::S)), Response::Redraw);
+        assert!(!failing.quit, "the only copy was thrown away");
+        assert!(
+            failing
+                .status_message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("Could not save")),
+            "{:?}",
+            failing.status_message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Words being typed when the window closes are part of the deck, so
+    /// closing asks about them.
+    #[test]
+    fn words_being_typed_when_the_window_closes_are_asked_about() {
+        let dir = scratch_dir(line!());
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.write_deck(&dir.join("deck.slides"));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types("Hi"));
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert!(app.editing.is_none());
+        assert!(format!("{:?}", app.slides[app.current_index].elements).contains("\"Hi\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Clicking into a box and out again changes nothing, so it does not mark
+    /// the deck unsaved -- nor empty a box still showing its prompt.
+    #[test]
+    fn typing_nothing_is_no_change() {
+        let dir = scratch_dir(line!());
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.write_deck(&dir.join("deck.slides"));
+        let before = describe(&app);
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.dirty, "an edit that changed nothing marked the deck");
+        assert_eq!(describe(&app), before);
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Closing during a show ends the show, so the question can be seen.
+    #[test]
+    fn closing_during_a_show_ends_it_to_ask() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::F5));
+        assert!(app.show.is_some(), "control: the show is running");
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert!(app.show.is_none());
+        assert!(rendered_text(&mut app).contains("Save them before closing?"));
+    }
+
+    /// The window bar marks unsaved changes, and a save clears the mark.
+    #[test]
+    fn the_window_bar_marks_unsaved_changes() {
+        let dir = scratch_dir(line!());
+        let mut app = fresh();
+        assert!(!app.title().starts_with('*'));
+        app.handle_event(&press(Key::T));
+        assert!(app.title().starts_with('*'));
+        app.write_deck(&dir.join("d.slides"));
+        assert!(!app.title().starts_with('*'));
+        app.handle_event(&press_ctrl(Key::Z));
+        assert!(
+            app.title().starts_with('*'),
+            "an undo after a save is a change"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a save, an open or an export did is shown, until the next thing
+    /// is done. It was kept and drawn nowhere, so an export that failed
+    /// failed in silence.
+    #[test]
+    fn what_a_save_or_an_export_did_is_shown() {
+        let mut app = fresh();
+        app.status_message = Some(String::from("Could not write /nowhere/deck.html: denied"));
+        assert!(drawn_text(&app).contains("Could not write /nowhere/deck.html"));
+        assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Consumed);
+        assert!(!drawn_text(&app).contains("Could not write"));
+    }
+
+    /// A failed save is reported, and the deck stays marked unsaved.
+    #[test]
+    fn a_failed_save_is_reported() {
+        let dir = scratch_dir(line!());
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        let said = app.write_deck(&dir.join("missing").join("deck.slides"));
+        assert!(said.starts_with("Could not save"), "{said}");
+        assert!(app.dirty);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A deck's file is named after the deck.
+    #[test]
+    fn a_decks_file_is_named_after_it() {
+        let mut app = fresh();
+        assert_eq!(app.file_name("slides"), "Untitled Presentation.slides");
+        app.title = String::from("Q3/plans\tdraft");
+        assert_eq!(app.file_name("slides"), "Q3-plans-draft.slides");
+        app.title = String::from("  ");
+        assert_eq!(app.file_name("html"), "presentation.html");
+    }
+    // ── The show ────────────────────────────────────────────────────
+
+    fn tick(ms: u64) -> Event {
+        Event::Tick { elapsed_ms: ms }
+    }
+
+    /// F5 presents from the first slide and Shift+F5 from this one. There
+    /// was no presenting view: the program edited decks and could not show
+    /// one.
+    #[test]
+    fn f5_presents_from_the_start_and_shift_f5_from_this_slide() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::End));
+        app.handle_event(&press(Key::F5));
+        assert_eq!(app.show.map(|s| s.index), Some(0));
+        app.handle_event(&press(Key::Escape));
+        assert!(app.show.is_none());
+        app.handle_event(&press(Key::End));
+        let last = app.current_index;
+        app.handle_event(&press_shift(Key::F5));
+        assert_eq!(app.show.map(|s| s.index), Some(last));
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Tool(Tool::Present));
+        assert_eq!(app.show.map(|s| s.index), Some(last));
+    }
+
+    /// The show is the slide and nothing else: no toolbar, no panels.
+    #[test]
+    fn the_show_draws_the_slide_and_nothing_else() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::F5));
+        let text = drawn_text(&app);
+        assert!(text.contains("Presentation Title"), "{text}");
+        assert!(
+            !text.contains("Duplicate") && !text.contains("Properties"),
+            "{text}"
+        );
+        assert_eq!(app.frame().hit_test(5.0, 5.0), Some(Target::Show));
+    }
+
+    /// The keys and the pointer move through the show and stop at its ends,
+    /// and Escape comes back to the editor on the slide that was showing.
+    #[test]
+    fn the_show_moves_by_key_and_press_and_ends_on_the_slide_shown() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::F5));
+        let count = app.slide_count();
+        for key in [Key::Space, Key::Right, Key::PageDown, Key::Enter] {
+            app.handle_event(&press(key));
+            app.handle_event(&tick(TRANSITION_MS));
+        }
+        assert_eq!(app.show.map(|s| s.index), Some(4));
+        probe::click(&mut app, Target::Show);
+        assert_eq!(app.show.map(|s| s.index), Some(5.min(count - 1)));
+        app.handle_event(&press(Key::End));
+        assert_eq!(
+            app.handle_event(&press(Key::Space)),
+            EventResult::Ignored,
+            "past the last slide"
+        );
+        app.handle_event(&press(Key::Backspace));
+        app.handle_event(&mouse(5.0, 5.0, MouseEventKind::Press(MouseButton::Right)));
+        assert_eq!(app.show.map(|s| s.index), Some(count - 3));
+        app.handle_event(&press(Key::Home));
+        assert_eq!(
+            app.handle_event(&press(Key::Left)),
+            EventResult::Ignored,
+            "before the first"
+        );
+        app.handle_event(&press(Key::Right));
+        app.handle_event(&tick(TRANSITION_MS));
+        app.handle_event(&press(Key::Escape));
+        assert!(app.show.is_none());
+        assert_eq!(app.current_index, 1);
+        // A key the show has no use for does nothing to the deck behind it.
+        app.handle_event(&press(Key::F5));
+        let before = element_count(&app);
+        assert_eq!(app.handle_event(&press(Key::T)), EventResult::Ignored);
+        assert_eq!(element_count(&app), before);
+    }
+
+    /// A transition plays over the clock's ticks, and the clock stops when
+    /// it is over.
+    #[test]
+    fn a_transition_plays_over_the_ticks_and_the_clock_stops() {
+        let mut app = seeded();
+        app.slides[1].transition = Transition::Fade;
+        app.handle_event(&press(Key::F5));
+        assert_eq!(app.tick_interval(), None, "a still slide wakes the window");
+        app.handle_event(&press(Key::Space));
+        assert!(app.tick_interval().is_some(), "a transition has no clock");
+        assert_eq!(app.show.and_then(|s| s.leaving), Some((0, 0)));
+        app.handle_event(&tick(200));
+        assert_eq!(app.show.and_then(|s| s.leaving), Some((0, 200)));
+        app.handle_event(&tick(400));
+        assert_eq!(app.show.and_then(|s| s.leaving), None);
+        assert_eq!(app.tick_interval(), None);
+        assert_eq!(app.handle_event(&tick(16)), EventResult::Ignored);
+        // Going back is a cut.
+        app.handle_event(&press(Key::Backspace));
+        assert_eq!(app.show.and_then(|s| s.leaving), None);
+    }
+
+    /// Every transition draws both slides part of the way through, each in
+    /// its own manner.
+    #[test]
+    fn each_transition_draws_both_slides_on_the_way() {
+        let fills = |app: &SlidesApp| -> Vec<Color> {
+            app.render_commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect { color, .. } => Some(color),
+                    _ => None,
+                })
+                .collect()
+        };
+        for transition in [
+            Transition::Fade,
+            Transition::SlideLeft,
+            Transition::SlideRight,
+            Transition::Wipe,
+            Transition::Dissolve,
+        ] {
+            let mut app = fresh();
+            app.handle_event(&press_ctrl(Key::N));
+            app.slides[0].background = Some(Color::rgb(10, 20, 30));
+            app.slides[1].background = Some(Color::rgb(200, 100, 50));
+            app.slides[1].transition = transition;
+            app.handle_event(&press(Key::F5));
+            app.handle_event(&press(Key::Space));
+            // A quarter of the way, and three quarters.
+            app.handle_event(&tick(TRANSITION_MS / 4));
+            let early = fills(&app);
+            app.handle_event(&tick(TRANSITION_MS / 2));
+            let late = fills(&app);
+            let (old, new) = (Color::rgb(10, 20, 30), Color::rgb(200, 100, 50));
+            match transition {
+                // Through black: the old slide, darkening; then the new one.
+                Transition::Fade => {
+                    assert!(
+                        early.contains(&old) && !early.contains(&new),
+                        "{transition:?}"
+                    );
+                    assert!(
+                        late.contains(&new) && !late.contains(&old),
+                        "{transition:?}"
+                    );
+                    assert!(
+                        early.iter().any(|c| c.r == 0
+                            && c.g == 0
+                            && c.b == 0
+                            && c.a > 0
+                            && c.a < 255),
+                        "no darkening"
+                    );
+                }
+                _ => {
+                    assert!(
+                        early.contains(&old) && early.contains(&new),
+                        "{transition:?}: {early:?}"
+                    );
+                    assert!(late.contains(&old) && late.contains(&new), "{transition:?}");
+                }
+            }
+            app.handle_event(&tick(TRANSITION_MS));
+            let done = fills(&app);
+            assert!(
+                done.contains(&new) && !done.contains(&old),
+                "{transition:?} did not finish"
+            );
+        }
+    }
+
+    /// Each transition, a quarter of the way through, is where it should
+    /// be: how dark the fade is, how far each slide has slid, how much the
+    /// wipe shows and how many cells the dissolve has revealed. Both slides
+    /// being drawn says nothing about any of that.
+    #[test]
+    fn each_transition_is_a_quarter_done_a_quarter_of_the_way() {
+        for transition in [
+            Transition::Fade,
+            Transition::SlideLeft,
+            Transition::SlideRight,
+            Transition::Wipe,
+            Transition::Dissolve,
+        ] {
+            let mut app = fresh();
+            app.handle_event(&press_ctrl(Key::N));
+            app.slides[1].transition = transition;
+            app.handle_event(&press(Key::F5));
+            app.handle_event(&press(Key::Space));
+            app.handle_event(&tick(TRANSITION_MS / 4));
+            let (_, _, scale) = app.show_geometry();
+            let sw = SLIDE_W * scale;
+            let cmds = app.render_commands();
+            match transition {
+                // Half dark on the way out: a quarter of the whole.
+                Transition::Fade => {
+                    let dark = cmds.iter().find_map(|c| match c {
+                        RenderCommand::FillRect { color, .. }
+                            if color.r == 0 && color.g == 0 && color.b == 0 && color.a < 255 =>
+                        {
+                            Some(color.a)
+                        }
+                        _ => None,
+                    });
+                    assert!(dark.is_some_and(|a| a.abs_diff(128) <= 1), "{dark:?}");
+                }
+                Transition::SlideLeft | Transition::SlideRight => {
+                    let way = if transition == Transition::SlideLeft {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let shifts: Vec<f32> = cmds
+                        .iter()
+                        .filter_map(|c| match c {
+                            RenderCommand::PushTranslate { dx, .. } => Some(*dx),
+                            _ => None,
+                        })
+                        .collect();
+                    let near = |want: f32| shifts.iter().any(|d| (d - want).abs() < 1.0);
+                    assert!(
+                        near(way * 0.25 * sw) && near(-way * 0.75 * sw),
+                        "{transition:?}: {shifts:?}"
+                    );
+                }
+                Transition::Wipe => {
+                    let widths: Vec<f32> = cmds
+                        .iter()
+                        .filter_map(|c| match c {
+                            RenderCommand::PushClip { width, .. } => Some(*width),
+                            _ => None,
+                        })
+                        .collect();
+                    assert!(
+                        widths.iter().any(|w| (w - 0.25 * sw).abs() < 1.0),
+                        "{widths:?}"
+                    );
+                    assert!(
+                        !widths
+                            .iter()
+                            .any(|w| (w - sw).abs() < 0.5 && widths.len() == 1)
+                    );
+                }
+                Transition::Dissolve => {
+                    let cell = sw / DISSOLVE_COLS as f32;
+                    let cells = cmds
+                        .iter()
+                        .filter(|c| matches!(c, RenderCommand::PushClip { width, .. } if (width - cell).abs() < 0.01))
+                        .count();
+                    assert_eq!(cells, DISSOLVE_COLS * DISSOLVE_ROWS / 4, "cells revealed");
+                }
+                Transition::None => {}
+            }
+        }
+    }
+
+    /// The export plays each slide's transition. Every slide switched with
+    /// `display`, whatever transition it had chosen.
+    #[test]
+    fn the_export_plays_each_slides_transition() {
+        let mut app = seeded();
+        app.slides[1].transition = Transition::Wipe;
+        app.slides[2].transition = Transition::SlideLeft;
+        let html = app.export_html();
+        assert!(
+            html.contains("class=\"slide t-wipe\" id=\"slide-1\""),
+            "{html}"
+        );
+        assert!(html.contains("class=\"slide t-slide-left\" id=\"slide-2\""));
+        assert!(html.contains("@keyframes t-wipe") && html.contains(".slide.active.t-wipe"));
+        assert!(
+            html.contains("class=\"slide active\" id=\"slide-0\""),
+            "a slide with no transition gained a class"
+        );
+    }
+
+    /// The export draws a line along its direction, and an arrow with its
+    /// head. Both were a flat two-pixel bar the width of their box.
+    #[test]
+    fn the_export_draws_lines_along_their_direction() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::A));
+        let html = app.export_html();
+        assert!(
+            html.contains("<line x1=\"0\" y1=\"0\" x2=\"200\" y2=\"120\""),
+            "{html}"
+        );
+        assert_eq!(
+            tag_count(&html, "line"),
+            1 + 2 + 1,
+            "the rule, the arrow and its head: {html}"
         );
     }
 }

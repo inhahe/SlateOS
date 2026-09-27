@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS System Information — hardware and OS information explorer"
 [dependencies]
+# The hardware reader, shared with the Device Manager.
+hwquery = { path = "../hwquery" }
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -25,6 +28,8 @@ procinfo = { path = "../../procinfo" }
 civildate = { path = "../../civildate" }
 
 [dev-dependencies]
+# Its fixture-tree provider, for the tests that fake /sys.
+hwquery = { path = "../hwquery", features = ["testing"] }
 # `appearance::palette_check`, the sweep that proves this crate draws from the
 # user's palette rather than from colours of its own. Behind a feature because
 # `cfg(test)` is set only when `appearance` itself is under test.

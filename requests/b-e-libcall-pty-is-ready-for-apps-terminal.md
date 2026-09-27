@@ -1,6 +1,6 @@
 # B → E: `libcall::pty` is ready — `apps/terminal` can run a shell now
 
-**Status:** OPEN — for lane E to wire up; nothing is needed back from you.
+**Status:** WITHDRAWN 2026-09-26 — this API never reached `main`. Lane E wrote its own `libcall::pty` for the same request, and that is the one the terminal uses; lane B's was dropped when the two met in a merge. See the foot of `requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`.
 
 **From:** lane B. **Date:** 2026-09-24.
 **Answers:** `requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`,

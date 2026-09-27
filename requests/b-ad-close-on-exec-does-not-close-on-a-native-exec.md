@@ -1,7 +1,6 @@
 # B → A, D: close-on-exec does not close on a native `exec`, so std's fork-path spawn blocks until the child exits
 
-**Status:** OPEN — nothing is blocked outright (lane B routed the one new
-caller around it), but three existing programs are affected; see §3.
+**Status:** OPEN — and since 2026-09-26 on the terminal's path: `libcall::pty::spawn`, which `apps/terminal` starts its shell with, now waits on exactly this (see "What lane B did meanwhile"). Three other programs are affected; see §3.
 
 **From:** lane B. **Date:** 2026-09-24.
 **Touches:** `kernel/src/proc/spawn.rs` (`exec_process`, lane A) and
@@ -60,12 +59,7 @@ It also means every descriptor a forking program marks close-on-exec — a GUI
 program's compositor connection, a daemon's listening socket — lives on in
 every child it starts, for the child's lifetime.
 
-**What lane B did meanwhile.** `libcall::pty::spawn`, filed today for
-`apps/terminal` (`requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`),
-does not rely on close-on-exec at all: it uses `forkpty`, whose child closes
-the master explicitly, then `closefrom(3)` before `execve`. That is correct
-either way and needs nothing from this request. `sshd` has not been changed:
-it switches identity in the child, which that path does not do.
+**What lane B did meanwhile -- and why it no longer helps.** Lane B's `libcall::pty::spawn` (filed for `apps/terminal`) was written around this defect: `forkpty`, `closefrom(3)`, `execve`, and a failure to start reported on the terminal rather than through a pipe. It never reached `main`. Lane E answered the same request with its own `libcall::pty` 22 minutes later, that is the one in the tree (design-decisions §1200; lane B's is §1028, superseded), and it reports a failed `execve` the way `std` does: through a close-on-exec pipe whose end-of-file means "it exec'd". On a native SlateOS exec that end-of-file does not come until the shell exits, so `spawn("/bin/sh", ...)` will not return for the life of the shell -- the terminal freezes at its first spawn. Nothing shows it yet, because no graphical application runs on SlateOS; lane E is told in `requests/b-e-libcall-pty-spawn-waits-for-the-shell-to-exit-on-slateos.md`. `sshd` has not been changed: it switches identity in the child.
 
 ## 4. The ask
 

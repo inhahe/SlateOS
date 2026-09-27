@@ -31,6 +31,7 @@ use guitk::rng::{RandomSource, SecretSource, SeededRng, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -1593,8 +1594,8 @@ impl PasswordApp {
     fn export_to(&mut self, path: &std::path::Path) {
         let text = self.export_history();
         self.status = Some(match safeio::write_str_atomically(path, &text) {
-            Ok(()) => format!("Exported {} to {}", self.history.len(), path.display()),
-            Err(e) => format!("Could not write {}: {e}", path.display()),
+            Ok(()) => format!("Exported {} to {}", self.history.len(), path.shown()),
+            Err(e) => format!("Could not write {}: {e}", path.shown()),
         });
     }
 

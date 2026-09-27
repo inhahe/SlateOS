@@ -1,1032 +1,1107 @@
-//! Programs on pseudo-terminals: start one, then talk to it.
+//! A program running on a new pseudo-terminal: what a terminal emulator needs
+//! from the C library, and nothing more.
 //!
-//! Requested by lane C for `apps/terminal`
-//! (`requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`): the
-//! emulator had two thousand lines of terminal and no process on the far end of
-//! it. [`spawn`] is the one call it asked for; [`PtyChild`] is what an emulator
-//! needs afterwards -- the program's output, a way to type into it, a resize,
-//! and the news that it exited -- so that no application reaches the C library
-//! itself for any of it, which is the reason this crate exists.
+//! # Why this is here
 //!
-//! # Why `forkpty` + `execve`, and not `std::process::Command`
+//! `apps/terminal` is a terminal emulator, which is the *master* side of a
+//! pseudo-terminal: it writes what the user types into the master and draws
+//! what comes back out of it. Everything between the two ends — echo, line
+//! editing in cooked mode, turning `^C` into `SIGINT` for the foreground job,
+//! telling a full-screen program its window changed size — is the kernel's
+//! line discipline (`kernel/src/tty/pty.rs`), and the shell on the slave side
+//! finds out it is on a terminal because `isatty(0)` is true.
 //!
-//! `userspace/sshd` starts its login shell with `Command` and a `pre_exec`
-//! closure calling `login_tty`, which is the idiomatic Rust shape, and on Linux
-//! it is the better one. It is not used here because **on SlateOS today it
-//! cannot return while the program runs**. A `pre_exec` closure takes std off
-//! `posix_spawn` and onto `fork` + `exec`, and std learns that the `exec`
-//! succeeded by reading end-of-file on a close-on-exec pipe. A native SlateOS
-//! `exec` leaves a close-on-exec descriptor out of the new image's table but
-//! does not release its kernel handle, so the pipe's write end lives on in the
-//! child and `spawn()` blocks until the program *exits*. For a terminal that
-//! is a window frozen for the life of its shell. The platform half is filed as
-//! `requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`.
+//! None of that is reachable from `std`. `std::process::Command` can give a
+//! child pipes, and a shell on pipes is not interactive: no prompt, no job
+//! control, no `^C`, and every full-screen program refuses to start. The call
+//! that puts a child on a terminal is `forkpty`, which `posix` implements
+//! (`posix/src/pty.rs`) and which, being stateful, `design-decisions.md` §768
+//! says a program reaches through the C ABI — this crate — rather than by
+//! naming `posix`. Asked for in
+//! `requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`.
 //!
-//! This path depends on nothing about close-on-exec, and would still be right
-//! once that is fixed:
+//! # One call, not `fork` then `exec`
 //!
-//! 1. `forkpty` (the C library's) opens the pair and forks; its child becomes a
-//!    session leader, takes the slave as its controlling terminal and as fds 0,
-//!    1 and 2, and closes the master -- explicitly, not by close-on-exec. A
-//!    failure there comes back to the parent through `forkpty`'s own pipe,
-//!    which its child closes explicitly too.
-//! 2. This module's child then changes directory if asked, puts `SIGPIPE`
-//!    back to its default and clears the signal mask, closes every other
-//!    descriptor it inherited (`closefrom(3)`), and `execve`s.
+//! Between the fork and the exec the child is a copy of a possibly
+//! multi-threaded process in which only the forking thread survived. A lock
+//! that any other thread held at the instant of the fork — the allocator's
+//! included — is held for ever in the child. So the child may do nothing but
+//! async-signal-safe system calls until it execs, and that is not a rule a
+//! caller can be trusted to keep from inside a closure, so the API offers no
+//! closure. [`spawn`] builds everything the child will need *before* forking —
+//! the argument and environment vectors live on this function's stack, which
+//! the child inherits a copy of — and the child's entire remaining life is:
+//! restore `SIGPIPE`, unblock every signal, `execve`, and on failure report
+//! `errno` and `_exit`. That is the request's own reasoning ("a rule I would
+//! be enforcing from the wrong side of the ABI"), carried to its end.
 //!
-//! # What the child may do between the fork and the exec
+//! # A failed `exec` is an error, not an exit code
 //!
-//! Only what is safe in a forked copy of a multi-threaded process: every
-//! other thread vanished mid-flight, possibly holding the allocator's lock.
-//! So everything the child touches -- the argument and environment arrays, the
-//! failure message -- is built **before** the fork, and the child makes bare
-//! calls into the C library and nothing else. It never returns: it becomes the
-//! program or it calls `_exit`.
+//! Without help, a parent learns that `execve` failed only when the child
+//! exits with status 127, which is indistinguishable from a shell that ran and
+//! exited 127 on its own. [`spawn`] opens a close-on-exec pipe first: a
+//! successful `execve` closes the child's end without writing, so the parent's
+//! read returns zero bytes; a failed one writes its `errno` there before
+//! `_exit`. So `spawn("/bin/zsh", …)` on a machine without zsh returns
+//! `Err(ENOENT)` and leaves no child behind, which is what lets a terminal say
+//! *which* shell could not be started, and why. It is the same device
+//! `forkpty` itself uses one level down for `login_tty`, and the same one
+//! `std::process::Command` uses for its own spawns.
 //!
-//! The signal reset is not optional. Every Rust program ignores `SIGPIPE` at
-//! startup, an ignored disposition survives `exec`, and a shell that inherits
-//! it hands it to every pipeline it runs -- `yes | head` then spins forever
-//! instead of ending when `head` does. std's own spawn makes the same reset.
+//! # What the child inherits, deliberately
 //!
-//! # A failure to start is reported on the terminal
+//! * **`SIGPIPE` is put back to its default.** Rust's runtime ignores
+//!   `SIGPIPE` in every program it starts, and an ignored disposition survives
+//!   `execve`. A shell started without resetting it runs every pipeline with
+//!   `SIGPIPE` ignored, so `yes | head -1` makes `yes` print "Broken pipe" and
+//!   loop on `EPIPE` instead of dying quietly. `std::process::Command` resets it
+//!   for the same reason.
+//! * **The signal mask is emptied.** A mask is inherited across both `fork` and
+//!   `execve`, and a shell that starts with `SIGINT` blocked cannot be
+//!   interrupted.
+//! * **The master is marked close-on-exec in the parent.** Otherwise the next
+//!   program this process starts — the second tab's shell — inherits the first
+//!   tab's master, and closing the first tab no longer hangs up its shell,
+//!   because a master still open anywhere is a terminal still connected.
 //!
-//! If `execve` (or the `chdir` before it) fails, the child writes one line
-//! naming the program and the error number to its own standard error -- which
-//! is the terminal -- and exits with 127, the status a shell gives a command it
-//! could not run. That is where the emulator's user is already looking, and it
-//! is what every terminal emulator does. [`spawn`] cannot return it as an
-//! `Err`: learning that an `exec` succeeded needs exactly the close-on-exec
-//! pipe this module exists to avoid. It does return every failure before the
-//! fork, and `forkpty`'s own.
+//! # Host builds
 //!
-//! # Linux, the host, and the tests
-//!
-//! Compiled for `unix`, like [`crate::kill`]: glibc 2.34 and later have
-//! `forkpty`, `login_tty` and `closefrom` in `libc.so.6` itself, so the same
-//! code runs on a Linux host, and the end-to-end tests below run there (in WSL
-//! on this machine) against real terminals. Everywhere else every call answers
-//! [`ENOSYS`](crate::ENOSYS), as the rest of this crate does.
+//! On a non-`unix` host there are no pseudo-terminals, and every call returns
+//! [`ENOSYS`](crate::ENOSYS) after the argument checks — the same choice the
+//! rest of this crate makes, and for the same reason: a terminal on a host
+//! must be able to *say* it has nothing to connect to, which it cannot do if
+//! the call pretends to succeed. The checks run first on every build so that
+//! the host test binary proves them.
 
-use core::ffi::{CStr, c_char};
-use std::vec::Vec;
+use core::ffi::CStr;
 
-use crate::{EAGAIN, EINTR, EINVAL, EIO, ESRCH};
+use crate::EINVAL;
 
-// ---------------------------------------------------------------------------
-// Values
-// ---------------------------------------------------------------------------
-//
-// Private, and asserted against `posix` in the tests below for the same reason
-// the crate's public values are: restating a number is how one truth becomes
-// two sources. Linux uses the same values, which is what lets the unix arm run
-// against glibc unchanged.
+/// Argument list too long: more arguments or environment entries than
+/// [`MAX_ARGS`] or [`MAX_ENV`].
+pub const E2BIG: i32 = 7;
+/// Bad file descriptor.
+pub const EBADF: i32 = 9;
+/// An interrupted system call. Retried here, never reported.
+pub const EINTR: i32 = 4;
+/// Input/output error. What a master reports once every slave is closed.
+pub const EIO: i32 = 5;
 
-/// `ioctl` request: set the terminal's window size.
-const TIOCSWINSZ: u64 = 0x5414;
-/// `fcntl` command: read the file status flags.
-const F_GETFL: i32 = 3;
-/// `fcntl` command: write the file status flags.
-const F_SETFL: i32 = 4;
-/// File status flag: reads and writes return instead of waiting.
-const O_NONBLOCK: i64 = 0o4000;
-/// `poll`: data may be read without blocking.
-const POLLIN: i16 = 0x0001;
-/// `poll`: an error condition.
-const POLLERR: i16 = 0x0008;
-/// `poll`: the other end has gone.
-const POLLHUP: i16 = 0x0010;
-/// `waitpid`: report nothing rather than wait.
-const WNOHANG: i32 = 1;
-/// Broken pipe.
-const SIGPIPE: i32 = 13;
-/// The default disposition, as a handler value.
-const SIG_DFL: usize = 0;
-/// `sigprocmask`: replace the mask outright.
-const SIG_SETMASK: i32 = 2;
-/// The status a shell gives a command it could not run.
-const CANNOT_RUN: i32 = 127;
+// The rest of what `spawn` can report, so that a caller can say *why* a
+// program would not start without depending on `posix` for the numbers.
+// Checked against `posix` in `constants_agree_with_posix`.
 
-/// `struct winsize`, as `openpty`, `forkpty` and `TIOCSWINSZ` read it.
+/// Not an executable format the kernel knows.
+pub const ENOEXEC: i32 = 8;
+/// No such child -- asked about a pid that is not ours, or already reaped.
+pub const ECHILD: i32 = 10;
+/// Out of processes or some other resource that may free up; try again.
+pub const EAGAIN: i32 = 11;
+/// Out of memory.
+pub const ENOMEM: i32 = 12;
+/// Permission denied: the program is not executable, or a directory on the
+/// way to it is not searchable.
+pub const EACCES: i32 = 13;
+/// A component of the path is not a directory.
+pub const ENOTDIR: i32 = 20;
+/// The system-wide descriptor or terminal table is full.
+pub const ENFILE: i32 = 23;
+/// This process has run out of descriptors.
+pub const EMFILE: i32 = 24;
+/// Not a terminal.
+pub const ENOTTY: i32 = 25;
+/// The program is open for writing and so may not be run.
+pub const ETXTBSY: i32 = 26;
+/// Too many symbolic links on the way to the program.
+pub const ELOOP: i32 = 40;
+
+/// Hang up. What a terminal sends the program on its slave when the window
+/// closes — the one signal every shell interprets as "your terminal is gone",
+/// and passes on to the jobs it started.
+pub const SIGHUP: i32 = 1;
+
+/// The largest argument vector [`spawn`] accepts, not counting the
+/// terminating null.
 ///
-/// Rows first. [`WindowSize`] names the two fields rather than ordering them,
-/// so the crossing happens once, here, where the C layout is.
-#[repr(C)]
+/// A bound rather than a heap allocation because the vector must exist before
+/// the fork and must not be built after it, and this crate has no allocator.
+/// 256 arguments is far beyond anything a terminal passes to a shell.
+pub const MAX_ARGS: usize = 256;
+
+/// The largest environment [`spawn`] accepts, not counting the terminating
+/// null.
+///
+/// A login environment is a few dozen entries; a thousand leaves room for a
+/// user who exports a great deal without putting a variable-length array on
+/// the stack.
+pub const MAX_ENV: usize = 1024;
+
+/// A terminal's size, in character cells and, optionally, in pixels.
+///
+/// The same four fields as C's `struct winsize`, named for what they mean
+/// rather than with its `ws_` prefixes. A pixel size of zero means "unknown",
+/// which is what most terminals report and what programs expect.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Winsize {
-    ws_row: u16,
-    ws_col: u16,
-    ws_xpixel: u16,
-    ws_ypixel: u16,
+pub struct WinSize {
+    /// Rows of character cells.
+    pub rows: u16,
+    /// Columns of character cells.
+    pub cols: u16,
+    /// Width of the text area in pixels, or zero.
+    pub xpixel: u16,
+    /// Height of the text area in pixels, or zero.
+    pub ypixel: u16,
 }
 
-/// `struct pollfd`.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct Pollfd {
-    fd: i32,
-    events: i16,
-    revents: i16,
+/// A program started by [`spawn`].
+///
+/// Two integers the caller now owns: a process to reap with [`try_wait`] and
+/// a descriptor to close. Deliberately not an RAII type — this crate is
+/// `no_std` and has no `OwnedFd` to offer — so the caller wraps `master` in
+/// whatever owns descriptors in its world (`std::fs::File`, usually) at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spawned {
+    /// The child's process id. It is a session leader, so this is also its
+    /// process group id and its session id.
+    pub pid: i32,
+    /// The master side of the child's terminal: write keystrokes here, read
+    /// its output from here. Close-on-exec.
+    pub master: i32,
+}
+
+/// Where a child started by [`spawn`] stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildState {
+    /// Still running (or stopped — a stop is not an exit).
+    Running,
+    /// It called `exit` with this status. Reaped: the pid is free again.
+    Exited(i32),
+    /// A signal ended it — this one. Reaped: the pid is free again.
+    Signaled(i32),
+}
+
+/// Start `path` on the slave side of a new pseudo-terminal of `size`.
+///
+/// `argv` is the argument vector, starting with the program's own name, and
+/// `envp` is the entire environment, as `NAME=value` entries — nothing is
+/// inherited implicitly, so a caller that wants its own environment passed on
+/// must pass it. `path` is not searched for on `PATH`; `execve` takes it as
+/// given.
+///
+/// The child is a session leader whose controlling terminal is the new slave,
+/// with the slave on its standard input, output and error. See the module
+/// documentation for everything else it inherits, and why.
+///
+/// # Errors
+///
+/// * [`EINVAL`] — `argv` is empty. Every program is entitled to find its own
+///   name in `argv[0]`, and a shell uses it to decide whether it is a login
+///   shell.
+/// * [`E2BIG`] — more than [`MAX_ARGS`] arguments or [`MAX_ENV`] environment
+///   entries.
+/// * The `errno` from creating the terminal or forking: `EMFILE`/`ENFILE` when
+///   descriptors or terminals have run out, `EAGAIN`/`ENOMEM` from `fork`.
+/// * The `errno` that `execve` failed with in the child — `ENOENT` for a
+///   program that does not exist, `EACCES` for one that may not be run,
+///   `ENOEXEC` for a file that is not a program. The child has been reaped and
+///   the terminal closed; nothing is left to clean up.
+/// * [`ENOSYS`](crate::ENOSYS) — built for a host with no pseudo-terminals.
+pub fn spawn(path: &CStr, argv: &[&CStr], envp: &[&CStr], size: WinSize) -> Result<Spawned, i32> {
+    // Checked before the target split, so that the host test binary proves
+    // them: a check compiled only for the target is a check nothing here runs.
+    if argv.is_empty() {
+        return Err(EINVAL);
+    }
+    if argv.len() > MAX_ARGS || envp.len() > MAX_ENV {
+        return Err(E2BIG);
+    }
+    spawn_one(path, argv, envp, size)
+}
+
+/// Tell the program on `master`'s terminal that the terminal is now `size`.
+///
+/// This is `ioctl(master, TIOCSWINSZ)`: the kernel records the size and
+/// raises `SIGWINCH` for the terminal's foreground process group if it
+/// changed, which is how a full-screen program learns to redraw at the new
+/// width. A terminal that resizes its grid without calling this leaves the
+/// shell wrapping its prompt at the old width.
+///
+/// # Errors
+///
+/// * [`EBADF`] — `master` is negative, or not an open descriptor.
+/// * `ENOTTY` — `master` is not a terminal.
+/// * [`ENOSYS`](crate::ENOSYS) — built for a host with no pseudo-terminals.
+pub fn set_window_size(master: i32, size: WinSize) -> Result<(), i32> {
+    if master < 0 {
+        return Err(EBADF);
+    }
+    set_window_size_one(master, size)
+}
+
+/// Whether the child `pid` has finished, without waiting for it to.
+///
+/// `waitpid(pid, WNOHANG)`. A child that has finished is *reaped* by this
+/// call — its exit status is collected and its process id released — so the
+/// answer [`ChildState::Exited`] or [`ChildState::Signaled`] is given once,
+/// and asking again afterwards is an error (`ECHILD`), not a second answer.
+///
+/// # A single child, deliberately
+///
+/// `waitpid` gives `pid <= 0` three wider meanings: any child at all, any
+/// child in the caller's process group, any child in a named group. Each one
+/// reaps whichever child happens to have finished — including one that some
+/// other part of the program started and is waiting for itself, whose exit
+/// status is then gone for good. So this refuses them with [`EINVAL`], for
+/// the reason [`crate::kill`] refuses its broadcast forms: every caller here
+/// means one child.
+///
+/// # Errors
+///
+/// * [`EINVAL`] — `pid` does not name a single process.
+/// * `ECHILD` — `pid` is not a child of this process, or was already reaped.
+/// * [`ENOSYS`](crate::ENOSYS) — built for a host with no processes of ours to wait for.
+pub fn try_wait(pid: i32) -> Result<ChildState, i32> {
+    if pid <= 0 {
+        return Err(EINVAL);
+    }
+    try_wait_one(pid)
+}
+
+/// Block until the child `pid` has finished -- without collecting it.
+///
+/// `waitid(P_PID, pid, WEXITED | WNOWAIT)`. Returns once the child has exited
+/// or a signal has ended it, and leaves it waitable: its exit status is still
+/// there for [`try_wait`] to collect, and **its process id stays reserved
+/// until then**. That is the point of the `WNOWAIT`. A thread that *reaped*
+/// the child while another thread might still signal it -- a terminal hanging
+/// up its shell -- would free the id in between, and the signal could reach
+/// whatever process was given that id next.
+///
+/// For a thread whose one job is to notice the child ending. A terminal that
+/// is woken for its shell's output rather than asking on a clock still has to
+/// learn when the shell has gone, and the end of the output is no sign of it:
+/// a job the shell started in the background can hold the terminal open long
+/// after the shell itself has exited.
+///
+/// A single child, for the reason [`try_wait`] gives.
+///
+/// # Errors
+///
+/// As [`try_wait`].
+pub fn wait_exited(pid: i32) -> Result<(), i32> {
+    if pid <= 0 {
+        return Err(EINVAL);
+    }
+    wait_exited_one(pid)
+}
+
+/// What a `waitpid` status word says, in the Linux encoding our `posix` and
+/// glibc both use.
+///
+/// Pure, so the host test binary checks the decoding even though it can never
+/// produce a status of its own.
+///
+/// The low seven bits are the terminating signal, zero for a normal exit;
+/// `0x7f` there means stopped, and `0xffff` as a whole means continued —
+/// neither of which `waitpid` reports without `WUNTRACED`/`WCONTINUED`, which
+/// [`try_wait`] does not pass, so both read as still running.
+///
+/// Private: [`try_wait`] is its one caller, and a status word from anywhere
+/// else is a status word from a `waitpid` this crate did not make. Compiled
+/// where that caller is, and for the tests on every build.
+#[cfg(any(unix, test))]
+#[must_use]
+const fn decode_status(status: i32) -> ChildState {
+    let low = status & 0x7f;
+    if low == 0 {
+        ChildState::Exited((status >> 8) & 0xff)
+    } else if low != 0x7f && status != 0xffff {
+        ChildState::Signaled(low)
+    } else {
+        ChildState::Running
+    }
 }
 
 // ---------------------------------------------------------------------------
 // The C library
 // ---------------------------------------------------------------------------
 
-/// The linked C library's calls, declared once.
+/// The symbols `spawn` and friends call, declared once.
 ///
-/// `ioctl` and `fcntl` are declared variadic because glibc's are; SlateOS's are
-/// not, and on x86-64 the two agree, since a variadic call passes its fixed and
-/// variable integer arguments in the same registers. The variable argument
-/// `fcntl` is given is an `i64`, never an `i32`: a 32-bit value passed to a
-/// callee that reads 64 bits leaves the upper half of the register undefined.
+/// `ioctl` and `fcntl` are declared variadic because that is what they are in
+/// C. Our `posix` defines them with a fixed third argument, and on x86-64 the
+/// two conventions put that argument in the same register, so one declaration
+/// serves both our library and glibc — which is what the `unix` test run on a
+/// Linux host links against.
 #[cfg(unix)]
-mod c {
-    use super::{Pollfd, Winsize};
-    use core::ffi::{c_char, c_void};
+mod sys {
+    /// C's `struct winsize`.
+    #[repr(C)]
+    pub struct Winsize {
+        pub ws_row: u16,
+        pub ws_col: u16,
+        pub ws_xpixel: u16,
+        pub ws_ypixel: u16,
+    }
 
     unsafe extern "C" {
         pub fn forkpty(
             amaster: *mut i32,
-            name: *mut c_char,
-            termp: *const c_void,
+            name: *mut u8,
+            termp: *const u8,
             winp: *const Winsize,
         ) -> i32;
+        pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32;
+        pub fn pipe2(fds: *mut i32, flags: i32) -> i32;
         pub fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
         pub fn write(fd: i32, buf: *const u8, count: usize) -> isize;
         pub fn close(fd: i32) -> i32;
-        pub fn poll(fds: *mut Pollfd, nfds: u64, timeout: i32) -> i32;
-        pub fn ioctl(fd: i32, request: u64, ...) -> i32;
-        pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         pub fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
-        pub fn chdir(path: *const c_char) -> i32;
-        pub fn execve(
-            path: *const c_char,
-            argv: *const *const c_char,
-            envp: *const *const c_char,
-        ) -> i32;
+        pub fn waitid(idtype: i32, id: i32, infop: *mut core::ffi::c_void, options: i32) -> i32;
         pub fn signal(signum: i32, handler: usize) -> usize;
         pub fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64) -> i32;
-        pub fn closefrom(lowfd: i32);
+        pub fn ioctl(fd: i32, request: u64, ...) -> i32;
+        pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         pub fn _exit(status: i32) -> !;
     }
+
+    /// `O_CLOEXEC`, for `pipe2`.
+    pub const O_CLOEXEC: i32 = 0o2_000_000;
+    /// `fcntl`: set the descriptor flags.
+    pub const F_SETFD: i32 = 2;
+    /// The one descriptor flag: close this descriptor on `execve`.
+    pub const FD_CLOEXEC: i64 = 1;
+    /// `TIOCSWINSZ`: set a terminal's window size.
+    pub const TIOCSWINSZ: u64 = 0x5414;
+    /// `waitpid`: do not block.
+    pub const WNOHANG: i32 = 1;
+    /// `waitid`: the id names one process.
+    pub const P_PID: i32 = 1;
+    /// `waitid`: report children that have ended.
+    pub const WEXITED: i32 = 4;
+    /// `waitid`: leave the child to be waited for again.
+    pub const WNOWAIT: i32 = 0x0100_0000;
+    /// `sigprocmask`: replace the mask outright.
+    pub const SIG_SETMASK: i32 = 2;
+    /// The signal a write to a pipe with no reader raises.
+    pub const SIGPIPE: i32 = 13;
+    /// The default disposition.
+    pub const SIG_DFL: usize = 0;
+    /// Words in a signal set: 1024 signals, the size glibc's `sigset_t` and
+    /// our `SigsetT` both have. An empty set of the larger size is an empty
+    /// set of any smaller one.
+    pub const SIGSET_WORDS: usize = 16;
 }
 
-/// Everywhere that is not `unix`: every call fails, and `errno` says
-/// [`ENOSYS`](crate::ENOSYS). Nothing is opened, so `forkpty` failing first
-/// means nothing after it ever runs -- but it all has to compile, which is
-/// what keeps the logic above the split one copy rather than two.
-#[cfg(not(unix))]
-#[allow(clippy::missing_safety_doc, clippy::unnecessary_wraps)]
-mod c {
-    use super::{Pollfd, Winsize};
-    use core::ffi::{c_char, c_void};
-
-    pub unsafe fn forkpty(
-        _amaster: *mut i32,
-        _name: *mut c_char,
-        _termp: *const c_void,
-        _winp: *const Winsize,
-    ) -> i32 {
-        -1
-    }
-    pub unsafe fn read(_fd: i32, _buf: *mut u8, _count: usize) -> isize {
-        -1
-    }
-    pub unsafe fn write(_fd: i32, _buf: *const u8, _count: usize) -> isize {
-        -1
-    }
-    pub unsafe fn close(_fd: i32) -> i32 {
-        -1
-    }
-    pub unsafe fn poll(_fds: *mut Pollfd, _nfds: u64, _timeout: i32) -> i32 {
-        -1
-    }
-    pub unsafe fn ioctl(_fd: i32, _request: u64, _arg: *mut Winsize) -> i32 {
-        -1
-    }
-    pub unsafe fn fcntl(_fd: i32, _cmd: i32, _arg: i64) -> i32 {
-        -1
-    }
-    pub unsafe fn waitpid(_pid: i32, _status: *mut i32, _options: i32) -> i32 {
-        -1
-    }
-    pub unsafe fn chdir(_path: *const c_char) -> i32 {
-        -1
-    }
-    pub unsafe fn execve(
-        _path: *const c_char,
-        _argv: *const *const c_char,
-        _envp: *const *const c_char,
-    ) -> i32 {
-        -1
-    }
-    pub unsafe fn signal(_signum: i32, _handler: usize) -> usize {
-        0
-    }
-    pub unsafe fn sigprocmask(_how: i32, _set: *const u64, _oldset: *mut u64) -> i32 {
-        -1
-    }
-    pub unsafe fn closefrom(_lowfd: i32) {}
-    pub unsafe fn _exit(_status: i32) -> ! {
-        std::process::abort()
-    }
-}
-
-/// This thread's `errno`, from the library that just failed.
 #[cfg(unix)]
-fn errno() -> i32 {
-    crate::last_errno()
-}
+fn spawn_one(path: &CStr, argv: &[&CStr], envp: &[&CStr], size: WinSize) -> Result<Spawned, i32> {
+    use core::ptr;
 
-/// No C library answered, because none was asked.
-#[cfg(not(unix))]
-fn errno() -> i32 {
-    crate::ENOSYS
-}
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// A terminal's size in character cells.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WindowSize {
-    /// Columns.
-    pub cols: u16,
-    /// Rows.
-    pub rows: u16,
-}
-
-impl From<WindowSize> for Winsize {
-    fn from(size: WindowSize) -> Self {
-        Self {
-            ws_row: size.rows,
-            ws_col: size.cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        }
+    // Both vectors are built now, in the parent, because the child may not
+    // build anything. One slot longer than the limit and filled with null, so
+    // the terminating null `execve` needs is already there whatever the length
+    // -- the length was checked against the limit before we got here.
+    let mut argv_ptrs: [*const u8; MAX_ARGS + 1] = [ptr::null(); MAX_ARGS + 1];
+    for (slot, arg) in argv_ptrs.iter_mut().zip(argv) {
+        *slot = arg.as_ptr().cast::<u8>();
     }
-}
-
-/// How a program on a terminal ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Exit {
-    /// It exited with this status. 127 is also what [`spawn`]'s child exits
-    /// with when the program could not be started, and the terminal then
-    /// carries a line saying why.
-    Code(i32),
-    /// It was ended by this signal.
-    Signal(i32),
-}
-
-impl Exit {
-    /// Decode a `waitpid` status word: the signal in the low seven bits, else
-    /// the exit status in the next eight. (Stops are not reported, because
-    /// nothing here asks `waitpid` for them.)
-    fn from_wait_status(status: i32) -> Self {
-        let sig = status & 0x7f;
-        if sig == 0 {
-            Self::Code((status >> 8) & 0xff)
-        } else {
-            Self::Signal(sig)
-        }
+    let mut envp_ptrs: [*const u8; MAX_ENV + 1] = [ptr::null(); MAX_ENV + 1];
+    for (slot, var) in envp_ptrs.iter_mut().zip(envp) {
+        *slot = var.as_ptr().cast::<u8>();
     }
-}
+    let winsize = sys::Winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
+        ws_xpixel: size.xpixel,
+        ws_ypixel: size.ypixel,
+    };
+    let empty_mask = [0u64; sys::SIGSET_WORDS];
 
-/// What a read from the terminal found.
-///
-/// Three answers rather than a byte count, because the end of a terminal is not
-/// a zero-length read. When the last holder of the slave closes it, a read on
-/// the master fails with `EIO`; and on SlateOS a zero-length read means
-/// "nothing right now" (`design-decisions.md` §259), so a caller that took zero
-/// for the end would declare a live session over, and one that took `EIO` for
-/// an error would report every normal exit as a failure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Output {
-    /// This many bytes of the program's output are at the front of the buffer.
-    Data(usize),
-    /// Nothing to read right now; the terminal is still open.
-    Nothing,
-    /// Everything holding the terminal's far end has closed it. Nothing more
-    /// will arrive; what the program's exit status was is [`PtyChild::wait`]'s
-    /// to say.
-    Closed,
-}
-
-/// A program running on a pseudo-terminal, and the terminal's master end.
-///
-/// Dropping it closes the master, which hangs the terminal up: the kernel sends
-/// `SIGHUP` to the terminal's foreground process group, which ends a shell. It
-/// does not wait for the program, exactly as dropping a `std::process::Child`
-/// does not; call [`wait`](Self::wait) or [`try_wait`](Self::try_wait) to
-/// collect its status and free its process-table entry.
-#[derive(Debug)]
-pub struct PtyChild {
-    pid: i32,
-    master: i32,
-    /// Set once the child has been reaped. After that its pid may belong to
-    /// some other process at any moment, so nothing here may name it again.
-    exit: Option<Exit>,
-}
-
-// ---------------------------------------------------------------------------
-// Starting a program
-// ---------------------------------------------------------------------------
-
-/// Start `program` on a new pseudo-terminal of `size`.
-///
-/// The program runs as the leader of a new session with the terminal as its
-/// controlling terminal and as its standard input, output and error -- what a
-/// login shell expects -- and inherits no other descriptor from the caller.
-///
-/// * `program` is a **path**: this is `execve`, which does not search `PATH`.
-///   A terminal knows its shell's path (from `$SHELL`, or the account).
-/// * `argv` is the program's whole argument vector, `argv[0]` included -- a
-///   login shell is told it is one by a `-` in front of its own name there.
-/// * `envp` is the program's whole environment, as `NAME=value` strings. An
-///   emulator sets `TERM` in it; nothing is inherited implicitly.
-/// * `cwd`, if given, is where the program starts.
-///
-/// # Errors
-///
-/// * [`EINVAL`] -- `program` is empty, or `argv` is. A program with no
-///   `argv[0]` breaks every convention that names it, so none is started.
-/// * Whatever `forkpty` sets -- no terminal could be opened (`EMFILE` when the
-///   table is full), or the process could not be forked.
-/// * [`ENOSYS`](crate::ENOSYS) where there is no terminal to open.
-///
-/// A program that cannot be *run* -- missing, not executable, or `cwd` not
-/// enterable -- is not an error here; see the module documentation for why. It
-/// exits with 127, and the terminal carries a line saying what failed.
-pub fn spawn(
-    program: &CStr,
-    argv: &[&CStr],
-    envp: &[&CStr],
-    cwd: Option<&CStr>,
-    size: WindowSize,
-) -> Result<PtyChild, i32> {
-    if program.is_empty() || argv.is_empty() {
-        return Err(EINVAL);
+    // The exec report, before the fork so both sides have it. Close-on-exec on
+    // both ends: the child's write end must vanish at a successful `execve`
+    // (that is the success signal), and neither end may leak into anything
+    // else this process ever starts.
+    let mut report = [-1i32; 2];
+    // SAFETY: `report` is two writable `i32`s, which is what `pipe2` fills.
+    if unsafe { sys::pipe2(report.as_mut_ptr(), sys::O_CLOEXEC) } != 0 {
+        return Err(crate::last_errno());
     }
-
-    // Everything the child will touch, built now: after the fork it may not
-    // allocate. `ptr::null()` ends each array, as `execve` requires.
-    let argv_ptrs: Vec<*const c_char> = argv
-        .iter()
-        .map(|a| a.as_ptr())
-        .chain(core::iter::once(core::ptr::null()))
-        .collect();
-    let envp_ptrs: Vec<*const c_char> = envp
-        .iter()
-        .map(|e| e.as_ptr())
-        .chain(core::iter::once(core::ptr::null()))
-        .collect();
-    let winsize = Winsize::from(size);
+    let [report_rd, report_wr] = report;
 
     let mut master: i32 = -1;
-    // SAFETY: `master` is a live local the call writes the master fd into on
-    // success. `name` is NULL, which `forkpty` documents as "do not report the
-    // slave's name"; `termp` is NULL, "leave the slave at the default modes"
-    // (cooked and echoing, what a shell expects); `winp` points at a live
-    // `Winsize` that outlives the call.
+    // SAFETY: `master` is a writable `i32`; a null `name` and a null `termp`
+    // are documented as "do not return the name" and "keep the default
+    // termios"; `winsize` is a live `struct winsize` for the whole call.
     let pid = unsafe {
-        c::forkpty(
+        sys::forkpty(
             &raw mut master,
-            core::ptr::null_mut(),
-            core::ptr::null(),
+            ptr::null_mut(),
+            ptr::null(),
             &raw const winsize,
         )
     };
-    if pid < 0 {
-        return Err(errno());
-    }
+
     if pid == 0 {
-        // SAFETY: this is the forked child, the only place `become_program`
-        // may run. Every pointer it is given addresses memory prepared before
-        // the fork, which the child's copy of the address space still holds.
-        unsafe { become_program(program, &argv_ptrs, &envp_ptrs, cwd) }
-    }
-    Ok(PtyChild {
-        pid,
-        master,
-        exit: None,
-    })
-}
-
-/// The forked child's whole life: become `program`, or say why not and exit.
-///
-/// # Safety
-///
-/// Call only in the child `forkpty` just created. It is async-signal-safe by
-/// construction -- bare C library calls on memory that existed before the
-/// fork, no allocation, no lock, no unwinding -- and it never returns.
-unsafe fn become_program(
-    program: &CStr,
-    argv: &[*const c_char],
-    envp: &[*const c_char],
-    cwd: Option<&CStr>,
-) -> ! {
-    if let Some(dir) = cwd {
-        // SAFETY: `dir` is NUL-terminated by `CStr`'s invariant and lives in
-        // memory the fork copied.
-        if unsafe { c::chdir(dir.as_ptr()) } != 0 {
-            // SAFETY: still the child; see this function's contract.
-            unsafe { fail(program, b"cannot enter its start directory", errno()) }
+        // The child. Only async-signal-safe system calls from here on -- see
+        // the module documentation -- and every value used below was computed
+        // before the fork. Nothing here returns: it execs or it exits.
+        //
+        // SAFETY (the whole block): each call receives descriptors this process
+        // owns, or pointers into `argv_ptrs`/`envp_ptrs`/`empty_mask`, which the
+        // fork copied into this child and which outlive every call. `path` and
+        // every string the vectors point at were borrowed by the parent for the
+        // duration of `spawn`, and the child's copy of the parent's memory holds
+        // them unchanged.
+        unsafe {
+            sys::close(report_rd);
+            // Failure of either reset is not reported: the child would have to
+            // choose between running with the wrong disposition and not running
+            // at all, and a shell that runs is the better of the two. Neither
+            // can fail for a valid signal number and a valid set, which these
+            // are.
+            sys::signal(sys::SIGPIPE, sys::SIG_DFL);
+            sys::sigprocmask(sys::SIG_SETMASK, empty_mask.as_ptr(), ptr::null_mut());
+            sys::execve(
+                path.as_ptr().cast::<u8>(),
+                argv_ptrs.as_ptr(),
+                envp_ptrs.as_ptr(),
+            );
+            // Still here: `execve` failed. Tell the parent why. A failed write
+            // leaves the parent reading zero bytes -- "it exec'd" -- and then
+            // seeing an exit status of 127, which is wrong but not dangerous;
+            // there is nothing more a child in this state can do.
+            let bytes = crate::last_errno().to_ne_bytes();
+            sys::write(report_wr, bytes.as_ptr(), bytes.len());
+            sys::_exit(127);
         }
     }
 
-    // SAFETY: plain scalar arguments -- a signal number and a disposition, then
-    // a pointer to a zeroed set that outlives the call. Resetting what the
-    // parent's runtime changed is what std's own spawn does here too; see the
-    // module documentation for what an inherited ignored `SIGPIPE` breaks.
-    // Both results are deliberately unread: neither can fail for these
-    // arguments, and a child that stopped here would run nothing at all.
-    unsafe {
-        c::signal(SIGPIPE, SIG_DFL);
-        let empty = [0u64; 16];
-        c::sigprocmask(SIG_SETMASK, empty.as_ptr(), core::ptr::null_mut());
+    // The parent. Its copy of the write end must go before the read below,
+    // or the read would wait for a writer that is this process.
+    // SAFETY: `report_wr` is a descriptor this process opened above.
+    unsafe { sys::close(report_wr) };
+
+    if pid < 0 {
+        let e = crate::last_errno();
+        // SAFETY: as above, `report_rd` is ours.
+        unsafe { sys::close(report_rd) };
+        return Err(e);
     }
 
-    // Every descriptor but the terminal. Closed, not merely marked
-    // close-on-exec: see the module documentation for why a mark is not
-    // enough on SlateOS today.
-    //
-    // SAFETY: no arguments that address memory; closing descriptors this
-    // child inherited and will never use.
-    unsafe { c::closefrom(3) };
+    let mut buf = [0u8; 4];
+    let got = read_all_retrying(report_rd, &mut buf);
+    // SAFETY: as above.
+    unsafe { sys::close(report_rd) };
 
-    // SAFETY: `program` is NUL-terminated by `CStr`'s invariant, and both
-    // arrays end in NULL (built that way in `spawn`) with every other element
-    // a `CStr` pointer from the caller's borrow, all in memory the fork copied.
-    unsafe { c::execve(program.as_ptr(), argv.as_ptr(), envp.as_ptr()) };
-    // `execve` returns only on failure.
-    // SAFETY: still the child; see this function's contract.
-    unsafe { fail(program, b"cannot run", errno()) }
-}
-
-/// Write `<program>: <what> (errno <n>)` to the terminal and exit with 127.
-///
-/// # Safety
-///
-/// Only in the child, where fd 2 is the terminal. Allocation-free: the number
-/// is formatted into a stack buffer.
-unsafe fn fail(program: &CStr, what: &[u8], err: i32) -> ! {
-    let mut digits = [0u8; 12];
-    let n = errno_digits(err, &mut digits);
-    for part in [
-        program.to_bytes(),
-        b": ",
-        what,
-        b" (errno ",
-        digits.get(n..).unwrap_or_default(),
-        b")\n",
-    ] {
-        // SAFETY: `part` is a live slice for the duration of the call. The
-        // result is deliberately unread: a child that cannot report is still
-        // a child that must exit, and the exit status carries the verdict.
-        unsafe { c::write(2, part.as_ptr(), part.len()) };
+    if got > 0 {
+        // The child reported an `execve` failure. Reap it so it does not
+        // linger as a zombie, and discard the terminal nobody will use.
+        let e = i32::from_ne_bytes(buf);
+        reap(pid);
+        // SAFETY: `master` was filled in by a successful `forkpty`.
+        unsafe { sys::close(master) };
+        return Err(if e > 0 { e } else { EIO });
     }
-    // SAFETY: `_exit` takes a scalar and does not return.
-    unsafe { c::_exit(CANNOT_RUN) }
+
+    // SAFETY: `master` is a descriptor this process owns; `F_SETFD` takes an
+    // integer flag word and touches no memory of ours.
+    if unsafe { sys::fcntl(master, sys::F_SETFD, sys::FD_CLOEXEC) } != 0 {
+        // A master that would leak into the next program this process starts
+        // is a terminal that cannot be hung up by closing it -- see the module
+        // documentation. Refuse rather than hand one out: kill the child we
+        // just started, reap it, and report why.
+        let e = crate::last_errno();
+        // The child is ours and alive, so this cannot fail in a way that
+        // leaves anything to do: at worst it has already exited, and the reap
+        // below collects it either way.
+        let _ = crate::kill(pid, crate::SIGKILL);
+        reap(pid);
+        // SAFETY: as above.
+        unsafe { sys::close(master) };
+        return Err(e);
+    }
+
+    Ok(Spawned { pid, master })
 }
 
-/// Format `err` in decimal at the END of `buf`, returning where it starts.
+/// Read until `buf` is full or the writer has gone, retrying `EINTR`.
 ///
-/// Right-aligned so no reversal is needed. Twelve bytes hold `i32::MIN` with
-/// its sign; `errno` is never negative, but a formatter that could overrun on
-/// one is a formatter with a bug, and this one runs where nothing can catch it.
-fn errno_digits(err: i32, buf: &mut [u8; 12]) -> usize {
-    let negative = err < 0;
-    let mut value = err.unsigned_abs();
-    let mut at = buf.len();
-    loop {
-        at = at.saturating_sub(1);
-        let digit = value.wrapping_rem(10) as u8;
-        if let Some(slot) = buf.get_mut(at) {
-            *slot = b'0'.wrapping_add(digit);
-        }
-        value = value.wrapping_div(10);
-        if value == 0 || at == 0 {
+/// Returns the number of bytes read; a read error counts as the writer having
+/// gone, which from the exec report's point of view it has. Zero is "the
+/// child exec'd"; anything else is "the child is reporting".
+#[cfg(unix)]
+fn read_all_retrying(fd: i32, buf: &mut [u8]) -> usize {
+    let mut got = 0usize;
+    while let Some(rest) = buf.get_mut(got..) {
+        if rest.is_empty() {
             break;
         }
-    }
-    if negative && at > 0 {
-        at = at.saturating_sub(1);
-        if let Some(slot) = buf.get_mut(at) {
-            *slot = b'-';
+        // SAFETY: `rest` is a live, writable slice and the length handed over
+        // is its own.
+        let n = unsafe { sys::read(fd, rest.as_mut_ptr(), rest.len()) };
+        match usize::try_from(n) {
+            Ok(0) => break,
+            Ok(n) => got = got.saturating_add(n),
+            Err(_) if crate::last_errno() == EINTR => {}
+            Err(_) => break,
         }
     }
-    at
+    got
 }
 
-// ---------------------------------------------------------------------------
-// Talking to it
-// ---------------------------------------------------------------------------
-
-impl PtyChild {
-    /// The program's process id.
-    #[must_use]
-    pub fn pid(&self) -> i32 {
-        self.pid
-    }
-
-    /// The master descriptor, for an event loop that polls several things at
-    /// once. Still owned here: closing it is [`Drop`]'s job, and a caller that
-    /// closed it would leave this value holding a number the next `open` may
-    /// reuse.
-    #[must_use]
-    pub fn master_fd(&self) -> i32 {
-        self.master
-    }
-
-    /// Read the program's output into `buf`.
-    ///
-    /// # Errors
-    ///
-    /// Whatever `read` sets other than the three it translates: `EIO` is
-    /// [`Output::Closed`], and `EAGAIN` and `EINTR` are [`Output::Nothing`].
-    pub fn read(&self, buf: &mut [u8]) -> Result<Output, i32> {
-        if buf.is_empty() {
-            return Ok(Output::Nothing);
-        }
-        // SAFETY: `buf` is a live, writable slice of exactly `buf.len()`
-        // bytes for the duration of the call.
-        let n = unsafe { c::read(self.master, buf.as_mut_ptr(), buf.len()) };
-        if n > 0 {
-            return Ok(Output::Data(n.unsigned_abs()));
-        }
-        if n == 0 {
-            // §259: on a SlateOS master, zero is "nothing now", never the end.
-            return Ok(Output::Nothing);
-        }
-        match errno() {
-            EIO => Ok(Output::Closed),
-            EAGAIN | EINTR => Ok(Output::Nothing),
-            e => Err(e),
+/// Wait for `pid` to finish and discard its status, retrying `EINTR`.
+///
+/// Used only for a child this module has just started and knows is exiting
+/// or killed, so blocking here is bounded by that child's last few system
+/// calls.
+#[cfg(unix)]
+fn reap(pid: i32) {
+    let mut status = 0i32;
+    loop {
+        // SAFETY: `status` is a writable `i32`.
+        let rc = unsafe { sys::waitpid(pid, &raw mut status, 0) };
+        if rc >= 0 || crate::last_errno() != EINTR {
+            return;
         }
     }
+}
 
-    /// Write `bytes` -- keystrokes, a paste -- to the program. Returns how many
-    /// were taken, which may be fewer than offered.
-    ///
-    /// # Errors
-    ///
-    /// Whatever `write` sets: `EAGAIN` when the master is non-blocking and the
-    /// terminal's input queue is full, `EIO` once the program has gone.
-    pub fn write(&self, bytes: &[u8]) -> Result<usize, i32> {
-        // SAFETY: `bytes` is a live slice of exactly `bytes.len()` bytes for
-        // the duration of the call.
-        let n = unsafe { c::write(self.master, bytes.as_ptr(), bytes.len()) };
-        if n < 0 {
-            Err(errno())
-        } else {
-            Ok(n.unsigned_abs())
+#[cfg(unix)]
+fn set_window_size_one(master: i32, size: WinSize) -> Result<(), i32> {
+    let winsize = sys::Winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
+        ws_xpixel: size.xpixel,
+        ws_ypixel: size.ypixel,
+    };
+    // SAFETY: `TIOCSWINSZ` reads one `struct winsize` through the pointer,
+    // which is `winsize`, live for the whole call; nothing is written back.
+    let rc = unsafe { sys::ioctl(master, sys::TIOCSWINSZ, &raw const winsize) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(crate::last_errno())
+    }
+}
+
+#[cfg(unix)]
+fn try_wait_one(pid: i32) -> Result<ChildState, i32> {
+    let mut status = 0i32;
+    loop {
+        // SAFETY: `status` is a writable `i32`.
+        let rc = unsafe { sys::waitpid(pid, &raw mut status, sys::WNOHANG) };
+        match rc {
+            0 => return Ok(ChildState::Running),
+            r if r > 0 => return Ok(decode_status(status)),
+            _ => {
+                let e = crate::last_errno();
+                if e != EINTR {
+                    return Err(e);
+                }
+            }
         }
     }
+}
 
-    /// Wait up to `timeout_ms` milliseconds (negative: indefinitely) for there
-    /// to be something to [`read`](Self::read). `true` also when the terminal
-    /// has closed, because a read is then what says so.
-    ///
-    /// # Errors
-    ///
-    /// Whatever `poll` sets.
-    pub fn wait_readable(&self, timeout_ms: i32) -> Result<bool, i32> {
-        let mut fds = [Pollfd {
-            fd: self.master,
-            events: POLLIN,
-            revents: 0,
-        }];
-        // SAFETY: `fds` is a live one-element array for the duration of the
-        // call, and the count passed is its length.
-        let rc = unsafe { c::poll(fds.as_mut_ptr(), 1, timeout_ms) };
-        if rc < 0 {
-            return Err(errno());
-        }
-        Ok(fds[0].revents & (POLLIN | POLLHUP | POLLERR) != 0)
-    }
+#[cfg(not(unix))]
+fn spawn_one(
+    _path: &CStr,
+    _argv: &[&CStr],
+    _envp: &[&CStr],
+    _size: WinSize,
+) -> Result<Spawned, i32> {
+    Err(crate::ENOSYS)
+}
 
-    /// Tell the terminal -- and so the program, which receives `SIGWINCH` --
-    /// its new size.
-    ///
-    /// # Errors
-    ///
-    /// Whatever `ioctl(TIOCSWINSZ)` sets.
-    pub fn resize(&self, size: WindowSize) -> Result<(), i32> {
-        let mut winsize = Winsize::from(size);
-        // SAFETY: `winsize` is a live `struct winsize` for the duration of
-        // the call, which is all `TIOCSWINSZ` reads.
-        let rc = unsafe { c::ioctl(self.master, TIOCSWINSZ, &raw mut winsize) };
-        if rc < 0 { Err(errno()) } else { Ok(()) }
-    }
+#[cfg(not(unix))]
+fn set_window_size_one(_master: i32, _size: WinSize) -> Result<(), i32> {
+    Err(crate::ENOSYS)
+}
 
-    /// Make reads and writes on the master return at once rather than wait --
-    /// what an emulator's single-threaded event loop wants.
-    ///
-    /// # Errors
-    ///
-    /// Whatever `fcntl` sets.
-    pub fn set_nonblocking(&self, on: bool) -> Result<(), i32> {
-        // SAFETY: scalar arguments only; the variable one is an `i64` for the
-        // reason `mod c` gives.
-        let flags = unsafe { c::fcntl(self.master, F_GETFL, 0i64) };
-        if flags < 0 {
-            return Err(errno());
-        }
-        let flags = i64::from(flags);
-        let wanted = if on {
-            flags | O_NONBLOCK
-        } else {
-            flags & !O_NONBLOCK
+#[cfg(not(unix))]
+fn try_wait_one(_pid: i32) -> Result<ChildState, i32> {
+    Err(crate::ENOSYS)
+}
+
+#[cfg(unix)]
+fn wait_exited_one(pid: i32) -> Result<(), i32> {
+    // Room for a `siginfo_t` -- 128 bytes on every Linux ABI and ours --
+    // which `waitid` fills and nothing here reads. Given rather than null:
+    // null is a Linux extension POSIX does not promise.
+    let mut info = [0u64; 16];
+    loop {
+        // SAFETY: `info` is 128 writable bytes, the size of a `siginfo_t`.
+        let rc = unsafe {
+            sys::waitid(
+                sys::P_PID,
+                pid,
+                info.as_mut_ptr().cast::<core::ffi::c_void>(),
+                sys::WEXITED | sys::WNOWAIT,
+            )
         };
-        if wanted == flags {
+        if rc == 0 {
             return Ok(());
         }
-        // SAFETY: as above.
-        let rc = unsafe { c::fcntl(self.master, F_SETFL, wanted) };
-        if rc < 0 { Err(errno()) } else { Ok(()) }
-    }
-
-    /// How the program ended, if it has; `None` if it is still running.
-    ///
-    /// # Errors
-    ///
-    /// Whatever `waitpid` sets.
-    pub fn try_wait(&mut self) -> Result<Option<Exit>, i32> {
-        if let Some(exit) = self.exit {
-            return Ok(Some(exit));
+        let e = crate::last_errno();
+        if e != EINTR {
+            return Err(e);
         }
-        let mut status: i32 = 0;
-        // SAFETY: `status` is a live local the call writes into.
-        let rc = unsafe { c::waitpid(self.pid, &raw mut status, WNOHANG) };
-        if rc < 0 {
-            return Err(errno());
-        }
-        if rc == 0 {
-            return Ok(None);
-        }
-        let exit = Exit::from_wait_status(status);
-        self.exit = Some(exit);
-        Ok(Some(exit))
-    }
-
-    /// Wait for the program to end, and say how it did.
-    ///
-    /// # Errors
-    ///
-    /// Whatever `waitpid` sets, other than `EINTR`, which is retried.
-    pub fn wait(&mut self) -> Result<Exit, i32> {
-        if let Some(exit) = self.exit {
-            return Ok(exit);
-        }
-        let mut status: i32 = 0;
-        loop {
-            // SAFETY: `status` is a live local the call writes into.
-            let rc = unsafe { c::waitpid(self.pid, &raw mut status, 0) };
-            if rc >= 0 {
-                break;
-            }
-            let e = errno();
-            if e != EINTR {
-                return Err(e);
-            }
-        }
-        let exit = Exit::from_wait_status(status);
-        self.exit = Some(exit);
-        Ok(exit)
-    }
-
-    /// Send `sig` to the program.
-    ///
-    /// # Errors
-    ///
-    /// [`ESRCH`] once the program has been reaped: from that moment its pid
-    /// may name another process, so this refuses rather than signal whoever
-    /// has it now. Otherwise whatever [`crate::kill`] returns.
-    pub fn signal(&self, sig: i32) -> Result<(), i32> {
-        if self.exit.is_some() {
-            return Err(ESRCH);
-        }
-        crate::kill(self.pid, sig)
     }
 }
 
-impl Drop for PtyChild {
-    fn drop(&mut self) {
-        // SAFETY: `self.master` is the descriptor `forkpty` returned, owned by
-        // this value alone and closed only here. A failed close is not
-        // reportable from `drop` and leaves nothing to retry.
-        unsafe { c::close(self.master) };
-    }
+#[cfg(not(unix))]
+fn wait_exited_one(_pid: i32) -> Result<(), i32> {
+    Err(crate::ENOSYS)
 }
 
-// A failed expectation in a test is a panic by design; the lints that keep
-// panics out of production code have nothing to guard here.
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
-)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it; the defensive lints exist for code that runs on a
+    // user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
-    use std::string::String;
+    #[cfg(not(unix))]
+    use crate::ENOSYS;
 
-    /// Every value this module restates equals `posix`'s.
-    #[test]
-    fn values_agree_with_posix() {
-        assert_eq!(TIOCSWINSZ, posix::ioctl::TIOCSWINSZ);
-        assert_eq!(F_GETFL, posix::fcntl_ops::F_GETFL);
-        assert_eq!(F_SETFL, posix::fcntl_ops::F_SETFL);
-        assert_eq!(O_NONBLOCK, i64::from(posix::fcntl::O_NONBLOCK));
-        assert_eq!(POLLIN, posix::poll::POLLIN);
-        assert_eq!(POLLHUP, posix::poll::POLLHUP);
-        assert_eq!(POLLERR, posix::poll::POLLERR);
-        assert_eq!(WNOHANG, posix::process::WNOHANG);
-        assert_eq!(SIGPIPE, posix::signal::SIGPIPE);
-        assert_eq!(SIG_DFL, posix::signal::SIG_DFL);
-        assert_eq!(SIG_SETMASK, posix::signal::SIG_SETMASK);
-        // The zeroed mask `become_program` passes must be at least as large
-        // as the set the library reads, or it reads past the array.
-        assert!(
-            core::mem::size_of::<[u64; 16]>() >= core::mem::size_of::<posix::signal::SigsetT>()
-        );
+    const SH: &CStr = c"/bin/sh";
+
+    fn size(rows: u16, cols: u16) -> WinSize {
+        WinSize {
+            rows,
+            cols,
+            xpixel: 0,
+            ypixel: 0,
+        }
     }
 
-    /// Rows first in the C layout, whichever order a caller thinks in.
+    /// Every restated value equals `posix`'s. See `constants_agree_with_posix`
+    /// in the crate root for why a restatement needs a comparison.
     #[test]
-    fn the_window_size_crosses_into_rows_first() {
-        let w = Winsize::from(WindowSize {
-            cols: 132,
-            rows: 43,
-        });
+    fn constants_agree_with_posix() {
+        assert_eq!(E2BIG, posix::errno::E2BIG);
+        assert_eq!(EBADF, posix::errno::EBADF);
+        assert_eq!(EINTR, posix::errno::EINTR);
+        assert_eq!(EIO, posix::errno::EIO);
+        assert_eq!(ENOEXEC, posix::errno::ENOEXEC);
+        assert_eq!(ECHILD, posix::errno::ECHILD);
+        assert_eq!(EAGAIN, posix::errno::EAGAIN);
+        assert_eq!(ENOMEM, posix::errno::ENOMEM);
+        assert_eq!(EACCES, posix::errno::EACCES);
+        assert_eq!(ENOTDIR, posix::errno::ENOTDIR);
+        assert_eq!(ENFILE, posix::errno::ENFILE);
+        assert_eq!(EMFILE, posix::errno::EMFILE);
+        assert_eq!(ENOTTY, posix::errno::ENOTTY);
+        assert_eq!(ETXTBSY, posix::errno::ETXTBSY);
+        assert_eq!(ELOOP, posix::errno::ELOOP);
+        assert_eq!(SIGHUP, posix::signal::SIGHUP);
+    }
+
+    /// The `unix` arm's private copies, against the same source.
+    #[cfg(unix)]
+    #[test]
+    fn the_c_constants_agree_with_posix() {
+        assert_eq!(sys::O_CLOEXEC, posix::fcntl::O_CLOEXEC);
+        assert_eq!(sys::F_SETFD, posix::fcntl_ops::F_SETFD);
+        assert_eq!(sys::FD_CLOEXEC, i64::from(posix::fdtable::FD_CLOEXEC));
+        assert_eq!(sys::TIOCSWINSZ, posix::ioctl::TIOCSWINSZ);
+        assert_eq!(sys::WNOHANG, posix::process::WNOHANG);
+        assert_eq!(sys::P_PID, posix::process::P_PID);
+        assert_eq!(sys::WEXITED, posix::process::WEXITED);
+        assert_eq!(sys::WNOWAIT, posix::process::WNOWAIT);
+        assert_eq!(sys::SIG_SETMASK, posix::signal::SIG_SETMASK);
+        assert_eq!(sys::SIGPIPE, posix::signal::SIGPIPE);
+        assert_eq!(sys::SIG_DFL, posix::signal::SIG_DFL);
         assert_eq!(
-            (w.ws_row, w.ws_col, w.ws_xpixel, w.ws_ypixel),
-            (43, 132, 0, 0)
+            core::mem::size_of::<[u64; sys::SIGSET_WORDS]>(),
+            core::mem::size_of::<posix::signal::SigsetT>()
         );
     }
 
-    /// The wait-status decoding, against the words Linux and SlateOS produce.
+    /// A status word decodes the way `posix`'s own macros read it.
+    ///
+    /// Checked against `posix::process`'s `wifexited` family rather than
+    /// against literals alone, so that the two decodings cannot drift apart.
     #[test]
-    fn a_wait_status_is_an_exit_code_or_a_signal() {
-        assert_eq!(Exit::from_wait_status(0), Exit::Code(0));
-        assert_eq!(Exit::from_wait_status(3 << 8), Exit::Code(3));
-        assert_eq!(Exit::from_wait_status(127 << 8), Exit::Code(127));
-        assert_eq!(Exit::from_wait_status(9), Exit::Signal(9));
-        // SIGSEGV with the core-dump bit (0x80): the bit is not the signal.
-        assert_eq!(Exit::from_wait_status(0x80 | 11), Exit::Signal(11));
+    fn status_words_decode_like_the_c_macros() {
+        use posix::process::{wexitstatus, wifexited, wifsignaled, wtermsig};
+        for status in [0, 0x100, 0x7f00, 0xff00, 9, 15, 0x8b, 0x0f] {
+            let expected = if wifexited(status) {
+                ChildState::Exited(wexitstatus(status))
+            } else if wifsignaled(status) {
+                ChildState::Signaled(wtermsig(status))
+            } else {
+                ChildState::Running
+            };
+            assert_eq!(decode_status(status), expected, "status {status:#x}");
+        }
+        assert_eq!(decode_status(0), ChildState::Exited(0));
+        assert_eq!(decode_status(0x0300), ChildState::Exited(3));
+        // Signal 9 with the core-dump bit (0x80) still decodes as signal 9.
+        assert_eq!(decode_status(0x89), ChildState::Signaled(9));
+        // Stopped and continued are not exits.
+        assert_eq!(decode_status(0x137f), ChildState::Running);
+        assert_eq!(decode_status(0xffff), ChildState::Running);
     }
 
-    /// The child's only formatter, which runs where nothing can catch it.
+    /// No argument vector at all is refused before anything is created.
     #[test]
-    fn errno_digits_are_right_aligned_and_never_overrun() {
-        let show = |e: i32| {
-            let mut buf = [0u8; 12];
-            let at = errno_digits(e, &mut buf);
-            String::from_utf8(buf[at..].to_vec()).unwrap()
-        };
-        assert_eq!(show(0), "0");
-        assert_eq!(show(2), "2");
-        assert_eq!(show(38), "38");
-        assert_eq!(show(i32::MAX), "2147483647");
-        assert_eq!(show(-5), "-5");
-        assert_eq!(show(i32::MIN), "-2147483648");
+    fn an_empty_argument_vector_is_refused() {
+        assert_eq!(spawn(SH, &[], &[], size(24, 80)), Err(EINVAL));
     }
 
-    /// Refused before anything is opened, on every build.
+    /// One argument too many, in either vector, is refused -- and exactly at
+    /// the limit is not (it reaches the arm below the checks instead).
+    // `MAX_ENV + 1` references is 16 KiB, just over the lint's line, on a
+    // test thread's stack of megabytes; and this crate has no allocator to put
+    // them on the heap with.
+    #[allow(clippy::large_stack_arrays)]
     #[test]
-    fn a_program_with_no_name_or_no_argv_is_refused() {
-        let size = WindowSize { cols: 80, rows: 24 };
-        let sh = c"/bin/sh";
-        assert_eq!(
-            spawn(c"", &[c"x"], &[], None, size).map(|_| ()),
-            Err(EINVAL)
-        );
-        assert_eq!(spawn(sh, &[], &[], None, size).map(|_| ()), Err(EINVAL));
+    fn oversized_vectors_are_refused_at_exactly_the_limit() {
+        let many = [c"x"; MAX_ARGS + 1];
+        assert_eq!(spawn(SH, &many, &[], size(24, 80)), Err(E2BIG));
+        let env = [c"A=1"; MAX_ENV + 1];
+        assert_eq!(spawn(SH, &[SH], &env, size(24, 80)), Err(E2BIG));
+
+        // At the limit the checks pass. On a host that is the ENOSYS arm; on
+        // a unix host the program is one that does not exist, so the answer
+        // is the child's report rather than the guard's.
+        let at_limit = [c"x"; MAX_ARGS];
+        let missing = c"/nonexistent/slateos-libcall-test";
+        let rc = spawn(missing, &at_limit, &[], size(24, 80));
+        assert_ne!(rc, Err(E2BIG), "the limit itself was refused");
+        assert!(rc.is_err());
     }
 
-    /// Where there is no terminal to open, the answer is `ENOSYS`, not a
-    /// child that is not there.
+    /// A broadcast pid never reaches `waitpid`.
+    ///
+    /// On both builds, because the guard sits above the split -- which is the
+    /// only reason this test can run on the host at all.
+    #[test]
+    fn try_wait_refuses_anything_but_one_child() {
+        assert_eq!(try_wait(0), Err(EINVAL));
+        assert_eq!(try_wait(-1), Err(EINVAL));
+        assert_eq!(try_wait(-42), Err(EINVAL));
+    }
+
+    /// A negative descriptor is refused as a bad descriptor, not passed on.
+    #[test]
+    fn set_window_size_refuses_a_negative_descriptor() {
+        assert_eq!(set_window_size(-1, size(24, 80)), Err(EBADF));
+    }
+
+    /// On a host every call declines once the checks have passed, rather than
+    /// pretending a terminal exists.
     #[cfg(not(unix))]
     #[test]
-    fn the_host_arm_declines() {
-        let size = WindowSize { cols: 80, rows: 24 };
-        assert_eq!(
-            spawn(c"/bin/sh", &[c"sh"], &[], None, size).map(|_| ()),
-            Err(crate::ENOSYS)
-        );
+    fn the_host_arms_decline() {
+        assert_eq!(spawn(SH, &[SH], &[], size(24, 80)), Err(ENOSYS));
+        assert_eq!(set_window_size(3, size(24, 80)), Err(ENOSYS));
+        assert_eq!(try_wait(1), Err(ENOSYS));
+        assert_eq!(wait_exited(1), Err(ENOSYS));
     }
 
-    /// The end-to-end half: a real terminal, a real program. Runs on a `unix`
-    /// build -- a Linux host (WSL here), or SlateOS itself.
+    /// `wait_exited` means one child, as `try_wait` does.
+    #[test]
+    fn wait_exited_refuses_every_pid_that_is_not_one_process() {
+        for pid in [0, -1, -42] {
+            assert_eq!(wait_exited(pid), Err(EINVAL), "pid {pid}");
+        }
+    }
+
+    /// Everything below starts real programs on real pseudo-terminals, so it
+    /// runs only where there are some: a Linux host, against glibc's
+    /// `forkpty`. It is the test of *this* module's half -- the vectors, the
+    /// exec report, the signal resets, close-on-exec, the size -- not of
+    /// `posix`'s, which the ring-3 fixture `services/ctest-python-repl` covers
+    /// on SlateOS itself.
     #[cfg(unix)]
     mod on_a_real_terminal {
+        extern crate std;
+
         use super::super::*;
+        use super::{SH, size};
         use std::string::String;
         use std::time::{Duration, Instant};
+        use std::vec::Vec;
 
-        const SIZE: WindowSize = WindowSize {
-            cols: 100,
-            rows: 40,
-        };
-
-        /// Everything the program writes, until the terminal closes. Bounded,
-        /// so a test that would hang fails instead.
-        fn drain(child: &PtyChild) -> String {
-            let deadline = Instant::now() + Duration::from_secs(20);
+        /// Everything the child writes until its terminal closes, or until
+        /// `limit` passes.
+        ///
+        /// Non-blocking so that a child that never finishes fails the test
+        /// instead of hanging it. `EIO` is how a master reports that the last
+        /// slave descriptor has closed -- the ordinary end of a terminal
+        /// session, not an error.
+        fn read_until_closed(master: i32, limit: Duration) -> String {
+            const F_GETFL: i32 = 3;
+            const F_SETFL: i32 = 4;
+            const O_NONBLOCK: i64 = 0o4000;
+            const EAGAIN: i32 = 11;
+            // SAFETY: flag-word `fcntl`s on a descriptor the test owns.
+            unsafe {
+                let flags = sys::fcntl(master, F_GETFL);
+                assert!(flags >= 0);
+                assert_eq!(
+                    sys::fcntl(master, F_SETFL, i64::from(flags) | O_NONBLOCK),
+                    0
+                );
+            }
+            let deadline = Instant::now() + limit;
             let mut out = Vec::new();
-            let mut buf = [0u8; 4096];
-            while Instant::now() < deadline {
-                if !child.wait_readable(200).expect("poll") {
+            let mut buf = [0u8; 512];
+            loop {
+                // SAFETY: `buf` is writable for its whole length.
+                let n = unsafe { sys::read(master, buf.as_mut_ptr(), buf.len()) };
+                if n > 0 {
+                    out.extend_from_slice(&buf[..usize::try_from(n).unwrap()]);
                     continue;
                 }
-                match child.read(&mut buf).expect("read") {
-                    Output::Data(n) => out.extend_from_slice(&buf[..n]),
-                    Output::Nothing => {}
-                    Output::Closed => return String::from_utf8_lossy(&out).into_owned(),
-                }
-            }
-            panic!(
-                "the terminal never closed; read so far: {:?}",
-                String::from_utf8_lossy(&out)
-            );
-        }
-
-        fn sh(script: &str) -> PtyChild {
-            let script = std::ffi::CString::new(script).unwrap();
-            spawn(
-                c"/bin/sh",
-                &[c"sh", c"-c", script.as_c_str()],
-                &[c"PATH=/usr/bin:/bin", c"TERM=xterm"],
-                None,
-                SIZE,
-            )
-            .expect("spawn")
-        }
-
-        #[test]
-        fn the_program_runs_on_a_terminal_of_the_size_asked_for() {
-            let mut child = sh("stty size; tty");
-            let out = drain(&child);
-            assert!(out.contains("40 100"), "{out:?}");
-            assert!(!out.contains("not a tty"), "{out:?}");
-            assert_eq!(child.wait(), Ok(Exit::Code(0)));
-        }
-
-        #[test]
-        fn the_program_inherits_no_descriptor_but_the_terminal() {
-            // A descriptor the caller left inheritable. Everything std opens is
-            // close-on-exec, which Linux's `exec` would close anyway, so a
-            // test using only those would pass with no `closefrom` at all --
-            // this is the one that proves the step, and the one SlateOS needs,
-            // where close-on-exec does not close (see the module docs).
-            const F_SETFD: i32 = 2;
-            let file = std::fs::File::open("/dev/null").expect("open");
-            let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
-            // SAFETY: `fd` is open for the life of `file`; clearing its
-            // close-on-exec flag touches nothing else.
-            assert_eq!(unsafe { c::fcntl(fd, F_SETFD, 0i64) }, 0);
-
-            // `ls` holds one of its own on /proc/self/fd while it reads it,
-            // so the honest expectation is 0, 1, 2 and exactly one more.
-            let mut child = sh("ls /proc/self/fd");
-            let out = drain(&child);
-            let fds: Vec<&str> = out.split_whitespace().collect();
-            assert_eq!(fds.len(), 4, "{out:?}");
-            assert_eq!(&fds[..3], &["0", "1", "2"], "{out:?}");
-            assert_eq!(child.wait(), Ok(Exit::Code(0)));
-            drop(file);
-        }
-
-        #[test]
-        fn sigpipe_is_back_at_its_default() {
-            // The test harness, like every Rust program, ignores SIGPIPE. The
-            // child must not: bit 12 of SigIgn is signal 13.
-            let mut child = sh("grep SigIgn /proc/self/status");
-            let out = drain(&child);
-            let mask = out
-                .split_whitespace()
-                .nth(1)
-                .and_then(|h| u64::from_str_radix(h, 16).ok())
-                .expect("a SigIgn mask");
-            assert_eq!(mask & (1 << 12), 0, "{out:?}");
-            assert_eq!(child.wait(), Ok(Exit::Code(0)));
-        }
-
-        #[test]
-        fn a_program_that_cannot_run_says_so_on_the_terminal_and_exits_127() {
-            let mut child = spawn(c"/nonexistent/program", &[c"program"], &[], None, SIZE)
-                .expect("the fork itself succeeds");
-            let out = drain(&child);
-            assert!(
-                out.contains("/nonexistent/program: cannot run (errno 2)"),
-                "{out:?}"
-            );
-            assert_eq!(child.wait(), Ok(Exit::Code(127)));
-        }
-
-        #[test]
-        fn the_program_starts_where_it_is_asked_to() {
-            let script = std::ffi::CString::new("pwd").unwrap();
-            let mut child = spawn(
-                c"/bin/sh",
-                &[c"sh", c"-c", script.as_c_str()],
-                &[],
-                Some(c"/"),
-                SIZE,
-            )
-            .expect("spawn");
-            let out = drain(&child);
-            assert_eq!(out.trim(), "/", "{out:?}");
-            assert_eq!(child.wait(), Ok(Exit::Code(0)));
-
-            let mut child =
-                spawn(c"/bin/sh", &[c"sh"], &[], Some(c"/nonexistent/dir"), SIZE).expect("spawn");
-            let out = drain(&child);
-            assert!(out.contains("cannot enter its start directory"), "{out:?}");
-            assert_eq!(child.wait(), Ok(Exit::Code(127)));
-        }
-
-        #[test]
-        fn typing_reaches_the_program_and_its_exit_status_comes_back() {
-            let mut child = spawn(c"/bin/sh", &[c"sh"], &[c"PS1=$ "], None, SIZE).expect("spawn");
-            child.write(b"echo typed-$((6*7))\n").expect("write");
-            child.write(b"exit 3\n").expect("write");
-            let out = drain(&child);
-            assert!(out.contains("typed-42"), "{out:?}");
-            assert_eq!(child.wait(), Ok(Exit::Code(3)));
-            // Reaped: the pid may be anyone's now, so it is not signalled.
-            assert_eq!(child.signal(crate::SIGTERM), Err(ESRCH));
-            assert_eq!(child.try_wait(), Ok(Some(Exit::Code(3))));
-        }
-
-        #[test]
-        fn a_resize_reaches_the_running_program() {
-            let mut child = spawn(c"/bin/sh", &[c"sh"], &[c"PS1="], None, SIZE).expect("spawn");
-            child
-                .resize(WindowSize {
-                    cols: 132,
-                    rows: 43,
-                })
-                .expect("resize");
-            child.write(b"stty size; exit\n").expect("write");
-            let out = drain(&child);
-            assert!(out.contains("43 132"), "{out:?}");
-            assert_eq!(child.wait(), Ok(Exit::Code(0)));
-        }
-
-        #[test]
-        fn a_non_blocking_read_of_a_quiet_terminal_is_nothing_not_an_error() {
-            let mut child = spawn(c"/bin/sh", &[c"sh"], &[c"PS1="], None, SIZE).expect("spawn");
-            child.set_nonblocking(true).expect("set");
-            // Idempotent: asking again changes nothing and still succeeds.
-            child.set_nonblocking(true).expect("set again");
-            let mut buf = [0u8; 64];
-            // Whatever the shell has printed so far, a quiet terminal ends in
-            // Nothing rather than an error, and never in Closed.
-            let mut saw_nothing = false;
-            for _ in 0..50 {
-                match child.read(&mut buf) {
-                    Ok(Output::Nothing) => {
-                        saw_nothing = true;
-                        break;
-                    }
-                    Ok(Output::Data(_)) => {}
-                    other => panic!("{other:?}"),
-                }
-            }
-            assert!(saw_nothing);
-            child.set_nonblocking(false).expect("unset");
-            child.write(b"exit 0\n").expect("write");
-            drain(&child);
-            assert_eq!(child.wait(), Ok(Exit::Code(0)));
-        }
-
-        #[test]
-        fn dropping_it_hangs_the_terminal_up() {
-            // An interactive shell that never exits on its own: only the
-            // hangup can end it, and the hangup is the master closing.
-            let child = spawn(c"/bin/sh", &[c"sh"], &[], None, SIZE).expect("spawn");
-            let pid = child.pid();
-            drop(child);
-            let mut status = 0;
-            let deadline = Instant::now() + Duration::from_secs(20);
-            loop {
-                // SAFETY: `status` is a live local; `pid` is our own child.
-                let rc = unsafe { c::waitpid(pid, &raw mut status, WNOHANG) };
-                if rc == pid {
+                if n == 0 {
                     break;
                 }
-                assert!(Instant::now() < deadline, "the shell outlived its terminal");
-                std::thread::sleep(Duration::from_millis(50));
+                let e = crate::last_errno();
+                if e == EIO {
+                    break;
+                }
+                assert!(e == EAGAIN || e == EINTR, "read failed: errno {e}");
+                assert!(
+                    Instant::now() < deadline,
+                    "the child's terminal never closed; got {:?}",
+                    String::from_utf8_lossy(&out)
+                );
+                std::thread::sleep(Duration::from_millis(5));
             }
-            // Reaching here is the assertion: the shell ended once its
-            // terminal was hung up. How it ended is the shell's business --
-            // bash and dash take the hangup's failed read as end of input and
-            // exit with a status; a shell with no handler dies of the SIGHUP
-            // itself -- so the status is not examined.
+            // Bytes from a test child, shown to a human if an assertion fails.
+            // Lossy is acceptable here and nowhere else: this is a diagnostic,
+            // not data being carried anywhere.
+            String::from_utf8_lossy(&out).into_owned()
+        }
+
+        /// Reap `pid`, waiting up to two seconds for it to finish.
+        fn wait_for(pid: i32) -> ChildState {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match try_wait(pid).expect("try_wait") {
+                    ChildState::Running => {
+                        assert!(Instant::now() < deadline, "the child never exited");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    done => return done,
+                }
+            }
+        }
+
+        fn close(fd: i32) {
+            // SAFETY: a descriptor the test owns, closed once.
+            unsafe { sys::close(fd) };
+        }
+
+        /// The point of the whole module: the program is on a terminal.
+        ///
+        /// `test -t` is `isatty`, which is exactly the check a shell makes to
+        /// decide whether to be interactive -- the check a shell on pipes
+        /// fails, and why one on pipes prints no prompt.
+        #[test]
+        fn the_child_runs_on_a_terminal() {
+            let script = c"test -t 0 && test -t 1 && test -t 2 && echo on-a-tty";
+            let s = spawn(SH, &[c"sh", c"-c", script], &[], size(24, 80)).expect("spawn");
+            let out = read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            assert!(out.contains("on-a-tty"), "not on a terminal: {out:?}");
+            assert_eq!(wait_for(s.pid), ChildState::Exited(0));
+        }
+
+        /// The size given to `spawn` is the size the child sees.
+        #[test]
+        fn the_child_sees_the_size_it_was_given() {
+            let s = spawn(SH, &[c"sh", c"-c", c"stty size"], &[], size(33, 101)).expect("spawn");
+            let out = read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            assert!(out.contains("33 101"), "stty size said {out:?}");
+            wait_for(s.pid);
+        }
+
+        /// A resize after the start reaches the child too -- the `TIOCSWINSZ`
+        /// half, which a terminal calls every time its window changes.
+        #[test]
+        fn a_resize_reaches_the_running_child() {
+            // `read` holds the child until the resize has happened.
+            let s =
+                spawn(SH, &[c"sh", c"-c", c"read x; stty size"], &[], size(24, 80)).expect("spawn");
+            set_window_size(s.master, size(40, 132)).expect("resize");
+            // SAFETY: a one-byte write from a live buffer to our own master.
+            let wrote = unsafe { sys::write(s.master, b"\n".as_ptr(), 1) };
+            assert_eq!(wrote, 1);
+            let out = read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            assert!(out.contains("40 132"), "after the resize stty said {out:?}");
+            wait_for(s.pid);
+        }
+
+        /// The environment is exactly the one passed, not the parent's.
+        #[test]
+        fn the_environment_is_the_one_given() {
+            let s = spawn(
+                c"/usr/bin/env",
+                &[c"env"],
+                &[c"SLATE_A=one", c"SLATE_B=two"],
+                size(24, 80),
+            )
+            .expect("spawn");
+            let out = read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            assert!(out.contains("SLATE_A=one"), "{out:?}");
+            assert!(out.contains("SLATE_B=two"), "{out:?}");
+            assert!(
+                !out.contains("PATH="),
+                "the parent's environment leaked: {out:?}"
+            );
+            wait_for(s.pid);
+        }
+
+        /// A program that does not exist is `ENOENT` from `spawn`, not a child
+        /// that exits 127.
+        #[test]
+        fn a_missing_program_is_an_error_and_leaves_no_child() {
+            let missing = c"/nonexistent/slateos-libcall-test";
+            assert_eq!(
+                spawn(missing, &[c"x"], &[], size(24, 80)),
+                Err(posix_enoent())
+            );
+        }
+
+        fn posix_enoent() -> i32 {
+            posix::errno::ENOENT
+        }
+
+        /// The exit status comes back, and a signal death is told apart from
+        /// an exit.
+        #[test]
+        fn exit_statuses_and_signal_deaths_are_reported() {
+            let s = spawn(SH, &[c"sh", c"-c", c"exit 7"], &[], size(24, 80)).expect("spawn");
+            read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            assert_eq!(wait_for(s.pid), ChildState::Exited(7));
+
+            let s = spawn(SH, &[c"sh", c"-c", c"kill -9 $$"], &[], size(24, 80)).expect("spawn");
+            read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            assert_eq!(wait_for(s.pid), ChildState::Signaled(9));
+        }
+
+        /// `wait_exited` blocks until the child is done and leaves it to be
+        /// collected: the exit status is still there afterwards, once.
+        #[test]
+        fn wait_exited_blocks_and_leaves_the_child_to_be_collected() {
+            let s =
+                spawn(SH, &[c"sh", c"-c", c"sleep 0.2; exit 5"], &[], size(24, 80)).expect("spawn");
+            let start = Instant::now();
+            assert_eq!(wait_exited(s.pid), Ok(()));
+            assert!(
+                start.elapsed() >= Duration::from_millis(150),
+                "it did not wait"
+            );
+            assert_eq!(
+                wait_exited(s.pid),
+                Ok(()),
+                "not collected: it can be waited for again"
+            );
+            assert_eq!(
+                try_wait(s.pid),
+                Ok(ChildState::Exited(5)),
+                "and its status is intact"
+            );
+            assert!(try_wait(s.pid).is_err(), "collected once");
+            close(s.master);
+        }
+
+        /// A finished child is reaped once, and asking again is an error.
+        #[test]
+        fn a_reaped_child_is_not_reported_twice() {
+            let s = spawn(SH, &[c"sh", c"-c", c"true"], &[], size(24, 80)).expect("spawn");
+            read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            assert_eq!(wait_for(s.pid), ChildState::Exited(0));
+            assert!(try_wait(s.pid).is_err(), "a second answer for one exit");
+        }
+
+        /// The child does not inherit an ignored `SIGPIPE`.
+        ///
+        /// Rust ignores `SIGPIPE` in every program it starts, this test binary
+        /// included, and the disposition survives `execve` unless it is reset.
+        /// Bit 12 of `SigIgn` is signal 13.
+        #[test]
+        fn sigpipe_is_restored_for_the_child() {
+            let s = spawn(
+                SH,
+                &[c"sh", c"-c", c"grep SigIgn /proc/self/status"],
+                &[],
+                size(24, 80),
+            )
+            .expect("spawn");
+            let out = read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            wait_for(s.pid);
+            let hex = out
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("SigIgn:"))
+                .expect("no SigIgn line")
+                .trim();
+            let mask = u64::from_str_radix(hex, 16).expect("hex mask");
+            assert_eq!(mask & (1 << 12), 0, "SIGPIPE is still ignored: {hex}");
+        }
+
+        /// The master will not leak into the next program this process
+        /// starts.
+        #[test]
+        fn the_master_is_close_on_exec() {
+            const F_GETFD: i32 = 1;
+            let s = spawn(SH, &[c"sh", c"-c", c"true"], &[], size(24, 80)).expect("spawn");
+            // SAFETY: a flag query on a descriptor the test owns.
+            let flags = unsafe { sys::fcntl(s.master, F_GETFD) };
+            read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            wait_for(s.pid);
+            assert!(flags >= 0);
+            assert_ne!(
+                i64::from(flags) & sys::FD_CLOEXEC,
+                0,
+                "the master is inheritable"
+            );
+        }
+
+        /// A signal is delivered to the child through the terminal's line
+        /// discipline, not by us: `^C` typed at the master interrupts the
+        /// foreground job. This is what makes it a terminal and not a pipe.
+        #[test]
+        fn ctrl_c_at_the_master_interrupts_the_child() {
+            let s = spawn(
+                SH,
+                &[c"sh", c"-c", c"echo ready; sleep 30"],
+                &[],
+                size(24, 80),
+            )
+            .expect("spawn");
+            // Wait for the child to be running `sleep` before interrupting it.
+            std::thread::sleep(Duration::from_millis(300));
+            // SAFETY: a one-byte write from a live buffer to our own master.
+            let wrote = unsafe { sys::write(s.master, [0x03u8].as_ptr(), 1) };
+            assert_eq!(wrote, 1);
+            read_until_closed(s.master, Duration::from_secs(5));
+            close(s.master);
+            match wait_for(s.pid) {
+                ChildState::Signaled(2) => {}
+                // Some shells exit with 128+SIGINT rather than re-raising.
+                ChildState::Exited(130) => {}
+                other => panic!("^C did not interrupt the child: {other:?}"),
+            }
         }
     }
 }

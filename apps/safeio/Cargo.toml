@@ -5,6 +5,7 @@ edition = "2024"
 description = "SlateOS shared crash-safe file writes — write-to-temporary-and-rename so an interrupted save can never truncate the file it was saving."
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 
 [features]
 # Counts the atomic operations this crate performs, so that a caller's tests

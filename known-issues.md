@@ -55902,6 +55902,18 @@ derives the payload size from the block structure and a test asserts it equals
 every row's stated capacity; both halves of the encoder read the data codeword
 count from one `data_codewords()` instead of each spelling out the subtraction.
 
+**It was not the last of them (2026-09-25, lane E).** The second opinion this
+finding asked for arrived as a test that reads each symbol back the way a
+scanner does, from a layout written again from the standard
+(`every_symbol_reads_back_as_what_was_encoded`). It found versions 7-10 with
+no version information at all -- the data placed where the version belongs,
+every later bit one place off, so the symbol was unreadable from 123 bytes at
+M, the same threshold as above -- version 10's alignment centres at 52 instead
+of 50, and the second format copy missing its bit 7. Fixed with the qrcode
+rework (see `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+**The lesson is this finding's own, one layer down:** the tests checked the
+codewords, and nothing checked the matrix a scanner reads them from.
+
 **A lint suppression whose justification did not cover the case that bit.**
 `apps/qrcode` allows `arithmetic_side_effects` and `indexing_slicing`
 file-wide, with a comment explaining that "indices are computed from QR-version
@@ -61545,7 +61557,33 @@ that make it likely to recur:
 inert rather than wrong. The remaining string-keyed apps have not been converted
 yet, and each is an opportunity to hit this again.
 
-### TD-C-LOGVIEWER-TAILS-A-STRING-COMPILED-INTO-ITSELF — 2026-09-04 — OPEN
+### TD-C-LOGVIEWER-TAILS-A-STRING-COMPILED-INTO-ITSELF — 2026-09-04 — FIXED 2026-09-25
+
+**Fixed 2026-09-25 (lane E, which owns `apps/` since the six-lane split).** The
+viewer reads files. `main` opens the system journal
+(`journalrec::MAIN_LOG_PATH`, `/var/log/syslog.jsonl`), and Open or Ctrl+O opens
+any other log in a tab of its own. The details the entry below names are all
+handled, and each has a test and a mutation that proves the test sees it:
+
+- **Following.** While a log with a file is open the window takes a one-second
+  clock (`tick_interval`) and reads what the file has grown by. Following
+  decides only whether the selection goes to what arrives.
+- **A half-written last line** is shown -- a file that ends without a newline is
+  complete as far as anyone can know -- and kept aside as bytes; when the rest
+  arrives, that entry is read again with it, so it becomes one entry, keeps a
+  bookmark given to its first half, and a character cut in two by the read is
+  whole.
+- **A log truncated or replaced** under the viewer (shorter than what was read)
+  is read again from the start.
+- **A log too large to read whole** is read from its end, at the first whole
+  line after the last 64 MiB; at most the newest 100 000 entries are kept, and
+  lines that would be let go at once are not parsed at all.
+- **Export** writes the exact bytes of the lines the filter shows, re-read from
+  the file and checked against a fingerprint of what was read, so a log changed
+  on disk since is refused rather than exported as lines that are not the ones
+  shown; it will not write over the log itself.
+
+The twenty invented entries survive as `App::with_sample`, for tests only.
 
 **In short.** The log viewer's own description promises "real-time log tailing
 with auto-scroll", and it draws an auto-scroll indicator in the status bar that
@@ -61620,7 +61658,33 @@ clone with a `filter-repo` history in it.
 a work tree", while the same commands work fine in `os-lane-a/b/c`. The check is
 `git -C "…/os" config --get core.bare`; the answer should be `false` or absent.
 
-### TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING — 2026-09-04 — OPEN
+### TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING — 2026-09-04 — FIXED 2026-09-25
+
+**FIXED 2026-09-25 (lane E).** The renamer has the control this entry asked
+for: an Add Rule menu (the toolbar's button, the operations panel's, or `R`)
+that adds any of the ten kinds, and a rule editor under the pipeline with a
+text box for every string or number a rule takes, a chooser for every choice
+(all eight case modes, all five date formats, the three trim modes, the five
+extension rules, start / end / at-a-position) and a switch for each flag.
+Typing takes effect as it is typed; a counting box refuses what is not a number
+and says so with a red rule under the box. `FileEntry::modified_ms` is read
+from the folder listing and a date stamp stamps it; `RenameRecord::timestamp_ms`
+is the clock's and the History panel shows it. Every rule can be selected
+(a press, or Ctrl+Up / Ctrl+Down), edited (F2), moved and removed -- the
+selection used to land only on the newest rule, so the others could be neither.
+
+Making the rules reachable showed what three of them would have done, fixed in
+the same change: the Regex rule was a literal replace ("only support literal
+patterns for now") and is a POSIX extended regular expression through `ere`,
+the engine the shell, `grep` and `sed` share, with `&` and `\1`...`\9` in the
+replacement; the date stamp was the constant 2026-05-18 and is the file's own
+modification date (UTC, `Tz::utc()`); and an empty search put the replacement
+between every character. Also: numbering counted every file in the list rather
+than the files being renamed, ticking a file did not re-run the preview or the
+conflicts, and opening a folder threw the rules away.
+
+The rest of this entry is the history.
+
 
 **Corrected 2026-09-15.** The paragraph below said the renamer "can actually
 rename". It could not: `apply_plan` edited a `Vec<FileEntry>` and the crate
@@ -61738,6 +61802,13 @@ here yet because nothing holds a tab index across a close. `id` is kept rather
 than deleted because it is what to switch to, and it is already maintained
 correctly.
 
+*2026-09-25 (lane E):* the first things to hold a tab across user
+interaction -- the unsaved-changes question and the picker choosing where to
+save -- name their tab by `id`, and `id` is read at last. `close_tab` now moves
+the active index when a tab before it closes, which a click on another tab's
+close mark made reachable. Everything else still addresses the *active* tab by
+position, which is safe within one event.
+
 **Neither is urgent.** No data is lost: an edit that cannot be made is a feature
 that is absent rather than a feature that is wrong, and the tab indices are
 consistent within a single operation. Written down because both look done from
@@ -61783,11 +61854,11 @@ promise to break.
 | `logviewer` | 21 log lines, filterable | any file; its header promises "real-time log tailing" and it draws an auto-scroll toggle | `None`, documented |
 | `sysinfo` | CPU, memory, disks, uptime | any read at all — uptime is the string `"4h 23m 17s"` | `None`, documented |
 | `sysmonitor` | processes, live graphs, alerts | a real process source, but the *clock* is now real | the refresh interval |
-| `finance` | accounts, budgets, transactions | both a source and a way to enter anything; see its own entry | `None`, documented |
+| `finance` | accounts, budgets, transactions | ~~both a source and a way to enter anything; see its own entry~~ -- both, 2026-09-25: forms, and a ledger kept as it changes | until midnight, for today's date |
 | `email` | an inbox, folders, threads, filters | a network. Every IMAP and SMTP command it can build -- `login`, `select`, `fetch`, `ehlo`, `mail_from`, twenty in all -- returns a protocol string with no socket to write it to | `None`, documented |
 | `rssreader` | feeds, folders, articles, search | an HTTP client. Its RSS/Atom parser is real and now runs at startup on one sample feed, but nothing can fetch a second one, so `global_auto_refresh_seconds` has nothing to refresh | `None`, documented |
 | `ebook` | library, pagination, bookmarks, contents, search | a window that can be resized. The reading position is a byte offset precisely so it survives repagination, and nothing ever repaginated because nothing ever changed size | `None` -- nothing in a book advances on its own |
-| `torrent` | transfers, peers, pieces, trackers | a network. `TrackerRequest::build_url` builds an announce URL nothing can fetch, so no peer list ever comes back -- the swarm a download picks pieces from is invented at the first tick | `PIECE_STEP` while downloading |
+| `torrent` | transfers, peers, pieces, trackers | a network. `TrackerRequest::build_url` builds an announce URL nothing can fetch, so no peer list ever comes back -- the swarm a download picks pieces from is invented at the first tick | `PIECE_STEP` while downloading -- since 2026-09-25 only while a download has a peer, so never; see `[E] The torrent client transfers nothing` |
 | `spreadsheet` | a sheet a user can actually fill in | nothing to *show* — the gap is the other way round: `import_csv`/`export_csv` work on a `String` and there is no file dialog, command line or system clipboard to carry one | `None`, documented |
 
 **The rule that came out of it, and it is not "wire a tick".** In each case the
@@ -61856,7 +61927,26 @@ corrupted; the app is a picture of a weather app. The reason to write it down is
 that the settings screen actively asserts otherwise, and a future reader could
 spend a while looking for the fetch that the interval configures.
 
-### TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA — 2026-09-04 — OPEN
+**Update 2026-09-25 (lane E): the settings screen no longer asserts it.** The
+interval row is gone from the settings view, as the proper fix above says it
+should be until it drives something; `Settings::update_interval_min` and
+`set_update_interval` stay for the source to use. What remains open is the
+source itself. (The sample weather the entry describes had already been
+removed on 2026-09-15; the app opens on a notice that it cannot fetch.)
+*Later the same day:* the field and its setter are gone too -- the pre-push
+write-only-fields gate refused them, written, clamped and tested and read by
+nothing but the tests. The interval comes back with the source.
+
+### TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA — 2026-09-04 — FIXED 2026-09-25
+
+**Fixed 2026-09-25 (lane E), all three gaps in one change, as this entry
+said they had to be.** Forms enter and change accounts, transactions and
+budgets; the ledger is kept as it changes, in a text file under the settings
+directory (`design-decisions.md` §1202 says why text and not YAML); and
+`current_date` is the clock's, with the view following midnight. The sample
+data stays test-only -- a first run opens on an empty dashboard that says
+why it is empty, where things will be kept, and has the one button that
+begins. The rest of this entry is the history.
 
 **In short.** The finance app now opens a window and responds to the keyboard,
 but there is no way to *put anything into it*: no "new transaction", no "new
@@ -156202,7 +156292,8 @@ maintained for a long time without anyone asking whether the spec wanted it**,
 because maintenance asks "is this correct?" and only a reader of the design
 asks "should this be here?"
 
-## TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS -- 2026-09-16
+## TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS -- 2026-09-16 -- **FIXED 2026-09-25**
+**Status:** FIXED 2026-09-25 by lane E -- both dead fields deleted as this entry prescribes (`grub_cfg_path` and `custom_dir`, with the local that only fed them); the record was serialised nowhere, and `parse_grub_config` itself has only its two tests as callers.
 
 **In short:** the installer builds a record of the boot loader's configuration
 and puts the path of its config file in it. Nothing anywhere reads that field.
@@ -159019,7 +159110,7 @@ one of these was introduced by an edit that added something and left the
 header alone.
 
 ## `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` (lane C, 2026-09-17)
-**Status:** OPEN — 2026-09-24 (lane F): the stall is about 3.5x shorter, not gone. `imagecodec`'s JPEG decoder is now about 3.3x faster with bit-identical output (4000x5333: whole picture 3.65 s → ~1.1 s, 128-px thumbnail 1.25 s → ~0.34 s, release, this machine), but the decode still runs on the thread that draws; moving it off that thread is still the fix. — 2026-09-25 (lane F): **the missing piece this entry names, the wake, now exists.** An application that returns `true` from `App::wants_waker` is handed a `std::task::Waker` in `App::attach_waker` before its first frame; a worker that calls `wake()` gets the application an `App::on_wake` on the loop's thread, then a frame (`EventLoop::waker`, `Dispatch::Woken`; design-decisions §1303). What remains is lane E's: moving the two decodes onto a worker — `requests/f-ce-a-finished-decode-can-now-wake-the-window-that-asked-for-it.md`.
+**Status:** OPEN — 2026-09-24 (lane F): the stall is about 3.5x shorter, not gone. `imagecodec`'s JPEG decoder is now about 3.3x faster with bit-identical output (4000x5333: whole picture 3.65 s → ~1.1 s, 128-px thumbnail 1.25 s → ~0.34 s, release, this machine), but the decode still runs on the thread that draws; moving it off that thread is still the fix. — 2026-09-25 (lane F): **the missing piece this entry names, the wake, now exists.** An application that returns `true` from `App::wants_waker` is handed a `std::task::Waker` in `App::attach_waker` before its first frame; a worker that calls `wake()` gets the application an `App::on_wake` on the loop's thread, then a frame (`EventLoop::waker`, `Dispatch::Woken`; design-decisions §1303). What remains is lane E's: moving the two decodes onto a worker — `requests/f-ce-a-finished-decode-can-now-wake-the-window-that-asked-for-it.md`. — 2026-09-26 (lane E): **both decodes are off the thread that draws.** `apps/imageviewer` (`display_image` → `request`) and `apps/photomanager` (`sync_picture`) ask for the waker and decode on a worker from the new `apps/offloop` (`Latest`: a request supersedes those waiting behind it, and only the newest request's result is handed back, so paging past photographs decodes the one the user stops on and a slow one can never land on top of the next). The viewer keeps the last picture up and says which is coming; the photo manager shows the card until the pixels arrive. With no waker (before the window exists, in tests) each decodes in place as before. Closing this entry is lane C's. Still on the drawing thread: the grids' **thumbnails** (`thumbs::ThumbnailGenerator::process_batch`, a bounded batch per frame, in `apps/explorer` and `apps/photomanager`) -- lane E's to move, a queue of every visible card rather than newest-wins; tracked in `[E] Thumbnails are still generated on the thread that draws`.
 
 **In short:** click a photograph and the window stops responding until the
 picture has been decoded -- about two thirds of a second for a photograph from
@@ -159869,7 +159960,7 @@ computes how many rows fit with `(height - 30.0) / 24.0` and then advances
 812 pixels, so the last few are drawn past the bottom of the panel they are
 in. One of the two numbers is wrong and they should be one constant.
 
-## `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED` (lane C, 2026-09-17)
+## `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED` (lane C, 2026-09-17) -- **ALL EXAMINED 2026-09-25 (lane E)**
 
 **In short:** twenty-one applications draw a graphical interface and handle no
 mouse events at all. Not "handle clicks badly" -- they never receive one:
@@ -159944,6 +160035,453 @@ a control drawn at coordinates the click handler had never heard of.
 **The measurement, which is one command:**
 
     grep -c "Event::Mouse\|MouseEvent" apps/*/src/main.rs
+
+**UPDATE 2026-09-25 (lane E): the list is lane E's now, and a third is
+examined -- `apps/markdowneditor`, a wholesale case like `notes`, and a worse
+one.** Recounted over each app's whole `src/` (every one is a single `main.rs`),
+twenty apps still take no pointer: weather, reminders, rssreader,
+markdowneditor, habits, pinball, slides, flashcards, finance, logviewer,
+qrcode, torrent, mediaconvert, regextester, tmux, soundrecorder, renamer,
+email, filesearch, metronome. `roadmap.md` → Lane E tracks them.
+
+The markdown editor drew a toolbar, a tab bar, a table of contents, a find
+panel and three dialogs, and its module doc called the contents "clickable".
+Asking the reachability question of each thing it offered found that the
+pointer was the smaller half of it:
+
+| | before | now |
+|---|---|---|
+| view mode, contents, templates, Save As | no key, no pointer: **unreachable** | a toolbar button each and a key each |
+| switching or closing a tab | no key, no pointer: a document once open stayed open, behind whichever was newest | tabs and close buttons answer; Ctrl+Tab, Ctrl+W; a `»` menu when the tabs overflow |
+| HTML export | computed the HTML and dropped it (`let _ = html;`) | writes it where the picker says |
+| a file changed on disk | `check_external_change` had no caller -- the prompt, merge and review were never raised | checked on focus and on tab switch; every answer a button and a key; a deleted file no longer offered a "Reload" that did nothing |
+| selection | the anchor had four writers that cleared it and none that set it | drag, Shift+press, Shift+arrows, Ctrl+A; typing replaces it; cut, copy, paste |
+| auto-save | no off switch | the status-bar label is one |
+| a failed Save As | reported only to a field nothing drew | sticky and red, like any failed save |
+
+Found on the way and fixed: undoing a delete that spanned lines put the
+newlines *inside* one line; the delete recorded an unclamped column; a heading
+button stacked `## ## `; a toolbar separator was a `NewFile` button in
+disguise; a narrow window drew its last toolbar buttons off its own edge. The
+close-button dialog is in and tested, and cannot take effect yet -- see the
+[E] entry on closing over unsaved work.
+
+Three examined: `notes` (wholesale), `reminders` (keyboard-driven by
+construction, two specific gaps), `markdowneditor` (wholesale, plus five
+operations nothing reached by any route). Seventeen to go.
+
+**`apps/filesearch`, 2026-09-25 -- wholesale, and the search could not use
+what it found.** Enter was on the F1 card as "Open what is selected" and re-ran
+the search; the preview's four action buttons were wired to nothing; the
+results stopped at the panel's edge with no way to scroll, while the keyboard
+could select rows that were never drawn; the filters panel ran under the status
+bar; every keystroke was recorded into a search history nothing drew, and
+saving a search had no caller. Now: every control answers the pointer; Enter,
+Open and Ctrl+L open a result with the program File Associations names or its
+folder in the file manager; the results and the filters scroll; recent searches
+(the ones something was opened from) and saved searches (which outlive the
+window) are listed and run again on a press. Copy Path and Properties were
+removed rather than wired: the first needs an application-reachable clipboard
+that can carry a path (the explorer's clipboard entry), and the second was the
+preview pane itself. Also fixed: "now" was the constant `1_779_000_000`, so the
+date filters and every "3 hours ago" were measured from one day in May 2026,
+and the Content mode matched names (its own [E] entry, fixed the same day).
+Four examined; sixteen to go.
+
+**`apps/renamer`, 2026-09-25 -- wholesale, and most of its purpose was
+unreachable.** Beyond the missing pointer, every rule that needed a string typed
+or a choice made could not be added (its own entry,
+`TD-C-RENAMER-CAN-ONLY-ADD-THE-RULES-THAT-NEED-NO-TYPING`, now fixed), only the
+newest rule could be selected, the file list and the extension filter had no
+way to scroll or be typed into, and the layout ignored the window's size. All
+reachable now, by pointer and by key. Five examined; fifteen to go.
+
+**`apps/logviewer`, 2026-09-25 -- wholesale, and there was no log.** Beyond the
+missing pointer, the viewer read no file: its entries were a string compiled
+into it (`TD-C-LOGVIEWER-TAILS-A-STRING-COMPILED-INTO-ITSELF`, now fixed), so
+its tailing, its follow switch and its "export filtered view" were words. The
+list could not be scrolled at all -- `scroll_offset` was written by nothing, and
+the keyboard walked the selection off the bottom of the window -- N and P moved
+a counter in the filter bar and not the selection, the search was a substring
+under a doc comment promising regular expressions, the time range could not be
+set by any route, a source filter could be cleared only by clearing everything,
+the detail view cut its message and raw line to one elided line each, and
+unbound chords ran the bare key under them (`Ctrl+D` raised the level floor).
+Now it opens the system journal at start and any log by Open or Ctrl+O, follows
+what is written with a line caught half-written becoming one entry, reads a
+rotated log again, exports the entries shown as the file's own bytes, searches
+by POSIX ERE (the engine `grep -E` uses) on Ctrl+R, and every control answers
+the pointer. Following now stops when the reader selects an earlier entry, since
+on a busy log the next line would otherwise drag the selection away before it
+could be read. Six examined; fourteen to go.
+
+**`apps/regextester`, 2026-09-25 -- wholesale, and half of it was out of
+reach.** Beyond the missing pointer: the test input could not take a newline
+(Enter's text is a control character and the typing path dropped them all), so
+the multiline flag had nothing to act on; every field could be edited only at
+its end; nothing scrolled (`scroll_offset` and `match_scroll_offset` were read
+and never written), so a long text, the matches past the first screenful, half
+the library and the end of the reference could not be seen; the Groups and
+Explain sub-tabs were drawn with nothing behind them and the breakdown was cut
+at six lines; a library pattern could not be loaded and none could be saved
+(`load_library_entry` and `save_to_library` had no caller -- `todo.txt`'s
+entry, now done); and typing on the Library tab went into a pattern nobody
+could see. Also fixed: match highlights were placed by treating a character
+index as a byte offset (wrong letters after any accent), the replacement's
+result was painted with the input's highlights, and each match attempt copied
+the whole input into a new character vector (a thousand matches over the
+16 384-character limit copied sixteen million characters per keystroke). Now
+the test input is a real multi-line field (caret, selection, clipboard, drag),
+the library saves patterns with their flags to the user's settings, and every
+control answers the pointer. Seven examined; fourteen to go -- the counts in
+the paragraphs above are each one short, because the list is twenty apps
+*besides* `notes`, which was the first examined.
+
+**`apps/weather`, 2026-09-25 -- a pointer layer, and three things that failed
+only with nothing fetched, which is every real run.** The app has no data
+source and says so; that part was right. But with nothing fetched F1 raised a
+shortcut card that was never drawn -- the draw returned before reaching it --
+while the card, being modal, swallowed every key, so the window looked frozen
+until F1 or Escape happened to be pressed. The Settings tab showed the same
+"cannot fetch" notice as every other tab, so U, W, P and T changed units
+nobody could see; and the units were forgotten at every start. Now the card
+and the settings draw whatever was fetched, a settings row changes its value
+on a press, the units are kept in the user's settings, the six tabs, the
+places and the hourly strip (under the wheel, either way) answer the pointer,
+and the update interval -- shown as "30 min", unchangeable, with nothing to
+refresh -- is absent until something refreshes, as
+`TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH` said it should be.
+Eight examined; thirteen to go.
+
+**`apps/rssreader`, 2026-09-25 -- a pointer layer, three panes that could not
+scroll, and a notice nobody could see.** The reader is keyboard-rich and
+honest about not fetching -- but its "cannot fetch" lines were drawn at the
+top of the window before the title bar, which painted over them, while the
+title bar offered a "Refresh All" button for a refresh nothing here can do.
+None of the three panes scrolled (`article_scroll_offset` and
+`sidebar_scroll_offset` were read and never written, and the article's offset
+only ever reset), so the selection walked off the list after nine articles and
+a long article was cut. Feed discovery (`discover_feeds`) was written, tested
+and called by nothing. Now the notice is where the articles would be and names
+the one way to get some (open a downloaded feed file); Open… and Export…
+replace the dead button; every row, dot, star, badge, button and prompt
+answers the pointer; the panes scroll under the wheel and follow the
+selection, and Page Down reads on; a saved web page opened with Open…
+subscribes to the feeds it links to. The reader still forgets everything at
+exit -- its own entry below. Nine examined; twelve to go.
+
+**`apps/habits`, 2026-09-25 -- the clock's day, a record that is kept, a
+pointer layer, and two lists that stopped at the edge.** "Today" was 18 May
+2026 in every run, moved only by `+` and `-`, so a check-in made today was
+filed in May; it is the clock's now, and rolls over at midnight while the
+window is open (design-decisions 1201). Nothing was kept -- the notice said
+so, from under the header that painted over it -- and every habit and
+check-in is now kept in the user's settings (`habits.yaml`, one entry per
+habit; an entry that cannot be read is skipped and left in the file). Ctrl+D
+deleted a habit and its whole record without asking; it asks now, on a card
+whose buttons answer the pointer, and an archived habit can be deleted from
+its row. Every tab, button, row, day cell and form control answers the
+pointer, and F1 lists the keys (the form's frequency moved from F1 to F2, its
+weekly count to Up and Down). The archive and the statistics table stopped
+drawing at the window's bottom edge; both scroll now, the dashboard follows
+its selection, Page Down pages, and the number keys start a screen at its top
+as a tab does. And a space could not be typed into a habit's name. 167 tests;
+`apps/habits/mutate.py` has 55 rows. Ten examined; eleven to go.
+
+**`apps/slides`, 2026-09-25 -- a pointer layer, and an editor that could not
+change most of a slide, keep a deck, or show one.** Nothing selected an
+element but adding one, so nothing a layout put on a slide -- the first
+slide's title included -- could be selected, typed into, moved or deleted, and
+only text boxes could be typed into at all (every Title + Content slide said
+"First point" for good). Undo and redo had no key, and the toolbar's Undo and
+Redo lit up and could not be pressed. The notes were shown and exported and
+could not be written. Ctrl+N made one layout and nothing made the other five.
+Nothing could move or resize an element. The thumbnail column and the sorter
+clipped and never scrolled. `set_theme` said it restyled every slide and
+restyled none, so the Light theme put pale text on a pale ground. There was
+no save and no open -- a deck lived as long as the window -- and no show: the
+transition every slide chose was stored, printed and exported as nothing. And
+the export's result message was drawn nowhere, so a failed export failed in
+silence. Now: Tab selects, a press selects and a second press types, a drag
+moves and corner handles resize, the arrows nudge; every toolbar and panel
+button works and the panel's values change; Ctrl+M and + Slide reach every
+layout; the thumbnails scroll, follow and reorder by drag; a theme change
+restyles what came from the theme; decks save and open as YAML (`.slides`,
+versioned), with a question before Open loses unsaved work and a `*` in the
+window bar; F5 presents, with each transition played -- in the export too, and
+lines there run in their own direction instead of flat. 146 tests;
+`apps/slides/mutate.py` has 61 rows. Eleven examined; ten to go.
+
+**`apps/flashcards`, 2026-09-25 -- a card editor nothing could type into,
+decks that could not be named, and a spaced-repetition program that forgot
+its reviews.** The card editor's keys were Enter and Escape, so no card could
+be made or changed (the tests set the strings directly); `n` made a deck
+called "New Deck" that nothing could rename; a delete took a deck or a card
+and its whole history at once. Nothing answered the pointer, the deck list
+had no scrolling, the card list showed eight rows at any height, the deck
+view's hint line advertised a `[D]ay+` key removed when the day came from the
+clock, a long answer was cut on the study card, and the notice was drawn
+under the header. Nothing was kept: Ctrl+S wrote one deck to a file the user
+had to open again at every start, and a review not saved that way was gone at
+close. Now the fields type (TextInput, Tab between them), decks are named and
+renamed, deletes ask, every button, row, field and rating answers the
+pointer, both lists scroll and fit the window, F1 lists the keys, answers
+wrap, and every deck and review is kept as it changes (one file per deck under
+the settings directory, opt-in so no test can write the developer's own).
+198 tests; `apps/flashcards/mutate.py` has 38 rows. Twelve examined; nine to
+go.
+
+**`apps/finance`, 2026-09-25 -- a budget tracker nothing could be entered
+into, that kept nothing, and whose today was a constant.** `add_account`,
+`add_transaction` and `set_budget` had no caller outside the tests; the
+notice saying so was drawn at the top of the window and then painted over by
+the sidebar and the header. Nothing was kept. "Today" was 18 May 2026 in
+every run. Nothing answered the pointer. The transaction list showed every
+month in the order things were typed, under a header naming one month whose
+arrows changed nothing in it, and it did not scroll -- rows past the bottom
+were not drawn, and the arrow keys stopped at the last one on screen. The
+budgets screen listed only budgets already set, so none could be set. Ctrl+D
+deleted at once, from any screen, including a transaction chosen on another
+one. Now: forms enter and change accounts, transactions and budgets (typed
+fields, Tab between them, choices stepped by the keys or their arrows, and a
+refusal that says why and keeps what was typed); deletes ask, on the screen
+that shows what goes; the list is the header's month, newest first, and a
+search reaches every month; every list scrolls and keeps its choice in view;
+the sidebar, month arrows, search box, category chip, buttons, rows, fields
+and question all answer the pointer; F1 lists the keys; today and midnight
+come from the clock; and the ledger is kept as it changes (a text file under
+the settings directory, refused whole and left alone if it cannot be read
+whole -- `design-decisions.md` §1202). 105 tests; `apps/finance/mutate.py`
+has 49 rows. Thirteen examined; eight to go.
+
+**`apps/qrcode`, 2026-09-25 -- a generator whose codes could not be kept,
+whose history was keystrokes, and whose symbols a scanner could not always
+read.** Nothing answered the pointer; the toolbar's Generate button did
+nothing (typing already generates) and nothing else could keep a code; the
+colour swatches could not be changed; the one box took typing at its end and
+nothing else; the history gained an entry per keystroke ("H", "He", "Hel"...)
+and a press on one did nothing; emptying the box left the old code on screen;
+an empty web-address box encoded `https://`; a barcode silently dropped what
+Code B cannot hold ("Café" scanned as "Caf" under a label reading
+"Café"); WiFi security was Ctrl+S, which everywhere else saves; and the
+window opened on a code and a history entry for "Hello, Slate OS!". Reading
+the symbols back as a scanner does found worse: **versions 7-10 had no version
+information**, so their data sat where the version belongs and every later bit
+was misplaced (anything past about 120 bytes -- most contacts); **version 10's
+alignment centres were 52 instead of 50**; the second format copy never wrote
+its bit 7; and **the Code128 table was corrupt from value 60** (entries
+marked "placeholder", one with a zero-width space, several duplicates), so no
+barcode with a lowercase letter could be read. Now: every control answers the
+pointer; the boxes are text fields (caret, selection, copy, cut, paste); one
+history entry per code, which a press brings back; SVG saving at the module
+size, in the chosen colours (PNG waits on
+`requests/e-f-a-png-encoder-applications-can-save-with.md`); colours chosen in
+the toolkit's colour dialog, with a warning when scanners may fail; the
+preview shrinks to fit; and a test reads every version back through a layout
+written again from the standard, and checks the Code128 table's rules and a
+sample of the published one. 114 tests; `apps/qrcode/mutate.py` has 41 rows.
+Fourteen examined; seven to go.
+
+**`apps/torrent`, 2026-09-25 -- a client that says it cannot transfer, said
+so where nobody could read it, and offered controls nothing could press.**
+The three-line notice was drawn at the top of the window and then painted
+over by the background and the header. Nothing answered the pointer: six
+toolbar buttons, seven filters, five labels, six tabs and every row. The
+transfer list did not scroll -- rows past the bottom were not drawn -- and Up
+and Down walked the transfers in the order they were added, not the order on
+screen, so with a sort or a filter on they jumped about and onto hidden rows.
+A label could be neither given nor chosen by; the search had a query and no
+way to type one; `add_magnet` had no caller and the dialog fields that would
+have fed it were written and never read; a file set to Skip was downloaded all
+the same, because nothing carried a file's priority to the pieces the picker
+reads; and a transfer set going asked for a tick every 150 ms for good, with no
+network to bring it a peer. Now: every button, filter, label, tab, column head
+(a press sorts, a second reverses) and row (a second press shows the details)
+answers the pointer; the list scrolls and follows the selection; a magnet
+dialog (Ctrl+U) that says what is wrong with a bad link; a search box (`/`);
+labels given with L or a press in the details; file priorities that set the
+pieces' (a piece shared by a skipped file and a wanted one is still fetched);
+"No network" in place of "Downloading" at 0% for good; and no clock without a
+peer. 103 tests; `apps/torrent/mutate.py` has 25 rows. The transfer itself is
+its own entry below. Fifteen examined; six to go.
+
+**`apps/mediaconvert`, 2026-09-25 -- a converter that could not be given a
+file or start a job.** Nothing added a source -- `add_source` had no caller
+outside the tests -- and `start_next_job` refused every job, so the queue could
+only ever hold a plan for files it had never seen; the notice saying so was
+drawn at the top of the window, under the toolbar that painted over it.
+Nothing answered the pointer. Of the settings drawn, only the profile and the
+quality preset could be changed: the sample rate, channels, sample format,
+picture size and naming rule were drawn and fixed, and every output was bound
+for `/home/converted`, a folder nothing makes, with no way to choose another.
+A `{date}` in a naming pattern was always `20260518`. And nothing in the tree
+decodes MP3, FLAC, AAC, Vorbis, Opus or any video, or encodes PNG, JPEG, GIF
+or WebP. Now: files are added with Ctrl+O and folders with Ctrl+Shift+O, and
+each is read for what it is (its size; a WAV's length and format; a picture's
+dimensions); jobs run one at a time on a worker thread, with a progress bar
+that moves and a cancel that stops before anything is written; every setting
+is walked with Up and Down and changed with Left and Right or a press; outputs
+go beside their sources or to a folder chosen in the dialog (`B`, `O`); a job
+is chosen by the arrows or a press, and Delete acts on that one; and nothing
+is written over -- a name on disk, the source's own, or one another job has
+planned gets " (2)", and a file that takes the name while the job waits is
+left alone (`safeio::write_new_atomically`, new: the finished file is linked
+into place, so the check and the claim are one operation). It converts WAV
+to WAV at any rate, channel count and sample format (`apps/wavpcm`, new: every
+PCM and float WAV read, windowed-sinc resampling, the standard channel mixes,
+TPDF dither) and PNG or JPEG to BMP, at their own size or fitted inside one.
+Every other profile is listed as "Not available", saying which half --
+decoder or encoder -- is missing, and is refused before it is queued. On the
+way: with a file chosen, the source list could not be scrolled, because every
+frame scrolled it back to the choice. 89 tests, 14 in `wavpcm` and six new in
+`safeio`; `apps/mediaconvert/mutate.py` has 29 rows, `apps/wavpcm/mutate.py`
+21 and `apps/safeio/mutate.py` 6. (A first cut read a WAV's length from the
+megabyte it reads for the header, so anything longer showed the wrong length;
+`wavpcm::parse_header_prefix` measures against the file.) The music player and the sound recorder
+read and write WAV with their own code; moving them onto `wavpcm` is part of
+examining the recorder, next. Sixteen examined; five to go.
+
+**`apps/soundrecorder`, 2026-09-25 -- a recorder that can neither record nor
+play here, and could reach nothing after a take.** No application can open a
+capture device -- the kernel's ALSA capture node hands back silence, because
+the mixer behind it has no input -- and nothing gives an application a way to
+play sound; the window said the first and not the second. Nothing answered the
+pointer. Everything after a take was out of reach even in principle: Save added
+a history entry naming `/recordings/<name>`, a file nothing wrote; trim handles
+and a playback bar were drawn over a take that could not exist; and no
+recording already on disk could be opened, so on this system the program had
+no use at all. Now: the recordings folder (`~/Recordings`, or one chosen for
+the session) is listed with each file's length and format, read by `wavpcm`
+from its first megabyte; any WAV opens -- from the list, or from anywhere with
+Ctrl+O -- as the waveform of the whole file, drawn from its stored samples;
+markers are put down (M or a press), named (F2), dragged, removed (Delete) and
+saved into the file as the `cue ` and `labl` chunks sound editors share -- but
+not over a file another program has changed since it was opened; a stretch is
+kept by setting its start and end (`[`, `]`, or dragging the handles) and saved
+as a new file, its samples copied as stored and its markers moved to its start,
+never over the recording itself; and unsaved markers are not left behind by one
+press on another file. Record and Play say why they cannot, by key and by
+press. The take is kept for the day a capture source exists, and Stop now
+saves it -- samples exactly as captured (the recorder's own WAV writer, and its
+reader that took only a 44-byte header, are gone for `wavpcm`), markers as cue
+points -- as a new file named for the moment, never over another, and opens
+it. 129 tests; `apps/soundrecorder/mutate.py` has 27 rows. The missing sound
+path for applications is its own entry below. Seventeen examined; four to go.
+
+**`apps/metronome`, 2026-09-25 -- a silent metronome that never said so.** It
+cannot make a sound (no application can, the [E] entry below) and drew nothing
+to say it, so a user who started it and heard nothing would look for a muted
+speaker. Nothing answered the pointer: not the tempo, not the beats, not the
+practice settings. Practice mode always began at 80 BPM -- `practice_start_bpm`
+had no writer -- under a panel whose other values could be changed, and its
+keys worked only once practice mode was already on. The beats were accented
+with the digits, so beats ten to twelve of a 12/8 measure could not be. Now:
+the window says the beat is shown, not heard; every control answers the
+pointer (tempo steps of one and ten, the wheel over the tempo, tap and forget,
+time signature, subdivision, a press on any beat to accent it, start, reset,
+practice, settings); the practice settings are rows -- practice itself, the
+start tempo, the target, the step, the measures -- that Up and Down walk and
+Left and Right change, set before practice starts, with a start above the
+target pulling it up; and F1 or `?` lists every key. 82 tests;
+`apps/metronome/mutate.py` has 15 rows. Eighteen examined; three to go.
+
+**`apps/email`, 2026-09-25 -- a mail client with no mail it could show, and a
+compose form it never drew.** It cannot send or receive (no network, no TLS),
+which it said -- in a notice the header then painted over. Worse, Ctrl+N opened
+a compose panel that nothing drew: every key typed after it went into a draft
+no one could see, and Escape threw it away. Nothing answered the pointer. The
+reading pane showed a message's one-line preview as the message; "below", one
+of the three pane positions Ctrl+P steps through, drew no pane at all. And no
+message could ever be in the window, from anywhere. Reading its parser to give
+it some found more: it took only text and read a part only if it was UTF-8;
+encoded words stayed `=?UTF-8?B?...?=` in subjects and names; an address list
+split at every comma, so `"Doe, Jane"` became two broken addresses; parameters
+split at every semicolon; attachments named only in `Content-Type` were not
+attachments; an HTML-only message showed nothing; and **the builder declared
+its body quoted-printable and wrote it raw**, so `x=41` read back as `xA`,
+while non-ASCII subjects and file names went into the headers as raw UTF-8.
+Now: it reads mail kept in files -- `~/Mail`'s mbox files (Thunderbird's
+extensionless folders too) and folders of `.eml` messages, and any file opened
+with Ctrl+O -- through a reader that decodes charsets, RFC 2047 words, RFC 2231
+names, HTML as text and mbox quoting (`apps/email/src/decode.rs`); a message
+is shown whole, with its attachments saved where the dialog says; marks (read,
+flagged) are kept in a file of its own under the configuration directory,
+because **it never rewrites mail it did not make**, and deleting such mail is
+refused with the reason; the compose form is drawn, with real text fields and a
+many-line body (`apps/textarea`, shared with the regular-expression tester),
+Tab between From, To, Cc, Subject and the body, attachments added and taken
+off, a draft saved to `~/Mail/Drafts` and opened again to go on writing, Save
+as file for an `.eml` to send from elsewhere, Send checking the message and
+saying plainly it cannot be sent, and closing over unsaved work asking first;
+and every control answers the pointer, the list and the message scroll, and
+all three pane positions draw. A message written here reads back exactly as
+written, which a test checks. 109 tests; `apps/email/mutate.py` has 35 rows
+over the window, the codings and the store. Nineteen examined; two to go.
+
+**`apps/tmux`, 2026-09-25 -- a multiplexer of terminals with nothing in them.**
+Every pane held a banner saying the system had no PTY layer, long after
+`apps/terminal` had a shell on a kernel pseudo-terminal; typing into a pane went
+nowhere, because every key that was not a multiplexer command was dropped; and
+nothing answered the pointer. Its own ANSI parser -- no scroll regions, no
+alternate screen, no cursor-key modes -- could not have drawn a full-screen
+program anyway. Reading it for the rework found more that was false:
+`:split-window -h` and the `even-horizontal` layout each did the opposite of
+tmux's; `prefix +`, "grow the pane", shrank every pane on the right or at the
+bottom; `}`, "swap this pane with the next", only moved the focus; `;`, "the
+pane you were in before", was the previous pane in order; `prefix 1` went to
+the window labelled 2 once a window had closed; the status bar's clock counted
+the seconds the window had been open and printed them as the time of day; a
+refused window or split left an orphan pane behind; a pane too small to halve
+was split into two that overlapped; a chooser drew all sixty-four sessions at
+the same pitch, most of them below its box; and the detached screen said to type
+`tmux attach`, a command that exists nowhere. Now every pane is an
+`apps/terminal` terminal -- the terminal is a library as well as a program for
+this -- running the user's shell: keys go to the active pane's shell, output is
+read on the tick (from background windows and detached sessions too), a pane's
+size reaches its shell whenever the layout changes, a shell that exits cleanly
+takes its pane with it and one that fails leaves the pane to say how, and a
+closed pane hangs its shell up. Closing a pane or a window asks first, as tmux
+does. The pointer reaches everything: tabs, a new-window button, each pane's
+title, grid and scrollback bar (a drag selects, the wheel scrolls the pane under
+it), the status bar's session and windows, the choosers' rows, the detached
+screen's Attach and Sessions, the question's Yes and No, and an F1 Keys button.
+Copy mode has the keyboard while it is on, marks whole lines that the terminal
+highlights, and copies the pointer's selection too; a paste goes to the program
+as a paste, fenced when it asked for bracketed paste. The clock is the wall
+clock, in UTC and said so. Putting the terminal's emulator in panes that are
+resized on every split found five bugs in *it*, all fixed: shrinking the grid
+pushed a shell's prompt into the scrollback; the hidden screen under a
+full-screen program lost its prompt on a resize; one saved-cursor slot served
+both screens; `reset` (`ESC c`) dropped the link to the shell and so killed it;
+and its grid was drawn in the proportional face at a guessed cell size. 62
+tests in tmux (91 in the terminal); `apps/tmux/mutate.py` has 42 rows and
+`apps/terminal/mutate.py` 90. Sessions end with the window -- see `[E] tmux is
+not a server`. Twenty examined; one to go.
+
+**`apps/pinball`, 2026-09-25 -- the last, and the case for "keyboard by design"
+did not hold.** It is a game played with the keys, and could have been left
+so -- but its table, its plunger lane and its New game were all drawn for a
+pointer that did nothing, and reading it found false features besides.
+"Tilt" was pressing the flippers fifteen times in a second, which killed the
+flippers for three seconds: the penalty fell on playing well, and there was no
+way to shove the table at all. The high-score table was five scores -- 10000
+down to 1000 -- that nobody had made, and nothing was kept when the window
+closed. N threw away a game in progress on one key. The flippers moved only
+inside the physics step, so they did not move while a ball waited in the
+plunger lane. The game ran on while its window was behind another, and a
+flipper held when the window lost the keyboard stayed up for good. And it asked
+for a tick sixty times a second whether or not anything was moving. Now: the
+pointer plays the whole game -- hold on the table's left or right half for that
+flipper, hold on the plunger lane to pull and let go to launch -- and the
+sidebar has New game, Pause, Nudge and Keys (F1, which lists every key); Up
+nudges the table and shoves the ball, and the third nudge in five seconds tilts
+it: dead flippers and no scoring until the ball drains; high scores are real,
+dated, and kept in `pinball/high-scores.txt` under the settings directory -- a
+file that cannot be read whole is left alone and the sidebar says why; N during
+a game asks first and says what is lost; losing the keyboard pauses the game
+and lets go of everything held; and the clock runs only while something moves.
+132 tests; `apps/pinball/mutate.py` has 31 rows. **All twenty-one examined** --
+two (`reminders`, `notes`) before the list was lane E's, nineteen since.
 
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
@@ -163496,6 +164034,7 @@ uses tabs. Without the second, opening a Makefile and typing still corrupts
 it, which is the case the whole finding is about.
 
 ## `TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` -- **FIXED 2026-09-18** (lane C)
+**Status:** FIXED again 2026-09-24 by lane E -- the 2026-09-18 fix ran the shell on pipes, which is not a terminal (no prompt, no `^C`, no size, and a dropped stderr pipe that killed it); it now runs on a kernel pseudo-terminal. See `[E] The terminal's shell ran on pipes` at the end of this file.
 
 **In short:** `apps/terminal` has no shell and starts no process. Typing works
 and the characters appear -- the PTY's cooked-mode line discipline echoes them
@@ -168219,11 +168758,7 @@ not help today, for the reason above; once the platform fix lands it becomes
 a one-line `fcntl(F_SETFD, FD_CLOEXEC)` after `openpty`, and should be made
 then.
 
-**Why not moved onto `libcall::pty::spawn`, which avoids both:** that path
-(`forkpty`, then `closefrom(3)` and `execve`) does not change identity, and
-`sshd` must: its `Command` carries the user's uid, gid and groups
-(`authlib::identity`). Doing that in a hand-written fork child is a security-
-sensitive piece of work of its own; the platform fix makes it unnecessary.
+**Why not moved onto `libcall::pty::spawn`:** it does not change identity, and `sshd` must: its `Command` carries the user's uid, gid and groups (`authlib::identity`). Nor would it avoid the wait: the `spawn` in the tree (lane E's, design-decisions §1200) reports a failed `execve` through a close-on-exec pipe, as `std` does, so on SlateOS it waits for the child to exit in the same way (`requests/b-e-libcall-pty-spawn-waits-for-the-shell-to-exit-on-slateos.md`). The platform fix is the fix for all of them.
 
 **Fix:** land the request (lane A releases a native `exec`'s close-on-exec
 handles; lane D names them), then set `FD_CLOEXEC` on the master in
@@ -168307,6 +168842,849 @@ seven programs) and `scripts/cksum-diff.sh` (`-a md5 -c REV STD`).
 reverse, and only across two check files named in one command -- so it could
 verify a file GNU would not, which is the direction that matters for a
 checksum tool, but only for a file whose own lines were all correct.
+
+### [E] The terminal's shell ran on pipes, so it was never on a terminal -- 2026-09-24
+**Status:** FIXED 2026-09-24 (lane E)
+
+**In short:** On 2026-09-18 `apps/terminal` started a shell, which closed
+`TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` as FIXED. But the shell ran on
+**pipes**, attached by two threads to a model of a terminal that lived inside
+the terminal's own process. A shell on pipes does not know it is talking to a
+person: it prints no prompt, Ctrl+C cannot stop what it is running, it never
+learns the window's size, and full-screen programs refuse to start. Its error
+output also went to a pipe nobody read, which kills it the first time it
+complains. The shell now runs on a real kernel pseudo-terminal.
+
+**What the 2026-09-18 code did** (`apps/terminal/src/main.rs`, `start_shell`,
+deleted here): `Command::new($SHELL or /bin/sh)` with piped stdin, stdout and
+stderr; one thread copying stdout into the model's slave end, one copying the
+model's slave end into stdin. Measured by reading it, each a property of pipes
+rather than a slip in the threads:
+
+| | |
+|---|---|
+| `isatty(0)` in the shell | false: non-interactive, so no prompt and no job control |
+| `^C` | the model turned it into a `PtySignal::Interrupt` value; no process received anything |
+| window size | written into the model's `WinSize`, which no process can ask for |
+| full-screen programs | `vi`, `less`, `top` need a terminal and refuse without one |
+| standard error | `Stdio::piped()`, and the `Child` holding its reading end was dropped when `start_shell` returned -- so the shell's first write to stderr (an error message, such as `command not found`) got `EPIPE`, and with `SIGPIPE` at its default, which `Command` restores in the child, the shell died |
+| the shell's exit | never waited for: a zombie, with no status to report |
+
+**Why nobody saw it.** On the Windows development host, where the suite runs,
+`/bin/sh` does not exist, so the pipe path never ran; the window said "No
+shell" and echoed typing through the model's line discipline. On SlateOS no
+graphical application runs yet. Every test drove the model directly. The
+defect was reachable only on a Unix host with a compositor, which this project
+does not have.
+
+**The fix.** The child is now a `child::Link` (`apps/terminal/src/child.rs`).
+The real link is the user's shell on a kernel pseudo-terminal, started by the
+new `libcall::pty::spawn` (`forkpty` and `execve` in one call, the vectors
+built before the fork) over lane D's existing `posix::pty::forkpty`. A reader
+thread drains the master through a bounded channel, so a flood of output is
+paced by the kernel's buffer rather than by this process's memory; a writer
+thread sends keystrokes, so a child that stops reading cannot freeze the
+window. Resizes go out as `TIOCSWINSZ`. The exit is reported once, after the
+child's last output, with its status or signal. The model (`pty.rs`, 2,054
+lines) is deleted: it was a second line discipline beside the kernel's, in the
+one process that must not have one. Rationale: `design-decisions.md` §1200.
+
+**Verified**, against real pseudo-terminals on a Linux host (glibc's
+`forkpty`, `/bin/sh`), under `cargo test --target x86_64-unknown-linux-gnu`
+in WSL: 10 tests in `libcall` (on a terminal, size and resize, exact
+environment, `^C` through the line discipline, `SIGPIPE` restored, a missing
+program is `ENOENT` with no child, exit statuses and signal deaths, reaped
+once, master close-on-exec) and 4 in `apps/terminal` driving a shell through
+the terminal's own link. All stable over five repeated runs. On the host: 80
+terminal tests; the mutation table, rewritten for the new child, 70 rows, all 70 caught by the tests named for them -- 23 of them the child's, new or rewritten for the link.
+
+**Not verified: SlateOS.** No graphical application runs there yet.
+`todo.txt` → Lane E → "The terminal has never run on SlateOS" lists what to
+check the first time one does.
+
+**Found alongside, and fixed in the same change:** `libcall`'s test
+`a_single_pid_reaches_the_libc_arm` asserts that `kill(1, SIGTERM)` returns
+`ENOSYS`. That is true only on the host build. Built for any Unix target the
+call is real: it sends a terminate request to PID 1 -- init -- and the test
+fails (`EPERM` as an ordinary user, measured on Linux). Run as root it would
+signal init. Nothing ran this crate's tests on a Unix target until this
+change's Linux run found it; the test is now `#[cfg(not(unix))]`.
+
+### [E] The terminal polls for its shell's output, because nothing can wake an application for its own descriptor -- 2026-09-24
+**Status:** FIXED 2026-09-25 (lane E, on lane F's waker)
+
+**What changed.** Lane F added a waker to the window loop (`App::wants_waker`,
+`attach_waker`, `on_wake`) and made a clock that speeds up take effect at once.
+The terminal and tmux ask for the waker and hand it to each link
+(`termchild::Link::set_waker`); the link's reader thread wakes the window after
+every chunk the shell writes, and a waiter thread wakes it when the shell
+finishes -- which the end of the output does not announce when a background
+job still holds the terminal open. The waiter blocks in the new
+`libcall::pty::wait_exited` (`waitid` with `WNOWAIT`), which leaves the child
+for the window's thread to collect, so the process id stays reserved while the
+window might still signal it; for a link already dropped -- a closed tmux pane
+-- the waiter collects it, so closed panes no longer leave finished processes
+behind for as long as tmux runs. A terminal at a prompt now asks for no clock at
+all; it asks only a link that cannot wake it, and while draining output a wake
+left over. The text below is the entry as it was.
+
+**In short:** The terminal cannot be told that its shell has written
+something; it has to look. It looks every 16 ms while the shell is talking and
+every 50 ms once it has been quiet for two seconds. So a terminal sitting at a
+prompt wakes the machine twenty times a second to find nothing, and the first
+key pressed after a pause waits up to 50 ms for its echo.
+
+**Why.** `oswindow`'s event loop blocks on the compositor's socket and wakes
+an application for two things only: the compositor's events and the clock the
+application asks for (`App::tick_interval`). The shell's output arrives on the
+pseudo-terminal's master, which the loop does not know about. The terminal's
+reader thread drains the master continuously, so the shell is never held up,
+but what it reads reaches the screen only on the next tick.
+
+**Where.** `apps/terminal/src/main.rs`: `ACTIVE_POLL_MS`, `IDLE_POLL_MS`,
+`ACTIVE_WINDOW_MS` and `TerminalState::tick_interval`. The 50 ms echo delay
+has a second cause in `gui/window/src/app.rs` `sync_clock`, which never
+shortens an armed deadline, so switching from the idle to the busy interval
+takes effect only after the idle one fires.
+
+**The proper fix** is lane F's: a waker the reader thread can call (ask 1 of
+the request), or at least letting a shorter interval replace a longer armed
+one (ask 2). Then the terminal stops asking for a clock on the child's behalf,
+and this entry closes.
+
+### [E] A freshly provisioned lane worktree cannot pass its first boot test, and finds out after two and a half hours -- 2026-09-25
+**Status:** OPEN -- the fix belongs to `scripts/bootstrap-worktree.sh` (no lane's, A-Q11) and `scripts/boot-test.sh` (lane A): `requests/e-a-rootfs-with-no-manifest-should-fail-in-seconds-not-hours.md`
+
+**In short:** lanes D, E and F got their worktrees on 2026-09-22 through
+`scripts/bootstrap-worktree.sh`. It copies a sibling's `rootfs.ext4` -- and not
+the manifest that records what was packed into it, not the 78 ring-3 fixture
+programs, and not the SlateOS builds of the userland programs the image
+carries. The boot test has refused such an image since the manifest check
+landed, but it asks only at the *staging* step, after every gate and the whole
+build. Lane E's first real boot test ran 8,712 seconds and ended there.
+
+**What happened, measured.** Run 1 on lane E stopped at an unrelated gate
+(the script index). Run 2 was stopped by hand at 6,000 s when lane F warned of
+the design-decisions band test. Run 3 passed every gate, clippy and the build,
+then:
+
+```
+=== Verifying rootfs.ext4 matches the built fixtures ===
+[ctest] ERROR: rootfs.ext4 exists but rootfs.ext4.manifest does not.
+[run-timeout] child exited: FAIL (exit 1), 8712s elapsed
+```
+
+The image cannot become valid during a run -- nothing in the boot test writes
+a manifest -- so every second before that line was spent on a verdict that was
+already decided.
+
+**What provisioning actually takes** (lane E, 2026-09-25):
+
+| step | cost |
+|---|---|
+| `python scripts/ctest-fixtures.py build` -- 78 fixtures, none had been built | 209 s |
+| spike artifacts (bash, pkgconf, make, cmake, CPython): copied from lane A's `build/spike`, whose `libc.a` is byte-identical to this tree's (sha256 `dce695fd...`), then given current mtimes -- the recipe's staleness gate compares mtimes, and `cp -p` had kept lane A's older ones | seconds |
+| SlateOS userland: `cd userspace/coreutils && CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release -p coreutils -p ar -p kill -p logger -p logrotate` | 267 s (the release profile rebuilds `std` for the target) |
+| `wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh` | 157 s |
+
+Each missing piece is refused by name, but one at a time and each only when
+reached: the manifest at the end of a boot test; the userland only after the
+recipe had staged everything else.
+
+**The proper fix, in two parts:**
+
+1. **Fail in seconds.** `rootfs.ext4` without `rootfs.ext4.manifest` should be
+   refused by the boot test's *prerequisite* check, before the gate phase --
+   it is a fact about the tree that no step of the run can change. (Lane A's
+   `scripts/boot-test.sh`; asked in the request named above.)
+2. **Provision completely.** `bootstrap-worktree.sh` should either produce a
+   worktree that can boot-test -- build the fixtures and the userland, then
+   pack an image with its manifest -- or say in its summary that the copied
+   image is unverifiable and print the four commands above. Copying the
+   sibling's manifest along with its image would not help: it would record the
+   sibling's fixture hashes, and a fresh tree has no fixtures to compare them
+   with.
+
+### [E] Every document application closes over unsaved work, and the event loop will not let one ask -- 2026-09-25
+**Status:** FIXED (lane E, 2026-09-25/26), on lane F's `Response::KeepOpen` (b82f06a11): the text editor, the markdown editor, the hex editor and the JSON viewer first, then slides, sticky notes, paint, the diagram editor, the whiteboard and the spreadsheet -- see `[E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all` below -- and notes, contacts, kanban and snippets, which kept nothing at all (`[E] Notes, contacts, snippets and kanban keep nothing`). This status said OPEN for slides and sticky notes after both were fixed.
+
+**In short:** click a window's X and every change since the last save is gone,
+without a question, in the text editor, the markdown editor, the hex editor and
+the JSON viewer. An untitled document -- which auto-save never touches -- is
+lost whole. The markdown editor has had an "Unsaved changes: Save / Don't save /
+Cancel" dialog since today, and it still loses the work in a real window,
+because `oswindow` closes the window on a close request whatever the
+application answers.
+
+**Where.** `gui/window/src/lib.rs`, `EventLoop::run_batched`: `if verdict ==
+EventResponse::Exit || requested_close` -- the loop stops on `CloseRequested`
+regardless of the verdict, by design ("A title-bar X that does nothing is worse
+than an application that quits when it would rather not have"). Behind it, each
+application answers `Exit` without looking: `apps/editor/src/input.rs`
+(`Event::CloseRequested => Response::Exit`), `apps/hexeditor/src/main.rs` and
+`apps/jsonviewer/src/main.rs` (`if matches!(event, Event::CloseRequested) {
+return Response::Exit; }`). `apps/markdowneditor` asks (`App::request_quit`),
+and is overruled.
+
+**How to see it.** Open a file in `apps/editor`, type a character, close the
+window. The file is unchanged and the character is gone.
+
+**`apps/slides` joins the list (2026-09-25).** It can save a deck now and
+knows when one has unsaved changes (the window bar's `*`, and the question
+before Open), so its close is the same loss; it answers
+`Event::CloseRequested` with `Response::Exit`, and asks nothing, until the
+loop lets it.
+
+**The proper fix** is in two halves. Lane F's: an explicit "not yet" answer to
+a close request (the request proposes `Response::KeepOpen`, keeping today's
+close-anyway default for every application that does not use it). Lane E's:
+each document application raises the markdown editor's dialog -- which
+already exists, tested, with pointer and keys -- and answers `KeepOpen` while
+it is up. Until the first half lands, the markdown editor at least saves every
+document that has a file when auto-save is on, since auto-save is the user
+having said "save for me" and the close is the last chance to.
+
+### [E] Nothing produces a double-click, so every double-click handler is dead -- 2026-09-25
+**Status:** FIXED by lane F, 2026-09-25 -- `oswindow` recognises a double click once for every application (029bf1d50) and delivers `MouseEventKind::DoubleClick` after the second press, so every handler below now runs in a real window
+
+**In short:** double-clicking a file in the file picker does not open it,
+double-clicking a word in a text view does not select it, and the same goes
+for every other double-click the toolkit handles: `MouseEventKind::DoubleClick`
+is defined, carried on the wire and matched in `guitk`'s file dialog, grid and
+text view -- and in `apps/markdowneditor` since today -- but nothing ever sends
+one.
+
+**Why.** The compositor deliberately does not synthesise it (`gui/compositor`,
+`wire_mouse_kind`: double-click timing "belongs with the widget that has to
+honour it"), and `oswindow` does not either, so the event every consumer waits
+for does not exist on any path from a real mouse.
+
+**The proper fix** is one synthesiser in `oswindow`, using the double-click
+interval it already reads from `input.yaml`, delivering `DoubleClick` alongside
+the second press. Design-decisions §502 settled the edge cases for the title
+bar's own double-click, and they carry over. Until then, double-click in the
+markdown editor's source pane (select a word) is tested by delivering the event
+directly and does nothing in a real window.
+
+### [E] The file search's Content mode matches names, not contents -- 2026-09-25 -- **FIXED 2026-09-25**
+**Status:** FIXED 2026-09-25 -- the mode reads the files, on a worker thread; see the end of this entry
+
+**In short:** the file search offers four ways to match a query -- name, glob,
+regex, content -- and the fourth is not what it says. Choosing "Content" and
+typing a word finds files whose *names* contain the word, exactly as "Name"
+does, because the matcher's Content arm reads "Content search would need actual
+file reading. For now, match against name as fallback". A person searching
+their documents for a phrase is told, silently, that no document contains it.
+
+**Where.** `apps/filesearch/src/main.rs`, `SearchCriteria::matches`, the
+`SearchMode::Content` arm.
+
+**The proper fix** reads the files: a worker thread searching the candidates
+the other filters leave, bounded in the size of file it reads, streaming
+matches back while the window keeps drawing -- and cancelled when the query
+changes, because content search is too slow to run to completion on every
+keystroke the way a name match can. Until then the mode's label should not
+promise what it does not do.
+
+**Fixed as described, the same day.** `ContentSearch` reads the candidates the
+other filters leave (files only) on a worker thread and streams matches back;
+the window takes them in on a 50 ms clock that runs only while the worker does
+(it cannot wake the window: `requests/e-f-wake-an-application-for-its-own-descriptor.md`),
+sorted into the table as they arrive. A new query, a changed filter or a change
+of mode drops the search, which stops the worker at its next file. Files over
+16 MiB are skipped and the skip is counted in the status line. Without match
+case, a UTF-8 file is lower-cased as text (`ÉCOLE` finds `école`) and any other
+file has only its ASCII letters folded -- never a lossy decode. Seven tests and
+five mutations in `apps/filesearch/mutate.py`.
+
+### [E] A test that forgets its scratch settings writes the developer's own -- 2026-09-25
+**Status:** OPEN -- the one leak found today is fixed; nothing stops the next
+
+**In short:** a test that saves a setting without first taking a scratch
+configuration directory writes to the real `~/.config/slateos` of whoever runs
+it. On 2026-09-25 the weather app's unit-key tests did exactly that, the first
+time pressing U, W, P or T began saving the choice: they left a
+`weather.yaml` of Fahrenheit, mph, inHg and 12-hour in the developer's home.
+They now run inside `settingsfile::testing::with_scratch_config`, and the file
+was deleted. Nothing but care stops the next such test.
+
+**What is still there.** On this Windows host `~/.config/slateos/` holds six
+more files that nothing but a test run can have written, all older than the
+2026-09-24 baseline run of every app's suite (so no current test writes them):
+`explorer.yaml` lists `explorer_test_manual_*` temporary folders as saved
+orderings; `appearance.yaml`, `fileassoc.yaml`, `input.yaml`,
+`notifications.yaml` and `widgets.yaml` hold what look like defaults. They
+were left in place, not being this session's to delete. A test that *reads*
+settings without a scratch directory sees them -- an order-dependent result
+waiting to happen.
+
+**The proper fix is a guard, in lane C's `gui/settingsfile`:** with its
+`testing` feature on -- which only a dev-dependency turns on -- `store` could
+refuse outright unless a `with_scratch_config` turn is held, panicking with a
+message that names the fix. Every app test that saves would then fail loudly
+the first time it forgot, instead of writing somebody's home. Asked of lane C
+on 2026-09-26: `requests/e-c-settingsfile-refuses-a-store-outside-a-scratch-config-in-tests.md`
+(whether a feature-gated panic in a shared crate is acceptable is its call).
+The six files above should be looked at by whoever owns the apps that wrote
+them.
+
+**A second defence, per app (2026-09-25, `apps/habits`).** An app can make
+keeping opt-in: `HabitTrackerApp::new`, which every test uses, is backed by
+nothing, and only `from_settings` -- what `main` calls -- turns writing on. A
+test that forgets its scratch directory then writes nowhere, and
+`a_tracker_made_with_new_writes_nothing` pins that. It protects the one app
+that does it, not the next one written; the guard above is still the fix.
+`apps/flashcards` does the same since the same day
+(`an_app_made_with_new_keeps_nothing`), and `apps/finance`
+(`a_window_made_by_new_keeps_nothing`).
+
+### [E] The feed reader forgets its subscriptions, folders and marks at exit -- 2026-09-25
+**Status:** FIXED (lane E, 2026-09-26) -- `design-decisions.md` §1212.
+
+**Fixed.** As the proper fix below says: the subscriptions and folders are kept
+as OPML (`rssreader/subscriptions.opml` in the settings folder), and each
+article's read and starred marks by its feed and link (`rssreader/marks.txt`),
+written after every change. A feed read from a file is read from it again at
+the next start, and its articles get their marks back. A kept file that
+cannot be read whole is left alone and the window says why; closing over a
+save that is failing asks first. Two things found on the way: an OPML list
+imported twice doubled every feed in it, and an empty folder -- which is how
+the reader's own export writes a folder with no feeds yet -- was dropped on
+import.
+
+**In short:** the feed reader keeps nothing between sessions. Feeds added by
+address or by an OPML list, the folders they are filed in, the articles read
+from feed files, and which articles are read or starred all go when the window
+closes; the next start is empty. Only Export… (OPML) saves anything, and only
+the subscription list.
+
+**Where.** `apps/rssreader/src/main.rs`: `RssReaderApp` holds `feeds`,
+`folders` and `articles` in memory and nothing reads or writes them at start
+or exit (the crate does not depend on `settingsfile`).
+
+**The proper fix** keeps two things, in two shapes: the subscriptions and
+folders as an OPML file in the user's configuration directory (the format the
+program already reads and writes, and one a person can take elsewhere), read
+at start; and each article's read and starred marks keyed by the article's
+link -- or title, where a feed gives none -- in a small settings document, so
+reopening a feed file restores them. The articles themselves need no copy:
+they come from files the user keeps, and `read_any_file` already merges a
+re-read feed into the one it came from.
+
+**Not urgent, and it does not get worse.** Nothing a user has is lost that
+they did not just type or open this session. Not done with the pointer pass
+because it is a feature with its own shape to settle (above), not a way of
+reaching one the program already had.
+
+### [E] The option-table gate read a slow WSL as no WSL, and let a push through unjudged -- 2026-09-25 -- FIXED 2026-09-25
+**Status:** FIXED 2026-09-25 -- `scripts/getopt-ambiguity-check.py`.
+**Superseded 2026-09-26:** lane E's fix (below) and lane A's `54e1c8743`
+("gate 5: a GNU side that cannot be reached is a loud skip (exit 3), never a
+pass and never a finding", handed over by lane F) changed the same probe at the
+same time, and met in lane E's merge of `main`. Lane A's version was kept
+whole: it covers this failure and three more (a WSL that hangs mid-sweep, one
+that fails a call after the probe passed, and output without proof the GNU
+side ran), it gives the startup probe 90 s, and it reports every "could not
+reach GNU" as exit 3, which the hook -- changed in the same commit -- lists
+as *skipped* rather than *ran*. That also closes the "still open" note at the
+end of this entry. The one behaviour that differs from lane E's: a WSL that
+times out is now a loud skip that lets the push through, where lane E's
+refused it (exit 2). That is lane A's and lane F's call for the shared hook,
+made with its test suite in view, and lane E's text below is kept as the
+record of how the failure was found.
+
+**In short:** the pre-push hook's gate 5 compares each coreutils option table
+with GNU's through WSL. Its probe gave WSL 30 seconds to answer, and on a busy
+machine a cold WSL can take longer; the checker then printed "no GNU userland
+available; nothing to check", exited 0, and the hook counted the gate as run
+and allowed the push. So a table broken on a pushed branch was published
+unjudged whenever the host happened to be loaded.
+
+**How it was found.** A lane-E boot test refused to build because
+`test-checkers-honour-head.py` failed its gate-5 case "a branch other than
+HEAD is still judged" (allowed, where refused was expected). Run alone with
+WSL healthy in every shell, it failed again; replayed with the hook's output
+printed, the checker was saying "no GNU userland" inside the hook while the
+test's own probe, moments earlier, had found one. The host was running
+several builds at once.
+
+**The fix.** The probe now waits 30, then 60, then 120 seconds before giving
+up. A WSL that answers each probe with an error (none installed, no
+distribution) is still the documented skip; one that *times out* every time
+is `RunnerUnavailable`, reported as "WSL is installed but did not answer" with
+exit 2 -- the hook's no-verdict, which refuses the push rather than publishing
+tables nobody compared. The retry is the usual remedy; `ALLOW_GETOPT_DRIFT=1`
+remains the loud bypass.
+
+**Still open, and noted rather than done:** the checker reports the real skip
+(no GNU userland) with exit 0, so the hook's tally lists gate 5 under "ran"
+when it compared nothing. `scripts/run-checker.sh` defines exit 3 for exactly
+that ("I could not run, and here is why"); moving this checker to it needs the
+hook's gate-5 loop to read `RUN_CHECKER_SKIPPED`, which is a change to the
+shared hook best made with its test suite in view.
+
+### [E] The NUL-visibility gate ran in WSL by accident, and stopped the boot test whenever WSL was slow to start -- 2026-09-25 -- FIXED 2026-09-25
+**Status:** FIXED 2026-09-25 -- `scripts/check-cp-diff-sees-nul.py`, with a
+paired suite, `scripts/test-check-cp-diff-sees-nul.py` (which the pre-push hook
+is meant to run when the checker is pushed, and does not yet on most pushes:
+see the next entry). Four launches of the same shape in lane A's boot-test
+suites are open: `requests/e-a-bare-bash-in-boot-test-suites.md`.
+
+**In short:** one of the boot test's early gates checks that `cp-diff.sh` can
+still see a difference made only of NUL bytes. It started its probe with
+`subprocess.run(['bash', ...])`, and on Windows that is WSL's bash --
+`CreateProcess` searches System32 before `PATH` -- so every boot test quietly
+started a Linux VM. When the VM did not come up in time, the gate's self-test
+said it "fails its own cases" and the boot test refused to build a tree that
+nothing was wrong with.
+
+**How it was found.** A lane-E boot test on `731de9b3e` stopped at "refusing
+to build. The NUL-visibility gate fails its own cases", quoting a UTF-16
+message: "The operation timed out because a response was not received from the
+virtual machine or container. Error code:
+Bash/Service/CreateInstance/CreateVm/HCS_E_CONNECTION_TIMEOUT". Measured
+afterwards in the same tree: `subprocess.run(['bash', '-c', 'uname -s; pwd'])`
+prints `Linux` and `/mnt/e/...`, while `proctree.find_unix_shell()` answers
+Git's bash.
+
+**Three faults, fixed together:**
+
+1. **The shell.** The probe runs under `proctree.find_unix_shell()` -- the
+   project's one resolver: `SLATE_BASH`, then `PATH` minus the WSL shim, then
+   the known Git and MSYS2 paths -- and prints the shell it ran under.
+2. **The tools.** It puts that shell's own `/usr/bin` first. A Git bash
+   started from a PowerShell parent inherits that `PATH` and finds
+   `C:\Windows\System32\find.exe` and `sort.exe`, and no `sha256sum` at all
+   (measured with `PATH=C:\Windows\System32`).
+3. **The exit codes**, as `scripts/run-checker.sh` reads them. A probe that
+   could not run is 2, no verdict; it was 1, a finding, printed directly under
+   the sentence "A gate that cannot run must say so, not report a finding".
+   Its two skips -- no shell, no `sha256sum` -- are 3, listed as skipped; they
+   were 0, counted as passes.
+
+The comments that blamed MSYS for two earlier faults -- a `C:/Users/...` path
+that would not resolve, and a function defined by `bash -c` that was invisible
+inside `$(...)` -- were written from inside the VM. The second reproduces
+exactly under WSL's launcher (`declare -F f` succeeds, then
+`/bin/bash: line 1: f: command not found`) and not at all under Git's bash;
+the comments now say what was measured.
+
+**Still open, filed rather than edited:** `scripts/test-boot-test.py` (three
+harness launches) and `scripts/test-boot-history-commit.py` (one) pass the
+bare word too, so they test extracted `boot-test.sh` functions under WSL's
+bash and git while production runs them under Git's. They run only when
+`boot-test.sh` changes, they are lane A's suites, and `scripts/**` is unowned
+(A-Q11) -- hence the request.
+
+### [E] The pre-push hook's paired suites run nothing on a push of three or more commits -- 2026-09-25
+**Status:** OPEN -- `scripts/hooks/pre-push` (gate 20 and the hook's own-suites
+block, lines ~1154 and ~1208). Filed as
+`requests/e-ab-pre-push-suites-never-run-on-a-multi-commit-push.md`; lane E has
+not edited the hook, because the hook's ownership is open question A-Q11.
+
+**In short:** when a script in `scripts/` is pushed, the hook is meant to run
+that script's own test suite, and when the hook itself is pushed, its six
+suites. Both steps list the pushed files by handing every pushed commit to a
+single `git diff-tree`, which takes at most two trees and reads the rest as
+path filters. On a push of three or more commits -- nearly every lane push --
+the list comes back empty, the hook prints "no scripts/*.py in this push has a
+paired test suite", and no suite runs.
+
+**How it was found.** A lane-E push of ten commits, three touching `scripts/`
+and one adding `scripts/test-check-cp-diff-sees-nul.py` beside the checker it
+tests, logged that sentence. Reproduced by running the hook's pipeline by hand
+against the same commits: nothing with `xargs -r git diff-tree`, the five
+`scripts/` files with `git diff-tree --stdin`.
+
+**The fix** is `git diff-tree --stdin` (or `xargs -r -n1`) in both places,
+given in the request with a regression case for `test-pre-push-gates.py`.
+Until then, run a script's `test-<stem>.py` by hand before pushing it.
+
+### [E] The calendar's .ics import left out most of what other calendars write -- 2026-09-26
+**Status:** FIXED (lane E, 2026-09-26).
+
+**In short:** importing a calendar exported from a phone or a web calendar
+added few of its events, or none, and said "Added N events" either way. The
+reader only knew the lines this program writes itself: an event whose start
+carried a parameter -- `DTSTART;TZID=Europe/Paris:...`, or
+`DTSTART;VALUE=DATE:...` for every all-day event -- or that had a `DURATION`
+instead of an end, or no end at all, was left out without a word; a long line
+folded onto the next (as the standard asks every writer to do) lost its
+second half; a repeat was never read, so a weekly meeting came in once; and an
+alarm's own `DESCRIPTION` replaced the event's notes. The export, for its part,
+wrote an all-day event as an appointment from midnight to 23:59, dropped the
+reminder, and folded no line.
+
+**Where.** `apps/calendar/src/main.rs`: `parse_ics` (now `parse_ics_report`,
+with `unfold_ics`, `split_ics_line`, `parse_ics_when`, `parse_ics_duration`,
+`parse_rrule`, `reminder_from_trigger`, `finish_ics_event`),
+`CalendarEvent::{to_ics, occurs_on}`, `fold_ics_line`, `ics_escape`,
+`CalendarApp::read_ics`.
+
+**Fixed.** Lines are unfolded; parameters are read (a `TZID`'d or UTC time is
+kept as the clock time written, and counted); a date start is an all-day event
+whose end is the day before `DTEND`; a `DURATION` is an end, and no end is a
+moment; `RRULE` becomes the nearest repeat the calendar has, and one it cannot
+keep exactly (an end, "the second Tuesday", every three months) is counted;
+categories after the first are tried; an alarm's `TRIGGER` becomes the
+reminder and its other lines stay its own. The import says what it left out,
+what had zoned times and what repeats were simplified. The export writes
+all-day events as dates, a reminder as an alarm, and folds lines at 75 octets;
+an export reads back as itself. An all-day event of several days is now on
+each day it covers (a timed one that runs past midnight is still drawn on the
+day it starts: the day and week views place an event by its times). What is
+still not read: time zones themselves (the calendar has none), `EXDATE`, and
+events that are exceptions to a repeat (`RECURRENCE-ID`) -- each comes in as
+an event of its own.
+
+### [E] The mind map's undo acts on whichever map is showing, and can delete a node of another map -- 2026-09-26
+**Status:** FIXED (lane E, 2026-09-26) -- with the mind map's own file (design-decisions §1208).
+
+**In short:** the mind map app holds several maps, as tabs, and keeps one undo
+history for the window. Undo replays the last change onto whichever map is
+showing. Each map is given a copy of the id counter when it is made, so node
+numbers repeat from map to map -- and undoing "add a node" made on one map,
+while another is showing, deletes that other map's node with the same number,
+with everything under it. Deleting a map leaves its changes in the history too.
+
+**Where.** `apps/mindmap/src/main.rs`: `MindMapApp::{undo, redo, apply_reverse,
+apply_forward, switch_map, delete_active_map}`, `MindMap::new` (the cloned
+`IdGenerator`).
+
+**And the tabs cannot be reached.** The tab strip is drawn, but no click
+selects a tab and no key does: `switch_map`, `add_map` and `delete_active_map`
+have no caller. Ctrl+O reads an outline into a new tab and makes it the one
+showing, so every map before it is then out of reach for the rest of the
+session.
+
+**The proper fix** is the whiteboard's (known-issues, the document
+applications entry): each map keeps its own history, and a change is undone on
+the map it was made on. The tabs want to work -- a click, Ctrl+Tab, a new map
+and closing one (asking first when it has unsaved changes). With it, the mind map wants what the diagram and the
+whiteboard got -- a file of its own that keeps every colour, shape and fold (its
+outline save keeps only the words and the tree, as its notice says), the
+unsaved mark, and the question before a close or an Open.
+
+**Fixed** the same day. Each map keeps its own history
+(`MindMap::{undo_stack, redo_stack}`), so an undo acts on the map it was made
+on, and a map closed takes its history with it. The tabs answer a click,
+Ctrl+Tab and Ctrl+Shift+Tab; "+" and Ctrl+N add a map; a tab's close mark and
+Ctrl+W close one, asking first when it has changes not saved. Each map saves
+whole to a file of its own and the window asks before losing one (§1208).
+
+Found on the way, and fixed with it: the toolbar's eight buttons were drawn and
+answered no click, and three overlapped the next by five pixels; what the last
+open or save did was kept "for the status line" and never drawn, so every open
+and save said nothing; the status line ran under the selected node's line; and
+a press on the sidebar or the status line was taken as one on empty canvas,
+dropping the selection and starting a pan. The notice strip is gone with what
+it warned of: the map is kept whole now, and the outline export says what it
+leaves out.
+
+### [E] Warnings drawn where the next thing drawn covers them -- 2026-09-25
+**Status:** FIXED (lane E, 2026-09-25) -- all fifteen apps.
+
+**In short:** a sweep in mid-September gave many apps one or two lines of
+text at the very top of the window saying something the user must know: the
+alarm clock makes no sound, so "if this window is not in front of you, nothing
+will wake you"; the calendar and the reminders list keep nothing; the
+spreadsheet opens on an example. Each was drawn "after the background, or it
+would be painted over" -- and then the app drew its toolbar or tab bar over the
+same pixels. The lines were in every frame and on no screen. Their tests read
+the frame's list of texts, where the lines were, and passed.
+
+**Fixed** in `apps/notes` (drawn before the window's own background),
+`apps/kanban` (under the toolbar, and on every board) and `apps/alarmclock`
+(under the tab bar -- the worst of them, since an alarm clock that cannot wake
+anyone must say so where it is read). Each now draws its lines where nothing
+covers them, and its test also asks that nothing drawn after a line fills the
+point it is drawn at.
+
+The spreadsheet's lines were drawn before the window's background, on every
+sheet, and said Ctrl+S wrote a CSV and that work was gone at close -- both
+false since it kept workbooks and asked before losing one (design-decisions
+§1204). One true line now, on the status bar, while the sheet is the example
+nobody has touched.
+
+**The other eleven, the same day** -- each marked by the same comment. A test
+in each (`the_warning_lines_are_not_painted_over`) found eight painted over
+(`calendar`, `credmanager`, `filediff`, `mindmap`, `musicplayer`, `podcast`,
+`remotedesktop`, `videoplayer`) and, once it also asked that no other text share
+a line's row, two more drawn under other text (`clipmanager`'s under its search
+bar, `startupmanager`'s under its header; `reminders`' lines sat under its
+header's title too, though the default theme draws that header unfilled). Each
+got a place nothing else is drawn: a strip of its own under the top bar that
+the content starts below (`calendar`, `credmanager`, `mindmap` -- gone since,
+with what it warned of (§1208) -- `musicplayer`, `remotedesktop`, `reminders`
+-- while the notice is shown, where it is keyed on an empty list), a strip along the bottom (`podcast`, which has no top bar),
+or the empty panel the lines explain (`filediff`, `clipmanager`,
+`startupmanager`, `videoplayer`), wrapped there rather than cut where the panel
+is narrow. `videoplayer`'s empty picture also said "Ctrl+O to open", and Ctrl+O
+is bound to nothing: the true lines are there now. The test in each asks that
+nothing drawn after a line fills the point it is drawn at, and that no other
+text overlapping it horizontally is on its row.
+
+The calendar's and the reminders list's lines say they keep nothing, which is
+so: two more apps that keep nothing, beside the four the entry below names --
+and neither can make an item yet (the calendar only imports `.ics`, the
+reminders list only opens JSON), so each wants a way to add one before a store
+is worth much. Lane E's.
+
+**The calendar, 2026-09-26.** Events are added (N, or New event in the top
+bar), changed (Enter, or a second press on an event) and deleted (Delete, which
+asks) in a form, and kept in `calendar/events.txt` in the settings directory,
+written after every change and read whole or not at all (design-decisions
+§1209). Its empty line now says how to add one; what the last import or export
+did has a line of its own under the top bar, where it had been drawn across the
+top bar's buttons.
+
+**The reminders list, the same day.** Reminders are added (N), changed (E) and
+deleted (Delete, which asks) in a form, from the keyboard like the rest of the
+program; their steps -- which the model had and nothing could reach -- are
+added, ticked and taken off in the form, and Shift+1-9 ticks one from the list.
+The list is kept in `reminders/tasks.txt` in the settings directory (§1210).
+Found on the way: a repeating reminder, once done, was finished for good -- it
+now comes round at its next time still to come -- and the snooze question and
+what the last save did were drawn at the foot of the window, over the list's
+last row; they have lines in the strip under the header now.
+
+### [E] The explorer's file-type columns showed the same invented values for every file -- 2026-09-25
+**Status:** FIXED for pictures, source files and zip archives (lane E, 2026-09-25), and for audio files, video files, TAR and gzip archives (lane E, 2026-09-26); OPEN for a picture's colour depth (lane F's to read: `requests/e-f-a-pictures-colour-depth-from-its-header.md`), the count of files in a `.tar.gz`, and 7z and rar archives -- lane E's.
+
+**In short:** the file explorer's detail view can show extra columns for
+pictures (size, colour depth, shape), songs (length, bitrate, artist...),
+source files (lines) and archives (files inside, compressed size). Every one of
+those cells was made up: every picture was "1920 x 1080, 24-bit, 16:9", every
+song "3:42, 320 kbps, Unknown Artist", every source file 0 lines, every archive
+0 files. A user who turned a column on saw the same numbers down the whole
+list. The code said so -- "Stub: in a real implementation, read image headers"
+-- and a test pinned the invented 3:42.
+
+**Fixed.** Pictures are measured by `imagecodec::dimensions`, which reads the
+header only (64 KiB first; a TIFF whose directory is further in, up to 64 MiB),
+and turns the size the way the picture is shown; the ratio is worked out from
+it (`16:9`, or `1.78:1` when the lowest terms are not small). WebP, ICO and TIFF
+joined the column's formats. Source files are counted (line feeds, plus an
+unfinished last line; files over 16 MiB are left blank). A zip archive's own
+directory is read through `ziparchive::parse_at` from the end of the file:
+files inside, their compressed size, and the share that saves. Each provider
+keeps what it read per file while the file's size and time are unchanged
+(`FactCache`), because a provider is asked for every visible row every frame.
+
+**Fixed, 2026-09-26: audio.** The readers were inside `apps/musicplayer`'s
+binary, where nothing else could reach them; they are the crate
+`apps/audiotags` now, which both use, and the move finished them. They had
+decoded an ISO-8859-1 ID3 frame as UTF-8 (a title with an "e acute" in a
+Latin-1 tag was dropped whole) and kept the NUL a text frame may end in;
+computed a FLAC's bit depth as `hi | (lo + 1)` (a 32-bit FLAC read as 16); and
+read no MP3's length or bitrate, no Ogg file, no FLAC's own tags, no WAV's
+`LIST`/`INFO` and no ID3v1 tag. `audiotags` reads MP3 (the first frame header
+confirmed by the next; a Xing/Info or VBRI header for a VBR file; ID3v2.2 to
+2.4, unsynchronisation, every text encoding; ID3v1 behind it filling what v2
+does not say), FLAC (STREAMINFO and its Vorbis comments, and a FLAC behind an
+ID3 tag), Ogg Vorbis and Opus (the first packets and the last page's granule,
+Opus at 48 kHz less its pre-skip) and WAV (`fmt `, `data`, `LIST`/`INFO`),
+bounded throughout. The six audio columns read from it through the same
+`FactCache`; the bitrate and sample rate are a `ColumnValue::Measure`, which
+sorts by the count ("96 kbps" before "320 kbps", which as text it was not).
+
+The move turned up that the **player never called its own readers**: every
+track it listed showed its file name, "Unknown Artist" and 0:00, whatever the
+file said. A playlist's tracks read their files now, and a relative M3U entry
+is taken from the playlist's folder, as M3U means it (it was taken from the
+player's working directory).
+
+**Fixed, 2026-09-26: video, TAR and gzip.** Video files had no columns at
+all; a new provider reads them through `apps/mediaprobe` into the Duration,
+Bitrate and Dimensions columns music and pictures already have (shared by id:
+one Duration column for everything that plays) and a new Frame Rate. A TAR's
+headers are read through `apps/tararchive` -- its files, their size, and a
+compression ratio of 0%, which a TAR honestly has. A gzip file's trailer gives
+the size it inflates to, so its ratio is read without inflating it; a plain
+`.gz` holds one file.
+
+**Still open, and blank rather than guessed:**
+- **Colour depth** -- `imagecodec` does not report a picture's bit depth; a
+  header-only `pixel_format` beside `dimensions` would be lane F's, and is
+  asked for in `requests/e-f-a-pictures-colour-depth-from-its-header.md`
+  (2026-09-26).
+- **How many files a `.tar.gz` holds** -- counting them means inflating the
+  whole archive, synchronously, while the window draws the row. The proper
+  fix is a background reader for the columns (the thumbnails have one); until
+  then the cell is blank, not a guess.
+- **7z, rar** -- nothing in the tree reads them.
+
+**Where.** `apps/explorer/src/columns.rs`: `ImageColumns`, `AudioColumns`,
+`CodeColumns`, `ArchiveColumns`, `FactCache`, `image_size`, `line_count`,
+`zip_facts`, `audio_facts`. `apps/audiotags`. `apps/musicplayer/src/main.rs`:
+`Track::read_facts`, `PlayerState::load_m3u_from`.
+
+### [E] The torrent client transfers nothing: it has no tracker or peer transport -- 2026-09-25
+**Status:** FIXED for downloading, 2026-09-26 (lane E) -- `apps/torrent/src/`
+`tracker.rs`, `peer.rs`, `storage.rs`, `session.rs`, wired in `main.rs`. OPEN,
+lane E's: uploading, incoming connections, the end of a download (no endgame),
+magnet links (BEP 9/10), DHT -- listed below. On SlateOS itself the whole of it
+waits on `std::net` reaching lane D's sockets, which nothing here has tried.
+
+**In short:** the torrent client downloads now. Opening a `.torrent` starts it:
+the trackers are asked for peers (UDP or plain HTTP), each peer gets a thread,
+every piece is checked against its SHA-1 before a byte of it is written, and the
+window shows the pieces, peers, trackers and speed as they come. Pause stops it,
+Resume carries on from what is on disk. It does not share what it fetches.
+
+**What was built, in the order it was tested:**
+1. `.torrent` read as it is (`b8f43aba2`): the info hash over the file's own
+   bytes (it was the re-encoded dictionary's -- a torrent written non-canonically
+   got a hash no tracker knows); paths kept as bytes and checked a part at a
+   time, so none can climb out of the save folder (a non-UTF-8 part used to be
+   dropped silently); a file entry without a length an error (it used to be
+   skipped, shifting every later byte into the wrong file); bencode nesting
+   bounded. The tree's `sha1` crate replaces the crate's own copy.
+2. `storage.rs`: pieces mapped onto the files they span; only whole, checked
+   pieces written; a symbolic link below the save folder refused; what is
+   already on disk and whole found (`have`), so a restart fetches only the rest.
+3. `tracker.rs`: HTTP (deadline, 1 MiB cap, chunked, redirects to `http://`
+   only, BEP 7 IPv6 peers) and UDP (BEP 15; a reply with another transaction
+   number ignored). `https://` refused with the reason.
+4. `peer.rs`: the handshake, framed messages that survive a read timeout
+   mid-message, and a piece assembled from only the blocks asked for.
+5. `session.rs`: a coordinator thread, a thread a peer, a shared rarest-first
+   picker; a bad piece fetched again and a peer dropped after three; a snubbing
+   peer dropped after a minute; events to the window.
+6. The window: open starts, Space/Pause/Resume stop and start a session,
+   removing stops it (and, when asked, deletes the torrent's own files), ticks
+   apply the events, the speed is sampled a second at a time, a finished
+   download is Complete -- not Seeding, since nothing is uploaded -- and the
+   notice says what the client does not do. The simulated swarm the window used
+   to download from, and the helpers only it used, are gone.
+
+Tested byte for byte against a tracker and seeding peers run in threads on
+loopback (a download, one with a lying peer beside an honest one, a restart
+with pieces already on disk, a stop, an unwritable folder, the whole thing
+through the window). The tests cannot reach the network: in them a tracker
+anywhere but loopback is refused before its name is looked up, and the default
+save folder is a temporary one.
+
+**Still to do:**
+- **Upload.** Requests are unanswered and no peer is unchoked. A client that
+  only takes is tolerated by swarms but is poor manners, and some private
+  trackers drop it. Needs a choking algorithm and a listener.
+- **Incoming connections.** Nothing listens on `listen_port`, which is still
+  announced; peers that try it fail. Belongs with upload.
+- **Endgame.** The last piece waits for the peer holding it, or for its silence
+  to time out after a minute; clients ask a second peer for the same blocks.
+- **Magnet links** (BEP 9/10 metadata exchange): the files are not known until
+  a peer sends the info dictionary. `PeerConn::extensions` records who could.
+- **DHT, PEX, encryption, µTP, proxies, bandwidth limits**: the settings panel
+  says only the port and connections per torrent are read.
+
+The window polls on a tick while a download runs (150 ms with peers, a second
+without); `requests/e-f-wake-an-application-for-its-own-descriptor.md` would
+let it wait instead.
+
+### [E] The screenshot tool's first save can replace a file that took its name a moment earlier -- 2026-09-25
+**Status:** FIXED 2026-09-26 -- `apps/screenshot/src/main.rs`
+(`write_new_file`, `write_first_free`, `save_names`). A new capture now claims
+each name with `safeio::write_new_atomically`, in the same step as it writes
+it: a name taken since the look is passed over like one seen taken, and when
+all 9,999 names are taken the save fails with "every name up to … is in use"
+instead of replacing the first. Saving a capture again over its own file keeps
+`write_atomically`. A folder that cannot be written fails at the first name
+with its own reason. Five tests; `apps/screenshot/mutate.py` (15 rows) covers
+the save path. Still unreachable in the shipped binary until the compositor
+offers a framebuffer read (`CANNOT_CAPTURE`).
+
+**In short:** a new screenshot picks a file name nothing holds, then writes it
+with `safeio::write_atomically`, which replaces whatever is at the name. A file
+another program creates between the check and the write is replaced -- a
+window of microseconds here, where the media converter's was minutes (it
+plans a queue of names). After 10,000 taken names it falls back to the plain
+name on purpose, which overwrites.
+
+**The proper fix:** try the names in order with `safeio::write_new_atomically`
+(2026-09-25), which refuses a name in use atomically, until one is claimed --
+and never fall back to replacing. Saving a capture again over its own file
+keeps `write_atomically`, which is right for that.
+
+### [E] Applications can neither record nor play sound -- 2026-09-25
+**Status:** OPEN -- blocked below lane E (traced 2026-09-26): nothing empties
+the kernel's mixer into a device, and a native program cannot drive the PCM
+device at all -- items 2 and 4 below, filed as
+`requests/e-ad-no-application-can-reach-the-sound-device.md`. After those, lane
+E's client crate (item 1). Capture: lane A (the kernel mixer has no input).
+
+**In short:** a program here cannot make a sound or hear one. The recorder
+cannot record, the music player and the metronome cannot play, and every one of
+them says so. Nothing is broken in any of them: the path from an application
+to a speaker, and from a microphone to an application, is what is missing.
+
+**What exists.** The kernel speaks the Linux sound interface: `/dev/snd/pcmC0D0p`
+(playback) and `/dev/snd/pcmC0D0c` (capture), driven by the usual ALSA ioctls
+(`HW_PARAMS`, `PREPARE`, `WRITEI_FRAMES`/`READI_FRAMES`), in
+`kernel/src/syscall/linux.rs` and `kernel/src/ipc/alsa_pcm.rs`. A playback
+stream feeds `kernel/src/audio_mixer.rs`, whose documentation routes its
+output to HDA, virtio-sound or AC97. A capture stream reads
+**synthesised silence** -- `alsa_pcm_ioctl_readi` says so: the mixer is
+output-only.
+
+**What is missing.**
+1. **No application opens `/dev/snd` at all.** There is no client crate, so
+   each program would need its own ALSA ioctl bindings. The proper fix is one
+   small crate in `apps/` (a `pcmout`: open, negotiate 48 kHz 16-bit stereo,
+   write frames; on the host build, "no device") that `musicplayer`,
+   `metronome`, `soundrecorder` and `videoplayer` share -- and a boot-test rung
+   that plays a known buffer and reads back what the mixer produced, since
+   nothing on the host can observe it.
+2. **The mixer's output reaches no device** (traced 2026-09-26; this said
+   "unverified" before). `audio_mixer::mix_output` has no caller outside its
+   own file, and the HDA, AC97 and virtio-sound drivers play only their own
+   test tones. A stream's ring (16 KiB, about 85 ms) fills once and stays
+   full: every write after that is `EAGAIN`, and `POLLOUT` never fires, so a
+   player waiting for room waits forever. Lane A's.
+3. **Capture has no source.** Until the mixer (or a driver beside it) has an
+   input, `READI_FRAMES` is silence, and a recorder that took it would record
+   nothing while its level meter sat still -- the failure
+   `TD-C-A-RECORDER-THAT-RAN-A-CLOCK-OVER-NO-AUDIO` describes. Lane A's.
+4. **A native program cannot drive the device** (found 2026-09-26). A PCM
+   descriptor is made only by the Linux-ABI open
+   (`kernel/src/syscall/linux.rs::try_open_alsa_pcm`), and the ALSA controls
+   exist only in `linux.rs::alsa_pcm_ioctl`. Every `apps/**` binary is a native
+   program, whose `ioctl()` is `posix/src/ioctl.rs` -- which answers anything
+   but the terminal requests with `ENOTTY`. So item 1's crate could not
+   negotiate a format even with item 2 fixed. Lanes A and D: either the native
+   open and `ioctl` reach the existing ALSA handlers (lane E's recommendation,
+   since the kernel already implements that interface), or a native audio
+   interface.
+
+**Until then** the recorder refuses a take with the reason on screen, and is
+useful only for what is already on disk (see the soundrecorder paragraph of
+`TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+
+### [E] tmux is not a server: its sessions end when its window closes -- 2026-09-25
+**Status:** OPEN -- a design choice for now (`design-decisions.md` §1203);
+lane E's to build when there is a reason to.
+
+**In short:** real tmux keeps its sessions -- and every program running in them
+-- alive after the terminal it was started in closes, so a user can come back
+to them later. This one cannot: the sessions live inside the window's own
+process, so closing the window ends every session and hangs up every shell in
+them. Detaching only hides a session inside the same window. The detached
+screen says so ("Closing this window ends every session."), so nobody loses
+work believing otherwise.
+
+**Where:** `apps/tmux/src/main.rs` -- `Multiplexer` owns the panes, and each
+pane's `TerminalState` owns its shell's pseudo-terminal link.
+
+**The proper fix** is tmux's own shape: a server process that owns the
+sessions and the pseudo-terminals, and clients that attach to it over a local
+channel -- a window per client, sending keys and receiving each pane's screen
+(or its output stream, to be parsed client-side). The pieces this needs that
+exist: `terminal::child`'s links (the server would hold them), the terminal's
+emulator (either side could run it), and the system's IPC channels. What does
+not exist: the protocol, the server's lifetime (who starts it, when it exits),
+and a way for a second window to find the first's server. It is worth doing
+when detaching to leave a long job running is a thing users need here.
+
 ### [A] `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER` — `^C` typed into a pty could not interrupt a program that was not reading -- 2026-09-24
 **Status:** FIXED 2026-09-24 in the kernel (lane A); awaiting the boot that shows `ctest-pty` pass.
 
@@ -169882,6 +171260,615 @@ the first write (8192 on a closed descriptor, `st_blksize` otherwise), and
 upstream lsmem's held `/sys` descriptor is what descriptor 1 is by then.
 **How to see it.** `target/fontcheck` draws emoji lines from any font given
 it; `target/colr_compare.py` compares with Edge.
+
+### [E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all -- 2026-09-25
+**Status:** FIXED for the text editor, the markdown editor, the hex editor, the JSON viewer, slides and sticky notes (lane E, 2026-09-25), and paint, the diagram editor, the whiteboard and the spreadsheet (2026-09-25). What remains is the entry below it: notes, contacts, snippets and kanban keep nothing at all.
+
+**In short:** closing the window of an editor threw away every unsaved change
+without a word -- the window library closed a window on any close request,
+whatever the application answered, until lane F added `Response::KeepOpen`
+(`requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`).
+Worse, two of the editors could not save at all: the hex editor's toolbar drew
+a Save button (and New, Open, Undo, Redo, Find and GoTo) that answered nothing,
+and no key saved; the JSON viewer keeps a "modified" mark and has no save. So
+every edit either program made was lost when its window closed.
+
+**What changed.** The markdown editor answers `KeepOpen` while its Save / Don't
+save / Cancel question is up (it was drawn into a window already gone). The
+text editor asks at all -- closing a modified tab had been refused with a
+message offering Ctrl+Shift+W to discard, a key nothing bound. The hex editor
+saves (Ctrl+S, Ctrl+Shift+S, the toolbar), atomically through `safeio`, and
+**refuses to save a file it read only in part** over the file itself -- it reads
+the first 16 MiB of a larger file, and writing those back would cut the file
+short; Save As writes them to a new file instead. Its toolbar and tabs answer
+the pointer, and closing a tab or the window over unsaved work asks, with
+Save as file for a document that has none. Its documents now keep the real
+path they came from, not the lossy display string, so a file whose name is not
+valid UTF-8 is saved to itself rather than to some other name.
+
+**Where.** `apps/editor/src/{main,input}.rs` (`CloseScope`, `answer_close`,
+`close_prompt_key`), `apps/markdowneditor/src/main.rs` (`GEvent::CloseRequested`),
+`apps/hexeditor/src/main.rs` (`save_active`, `save_to_own_file`, `picked`,
+`TOOLBAR_BUTTONS`, `tab_rects`, `request_quit`). Mutation tables: `apps/editor/mutate.py`
+(new), `apps/markdowneditor/mutate.py`, `apps/hexeditor/mutate.py` (new).
+
+**The JSON viewer, the same day.** It saves (Ctrl+S, Ctrl+Shift+S, a Save
+button) through `safeio`, refuses to save a partly read file over itself as
+the hex editor does, and asks before a modified tab or the window closes. The
+close question and the picker name their document by `Document::id` rather
+than by position -- the arrangement `TD-C-JSONVIEWER-CAN-EDIT-A-VALUE-BUT-NOT-ADD-ONE`
+warned about, and the first code to hold a tab across user interaction. Save As
+starts beside the document's own file. Looking at it turned up six more
+faults, all fixed in the same change:
+
+| what | what the user saw |
+|---|---|
+| the toolbar (New, Search, Edit) sat above a click handler that began at the tab bar | three buttons that did nothing; Open and Save were not there to draw |
+| a tab's "x" close mark was part of the tab's select area | clicking it selected the tab it was meant to close |
+| `close_tab` never moved the active index when a tab *before* it closed | the next click-to-close would have shown a different document as the active one |
+| the find bar lay over the tree and took none of its clicks | a click on the bar -- or on its "Aa" -- selected a tree row under it; "Aa" and "Esc" could not be clicked |
+| an edit in progress was only a *path*, and survived a tab switch or close | Enter wrote the typed value into the next tab's document at the same path |
+| a tree edit rewrote the whole text as `format_json(value, indent)`, `indent` being the raw view's two-space default | changing one number in a one-line or four-space file reformatted all of it -- harmless while nothing could save, a rewrite of the user's file once something could |
+
+Also: the redraw fingerprint gained the tab list and the status line, so a
+save (which changes neither content nor selection) and closing the first of
+two fresh tabs (which left every other field equal) redraw; and the find bar's
+matches are recomputed for the tab on screen instead of kept from the last
+one. A tree edit now keeps the text's layout -- one line stays one line, an
+indented file keeps its indent ([`IndentStyle::detect`]), a final newline is
+kept or left off -- and the raw view opens in the file's own indent. Mutation
+table `apps/jsonviewer/mutate.py` (new, 24 rows).
+
+**Slides and sticky notes, the same day.** `apps/slides` asks before its
+window closes over unsaved changes, with the question it already asked before
+Open -- which now offers Save as well: S saves (asking where for a deck with no
+file) and goes on only if the save worked, D goes on without saving, any other
+key keeps the deck. A close during a slide show ends the show, which draws
+nothing but the slide. Words being typed into a box when the window closes are
+committed first, so they are asked about rather than dropped -- and a box
+clicked into and out of again, unchanged, no longer marks the deck unsaved
+(every finished edit counted as a change, and a box still showing its prompt
+was emptied). `apps/stickynotes`: **Ctrl+Q quit without saving at all**, so
+whatever had been typed since the last autosave went with the window; and the
+close button saved and quit whether or not the save worked. Both now save
+first, and a failed save keeps the window open once, with the reason on the
+toolbar -- asking again quits, so a disk that stays broken cannot make the
+window impossible to close. Mutation tables: `apps/slides/mutate.py` (eleven
+rows new or rewritten), `apps/stickynotes/mutate.py` (new, 5 rows).
+
+**Paint, the same day.** Nothing recorded whether the picture had changed,
+so nothing could ask: the window closed over it, and Ctrl+N and Ctrl+O
+replaced it, without a word. It keeps that record now (every edit goes through
+`push_history`, which sets it; so do undo and redo, and the layer operations,
+which do not go through history), marks the window bar with `*`, and asks --
+on `apps/unsaved`, the first program to -- before a close, a New or an Open.
+Ctrl+S writes over the picture's own file once it has one (it asked where
+every time), Ctrl+Shift+S asks, and the picker starts beside the file. And
+what an open or a save did is drawn in the status bar: it was recorded and
+drawn nowhere, so a save that failed looked like one that worked. Mutation
+table `apps/paint/mutate.py` (new, 13 rows).
+
+**The diagram editor and the whiteboard, the same day.** Neither could save
+anything it could open again -- the diagram wrote an SVG, or a JSON that kept
+the shapes and dropped their colours, borders, fonts, arrowheads, layers and
+groups, for "an importer that does not exist yet"; the whiteboard wrote the
+page in front as an SVG, so a board's other pages could not be kept at all --
+and each said so in a banner across the top of the window. Each now has a
+file of its own, YAML as `apps/slides` keeps a deck (`.diagram`,
+`.whiteboard`; `slateos-diagram: 1`, `slateos-whiteboard: 1`), written through
+`safeio` and read back whole: every property, a later format refused rather
+than half-read, a file cut short refused rather than read as a smaller
+document, ids that clash refused, and a shape of an unknown kind -- or an arrow
+to a box that is not there -- left out while the rest is read, the opening
+saying how many were left out. Ctrl+S saves (asking where the first time),
+Ctrl+Shift+S saves as, Ctrl+O opens, and the old save is Ctrl+E, export, which
+is not a save: it leaves the unsaved mark.
+Each records unsaved changes and asks on `apps/unsaved` before a close or an
+Open, and the status line shows what the last save did (neither drew it).
+Also fixed in the diagram: naming a box and leaving the name as it was no
+longer counts as a change. In the whiteboard, two faults in undo, both of
+which the file made matter: **a deletion could not be undone** -- the undo
+record held only the shape's id and was made after the shape was gone, so
+undo found nothing to put back (a layer's deletion likewise) -- and **the
+history was one for the window**, replayed onto whichever page was showing,
+so undo after switching pages took a same-numbered shape off the wrong page.
+Deletions now carry what they took and where it was, and each page keeps its
+own history. Mutation tables: `apps/diagram/mutate.py`,
+`apps/whiteboard/mutate.py` (both new).
+
+**The spreadsheet, the same day.** Ctrl+S wrote the sheet in front as CSV --
+its values, with no formula, no format and no other sheet -- and Ctrl+O read a
+CSV into the sheet in front. It now keeps a workbook, `.spreadsheet`: every
+sheet, every cell as it was typed (a formula comes back a formula, and is
+worked out again), every format, width, height and frozen pane, in a
+tab-separated file read whole or not at all, a refusal naming the line
+(design-decisions §1204). Ctrl+S saves (asking where the first time), F12
+saves as (Ctrl+Shift+S was already the status bar's), Ctrl+O opens a workbook
+-- or a CSV, as a new workbook of one sheet that does not take the CSV as its
+file -- and Ctrl+E exports the sheet as CSV, which is not a save. Unsaved
+changes are recorded where every change already went, the undo manager, plus
+freezing panes, which undo does not see; the window bar shows `*`; and a close
+or an Open over them asks on `apps/unsaved`, committing a value half typed
+first. Mutation table `apps/spreadsheet/mutate.py` (new).
+
+Four more that looked like the same case are a worse one -- see `[E] Notes,
+contacts, snippets and kanban keep nothing` below.
+
+**One question, not thirteen -- done the same day.** The six applications
+fixed first each drew the question by hand, beside the toolkit's own
+`guitk::modal::AlertDialog`, which has focus, hover, Escape, a scrim and the
+destructive colour for the one button that loses work. `apps/unsaved` is that
+dialog asked the one way -- Save, Don't save, Cancel; S, D, Escape, Tab; a
+click beside the card answers nothing; shown at once rather than faded in, for
+the applications that have no clock -- and paint, the text editor, the
+markdown editor, the hex editor, the JSON viewer and slides all ask through it
+now. What changed for a user: slides' Y ("yes, go on") and the markdown
+editor's C ("cancel") are gone in favour of the shared keys, and a key that
+answers nothing is swallowed rather than read as Keep. Mutation table
+`apps/unsaved/mutate.py` (7 rows); each application's table follows its own
+routing to the question.
+
+**Left behind on purpose:** the two editors' *other* modal question -- "the
+file changed on disk" -- is still drawn by hand in both. It has four answers
+and a merge review behind one of them, which is more than a dialog's row of
+buttons; it is the next candidate for the same treatment, not a reason to
+have left this one hand-drawn.
+
+### [E] Notes, contacts, snippets and kanban keep nothing -- 2026-09-25
+**Status:** FIXED -- notes, contacts and kanban (lane E, 2026-09-25), snippets (2026-09-26).
+
+**In short:** the notes app, the address book, the snippet library and the
+kanban boards each hold everything the user puts in them in memory only. There
+is no store on disk: each opens empty (or, for snippets, on a built-in sample)
+and forgets every note, contact, snippet and board the moment its window
+closes. The one way to keep anything is an export -- the selected note as
+Markdown, the whole book as vCard, a snippet as JSON, one board as JSON (Ctrl+E)
+-- which the user has to remember to do, and which does not come back on the
+next start. Asking "save your changes?" on close would be the wrong fix: nobody
+expects to save a notes app.
+
+**Where.** `apps/notes/src/main.rs` (`main`: "Until there is a store on disk
+this is what there is to show"; `save_selected_note` is an export),
+`apps/contacts/src/main.rs` (`ContactsApp::new`, `write_vcards`/`read_vcards`
+are import and export), `apps/snippets/src/main.rs` (`App::new`, the JSON
+export), `apps/kanban/src/main.rs` (`KanbanApp::boards`; `write_board` and
+`read_board` export one board and import one as a new board).
+
+**The proper fix** is the one `apps/stickynotes`, `apps/flashcards`,
+`apps/finance` and `apps/habits` already use: the library is a file in the
+settings directory, read at start and written -- atomically, through `safeio`
+or `settingsfile` -- as it changes, with a failed write said on screen and the
+record kept marked unsaved so the next change tries again. The exports stay as
+exports. See `todo.txt` -> Lane E -> "The habit tracker keeps its record in the
+settings directory" for why the settings directory rather than a data one.
+
+**Notes, the same day.** The library is `notes/library.txt` in the settings
+directory: every notebook and note with its tags, checklist, table, pins and
+version history, tab-separated with `textfmt::tsv`'s escapes, rewritten after
+every event that changed it and read whole or not at all (design-decisions
+§1205). A failed save is drawn in red in the status bar and retried by the next
+change or Ctrl+S; a close while it fails asks on `apps/unsaved`; a note being
+written when the window closes is committed and kept, where it was dropped.
+Ctrl+S, which was the Markdown export, now says where the notes are kept, and
+the export is Ctrl+E. Also fixed on the way:
+- **The empty window's text was never seen.** "No notes yet -- Ctrl+N makes
+  one." and the line under it were drawn at the top of every frame, notes or
+  not, and *before* the window's background, which painted over them. They are
+  drawn in the editor, and only when there are no notes; the second line now
+  says where notes are kept, or why they are not.
+- **Timestamps were a counter** from 1000, shown as "Modified: 1004" and
+  "v3 (1003)", and restarting at 1000 would have stamped every note made after
+  a restart earlier than every kept one. They are the clock's, never earlier
+  than a stamp already given, shown as `2026-09-25 14:03`.
+- **Leaving a note unchanged changed it.** Escape out of the writing mode
+  committed the body whether or not anything was typed, putting a copy of the
+  same text in the history and moving the note to the top of the list; now
+  the same text, title, notebook or name is no change.
+Mutation table `apps/notes/mutate.py` (new, 26 rows, all caught).
+
+**Contacts, the same day.** The address book is
+`contacts/address-book.txt` in the settings directory: every contact with all
+its numbers, addresses, accounts and groups, the groups with their colours,
+and the recently viewed, in the notes library's kind of file, read whole or not
+at all (design-decisions §1206). The store counts its own changes
+(`ContactStore::revision`) and the window writes the book after any event that
+moved the count; a failed save is drawn in red on the status line and retried;
+closing over a contact being edited, or while a save fails, asks on
+`apps/unsaved`. Ctrl+S says where the book is kept; export moved to Ctrl+E.
+Also fixed on the way:
+- **Saving an edit lost data.** The form shows the names, the work fields,
+  the notes, the birthday and the *first* phone number, email address and
+  postal address. Saving rebuilt the contact from the form and copied back
+  four things (groups, the star, when it was added, when it was last reached),
+  so every other number, address and account, a display name imported from a
+  vCard, and the photo were dropped by the first edit -- beside a comment
+  saying they must not be. The form is now written onto the contact; an
+  emptied field removes what it showed; the display name follows the names
+  only when it was theirs. Saving an unchanged form changes nothing.
+- **Nothing had a time.** No contact was ever given one, so "recently added"
+  sorted nothing, and "recently contacted" ran on a counter from
+  2,000,000,000. Both are the clock's now, never earlier than a time already
+  kept; an import is stamped as added now.
+- **The vCard import read the whole file** into memory and cut it at 8 MiB
+  afterwards; it reads through `safeio::read_to_string_capped`, which stops at
+  the cap.
+- **A contact could be put in a group that did not exist**
+  (`add_contact_to_group` did not look); it cannot, since that would make the
+  book a file that cannot be read back.
+- The empty window said "Nothing is saved automatically -- press Ctrl+S to
+  write a vCard file"; it says where the book is kept.
+Mutation table `apps/contacts/mutate.py`: 31 rows added, and four of its
+older rows moved to where the code now is.
+
+**Kanban, the same day.** Every board is `kanban/boards.txt` in the settings
+directory, the same kind of file, read whole or not at all; a card is written
+once and each column lists its cards by id (design-decisions §1207). After
+every key or click the window compares the boards' text with what it last
+wrote, and writes it when they differ; a first run's starting board is not
+written until something on it changes. A failed save is on the status line and
+retried; closing while it fails asks. Also fixed:
+- **A card made after an import could replace an imported one.** The import
+  keeps the ids its file carries, and did not move the id counter past them,
+  so the next card made could be given the id of one just read -- and cards
+  are kept in a map by id. Every id read moves the counter now
+  (`Id::from_stored`).
+- **An import could hold a card in two columns**, or a column naming a card
+  the board does not have; it drops them, keeping the first place a card is
+  named.
+- **What an import or an export did was drawn nowhere** (`last_file_action`,
+  "for the status line", which there was not). There is a status line now.
+- **The empty board's two lines were never seen**: drawn at the top of the
+  window, on every board, before the toolbar, which painted over them -- and
+  pinned by a test that read the command list rather than the screen. The
+  status line says how to start and where boards are kept; the test now also
+  asks that nothing drawn after it covers it.
+- Card times were a counter from 1000; they are the clock's, never earlier
+  than a time already kept.
+Mutation table `apps/kanban/mutate.py` (new).
+
+**Snippets, 2026-09-26.** A snippet can be written now: F2, the new Edit
+button, or making one (N, which still names it from the search box) opens it
+in the column it is shown in -- title, language, folder, tags, a description
+and the code itself, in the fixed-pitch face it is shown in, Tab indenting
+there (`apps/textarea`, which learned to measure in that face). Ctrl+S saves;
+Escape over changes asks before throwing them away. The library is
+`snippets/library.txt` in the settings directory, written after every change
+and read whole or not at all (design-decisions §1211); a first run still opens
+on the examples, which are not written until something changes. Also fixed:
+Delete deleted at once, with no undo -- it asks now; a snippet's time was its
+id, which restarted with every window -- it is the clock's; and the JSON
+export was written with `fs::write`, which truncates before writing -- it is
+atomic now.
+
+### [E] The JSON viewer's text input cannot be reached -- 2026-09-25
+**Status:** FIXED 2026-09-26 -- `apps/jsonviewer/src/main.rs` (`SourceEdit`,
+`App::open_source`, `source_key`, `source_click`, `render_source`). The raw
+view edits the document's own text: Enter there, Enter in a tree that is empty
+or does not parse, or a press in the raw view opens it -- verbatim, in the
+fixed-pitch face, with a caret, a selection, Ctrl+A/C/X/V, Tab as a step of the
+text's own indent, the caret kept on screen down the text and along a long
+line (a minified document is one line, and only the part on screen is drawn).
+Every change is written back to `input` and parsed again at once, so the tree,
+the statistics and Ctrl+S see it; the line that fails is marked in the gutter
+and the parse's verdict is at the foot. Enter on a document that does not parse
+puts the caret where the parse failed, and the error banner now says so.
+Escape, or leaving the raw view, stops; the find bar and the text each close
+the other. The text cannot grow past `MAX_OPEN_BYTES`, what opening it again
+would read whole -- the status line says so when a key is refused. `guitk` still
+has no multi-line editor, but `apps/textarea` is one, and it serves here. The
+dead `input_focused`/`cursor_pos`/`handle_input_key` are gone. Found beside it
+and fixed: the wheel moved every view three *pixels* a notch (its `dy` is in
+notches -- `guitk::wheel::pixels` now), and opening a file read all of it before
+applying the 8 MiB cap (`safeio::read_to_string_capped` now). 18 tests;
+`apps/jsonviewer/mutate.py` has 40 rows for it.
+
+**In short:** a new JSON viewer tab says "Enter JSON in the input area or
+paste a document" (now "press Ctrl+O to open a JSON file", which is true), and
+there is no input area. `handle_input_key` is a complete little text editor --
+insert, Backspace, Delete, arrows, Home, End, Enter -- guarded by
+`input_focused`, and nothing ever sets `input_focused` to `true`; only Escape
+sets it, to `false`. So a new document can never be given any content, and an
+opened file with a parse error -- the commonest reason to open JSON in an
+editor -- can be looked at but not repaired.
+
+**Where.** `apps/jsonviewer/src/main.rs`: `App::input_focused`,
+`App::handle_input_key`, and the raw view (`render_raw_view`), which draws the
+*formatted* text rather than `input` and has no caret, so it cannot simply be
+made focusable.
+
+**The proper fix** is a source-editing mode for the raw view: a click (or
+Enter) in it edits `input` itself -- drawn verbatim, with a caret, Up/Down by
+line, the caret kept on screen, the parse re-run as the text changes -- and
+Escape returns to the formatted view. `guitk` has no multi-line editor to lend
+(`textedit` is single-line), so the editing stays in this crate.
+
+### [E] The two text editors draw a file name's control characters raw in the tab and title -- 2026-09-26
+**Status:** FIXED (lane E, 2026-09-26) -- `Document::shown_name` in both editors
+renders the name through `pathtext` at every drawing and message site; `name`
+itself stays exact for Save As and the conflict markers. Tests
+`a_documents_name_is_kept_exactly_and_drawn_escaped` in each. Was:
+`apps/editor/src/main.rs` and `apps/markdowneditor/src/main.rs`,
+`shown_file_name` and every use of `Document::name` / the document's `name`.
+
+**In short:** a document's name is one string doing two jobs. It is *used* --
+Save As suggests it, and a merge conflict writes it into the text as a marker
+-- so it is the file's name exactly whenever that is text
+(`pathtext::ShowPath::text_or_shown`). It is also *drawn*, in the tab and the
+window title, where a name holding a control character (a tab, a line break;
+legal in a SlateOS name) is drawn raw rather than as an escape. Nothing is
+lost or misnamed; the label only looks wrong for such a name.
+
+**The proper fix:** keep the exact name as the document's name and render it
+at each drawing site with `Path::new(&name).shown()` (or keep a second,
+shown label beside it). Every other lane E program already draws names
+through `shown`; these two were left because their name also feeds Save As
+and the conflict markers, which must stay exact.
+
+### [E] Applications show paths through `Path::display`, which decodes lossily -- 2026-09-26
+**Status:** FIXED (lane E, 2026-09-26). Every `Path::display` / `OsStr::display`
+under `apps/` -- 368 calls in 68 files, found by clippy itself rather than by
+pattern (the fourteen application types with a `display()` of their own are
+not paths) -- now calls `pathtext::ShowPath::shown` (new crate `apps/pathtext`),
+which renders through `quoting::escape_unprintable`. `apps/clippy.toml` names
+both methods in `disallowed-methods`, and the workspace denies `clippy::all`,
+so a new one fails the boot test's clippy gate. design-decisions.md §1213.
+Every site was then read, because a dozen were not displays at all but uses
+-- an M3U line, a persisted key, a feed address read back as a path, a path
+box, a linker argument, suggested file names -- and those now keep the name
+exactly (see §1213's table). `pathtext` gained `text_or_shown` for them, and
+ten per-application name helpers now go through `pathtext`.
+
+The original entry, for the record:
+
+**Was:** 449 uses in 73 files under `apps/` (measured with
+`git grep -c "\.display()" -- 'apps/*/src/*.rs'`), most in status lines and
+error messages. Fixed where it is a window's own name: the file manager's
+title (2026-09-26), the image viewer's error messages (`shown_path`).
+
+**In short:** a file or folder whose name holds bytes that are not text is
+shown with a replacement character in their place, so two such names can
+look the same on screen, and a message about one can seem to be about the
+other. Nothing is lost -- the path itself is untouched -- but the user cannot
+tell the files apart. The lossy-decode gate (`scripts/lossy-decode.py`)
+catches decodes whose result is *kept*; `display()` builds only a string to
+show, so the gate does not see it.
+
+**The proper fix:** one shared way to show a path -- the escaping
+`quoting::escape_unprintable` already gives names (`\351` for a byte that is
+not text) -- applied at every site, and a ratchet like the lossy-decode one
+so no new `display()` reaches a user. Mechanical, but 449 sites; worth doing
+as one sweep rather than piecemeal. The per-app `shown_name`/`shown_path`
+helpers written this month are the seed of the shared function.
+
+### [E] Thumbnails are still generated on the thread that draws -- 2026-09-26
+**Status:** FIXED (lane E, 2026-09-26) -- both grids make their thumbnails on
+`offloop::Queue` (new the same day): the request is every card the view
+shows that has no thumbnail, replacing whatever of the last set is not yet
+started; each thumbnail is filed as it arrives, in `App::on_wake`, which asks
+for a frame. The window's generator, with its disk cache, moves to the
+worker when the waker arrives; without one (tests, a worker that will not
+start) the old per-frame budget still does the work. Tests
+`thumbnails_are_made_off_the_window` (explorer) and
+`the_grids_thumbnails_are_made_off_the_window` (photomanager); both mutation
+tables, `apps/explorer/mutate.py` (new) and `apps/photomanager/mutate.py`,
+catch every row. Was: `apps/explorer/src/main.rs` (`pump_thumbnails` ->
+`self.thumb_gen.process_batch(batch)`), `apps/photomanager/src/main.rs`
+(`sync_thumbnails` -> `process_batch(Self::THUMB_BATCH)`).
+
+**In short:** opening a folder of photographs in the file manager, or the
+photo manager's grid, makes each thumbnail on the thread that draws the
+window, a few per frame. `imagecodec::decode_scaled` makes one cheap for a
+small picture, but a camera's JPEG still costs about a third of a second at
+128 pixels (lane F's figure, 4000x5333, release), so every frame that makes
+two or three of them is a frame the window cannot answer in. The selected
+photograph's own decode moved off that thread on 2026-09-26 (`apps/offloop`,
+`TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`); the grids'
+thumbnails did not.
+
+**The proper fix** is the same worker with a different rule. A viewer wants
+only the newest request (`offloop::Latest`); a grid wants *every* card it can
+see, and each result as soon as it exists. So: a second `offloop` type whose
+request is the whole set of visible cards -- replacing the set not yet
+started, since cards scrolled away are no longer wanted -- and whose results
+are handed back one by one as they are made, each waking the loop. The
+thumbnail cache (`gui/thumbs`, lane C's) stays where it is; only the
+`process_batch` call moves to the worker, with the generator's input and
+output crossing by channel.
+
+### [E] The process explorer's window picker, blocking analyzer and affinity and priority controls are unwired -- 2026-09-26
+**Status:** OPEN -- `apps/procexplorer/src/features.rs`, under an
+`#![expect(dead_code)]` that goes when they are wired. Each waits on something
+outside lane E's tree.
+
+**In short:** `features.rs` held six panels written against invented data and
+reachable from nothing (the orphan-modules scan's island). Two are real now:
+the **Environment** and **Memory** tabs show the selected process's
+`/proc/<pid>/environ` and `/proc/<pid>/maps` (2026-09-26). The other four are
+not, and cannot be from here:
+
+| Panel | What it needs | Whose |
+|---|---|---|
+| Window picker ("which process owns this window?") | the compositor to report the window under the pointer and its owner | lane F |
+| Blocking analyzer (what a process waits on, deadlocks) | the kernel to publish a task's wait reason and what holds it (`/proc/<pid>/wchan` or better) | lane A |
+| Affinity control | `sched_setaffinity` reachable from a native program | lanes A/D |
+| Priority control | `setpriority` that acts on the process it names: libc's ignores `who` and renices the caller, and no native syscall can name another process (`requests/e-ad-renicing-another-process-renices-the-caller.md`) | lanes A/D |
+
+Their invented fixtures (`with_demo_data`, `mock_pick`) are `#[cfg(test)]` or
+test-only now, so no build can show them. The memory map does not show what is
+*resident*: `/proc/<pid>/maps` does not say, and there is no `smaps`.
+
+### [E] apps/ had 47 lossy decodes reaching a value -- 2026-09-26
+**Status:** FIXED (lane E, 2026-09-26). `python scripts/lossy-decode.py --under
+apps` reports VALUE 0; `scripts/lossy-decode-baseline.txt` now lists only
+`gui/` files. The backlog is `TD-C-THE-LOSSY-DECODE-CHECKER-NEVER-LOOKED-AT-TWO-THIRDS-OF-THE-TREE`'s
+ratchet, cleared for lane E's half.
+
+**In short:** nineteen programs turned a name that is not text into text by
+replacing its odd bytes with U+FFFD and then used the result. Most only showed
+it -- two such names drawn as the same row -- but four did real harm: the file
+manager's rename box began with the lossy name, so accepting it unchanged
+renamed the file; the archive manager keyed members by that string, so two
+members became one entry; the indexer gave two such names one search key; and
+backup and the indexer matched exclusions against a text that a pattern
+holding U+FFFD could match. Names are now shown by their bytes through
+`quoting::escape_unprintable` (the tree's one renderer for untrusted text),
+matched by their bytes where the matcher allows (backup's glob, the indexer's
+exclusions), and the rename box treats its own starting escapes, answered
+unchanged, as no change. The photo manager's import, found beside it, also
+read a whole file before its cap; it reads under the cap now.
+
+### [E] The mutation harness scored every failure in a submodule's tests as a crash -- 2026-09-25
+**Status:** FIXED (lane E, 2026-09-25) -- `scripts/mutation_harness.py`
+
+**In short:** the tool that proves a test suite catches broken code read a
+failing test's name only when the test lived in the crate's root module
+(`tests::name`). A test in a module the root declares is listed as
+`input::tests::name`, and went unread -- so for a crate tested that way, every
+mutation looked like a crash and was scored "caught", whatever the tests had
+said. A table could pass a crate whose tests caught nothing.
+
+**How it was found.** The text editor's close question is tested in
+`apps/editor/src/input.rs`; its first sweep reported all seven rows "caught by a
+crash", and its `main.rs` rows were refused as naming "no such test", because
+the table check looked for test functions only in the file being mutated.
+
+**The fix, additive:** failures are read under any module path, and a table's
+test names are looked up in every `.rs` file beside the mutated one. Tables
+that mutate a file other than the crate root: `apps/editor` (now swept),
+`apps/email` and `apps/mediaconvert` -- both never swept, so no recorded
+result rests on the old reading; their sweeps are in lane E's queue.
+
+### [E] "Open with" opened nothing in six of the file manager's eight programs -- 2026-09-26
+**Status:** FIXED for all six (lane E, 2026-09-26). OPEN only for a file whose name is not UTF-8, which still crashes whichever program it is sent to -- lane F's `Args` (`requests/e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`).
+
+**In short:** double-clicking a file in the file manager runs the program the
+associations name with the file's path after it. Six of the eight programs the
+associations can name started through `oswindow::app::launch`, which refuses
+every argument but `--display` -- it printed "unexpected argument" to a stderr
+nobody sees and exited 2 before the window opened. So opening a song, a PDF, a
+binary file, a disk image or an archive did nothing at all, and "show in
+folder" from anywhere in the desktop opened no folder. The archive manager and
+the explorer even read the path themselves first (`args_os().nth(1)`), then
+called `launch`, which refused the very argument they had just used.
+
+**Fixed.** Each parses its command line with `oswindow::app::Args` and starts
+through `launch_with`, as the editor and the image viewer already did:
+
+- **hexeditor** -- each file named opens in a tab of its own; every message is
+  kept, so a file that could not be read is named beside the ones that opened.
+  Its open also read the whole file (`std::fs::read`) before cutting it to the
+  16 MiB cap, so the four-gigabyte file the cap is for was read in full first;
+  it reads only as far as the cap now (`safeio::read_capped`).
+- **pdfviewer** -- each PDF named opens in a tab; a file that fails leaves no
+  empty tab behind, and every failure is shown.
+- **archivemanager** -- the archive named opens; a second one named is said
+  not to have been opened (a window holds one).
+- **explorer** -- a folder named opens on itself; a file named opens on its
+  folder with the file selected; a second path is said not to have been opened.
+- **musicplayer** -- every song and every playlist named is listed and the
+  first becomes the one shown. Ctrl+O read every pick as an M3U playlist, so a
+  song chosen there was "stream did not contain valid UTF-8"; a song joins the
+  list now and a playlist replaces it, which the window's own help line says.
+
+- **videoplayer** -- it had no picker either, and its window said it "has no
+  filesystem access". A file opens now from the command line, Ctrl+O or a
+  playlist entry, and is read for what it holds by `apps/mediaprobe` (a new
+  crate: MP4/MOV, Matroska/WebM and AVI headers -- length, and each track's
+  codec, size, frame rate, sound and language). Nothing decodes a frame, so
+  Play says so rather than running a clock over a black picture.
+
+**Still open:**
+- **Names that are not UTF-8** -- `Args::from_env` reads `std::env::args()`,
+  which panics on such an argument, and `Args::rest` is `Vec<String>`. Lane F's
+  (`gui/window`); the request says what would do it. Lane E's seven callers
+  change one signature each when it lands.
+
+**Where.** `main` and a testable `open_arguments` (`explorer_for` in the
+explorer) in `apps/{hexeditor,pdfviewer,archivemanager,explorer,musicplayer,videoplayer}/src/main.rs`;
+the music player's `add_song`, `add_playlist`, `open_picked` and
+`PlayerState::add_m3u_from`; the video player's `MediaFile::open`,
+`open_path`, `add_path` and `load_playlist_entry`; `apps/mediaprobe`.
+
+### [E] The archive manager read only ZIP, and "New" wrote a ZIP whatever the name -- 2026-09-26
+**Status:** FIXED for TAR and TAR.GZ (lane E, 2026-09-26). OPEN for TAR.BZ2, TAR.XZ and 7z -- refused by name, and since 2026-09-26 by their bytes when the name says TAR. Their decompressors exist, in the kernel, where no program can reach them: `requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md` asks lane A to promote them as it did `deflate` and `ziparchive`.
+
+**Also fixed 2026-09-26: the Open dialog showed only ZIP files.** Its filter
+was `*.zip` alone, written when ZIP was all the program read, so once TAR and
+TAR.GZ opened, the dialog still hid every one of them. The filter and the
+program's own name detection now read one table, `ArchiveFormat::patterns`,
+so a name the program recognises is always one the dialog shows. A `.tar.xz`
+was not recognised at all ("does not end in an archive extension I know");
+it is now named, and refused as TAR.XZ.
+
+**In short:** the archive manager opened ZIP files and nothing else: a `.tar`
+or `.tar.gz` -- the commonest archives on a Unix-like system -- was refused
+with "this build reads ZIP only". And "New archive" wrote an empty ZIP
+whatever the user named it, so a new `backup.tar` held ZIP bytes under a TAR's
+name, which nothing then opened as either.
+
+**Fixed.** A new crate, `apps/tararchive`, lists and writes TAR: ustar, GNU
+(long names and links, base-256 numbers) and PAX (path, linkpath, size, mtime
+records), every header's checksum checked, a damaged archive listed as far as
+it reads with where it stopped. There were three TAR parsers in the tree --
+the kernel's, coreutils' `tar`, `undelete`'s -- and none a crate could use.
+The archive manager opens TAR in place and TAR.GZ inflated (under the same
+512 MiB cap as everything else), by what the bytes are rather than the name;
+lists members (a `./` root is not a member, no name keeps its `./`); extracts
+files and folders, a hard link as a copy of its target, and refuses symbolic
+links (a link can point outside the destination) and devices by name; Test
+reads every member back and says where a damaged archive stops; Add, Delete
+and New write TAR and TAR.GZ in their own format (a TAR streamed, a TAR.GZ
+built and compressed, both refused up front past the memory budget). The CRC
+column is blank for TAR, which keeps no checksum of a member, rather than a
+column of zeros.
+
+**Where.** `apps/tararchive`; `apps/archivemanager/src/backend.rs`:
+`parse_tar`, `extract_tar`, `verify_tar`, `save_tar`, `create_empty`,
+`SeekReader`, `copy_bytes`; `ArchiveEntry::crc32` is an `Option`;
+`ArchiveModel::damage`, `ArchiveTestResults::damage`.
+
+**Still open.** Other copies of TAR parsing -- `kernel/src/fs/tar.rs` (lane
+A), `userspace/coreutils/src/bin/tar.rs` (lane B), `apps/undelete` -- could
+use `tararchive`; not filed as requests yet, since the kernel's is `no_std`
+and `tararchive` reads through `std::io`.
+
+### [E] The Device Manager cannot say which driver runs a PCI device, nor its interrupt or memory -- 2026-09-26
+**Status:** OPEN, waiting on lane A -- `requests/e-a-publish-each-pci-functions-irq-bars-and-driver.md`. The rest of the Device Manager's inventory is FIXED (lane E, 2026-09-26).
+
+**In short:** the Device Manager now lists the machine's real devices -- where
+it used to invent them (to 2026-09-15) and then show none (to today). But for
+a PCI device it cannot say which driver runs it, which interrupt it uses or
+which memory it occupies, because the kernel does not publish those. Every PCI
+row says so in words ("Unknown" status, driver "Not reported"), and the
+Resources view is empty.
+
+**What is listed, and from where** (`apps/devicemanager/src/inventory.rs`,
+through `apps/hwquery`, the reader System Information uses, so the two cannot
+disagree about the machine): every PCI function from `/sys/devices/pci`,
+sorted into a branch by its class code; each registered disk from
+`/sys/devices/block`; each network interface but loopback from
+`/proc/net/dev`; each display output from `/proc/monitors` (a disabled one as
+Disabled); the processor. A source that cannot be read is named in the window
+-- in the empty-tree banner, or beside the counts in the status bar -- so an
+empty branch is not read as an absent device. The window scans once on
+opening and again on F5. Export writes the report to a file the user picks,
+through `safeio::write_str_atomically`.
+
+**Wording changed with it.** "N/A" for an IRQ, a memory range, a DMA channel
+or a hardware ID claimed the device has none; it is now "Not reported". "No
+driver installed" claimed a finding about the machine; the Driver tab now says
+the kernel does not report which driver runs a device. The status bar counts
+the devices "with no status reported" where it counted "enabled", which every
+listed device is in the only sense the kernel knows.
+
+**Still refused, correctly:** Enable, Disable and Uninstall -- the kernel has
+no interface for any of them. The refusal now meets real rows, which is the day
+the 2026-09-15 entry (`TD-C-A-DEVICE-MANAGER-THAT-INVENTED-THE-MACHINE`) wrote
+it for.
+
+**Not listed at all:** USB devices behind a controller and sound devices as
+such (the controllers appear as PCI functions). Nothing publishes either;
+`/sys/hardware/usb` and `/sys/hardware/sound` never existed.
 
 ### [F] Text is never hinted: the `hinting` font setting changes nothing -- 2026-09-26
 

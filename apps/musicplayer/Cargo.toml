@@ -6,6 +6,7 @@ edition = "2024"
 # description was the only place in the repository the word appeared.
 description = "SlateOS Playlist Editor — build and save .m3u playlists"
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -18,6 +19,13 @@ oswindow = { path = "../../gui/window" }
 # first. The read is capped because an .m3u is handed to us by whoever
 # wrote it.
 safeio = { path = "../safeio" }
+
+# What an audio file is and says -- its length, rate and tags -- shared with
+# the explorer's audio columns.
+audiotags = { path = "../audiotags" }
+# A song named by its file is shown by its bytes: what is not UTF-8, or is a
+# control character, written as an escape rather than lost.
+quoting = { path = "../../userspace/quoting" }
 
 [dev-dependencies]
 # `appearance::palette_check`.

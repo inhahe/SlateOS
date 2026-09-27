@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Names are shown through `pathtext`: a byte that is not text, or a control
+# character, as an escape -- never as a lossy decode.
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -13,6 +16,15 @@ oswindow = { path = "../../gui/window" }
 # one. Until this arrived the library could import a file, read its EXIF and
 # list it, and then drew a card with its name on it.
 imagecodec = { path = "../../gui/imagecodec" }
+
+# A photograph's EXIF -- camera, exposure, date, place. This file's own parser
+# moved there on 2026-09-26, for the viewer and the file manager to share.
+exif = { path = "../exif" }
+
+# The selected photograph is decoded off the window's thread and handed back
+# through the waker the window gives it, so selecting a large one never
+# freezes the window.
+offloop = { path = "../offloop" }
 
 # The grid's thumbnails: generation, an LRU that owns the image ids, and the
 # eviction list the compositor must be told about. Extracted from the file

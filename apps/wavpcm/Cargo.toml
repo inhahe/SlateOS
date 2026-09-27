@@ -1,0 +1,16 @@
+[package]
+name = "wavpcm"
+version = "0.1.0"
+edition = "2024"
+description = "Reading, converting and writing uncompressed WAV audio: sample rates, channel counts and sample formats, without trusting the file."
+
+# No dependencies. A WAV file is a RIFF header over raw samples, and every
+# conversion here is arithmetic on them; nothing in it needs a window, a file
+# system or a codec. `apps/mediaconvert` is the first user; `apps/musicplayer`
+# and `apps/soundrecorder` each carry their own WAV header code and are the
+# next (known-issues.md, the mediaconvert paragraph of
+# TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED).
+[dependencies]
+
+[lints]
+workspace = true

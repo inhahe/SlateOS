@@ -107,6 +107,10 @@ const FIELD_LABEL_WIDTH: f32 = 130.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_WIDTH: f32 = 110.0;
 const TAB_HEIGHT: f32 = 32.0;
+/// The strip under the tabs that says this program cannot connect, and one
+/// line of it.
+const NOTICE_H: f32 = 50.0;
+const NOTICE_LINE_H: f32 = 15.0;
 const TRANSFER_ITEM_HEIGHT: f32 = 48.0;
 const HISTORY_ITEM_HEIGHT: f32 = 44.0;
 
@@ -1118,7 +1122,7 @@ impl RemoteDesktopApp {
     /// Top of the main content area, below the title bar, toolbar and tabs.
     #[must_use]
     pub fn content_top() -> f32 {
-        TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT
+        TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT + NOTICE_H
     }
 
     /// Height of the main content area.
@@ -1554,7 +1558,7 @@ impl RemoteDesktopApp {
                 }
 
                 // Main content area
-                let content_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT;
+                let content_y = Self::content_top();
                 if y >= content_y {
                     // Sidebar click
                     if x < SIDEBAR_WIDTH {
@@ -1876,34 +1880,36 @@ impl RemoteDesktopApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // After the background, or it would be painted over.
+        self.render_title_bar(&mut cmds);
+        self.render_toolbar(&mut cmds);
+        self.render_tabs(&mut cmds);
+        // In the strip under the tabs, which the content starts below. The
+        // lines were drawn at the top of the window, before the title bar,
+        // which filled the same pixels.
+        let strip_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT;
         for (i, line) in CANNOT_CONNECT_LINES.iter().enumerate() {
             cmds.push(RenderCommand::Text {
                 x: 10.0,
                 #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                y: 1.0 + i as f32 * 12.0,
+                y: strip_y + 3.0 + i as f32 * NOTICE_LINE_H,
                 text: (*line).to_string(),
                 color: if i == 0 {
                     self.palette.ink(self.palette.yellow)
                 } else {
                     self.palette.subtext0
                 },
-                font_size: if i == 0 { 11.0 } else { 9.0 },
+                font_size: if i == 0 { 12.0 } else { 11.0 },
                 font_weight: if i == 0 {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(self.window_width - 20.0),
+                max_width: Some((self.window_width - 20.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
 
-        self.render_title_bar(&mut cmds);
-        self.render_toolbar(&mut cmds);
-        self.render_tabs(&mut cmds);
-
-        let content_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT;
+        let content_y = Self::content_top();
         let content_h = self.window_height - content_y - STATUS_BAR_HEIGHT;
 
         // Content area
@@ -3334,7 +3340,7 @@ impl RemoteDesktopApp {
 
     fn render_perf_overlay(&self, cmds: &mut Vec<RenderCommand>) {
         let ox = self.window_width - 240.0;
-        let oy = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + TAB_HEIGHT + 10.0;
+        let oy = RemoteDesktopApp::content_top() + 10.0;
         let ow = 220.0;
         let oh = 160.0;
 
@@ -5635,5 +5641,48 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let app = RemoteDesktopApp::new();
+        let commands: Vec<RenderCommand> = app.render_commands();
+        for line in CANNOT_CONNECT_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !CANNOT_CONNECT_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
     }
 }

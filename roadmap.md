@@ -1930,7 +1930,12 @@ word; text inside them that says "lane C" is history.
   machine until 2026-09-15 and showed nothing since -- lists through it every
   PCI function by class, the disks, the network interfaces, the display
   outputs and the processor, scanning on opening and on F5; Export writes a
-  file. **Waiting on lane A** for what a device manager exists to show --
+  file. The network interfaces are SlateOS's own `/proc/net` (a file; it
+  read Linux's `/proc/net/dev`, which SlateOS does not serve, so the network
+  was always "not available"): link state, MAC and addresses, an address the
+  kernel says there is none of reading "None assigned" rather than "Not
+  reported", and the `eth0` placeholder it writes with no card left out.
+  **Waiting on lane A** for what a device manager exists to show --
   which driver runs each PCI function, its interrupt line and its memory
   (`requests/e-a-publish-each-pci-functions-irq-bars-and-driver.md`); until
   then those read "Not reported". `known-issues.md` → `[E] The Device Manager

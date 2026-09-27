@@ -1259,6 +1259,8 @@ name = "hwquery"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "quoting",
+ "scratchdir",
 ]
 
 [[package]]

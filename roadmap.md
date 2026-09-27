@@ -8064,7 +8064,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
     - [x] DragDropManager state machine (Idle→Dragging→OverTarget)
     - [x] Drop target registration, hit testing, format compatibility, effect negotiation
     - [x] Drag threshold, cancel support, DragEvent lifecycle events
-  - [-] File picker / save dialog (reuses file explorer component) -- *corrected 2026-09-27: the dialog works, but it does not reuse the explorer; `guitk::dialog` is its own, plainer implementation. How it becomes the explorer is `open-questions.md` C-Q30.*
+  - [-] File picker / save dialog (reuses file explorer component) -- *corrected 2026-09-27: the dialog works, but it does not reuse the explorer; `guitk::dialog` is its own, plainer implementation. Decided 2026-09-27 (`design-decisions.md` §1415): the explorer will show the window for every program and hand back only the file chosen.*
     - [x] Open/Save/SelectFolder modes with builder API
     - [x] Directory navigation (back/forward/up), quick-access sidebar
     - [x] Sortable file list, extension filters, auto-extension append

@@ -43,6 +43,7 @@ use guitk::scrollbar;
 use guitk::splitter;
 use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
+use pathtext::ShowPath;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, SortOrder};
 use drives::DriveSet;
@@ -64,8 +65,10 @@ use thumbs::{
 };
 
 use std::collections::{HashSet, VecDeque};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+
 use std::time::SystemTime;
 
 // ============================================================================
@@ -313,6 +316,21 @@ const SIDEBAR_ITEMS: [(&str, &str); 5] = [
     ("/var", "/var"),
     ("/usr", "/usr"),
 ];
+
+/// The worker that makes thumbnails off the window's thread: asked with every
+/// entry the view draws a thumbnail for, answering with each one as it is made.
+type ThumbWorker = offloop::Queue<ThumbnailRequest, Option<(ThumbnailRequest, Thumbnail)>>;
+
+/// Make one thumbnail with `generator` -- from its disk cache when it has
+/// one there, else from the file.
+fn make_thumbnail(
+    generator: &mut ThumbnailGenerator,
+    request: ThumbnailRequest,
+) -> Option<(ThumbnailRequest, Thumbnail)> {
+    generator.push(request);
+    generator.process_batch(1);
+    generator.take_completed().pop()
+}
 
 /// How many thumbnails [`ExplorerState::pump_thumbnails`] generates per call
 /// when the caller does not say.
@@ -593,6 +611,10 @@ enum Modal {
         /// path is the stable identifier, and it is looked up when the dialog
         /// answers.
         target: PathBuf,
+        /// What the box began with, when the name is not text: the name's
+        /// escapes, which are not the name, so an answer equal to them is no
+        /// change rather than a new name.
+        not_text: Option<String>,
     },
 }
 
@@ -847,8 +869,17 @@ pub struct ExplorerState {
     /// are the same fact.)
     pub thumbs: ThumbnailCache,
     /// Pending thumbnail work, drained a few entries at a time by
-    /// [`Self::pump_thumbnails`].
+    /// [`Self::pump_thumbnails`] -- until the window hands over a way to be
+    /// woken, when it moves to `thumb_worker`, disk cache and all.
     pub thumb_gen: ThumbnailGenerator,
+    /// The worker that makes the thumbnails off the window's thread.
+    ///
+    /// They were made a few per tick on the thread that draws, and a camera's
+    /// JPEG costs about a third of a second even at thumbnail size, so a
+    /// folder of photographs made the window stall tick after tick until the
+    /// last was done (`known-issues.md` -> `[E] Thumbnails are still generated
+    /// on the thread that draws`).
+    thumb_worker: Option<ThumbWorker>,
     /// Size and colours new thumbnails are generated at.
     pub thumb_config: ThumbConfig,
     /// Which labels the icon view draws under each thumbnail.
@@ -948,6 +979,7 @@ impl ExplorerState {
                 config
             },
             pending_uploads: Vec::new(),
+            thumb_worker: None,
             uploaded: HashSet::new(),
             dropzone: DropZoneManager::new(start_path.to_path_buf()),
             drag: None,
@@ -1064,7 +1096,7 @@ impl ExplorerState {
     /// another there. `None` when the path has no final component, which is
     /// the root, and the root is never a row in its own listing.
     fn entry_for(path: PathBuf) -> Option<FileEntry> {
-        let name = path.file_name()?.to_string_lossy().to_string();
+        let name = path.file_name()?.shown().to_string();
         let meta = fs::metadata(&path).ok();
         let is_dir = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
         let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
@@ -1073,11 +1105,9 @@ impl ExplorerState {
         let file_type = if is_dir {
             FileType::Directory
         } else {
-            let ext = path
-                .extension()
-                .map(|e| e.to_string_lossy().to_string())
-                .unwrap_or_default();
-            FileType::from_extension(&ext)
+            // An extension that is not text is no type this listing knows.
+            let ext = path.extension().and_then(OsStr::to_str).unwrap_or_default();
+            FileType::from_extension(ext)
         };
 
         Some(FileEntry {
@@ -1103,13 +1133,9 @@ impl ExplorerState {
     /// over-long label is a worse-looking row, while an unwrap here would be a
     /// crash in a file manager for a cosmetic reason.
     fn relative_label(path: &Path, root: &Path) -> String {
-        let shown = path.strip_prefix(root).unwrap_or(path);
-        // Lossy on purpose and safe here: this is the text a row is drawn
-        // with, and `FileEntry::path` beside it is what opening the row uses.
-        // Named rather than chained so the exemption in `lossy-decode.py` has
-        // something specific to anchor on -- a bare `.to_string_lossy()` would
-        // match every future lossy call in this file too.
-        shown.to_string_lossy().into_owned()
+        // The text a row is drawn with (`pathtext`); `FileEntry::path` beside
+        // it is what opening the row uses.
+        path.strip_prefix(root).unwrap_or(path).shown().to_string()
     }
 
     /// Ask what to look for.
@@ -1408,22 +1434,48 @@ impl ExplorerState {
     /// and size, so a hit is a hit on *this* version of the file, and a miss
     /// after an edit is automatic.
     pub fn queue_thumbnails(&mut self) {
+        let wanted = self.thumbnail_requests();
+        // The worker's set replaces what is left of the last -- the folder
+        // navigated away from -- and an empty set cancels it.
+        let wanted = match self.thumb_worker.as_mut() {
+            Some(worker) => match worker.replace(wanted) {
+                Ok(()) => return,
+                // The worker is gone (only a panic does that, and only a
+                // test's build survives one): make them here, a few a tick.
+                Err(wanted) => {
+                    self.thumb_worker = None;
+                    wanted
+                }
+            },
+            None => wanted,
+        };
         self.thumb_gen.cancel_all();
+        for request in wanted {
+            self.thumb_gen.push(request);
+        }
+    }
+
+    /// A request for every entry the current view draws a thumbnail for and
+    /// the cache has none of.
+    fn thumbnail_requests(&self) -> Vec<ThumbnailRequest> {
         if !self.view_wants_thumbnails() {
-            return;
+            return Vec::new();
         }
-        for entry in &self.entries {
-            let mtime = mtime_secs(entry.modified);
-            if self.thumbs.peek(&entry.path, mtime, entry.size).is_some() {
-                continue;
-            }
-            self.thumb_gen.push(ThumbnailRequest {
-                path: entry.path.clone(),
-                mtime,
-                size: entry.size,
-                config: self.thumb_config.clone(),
-            });
-        }
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let mtime = mtime_secs(entry.modified);
+                self.thumbs
+                    .peek(&entry.path, mtime, entry.size)
+                    .is_none()
+                    .then(|| ThumbnailRequest {
+                        path: entry.path.clone(),
+                        mtime,
+                        size: entry.size,
+                        config: self.thumb_config.clone(),
+                    })
+            })
+            .collect()
     }
 
     /// Generate up to `batch` queued thumbnails and file the results.
@@ -1439,11 +1491,35 @@ impl ExplorerState {
     pub fn pump_thumbnails(&mut self, batch: usize) -> usize {
         let generated = self.thumb_gen.process_batch(batch);
         for (req, thumb) in self.thumb_gen.take_completed() {
-            let id = thumbs::image_id(&req.path, req.mtime, req.size);
-            self.pending_uploads.push((id, thumb.clone()));
-            self.thumbs.insert(&req.path, req.mtime, req.size, thumb);
+            self.file_thumbnail(req, thumb);
         }
-        generated
+        generated.saturating_add(self.collect_thumbnails())
+    }
+
+    /// File every thumbnail the worker has made since the last call, and say
+    /// how many there were.
+    fn collect_thumbnails(&mut self) -> usize {
+        let made: Vec<_> = self
+            .thumb_worker
+            .as_mut()
+            .map(offloop::Queue::take)
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect();
+        let count = made.len();
+        for (req, thumb) in made {
+            self.file_thumbnail(req, thumb);
+        }
+        count
+    }
+
+    /// File one made thumbnail: into the cache the renderer reads, and the
+    /// list the host hands to the compositor.
+    fn file_thumbnail(&mut self, req: ThumbnailRequest, thumb: Thumbnail) {
+        let id = thumbs::image_id(&req.path, req.mtime, req.size);
+        self.pending_uploads.push((id, thumb.clone()));
+        self.thumbs.insert(&req.path, req.mtime, req.size, thumb);
     }
 
     /// [`Self::pump_thumbnails`] at the default per-frame budget.
@@ -1612,8 +1688,10 @@ impl ExplorerState {
                 SortBy::Size => a.size.cmp(&b.size),
                 SortBy::Modified => a.modified.cmp(&b.modified),
                 SortBy::Type => {
-                    let ext_a = a.path.extension().map(|e| e.to_string_lossy().to_string());
-                    let ext_b = b.path.extension().map(|e| e.to_string_lossy().to_string());
+                    // By the extensions' own bytes: two that differ only
+                    // in a byte that is not text are still two.
+                    let ext_a = a.path.extension().map(OsStr::as_encoded_bytes);
+                    let ext_b = b.path.extension().map(OsStr::as_encoded_bytes);
                     ext_a.cmp(&ext_b)
                 }
                 // Unreachable: handled above, before the folders-first rule
@@ -2025,10 +2103,7 @@ impl ExplorerState {
     ) -> String {
         use std::fmt::Write as _;
 
-        let current = Path::new(&progress.current_file)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let current = progress.current_file.clone();
         let mut line = format!("{verb} {} of {total_files}", progress.completed_files);
         if !current.is_empty() {
             line.push_str(" — ");
@@ -2941,7 +3016,7 @@ impl ExplorerState {
                     Ok(id) => recycled.push((path.clone(), UndoTarget::Recycled(id))),
                     Err(e) => {
                         if first_error.is_none() {
-                            first_error = Some(format!("{}: {e}", path.display()));
+                            first_error = Some(format!("{}: {e}", path.shown()));
                         }
                     }
                 }
@@ -3017,11 +3092,11 @@ impl ExplorerState {
         // the count, so nothing is lost.
         let detail = match errors.first() {
             Some(first) => {
-                msg.push_str(&format!(" — {}: {}", first.path.display(), first.message));
+                msg.push_str(&format!(" — {}: {}", first.path.shown(), first.message));
                 format!(
                     "{failed} of {} could not be done.\n\n{}: {}",
                     succeeded.saturating_add(*failed),
-                    first.path.display(),
+                    first.path.shown(),
                     first.message
                 )
             }
@@ -3679,7 +3754,7 @@ impl ExplorerState {
                         // `display()` only because this is a sentence for a
                         // human; the path itself was carried here as bytes and
                         // is never rebuilt from this string.
-                        self.status_message = format!("No such folder: {}", target.display());
+                        self.status_message = format!("No such folder: {}", target.shown());
                     }
                 }
                 PathBarEvent::RequestAutoComplete { prefix } => {
@@ -4888,15 +4963,47 @@ impl oswindow::app::App for ExplorerState {
     /// buttons is elided from the right, so leading with the application name
     /// would give every open folder the same visible label.
     fn title(&self) -> String {
+        // By `pathtext`'s `shown`, not `Path::display`, which decodes lossily: two
+        // folders whose names differ only in bytes that are not text would
+        // have had the same title.
         match self.current_path.file_name() {
-            Some(name) => format!("{} — Files", Path::new(name).display()),
+            Some(name) => format!("{} — Files", name.shown()),
             // The root of the tree has no file name of its own.
-            None => format!("{} — Files", self.current_path.display()),
+            None => format!("{} — Files", self.current_path.shown()),
         }
     }
 
     fn initial_size(&self) -> (u32, u32) {
         (self.window_width, self.window_height)
+    }
+
+    /// Thumbnails are made off the loop's thread, and the loop woken as each
+    /// one is ready.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        // The generator goes to the worker with the disk cache it was given;
+        // an empty one is left here, which is what a worker that fails to
+        // start falls back on -- slower, never wrong.
+        let mut generator = std::mem::take(&mut self.thumb_gen);
+        self.thumb_worker = offloop::Queue::start("explorer-thumbs", waker, move |request| {
+            make_thumbnail(&mut generator, request)
+        })
+        .ok();
+        // Whatever the generator had queued went with it; ask again, of the
+        // worker (or, if it did not start, of the generator left here).
+        self.queue_thumbnails();
+    }
+
+    /// Thumbnails the worker has made: file them, and draw them.
+    fn on_wake(&mut self) -> oswindow::app::Response {
+        if self.collect_thumbnails() > 0 {
+            oswindow::app::Response::Redraw
+        } else {
+            oswindow::app::Response::Idle
+        }
     }
 
     /// A clock only while thumbnails remain to be generated.
@@ -5408,10 +5515,10 @@ impl ExplorerState {
         let mut selected = self.entries.iter().filter(|e| e.selected);
         let first = selected.next()?;
         let rest = selected.count();
-        let name = first.path.file_name().map_or_else(
-            || first.path.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+        let name = first
+            .path
+            .file_name()
+            .map_or_else(|| first.path.shown().to_string(), |n| n.shown().to_string());
         Some((rest.saturating_add(1), name))
     }
 
@@ -5464,14 +5571,29 @@ impl ExplorerState {
             return false;
         };
         let target = entry.path.clone();
+        // The box's text is edited and used, so it starts as the name exactly
+        // whenever the name is text -- a control character included, which
+        // `shown` would turn into escapes the rename would then write.
         let current = target
             .file_name()
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            .map_or_else(String::new, |n| n.text_or_shown().into_owned());
+        // A name that is not text starts the box as its escapes; accepted as
+        // it stands, that text is not the name, and renaming to it would
+        // rename the file. So it is remembered, and answering with it
+        // unchanged renames nothing.
+        let not_text = target
+            .file_name()
+            .is_some_and(|n| n.to_str().is_none())
+            .then(|| current.clone());
 
         let mut dialog =
             InputDialog::prompt("Rename", "New name:", &current).with_initial_text(&current);
         dialog.show();
-        self.modal = Some(Modal::Rename { dialog, target });
+        self.modal = Some(Modal::Rename {
+            dialog,
+            target,
+            not_text,
+        });
         true
     }
 
@@ -5545,7 +5667,14 @@ impl ExplorerState {
                 }
                 _ => self.status_message = "Search cancelled".to_string(),
             },
-            Some(Modal::Rename { target, .. }) => match answer {
+            Some(Modal::Rename {
+                target, not_text, ..
+            }) => match answer {
+                DialogResult::Text(name) if not_text.as_deref() == Some(name.as_str()) => {
+                    self.report(Outcome::ok(format!(
+                        "Not renamed: {name} was left as it was"
+                    )));
+                }
                 DialogResult::Text(name) => self.rename_path(&target, &name),
                 _ => self.status_message = "Rename cancelled".to_string(),
             },
@@ -5689,17 +5818,62 @@ pub(crate) fn guarded_scratch(label: &str) -> scratchdir::ScratchDir {
 }
 
 fn main() -> std::process::ExitCode {
-    // The folder to open, then the home directory, then the root. A path given
-    // on the command line is what makes "open containing folder" possible from
-    // anywhere else in the desktop.
-    let start_path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/"));
+    // A path given on the command line is what makes "open containing folder"
+    // possible from anywhere else in the desktop.
+    //
+    // Parsed by `Args` and handed to `launch_with`. It was read as
+    // `args_os().nth(1)` and then `launch` was called -- which parses the same
+    // command line, found the path left over, and refused it: "exit 2,
+    // unexpected argument", before the window opened. Every "open containing
+    // folder" and every association that sends a file here opened nothing.
+    let args = match oswindow::app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("explorer: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut explorer = explorer_for(&args.rest, home);
+    oswindow::app::launch_with("explorer", args.display.as_deref(), &mut explorer)
+}
 
-    let mut explorer = ExplorerState::new(&start_path);
-    oswindow::app::launch("explorer", &mut explorer)
+/// The window a command line asks for.
+///
+/// A folder named opens on that folder. A file named opens on the folder it
+/// is in, with the file selected: "show in folder", and what the associations
+/// that send an archive or a disk image here mean. Nothing named opens on
+/// `home`, then the root. A window shows one folder, so a second path named is
+/// said not to have been opened rather than dropped without a word.
+fn explorer_for(paths: &[String], home: Option<PathBuf>) -> ExplorerState {
+    let Some((first, rest)) = paths.split_first() else {
+        return ExplorerState::new(&home.unwrap_or_else(|| PathBuf::from("/")));
+    };
+    let named = PathBuf::from(first);
+    // Made absolute, so the path bar and the history hold where the window
+    // is rather than where it was started from. It fails only when the
+    // working directory cannot be read, and then the path as given is the
+    // best there is: the listing names it if it cannot be read either.
+    let named = std::path::absolute(&named).unwrap_or(named);
+    let mut state = match (named.is_file(), named.parent(), named.file_name()) {
+        (true, Some(folder), Some(name)) => {
+            let mut state = ExplorerState::new(folder);
+            if let Some(index) = state
+                .entries
+                .iter()
+                .position(|e| e.path.file_name() == Some(name))
+            {
+                state.move_selection_to(index);
+            }
+            state
+        }
+        // A folder, or nothing there at all: the listing says which.
+        _ => ExplorerState::new(&named),
+    };
+    if !rest.is_empty() {
+        state.status_message = format!("{} more not opened: a window shows one folder", rest.len());
+    }
+    state
 }
 
 // ============================================================================
@@ -5729,7 +5903,7 @@ mod tests {
             copied_bytes: 400_000,
             total_files: 9,
             completed_files: 3,
-            current_file: "/home/u/photos/holiday.png".to_string(),
+            current_file: "holiday.png".to_string(),
             elapsed_secs: 4.0,
             eta_secs: secs,
             bytes_per_sec: 100_000,
@@ -6035,6 +6209,79 @@ mod tests {
             ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));
         state.queue_thumbnails();
         state
+    }
+
+    /// The title names the folder by its bytes where they are not text:
+    /// two such folders never share a title.
+    #[test]
+    fn a_folder_whose_name_is_not_text_is_titled_by_its_bytes() {
+        use oswindow::app::App;
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_wide(&[0x0066, 0xD800]),
+                std::ffi::OsString::from_wide(&[0x0066, 0xD801]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_vec(vec![b'f', 0xFE]),
+                std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
+            )
+        };
+        let scratch = temp_dir("title_bytes");
+        let mut state = state_at(scratch.dir());
+        state.current_path = scratch.dir().join(&a);
+        let first = state.title();
+        state.current_path = scratch.dir().join(&b);
+        let second = state.title();
+        assert!(!first.contains('\u{FFFD}'), "{first}");
+        assert_ne!(first, second, "two folders, one title");
+    }
+
+    /// A path on the command line: a folder opens on itself, a file on its
+    /// folder with it selected, and nothing on home. It opened no window at
+    /// all -- `launch` refused the path as an unexpected argument.
+    #[test]
+    fn a_path_on_the_command_line_opens_its_folder() {
+        let scratch = temp_dir("command_line");
+        let dir = scratch.dir().to_path_buf();
+        fs::create_dir_all(dir.join("inner")).expect("mkdir");
+        write(&dir.join("a.txt"), "a");
+        write(&dir.join("b.txt"), "b");
+        let text = |p: &Path| p.to_str().expect("a text path").to_owned();
+        let _turn = settingsfile::testing::config_turn();
+
+        let folder = explorer_for(&[text(&dir.join("inner"))], None);
+        assert_eq!(folder.current_path, dir.join("inner"));
+        assert!(folder.selected_indices.is_empty());
+
+        let file = explorer_for(&[text(&dir.join("b.txt"))], None);
+        assert_eq!(file.current_path, dir, "a file opens on its folder");
+        let selected: Vec<&str> = file
+            .selected_indices
+            .iter()
+            .map(|&i| file.entries[i].name.as_str())
+            .collect();
+        assert_eq!(selected, ["b.txt"], "with the file selected");
+
+        let two = explorer_for(&[text(&dir), text(&dir.join("a.txt"))], None);
+        assert_eq!(two.current_path, dir);
+        assert!(
+            two.status_message.contains("1 more not opened"),
+            "{}",
+            two.status_message
+        );
+
+        let home = explorer_for(&[], Some(dir.join("inner")));
+        assert_eq!(
+            home.current_path,
+            dir.join("inner"),
+            "nothing named opens on home"
+        );
     }
 
     /// A directory holding `n` files, so a listing can be longer than a window.
@@ -9277,6 +9524,43 @@ mod tests {
         );
     }
 
+    /// **Thumbnails are made off the window's thread**, every entry the view
+    /// draws one for, each filed as it arrives -- and drawn once uploaded,
+    /// exactly as on the window's own ticks. They were made a few a tick on
+    /// the thread that draws.
+    #[test]
+    fn thumbnails_are_made_off_the_window() {
+        use oswindow::app::App;
+        let scratch = dir_of("thumbs_off_window", &["a.txt", "b.txt", "c.txt"]);
+        let mut state = state_at(scratch.dir());
+        assert!(state.wants_waker());
+        let (waker, heard) = offloop::channel_waker();
+        state.attach_waker(waker);
+        assert!(state.thumb_worker.is_some(), "no worker was started");
+        state.set_view_mode(ViewMode::Icons);
+        assert_eq!(
+            state.thumb_gen.pending_count(),
+            0,
+            "the window's ticks were left to make them"
+        );
+        let mut uploads = Vec::new();
+        let mut redraws: usize = 0;
+        while uploads.len() < 3 {
+            heard
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the worker never woke the window");
+            if state.on_wake() == oswindow::app::Response::Redraw {
+                redraws = redraws.saturating_add(1);
+            }
+            uploads.extend(state.take_pending_uploads());
+        }
+        assert!(redraws > 0, "thumbnails arrived and no frame was asked for");
+        for (id, _) in &uploads {
+            state.mark_uploaded(*id);
+        }
+        assert_eq!(image_ids(&state.render()).len(), 3);
+    }
+
     /// The reverse edge. A host that reclaims memory by unregistering an image
     /// must get the placeholder back, not an empty frame.
     #[test]
@@ -10521,12 +10805,87 @@ mod tests {
         send(&mut state, &key(Key::F2));
 
         match state.modal.as_ref() {
-            Some(Modal::Rename { dialog, target }) => {
+            Some(Modal::Rename {
+                dialog,
+                target,
+                not_text,
+            }) => {
                 assert_eq!(dialog.input_text(), "notes.txt", "prefilled, not empty");
                 assert_eq!(target, &root.join("notes.txt"));
+                assert_eq!(not_text, &None, "a name that is text is edited as it is");
             }
             _ => panic!("F2 must open a rename box"),
         }
+    }
+
+    /// A name that is not text is shown by its bytes, escaped, and two such
+    /// names never look the same; a name that is text is shown as it is.
+    #[test]
+    fn a_name_that_is_not_text_is_shown_by_its_bytes() {
+        assert_eq!(OsStr::new("notes.txt").shown().to_string(), "notes.txt");
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            // Unpaired surrogates: names Windows holds that have no UTF-8.
+            (
+                std::ffi::OsString::from_wide(&[0x0066, 0xD800]),
+                std::ffi::OsString::from_wide(&[0x0066, 0xD801]),
+            )
+        };
+        #[cfg(not(windows))]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStringExt;
+            (
+                std::ffi::OsString::from_vec(vec![b'f', 0xFE]),
+                std::ffi::OsString::from_vec(vec![b'f', 0xFF]),
+            )
+        };
+        let (shown_a, shown_b) = (a.shown().to_string(), b.shown().to_string());
+        assert!(!shown_a.contains('\u{FFFD}'), "{shown_a:?}");
+        assert!(
+            shown_a.starts_with('f') && shown_a.contains('\\'),
+            "{shown_a:?}"
+        );
+        assert_ne!(shown_a, shown_b, "two names became one");
+    }
+
+    /// A rename box opened on a name that is not text begins with the name's
+    /// escapes; answered with them unchanged, it renames nothing -- they are
+    /// not the name, and renaming to them would rename the file.
+    #[test]
+    fn a_rename_answered_unchanged_on_a_non_text_name_renames_nothing() {
+        let scratch = temp_dir("rename_not_text");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("stands-in.txt"), "keep me");
+        let mut state = state_at(&root);
+        // The host cannot hold a name that is not text, so a text-named file
+        // stands in, with the box told its escapes are "stands-in.txt".
+        let modal = Modal::Rename {
+            dialog: InputDialog::prompt("Rename", "New name:", "stands-in.txt"),
+            target: root.join("stands-in.txt"),
+            not_text: Some(String::from("stands-in.txt")),
+        };
+        state.apply_modal_answer(
+            Some(modal),
+            DialogResult::Text(String::from("stands-in.txt")),
+        );
+        assert!(root.join("stands-in.txt").exists(), "the file was renamed");
+        assert!(
+            state.status_message.contains("Not renamed"),
+            "{}",
+            state.status_message
+        );
+        // Any other answer is a new name, as ever.
+        let modal = Modal::Rename {
+            dialog: InputDialog::prompt("Rename", "New name:", "stands-in.txt"),
+            target: root.join("stands-in.txt"),
+            not_text: Some(String::from("stands-in.txt")),
+        };
+        state.apply_modal_answer(Some(modal), DialogResult::Text(String::from("renamed.txt")));
+        assert!(
+            root.join("renamed.txt").exists(),
+            "a new name was not taken"
+        );
     }
 
     #[test]

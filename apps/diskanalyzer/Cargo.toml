@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Disk Usage Analyzer — treemap, file list and extension breakdown"
 [dependencies]
+# Names are shown through `pathtext`: a byte that is not text, or a control
+# character, as an escape -- never as a lossy decode.
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

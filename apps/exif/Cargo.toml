@@ -1,0 +1,19 @@
+[package]
+name = "exif"
+version = "0.1.0"
+edition = "2024"
+description = "A photograph's EXIF -- camera, exposure, date, place -- read from a JPEG, PNG, WebP or TIFF"
+
+[dependencies]
+# Text that is not UTF-8 is shown by its bytes, as escapes -- the tree's one
+# renderer for an untrusted string -- never decoded lossily.
+quoting = { path = "../../userspace/quoting" }
+
+[features]
+# `exif::testing`: a camera's EXIF, and a JPEG carrying it, for the tests of
+# the programs that show EXIF. A dependent turns it on in its own
+# `[dev-dependencies]`.
+testing = []
+
+[lints]
+workspace = true

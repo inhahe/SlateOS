@@ -8,18 +8,22 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+use pathtext::ShowPath;
 // The toolkit's rectangle rather than a private copy: this crate had
 // the same four floats under `width`/`height`, with the same half-open
 // `contains`. See `known-issues.md`
 // `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use mediaprobe::Codec;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Seed used when the system has no entropy to offer.
@@ -62,17 +66,31 @@ const TAB_PADDING: f32 = 4.0;
 /// `std::time::Duration`, not this file's own millisecond `Duration`: the two
 /// share a name and only one of them is what the harness's clock speaks.
 const FRAME_TICK: std::time::Duration = std::time::Duration::from_millis(100);
-/// What the window says instead of a picture.
+/// What the window says instead of a picture, with no file open.
 ///
 /// Three lines. The third is about the playlist, which outlives the window:
 /// entries naming `/home/user/Videos/sample.mkv` are a claim that a file is at
 /// that path, and a playlist is the kind of thing somebody reads later to find
 /// out what they have.
+///
+/// The second said "it has no filesystem access, so nothing has been read",
+/// long after both stopped being true; what is still true is the first half
+/// of the first line's old wording -- nothing decodes a picture -- and a file
+/// can now be opened for everything but that.
 const CANNOT_PLAY_LINES: [&str; 3] = [
-    "This player cannot open or play a file.",
-    "It has no filesystem access, so nothing has been read and no video is decoding.",
-    "The playlist is empty because nothing was found -- it is not a list of files you have.",
+    "This player cannot play a file: nothing here decodes video.",
+    "Ctrl+O opens one to read what it holds -- its length, its picture's size and codec, its sound and its subtitles.",
+    "The playlist is empty because nothing was opened -- it is not a list of files you have.",
 ];
+
+/// What the window says where the picture would be, with a file open.
+const NO_PICTURE_LINES: [&str; 2] = [
+    "No picture: nothing here decodes video.",
+    "What the file holds is on the Media Info tab (I).",
+];
+
+/// What Play says, with a file open and nothing to decode it.
+const CANNOT_DECODE: &str = "Cannot play: nothing here decodes video";
 
 const WINDOW_WIDTH: f32 = 1280.0;
 const WINDOW_HEIGHT: f32 = 720.0;
@@ -84,18 +102,17 @@ const MIN_WINDOW_HEIGHT: f32 = 320.0;
 ///
 /// **The shortcut for this was already removed as impossible.** `Shortcuts
 /// ::list` used to advertise `Ctrl+S` (take a screenshot) and no longer does,
-/// with the reason recorded there: "this tree has neither a file chooser nor a
-/// way to read back the framebuffer, and a help panel that promises what the
-/// program cannot do is the same defect one level up".
+/// because a help panel that promises what the program cannot do is the same
+/// defect one level up. The reason that stands is that no frame is decoded:
+/// there is nothing to take a picture of.
 ///
 /// The settings block was left behind, still naming a format, a quality and a
-/// subtitle option. `CANNOT_PLAY_LINES` does cover the prerequisites -- no
-/// frame is decoding and there is no filesystem -- but it is drawn at the top
-/// left of the window, and relying on a reader having seen it before reaching
-/// a settings panel is what `apps/mediaconvert` got wrong: three lines about
-/// the queue did not reach the panel that configured it.
+/// subtitle option. `CANNOT_PLAY_LINES` does say nothing decodes -- but it is
+/// drawn where the picture would be, and relying on a reader having seen it
+/// before reaching a settings panel is what `apps/mediaconvert` got wrong:
+/// three lines about the queue did not reach the panel that configured it.
 const NO_SCREENSHOTS: &str = "Not applied: this player cannot take a \
-screenshot -- no frame is decoded and there is nowhere to write one.";
+screenshot -- no frame is decoded.";
 
 // ============================================================================
 // Media container and codec types
@@ -116,6 +133,18 @@ pub enum ContainerFormat {
 }
 
 impl ContainerFormat {
+    /// The container the file's own bytes name, where `mediaprobe` reads it.
+    pub fn from_probe(container: mediaprobe::Container) -> Option<Self> {
+        match container {
+            mediaprobe::Container::Mp4 => Some(Self::Mp4),
+            mediaprobe::Container::QuickTime => Some(Self::Mov),
+            mediaprobe::Container::Matroska => Some(Self::Mkv),
+            mediaprobe::Container::WebM => Some(Self::WebM),
+            mediaprobe::Container::Avi => Some(Self::Avi),
+            mediaprobe::Container::Unknown => None,
+        }
+    }
+
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_ascii_lowercase().as_str() {
             "mp4" | "m4v" => Some(Self::Mp4),
@@ -160,90 +189,40 @@ impl ContainerFormat {
     }
 }
 
-/// Supported video codecs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VideoCodec {
-    H264,
-    H265,
-    Vp8,
-    Vp9,
-    Av1,
-    Mpeg2,
-    Mpeg4,
-    Theora,
-    WmvV3,
-}
+// The codecs are `mediaprobe::Codec`, which names what a file's header
+// names. This file had its own `VideoCodec` and `AudioCodec` -- nine and
+// eleven variants, filled only by sample data -- and a `HW Decode:
+// Supported` row that said so for H.264 on a system that decodes nothing.
 
-impl VideoCodec {
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::H264 => "H.264 / AVC",
-            Self::H265 => "H.265 / HEVC",
-            Self::Vp8 => "VP8",
-            Self::Vp9 => "VP9",
-            Self::Av1 => "AV1",
-            Self::Mpeg2 => "MPEG-2",
-            Self::Mpeg4 => "MPEG-4 Part 2",
-            Self::Theora => "Theora",
-            Self::WmvV3 => "WMV3",
-        }
-    }
-
-    pub fn is_hardware_decodable(self) -> bool {
-        matches!(self, Self::H264 | Self::H265 | Self::Vp9 | Self::Av1)
+/// A channel count's usual name: 6 is 5.1.
+pub fn channel_layout_name(channels: u32) -> &'static str {
+    match channels {
+        1 => "Mono",
+        2 => "Stereo",
+        3 => "2.1",
+        4 => "Quad",
+        5 => "5.0",
+        6 => "5.1",
+        7 => "6.1",
+        8 => "7.1",
+        _ => "Unknown",
     }
 }
 
-/// Supported audio codecs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AudioCodec {
-    Aac,
-    Mp3,
-    Opus,
-    Vorbis,
-    Flac,
-    Pcm,
-    Ac3,
-    Eac3,
-    Dts,
-    Wma,
-    TrueHd,
+/// Whether sound in `codec` comes back exactly as it went in.
+pub fn is_lossless(codec: &Codec) -> bool {
+    matches!(
+        codec,
+        Codec::Flac | Codec::Alac | Codec::Pcm | Codec::TrueHd
+    )
 }
 
-impl AudioCodec {
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Aac => "AAC",
-            Self::Mp3 => "MP3",
-            Self::Opus => "Opus",
-            Self::Vorbis => "Vorbis",
-            Self::Flac => "FLAC",
-            Self::Pcm => "PCM",
-            Self::Ac3 => "Dolby Digital (AC-3)",
-            Self::Eac3 => "Dolby Digital Plus (E-AC-3)",
-            Self::Dts => "DTS",
-            Self::Wma => "WMA",
-            Self::TrueHd => "Dolby TrueHD",
-        }
-    }
-
-    pub fn is_lossless(self) -> bool {
-        matches!(self, Self::Flac | Self::Pcm | Self::TrueHd)
-    }
-
-    pub fn channel_layout_name(channels: u32) -> &'static str {
-        match channels {
-            1 => "Mono",
-            2 => "Stereo",
-            3 => "2.1",
-            4 => "Quad",
-            5 => "5.0",
-            6 => "5.1",
-            7 => "6.1",
-            8 => "7.1",
-            _ => "Unknown",
-        }
-    }
+/// Whether subtitles in `codec` are text, rather than pictures of text.
+pub fn is_text_subtitle(codec: &Codec) -> bool {
+    matches!(
+        codec,
+        Codec::Text | Codec::WebVtt | Codec::Ttml | Codec::Ass | Codec::Ssa
+    )
 }
 
 // ============================================================================
@@ -263,6 +242,21 @@ impl Duration {
 
     pub fn from_millis(ms: u64) -> Self {
         Self(ms)
+    }
+
+    /// Seconds as a float -- a header's length -- to the nearest
+    /// millisecond. Nothing, for what is not a length.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "checked finite and non-negative first, and `as` saturates"
+    )]
+    pub fn from_secs_f64(secs: f64) -> Self {
+        if secs.is_finite() && secs > 0.0 {
+            Self((secs * 1000.0).round() as u64)
+        } else {
+            Self::ZERO
+        }
     }
 
     pub fn as_secs(self) -> u64 {
@@ -323,23 +317,25 @@ impl Duration {
 // Media streams
 // ============================================================================
 
-/// A video stream within a media file.
+/// A video stream within a media file: each part `None` where the file's
+/// headers do not say.
 #[derive(Debug, Clone)]
 pub struct VideoStream {
     pub index: u32,
-    pub codec: VideoCodec,
-    pub width: u32,
-    pub height: u32,
-    pub frame_rate: f64,
-    pub bit_rate: u64,
-    pub pixel_format: String,
+    pub codec: Codec,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub frame_rate: Option<f64>,
+    pub bit_rate: Option<u64>,
+    pub pixel_format: Option<String>,
     pub color_space: Option<String>,
     pub hdr: bool,
 }
 
 impl VideoStream {
-    pub fn resolution_label(&self) -> &'static str {
-        match self.height {
+    /// The size's usual name -- "1080p (Full HD)" -- if the height is known.
+    pub fn resolution_label(&self) -> Option<&'static str> {
+        Some(match self.height? {
             0..=360 => "360p",
             361..=480 => "480p (SD)",
             481..=720 => "720p (HD)",
@@ -348,16 +344,15 @@ impl VideoStream {
             1441..=2160 => "2160p (4K UHD)",
             2161..=4320 => "4320p (8K UHD)",
             _ => "Unknown",
-        }
+        })
     }
 
-    pub fn aspect_ratio(&self) -> String {
-        if self.height == 0 {
-            return "N/A".to_string();
-        }
-        let ratio = self.width as f64 / self.height as f64;
+    /// `16:9`, `4:3` and the like, or `1.85:1`; `None` without a size.
+    pub fn aspect_ratio(&self) -> Option<String> {
+        let (w, h) = (self.width?, self.height.filter(|&h| h > 0)?);
+        let ratio = f64::from(w) / f64::from(h);
         // Common aspect ratios
-        if (ratio - 16.0 / 9.0).abs() < 0.05 {
+        Some(if (ratio - 16.0 / 9.0).abs() < 0.05 {
             "16:9".to_string()
         } else if (ratio - 4.0 / 3.0).abs() < 0.05 {
             "4:3".to_string()
@@ -367,11 +362,12 @@ impl VideoStream {
             "1:1".to_string()
         } else {
             format!("{ratio:.2}:1")
-        }
+        })
     }
 
-    pub fn bitrate_display(&self) -> String {
-        format_bitrate(self.bit_rate)
+    /// `1920x1080`, as far as the size is known.
+    pub fn size_label(&self) -> Option<String> {
+        Some(format!("{}x{}", self.width?, self.height?))
     }
 }
 
@@ -379,10 +375,10 @@ impl VideoStream {
 #[derive(Debug, Clone)]
 pub struct AudioStream {
     pub index: u32,
-    pub codec: AudioCodec,
-    pub sample_rate: u32,
-    pub channels: u32,
-    pub bit_rate: u64,
+    pub codec: Codec,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u32>,
+    pub bit_rate: Option<u64>,
     pub language: Option<String>,
     pub title: Option<String>,
     pub is_default: bool,
@@ -390,14 +386,17 @@ pub struct AudioStream {
 
 impl AudioStream {
     pub fn display_label(&self) -> String {
-        let codec = self.codec.display_name();
-        let layout = AudioCodec::channel_layout_name(self.channels);
+        let codec = self.codec.name();
         let lang = self.language.as_deref().unwrap_or("Unknown");
         let title = self.title.as_deref().unwrap_or("");
+        let what = match self.channels {
+            Some(channels) => format!("{codec} {}", channel_layout_name(channels)),
+            None => codec.to_string(),
+        };
         if title.is_empty() {
-            format!("{lang} - {codec} {layout}")
+            format!("{lang} - {what}")
         } else {
-            format!("{title} ({lang}) - {codec} {layout}")
+            format!("{title} ({lang}) - {what}")
         }
     }
 }
@@ -406,7 +405,7 @@ impl AudioStream {
 #[derive(Debug, Clone)]
 pub struct SubtitleStream {
     pub index: u32,
-    pub format: SubtitleFormat,
+    pub codec: Codec,
     pub language: Option<String>,
     pub title: Option<String>,
     pub is_default: bool,
@@ -416,7 +415,7 @@ pub struct SubtitleStream {
 impl SubtitleStream {
     pub fn display_label(&self) -> String {
         let lang = self.language.as_deref().unwrap_or("Unknown");
-        let fmt = self.format.display_name();
+        let fmt = self.codec.name();
         let title = self.title.as_deref().unwrap_or("");
         let forced = if self.is_forced { " [Forced]" } else { "" };
         if title.is_empty() {
@@ -424,39 +423,6 @@ impl SubtitleStream {
         } else {
             format!("{title} ({lang}, {fmt}){forced}")
         }
-    }
-}
-
-/// Subtitle format types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubtitleFormat {
-    Srt,
-    Ass,
-    Ssa,
-    VobSub,
-    Pgs,
-    WebVtt,
-    MovText,
-}
-
-impl SubtitleFormat {
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Srt => "SRT",
-            Self::Ass => "ASS/SSA",
-            Self::Ssa => "SSA",
-            Self::VobSub => "VobSub (DVD)",
-            Self::Pgs => "PGS (Blu-ray)",
-            Self::WebVtt => "WebVTT",
-            Self::MovText => "mov_text",
-        }
-    }
-
-    pub fn is_text_based(self) -> bool {
-        matches!(
-            self,
-            Self::Srt | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText
-        )
     }
 }
 
@@ -762,7 +728,7 @@ fn strip_webvtt_tags(text: &str) -> String {
 /// Complete information about a media file.
 #[derive(Debug, Clone)]
 pub struct MediaFile {
-    pub path: String,
+    pub path: PathBuf,
     pub file_name: String,
     pub file_size: u64,
     pub container: ContainerFormat,
@@ -774,6 +740,85 @@ pub struct MediaFile {
 }
 
 impl MediaFile {
+    /// Read the file at `path` for what it holds, or say why it cannot be.
+    ///
+    /// # Errors
+    ///
+    /// A message fit to show: the file cannot be read, is a folder, or is not
+    /// a video this player knows by its bytes or, failing those, its name.
+    pub fn open(path: &Path) -> Result<Self, String> {
+        let shown = path.shown();
+        let md = std::fs::metadata(path).map_err(|e| format!("Could not open {shown}: {e}"))?;
+        if md.is_dir() {
+            return Err(format!("Could not open {shown}: it is a folder"));
+        }
+        let probe =
+            mediaprobe::probe_path(path).map_err(|e| format!("Could not read {shown}: {e}"))?;
+        Self::from_probe(path, md.len(), probe)
+            .ok_or_else(|| format!("{shown} is not a video this player knows"))
+    }
+
+    /// A file of `size` bytes at `path`, as `probe` read it. `None` when
+    /// neither the bytes nor the name say it is a video.
+    pub fn from_probe(path: &Path, size: u64, probe: mediaprobe::Probe) -> Option<Self> {
+        let container = ContainerFormat::from_probe(probe.container).or_else(|| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .and_then(ContainerFormat::from_extension)
+        })?;
+        let mut file = Self {
+            path: path.to_path_buf(),
+            file_name: shown_name(path),
+            file_size: size,
+            container,
+            duration: probe
+                .duration_secs
+                .map_or(Duration::ZERO, Duration::from_secs_f64),
+            video_streams: Vec::new(),
+            audio_streams: Vec::new(),
+            subtitle_streams: Vec::new(),
+            metadata: MediaMetadata {
+                title: probe.title,
+                ..MediaMetadata::default()
+            },
+        };
+        for (index, track) in (0_u32..).zip(probe.tracks) {
+            match track.kind {
+                mediaprobe::Kind::Video => file.video_streams.push(VideoStream {
+                    index,
+                    codec: track.codec,
+                    width: track.width,
+                    height: track.height,
+                    frame_rate: track.frame_rate,
+                    bit_rate: None,
+                    pixel_format: None,
+                    color_space: None,
+                    hdr: false,
+                }),
+                mediaprobe::Kind::Audio => file.audio_streams.push(AudioStream {
+                    index,
+                    codec: track.codec,
+                    sample_rate: track.sample_rate,
+                    channels: track.channels.map(u32::from),
+                    bit_rate: None,
+                    language: track.language,
+                    title: track.name,
+                    is_default: track.default,
+                }),
+                mediaprobe::Kind::Subtitle => file.subtitle_streams.push(SubtitleStream {
+                    index,
+                    codec: track.codec,
+                    language: track.language,
+                    title: track.name,
+                    is_default: track.default,
+                    is_forced: track.forced,
+                }),
+                mediaprobe::Kind::Other => {}
+            }
+        }
+        Some(file)
+    }
+
     pub fn primary_video(&self) -> Option<&VideoStream> {
         self.video_streams.first()
     }
@@ -1110,7 +1155,7 @@ impl AspectMode {
 #[derive(Debug, Clone)]
 pub struct PlaylistEntry {
     pub id: u64,
-    pub path: String,
+    pub path: PathBuf,
     pub file_name: String,
     pub duration: Option<Duration>,
     pub title: Option<String>,
@@ -1186,7 +1231,7 @@ impl Playlist {
 
     pub fn add(
         &mut self,
-        path: String,
+        path: PathBuf,
         file_name: String,
         duration: Option<Duration>,
         title: Option<String>,
@@ -1677,6 +1722,8 @@ pub enum Command {
     ToggleEqualizerEnabled,
     /// Change the Settings row the cursor is on.
     ChangeSetting,
+    /// Put up the file picker to open a video.
+    Open,
 }
 
 /// Which keystroke runs a command.
@@ -1754,10 +1801,11 @@ pub struct Shortcuts;
 impl Shortcuts {
     /// Every shortcut the player has.
     ///
-    /// `Ctrl+O` (open a file) and `Ctrl+S` (take a screenshot) were listed
-    /// here and are not: this tree has neither a file chooser nor a way to
-    /// read back the framebuffer, and a help panel that promises what the
-    /// program cannot do is the same defect one level up. See `todo.txt`.
+    /// `Ctrl+S` (take a screenshot) was listed here and is not: no frame is
+    /// decoded, so there is nothing to take, and a help panel that promises
+    /// what the program cannot do is the same defect one level up. `Ctrl+O`
+    /// was removed for want of a file chooser and is back: the toolkit has
+    /// one, and a file opens to be read for what it holds.
     pub const fn list() -> &'static [Shortcut] {
         const fn sc(
             keys: &'static str,
@@ -1773,6 +1821,7 @@ impl Shortcuts {
             }
         }
         static TABLE: &[Shortcut] = &[
+            sc("Ctrl+O", "Open a File", Press::Ctrl(Key::O), Command::Open),
             sc(
                 "Space",
                 "Play / Pause",
@@ -2046,6 +2095,21 @@ impl Default for ScreenshotConfig {
     }
 }
 
+/// A file's name as the window shows it (`pathtext`): a byte that is not
+/// text, or a control character, as an escape -- `caf\351.mp4` -- the one
+/// rendering every application uses. It wrote `\xNN` of its own.
+///
+/// For showing only -- the path is kept whole beside it, and that is what is
+/// opened. A lossy decode would show both of two names that differ only in
+/// such a byte as the same `\u{FFFD}`, which is the name a user would then
+/// hunt for and not find; this shows each as it is.
+fn shown_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .shown()
+        .to_string()
+}
+
 // ============================================================================
 // Recent files
 // ============================================================================
@@ -2053,7 +2117,7 @@ impl Default for ScreenshotConfig {
 /// A recently opened file.
 #[derive(Debug, Clone)]
 pub struct RecentFile {
-    pub path: String,
+    pub path: PathBuf,
     pub file_name: String,
     pub last_position: Duration,
     pub last_opened_timestamp: u64,
@@ -2094,7 +2158,7 @@ impl RecentHistory {
 
     pub fn add(
         &mut self,
-        path: String,
+        path: PathBuf,
         file_name: String,
         position: Duration,
         timestamp: u64,
@@ -2127,7 +2191,7 @@ impl RecentHistory {
         self.files.clear();
     }
 
-    pub fn find_by_path(&self, path: &str) -> Option<&RecentFile> {
+    pub fn find_by_path(&self, path: &Path) -> Option<&RecentFile> {
         self.files.iter().find(|f| f.path == path)
     }
 }
@@ -2395,6 +2459,14 @@ pub struct VideoPlayerApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether anything here turns a file into pictures and sound. Nothing
+    /// does: there is no decoder. The transport -- play, the clock, the end of
+    /// a file, repeat -- is written and tested for the day one exists; until
+    /// then `play` says why it will not, rather than running a clock over a
+    /// black picture and calling that playing.
+    pub decodes: bool,
+    /// The picker Ctrl+O puts up.
+    pub picker: FilePicker,
 }
 
 /// UI tabs/panels.
@@ -2477,6 +2549,8 @@ impl VideoPlayerApp {
             settings_row: 0,
             osd_message: None,
             osd_remaining_ms: 0,
+            decodes: false,
+            picker: FilePicker::default(),
         }
     }
 
@@ -2485,10 +2559,15 @@ impl VideoPlayerApp {
     // ========================================================================
 
     pub fn play(&mut self) {
-        if self.current_file.is_some() {
-            self.state = PlaybackState::Playing;
-            self.show_osd("Play");
+        if self.current_file.is_none() {
+            return;
         }
+        if !self.decodes {
+            self.show_osd(CANNOT_DECODE);
+            return;
+        }
+        self.state = PlaybackState::Playing;
+        self.show_osd("Play");
     }
 
     pub fn pause(&mut self) {
@@ -2754,12 +2833,80 @@ impl VideoPlayerApp {
         }
     }
 
+    /// Open the playlist's entry `index`: its file is read again, since it
+    /// may have changed or gone since it was listed. It said "Now playing"
+    /// and set the clock running without opening anything -- the picture,
+    /// the Media Info tab and the length all stayed the previous file's.
     fn load_playlist_entry(&mut self, index: usize) {
-        if let Some(entry) = self.playlist.entries().get(index) {
-            let file_name = entry.file_name.clone();
-            self.show_osd(&format!("Now playing: {file_name}"));
-            self.position = Duration::ZERO;
-            self.state = PlaybackState::Playing;
+        let Some(entry) = self.playlist.entries().get(index) else {
+            return;
+        };
+        let path = entry.path.clone();
+        match MediaFile::open(&path) {
+            Ok(file) => {
+                let name = file.file_name.clone();
+                self.show_file(file);
+                if self.decodes {
+                    self.state = PlaybackState::Playing;
+                    self.show_osd(&format!("Now playing: {name}"));
+                } else {
+                    self.show_osd(&format!("Opened {name}"));
+                }
+            }
+            Err(why) => {
+                self.current_file = None;
+                self.state = PlaybackState::Stopped;
+                self.position = Duration::ZERO;
+                self.show_osd(&why);
+            }
+        }
+    }
+
+    /// Make `file` the one on screen: at its start, stopped, its own default
+    /// sound and subtitles chosen, and nothing of the last file's -- its
+    /// chapters or loaded subtitles -- carried over.
+    fn show_file(&mut self, file: MediaFile) {
+        self.selected_audio_track = file.primary_audio().map(|a| a.index);
+        self.selected_subtitle_track = file
+            .subtitle_streams
+            .iter()
+            .find(|s| s.is_forced || s.is_default)
+            .map(|s| s.index);
+        self.current_file = Some(file);
+        self.position = Duration::ZERO;
+        self.state = PlaybackState::Stopped;
+        self.chapters.clear();
+        self.external_subtitles.clear();
+    }
+
+    /// Read the video at `path` into the playlist, after what is there.
+    ///
+    /// # Errors
+    ///
+    /// Why the file could not be read, fit to show.
+    pub fn add_path(&mut self, path: &Path) -> Result<usize, String> {
+        let file = MediaFile::open(path)?;
+        let title = file.metadata.title.clone();
+        let duration = (file.duration > Duration::ZERO).then_some(file.duration);
+        self.playlist
+            .add(path.to_path_buf(), file.file_name.clone(), duration, title);
+        Ok(self.playlist.len().saturating_sub(1))
+    }
+
+    /// Open the video at `path`: listed, made the current entry, and shown.
+    /// Returns what happened, which is also what the window says.
+    pub fn open_path(&mut self, path: &Path) -> String {
+        match self.add_path(path) {
+            Ok(index) => {
+                self.playlist.set_current(index);
+                self.load_playlist_entry(index);
+                self.active_tab = PlayerTab::Player;
+                self.osd_message.clone().unwrap_or_default()
+            }
+            Err(why) => {
+                self.show_osd(&why);
+                why
+            }
         }
     }
 
@@ -2832,6 +2979,15 @@ impl VideoPlayerApp {
 
     /// Handle one input event. Returns whether anything changed.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The picker takes everything while it is up.
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                self.open_path(&path);
+                return true;
+            }
+            Picked::Handled | Picked::Cancelled => return true,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -2856,6 +3012,7 @@ impl VideoPlayerApp {
     pub fn run(&mut self, command: Command, digit: Option<u32>) {
         match command {
             Command::TogglePlayPause => self.toggle_play_pause(),
+            Command::Open => self.picker.open_to_read(),
             Command::Stop => self.stop(),
             Command::ToggleFullscreen => self.toggle_fullscreen(),
             Command::ToggleMute => self.toggle_mute(),
@@ -3201,34 +3358,6 @@ impl VideoPlayerApp {
             Surface::Card,
         );
 
-        // After the background, or it would be painted over.
-        //
-        // Keyed on there being no file, so it retires itself the day something
-        // can open one rather than becoming a stale claim of its own.
-        if self.current_file.is_none() {
-            for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
-                cmds.push(RenderCommand::Text {
-                    x: 10.0,
-                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                    y: 2.0 + i as f32 * 13.0,
-                    text: (*line).to_string(),
-                    color: if i == 0 {
-                        self.palette.ink(self.palette.yellow)
-                    } else {
-                        self.palette.subtext0
-                    },
-                    font_size: if i == 0 { 12.0 } else { 10.0 },
-                    font_weight: if i == 0 {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    },
-                    max_width: Some(self.width - 20.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
-
         match self.active_tab {
             PlayerTab::Player => self.render_player_view(&mut cmds),
             PlayerTab::Playlist => self.render_playlist_panel(&mut cmds),
@@ -3247,6 +3376,9 @@ impl VideoPlayerApp {
         if self.chapter_list_visible {
             self.render_chapter_list(&mut cmds);
         }
+
+        // The picker last, over everything.
+        cmds.extend(self.picker.render(&self.palette, self.width, self.height));
 
         cmds
     }
@@ -3416,43 +3548,77 @@ impl VideoPlayerApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // If no file loaded, show placeholder
+        // With no file, what this player cannot do, where a picture would be.
+        //
+        // It said "No file loaded" and "Ctrl+O to open" here -- and Ctrl+O is
+        // bound to nothing -- while the true lines were drawn at the top of the
+        // window, under the video area and the tab bar that were then drawn
+        // over them. Keyed on there being no file, so they retire themselves
+        // the day something can open one.
         if self.current_file.is_none() {
-            cmds.push(RenderCommand::Text {
-                x: self.width / 2.0 - 80.0,
-                y: top + video_h / 2.0 - 20.0,
-                text: "No file loaded".to_string(),
-                font_size: 18.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(300.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: self.width / 2.0 - 60.0,
-                y: top + video_h / 2.0 + 10.0,
-                text: "Ctrl+O to open".to_string(),
-                font_size: 13.0,
-                color: self.palette.surface2,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(200.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        } else {
-            // Video frame placeholder
-            if let Some(file) = &self.current_file
-                && let Some(vs) = file.primary_video()
-            {
-                let label = format!("{}x{} {}", vs.width, vs.height, vs.codec.display_name());
+            let avail = (self.width - 32.0).max(0.0);
+            for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                let ty = top + video_h / 2.0 - 30.0 + i as f32 * 22.0;
+                if avail <= 0.0 || ty < top || ty + 22.0 > top + video_h {
+                    continue;
+                }
                 cmds.push(RenderCommand::Text {
-                    x: self.width / 2.0 - 60.0,
-                    y: top + video_h / 2.0 - 8.0,
-                    text: label,
-                    font_size: 14.0,
-                    color: self.palette.surface2,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(300.0),
+                    x: 16.0,
+                    y: ty,
+                    text: (*line).to_string(),
+                    font_size: if i == 0 { 16.0 } else { 13.0 },
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(avail),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        } else {
+            // Where the picture would be: that there is none, and why; then
+            // what the picture is, as far as the file says.
+            let avail = (self.width - 32.0).max(0.0);
+            let what = self.current_file.as_ref().and_then(|file| {
+                let vs = file.primary_video()?;
+                Some(match vs.size_label() {
+                    Some(size) => format!("{size} {}", vs.codec.name()),
+                    None => vs.codec.name().to_string(),
+                })
+            });
+            let lines = NO_PICTURE_LINES
+                .iter()
+                .map(|l| (*l).to_string())
+                .chain(what);
+            for (i, line) in lines.enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+                let ty = top + video_h / 2.0 - 30.0 + i as f32 * 22.0;
+                if avail <= 0.0 || ty < top || ty + 22.0 > top + video_h {
+                    continue;
+                }
+                cmds.push(RenderCommand::Text {
+                    x: 16.0,
+                    y: ty,
+                    text: line,
+                    font_size: if i == 0 { 16.0 } else { 13.0 },
+                    color: if i == 0 {
+                        self.palette.ink(self.palette.yellow)
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(avail),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
@@ -4089,7 +4255,7 @@ impl VideoPlayerApp {
             cmds.push(RenderCommand::Text {
                 x: 56.0,
                 y: ey + 22.0,
-                text: entry.path.clone(),
+                text: entry.path.shown().to_string(),
                 font_size: 10.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
@@ -4179,38 +4345,35 @@ impl VideoPlayerApp {
                     &mut line_y,
                     &format!("Video Stream #{}", i.saturating_add(1)),
                 );
-                info_row(cmds, &mut line_y, "Codec", vs.codec.display_name());
-                info_row(
-                    cmds,
-                    &mut line_y,
-                    "Resolution",
-                    &format!("{}x{} ({})", vs.width, vs.height, vs.resolution_label()),
-                );
-                info_row(cmds, &mut line_y, "Aspect Ratio", &vs.aspect_ratio());
-                info_row(
-                    cmds,
-                    &mut line_y,
-                    "Frame Rate",
-                    &format!("{:.3} fps", vs.frame_rate),
-                );
-                info_row(cmds, &mut line_y, "Bit Rate", &vs.bitrate_display());
-                info_row(cmds, &mut line_y, "Pixel Format", &vs.pixel_format);
+                // Each row only where the file says: a blank or a zero
+                // where a header is silent would read as the file's answer.
+                info_row(cmds, &mut line_y, "Codec", vs.codec.name());
+                if let (Some(size), Some(label)) = (vs.size_label(), vs.resolution_label()) {
+                    info_row(
+                        cmds,
+                        &mut line_y,
+                        "Resolution",
+                        &format!("{size} ({label})"),
+                    );
+                }
+                if let Some(ratio) = vs.aspect_ratio() {
+                    info_row(cmds, &mut line_y, "Aspect Ratio", &ratio);
+                }
+                if let Some(fps) = vs.frame_rate {
+                    info_row(cmds, &mut line_y, "Frame Rate", &format!("{fps:.3} fps"));
+                }
+                if let Some(bps) = vs.bit_rate {
+                    info_row(cmds, &mut line_y, "Bit Rate", &format_bitrate(bps));
+                }
+                if let Some(pf) = &vs.pixel_format {
+                    info_row(cmds, &mut line_y, "Pixel Format", pf);
+                }
                 if vs.hdr {
                     info_row(cmds, &mut line_y, "HDR", "Yes");
                 }
                 if let Some(cs) = &vs.color_space {
                     info_row(cmds, &mut line_y, "Color Space", cs);
                 }
-                info_row(
-                    cmds,
-                    &mut line_y,
-                    "HW Decode",
-                    if vs.codec.is_hardware_decodable() {
-                        "Supported"
-                    } else {
-                        "Not available"
-                    },
-                );
             }
 
             // Audio streams
@@ -4220,33 +4383,27 @@ impl VideoPlayerApp {
                     &mut line_y,
                     &format!("Audio Stream #{}", i.saturating_add(1)),
                 );
-                info_row(cmds, &mut line_y, "Codec", audio.codec.display_name());
-                info_row(
-                    cmds,
-                    &mut line_y,
-                    "Sample Rate",
-                    &format!("{} Hz", audio.sample_rate),
-                );
-                info_row(
-                    cmds,
-                    &mut line_y,
-                    "Channels",
-                    AudioCodec::channel_layout_name(audio.channels),
-                );
-                info_row(
-                    cmds,
-                    &mut line_y,
-                    "Bit Rate",
-                    &format_bitrate(audio.bit_rate),
-                );
+                info_row(cmds, &mut line_y, "Codec", audio.codec.name());
+                if let Some(hz) = audio.sample_rate {
+                    info_row(cmds, &mut line_y, "Sample Rate", &format!("{hz} Hz"));
+                }
+                if let Some(channels) = audio.channels {
+                    info_row(cmds, &mut line_y, "Channels", channel_layout_name(channels));
+                }
+                if let Some(bps) = audio.bit_rate {
+                    info_row(cmds, &mut line_y, "Bit Rate", &format_bitrate(bps));
+                }
                 if let Some(lang) = &audio.language {
                     info_row(cmds, &mut line_y, "Language", lang);
+                }
+                if let Some(title) = &audio.title {
+                    info_row(cmds, &mut line_y, "Name", title);
                 }
                 info_row(
                     cmds,
                     &mut line_y,
                     "Lossless",
-                    if audio.codec.is_lossless() {
+                    if is_lossless(&audio.codec) {
                         "Yes"
                     } else {
                         "No"
@@ -4261,7 +4418,7 @@ impl VideoPlayerApp {
                     &mut line_y,
                     &format!("Subtitle Stream #{}", i.saturating_add(1)),
                 );
-                info_row(cmds, &mut line_y, "Format", sub.format.display_name());
+                info_row(cmds, &mut line_y, "Format", sub.codec.name());
                 if let Some(lang) = &sub.language {
                     info_row(cmds, &mut line_y, "Language", lang);
                 }
@@ -4269,7 +4426,7 @@ impl VideoPlayerApp {
                     cmds,
                     &mut line_y,
                     "Text Based",
-                    if sub.format.is_text_based() {
+                    if is_text_subtitle(&sub.codec) {
                         "Yes"
                     } else {
                         "No"
@@ -4943,49 +5100,49 @@ impl VideoPlayerApp {
 #[cfg(test)]
 fn sample_media_file() -> MediaFile {
     MediaFile {
-        path: "/home/user/Videos/sample.mkv".to_string(),
+        path: PathBuf::from("/home/user/Videos/sample.mkv"),
         file_name: "sample.mkv".to_string(),
         file_size: 1_500_000_000,
         container: ContainerFormat::Mkv,
         duration: Duration::from_secs(7200),
         video_streams: vec![VideoStream {
             index: 0,
-            codec: VideoCodec::H265,
-            width: 3840,
-            height: 2160,
-            frame_rate: 23.976,
-            bit_rate: 15_000_000,
-            pixel_format: "yuv420p10le".to_string(),
+            codec: Codec::H265,
+            width: Some(3840),
+            height: Some(2160),
+            frame_rate: Some(23.976),
+            bit_rate: Some(15_000_000),
+            pixel_format: Some("yuv420p10le".to_string()),
             color_space: Some("bt2020nc".to_string()),
             hdr: true,
         }],
         audio_streams: vec![
             AudioStream {
                 index: 1,
-                codec: AudioCodec::TrueHd,
-                sample_rate: 48000,
-                channels: 8,
-                bit_rate: 4_500_000,
+                codec: Codec::TrueHd,
+                sample_rate: Some(48000),
+                channels: Some(8),
+                bit_rate: Some(4_500_000),
                 language: Some("English".to_string()),
                 title: Some("Dolby TrueHD 7.1".to_string()),
                 is_default: true,
             },
             AudioStream {
                 index: 2,
-                codec: AudioCodec::Aac,
-                sample_rate: 48000,
-                channels: 2,
-                bit_rate: 192_000,
+                codec: Codec::Aac,
+                sample_rate: Some(48000),
+                channels: Some(2),
+                bit_rate: Some(192_000),
                 language: Some("English".to_string()),
                 title: Some("Stereo Commentary".to_string()),
                 is_default: false,
             },
             AudioStream {
                 index: 3,
-                codec: AudioCodec::Ac3,
-                sample_rate: 48000,
-                channels: 6,
-                bit_rate: 640_000,
+                codec: Codec::Ac3,
+                sample_rate: Some(48000),
+                channels: Some(6),
+                bit_rate: Some(640_000),
                 language: Some("Spanish".to_string()),
                 title: None,
                 is_default: false,
@@ -4994,7 +5151,7 @@ fn sample_media_file() -> MediaFile {
         subtitle_streams: vec![
             SubtitleStream {
                 index: 4,
-                format: SubtitleFormat::Pgs,
+                codec: Codec::Pgs,
                 language: Some("English".to_string()),
                 title: Some("Full".to_string()),
                 is_default: true,
@@ -5002,7 +5159,7 @@ fn sample_media_file() -> MediaFile {
             },
             SubtitleStream {
                 index: 5,
-                format: SubtitleFormat::Srt,
+                codec: Codec::Text,
                 language: Some("Spanish".to_string()),
                 title: None,
                 is_default: false,
@@ -5010,7 +5167,7 @@ fn sample_media_file() -> MediaFile {
             },
             SubtitleStream {
                 index: 6,
-                format: SubtitleFormat::Ass,
+                codec: Codec::Ass,
                 language: Some("English".to_string()),
                 title: Some("Signs/Songs".to_string()),
                 is_default: false,
@@ -5174,25 +5331,26 @@ impl App for VideoPlayerApp {
 #[cfg(test)]
 fn seeded_player() -> VideoPlayerApp {
     let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+    app.decodes = true;
     app.current_file = Some(sample_media_file());
     app.chapters = sample_chapters();
     app.selected_audio_track = Some(1);
     app.selected_subtitle_track = Some(4);
     app.external_subtitles = parse_srt(sample_subtitle_srt());
     app.playlist.add(
-        "/home/user/Videos/sample.mkv".to_string(),
+        PathBuf::from("/home/user/Videos/sample.mkv"),
         "sample.mkv".to_string(),
         Some(Duration::from_secs(7200)),
         Some("Sample Movie".to_string()),
     );
     app.playlist.add(
-        "/home/user/Videos/trailer.mp4".to_string(),
+        PathBuf::from("/home/user/Videos/trailer.mp4"),
         "trailer.mp4".to_string(),
         Some(Duration::from_secs(120)),
         None,
     );
     app.playlist.add(
-        "/home/user/Videos/concert.webm".to_string(),
+        PathBuf::from("/home/user/Videos/concert.webm"),
         "concert.webm".to_string(),
         Some(Duration::from_secs(5400)),
         Some("Live Concert 2024".to_string()),
@@ -5202,12 +5360,55 @@ fn seeded_player() -> VideoPlayerApp {
 }
 
 fn main() -> ExitCode {
-    // Opens empty. It used to call `seeded_player`, so every launch began with
-    // a two-hour "Sample Movie" at /home/user/Videos/sample.mkv, chapters,
-    // external subtitles and a playlist -- and the clock ran when you pressed
-    // play.
+    // Opens empty, or on the files it is given. It used to call
+    // `seeded_player`, so every launch began with a two-hour "Sample Movie" at
+    // /home/user/Videos/sample.mkv, chapters, external subtitles and a
+    // playlist -- and the clock ran when you pressed play.
+    //
+    // Parsed here rather than by `app::launch`, which refuses every argument
+    // but `--display`: the file manager opens a video by naming it, and the
+    // refusal ended the player before its window opened.
+    let args = match app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("videoplayer: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-    app::launch("videoplayer", &mut app)
+    for why in open_arguments(&mut app, &args.rest) {
+        eprintln!("videoplayer: {why}");
+    }
+    app::launch_with("videoplayer", args.display.as_deref(), &mut app)
+}
+
+/// Open the videos named on the command line: the first shown, the rest
+/// listed after it. Returns why each that could not be read was not.
+fn open_arguments(app: &mut VideoPlayerApp, paths: &[String]) -> Vec<String> {
+    let mut failed = Vec::new();
+    let mut shown = false;
+    for path in paths.iter().map(Path::new) {
+        let result = if shown {
+            app.add_path(path).map(drop)
+        } else {
+            match app.add_path(path) {
+                Ok(index) => {
+                    app.playlist.set_current(index);
+                    app.load_playlist_entry(index);
+                    shown = app.current_file.is_some();
+                    Ok(())
+                }
+                Err(why) => Err(why),
+            }
+        };
+        if let Err(why) = result {
+            failed.push(why);
+        }
+    }
+    if let Some(last) = failed.last() {
+        app.show_osd(last);
+    }
+    failed
 }
 
 #[cfg(test)]
@@ -5243,14 +5444,12 @@ mod tests {
     /// before and after. The other was `apps/email`.
     /// The screenshot options are drawn with the fact that none can be taken.
     ///
-    /// **`Ctrl+S` was already removed from `Shortcuts::list` as impossible**,
-    /// with the reason recorded there: this tree has neither a file chooser
-    /// nor a way to read back the framebuffer. The settings block was left
-    /// behind, still naming a format, a quality and a subtitle option.
+    /// **`Ctrl+S` was already removed from `Shortcuts::list` as impossible**:
+    /// no frame is decoded, so there is nothing to take. The settings block
+    /// was left behind, still naming a format, a quality and a subtitle option.
     ///
-    /// `CANNOT_PLAY_LINES` does cover the prerequisites -- no frame is
-    /// decoded, there is no filesystem -- but it is drawn at the top left of
-    /// the window. Relying on a reader having passed it before reaching a
+    /// `CANNOT_PLAY_LINES` does say nothing decodes -- but it is drawn where
+    /// the picture would be. Relying on a reader having passed it before reaching a
     /// settings panel is exactly what `apps/mediaconvert` got wrong: three
     /// lines about the queue did not reach the panel that configured it.
     /// **C opens the chapter list, and it says so when there are none.**
@@ -5350,6 +5549,231 @@ test to be about anything -- it drew {} text command(s)",
                 .any(|t| t.contains("Not applied") && t.contains("screenshot")),
             "the panel offered screenshot options and did not say none can be taken"
         );
+    }
+
+    /// A scratch directory of the test's own, removed when dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "slateos-videoplayer-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+
+        fn file(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, bytes).expect("write");
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.0));
+        }
+    }
+
+    fn texts(app: &VideoPlayerApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A video opened is read for what it holds: its container, length and
+    /// tracks come from the file, not from a sample.
+    #[test]
+    fn a_video_opened_is_read_for_what_it_holds() {
+        let dir = Scratch::new("open");
+        let path = dir.file("film.mp4", &mediaprobe::testing::mp4(1920, 1080, 90, 25));
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let said = app.open_path(&path);
+        let file = app
+            .current_file
+            .as_ref()
+            .unwrap_or_else(|| panic!("not opened: {said}"));
+        assert_eq!(file.container, ContainerFormat::Mp4);
+        assert_eq!(file.duration, Duration::from_secs(90));
+        let video = file.primary_video().expect("a picture");
+        assert_eq!(video.codec, Codec::H264);
+        assert_eq!(video.size_label().as_deref(), Some("1920x1080"));
+        assert_eq!(video.frame_rate, Some(25.0));
+        let audio = file.primary_audio().expect("sound");
+        assert_eq!(
+            (audio.codec.clone(), audio.sample_rate, audio.channels),
+            (Codec::Aac, Some(48_000), Some(2))
+        );
+        assert_eq!(app.playlist.len(), 1, "an opened file is listed");
+        assert_eq!(
+            app.playlist.entries()[0].duration,
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(app.state, PlaybackState::Stopped);
+        assert_eq!(
+            app.selected_audio_track,
+            Some(audio.index),
+            "its own sound is chosen"
+        );
+        // Where the picture would be: that there is none, and what it is.
+        let shown = texts(&app);
+        for line in NO_PICTURE_LINES {
+            assert!(shown.iter().any(|t| t == line), "never said {line:?}");
+        }
+        assert!(shown.iter().any(|t| t == "1920x1080 H.264"), "{shown:?}");
+        assert!(
+            !shown
+                .iter()
+                .any(|t| CANNOT_PLAY_LINES.contains(&t.as_str()))
+        );
+    }
+
+    /// Play says why it will not, rather than running a clock over a black
+    /// picture: nothing here decodes a frame.
+    #[test]
+    fn play_says_there_is_no_decoder_rather_than_pretending() {
+        let dir = Scratch::new("play");
+        let path = dir.file("film.mkv", &mediaprobe::testing::mkv(640, 360, 30, 24));
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.open_path(&path);
+        app.handle_event(&press(Key::Space));
+        assert_eq!(app.state, PlaybackState::Stopped);
+        assert_eq!(app.osd_message.as_deref(), Some(CANNOT_DECODE));
+        app.tick(5000);
+        assert_eq!(
+            app.position,
+            Duration::ZERO,
+            "the clock ran with nothing playing"
+        );
+    }
+
+    /// Every kind of file this reads opens; what is not a video, a folder or
+    /// nothing at all says so, and the player keeps what it had.
+    #[test]
+    fn what_cannot_be_opened_says_why() {
+        let dir = Scratch::new("refuse");
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (name, bytes) in [
+            ("a.webm", mediaprobe::testing::webm(320, 240, 5, 30)),
+            ("b.avi", mediaprobe::testing::avi(320, 240, 5, 25)),
+        ] {
+            let said = app.open_path(&dir.file(name, &bytes));
+            assert!(said.starts_with("Opened"), "{name}: {said}");
+        }
+        assert_eq!(
+            app.current_file.as_ref().unwrap().container,
+            ContainerFormat::Avi
+        );
+        let text = dir.file("notes.txt", b"not a video");
+        assert!(
+            app.open_path(&text)
+                .contains("not a video this player knows")
+        );
+        assert!(app.open_path(&dir.0).contains("it is a folder"));
+        assert!(
+            app.open_path(&dir.0.join("gone.mp4"))
+                .starts_with("Could not open")
+        );
+        assert_eq!(
+            app.playlist.len(),
+            2,
+            "nothing was listed for a file that did not open"
+        );
+        assert_eq!(
+            app.current_file.as_ref().unwrap().container,
+            ContainerFormat::Avi,
+            "a failed open kept the file that was open"
+        );
+        // A file whose bytes this does not read, named as a video it knows,
+        // is listed by its name with nothing read: FLV is a container this
+        // player names and nothing here parses.
+        let flv = dir.file("old.flv", b"FLV\x01 not parsed here");
+        assert!(app.open_path(&flv).starts_with("Opened"));
+        let file = app.current_file.as_ref().unwrap();
+        assert_eq!(file.container, ContainerFormat::Flv);
+        assert!(file.video_streams.is_empty());
+    }
+
+    /// Ctrl+O puts up the picker; a file chosen there opens.
+    #[test]
+    fn ctrl_o_opens_the_picker() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(app.handle_event(&press_with(Key::O, ctrl())));
+        assert!(app.picker.is_open());
+        // It takes the keys while it is up: Space is not Play.
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.picker.is_open());
+        assert!(
+            Shortcuts::list().iter().any(|s| s.keys == "Ctrl+O"),
+            "the help panel does not say how to open a file"
+        );
+    }
+
+    /// A scratch path as a command-line argument: its exact text.
+    fn text(path: &std::path::Path) -> String {
+        path.to_str().expect("a scratch path is text").to_owned()
+    }
+
+    /// Stepping through the playlist opens each entry's file: it said "Now
+    /// playing" and changed nothing but the clock.
+    #[test]
+    fn the_next_entry_is_its_own_file() {
+        let dir = Scratch::new("next");
+        let first = dir.file("one.mp4", &mediaprobe::testing::mp4(640, 480, 10, 25));
+        let second = dir.file("two.mkv", &mediaprobe::testing::mkv(1280, 720, 20, 24));
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let failed = open_arguments(
+            &mut app,
+            // Arguments are opened, not shown: each path's exact text.
+            &[text(&first), text(&second)],
+        );
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(app.playlist.len(), 2);
+        assert_eq!(
+            app.current_file.as_ref().unwrap().file_name,
+            "one.mp4",
+            "the first is shown"
+        );
+        app.playlist_next();
+        let file = app.current_file.as_ref().expect("the next file");
+        assert_eq!(file.file_name, "two.mkv");
+        assert_eq!(file.duration, Duration::from_secs(20));
+        assert_eq!(
+            file.primary_video().unwrap().size_label().as_deref(),
+            Some("1280x720")
+        );
+        // An entry whose file has gone says so, and shows nothing.
+        std::fs::remove_file(&first).expect("remove");
+        app.playlist_previous();
+        assert!(app.current_file.is_none());
+        assert!(
+            app.osd_message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("Could not open"))
+        );
+    }
+
+    /// A command line naming files that cannot be read says so for each, and
+    /// opens the ones that can.
+    #[test]
+    fn the_command_line_opens_what_it_can_and_names_what_it_cannot() {
+        let dir = Scratch::new("args");
+        let good = dir.file("good.avi", &mediaprobe::testing::avi(320, 240, 4, 25));
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let failed = open_arguments(&mut app, &[text(&dir.0.join("missing.mp4")), text(&good)]);
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].contains("missing.mp4"), "{failed:?}");
+        assert_eq!(app.current_file.as_ref().unwrap().file_name, "good.avi");
+        assert!(open_arguments(&mut VideoPlayerApp::new(1.0, 1.0), &[]).is_empty());
     }
 
     #[test]
@@ -5468,76 +5892,66 @@ test to be about anything -- it drew {} text command(s)",
         assert!(exts.contains(&"m4v"));
     }
 
-    // Video codec tests
-    #[test]
-    fn test_video_codec_hw_decode() {
-        assert!(VideoCodec::H264.is_hardware_decodable());
-        assert!(VideoCodec::Av1.is_hardware_decodable());
-        assert!(!VideoCodec::Theora.is_hardware_decodable());
+    fn video_stream(width: u32, height: u32) -> VideoStream {
+        VideoStream {
+            index: 0,
+            codec: Codec::H264,
+            width: Some(width),
+            height: Some(height),
+            frame_rate: Some(24.0),
+            bit_rate: None,
+            pixel_format: None,
+            color_space: None,
+            hdr: false,
+        }
     }
 
-    // Audio codec tests
     #[test]
-    fn test_audio_codec_lossless() {
-        assert!(AudioCodec::Flac.is_lossless());
-        assert!(AudioCodec::TrueHd.is_lossless());
-        assert!(!AudioCodec::Aac.is_lossless());
+    fn a_codec_is_lossless_and_a_subtitle_is_text_by_its_codec() {
+        assert!(is_lossless(&Codec::Flac));
+        assert!(is_lossless(&Codec::TrueHd));
+        assert!(is_lossless(&Codec::Alac));
+        assert!(!is_lossless(&Codec::Aac));
+        assert!(is_text_subtitle(&Codec::Text));
+        assert!(is_text_subtitle(&Codec::WebVtt));
+        assert!(!is_text_subtitle(&Codec::Pgs));
+        assert!(!is_text_subtitle(&Codec::VobSub));
     }
 
     #[test]
     fn test_channel_layout_name() {
-        assert_eq!(AudioCodec::channel_layout_name(2), "Stereo");
-        assert_eq!(AudioCodec::channel_layout_name(6), "5.1");
-        assert_eq!(AudioCodec::channel_layout_name(8), "7.1");
+        assert_eq!(channel_layout_name(2), "Stereo");
+        assert_eq!(channel_layout_name(6), "5.1");
+        assert_eq!(channel_layout_name(8), "7.1");
     }
 
     // Video stream tests
     #[test]
     fn test_resolution_label() {
-        let vs = VideoStream {
-            index: 0,
-            codec: VideoCodec::H264,
-            width: 1920,
-            height: 1080,
-            frame_rate: 24.0,
-            bit_rate: 5_000_000,
-            pixel_format: "yuv420p".to_string(),
-            color_space: None,
-            hdr: false,
-        };
-        assert_eq!(vs.resolution_label(), "1080p (Full HD)");
+        assert_eq!(
+            video_stream(1920, 1080).resolution_label(),
+            Some("1080p (Full HD)")
+        );
+        let mut unknown = video_stream(1920, 1080);
+        unknown.height = None;
+        assert_eq!(unknown.resolution_label(), None, "no height, no label");
     }
 
     #[test]
     fn test_aspect_ratio() {
-        let vs = VideoStream {
-            index: 0,
-            codec: VideoCodec::H264,
-            width: 1920,
-            height: 1080,
-            frame_rate: 24.0,
-            bit_rate: 5_000_000,
-            pixel_format: "yuv420p".to_string(),
-            color_space: None,
-            hdr: false,
-        };
-        assert_eq!(vs.aspect_ratio(), "16:9");
-    }
-
-    #[test]
-    fn test_aspect_ratio_4_3() {
-        let vs = VideoStream {
-            index: 0,
-            codec: VideoCodec::Mpeg2,
-            width: 640,
-            height: 480,
-            frame_rate: 30.0,
-            bit_rate: 2_000_000,
-            pixel_format: "yuv420p".to_string(),
-            color_space: None,
-            hdr: false,
-        };
-        assert_eq!(vs.aspect_ratio(), "4:3");
+        assert_eq!(
+            video_stream(1920, 1080).aspect_ratio().as_deref(),
+            Some("16:9")
+        );
+        assert_eq!(
+            video_stream(640, 480).aspect_ratio().as_deref(),
+            Some("4:3")
+        );
+        assert_eq!(video_stream(640, 0).aspect_ratio(), None);
+        assert_eq!(
+            video_stream(1920, 1080).size_label().as_deref(),
+            Some("1920x1080")
+        );
     }
 
     // Audio stream tests
@@ -5545,33 +5959,35 @@ test to be about anything -- it drew {} text command(s)",
     fn test_audio_display_label() {
         let stream = AudioStream {
             index: 1,
-            codec: AudioCodec::Aac,
-            sample_rate: 48000,
-            channels: 2,
-            bit_rate: 192000,
-            language: Some("English".to_string()),
+            codec: Codec::Aac,
+            sample_rate: Some(48000),
+            channels: Some(2),
+            bit_rate: None,
+            language: Some("eng".to_string()),
             title: None,
             is_default: true,
         };
-        assert_eq!(stream.display_label(), "English - AAC Stereo");
+        assert_eq!(stream.display_label(), "eng - AAC Stereo");
+        let no_channels = AudioStream {
+            channels: None,
+            ..stream
+        };
+        assert_eq!(no_channels.display_label(), "eng - AAC");
     }
 
     #[test]
     fn test_audio_display_label_with_title() {
         let stream = AudioStream {
             index: 1,
-            codec: AudioCodec::Ac3,
-            sample_rate: 48000,
-            channels: 6,
-            bit_rate: 640000,
-            language: Some("English".to_string()),
+            codec: Codec::Ac3,
+            sample_rate: Some(48000),
+            channels: Some(6),
+            bit_rate: None,
+            language: Some("eng".to_string()),
             title: Some("Commentary".to_string()),
             is_default: false,
         };
-        assert_eq!(
-            stream.display_label(),
-            "Commentary (English) - Dolby Digital (AC-3) 5.1"
-        );
+        assert_eq!(stream.display_label(), "Commentary (eng) - AC-3 5.1");
     }
 
     // Subtitle tests
@@ -5579,34 +5995,26 @@ test to be about anything -- it drew {} text command(s)",
     fn test_subtitle_display_label() {
         let sub = SubtitleStream {
             index: 0,
-            format: SubtitleFormat::Srt,
-            language: Some("English".to_string()),
+            codec: Codec::Text,
+            language: Some("eng".to_string()),
             title: None,
             is_default: true,
             is_forced: false,
         };
-        assert_eq!(sub.display_label(), "English (SRT)");
+        assert_eq!(sub.display_label(), "eng (Text)");
     }
 
     #[test]
     fn test_subtitle_forced_label() {
         let sub = SubtitleStream {
             index: 0,
-            format: SubtitleFormat::Pgs,
-            language: Some("English".to_string()),
+            codec: Codec::Pgs,
+            language: Some("eng".to_string()),
             title: Some("Signs".to_string()),
             is_default: false,
             is_forced: true,
         };
         assert!(sub.display_label().contains("[Forced]"));
-    }
-
-    #[test]
-    fn test_subtitle_format_text_based() {
-        assert!(SubtitleFormat::Srt.is_text_based());
-        assert!(SubtitleFormat::WebVtt.is_text_based());
-        assert!(!SubtitleFormat::Pgs.is_text_based());
-        assert!(!SubtitleFormat::VobSub.is_text_based());
     }
 
     // SRT parsing tests
@@ -5770,8 +6178,8 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_playlist_add_remove() {
         let mut pl = Playlist::new();
-        pl.add("a.mp4".to_string(), "a.mp4".to_string(), None, None);
-        pl.add("b.mp4".to_string(), "b.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("a.mp4"), "a.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("b.mp4"), "b.mp4".to_string(), None, None);
         assert_eq!(pl.len(), 2);
         pl.remove(0);
         assert_eq!(pl.len(), 1);
@@ -5781,9 +6189,9 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_playlist_next_sequential() {
         let mut pl = Playlist::new();
-        pl.add("a.mp4".to_string(), "a.mp4".to_string(), None, None);
-        pl.add("b.mp4".to_string(), "b.mp4".to_string(), None, None);
-        pl.add("c.mp4".to_string(), "c.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("a.mp4"), "a.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("b.mp4"), "b.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("c.mp4"), "c.mp4".to_string(), None, None);
         pl.set_current(0);
         assert_eq!(pl.next(RepeatMode::Off), Some(1));
         assert_eq!(pl.next(RepeatMode::Off), Some(2));
@@ -5793,8 +6201,8 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_playlist_next_repeat_all() {
         let mut pl = Playlist::new();
-        pl.add("a.mp4".to_string(), "a.mp4".to_string(), None, None);
-        pl.add("b.mp4".to_string(), "b.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("a.mp4"), "a.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("b.mp4"), "b.mp4".to_string(), None, None);
         pl.set_current(1);
         assert_eq!(pl.next(RepeatMode::All), Some(0));
     }
@@ -5802,8 +6210,8 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_playlist_next_repeat_one() {
         let mut pl = Playlist::new();
-        pl.add("a.mp4".to_string(), "a.mp4".to_string(), None, None);
-        pl.add("b.mp4".to_string(), "b.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("a.mp4"), "a.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("b.mp4"), "b.mp4".to_string(), None, None);
         pl.set_current(0);
         assert_eq!(pl.next(RepeatMode::One), Some(0));
     }
@@ -5811,8 +6219,8 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_playlist_previous() {
         let mut pl = Playlist::new();
-        pl.add("a.mp4".to_string(), "a.mp4".to_string(), None, None);
-        pl.add("b.mp4".to_string(), "b.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("a.mp4"), "a.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("b.mp4"), "b.mp4".to_string(), None, None);
         pl.set_current(1);
         assert_eq!(pl.previous(), Some(0));
     }
@@ -5820,7 +6228,7 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_playlist_clear() {
         let mut pl = Playlist::new();
-        pl.add("a.mp4".to_string(), "a.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("a.mp4"), "a.mp4".to_string(), None, None);
         pl.set_current(0);
         pl.clear();
         assert!(pl.is_empty());
@@ -5830,9 +6238,9 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_playlist_move_entry() {
         let mut pl = Playlist::new();
-        pl.add("a.mp4".to_string(), "a.mp4".to_string(), None, None);
-        pl.add("b.mp4".to_string(), "b.mp4".to_string(), None, None);
-        pl.add("c.mp4".to_string(), "c.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("a.mp4"), "a.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("b.mp4"), "b.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("c.mp4"), "c.mp4".to_string(), None, None);
         pl.set_current(0);
         pl.move_entry(0, 2);
         assert_eq!(pl.entries()[0].file_name, "b.mp4");
@@ -5844,7 +6252,12 @@ test to be about anything -- it drew {} text command(s)",
     fn test_playlist_shuffle() {
         let mut pl = Playlist::new();
         for i in 0..10 {
-            pl.add(format!("{i}.mp4"), format!("{i}.mp4"), None, None);
+            pl.add(
+                PathBuf::from(format!("{i}.mp4")),
+                format!("{i}.mp4"),
+                None,
+                None,
+            );
         }
         pl.set_current(0);
         pl.toggle_shuffle();
@@ -5862,7 +6275,12 @@ test to be about anything -- it drew {} text command(s)",
     fn repeated_shuffle_orders(seed: u64, len: usize, rebuilds: usize) -> Vec<Vec<usize>> {
         let mut pl = Playlist::with_seed(seed);
         for i in 0..len {
-            pl.add(format!("{i}.mp4"), format!("{i}.mp4"), None, None);
+            pl.add(
+                PathBuf::from(format!("{i}.mp4")),
+                format!("{i}.mp4"),
+                None,
+                None,
+            );
         }
         (0..rebuilds)
             .map(|_| {
@@ -5926,7 +6344,12 @@ test to be about anything -- it drew {} text command(s)",
     fn a_fresh_playlist_is_seeded_by_the_system_and_not_by_a_literal() {
         fn first_order(mut pl: Playlist) -> Vec<usize> {
             for i in 0..12 {
-                pl.add(format!("{i}.mp4"), format!("{i}.mp4"), None, None);
+                pl.add(
+                    PathBuf::from(format!("{i}.mp4")),
+                    format!("{i}.mp4"),
+                    None,
+                    None,
+                );
             }
             pl.toggle_shuffle();
             pl.shuffle_order.clone()
@@ -5940,18 +6363,18 @@ test to be about anything -- it drew {} text command(s)",
     fn test_playlist_total_duration() {
         let mut pl = Playlist::new();
         pl.add(
-            "a.mp4".to_string(),
+            PathBuf::from("a.mp4"),
             "a.mp4".to_string(),
             Some(Duration::from_secs(60)),
             None,
         );
         pl.add(
-            "b.mp4".to_string(),
+            PathBuf::from("b.mp4"),
             "b.mp4".to_string(),
             Some(Duration::from_secs(120)),
             None,
         );
-        pl.add("c.mp4".to_string(), "c.mp4".to_string(), None, None);
+        pl.add(PathBuf::from("c.mp4"), "c.mp4".to_string(), None, None);
         assert_eq!(pl.total_duration(), Duration::from_secs(180));
     }
 
@@ -6063,26 +6486,47 @@ test to be about anything -- it drew {} text command(s)",
         assert!(adj.is_default());
     }
 
+    /// A name is shown as its bytes: what is not UTF-8 is written as an octal
+    /// escape (`pathtext`, as every application writes it), not replaced, so
+    /// two names differing only there look different.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_shown_as_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let a = Path::new(std::ffi::OsStr::from_bytes(b"/v/clip\xFF.mp4"));
+        let b = Path::new(std::ffi::OsStr::from_bytes(b"/v/clip\xFE.mp4"));
+        assert_eq!(shown_name(a), r"clip\377.mp4");
+        assert_ne!(shown_name(a), shown_name(b));
+    }
+
+    #[test]
+    fn a_name_is_shown_without_its_folder() {
+        assert_eq!(shown_name(Path::new("videos/holiday.mkv")), "holiday.mkv");
+        assert_eq!(shown_name(Path::new("caf\u{e9}.mp4")), "caf\u{e9}.mp4");
+        // A path with no last part is shown whole.
+        assert_eq!(shown_name(Path::new("..")), "..");
+    }
+
     // Recent files tests
     #[test]
     fn test_recent_history() {
         let mut recent = RecentHistory::new(3);
         recent.add(
-            "a.mp4".to_string(),
+            PathBuf::from("a.mp4"),
             "a.mp4".to_string(),
             Duration::ZERO,
             100,
             None,
         );
         recent.add(
-            "b.mp4".to_string(),
+            PathBuf::from("b.mp4"),
             "b.mp4".to_string(),
             Duration::ZERO,
             200,
             None,
         );
         recent.add(
-            "c.mp4".to_string(),
+            PathBuf::from("c.mp4"),
             "c.mp4".to_string(),
             Duration::ZERO,
             300,
@@ -6090,7 +6534,7 @@ test to be about anything -- it drew {} text command(s)",
         );
         assert_eq!(recent.files().len(), 3);
         recent.add(
-            "d.mp4".to_string(),
+            PathBuf::from("d.mp4"),
             "d.mp4".to_string(),
             Duration::ZERO,
             400,
@@ -6104,21 +6548,21 @@ test to be about anything -- it drew {} text command(s)",
     fn test_recent_dedup() {
         let mut recent = RecentHistory::new(10);
         recent.add(
-            "a.mp4".to_string(),
+            PathBuf::from("a.mp4"),
             "a.mp4".to_string(),
             Duration::from_secs(10),
             100,
             None,
         );
         recent.add(
-            "b.mp4".to_string(),
+            PathBuf::from("b.mp4"),
             "b.mp4".to_string(),
             Duration::ZERO,
             200,
             None,
         );
         recent.add(
-            "a.mp4".to_string(),
+            PathBuf::from("a.mp4"),
             "a.mp4".to_string(),
             Duration::from_secs(50),
             300,
@@ -6132,13 +6576,13 @@ test to be about anything -- it drew {} text command(s)",
     fn test_recent_find_by_path() {
         let mut recent = RecentHistory::new(10);
         recent.add(
-            "a.mp4".to_string(),
+            PathBuf::from("a.mp4"),
             "a.mp4".to_string(),
             Duration::from_secs(30),
             100,
             Some(Duration::from_secs(120)),
         );
-        let found = recent.find_by_path("a.mp4").unwrap();
+        let found = recent.find_by_path(Path::new("a.mp4")).unwrap();
         assert_eq!(found.last_position, Duration::from_secs(30));
         assert!((found.progress_fraction() - 0.25).abs() < 0.01);
     }
@@ -6155,7 +6599,7 @@ test to be about anything -- it drew {} text command(s)",
     fn test_media_file_primary_streams() {
         let file = sample_media_file();
         let video = file.primary_video().unwrap();
-        assert_eq!(video.codec, VideoCodec::H265);
+        assert_eq!(video.codec, Codec::H265);
         let audio = file.primary_audio().unwrap();
         assert!(audio.is_default);
     }
@@ -6164,6 +6608,7 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_player_play_pause() {
         let mut app = VideoPlayerApp::new(800.0, 600.0);
+        app.decodes = true;
         app.current_file = Some(sample_media_file());
         app.play();
         assert_eq!(app.state, PlaybackState::Playing);
@@ -6344,7 +6789,7 @@ test to be about anything -- it drew {} text command(s)",
         app.chapters = sample_chapters();
         app.external_subtitles = parse_srt(sample_subtitle_srt());
         app.playlist.add(
-            "test.mp4".to_string(),
+            PathBuf::from("test.mp4"),
             "test.mp4".to_string(),
             Some(Duration::from_secs(120)),
             None,
@@ -6424,7 +6869,7 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn test_recent_file_resume_label() {
         let rf = RecentFile {
-            path: "test.mp4".to_string(),
+            path: PathBuf::from("test.mp4"),
             file_name: "test.mp4".to_string(),
             last_position: Duration::from_secs(300),
             last_opened_timestamp: 0,
@@ -6468,7 +6913,7 @@ test to be about anything -- it drew {} text command(s)",
     fn test_playlist_entry_display() {
         let entry = PlaylistEntry {
             id: 1,
-            path: "/home/test.mp4".to_string(),
+            path: PathBuf::from("/home/test.mp4"),
             file_name: "test.mp4".to_string(),
             duration: None,
             title: Some("My Video".to_string()),
@@ -6477,7 +6922,7 @@ test to be about anything -- it drew {} text command(s)",
 
         let entry2 = PlaylistEntry {
             id: 2,
-            path: "/home/other.mp4".to_string(),
+            path: PathBuf::from("/home/other.mp4"),
             file_name: "other.mp4".to_string(),
             duration: None,
             title: None,
@@ -6811,8 +7256,12 @@ as many times as before",
         Event::Mouse(MouseEvent { x, y, kind })
     }
 
+    /// A player with a file open, and a decoder: what the transport's tests
+    /// are about -- play, the clock, the end of a file -- is what a decoder
+    /// will drive, and there is none yet.
     fn loaded() -> VideoPlayerApp {
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.decodes = true;
         app.current_file = Some(sample_media_file());
         app.chapters = sample_chapters();
         app
@@ -6929,11 +7378,7 @@ as many times as before",
     fn a_shortcut_that_is_not_bound_leaves_the_player_alone() {
         let mut app = loaded();
         assert!(!app.handle_event(&press(Key::F9)));
-        assert!(
-            !app.handle_event(&press_with(Key::O, ctrl())),
-            "Ctrl+O opens a file and this tree has no file chooser -- the row \
-             was removed from the help panel rather than left as a promise"
-        );
+        assert!(!app.handle_event(&press_with(Key::Q, ctrl())));
     }
 
     #[test]
@@ -7359,6 +7804,7 @@ as many times as before",
     fn the_title_names_the_file_and_says_when_it_is_paused() {
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert_eq!(app.title(), "Video Player");
+        app.decodes = true;
         app.current_file = Some(sample_media_file());
         let name = app.current_file.as_ref().expect("a file").file_name.clone();
         app.play();
@@ -7676,5 +8122,48 @@ as many times as before",
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let commands: Vec<RenderCommand> = app.render_commands();
+        for line in CANNOT_PLAY_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !CANNOT_PLAY_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
     }
 }

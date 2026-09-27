@@ -47,8 +47,20 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
-use std::collections::BTreeMap;
+use pathtext::ShowPath;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::path::{Path, PathBuf};
+
+use randrange::RandomSource;
+
+// The transport's parts land a stage at a time, each tested; the session that
+// drives them comes after the tracker and peer ones. `expect` rather than
+// `allow`, so this goes the moment something uses them.
+mod peer;
+mod session;
+mod storage;
+mod tracker;
 
 // ─── Bencode ─────────────────────────────────────────────────────────
 
@@ -112,20 +124,66 @@ impl BencodeValue {
 /// Bencode parser
 pub struct BencodeParser;
 
+/// How deep lists and dictionaries may nest. Nothing in BitTorrent nests more
+/// than a handful deep; the bound is what keeps eight megabytes of `l` -- from
+/// a file, a tracker or a peer -- from recursing until the stack runs out.
+const MAX_BENCODE_DEPTH: usize = 64;
+
 impl BencodeParser {
-    /// Parse a bencode value from bytes
+    /// Parse a bencode value from bytes, returning it and how many bytes it
+    /// took.
     pub fn parse(data: &[u8]) -> Result<(BencodeValue, usize), String> {
+        Self::parse_at(data, 0)
+    }
+
+    fn parse_at(data: &[u8], depth: usize) -> Result<(BencodeValue, usize), String> {
         if data.is_empty() {
             return Err("empty input".to_string());
+        }
+        if depth > MAX_BENCODE_DEPTH {
+            return Err(format!("nested more than {MAX_BENCODE_DEPTH} deep"));
         }
 
         match data.first() {
             Some(b'i') => Self::parse_integer(data),
-            Some(b'l') => Self::parse_list(data),
-            Some(b'd') => Self::parse_dict(data),
+            Some(b'l') => Self::parse_list(data, depth),
+            Some(b'd') => Self::parse_dict(data, depth),
             Some(b'0'..=b'9') => Self::parse_bytes(data),
             Some(c) => Err(format!("unexpected byte: {c}")),
             None => Err("unexpected end of input".to_string()),
+        }
+    }
+
+    /// Where the value under `key` in the dictionary that `data` starts with
+    /// lies, as a range of `data`: the bytes as they are in the file.
+    ///
+    /// An info hash is the SHA-1 of the `info` dictionary's own bytes.
+    /// Re-encoding the parsed value gives the same bytes only when the file
+    /// was written canonically -- keys sorted, integers without leading zeros
+    /// -- and a torrent that was not would be given an info hash no tracker
+    /// and no peer has heard of.
+    pub fn dict_value_span(
+        data: &[u8],
+        key: &str,
+    ) -> Result<Option<std::ops::Range<usize>>, String> {
+        if data.first() != Some(&b'd') {
+            return Err("not a dictionary".to_string());
+        }
+        let mut pos = 1_usize;
+        loop {
+            match data.get(pos) {
+                None => return Err("unterminated dict".to_string()),
+                Some(b'e') => return Ok(None),
+                Some(_) => {}
+            }
+            let (found, key_len) = Self::parse_at(data.get(pos..).unwrap_or_default(), 1)?;
+            let at = pos.saturating_add(key_len);
+            let (_, value_len) = Self::parse_at(data.get(at..).unwrap_or_default(), 1)?;
+            let end = at.saturating_add(value_len);
+            if found.as_bytes() == Some(key.as_bytes()) {
+                return Ok(Some(at..end));
+            }
+            pos = end;
         }
     }
 
@@ -163,7 +221,7 @@ impl BencodeParser {
         Ok((BencodeValue::Bytes(bytes), end))
     }
 
-    fn parse_list(data: &[u8]) -> Result<(BencodeValue, usize), String> {
+    fn parse_list(data: &[u8], depth: usize) -> Result<(BencodeValue, usize), String> {
         // l<values>e
         let mut items = Vec::new();
         let mut pos = 1; // skip 'l'
@@ -174,13 +232,14 @@ impl BencodeParser {
             if data.get(pos) == Some(&b'e') {
                 return Ok((BencodeValue::List(items), pos.saturating_add(1)));
             }
-            let (val, consumed) = Self::parse(data.get(pos..).unwrap_or_default())?;
+            let (val, consumed) =
+                Self::parse_at(data.get(pos..).unwrap_or_default(), depth.saturating_add(1))?;
             items.push(val);
             pos = pos.saturating_add(consumed);
         }
     }
 
-    fn parse_dict(data: &[u8]) -> Result<(BencodeValue, usize), String> {
+    fn parse_dict(data: &[u8], depth: usize) -> Result<(BencodeValue, usize), String> {
         // d<key><value>...e
         let mut map = BTreeMap::new();
         let mut pos = 1; // skip 'd'
@@ -192,7 +251,8 @@ impl BencodeParser {
                 return Ok((BencodeValue::Dict(map), pos.saturating_add(1)));
             }
             // Key must be a byte string
-            let (key_val, key_consumed) = Self::parse(data.get(pos..).unwrap_or_default())?;
+            let (key_val, key_consumed) =
+                Self::parse_at(data.get(pos..).unwrap_or_default(), depth.saturating_add(1))?;
             let key = match key_val {
                 BencodeValue::Bytes(b) => {
                     String::from_utf8(b).map_err(|e| format!("dict key not UTF-8: {e}"))?
@@ -200,7 +260,8 @@ impl BencodeParser {
                 _ => return Err("dict key must be a byte string".to_string()),
             };
             pos = pos.saturating_add(key_consumed);
-            let (val, val_consumed) = Self::parse(data.get(pos..).unwrap_or_default())?;
+            let (val, val_consumed) =
+                Self::parse_at(data.get(pos..).unwrap_or_default(), depth.saturating_add(1))?;
             map.insert(key, val);
             pos = pos.saturating_add(val_consumed);
         }
@@ -244,166 +305,6 @@ fn bencode_encode_into(val: &BencodeValue, out: &mut Vec<u8>) {
             }
             out.push(b'e');
         }
-    }
-}
-
-// ─── SHA-1 ───────────────────────────────────────────────────────────
-
-/// Minimal SHA-1 implementation for info hash computation
-pub struct Sha1 {
-    h: [u32; 5],
-    buffer: [u8; 64],
-    buf_len: usize,
-    total_len: u64,
-}
-
-impl Default for Sha1 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Sha1 {
-    const H0: [u32; 5] = [
-        0x6745_2301,
-        0xEFCD_AB89,
-        0x98BA_DCFE,
-        0x1032_5476,
-        0xC3D2_E1F0,
-    ];
-
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            h: Self::H0,
-            buffer: [0u8; 64],
-            buf_len: 0,
-            total_len: 0,
-        }
-    }
-
-    pub fn update(&mut self, data: &[u8]) {
-        let mut offset = 0;
-        self.total_len = self.total_len.wrapping_add(data.len() as u64);
-
-        // Fill buffer first
-        if self.buf_len > 0 {
-            let space = 64usize.saturating_sub(self.buf_len);
-            let copy_len = space.min(data.len());
-            if let (Some(dst), Some(src)) = (
-                self.buffer
-                    .get_mut(self.buf_len..self.buf_len.saturating_add(copy_len)),
-                data.get(..copy_len),
-            ) {
-                dst.copy_from_slice(src);
-            }
-            self.buf_len = self.buf_len.saturating_add(copy_len);
-            offset = copy_len;
-
-            if self.buf_len == 64 {
-                let block = self.buffer;
-                self.process_block(&block);
-                self.buf_len = 0;
-            }
-        }
-
-        // Process full blocks
-        while offset.saturating_add(64) <= data.len() {
-            let mut block = [0u8; 64];
-            if let Some(src) = data.get(offset..offset.saturating_add(64)) {
-                block.copy_from_slice(src);
-            }
-            self.process_block(&block);
-            offset = offset.saturating_add(64);
-        }
-
-        // Buffer remainder
-        let remaining = data.len().saturating_sub(offset);
-        if remaining > 0 {
-            if let (Some(dst), Some(src)) = (self.buffer.get_mut(..remaining), data.get(offset..)) {
-                dst.copy_from_slice(src);
-            }
-            self.buf_len = remaining;
-        }
-    }
-
-    fn process_block(&mut self, block: &[u8; 64]) {
-        let mut w = [0u32; 80];
-        for i in 0..16usize {
-            let base = i.saturating_mul(4);
-            w[i] = u32::from_be_bytes([
-                block.get(base).copied().unwrap_or(0),
-                block.get(base.saturating_add(1)).copied().unwrap_or(0),
-                block.get(base.saturating_add(2)).copied().unwrap_or(0),
-                block.get(base.saturating_add(3)).copied().unwrap_or(0),
-            ]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i.saturating_sub(3)]
-                ^ w[i.saturating_sub(8)]
-                ^ w[i.saturating_sub(14)]
-                ^ w[i.saturating_sub(16)])
-            .rotate_left(1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e] = self.h;
-
-        for i in 0..80 {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1u32),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDCu32),
-                _ => (b ^ c ^ d, 0xCA62_C1D6u32),
-            };
-
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(w[i]);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-
-        self.h[0] = self.h[0].wrapping_add(a);
-        self.h[1] = self.h[1].wrapping_add(b);
-        self.h[2] = self.h[2].wrapping_add(c);
-        self.h[3] = self.h[3].wrapping_add(d);
-        self.h[4] = self.h[4].wrapping_add(e);
-    }
-
-    #[must_use]
-    pub fn finalize(mut self) -> [u8; 20] {
-        let bit_len = self.total_len.wrapping_mul(8);
-
-        // Padding
-        self.update(&[0x80]);
-        while self.buf_len != 56 {
-            self.update(&[0x00]);
-        }
-        self.update(&bit_len.to_be_bytes());
-
-        let mut result = [0u8; 20];
-        for (i, &h) in self.h.iter().enumerate() {
-            let bytes = h.to_be_bytes();
-            let base = i.saturating_mul(4);
-            if let Some(dst) = result.get_mut(base..base.saturating_add(4)) {
-                dst.copy_from_slice(&bytes);
-            }
-        }
-        result
-    }
-
-    /// Compute SHA-1 of data in one call
-    #[must_use]
-    pub fn digest(data: &[u8]) -> [u8; 20] {
-        let mut sha = Self::new();
-        sha.update(data);
-        sha.finalize()
     }
 }
 
@@ -465,16 +366,80 @@ pub fn url_encode_bytes(data: &[u8]) -> String {
 /// A file within a torrent
 #[derive(Debug, Clone)]
 pub struct TorrentFile {
+    /// The path as the window shows it: the parts joined by `/`, with any
+    /// byte that is not UTF-8 written `\xNN`. Never used to name a file.
     pub path: String,
+    /// The path as the torrent gives it, a part at a time, each its own
+    /// bytes: what a file on disk is named from. Every part has been checked
+    /// by [`checked_part`], so none can climb out of the download's folder.
+    pub parts: Vec<Vec<u8>>,
     pub length: u64,
     pub md5sum: Option<String>,
 }
+
+impl TorrentFile {
+    /// A file at `path` (parts separated by `/`) of `length` bytes.
+    #[must_use]
+    pub fn named(path: &str, length: u64) -> Self {
+        Self {
+            path: path.to_string(),
+            parts: path.split('/').map(|p| p.as_bytes().to_vec()).collect(),
+            length,
+            md5sum: None,
+        }
+    }
+}
+
+/// `bytes` as the window shows them: text, with any byte that is not UTF-8
+/// written `\xNN`, so two names that differ only there still differ.
+#[must_use]
+pub fn shown_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        for byte in chunk.invalid() {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "\\x{byte:02X}");
+        }
+    }
+    out
+}
+
+/// `part`, if it can name a file or folder inside the download's folder:
+/// not empty, not `.` or `..`, and holding no `/` and no NUL.
+///
+/// A torrent is a stranger's file. One whose path held `..`, or a part with
+/// a `/` in it, would have its bytes written wherever it pointed; this is the
+/// check that makes the parts safe to join below the save folder.
+pub fn checked_part(part: &[u8]) -> Result<&[u8], String> {
+    if part.is_empty() || part == b"." || part == b".." || part.contains(&b'/') || part.contains(&0)
+    {
+        return Err(format!(
+            "the torrent names a file outside its folder: \"{}\"",
+            shown_bytes(part)
+        ));
+    }
+    Ok(part)
+}
+
+/// The most a piece may hold. Pieces are held whole while they are fetched
+/// and checked, one a peer; real torrents use 16 KiB to 16 MiB.
+pub const MAX_PIECE_LENGTH: u64 = 32 * 1024 * 1024;
 
 /// Torrent metadata parsed from .torrent file
 #[derive(Debug, Clone)]
 pub struct TorrentMetainfo {
     pub info_hash: [u8; 20],
+    /// As the window shows it; see [`TorrentFile::path`].
     pub name: String,
+    /// As the torrent gives it: the single file's name, or the folder the
+    /// files go in. Checked by [`checked_part`].
+    pub name_bytes: Vec<u8>,
+    /// Whether the torrent is a folder of files (its info has a `files`
+    /// list) rather than one file -- which decides whether `name` is a
+    /// folder the files go in or the file itself.
+    pub multi_file: bool,
     pub piece_length: u64,
     pub pieces: Vec<[u8; 20]>,
     pub files: Vec<TorrentFile>,
@@ -526,20 +491,33 @@ impl TorrentMetainfo {
         let info = dict.get("info").ok_or("missing 'info' dict")?;
         let info_dict = info.as_dict().ok_or("info must be a dict")?;
 
-        // Compute info hash from the bencoded info dict
-        let info_bytes = bencode_encode(info);
-        let info_hash = Sha1::digest(&info_bytes);
+        // The info hash, over the info dictionary's bytes as the file has
+        // them -- see `BencodeParser::dict_value_span`.
+        let span = BencodeParser::dict_value_span(data, "info")?.ok_or("missing 'info' dict")?;
+        let info_hash = sha1::sha1(data.get(span).unwrap_or_default());
 
-        let name = info_dict
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or("missing torrent name")?
-            .to_string();
+        let name_bytes = checked_part(
+            info_dict
+                .get("name")
+                .and_then(BencodeValue::as_bytes)
+                .ok_or("missing torrent name")?,
+        )?
+        .to_vec();
+        let name = shown_bytes(&name_bytes);
 
         let piece_length = info_dict
             .get("piece length")
             .and_then(BencodeValue::as_int)
-            .ok_or("missing piece length")? as u64;
+            .ok_or("missing piece length")?;
+        let piece_length = u64::try_from(piece_length)
+            .ok()
+            .filter(|&n| n > 0)
+            .ok_or(format!("a piece length of {piece_length} bytes"))?;
+        if piece_length > MAX_PIECE_LENGTH {
+            return Err(format!(
+                "pieces of {piece_length} bytes are more than this client holds ({MAX_PIECE_LENGTH})"
+            ));
+        }
 
         let pieces_bytes = info_dict
             .get("pieces")
@@ -561,55 +539,86 @@ impl TorrentMetainfo {
 
         let is_private = info_dict.get("private").and_then(BencodeValue::as_int) == Some(1);
 
+        let length_of = |v: Option<&BencodeValue>| -> Result<u64, String> {
+            let n = v
+                .and_then(BencodeValue::as_int)
+                .ok_or("a file without a length")?;
+            u64::try_from(n).map_err(|_| format!("a file of {n} bytes"))
+        };
         // Single file or multi-file?
-        let files = if let Some(files_list) = info_dict.get("files").and_then(|v| v.as_list()) {
-            // Multi-file torrent
+        let listed = info_dict.get("files").and_then(|v| v.as_list());
+        let multi_file = listed.is_some();
+        let files = if let Some(files_list) = listed {
+            // Multi-file torrent: every entry must be a file with a length
+            // and a path. One skipped would shift every byte after it into
+            // the wrong file.
             files_list
                 .iter()
-                .filter_map(|f| {
-                    let fd = f.as_dict()?;
-                    let length = fd.get("length")?.as_int()? as u64;
-                    let path_parts: Vec<&str> = fd
-                        .get("path")?
-                        .as_list()?
+                .map(|f| {
+                    let fd = f.as_dict().ok_or("a file entry that is not a dictionary")?;
+                    let length = length_of(fd.get("length"))?;
+                    let parts = fd
+                        .get("path")
+                        .and_then(BencodeValue::as_list)
+                        .ok_or("a file without a path")?
                         .iter()
-                        .filter_map(|p| p.as_str())
-                        .collect();
-                    let path = if path_parts.is_empty() {
-                        "unknown".to_string()
-                    } else {
-                        path_parts.join("/")
-                    };
+                        .map(|p| {
+                            p.as_bytes()
+                                .ok_or_else(|| "a path part that is not a string".to_string())
+                                .and_then(checked_part)
+                                .map(<[u8]>::to_vec)
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    if parts.is_empty() {
+                        return Err("a file with an empty path".to_string());
+                    }
+                    let path = parts
+                        .iter()
+                        .map(|p| shown_bytes(p))
+                        .collect::<Vec<_>>()
+                        .join("/");
                     let md5sum = fd.get("md5sum").and_then(|v| v.as_str()).map(String::from);
-                    Some(TorrentFile {
+                    Ok(TorrentFile {
                         path,
+                        parts,
                         length,
                         md5sum,
                     })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, String>>()?
         } else {
             // Single file torrent
-            let length = info_dict
-                .get("length")
-                .and_then(BencodeValue::as_int)
-                .ok_or("missing file length")? as u64;
+            let length = length_of(info_dict.get("length"))?;
             let md5sum = info_dict
                 .get("md5sum")
                 .and_then(|v| v.as_str())
                 .map(String::from);
             vec![TorrentFile {
                 path: name.clone(),
+                parts: vec![name_bytes.clone()],
                 length,
                 md5sum,
             }]
         };
 
-        let total_size: u64 = files.iter().map(|f| f.length).sum();
+        let total_size = files
+            .iter()
+            .try_fold(0_u64, |sum, f| sum.checked_add(f.length))
+            .ok_or("the files add up to more bytes than can be counted")?;
+        // One hash a piece, and exactly as many pieces as the files fill.
+        let wanted = total_size.div_ceil(piece_length);
+        if u64::try_from(pieces.len()).ok() != Some(wanted) {
+            return Err(format!(
+                "{} piece hashes for {total_size} bytes in pieces of {piece_length}, which is {wanted}",
+                pieces.len()
+            ));
+        }
 
         Ok(Self {
             info_hash,
             name,
+            name_bytes,
+            multi_file,
             piece_length,
             pieces,
             files,
@@ -1232,6 +1241,12 @@ impl PieceTracker {
         }
     }
 
+    /// A piece's priority: 0 for never, then 1, 5 and 10.
+    #[must_use]
+    pub fn priority(&self, index: usize) -> Option<u8> {
+        self.priorities.get(index).copied()
+    }
+
     /// Get our bitfield for sending to peers
     #[must_use]
     pub fn bitfield(&self) -> &[u8] {
@@ -1744,6 +1759,20 @@ pub enum FilePriority {
     High,
 }
 
+impl FilePriority {
+    /// The priority a piece of a file this important gets: the scale
+    /// `PieceTracker` picks by, where 0 is never.
+    #[must_use]
+    pub fn piece_priority(self) -> u8 {
+        match self {
+            Self::Skip => 0,
+            Self::Low => 1,
+            Self::Normal => 5,
+            Self::High => 10,
+        }
+    }
+}
+
 impl fmt::Display for FilePriority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1768,10 +1797,14 @@ pub struct ManagedTorrent {
     pub trackers: Vec<TrackerEntry>,
     pub download_speed: SpeedTracker,
     pub upload_speed: SpeedTracker,
+    /// Bytes of the pieces on disk that have matched their hashes -- what is
+    /// had, not what has arrived (a piece that failed its hash arrived and is
+    /// not had).
     pub downloaded: u64,
     pub uploaded: u64,
     pub total_size: u64,
-    pub save_path: String,
+    /// The folder the torrent's file or folder goes in.
+    pub save_path: PathBuf,
     pub added_time: u64,
     pub completed_time: Option<u64>,
     pub file_priorities: Vec<FilePriority>,
@@ -1781,6 +1814,8 @@ pub struct ManagedTorrent {
     pub sequential_download: bool,
     pub error_message: Option<String>,
     pub label: String,
+    /// Bytes that have arrived since the speed was last sampled.
+    pub unsampled: u64,
 }
 
 /// Tracker entry with status
@@ -1822,7 +1857,7 @@ impl fmt::Display for TrackerStatus {
 impl ManagedTorrent {
     /// Create from a parsed torrent file
     #[must_use]
-    pub fn from_metainfo(id: u32, meta: TorrentMetainfo, save_path: &str) -> Self {
+    pub fn from_metainfo(id: u32, meta: TorrentMetainfo, save_path: &Path) -> Self {
         let piece_count = meta.piece_count();
         let file_count = meta.files.len();
         let total_size = meta.total_size;
@@ -1874,7 +1909,7 @@ impl ManagedTorrent {
             downloaded: 0,
             uploaded: 0,
             total_size,
-            save_path: save_path.to_string(),
+            save_path: save_path.to_path_buf(),
             added_time: 0,
             completed_time: None,
             file_priorities: vec![FilePriority::Normal; file_count],
@@ -1884,12 +1919,13 @@ impl ManagedTorrent {
             sequential_download: false,
             error_message: None,
             label: String::new(),
+            unsampled: 0,
         }
     }
 
     /// Create from a magnet link
     #[must_use]
-    pub fn from_magnet(id: u32, magnet: MagnetLink, save_path: &str) -> Self {
+    pub fn from_magnet(id: u32, magnet: MagnetLink, save_path: &Path) -> Self {
         let name = magnet.display_name.clone().unwrap_or_else(|| {
             hex_encode(&magnet.info_hash)
                 .get(..16)
@@ -1928,7 +1964,7 @@ impl ManagedTorrent {
             downloaded: 0,
             uploaded: 0,
             total_size: 0,
-            save_path: save_path.to_string(),
+            save_path: save_path.to_path_buf(),
             added_time: 0,
             completed_time: None,
             file_priorities: Vec::new(),
@@ -1938,6 +1974,7 @@ impl ManagedTorrent {
             sequential_download: false,
             error_message: None,
             label: String::new(),
+            unsampled: 0,
         }
     }
 
@@ -1972,25 +2009,167 @@ impl ManagedTorrent {
 
     /// Pause the torrent
     pub fn pause(&mut self) {
-        if self.state == TorrentState::Downloading || self.state == TorrentState::Seeding {
+        if matches!(
+            self.state,
+            TorrentState::Downloading | TorrentState::Seeding | TorrentState::CheckingFiles
+        ) {
             self.state = TorrentState::Paused;
+            // Their connections end with the session.
+            self.peers.clear();
         }
     }
 
-    /// Resume the torrent
-    pub fn resume(&mut self) {
-        if self.state == TorrentState::Paused {
-            self.state = if self.pieces.is_complete() {
-                TorrentState::Seeding
-            } else {
-                TorrentState::Downloading
-            };
+    /// Whether a download can be started from here: added and not begun,
+    /// paused, or stopped by an error.
+    #[must_use]
+    pub fn can_start(&self) -> bool {
+        self.metainfo.is_some()
+            && matches!(
+                self.state,
+                TorrentState::Queued | TorrentState::Paused | TorrentState::Error
+            )
+    }
+
+    /// Which pieces are wanted: those of the files not set to Skip. A piece
+    /// shared by a skipped file and a wanted one is wanted.
+    #[must_use]
+    pub fn wanted(&self) -> Vec<bool> {
+        (0..self.pieces.total_count())
+            .map(|i| self.pieces.priority(i).is_some_and(|p| p > 0))
+            .collect()
+    }
+
+    /// Bytes of the pieces had.
+    fn have_bytes(&self) -> u64 {
+        let Some(meta) = &self.metainfo else {
+            return 0;
+        };
+        (0..meta.piece_count())
+            .filter(|&i| self.pieces.has_piece(i))
+            .map(|i| meta.piece_size(i))
+            .sum()
+    }
+
+    /// Take in what the torrent's download reports. Whether the download has
+    /// ended -- finished or failed -- so its session can go.
+    fn apply(&mut self, event: session::Event) -> bool {
+        use session::Event as E;
+        let same = |p: &PeerInfo, addr: &std::net::SocketAddr| {
+            p.port == addr.port() && p.address == addr.ip().to_string()
+        };
+        match event {
+            E::Checked(have) => {
+                for (i, _) in have.iter().enumerate().filter(|(_, h)| **h) {
+                    self.pieces.set_piece(i);
+                }
+                self.downloaded = self.have_bytes();
+                self.state = TorrentState::Downloading;
+                false
+            }
+            E::Tracker { url, result } => {
+                if let Some(t) = self.trackers.iter_mut().find(|t| t.url == url) {
+                    t.announce_count = t.announce_count.saturating_add(1);
+                    match result {
+                        Ok(answer) => {
+                            t.status = TrackerStatus::Working;
+                            t.seeders = answer.seeders.unwrap_or(0);
+                            t.leechers = answer.leechers.unwrap_or(0);
+                            t.error_message = answer.warning;
+                        }
+                        Err(why) => {
+                            t.status = TrackerStatus::Error;
+                            t.error_message = Some(why);
+                        }
+                    }
+                }
+                false
+            }
+            E::PeerUp {
+                addr,
+                id,
+                extensions,
+            } => {
+                self.peers.retain(|p| !same(p, &addr));
+                let mut peer = PeerInfo::new(&addr.ip().to_string(), addr.port());
+                peer.supports_extensions = extensions;
+                peer.peer_id = Some(id);
+                peer.client_name = PeerInfo::identify_client(&id);
+                peer.state = PeerState::Connected;
+                self.peers.push(peer);
+                false
+            }
+            E::PeerDown { addr, .. } => {
+                self.peers.retain(|p| !same(p, &addr));
+                false
+            }
+            E::Received { addr, bytes } => {
+                self.unsampled = self.unsampled.saturating_add(bytes);
+                if let Some(p) = self.peers.iter_mut().find(|p| same(p, &addr)) {
+                    p.downloaded = p.downloaded.saturating_add(bytes);
+                }
+                false
+            }
+            E::Piece { index } => {
+                self.pieces.set_piece(index);
+                self.downloaded = self.have_bytes();
+                false
+            }
+            // Fetched again by the session; nothing to show but the time.
+            E::BadPiece { .. } => false,
+            E::Finished => {
+                // Complete, not Seeding: this client uploads nothing, and
+                // "Seeding" would say it was sharing the file.
+                self.state = TorrentState::Complete;
+                self.completed_time = Some(now_secs());
+                self.peers.clear();
+                true
+            }
+            E::Failed(why) => {
+                self.state = TorrentState::Error;
+                self.error_message = Some(why);
+                self.peers.clear();
+                true
+            }
         }
     }
 
     /// Toggle sequential download mode
     pub fn toggle_sequential(&mut self) {
         self.sequential_download = !self.sequential_download;
+    }
+
+    /// Set file `index`'s priority, and the priority of every piece it
+    /// shares -- which the piece picker reads, and which nothing set: a file
+    /// marked Skip was still downloaded. A piece takes the highest priority
+    /// of the files it holds part of, so a piece shared by a skipped file and
+    /// a wanted one is still fetched.
+    pub fn set_file_priority(&mut self, index: usize, priority: FilePriority) {
+        let Some(slot) = self.file_priorities.get_mut(index) else {
+            return;
+        };
+        *slot = priority;
+        let Some(meta) = &self.metainfo else {
+            return;
+        };
+        let piece_length = meta.piece_length.max(1);
+        let mut start = 0_u64;
+        let mut spans = Vec::with_capacity(meta.files.len());
+        for file in &meta.files {
+            spans.push((start, start.saturating_add(file.length)));
+            start = start.saturating_add(file.length);
+        }
+        for piece in 0..self.pieces.total_count() {
+            let from = (piece as u64).saturating_mul(piece_length);
+            let to = from.saturating_add(piece_length);
+            let wanted = spans
+                .iter()
+                .zip(&self.file_priorities)
+                .filter(|((a, b), _)| *a < to && from < *b)
+                .map(|(_, p)| p.piece_priority())
+                .max()
+                .unwrap_or(5);
+            self.pieces.set_priority(piece, wanted);
+        }
     }
 }
 
@@ -2008,7 +2187,7 @@ pub struct ClientSettings {
     pub max_uploads_per_torrent: u32,
     pub global_download_limit: u64, // bytes/s, 0 = unlimited
     pub global_upload_limit: u64,
-    pub default_save_path: String,
+    pub default_save_path: PathBuf,
     pub dht_enabled: bool,
     pub pex_enabled: bool, // Peer exchange
     pub lsd_enabled: bool, // Local service discovery
@@ -2076,7 +2255,7 @@ impl Default for ClientSettings {
             max_uploads_per_torrent: 8,
             global_download_limit: 0,
             global_upload_limit: 0,
-            default_save_path: "/home/user/Downloads".to_string(),
+            default_save_path: downloads_folder(),
             dht_enabled: true,
             pex_enabled: true,
             lsd_enabled: true,
@@ -2099,71 +2278,15 @@ impl Default for ClientSettings {
 // ─── Application ─────────────────────────────────────────────────────
 
 use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::textinput::TextInput;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
-
-/// How many peers in `peers` hold each piece.
-///
-/// This is what `PieceTracker::pick_piece` compares to choose the rarest piece
-/// first, and it is the reason the picker takes an availability slice at all.
-/// The peers are simulated -- their bitfields are made up when a torrent is
-/// added -- but the counting and the choice are the real ones.
-fn piece_availability(peers: &[PeerInfo], piece_count: usize) -> Vec<u32> {
-    let mut counts = vec![0u32; piece_count];
-    for peer in peers {
-        for (index, count) in counts.iter_mut().enumerate() {
-            if peer_has_piece(peer, index) {
-                *count = count.saturating_add(1);
-            }
-        }
-    }
-    counts
-}
-
-/// The union of every peer's bitfield: what the swarm can supply between them.
-fn swarm_bitfield(peers: &[PeerInfo], bytes: usize) -> Vec<u8> {
-    let mut union = vec![0u8; bytes];
-    for peer in peers {
-        for (index, byte) in union.iter_mut().enumerate() {
-            *byte |= peer.bitfield.get(index).copied().unwrap_or(0);
-        }
-    }
-    union
-}
-
-/// Whether `peer` holds piece `index`.
-///
-/// Bit 7 of the first byte is piece 0, per BEP 3 -- the same order
-/// `PieceTracker::set_piece` writes in, which is why this is spelled out
-/// rather than left to a reader to match up.
-fn peer_has_piece(peer: &PeerInfo, index: usize) -> bool {
-    let byte = index / 8;
-    let bit = 7usize.saturating_sub(index % 8);
-    peer.bitfield
-        .get(byte)
-        .is_some_and(|b| b & (1u8 << bit) != 0)
-}
-
-/// How many bytes piece `index` holds.
-///
-/// Every piece is `total / count` except the last, which is the remainder --
-/// so a progress figure summed from these reaches the torrent's real size
-/// rather than overshooting it on the final piece.
-fn piece_size(total_size: u64, piece_count: usize, index: usize) -> u64 {
-    let count = piece_count as u64;
-    let Some(each) = total_size.checked_div(count) else {
-        return 0;
-    };
-    if index.saturating_add(1) >= piece_count {
-        total_size.saturating_sub(each.saturating_mul(count.saturating_sub(1)))
-    } else {
-        each
-    }
-}
 
 /// The window size to ask for.
 const WINDOW_WIDTH: f32 = 1300.0;
@@ -2182,6 +2305,84 @@ use guitk::text;
 /// Font size used for every detail-table header and cell.
 const TABLE_FONT: f32 = 11.0;
 
+/// The window's bands.
+const HEADER_H: f32 = 48.0;
+const TAB_H: f32 = 36.0;
+const STATUS_H: f32 = 28.0;
+const SIDEBAR_W: f32 = 160.0;
+
+/// A transfer row's height.
+const ROW_H: f32 = 48.0;
+
+/// The band at the top of the transfer list that says what this client
+/// cannot do.
+const NOTICE_H: f32 = 48.0;
+
+/// The most characters the magnet dialog takes. A magnet link with a dozen
+/// trackers is a few kilobytes; this is past any.
+const MAX_MAGNET_CHARS: usize = 8192;
+
+/// The sidebar's filters, in the order the number keys choose them.
+const FILTERS: [TorrentFilter; 7] = [
+    TorrentFilter::All,
+    TorrentFilter::Downloading,
+    TorrentFilter::Seeding,
+    TorrentFilter::Completed,
+    TorrentFilter::Paused,
+    TorrentFilter::Active,
+    TorrentFilter::Error,
+];
+
+/// The transfer list's columns: what each sorts by, its heading, its width.
+const TRANSFER_COLUMNS: [(SortColumn, &str, f32); 8] = [
+    (SortColumn::Name, "Name", 250.0),
+    (SortColumn::Size, "Size", 80.0),
+    (SortColumn::Progress, "Progress", 120.0),
+    (SortColumn::Status, "Status", 80.0),
+    (SortColumn::DownSpeed, "\u{2193} Speed", 80.0),
+    (SortColumn::UpSpeed, "\u{2191} Speed", 80.0),
+    (SortColumn::Ratio, "Ratio", 60.0),
+    (SortColumn::Eta, "ETA", 80.0),
+];
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// Nothing answered the pointer: six toolbar buttons, seven filters, five
+/// labels, six tabs, eight sortable column heads and every row were drawn as
+/// controls and were pictures of them (`known-issues.md` ->
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Open,
+    AddMagnet,
+    Remove,
+    Pause,
+    Resume,
+    PauseAll,
+    ResumeAll,
+    Help,
+    Search,
+    Filter(TorrentFilter),
+    /// A label in the sidebar, by its place in `TorrentApp::labels`.
+    Label(usize),
+    Tab(Tab),
+    SortBy(SortColumn),
+    TransferList,
+    Row(u32),
+    /// The selected transfer's label, in its details.
+    CycleLabel,
+    /// Whether the selected transfer downloads in order.
+    ToggleSequential,
+    /// A file's priority, by its place in the torrent's file list.
+    FilePriority(usize),
+    MagnetField,
+    MagnetAdd,
+    MagnetCancel,
+    /// Around and behind the magnet dialog: a press does nothing.
+    DialogBackdrop,
+    HelpCard,
+}
+
 /// What the window says instead of a transfer.
 ///
 /// Three lines. The third exists because an empty torrent list, or a torrent
@@ -2196,15 +2397,81 @@ const TABLE_FONT: f32 = 11.0;
 /// parse and the parse error alone would blame the file.
 pub const MAX_TORRENT_BYTES: usize = 8 * 1024 * 1024;
 
-const CANNOT_TRANSFER_LINES: [&str; 3] = [
-    "This client cannot download or upload anything.",
-    "It has no network access and no way to write a file, so no tracker or peer has been contacted.",
-    "A torrent showing no progress is not an empty swarm -- nothing was ever asked for.",
+/// What this client does not do, where the transfers are listed.
+const TRANSFER_NOTE_LINES: [&str; 3] = [
+    "Downloads only: nothing is uploaded, and no peer can connect to this client.",
+    "Trackers are asked over UDP or plain HTTP; one reached only over https:// cannot be, for want of TLS.",
+    "A magnet link cannot be fetched yet: its files are learned from peers, which this client does not ask.",
 ];
+
+/// Where downloads go unless the user says otherwise: `Downloads` in the
+/// home folder. The tests' downloads go to a folder of their own in the
+/// temporary folder, whatever a test starts -- never the developer's.
+fn downloads_folder() -> PathBuf {
+    #[cfg(test)]
+    {
+        std::env::temp_dir().join(format!("slateos-torrent-tests-{}", std::process::id()))
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map_or_else(
+                || PathBuf::from("Downloads"),
+                |home| PathBuf::from(home).join("Downloads"),
+            )
+    }
+}
+
+/// Delete the files a torrent downloaded, and the folders it made that are
+/// left empty. Only the torrent's own files, below its save folder: the same
+/// paths `storage` writes, and nothing else.
+fn delete_downloaded(torrent: &ManagedTorrent) -> Result<(), String> {
+    let Some(meta) = &torrent.metainfo else {
+        return Ok(());
+    };
+    let store = storage::Storage::new(meta, &torrent.save_path)?;
+    let mut folders = Vec::new();
+    for i in 0..meta.files.len() {
+        let Some(path) = store.file_path(i) else {
+            continue;
+        };
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("could not delete {}: {e}", path.shown())),
+        }
+        let mut up = path.parent();
+        while let Some(folder) = up {
+            if folder == torrent.save_path || !folder.starts_with(&torrent.save_path) {
+                break;
+            }
+            if !folders.contains(&folder.to_path_buf()) {
+                folders.push(folder.to_path_buf());
+            }
+            up = folder.parent();
+        }
+    }
+    // Deepest first; one that is not empty holds something else, and stays.
+    folders.sort_by_key(|f| std::cmp::Reverse(f.components().count()));
+    for folder in folders {
+        // A folder left non-empty holds the user's own files: keeping it is
+        // the point, not a failure.
+        let _ = std::fs::remove_dir(&folder);
+    }
+    Ok(())
+}
+
+/// Seconds since the Unix epoch, for the times a torrent keeps.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
 
 /// What the settings panel has to say about itself.
 ///
-/// `CANNOT_TRANSFER_LINES` covers the transfers view. This covers the
+/// `TRANSFER_NOTE_LINES` covers the transfers view. This covers the
 /// settings panel, which was the half those three lines never reached: a
 /// person reading "this client cannot download or upload anything" has been
 /// told the *transfers* do not happen, and may still reasonably believe that
@@ -2219,8 +2486,8 @@ const CANNOT_TRANSFER_LINES: [&str; 3] = [
 ///
 /// The repair is this line and not a key. A control that moves and changes
 /// nothing is a claim; a fixed value beside an honest note is a gap.
-const SETTINGS_NOT_APPLIED: &str =
-    "Not applied: nothing reads these except this panel -- there is no network stack.";
+const SETTINGS_NOT_APPLIED: &str = "Only the listening port (announced to trackers) and the connections per \
+     torrent are used; nothing else here is read yet.";
 
 /// Columns of the Peers detail table.
 const PEER_COLUMNS: &[Column] = &[
@@ -2291,7 +2558,7 @@ const TRACKER_COLUMNS: &[Column] = &[
 ];
 
 /// Active UI tab
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Transfers,
     Details,
@@ -2350,9 +2617,29 @@ pub struct TorrentApp {
     pub filter: TorrentFilter,
     pub global_download_speed: SpeedTracker,
     pub global_upload_speed: SpeedTracker,
+    /// Whether the magnet dialog is up, what is typed in it, why the last
+    /// attempt to add it failed, and where the new transfer will save.
     pub show_add_dialog: bool,
-    pub add_url_input: String,
-    pub add_save_path: String,
+    pub magnet_input: TextInput,
+    pub magnet_error: Option<String>,
+    pub add_save_path: PathBuf,
+    /// Each running download, by torrent id. Dropping one stops it.
+    sessions: HashMap<u32, session::Session>,
+    /// Milliseconds of ticks since the speeds were last sampled.
+    since_sample_ms: u64,
+    /// Whether the search box has the keys.
+    pub search_active: bool,
+    /// How far the transfer list is scrolled, in rows. It did not scroll:
+    /// rows past the bottom were not drawn.
+    pub transfer_scroll: usize,
+    /// The text fields' clipboard.
+    clipboard: String,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
+    /// The wheel's remainder.
+    wheel: wheel::Accumulator,
     pub status_message: String,
     pub labels: Vec<String>,
     pub selected_label: Option<String>,
@@ -2412,7 +2699,7 @@ impl SortColumn {
 }
 
 /// Column for sorting
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {
     Name,
     Size,
@@ -2428,7 +2715,7 @@ pub enum SortColumn {
 }
 
 /// Filter for torrent list
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TorrentFilter {
     All,
     Downloading,
@@ -2488,7 +2775,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("C", "Change the sort column"),
     ("R", "Reverse the sort"),
     ("Tab", "Next tab"),
+    ("Enter", "The selected transfer's details"),
+    ("L", "Change the selected transfer's label"),
+    ("PgUp / PgDn", "Scroll the list a page"),
+    ("/", "Search names and labels; Esc clears it"),
     ("Ctrl+O", "Open a .torrent file"),
+    ("Ctrl+U", "Add a magnet link"),
     ("Ctrl+P", "Pause every transfer"),
     ("Ctrl+R", "Resume every transfer"),
 ];
@@ -2502,12 +2794,14 @@ impl Default for TorrentApp {
 impl TorrentApp {
     #[must_use]
     pub fn new() -> Self {
-        // Generate peer ID: -OT0100- + 12 random chars (OT = OurTorrent)
-        let mut peer_id = [0u8; 20];
-        peer_id[..8].copy_from_slice(b"-OT0100-");
-        // Fill remainder with deterministic-looking bytes for now
-        for i in 8..20 {
-            peer_id[i] = ((i as u8).wrapping_mul(37)).wrapping_add(42);
+        // An Azureus-style id (BEP 20): this client and version, then twelve
+        // characters drawn afresh each run, so no two clients share one.
+        let mut peer_id = *b"-SL0001-000000000000";
+        let mut rng = randrange::seeded_from_system(0x0070_6565_7269_6464);
+        const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        for b in peer_id.iter_mut().skip(8) {
+            let pick = usize::try_from(rng.next_u32()).unwrap_or(0) % DIGITS.len();
+            *b = DIGITS.get(pick).copied().unwrap_or(b'0');
         }
 
         Self {
@@ -2530,8 +2824,17 @@ impl TorrentApp {
             global_download_speed: SpeedTracker::new(60, 1000),
             global_upload_speed: SpeedTracker::new(60, 1000),
             show_add_dialog: false,
-            add_url_input: String::new(),
+            magnet_input: TextInput::new(),
+            magnet_error: None,
             add_save_path: ClientSettings::default().default_save_path.clone(),
+            sessions: HashMap::new(),
+            since_sample_ms: 0,
+            search_active: false,
+            transfer_scroll: 0,
+            clipboard: String::new(),
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
             status_message: "Ready".to_string(),
             labels: vec![
                 "Movies".to_string(),
@@ -2545,22 +2848,28 @@ impl TorrentApp {
     }
 
     /// Add a torrent from parsed metainfo
-    pub fn add_torrent(&mut self, meta: TorrentMetainfo, save_path: Option<&str>) -> u32 {
+    pub fn add_torrent(&mut self, meta: TorrentMetainfo, save_path: Option<&Path>) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let path = save_path.unwrap_or(&self.settings.default_save_path);
-        let torrent = ManagedTorrent::from_metainfo(id, meta, path);
+        let path = save_path.map_or_else(
+            || self.settings.default_save_path.clone(),
+            Path::to_path_buf,
+        );
+        let torrent = ManagedTorrent::from_metainfo(id, meta, &path);
         self.status_message = format!("Added: {}", torrent.name);
         self.torrents.push(torrent);
         id
     }
 
     /// Add a torrent from a magnet link
-    pub fn add_magnet(&mut self, magnet: MagnetLink, save_path: Option<&str>) -> u32 {
+    pub fn add_magnet(&mut self, magnet: MagnetLink, save_path: Option<&Path>) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        let path = save_path.unwrap_or(&self.settings.default_save_path);
-        let torrent = ManagedTorrent::from_magnet(id, magnet, path);
+        let path = save_path.map_or_else(
+            || self.settings.default_save_path.clone(),
+            Path::to_path_buf,
+        );
+        let torrent = ManagedTorrent::from_magnet(id, magnet, &path);
         self.status_message = format!("Added magnet: {}", torrent.name);
         self.torrents.push(torrent);
         id
@@ -2568,13 +2877,29 @@ impl TorrentApp {
 
     /// Remove a torrent by ID
     pub fn remove_torrent(&mut self, id: u32, delete_files: bool) {
+        // Its download ends first -- and when its files are to go, nothing may
+        // be writing them. Neither waits on the trackers being told.
+        if let Some(session) = self.sessions.remove(&id) {
+            if delete_files {
+                session.stop_until_quiet();
+            } else {
+                session.stop();
+            }
+        }
         if let Some(pos) = self.torrents.iter().position(|t| t.id == id) {
             let name = self
                 .torrents
                 .get(pos)
                 .map_or("Unknown", |t| &t.name)
                 .to_string();
-            self.torrents.remove(pos);
+            let removed = self.torrents.remove(pos);
+            if delete_files && let Err(why) = delete_downloaded(&removed) {
+                self.status_message = format!("Removed {name}, but {why}");
+                if self.selected_torrent == Some(id) {
+                    self.selected_torrent = None;
+                }
+                return;
+            }
             if self.selected_torrent == Some(id) {
                 self.selected_torrent = None;
             }
@@ -2596,68 +2921,6 @@ impl TorrentApp {
     // picker -- `pick_piece`, `set_piece`, `set_in_progress` -- which is the
     // whole of a `BitTorrent` client's download loop.
     // ====================================================================
-
-    /// Give a torrent a swarm to download from.
-    ///
-    /// The stand-in for a tracker announce: this tree has no HTTP client, so
-    /// `TrackerRequest::build_url` builds a URL nothing can fetch and no peer
-    /// list ever comes back. Without one, the Peers tab is empty for every
-    /// torrent -- which it was -- and `pick_piece` has nobody to ask, so
-    /// nothing downloads.
-    ///
-    /// The peers are invented; what is done with them is not. Their bitfields
-    /// overlap unevenly on purpose, so `piece_availability` produces genuinely
-    /// different counts and the picker's rarest-first choice is exercised
-    /// rather than being a tie broken by index.
-    #[cfg(test)]
-    fn attach_simulated_peers(&mut self, id: u32) {
-        let Some(torrent) = self.torrents.iter_mut().find(|t| t.id == id) else {
-            return;
-        };
-        if !torrent.peers.is_empty() {
-            return;
-        }
-        let bytes = torrent.pieces.bitfield().len();
-        // A seed, and two partial peers holding alternating halves -- so every
-        // piece is available, and how many peers hold each one differs.
-        for (index, (address, port, rule)) in [
-            ("203.0.113.10", 51_413u16, 0u8),
-            ("198.51.100.7", 6881, 1),
-            ("192.0.2.44", 6889, 2),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let mut peer = PeerInfo::new(address, port);
-            peer.bitfield = (0..bytes)
-                .map(|byte| match rule {
-                    // A seed: everything, so no piece is held by nobody.
-                    0 => 0xFF,
-                    // The first half, and every third byte. Between them the
-                    // counts come out 1, 2 or 3 -- which is the point, and is
-                    // what an earlier version of this got wrong: a seed plus
-                    // two peers holding alternate halves gives *every* piece a
-                    // count of exactly two, so rarest-first has nothing to
-                    // choose between and the picker falls back to index order.
-                    // The test noticed.
-                    1 => u8::from(byte < bytes / 2).wrapping_mul(0xFF),
-                    _ => u8::from(byte % 3 == 0).wrapping_mul(0xFF),
-                })
-                .collect();
-            // A real peer ID, so the Peers tab's client column is filled by
-            // `PeerInfo::identify_client` -- which parses the Azureus-style
-            // `-XX0000-` prefix, has two tests, and had no caller.
-            let prefixes: [&[u8; 8]; 3] = [b"-qB4650-", b"-TR4060-", b"-lt0D60-"];
-            let mut id_bytes = [0u8; 20];
-            let prefix = prefixes.get(index).copied().unwrap_or(b"-qB4650-");
-            if let Some(head) = id_bytes.get_mut(..8) {
-                head.copy_from_slice(prefix);
-            }
-            peer.peer_id = Some(id_bytes);
-            peer.client_name = PeerInfo::identify_client(&id_bytes);
-            torrent.peers.push(peer);
-        }
-    }
 
     /// Handle one event from the window.
     /// Read `path` as a `.torrent` and list what is in it.
@@ -2682,7 +2945,7 @@ impl TorrentApp {
     pub fn open_torrent_file(&mut self, path: &std::path::Path) -> String {
         let read = match safeio::read_capped(path, MAX_TORRENT_BYTES) {
             Ok(read) => read,
-            Err(err) => return format!("Could not read {}: {err}", path.display()),
+            Err(err) => return format!("Could not read {}: {err}", path.shown()),
         };
         // Front-loaded: a cut bencode document fails to parse, so without this
         // the user is told their file is malformed when it is merely long.
@@ -2691,13 +2954,15 @@ impl TorrentApp {
             Ok(meta) => {
                 let name = meta.name.clone();
                 let files = meta.files.len().max(1);
-                self.add_torrent(meta, None);
-                format!("{note}Opened {name}: {files} file(s), nothing contacted")
+                let id = self.add_torrent(meta, None);
+                self.start_torrent(id);
+                let into = self.settings.default_save_path.shown();
+                format!("{note}Opened {name}: {files} file(s), fetching into {into}")
             }
             // The parser's own reason, not one invented here: "missing 'info'
             // dict" and "missing torrent name" say which part is absent, and
             // replacing them with "not a torrent" would throw that away.
-            Err(why) => format!("{note}Could not read {}: {why}", path.display()),
+            Err(why) => format!("{note}Could not read {}: {why}", path.shown()),
         }
     }
 
@@ -2723,74 +2988,72 @@ impl TorrentApp {
             Picked::Ignored => {}
         }
         match event {
-            Event::Key(key) if key.pressed => self.handle_key(key),
-            Event::Tick { .. } => self.handle_tick(),
+            Event::Key(key) if key.pressed => {
+                let result = self.handle_key(key);
+                self.keep_selection_visible();
+                result
+            }
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Tick { elapsed_ms } => self.handle_tick(*elapsed_ms),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.win_width = *width as f32;
+                    self.win_height = *height as f32;
+                }
+                EventResult::Ignored
+            }
             _ => EventResult::Ignored,
         }
     }
 
-    /// Take one piece for each downloading torrent.
+    /// Take in what each download has reported, and sample the speeds.
     ///
-    /// Through `PieceTracker::pick_piece` and `set_piece`, which is the point:
-    /// the picker chooses the rarest piece that is not already held, in
-    /// progress or set to skip, and it had no caller -- so a client whose
-    /// module doc leads with "piece management with bitfield tracking" never
-    /// picked one, and every torrent sat at whatever progress it was created
-    /// with.
-    ///
-    /// The peers are simulated, so the availability count is taken from the
-    /// peers the torrent has rather than from a wire; what the picker does
-    /// with it is the real thing.
-    fn handle_tick(&mut self) -> EventResult {
+    /// This used to simulate a download: it picked a piece from invented
+    /// peers each tick and marked it had, so a torrent ran to 100% with
+    /// nothing fetched and nothing written. The sessions do the real thing
+    /// now (`session.rs`), and a tick is when the window hears of it.
+    fn handle_tick(&mut self, elapsed_ms: u64) -> EventResult {
         let mut moved = false;
-        for torrent in &mut self.torrents {
-            if torrent.state != TorrentState::Downloading {
-                continue;
-            }
-            if torrent.peers.is_empty() {
-                // And that is where it stops. This used to call
-                // `attach_simulated_peers`, which invented a seed and two
-                // partial peers at 203.0.113.10, 198.51.100.7 and 192.0.2.44,
-                // between them holding every piece -- so the picker below
-                // always had something to pick, every piece "arrived" the
-                // instant it was requested, and the torrent ran to 100% and
-                // flipped to Seeding with a completion time.
-                //
-                // Nothing was transferred and nothing was written: this crate
-                // has no `std::net` and no `std::fs`. So the client reported a
-                // finished download of a file that exists nowhere, and then
-                // reported that it was uploading that file to other people.
-                //
-                // A finished download is acted on. It is the point at which
-                // someone stops looking for the thing, and may delete the
-                // source they got the torrent from.
-                continue;
-            }
-            let availability = piece_availability(&torrent.peers, torrent.pieces.total_count());
-            // What the swarm between them can supply. With no peers there is
-            // nothing to ask, which is the honest answer -- and is why a
-            // torrent with an empty peer list makes no progress rather than
-            // downloading from nobody.
-            let offered = swarm_bitfield(&torrent.peers, torrent.pieces.bitfield().len());
-            let Some(index) = torrent.pieces.pick_piece(&offered, &availability) else {
-                // Nothing to pick: finished, or every remaining piece is set
-                // to skip, or no peer has what is left.
-                if torrent.pieces.is_complete() {
-                    torrent.state = TorrentState::Seeding;
-                    torrent.completed_time = Some(torrent.added_time);
+        let ids: Vec<u32> = self.sessions.keys().copied().collect();
+        for id in ids {
+            let events: Vec<session::Event> = self
+                .sessions
+                .get(&id)
+                .map(|s| s.events.try_iter().collect())
+                .unwrap_or_default();
+            let mut ended = false;
+            match self.torrents.iter_mut().find(|t| t.id == id) {
+                Some(t) => {
+                    for event in events {
+                        moved = true;
+                        ended |= t.apply(event);
+                    }
                 }
-                continue;
-            };
-            torrent.pieces.set_in_progress(index);
-            torrent.pieces.set_piece(index);
-            torrent.pieces.clear_in_progress(index);
-            let size = piece_size(torrent.total_size, torrent.pieces.total_count(), index);
-            torrent.downloaded = torrent.downloaded.saturating_add(size);
-            if torrent.pieces.is_complete() {
-                torrent.state = TorrentState::Seeding;
-                torrent.completed_time = Some(torrent.added_time);
+                None => ended = true,
             }
-            moved = true;
+            if ended {
+                // Dropping it stops whatever of it is still running.
+                self.sessions.remove(&id);
+            }
+        }
+        // A second's worth of arrivals becomes one sample of the speed.
+        self.since_sample_ms = self.since_sample_ms.saturating_add(elapsed_ms);
+        if self.since_sample_ms >= 1000 {
+            self.since_sample_ms = 0;
+            let mut total = 0_u64;
+            for t in &mut self.torrents {
+                if self.sessions.contains_key(&t.id) || t.unsampled > 0 {
+                    t.download_speed.add_sample(t.unsampled);
+                    total = total.saturating_add(t.unsampled);
+                    t.unsampled = 0;
+                    moved = true;
+                }
+            }
+            self.global_download_speed.add_sample(total);
         }
         if moved {
             EventResult::Consumed
@@ -2838,8 +3101,21 @@ impl TorrentApp {
             }
             return EventResult::Consumed;
         }
+        // The magnet dialog and the search box take the keys while they have
+        // them: a `1` in a magnet link would change the filter, and Delete in
+        // the search would remove the selected transfer.
+        if self.show_add_dialog {
+            return self.handle_dialog_key(key);
+        }
+        if self.search_active {
+            return self.handle_search_key(key);
+        }
         if key.modifiers.ctrl {
             return match key.key {
+                Key::U => {
+                    self.open_magnet_dialog();
+                    EventResult::Consumed
+                }
                 // Everything at once, which is what the toolbar buttons are
                 // for and what nothing called.
                 Key::P => {
@@ -2873,16 +3149,39 @@ impl TorrentApp {
                 self.move_selection(if key.key == Key::Down { 1 } else { -1 });
                 EventResult::Consumed
             }
+            Key::PageUp | Key::PageDown => {
+                let (_, rows) = Self::transfer_pane(self.content_rect());
+                let page = isize::try_from(rows).unwrap_or(1);
+                self.move_selection(if key.key == Key::PageDown {
+                    page
+                } else {
+                    page.saturating_neg()
+                });
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                if self.selected_torrent.is_none() || self.active_tab == Tab::Details {
+                    return EventResult::Ignored;
+                }
+                self.active_tab = Tab::Details;
+                EventResult::Consumed
+            }
+            Key::L => self.cycle_label(),
+            Key::Slash => {
+                self.search_active = true;
+                EventResult::Consumed
+            }
             // Pause and resume the selected transfer. Both existed, both were
             // tested, and neither had a key -- so a download could be started
             // and not stopped.
             Key::Space => {
                 if let Some(id) = self.selected_torrent {
-                    let downloading = self
-                        .torrents
-                        .iter()
-                        .find(|t| t.id == id)
-                        .is_some_and(|t| t.state == TorrentState::Downloading);
+                    let downloading = self.torrents.iter().find(|t| t.id == id).is_some_and(|t| {
+                        matches!(
+                            t.state,
+                            TorrentState::Downloading | TorrentState::CheckingFiles
+                        )
+                    });
                     if downloading {
                         self.pause_torrent(id);
                     } else {
@@ -2954,7 +3253,10 @@ impl TorrentApp {
     /// Held as an id rather than an index, so removing a torrent above the
     /// selected one does not silently select its neighbour. Stops at the ends.
     fn move_selection(&mut self, delta: isize) {
-        let ids: Vec<u32> = self.torrents.iter().map(|t| t.id).collect();
+        // The list on screen, in its order: it walked `torrents` in the order
+        // they were added, so with a sort or a filter on, Down jumped about
+        // the list and onto rows the filter hid.
+        let ids: Vec<u32> = self.filtered_torrents().iter().map(|t| t.id).collect();
         if ids.is_empty() {
             self.selected_torrent = None;
             return;
@@ -2980,32 +3282,65 @@ impl TorrentApp {
         self.selected_torrent = ids.first().copied();
     }
 
-    /// Pause a torrent
+    /// Start downloading torrent `id`: a session of its own checks what is
+    /// already on disk, asks the trackers for peers and fetches the rest.
+    pub fn start_torrent(&mut self, id: u32) {
+        if self.sessions.contains_key(&id) {
+            return;
+        }
+        let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        if !t.can_start() {
+            return;
+        }
+        let Some(meta) = t.metainfo.clone() else {
+            return;
+        };
+        let plan = session::Plan {
+            wanted: t.wanted(),
+            meta,
+            save_dir: t.save_path.clone(),
+            peer_id: self.peer_id,
+            port: self.settings.listen_port,
+            max_peers: usize::try_from(self.settings.max_connections_per_torrent)
+                .unwrap_or(usize::MAX)
+                .max(1),
+        };
+        t.state = TorrentState::CheckingFiles;
+        t.error_message = None;
+        self.sessions.insert(id, session::Session::start(plan));
+    }
+
+    /// Pause a torrent: its download stops, and what it has fetched stays.
     pub fn pause_torrent(&mut self, id: u32) {
         if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
             t.pause();
         }
+        if let Some(session) = self.sessions.remove(&id) {
+            session.stop();
+        }
     }
 
-    /// Resume a torrent
+    /// Resume a torrent: its download starts again from what is on disk.
     pub fn resume_torrent(&mut self, id: u32) {
-        if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
-            t.resume();
-        }
+        self.start_torrent(id);
     }
 
     /// Pause all torrents
     pub fn pause_all(&mut self) {
-        for t in &mut self.torrents {
-            t.pause();
+        let ids: Vec<u32> = self.torrents.iter().map(|t| t.id).collect();
+        for id in ids {
+            self.pause_torrent(id);
         }
         self.status_message = "All torrents paused".to_string();
     }
 
     /// Resume all torrents
     pub fn resume_all(&mut self) {
-        for t in &mut self.torrents {
-            t.resume();
+        let ids: Vec<u32> = self.torrents.iter().map(|t| t.id).collect();
+        for id in ids {
+            self.resume_torrent(id);
         }
         self.status_message = "All torrents resumed".to_string();
     }
@@ -3094,47 +3429,23 @@ impl TorrentApp {
         (downloading, seeding, total, dl_speed, ul_speed)
     }
 
-    /// Render the UI
-    #[must_use]
-    /// Draw the whole window.
+    /// For the tests: the window draws `frame`, whose boxes it keeps.
     ///
     /// Not `render`: [`App::render`] is the one the window calls, and this one
     /// takes the same two arguments -- so at equal arity the inherent method
     /// wins method lookup outright and the trait's is never called, silently.
+    #[cfg(test)]
+    #[must_use]
     pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-        // Drawn first so the layout below sits under it, and unconditionally:
-        // there is no state in which this client *can* transfer, so a
-        // condition here would be one that is always true and would rot the
-        // moment it stopped being.
-        for (i, line) in CANNOT_TRANSFER_LINES.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: 12.0,
-                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                y: 4.0 + i as f32 * 14.0,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 12.0 } else { 10.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(width - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-        let header_h = 48.0;
-        let tab_h = 36.0;
-        let status_h = 28.0;
-        let sidebar_w = 160.0;
+        self.frame(width, height).into_tree().commands
+    }
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -3142,89 +3453,232 @@ impl TorrentApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+        self.render_header(&mut f, width);
+        self.render_sidebar(&mut f, height);
+        self.render_tabs(&mut f, width);
 
-        // Header bar
+        let content = Rect::new(
+            SIDEBAR_W,
+            HEADER_H + TAB_H,
+            (width - SIDEBAR_W).max(0.0),
+            (height - HEADER_H - TAB_H - STATUS_H).max(0.0),
+        );
+        f.clip(content);
+        match self.active_tab {
+            Tab::Transfers => self.render_transfers(&mut f, content),
+            Tab::Details => self.render_details(&mut f, content),
+            Tab::Peers => self.render_peers(&mut f, content),
+            Tab::Files => self.render_files(&mut f, content),
+            Tab::Trackers => self.render_trackers(&mut f, content),
+            Tab::Settings => self.render_settings(&mut f, content),
+        }
+        f.unclip();
+        self.render_status(&mut f, width, height);
+
+        if self.show_add_dialog {
+            self.render_magnet_dialog(&mut f, width, height);
+        }
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, width, height));
+        }
+        // Last, so it is above everything. Without this the picker
+        // takes every keystroke with nothing on screen to say why --
+        // the defect apps/flashcards shipped.
+        f.extend(self.picker.render(&self.palette, width, height));
+        f
+    }
+
+    /// A button, lit while the pointer is on it; one with nothing to do is
+    /// drawn dim and records no box.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
+            corner_radii: CornerRadii::all(4.0),
+        });
+        f.push(RenderCommand::Text {
+            x: rect.x + 12.0,
+            y: rect.y + (rect.h - 12.0) / 2.0,
+            text: label.to_string(),
+            font_size: 12.0,
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 16.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
+    }
+
+    /// The torrent the selection names, if it still exists.
+    fn selected(&self) -> Option<&ManagedTorrent> {
+        self.selected_torrent
+            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
+    }
+
+    fn render_header(&self, f: &mut Frame<Target>, width: f32) {
         self.palette.push_surface(
-            &mut cmds,
+            f,
             0.0,
             0.0,
             width,
-            header_h,
+            HEADER_H,
             0.0,
             Surface::Strip(Edge::Bottom),
         );
-
-        // Title
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 16.0,
             y: 14.0,
             text: "Torrent".to_string(),
             font_size: 18.0,
             color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(96.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
-        // Toolbar buttons
-        let buttons = [
-            "Add",
-            "Remove",
-            "Pause",
-            "Resume",
-            "Pause All",
-            "Resume All",
-        ];
+        // The toolbar. Six buttons were drawn here and none could be pressed.
+        let selected = self.selected();
+        let can_pause = selected.is_some_and(|t| {
+            matches!(
+                t.state,
+                TorrentState::Downloading | TorrentState::Seeding | TorrentState::CheckingFiles
+            )
+        });
+        let can_resume = selected.is_some_and(ManagedTorrent::can_start);
+        let any_running = self.torrents.iter().any(|t| {
+            matches!(
+                t.state,
+                TorrentState::Downloading | TorrentState::Seeding | TorrentState::CheckingFiles
+            )
+        });
+        let any_paused = self.torrents.iter().any(ManagedTorrent::can_start);
         let mut bx = 120.0;
-        for label in &buttons {
+        for (label, target, enabled) in [
+            ("Open\u{2026}", Target::Open, true),
+            ("Add magnet\u{2026}", Target::AddMagnet, true),
+            ("Remove", Target::Remove, selected.is_some()),
+            ("Pause", Target::Pause, can_pause),
+            ("Resume", Target::Resume, can_resume),
+            ("Pause all", Target::PauseAll, any_running),
+            ("Resume all", Target::ResumeAll, any_paused),
+        ] {
             let bw = text::padded_width(label, 12.0, 12.0, FontWeightHint::Regular);
-            self.palette
-                .push_surface(&mut cmds, bx, 8.0, bw, 32.0, 4.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
-                x: bx + 12.0,
-                y: 16.0,
-                text: label.to_string(),
-                font_size: 12.0,
-                color: self.palette.text,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.button(f, Rect::new(bx, 8.0, bw, 32.0), label, target, enabled);
             bx += bw + 8.0;
         }
 
-        // Sidebar
-        let sidebar_y = header_h;
-        let sidebar_h = height - header_h - status_h;
-        cmds.push(RenderCommand::FillRect {
+        // The search box and the keys, at the right.
+        let keys = Rect::new(width - 12.0 - 84.0, 8.0, 84.0, 32.0);
+        self.button(f, keys, "Keys (F1)", Target::Help, true);
+        let search = Rect::new((keys.x - 8.0 - 220.0).max(bx), 8.0, 220.0, 32.0);
+        self.palette.push_surface(
+            f,
+            search.x,
+            search.y,
+            search.w,
+            search.h,
+            6.0,
+            Surface::Card,
+        );
+        if self.search_active {
+            f.push(RenderCommand::StrokeRect {
+                x: search.x,
+                y: search.y,
+                width: search.w,
+                height: search.h,
+                color: self.palette.blue,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(6.0),
+            });
+        }
+        let placeholder = self.search_query.is_empty() && !self.search_active;
+        f.push(RenderCommand::Text {
+            x: search.x + 10.0,
+            y: search.y + 9.0,
+            text: if placeholder {
+                String::from("Search names and labels  ( / )")
+            } else {
+                self.search_query.clone()
+            },
+            font_size: 12.0,
+            color: if placeholder {
+                self.palette.subtext0
+            } else {
+                self.palette.text
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(search.w - 20.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if self.search_active {
+            let typed = text::measure(&self.search_query, 12.0, FontWeightHint::Regular);
+            f.push(RenderCommand::FillRect {
+                x: search.x + 10.0 + typed.min(search.w - 22.0),
+                y: search.y + 8.0,
+                width: guitk::textedit::CARET_WIDTH,
+                height: 16.0,
+                color: self.palette.text,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+        f.hit(Target::Search, search);
+    }
+
+    fn render_sidebar(&self, f: &mut Frame<Target>, height: f32) {
+        f.push(RenderCommand::FillRect {
             x: 0.0,
-            y: sidebar_y,
-            width: sidebar_w,
-            height: sidebar_h,
+            y: HEADER_H,
+            width: SIDEBAR_W,
+            height: (height - HEADER_H - STATUS_H).max(0.0),
             color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // Filter items in sidebar
-        let filters = [
-            TorrentFilter::All,
-            TorrentFilter::Downloading,
-            TorrentFilter::Seeding,
-            TorrentFilter::Completed,
-            TorrentFilter::Paused,
-            TorrentFilter::Active,
-            TorrentFilter::Error,
-        ];
-        let mut fy = sidebar_y + 8.0;
-        for filter in &filters {
-            let is_sel = *filter == self.filter;
-            if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
-                    y: fy,
-                    width: sidebar_w - 8.0,
-                    height: 28.0,
-                    color: self.palette.surface0,
+        // The filters. They were drawn, highlighted, and could not be chosen.
+        let mut fy = HEADER_H + 8.0;
+        for filter in FILTERS {
+            let row = Rect::new(4.0, fy, SIDEBAR_W - 8.0, 28.0);
+            let target = Target::Filter(filter);
+            let chosen = filter == self.filter;
+            if chosen || self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: row.x,
+                    y: row.y,
+                    width: row.w,
+                    height: row.h,
+                    color: if chosen {
+                        self.palette.surface0
+                    } else {
+                        self.palette.crust
+                    },
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -3233,92 +3687,107 @@ impl TorrentApp {
                 .iter()
                 .filter(|t| filter.matches(t.state))
                 .count();
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: 16.0,
                 y: fy + 7.0,
-                text: format!("{} ({})", filter.label(), count),
+                text: format!("{} ({count})", filter.label()),
                 font_size: 12.0,
-                color: if is_sel {
+                color: if chosen {
                     self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext1
                 },
-                font_weight: if is_sel {
+                font_weight: if chosen {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(sidebar_w - 24.0),
+                max_width: Some(SIDEBAR_W - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
+            f.hit(target, row);
             fy += 32.0;
         }
 
-        // Labels section
+        // The labels: a press shows only the transfers under one, and a
+        // second press all of them again. Nothing could choose one, and
+        // nothing could give a transfer a label to be chosen by.
         fy += 16.0;
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 16.0,
             y: fy,
             text: "Labels".to_string(),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(SIDEBAR_W - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         fy += 20.0;
-        for label in &self.labels {
-            let is_sel = self.selected_label.as_ref() == Some(label);
-            if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
-                    y: fy,
-                    width: sidebar_w - 8.0,
-                    height: 24.0,
-                    color: self.palette.surface0,
+        for (i, label) in self.labels.iter().enumerate() {
+            let row = Rect::new(4.0, fy, SIDEBAR_W - 8.0, 24.0);
+            let target = Target::Label(i);
+            let chosen = self.selected_label.as_ref() == Some(label);
+            if chosen || self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: row.x,
+                    y: row.y,
+                    width: row.w,
+                    height: row.h,
+                    color: if chosen {
+                        self.palette.surface0
+                    } else {
+                        self.palette.crust
+                    },
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
-            cmds.push(RenderCommand::Text {
+            let count = self.torrents.iter().filter(|t| &t.label == label).count();
+            f.push(RenderCommand::Text {
                 x: 16.0,
                 y: fy + 5.0,
-                text: label.clone(),
+                text: format!("{label} ({count})"),
                 font_size: 12.0,
-                color: if is_sel {
+                color: if chosen {
                     self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 },
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(sidebar_w - 24.0),
+                max_width: Some(SIDEBAR_W - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
+            f.hit(target, row);
             fy += 28.0;
         }
+    }
 
-        // Tab bar
-        let content_x = sidebar_w;
-        let content_w = width - sidebar_w;
-        cmds.push(RenderCommand::FillRect {
-            x: content_x,
-            y: header_h,
-            width: content_w,
-            height: tab_h,
+    fn render_tabs(&self, f: &mut Frame<Target>, width: f32) {
+        f.push(RenderCommand::FillRect {
+            x: SIDEBAR_W,
+            y: HEADER_H,
+            width: (width - SIDEBAR_W).max(0.0),
+            height: TAB_H,
             color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
-
-        let mut tx = content_x + 8.0;
-        for tab in &Tab::ALL {
-            let is_active = *tab == self.active_tab;
+        let mut tx = SIDEBAR_W + 8.0;
+        for tab in Tab::ALL {
+            let is_active = tab == self.active_tab;
             let tw = text::padded_width_any_weight(tab.label(), 10.0, 12.0);
-            if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tx,
-                    y: header_h + 4.0,
-                    width: tw,
-                    height: tab_h - 4.0,
-                    color: self.palette.base,
+            let rect = Rect::new(tx, HEADER_H + 4.0, tw, TAB_H - 4.0);
+            let target = Target::Tab(tab);
+            if is_active || self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.w,
+                    height: rect.h,
+                    color: if is_active {
+                        self.palette.base
+                    } else {
+                        self.palette.mantle
+                    },
                     corner_radii: CornerRadii {
                         top_left: 6.0,
                         top_right: 6.0,
@@ -3327,9 +3796,9 @@ impl TorrentApp {
                     },
                 });
             }
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: tx + 10.0,
-                y: header_h + 12.0,
+                y: HEADER_H + 12.0,
                 text: tab.label().to_string(),
                 font_size: 12.0,
                 color: if is_active {
@@ -3342,44 +3811,24 @@ impl TorrentApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: None,
+                max_width: Some(tw),
                 overflow: TextOverflow::Clip,
             });
+            f.hit(target, rect);
             tx += tw + 4.0;
         }
+    }
 
-        // Content area
-        let content_y = header_h + tab_h;
-        let content_h = height - header_h - tab_h - status_h;
-
-        match self.active_tab {
-            Tab::Transfers => {
-                self.render_transfers(&mut cmds, content_x, content_y, content_w, content_h);
-            }
-            Tab::Details => {
-                self.render_details(&mut cmds, content_x, content_y, content_w, content_h);
-            }
-            Tab::Peers => self.render_peers(&mut cmds, content_x, content_y, content_w, content_h),
-            Tab::Files => self.render_files(&mut cmds, content_x, content_y, content_w, content_h),
-            Tab::Trackers => {
-                self.render_trackers(&mut cmds, content_x, content_y, content_w, content_h);
-            }
-            Tab::Settings => {
-                self.render_settings(&mut cmds, content_x, content_y, content_w, content_h);
-            }
-        }
-
-        // Status bar
-        let sy = height - status_h;
+    fn render_status(&self, f: &mut Frame<Target>, width: f32, height: f32) {
+        let sy = height - STATUS_H;
         self.palette
-            .push_surface(&mut cmds, 0.0, sy, width, status_h, 0.0, Surface::Card);
-
+            .push_surface(f, 0.0, sy, width, STATUS_H, 0.0, Surface::Card);
         let (downloading, seeding, total, dl_speed, ul_speed) = self.stats();
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 12.0,
             y: sy + 8.0,
             text: format!(
-                "↓ {}  ↑ {}  |  {} downloading, {} seeding, {} total  |  sorted by {} {} (C, R)  |  {}",
+                "\u{2193} {}  \u{2191} {}  |  {} downloading, {} seeding, {} total  |  sorted by {} {} (C, R)  |  {}",
                 format_speed(dl_speed),
                 format_speed(ul_speed),
                 downloading,
@@ -3391,293 +3840,363 @@ impl TorrentApp {
                 } else {
                     "descending"
                 },
-                self.status_message
+                self.last_open.as_deref().unwrap_or(&self.status_message)
             ),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(width - 24.0),
+            max_width: Some((width - 24.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
-
-        if self.show_help {
-            guitk::shortcut::render_card(
-                &mut cmds,
-                &self.palette,
-                (width, height),
-                0.0,
-                SHORTCUTS,
-                "F1 or ? closes this",
-            );
-        }
-
-        // Last, so it is above everything. Without this the picker
-        // takes every keystroke with nothing on screen to say why --
-        // the defect apps/flashcards shipped.
-        cmds.extend(self.picker.render(&self.palette, width, height));
-
-        cmds
     }
 
-    fn render_transfers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        // Column headers
-        let cols = [
-            ("Name", 250.0),
-            ("Size", 80.0),
-            ("Progress", 120.0),
-            ("Status", 80.0),
-            ("↓ Speed", 80.0),
-            ("↑ Speed", 80.0),
-            ("Ratio", 60.0),
-            ("ETA", 80.0),
-        ];
-        let mut cx = x + 8.0;
-        let hy = y + 4.0;
-        for (label, cw) in &cols {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: hy,
-                text: label.to_string(),
-                font_size: 11.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(*cw),
+    /// Where the transfer rows are drawn in the content area `content`, and
+    /// how many whole rows fit: under the notice and the column heads.
+    fn transfer_pane(content: Rect) -> (Rect, usize) {
+        let top = content.y + NOTICE_H + 24.0;
+        let pane = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0.0));
+        (pane, ((pane.h / ROW_H).floor().max(1.0)) as usize)
+    }
+
+    /// The content area at the window's own size.
+    fn content_rect(&self) -> Rect {
+        Rect::new(
+            SIDEBAR_W,
+            HEADER_H + TAB_H,
+            (self.win_width - SIDEBAR_W).max(0.0),
+            (self.win_height - HEADER_H - TAB_H - STATUS_H).max(0.0),
+        )
+    }
+
+    fn render_transfers(&self, f: &mut Frame<Target>, content: Rect) {
+        let (x, y, w) = (content.x, content.y, content.w);
+        // What this client cannot do, where it can be read. It was drawn
+        // first, at the top of the window, and then painted over by the
+        // background and the header.
+        for (i, line) in TRANSFER_NOTE_LINES.iter().enumerate() {
+            f.push(RenderCommand::Text {
+                x: x + 12.0,
+                y: y + 6.0 + i as f32 * 14.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 12.0 } else { 10.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some((w - 24.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
+        }
+
+        // The column heads: a press sorts by one, and a second press on the
+        // one already sorted by reverses it.
+        let head_y = y + NOTICE_H;
+        let mut cx = x + 8.0;
+        for (column, label, cw) in TRANSFER_COLUMNS {
+            let rect = Rect::new(cx - 4.0, head_y, cw + 8.0, 22.0);
+            let target = Target::SortBy(column);
+            let sorted = column == self.sort_column;
+            if self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.w,
+                    height: rect.h,
+                    color: self.palette.surface0,
+                    corner_radii: CornerRadii::all(3.0),
+                });
+            }
+            f.push(RenderCommand::Text {
+                x: cx,
+                y: head_y + 4.0,
+                text: if sorted {
+                    format!(
+                        "{label} {}",
+                        if self.sort_ascending {
+                            "\u{25B2}"
+                        } else {
+                            "\u{25BC}"
+                        }
+                    )
+                } else {
+                    label.to_string()
+                },
+                font_size: 11.0,
+                color: if sorted {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(cw),
+                overflow: TextOverflow::Ellipsis,
+            });
+            f.hit(target, rect);
             cx += cw + 8.0;
         }
 
-        // Torrent rows
+        let (pane, rows) = Self::transfer_pane(content);
+        f.hit(Target::TransferList, pane);
         let filtered = self.filtered_torrents();
-        let row_h = 48.0;
-        let mut ry = y + 24.0;
+        if filtered.is_empty() {
+            let why = if self.torrents.is_empty() {
+                String::from(
+                    "No torrents. Open\u{2026} (Ctrl+O) reads a .torrent file; Add magnet\u{2026} (Ctrl+U) takes a magnet link.",
+                )
+            } else {
+                String::from("Nothing here matches the filter, the label or the search.")
+            };
+            f.push(RenderCommand::Text {
+                x: pane.x + 16.0,
+                y: pane.y + 20.0,
+                text: why,
+                font_size: 13.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((pane.w - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        for (shown, torrent) in filtered
+            .iter()
+            .skip(self.transfer_scroll)
+            .take(rows.saturating_add(1))
+            .enumerate()
+        {
+            let ry = pane.y + shown as f32 * ROW_H;
+            let row = Rect::new(x + 4.0, ry, (w - 8.0).max(0.0), ROW_H - 2.0);
+            self.render_transfer_row(f, torrent, row);
+            f.hit(Target::Row(torrent.id), row);
+        }
+        if filtered.len() > rows {
+            let last = filtered.len().saturating_sub(rows).max(1);
+            let thumb_h = (pane.h * rows as f32 / filtered.len() as f32)
+                .max(16.0)
+                .min(pane.h);
+            let thumb_y =
+                pane.y + (pane.h - thumb_h) * (self.transfer_scroll.min(last) as f32 / last as f32);
+            f.push(RenderCommand::FillRect {
+                x: pane.right() - 5.0,
+                y: thumb_y,
+                width: 4.0,
+                height: thumb_h,
+                color: self.palette.surface2,
+                corner_radii: CornerRadii::all(2.0),
+            });
+        }
+    }
 
-        for torrent in filtered.iter().take(((h - 24.0) / row_h) as usize) {
-            if ry + row_h > y + h {
-                break;
-            }
+    fn render_transfer_row(&self, f: &mut Frame<Target>, torrent: &ManagedTorrent, row: Rect) {
+        let is_sel = self.selected_torrent == Some(torrent.id);
+        if is_sel {
+            self.palette
+                .push_surface(f, row.x, row.y, row.w, row.h, 4.0, Surface::Card);
+        } else if self.hover == Some(Target::Row(torrent.id)) {
+            f.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
+                color: self.palette.mantle,
+                corner_radii: CornerRadii::all(4.0),
+            });
+        }
+        let ry = row.y;
+        let mut cx = row.x + 4.0;
 
-            let is_sel = self.selected_torrent == Some(torrent.id);
-            if is_sel {
-                self.palette.push_surface(
-                    cmds,
-                    x + 4.0,
-                    ry,
-                    w - 8.0,
-                    row_h - 2.0,
-                    4.0,
-                    Surface::Card,
-                );
-            }
-
-            let mut cx = x + 8.0;
-
-            // Name
-            cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
+            x: cx,
+            y: ry + 6.0,
+            text: torrent.name.clone(),
+            font_size: 12.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(250.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if !torrent.label.is_empty() {
+            f.push(RenderCommand::Text {
                 x: cx,
-                y: ry + 6.0,
-                text: torrent.name.clone(),
-                font_size: 12.0,
-                color: self.palette.text,
+                y: ry + 24.0,
+                text: torrent.label.clone(),
+                font_size: 10.0,
+                color: self.palette.ink(self.palette.mauve),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            if !torrent.label.is_empty() {
-                cmds.push(RenderCommand::Text {
-                    x: cx,
-                    y: ry + 24.0,
-                    text: torrent.label.clone(),
-                    font_size: 10.0,
-                    color: self.palette.ink(self.palette.mauve),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(250.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-            cx += 258.0;
+        }
+        cx += 258.0;
 
-            // Size
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: format_size(torrent.total_size),
-                font_size: 12.0,
-                color: self.palette.subtext1,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 88.0;
+        f.push(RenderCommand::Text {
+            x: cx,
+            y: ry + 6.0,
+            text: format_size(torrent.total_size),
+            font_size: 12.0,
+            color: self.palette.subtext1,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cx += 88.0;
 
-            // Progress bar
-            let bar_w = 112.0;
-            let bar_h = 12.0;
-            cmds.push(RenderCommand::FillRect {
+        let bar_w = 112.0;
+        let bar_h = 12.0;
+        f.push(RenderCommand::FillRect {
+            x: cx,
+            y: ry + 8.0,
+            width: bar_w,
+            height: bar_h,
+            color: self.palette.surface1,
+            corner_radii: CornerRadii::all(3.0),
+        });
+        let progress = torrent.progress();
+        let fill_w = (bar_w * progress as f32 / 100.0).min(bar_w);
+        if fill_w > 0.5 {
+            f.push(RenderCommand::FillRect {
                 x: cx,
                 y: ry + 8.0,
-                width: bar_w,
+                width: fill_w,
                 height: bar_h,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(3.0),
-            });
-            let progress = torrent.progress();
-            let fill_w = (bar_w * progress as f32 / 100.0).min(bar_w);
-            if fill_w > 0.5 {
-                let bar_color = match torrent.state {
+                color: match torrent.state {
                     TorrentState::Downloading => self.palette.blue,
                     TorrentState::Seeding => self.palette.green,
                     TorrentState::Paused => self.palette.yellow,
                     TorrentState::Error => self.palette.red,
                     _ => self.palette.teal,
-                };
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: ry + 8.0,
-                    width: fill_w,
-                    height: bar_h,
-                    color: bar_color,
-                    corner_radii: CornerRadii::all(3.0),
-                });
-            }
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 24.0,
-                text: format!("{progress:.1}%"),
-                font_size: 10.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                },
+                corner_radii: CornerRadii::all(3.0),
             });
-            cx += 128.0;
-
-            // Status
-            let status_color = match torrent.state {
-                TorrentState::Downloading => self.palette.blue,
-                TorrentState::Seeding => self.palette.green,
-                TorrentState::Paused => self.palette.yellow,
-                TorrentState::Error => self.palette.red,
-                TorrentState::Complete => self.palette.teal,
-                _ => self.palette.subtext0,
-            };
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: torrent.state.to_string(),
-                font_size: 12.0,
-                color: status_color,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 88.0;
-
-            // Down speed
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: format_speed(torrent.download_speed.speed_bps()),
-                font_size: 12.0,
-                color: self.palette.ink(self.palette.teal),
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 88.0;
-
-            // Up speed
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: format_speed(torrent.upload_speed.speed_bps()),
-                font_size: 12.0,
-                color: self.palette.ink(self.palette.peach),
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 88.0;
-
-            // Ratio
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: format!("{:.2}", torrent.ratio()),
-                font_size: 12.0,
-                color: self.palette.subtext1,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 68.0;
-
-            // ETA
-            let eta_str = torrent
-                .eta_seconds()
-                .map_or_else(|| "∞".to_string(), format_duration);
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: eta_str,
-                font_size: 12.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            ry += row_h;
         }
+        f.push(RenderCommand::Text {
+            x: cx,
+            y: ry + 24.0,
+            text: format!("{progress:.1}%"),
+            font_size: 10.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(bar_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cx += 128.0;
 
-        if filtered.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 80.0,
-                y: y + h / 2.0 - 10.0,
-                text: "No torrents".to_string(),
-                font_size: 14.0,
-                color: self.palette.subtext0,
+        // A transfer set going with nobody to transfer from says so, rather
+        // than "Downloading" in blue at 0% for good.
+        let (status, status_color) = match torrent.state {
+            TorrentState::Downloading if torrent.peers.is_empty() => {
+                (String::from("Looking for peers"), self.palette.subtext0)
+            }
+            TorrentState::Downloading => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.blue),
+            ),
+            TorrentState::Seeding => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.green),
+            ),
+            TorrentState::Paused => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.yellow),
+            ),
+            TorrentState::Error => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.red),
+            ),
+            TorrentState::Complete => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.teal),
+            ),
+            _ => (torrent.state.to_string(), self.palette.subtext0),
+        };
+        f.push(RenderCommand::Text {
+            x: cx,
+            y: ry + 6.0,
+            text: status,
+            font_size: 12.0,
+            color: status_color,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cx += 88.0;
+
+        for (value, ink, width) in [
+            (
+                format_speed(torrent.download_speed.speed_bps()),
+                self.palette.ink(self.palette.teal),
+                80.0,
+            ),
+            (
+                format_speed(torrent.upload_speed.speed_bps()),
+                self.palette.ink(self.palette.peach),
+                80.0,
+            ),
+            (
+                format!("{:.2}", torrent.ratio()),
+                self.palette.subtext1,
+                60.0,
+            ),
+            (
+                torrent
+                    .eta_seconds()
+                    .map_or_else(|| "\u{221E}".to_string(), format_duration),
+                self.palette.subtext0,
+                80.0,
+            ),
+        ] {
+            f.push(RenderCommand::Text {
+                x: cx,
+                y: ry + 6.0,
+                text: value,
+                font_size: 12.0,
+                color: ink,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
+            cx += width + 8.0;
         }
     }
 
-    fn render_details(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
-        let torrent = if let Some(t) = self
-            .selected_torrent
-            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
-        {
-            t
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 20.0,
-                text: "Select a torrent to view details".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    /// A line saying there is nothing chosen to show.
+    fn render_nothing_chosen(&self, f: &mut Frame<Target>, content: Rect, what: &str) {
+        f.push(RenderCommand::Text {
+            x: content.x + 16.0,
+            y: content.y + 20.0,
+            text: format!("Select a torrent to view {what}"),
+            font_size: 13.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((content.w - 32.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    fn render_details(&self, f: &mut Frame<Target>, content: Rect) {
+        let Some(torrent) = self.selected() else {
+            self.render_nothing_chosen(f, content, "details");
             return;
         };
-
-        let mut dy = y + 12.0;
+        let (x, y, w) = (content.x, content.y, content.w);
         let label_x = x + 16.0;
         let value_x = x + 160.0;
-        let max_val_w = w - 180.0;
+        let max_val_w = (w - 180.0).max(0.0);
 
-        let fields: Vec<(&str, String)> = vec![
-            ("Name:", torrent.name.clone()),
-            ("Save Path:", torrent.save_path.clone()),
-            ("Total Size:", format_size(torrent.total_size)),
-            ("Downloaded:", format_size(torrent.downloaded)),
-            ("Uploaded:", format_size(torrent.uploaded)),
-            ("Ratio:", format!("{:.3}", torrent.ratio())),
-            ("Status:", torrent.state.to_string()),
-            ("Progress:", format!("{:.1}%", torrent.progress())),
+        let fields: Vec<(&str, String, Option<Target>)> = vec![
+            ("Name:", torrent.name.clone(), None),
+            ("Save Path:", torrent.save_path.shown().to_string(), None),
+            ("Total Size:", format_size(torrent.total_size), None),
+            ("Downloaded:", format_size(torrent.downloaded), None),
+            ("Uploaded:", format_size(torrent.uploaded), None),
+            ("Ratio:", format!("{:.3}", torrent.ratio()), None),
+            ("Status:", torrent.state.to_string(), None),
+            ("Progress:", format!("{:.1}%", torrent.progress()), None),
             (
                 "Pieces:",
                 format!(
@@ -3689,8 +4208,9 @@ impl TorrentApp {
                         .as_ref()
                         .map_or("?".to_string(), |m| format_size(m.piece_length)),
                 ),
+                None,
             ),
-            ("Peers:", format!("{} connected", torrent.peers.len())),
+            ("Peers:", format!("{} connected", torrent.peers.len()), None),
             (
                 "Info Hash:",
                 torrent.metainfo.as_ref().map_or_else(
@@ -3702,6 +4222,7 @@ impl TorrentApp {
                     },
                     |m| hex_encode(&m.info_hash),
                 ),
+                None,
             ),
             (
                 "Comment:",
@@ -3710,6 +4231,7 @@ impl TorrentApp {
                     .as_ref()
                     .and_then(|m| m.comment.clone())
                     .unwrap_or_else(|| "N/A".to_string()),
+                None,
             ),
             (
                 "Created By:",
@@ -3718,38 +4240,63 @@ impl TorrentApp {
                     .as_ref()
                     .and_then(|m| m.created_by.clone())
                     .unwrap_or_else(|| "N/A".to_string()),
+                None,
             ),
             (
                 "Sequential:",
-                if torrent.sequential_download {
-                    "Yes"
-                } else {
-                    "No"
-                }
-                .to_string(),
+                format!(
+                    "{}   (press, or S)",
+                    if torrent.sequential_download {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ),
+                Some(Target::ToggleSequential),
             ),
             (
                 "Label:",
-                if torrent.label.is_empty() {
-                    "None".to_string()
-                } else {
-                    torrent.label.clone()
-                },
+                format!(
+                    "{}   (press, or L)",
+                    if torrent.label.is_empty() {
+                        "None"
+                    } else {
+                        torrent.label.as_str()
+                    }
+                ),
+                Some(Target::CycleLabel),
             ),
         ];
 
-        for (label, value) in &fields {
-            cmds.push(RenderCommand::Text {
+        let mut dy = y + 12.0;
+        for (label, value, target) in &fields {
+            f.push(RenderCommand::Text {
                 x: label_x,
                 y: dy,
-                text: label.to_string(),
+                text: (*label).to_string(),
                 font_size: 12.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
+            if let Some(target) = target {
+                let rect = Rect::new(value_x - 6.0, dy - 3.0, max_val_w.min(320.0), 20.0);
+                f.push(RenderCommand::FillRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.w,
+                    height: rect.h,
+                    color: if self.hover == Some(*target) {
+                        self.palette.surface1
+                    } else {
+                        self.palette.surface0
+                    },
+                    corner_radii: CornerRadii::all(4.0),
+                });
+                f.hit(*target, rect);
+            }
+            f.push(RenderCommand::Text {
                 x: value_x,
                 y: dy,
                 text: value.clone(),
@@ -3763,35 +4310,19 @@ impl TorrentApp {
         }
     }
 
-    fn render_peers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        let torrent = if let Some(t) = self
-            .selected_torrent
-            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
-        {
-            t
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 20.0,
-                text: "Select a torrent to view peers".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    fn render_peers(&self, f: &mut Frame<Target>, content: Rect) {
+        let Some(torrent) = self.selected() else {
+            self.render_nothing_chosen(f, content, "peers");
             return;
         };
-
+        let (x, y, w, h) = (content.x, content.y, content.w, content.h);
         let table = Table::new(PEER_COLUMNS, x);
-        table.header(cmds, y + 4.0, self.palette.overlay0, TABLE_FONT);
-
+        f.draw_with(|c| table.header(c, y + 4.0, self.palette.subtext0, TABLE_FONT));
         let mut py = y + 24.0;
         for peer in &torrent.peers {
             if py + 24.0 > y + h {
                 break;
             }
-
             let mut flags = String::new();
             if !peer.am_choking {
                 flags.push('u');
@@ -3808,7 +4339,6 @@ impl TorrentApp {
             if peer.supports_extensions {
                 flags.push('e');
             }
-
             let cells: [(String, guitk::Color, Fit); 6] = [
                 (
                     format!("{}:{}", peer.address, peer.port),
@@ -3821,12 +4351,12 @@ impl TorrentApp {
                 (peer.client_name.clone(), self.palette.text, Fit::Start),
                 (
                     format_speed(peer.download_rate),
-                    self.palette.teal,
+                    self.palette.ink(self.palette.teal),
                     Fit::Start,
                 ),
                 (
                     format_speed(peer.upload_rate),
-                    self.palette.peach,
+                    self.palette.ink(self.palette.peach),
                     Fit::Start,
                 ),
                 (
@@ -3841,73 +4371,87 @@ impl TorrentApp {
                 table.len(),
                 "a cell with no column is positioned past the table and drawn empty",
             );
-            for (i, (cell, color, fit)) in cells.iter().enumerate() {
-                table.cell(cmds, i, py, cell, *color, TABLE_FONT, *fit);
-            }
-
+            f.draw_with(|c| {
+                for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                    table.cell(c, i, py, cell, *color, TABLE_FONT, *fit);
+                }
+            });
             py += 24.0;
         }
-
         if torrent.peers.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 50.0,
+            f.push(RenderCommand::Text {
+                x: x + 16.0,
                 y: y + 40.0,
-                text: "No peers".to_string(),
+                text: String::from("No peers: this client has no network to find any on."),
                 font_size: 13.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some((w - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
 
-    fn render_files(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, _w: f32, h: f32) {
-        let torrent = if let Some(t) = self
-            .selected_torrent
-            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
-        {
-            t
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 20.0,
-                text: "Select a torrent to view files".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    fn render_files(&self, f: &mut Frame<Target>, content: Rect) {
+        let Some(torrent) = self.selected() else {
+            self.render_nothing_chosen(f, content, "files");
             return;
         };
-
+        let (x, y, h) = (content.x, content.y, content.h);
         let meta_files = torrent
             .metainfo
             .as_ref()
             .map_or(&[] as &[TorrentFile], |m| &m.files);
-
         let table = Table::new(FILE_COLUMNS, x);
-        table.header(cmds, y + 4.0, self.palette.overlay0, TABLE_FONT);
-
+        f.draw_with(|c| table.header(c, y + 4.0, self.palette.subtext0, TABLE_FONT));
+        if meta_files.is_empty() {
+            f.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: y + 32.0,
+                text: String::from(
+                    "No file list: a magnet link carries none, and the metadata that would comes from peers.",
+                ),
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((content.w - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let priority_x = x + FILE_COLUMNS.iter().take(2).map(|c| c.width).sum::<f32>();
         let mut fy = y + 24.0;
         for (i, file) in meta_files.iter().enumerate() {
             if fy + 22.0 > y + h {
                 break;
             }
-
             let priority = torrent
                 .file_priorities
                 .get(i)
                 .copied()
                 .unwrap_or(FilePriority::Normal);
             let prio_color = match priority {
-                FilePriority::Skip => self.palette.overlay0,
-                FilePriority::Low => self.palette.yellow,
+                FilePriority::Skip => self.palette.subtext0,
+                FilePriority::Low => self.palette.ink(self.palette.yellow),
                 FilePriority::Normal => self.palette.text,
-                FilePriority::High => self.palette.green,
+                FilePriority::High => self.palette.ink(self.palette.green),
             };
-
+            // A press on the priority steps it: Low, Normal, High, Skip. It
+            // was shown and could not be changed.
+            let target = Target::FilePriority(i);
+            let chip = Rect::new(priority_x, fy - 2.0, 80.0, 20.0);
+            f.push(RenderCommand::FillRect {
+                x: chip.x,
+                y: chip.y,
+                width: chip.w,
+                height: chip.h,
+                color: if self.hover == Some(target) {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                corner_radii: CornerRadii::all(4.0),
+            });
+            f.hit(target, chip);
             // The path is elided from the *front*: it comes from the torrent's
             // metainfo and is routinely longer than the column, and what
             // identifies a file is its name, not the directory chain above it.
@@ -3922,50 +4466,34 @@ impl TorrentApp {
                 table.len(),
                 "a cell with no column is positioned past the table and drawn empty",
             );
-            for (i, (cell, color, fit)) in cells.iter().enumerate() {
-                table.cell(cmds, i, fy, cell, *color, TABLE_FONT, *fit);
-            }
-
+            f.draw_with(|c| {
+                for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                    table.cell(c, i, fy, cell, *color, TABLE_FONT, *fit);
+                }
+            });
             fy += 22.0;
         }
     }
 
-    fn render_trackers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, _w: f32, h: f32) {
-        let torrent = if let Some(t) = self
-            .selected_torrent
-            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
-        {
-            t
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 20.0,
-                text: "Select a torrent to view trackers".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    fn render_trackers(&self, f: &mut Frame<Target>, content: Rect) {
+        let Some(torrent) = self.selected() else {
+            self.render_nothing_chosen(f, content, "trackers");
             return;
         };
-
+        let (x, y, h) = (content.x, content.y, content.h);
         let table = Table::new(TRACKER_COLUMNS, x);
-        table.header(cmds, y + 4.0, self.palette.overlay0, TABLE_FONT);
-
+        f.draw_with(|c| table.header(c, y + 4.0, self.palette.subtext0, TABLE_FONT));
         let mut ty = y + 24.0;
         for tracker in &torrent.trackers {
             if ty + 22.0 > y + h {
                 break;
             }
-
             let status_color = match tracker.status {
-                TrackerStatus::Working => self.palette.green,
-                TrackerStatus::Updating => self.palette.blue,
-                TrackerStatus::Error => self.palette.red,
+                TrackerStatus::Working => self.palette.ink(self.palette.green),
+                TrackerStatus::Updating => self.palette.ink(self.palette.blue),
+                TrackerStatus::Error => self.palette.ink(self.palette.red),
                 _ => self.palette.subtext0,
             };
-
             // A tracker URL is elided from the front for the same reason a file
             // path is: the announce path at the end is what distinguishes two
             // trackers on the same host, and cutting the usual way keeps only
@@ -3973,8 +4501,16 @@ impl TorrentApp {
             let cells: [(String, guitk::Color, Fit); 5] = [
                 (tracker.url.clone(), self.palette.text, Fit::End),
                 (tracker.status.to_string(), status_color, Fit::Start),
-                (tracker.seeders.to_string(), self.palette.green, Fit::Start),
-                (tracker.leechers.to_string(), self.palette.peach, Fit::Start),
+                (
+                    tracker.seeders.to_string(),
+                    self.palette.ink(self.palette.green),
+                    Fit::Start,
+                ),
+                (
+                    tracker.leechers.to_string(),
+                    self.palette.ink(self.palette.peach),
+                    Fit::Start,
+                ),
                 (tracker.tier.to_string(), self.palette.subtext0, Fit::Start),
             ];
             debug_assert_eq!(
@@ -3982,32 +4518,33 @@ impl TorrentApp {
                 table.len(),
                 "a cell with no column is positioned past the table and drawn empty",
             );
-            for (i, (cell, color, fit)) in cells.iter().enumerate() {
-                table.cell(cmds, i, ty, cell, *color, TABLE_FONT, *fit);
-            }
-
+            f.draw_with(|c| {
+                for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                    table.cell(c, i, ty, cell, *color, TABLE_FONT, *fit);
+                }
+            });
             ty += 22.0;
         }
     }
 
-    fn render_settings(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
+    fn render_settings(&self, f: &mut Frame<Target>, content: Rect) {
+        let (x, y, w) = (content.x, content.y, content.w);
         let mut sy = y + 12.0;
         let label_x = x + 16.0;
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: label_x,
             y: sy,
             text: SETTINGS_NOT_APPLIED.to_owned(),
             font_size: 11.0,
             color: self.palette.ink(self.palette.yellow),
             font_weight: FontWeightHint::Bold,
-            max_width: Some(w - 32.0),
+            max_width: Some((w - 32.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
         sy += 24.0;
         let value_x = x + 220.0;
-        let max_val_w = w - 240.0;
-
+        let max_val_w = (w - 240.0).max(0.0);
+        let on_off = |on: bool| if on { "Enabled" } else { "Disabled" }.to_string();
         let settings: Vec<(&str, String)> = vec![
             ("Listen Port:", self.settings.listen_port.to_string()),
             (
@@ -4044,36 +4581,12 @@ impl TorrentApp {
             ),
             (
                 "Default Save Path:",
-                self.settings.default_save_path.clone(),
+                self.settings.default_save_path.shown().to_string(),
             ),
             ("Encryption:", self.settings.encryption_mode.to_string()),
-            (
-                "DHT:",
-                if self.settings.dht_enabled {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }
-                .to_string(),
-            ),
-            (
-                "PEX:",
-                if self.settings.pex_enabled {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }
-                .to_string(),
-            ),
-            (
-                "µTP:",
-                if self.settings.enable_utp {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }
-                .to_string(),
-            ),
+            ("DHT:", on_off(self.settings.dht_enabled)),
+            ("PEX:", on_off(self.settings.pex_enabled)),
+            ("\u{B5}TP:", on_off(self.settings.enable_utp)),
             (
                 "Seed Ratio Limit:",
                 self.settings
@@ -4091,19 +4604,18 @@ impl TorrentApp {
             ),
             ("Proxy:", self.settings.proxy_type.to_string()),
         ];
-
         for (label, value) in &settings {
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: label_x,
                 y: sy,
-                text: label.to_string(),
+                text: (*label).to_string(),
                 font_size: 12.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: value_x,
                 y: sy,
                 text: value.clone(),
@@ -4115,6 +4627,447 @@ impl TorrentApp {
             });
             sy += 22.0;
         }
+    }
+
+    /// Where the magnet dialog's card is.
+    fn magnet_card(width: f32, height: f32) -> Rect {
+        let w = 600.0_f32.min(width - 24.0).max(0.0);
+        let h = 190.0_f32.min(height - 24.0).max(0.0);
+        Rect::new((width - w) / 2.0, (height - h) / 2.0, w, h)
+    }
+
+    /// The dialog that takes a magnet link. `add_magnet` had no caller, and
+    /// the fields it would have filled were written and never read.
+    fn render_magnet_dialog(&self, f: &mut Frame<Target>, width: f32, height: f32) {
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+            color: guitk::Color::rgba(0, 0, 0, 150),
+            corner_radii: CornerRadii::ZERO,
+        });
+        // Around and behind the card a press does nothing: the dialog is
+        // modal, and a press reaching a row behind it would change what it
+        // is about.
+        f.hit(Target::DialogBackdrop, Rect::new(0.0, 0.0, width, height));
+        let card = Self::magnet_card(width, height);
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 18.0,
+            text: String::from("Add a magnet link"),
+            font_size: 16.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((card.w - 40.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let field = Rect::new(card.x + 20.0, card.y + 50.0, (card.w - 40.0).max(0.0), 32.0);
+        self.palette
+            .push_surface(f, field.x, field.y, field.w, field.h, 4.0, Surface::Card);
+        f.push(RenderCommand::StrokeRect {
+            x: field.x,
+            y: field.y,
+            width: field.w,
+            height: field.h,
+            color: self.palette.blue,
+            line_width: 2.0,
+            corner_radii: CornerRadii::all(4.0),
+        });
+        if self.magnet_input.text().is_empty() {
+            f.push(RenderCommand::Text {
+                x: field.x + 8.0,
+                y: field.y + 9.0,
+                text: String::from("magnet:?xt=urn:btih:\u{2026}"),
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((field.w - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut tree = RenderTree::new();
+        guitk::textedit::draw(
+            &mut tree,
+            &guitk::textedit::SingleLine {
+                text: self.magnet_input.text(),
+                cursor: self.magnet_input.cursor(),
+                selection_anchor: self.magnet_input.selection_anchor(),
+                focused: true,
+                x: field.x + 8.0,
+                y: field.y + 7.0,
+                width: (field.w - 16.0).max(0.0),
+                line_height: 18.0,
+                font_size: 12.0,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: guitk::textedit::CARET_WIDTH,
+            },
+        );
+        f.extend(tree.commands);
+        f.hit(Target::MagnetField, field);
+        let (note, ink) = match &self.magnet_error {
+            Some(why) => (why.clone(), self.palette.ink(self.palette.red)),
+            None => (
+                format!(
+                    "Saved to {} once its files are known -- which this client cannot learn yet.",
+                    self.add_save_path.shown()
+                ),
+                self.palette.subtext0,
+            ),
+        };
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: field.bottom() + 12.0,
+            text: note,
+            font_size: 11.0,
+            color: ink,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((card.w - 40.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let by = card.bottom() - 48.0;
+        self.button(
+            f,
+            Rect::new(card.right() - 20.0 - 90.0, by, 90.0, 30.0),
+            "Cancel",
+            Target::MagnetCancel,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(card.right() - 20.0 - 90.0 - 8.0 - 90.0, by, 90.0, 30.0),
+            "Add",
+            Target::MagnetAdd,
+            !self.magnet_input.text().trim().is_empty(),
+        );
+    }
+
+    // ── The pointer ─────────────────────────────────────────────────
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame(self.win_width, self.win_height).hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let Some(target) = self
+                    .frame(self.win_width, self.win_height)
+                    .hit_test(event.x, event.y)
+                else {
+                    return EventResult::Ignored;
+                };
+                self.press(target)
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A left press on `target`.
+    fn press(&mut self, target: Target) -> EventResult {
+        // A press anywhere but the search box takes the keys out of it.
+        if target != Target::Search {
+            self.search_active = false;
+        }
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::Open => self.picker.open_to_read(),
+            Target::AddMagnet => self.open_magnet_dialog(),
+            Target::Remove => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                self.remove_torrent(id, false);
+                self.reanchor_selection();
+            }
+            Target::Pause => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                self.pause_torrent(id);
+            }
+            Target::Resume => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                self.resume_torrent(id);
+            }
+            Target::PauseAll => self.pause_all(),
+            Target::ResumeAll => self.resume_all(),
+            Target::Search => self.search_active = true,
+            Target::Filter(filter) => return self.set_filter(filter),
+            Target::Label(index) => {
+                let Some(label) = self.labels.get(index).cloned() else {
+                    return EventResult::Ignored;
+                };
+                self.selected_label = if self.selected_label.as_ref() == Some(&label) {
+                    None
+                } else {
+                    Some(label)
+                };
+                self.transfer_scroll = 0;
+            }
+            Target::Tab(tab) => {
+                if tab == self.active_tab {
+                    return EventResult::Ignored;
+                }
+                self.active_tab = tab;
+            }
+            Target::SortBy(column) => {
+                if column == self.sort_column {
+                    self.sort_ascending = !self.sort_ascending;
+                } else {
+                    self.sort_column = column;
+                }
+            }
+            // A press chooses a transfer; a second press on it shows its
+            // details.
+            Target::Row(id) => {
+                if self.selected_torrent == Some(id) {
+                    self.active_tab = Tab::Details;
+                } else {
+                    self.selected_torrent = Some(id);
+                }
+            }
+            Target::CycleLabel => return self.cycle_label(),
+            Target::ToggleSequential => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
+                    t.toggle_sequential();
+                }
+            }
+            Target::FilePriority(index) => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) else {
+                    return EventResult::Ignored;
+                };
+                let next = match t.file_priorities.get(index) {
+                    Some(FilePriority::Low) => FilePriority::Normal,
+                    Some(FilePriority::Normal) => FilePriority::High,
+                    Some(FilePriority::High) => FilePriority::Skip,
+                    Some(FilePriority::Skip) => FilePriority::Low,
+                    None => return EventResult::Ignored,
+                };
+                t.set_file_priority(index, next);
+            }
+            Target::MagnetAdd => self.add_typed_magnet(),
+            Target::MagnetCancel => self.close_magnet_dialog(),
+            Target::MagnetField | Target::DialogBackdrop | Target::TransferList => {
+                return EventResult::Ignored;
+            }
+        }
+        EventResult::Consumed
+    }
+
+    /// The wheel over the transfer list.
+    fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        if !matches!(
+            self.target_at(x, y),
+            Some(Target::TransferList | Target::Row(_))
+        ) {
+            return EventResult::Ignored;
+        }
+        let rows = self.wheel.rows(dy);
+        let (_, visible) = Self::transfer_pane(self.content_rect());
+        let last = self.filtered_torrents().len().saturating_sub(visible);
+        let now = self.transfer_scroll;
+        let next = if rows < 0 {
+            now.saturating_sub(rows.unsigned_abs())
+        } else {
+            now.saturating_add(rows.unsigned_abs())
+        }
+        .min(last);
+        if next == now {
+            return EventResult::Ignored;
+        }
+        self.transfer_scroll = next;
+        EventResult::Consumed
+    }
+
+    /// Scroll the transfer list so the selected transfer is on screen, and
+    /// the list not past its end.
+    fn keep_selection_visible(&mut self) {
+        let (_, visible) = Self::transfer_pane(self.content_rect());
+        let ids: Vec<u32> = self.filtered_torrents().iter().map(|t| t.id).collect();
+        if let Some(at) = self
+            .selected_torrent
+            .and_then(|id| ids.iter().position(|v| *v == id))
+        {
+            if at < self.transfer_scroll {
+                self.transfer_scroll = at;
+            } else if at >= self.transfer_scroll.saturating_add(visible) {
+                self.transfer_scroll = at.saturating_add(1).saturating_sub(visible);
+            }
+        }
+        self.transfer_scroll = self.transfer_scroll.min(ids.len().saturating_sub(visible));
+    }
+
+    /// Give the selected transfer the next label, and then none.
+    fn cycle_label(&mut self) -> EventResult {
+        let Some(id) = self.selected_torrent else {
+            return EventResult::Ignored;
+        };
+        let labels = self.labels.clone();
+        let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) else {
+            return EventResult::Ignored;
+        };
+        let at = labels.iter().position(|l| *l == t.label);
+        t.label = match at {
+            None => labels.first().cloned().unwrap_or_default(),
+            Some(i) => labels.get(i.saturating_add(1)).cloned().unwrap_or_default(),
+        };
+        self.status_message = if t.label.is_empty() {
+            format!("{}: no label", t.name)
+        } else {
+            format!("{}: labelled {}", t.name, t.label)
+        };
+        EventResult::Consumed
+    }
+
+    fn open_magnet_dialog(&mut self) {
+        self.show_add_dialog = true;
+        self.magnet_input.clear();
+        self.magnet_error = None;
+        self.add_save_path
+            .clone_from(&self.settings.default_save_path);
+    }
+
+    fn close_magnet_dialog(&mut self) {
+        self.show_add_dialog = false;
+        self.magnet_error = None;
+    }
+
+    /// Add the magnet link typed into the dialog, or say what is wrong with
+    /// it and keep it there to be mended.
+    fn add_typed_magnet(&mut self) {
+        let typed = self.magnet_input.text().trim().to_owned();
+        match MagnetLink::parse(&typed) {
+            Ok(magnet) => {
+                let path = self.add_save_path.clone();
+                let id = self.add_magnet(magnet, Some(&path));
+                self.status_message = String::from(
+                    "Added; a magnet link's files are learned from peers, which this client cannot ask yet",
+                );
+                self.selected_torrent = Some(id);
+                self.close_magnet_dialog();
+                self.keep_selection_visible();
+            }
+            Err(why) => {
+                self.magnet_error = Some(format!("Not a magnet link this client reads: {why}"));
+            }
+        }
+    }
+
+    /// Keys while the magnet dialog is up.
+    fn handle_dialog_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.close_magnet_dialog();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                if self.magnet_input.text().trim().is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.add_typed_magnet();
+                EventResult::Consumed
+            }
+            _ => {
+                let clipboard = self.clipboard.clone();
+                let before = (
+                    self.magnet_input.text().to_owned(),
+                    self.magnet_input.cursor(),
+                    self.magnet_input.selection_anchor(),
+                );
+                let copied = textline::apply_key(
+                    &mut self.magnet_input,
+                    key,
+                    MAX_MAGNET_CHARS,
+                    &clipboard,
+                    12.0,
+                )
+                .copied;
+                let did_copy = copied.is_some();
+                if let Some(text) = copied {
+                    self.clipboard = text;
+                }
+                let changed = self.magnet_input.text() != before.0;
+                if changed {
+                    self.magnet_error = None;
+                }
+                if changed
+                    || did_copy
+                    || self.magnet_input.cursor() != before.1
+                    || self.magnet_input.selection_anchor() != before.2
+                {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+        }
+    }
+
+    /// Keys while the search box has them.
+    fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.search_active = false;
+                self.search_query.clear();
+            }
+            Key::Enter | Key::Tab => self.search_active = false,
+            Key::Backspace => {
+                if self.search_query.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+            }
+            _ => {
+                if key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                let typed: String = key.text.chars().filter(|c| !c.is_control()).collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.search_query.push_str(&typed);
+            }
+        }
+        self.transfer_scroll = 0;
+        EventResult::Consumed
     }
 }
 
@@ -4179,11 +5132,28 @@ impl App for TorrentApp {
     /// A window showing a list of paused or finished torrents has nothing to
     /// redraw, and waking the machine to find that out is what
     /// `known-issues.md` lesson 47 is about.
+    ///
+    /// And only while one has a peer to take a piece from. It asked for a
+    /// tick every 150 ms while anything was "downloading", and with no
+    /// network nothing ever has a peer -- so a transfer set going woke the
+    /// machine seven times a second, for good, to find nothing to do.
+    ///
+    /// Now: while a download runs, since that is when there is news -- every
+    /// `PIECE_STEP` while one has peers, once a second while all are only
+    /// looking for them.
     fn tick_interval(&self) -> Option<Duration> {
-        self.torrents
+        if self.sessions.is_empty() {
+            return None;
+        }
+        let busy = self
+            .torrents
             .iter()
-            .any(|t| t.state == TorrentState::Downloading)
-            .then_some(PIECE_STEP)
+            .any(|t| self.sessions.contains_key(&t.id) && !t.peers.is_empty());
+        Some(if busy {
+            PIECE_STEP
+        } else {
+            Duration::from_secs(1)
+        })
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -4197,9 +5167,12 @@ impl App for TorrentApp {
     }
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
-        RenderTree {
-            commands: self.render_commands(width, height),
-        }
+        self.win_width = width;
+        self.win_height = height;
+        self.keep_selection_visible();
+        let frame = self.frame(width, height);
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 }
 
@@ -4269,15 +5242,13 @@ fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) 
         .collect();
 
     TorrentMetainfo {
-        info_hash: Sha1::digest(name.as_bytes()),
+        info_hash: sha1::sha1(name.as_bytes()),
         name: name.to_string(),
+        name_bytes: name.as_bytes().to_vec(),
+        multi_file: false,
         piece_length: piece_len,
         pieces,
-        files: vec![TorrentFile {
-            path: format!("{name}.iso"),
-            length: size,
-            md5sum: None,
-        }],
+        files: vec![TorrentFile::named(&format!("{name}.iso"), size)],
         total_size: size,
         announce: announce.to_string(),
         announce_list: Vec::new(),
@@ -4349,7 +5320,7 @@ mod tests {
     /// routing and reports whose tests notice. Sixteen of twenty did not.
     /// The settings panel says its settings are not applied.
     ///
-    /// `CANNOT_TRANSFER_LINES` tells a reader the transfers do not happen.
+    /// `TRANSFER_NOTE_LINES` tells a reader the transfers do not happen.
     /// This panel separately reports "Encryption: Prefer" and "DHT: Enabled",
     /// which a reader can believe describes how the client behaves on a
     /// network -- and there is no network stack, so those values have never
@@ -4380,8 +5351,8 @@ about anything -- it drew {} text command(s)",
         assert!(
             texts
                 .iter()
-                .any(|t| t.contains("Not applied") && t.contains("nothing reads these")),
-            "the panel drew settings and did not say they are not applied"
+                .any(|t| t.contains("nothing else here is read yet")),
+            "the panel drew settings and did not say most are not applied"
         );
     }
 
@@ -4423,7 +5394,8 @@ about anything -- it drew {} text command(s)",
         let said = app.open_torrent_file(&path);
 
         assert!(said.starts_with("Opened A Thing"), "said: {said}");
-        assert!(said.contains("nothing contacted"), "said: {said}");
+        // It is fetched as well as listed: opening a torrent starts it.
+        assert!(said.contains("fetching"), "said: {said}");
         assert_eq!(app.torrents.len(), before + 1, "no torrent was added");
 
         let added = app.torrents.last().expect("the torrent");
@@ -4558,9 +5530,9 @@ about anything -- it drew {} text command(s)",
         assert!(t.completed_time.is_none(), "it recorded a completion");
     }
 
-    /// And the window says why, before the user wonders about the swarm.
+    /// And the window says what this client does not do.
     #[test]
-    fn the_window_says_it_cannot_transfer() {
+    fn the_window_says_what_it_does_not_do() {
         let app = TorrentApp::new();
         let cmds = app.render_commands(WINDOW_WIDTH, WINDOW_HEIGHT);
         let texts: Vec<&str> = cmds
@@ -4570,14 +5542,14 @@ about anything -- it drew {} text command(s)",
                 _ => None,
             })
             .collect();
-        for line in CANNOT_TRANSFER_LINES {
+        for line in TRANSFER_NOTE_LINES {
             assert!(texts.contains(&line), "the window never said {line:?}");
         }
         assert!(
-            CANNOT_TRANSFER_LINES
+            TRANSFER_NOTE_LINES
                 .iter()
-                .any(|l| l.contains("not an empty swarm")),
-            "nothing forecloses reading no progress as an unpopular torrent",
+                .any(|l| l.contains("nothing is uploaded")),
+            "nothing says the client does not share what it fetches",
         );
     }
 
@@ -4679,14 +5651,23 @@ about anything -- it drew {} text command(s)",
     fn every_advertised_key_does_something() {
         for (label, what) in SHORTCUTS {
             for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let answered =
-                    [TorrentFilter::All, TorrentFilter::Error]
-                        .into_iter()
-                        .any(|start| {
-                            let mut app = TorrentApp::new();
-                            app.filter = start;
-                            app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
-                        });
+                // And one with a transfer chosen, for the keys that act on
+                // the chosen one.
+                let answered = [TorrentFilter::All, TorrentFilter::Error]
+                    .into_iter()
+                    .map(|start| {
+                        let mut app = TorrentApp::new();
+                        app.filter = start;
+                        app
+                    })
+                    .chain(std::iter::once({
+                        let mut app = seeded();
+                        app.selected_torrent = app.torrents.first().map(|t| t.id);
+                        app
+                    }))
+                    .any(|mut app| {
+                        app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                    });
                 assert!(
                     answered,
                     "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
@@ -4806,199 +5787,150 @@ about anything -- it drew {} text command(s)",
         assert!(app.torrents.len() > 1);
     }
 
-    // -- the download loop --
+    // -- downloads --
 
-    /// `pick_piece` and `set_piece` had no caller, so a client whose module
-    /// doc leads with "piece management with bitfield tracking" never picked
-    /// a piece and every torrent sat at whatever progress it was created with.
-    #[test]
-    fn a_downloading_torrent_takes_pieces_until_it_is_done() {
-        let mut app = seeded();
-        let id = app.torrents.first().map(|t| t.id).expect("a torrent");
-        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
-            t.state = TorrentState::Downloading;
-        }
-        let before = app
-            .torrents
-            .iter()
-            .find(|t| t.id == id)
-            .map_or(0, |t| t.pieces.completed_count());
-        assert!(app.tick_interval().is_some(), "a download needs a clock");
-
-        // The swarm is attached here rather than by the first tick. Until
-        // 2026-09-15 `handle_tick` called `attach_simulated_peers` itself, so
-        // a shipped client invented three peers and ran every torrent to 100%.
-        // What is still worth testing is the picker and the accounting, which
-        // are real; what is not is the swarm arriving out of nowhere.
-        app.attach_simulated_peers(id);
-        assert!(
-            app.torrents
-                .iter()
-                .find(|t| t.id == id)
-                .is_some_and(|t| !t.peers.is_empty()),
-            "the fixture attached no peers"
+    /// A `.torrent` file for `stream`, laid out as `testnet::content` lays
+    /// it out, announcing to `announce`.
+    fn torrent_file(stream: &[u8], announce: &str) -> Vec<u8> {
+        use session::testnet::PIECE;
+        let bytes = |s: &str| BencodeValue::Bytes(s.as_bytes().to_vec());
+        let file = |path: &[&str], len: usize| {
+            let mut d = BTreeMap::new();
+            d.insert(
+                String::from("length"),
+                BencodeValue::Integer(i64::try_from(len).unwrap()),
+            );
+            d.insert(
+                String::from("path"),
+                BencodeValue::List(path.iter().map(|p| bytes(p)).collect()),
+            );
+            BencodeValue::Dict(d)
+        };
+        let pieces: Vec<u8> = stream.chunks(PIECE as usize).flat_map(sha1::sha1).collect();
+        let mut info = BTreeMap::new();
+        info.insert(
+            String::from("files"),
+            BencodeValue::List(vec![
+                file(&["one.bin"], 40_000),
+                file(&["sub", "two.bin"], 50_000),
+                file(&["three.bin"], stream.len() - 90_000),
+            ]),
         );
-
-        // One tick, one piece. It used to take two, because the first tick
-        // was the one that invented the swarm.
-        app.handle_event(&tick());
-        let after = app
-            .torrents
-            .iter()
-            .find(|t| t.id == id)
-            .map_or(0, |t| t.pieces.completed_count());
-        assert_eq!(after, before + 1, "a tick with peers should take one piece");
+        info.insert(String::from("name"), bytes("Set"));
+        info.insert(
+            String::from("piece length"),
+            BencodeValue::Integer(PIECE as i64),
+        );
+        info.insert(String::from("pieces"), BencodeValue::Bytes(pieces));
+        let mut top = BTreeMap::new();
+        top.insert(String::from("announce"), bytes(announce));
+        top.insert(String::from("info"), BencodeValue::Dict(info));
+        bencode_encode(&BencodeValue::Dict(top))
     }
 
-    /// The bytes follow the pieces, and the last piece is the remainder -- so
-    /// a finished torrent reports its real size rather than overshooting.
+    /// **Opening a `.torrent` downloads it.** The window starts a session,
+    /// hears of every piece on its ticks, and ends Complete -- the files on
+    /// disk byte for byte, the tracker marked working, the session gone and
+    /// the clock stopped.
     #[test]
-    fn the_downloaded_total_reaches_the_torrents_size_exactly() {
+    fn opening_a_torrent_downloads_it() {
+        use session::testnet::{Scratch, Serve, content, seeder, tracker_for};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let (_, stream) = content();
+        // The info hash does not depend on the tracker's address, so the
+        // peer can be started before the tracker exists.
+        let draft =
+            TorrentMetainfo::from_bencode(&torrent_file(&stream, "http://127.0.0.1:1/a")).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (peer, peer_thread) = seeder(
+            &draft,
+            Arc::clone(&stream),
+            Serve::Honest,
+            Arc::clone(&stop),
+        );
+        let (url, tracker_thread) =
+            tracker_for(vec![peer], Arc::clone(&stop), Arc::new(AtomicUsize::new(0)));
+        let dir = Scratch::new("window");
+        let file = dir.0.join("set.torrent");
+        std::fs::write(&file, torrent_file(&stream, &url)).unwrap();
+
         let mut app = TorrentApp::new();
-        let torrent = create_sample_torrent("Small", 1000, 256, "https://example/announce");
-        let id = app.add_torrent(torrent, None);
-        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
-            t.state = TorrentState::Downloading;
-            t.downloaded = 0;
-        }
-        app.attach_simulated_peers(id);
-
-        for _ in 0..200 {
-            if app
-                .torrents
-                .iter()
-                .find(|t| t.id == id)
-                .is_some_and(|t| t.pieces.is_complete())
-            {
-                break;
-            }
+        app.settings.default_save_path = dir.0.join("downloads");
+        let said = app.open_torrent_file(&file);
+        assert!(said.contains("fetching"), "{said}");
+        assert_eq!(app.torrents[0].state, TorrentState::CheckingFiles);
+        assert!(app.tick_interval().is_some(), "a download needs a clock");
+        let deadline = std::time::Instant::now() + Duration::from_mins(1);
+        while app.torrents[0].state != TorrentState::Complete
+            && std::time::Instant::now() < deadline
+        {
             app.handle_event(&tick());
+            std::thread::sleep(Duration::from_millis(20));
         }
-        let t = app
-            .torrents
-            .iter()
-            .find(|t| t.id == id)
-            .expect("still there");
-        assert!(t.pieces.is_complete(), "it never finished");
-        assert_eq!(
-            t.downloaded, t.total_size,
-            "the byte total should land exactly on the size"
+        stop.store(true, Ordering::Relaxed);
+        let t = &app.torrents[0];
+        assert_eq!(t.state, TorrentState::Complete, "{:?}", t.error_message);
+        assert_eq!(t.downloaded, t.total_size);
+        assert!(t.pieces.is_complete());
+        assert_eq!(t.trackers[0].status, TrackerStatus::Working);
+        assert!(t.completed_time.is_some());
+        assert!(
+            app.sessions.is_empty(),
+            "a finished download kept its session"
         );
-        assert_eq!(
-            t.state,
-            TorrentState::Seeding,
-            "and it should start seeding"
-        );
-        assert_eq!(app.tick_interval(), None, "and the clock should stop");
+        assert_eq!(app.tick_interval(), None, "and its clock");
+        let saved = dir.0.join("downloads").join("Set");
+        let got = [
+            std::fs::read(saved.join("one.bin")).unwrap(),
+            std::fs::read(saved.join("sub").join("two.bin")).unwrap(),
+            std::fs::read(saved.join("three.bin")).unwrap(),
+        ]
+        .concat();
+        assert!(got == *stream, "the files do not hold the torrent's bytes");
+        peer_thread.join().unwrap();
+        tracker_thread.join().unwrap();
     }
 
-    /// A paused torrent takes nothing.
+    /// Space starts a download, stops it -- its session goes, what it
+    /// fetched stays -- and starts it again.
     #[test]
-    fn a_paused_torrent_makes_no_progress() {
-        let mut app = seeded();
-        let id = app.torrents.first().map(|t| t.id).expect("a torrent");
+    fn space_starts_pauses_and_resumes_a_download() {
+        let mut app = TorrentApp::new();
+        let meta = create_sample_torrent("Paused", 1000, 256, "http://127.0.0.1:1/announce");
+        let id = app.add_torrent(meta, None);
         app.selected_torrent = Some(id);
-        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
-            t.state = TorrentState::Downloading;
-        }
-
+        let state = |app: &TorrentApp| app.torrents.iter().find(|t| t.id == id).unwrap().state;
+        assert_eq!(state(&app), TorrentState::Queued);
         app.handle_event(&press(Key::Space));
-        assert_ne!(
-            app.torrents.iter().find(|t| t.id == id).map(|t| t.state),
-            Some(TorrentState::Downloading),
-            "space should have paused it"
+        assert_eq!(state(&app), TorrentState::CheckingFiles);
+        assert!(app.sessions.contains_key(&id), "nothing was started");
+        app.handle_event(&press(Key::Space));
+        assert_eq!(state(&app), TorrentState::Paused);
+        assert!(
+            !app.sessions.contains_key(&id),
+            "a paused download kept running"
         );
-        let before = app
-            .torrents
-            .iter()
-            .find(|t| t.id == id)
-            .map_or(0, |t| t.pieces.completed_count());
-        for _ in 0..5 {
+        app.handle_event(&press(Key::Space));
+        assert!(app.sessions.contains_key(&id), "resuming started nothing");
+    }
+
+    /// A download a tracker has no peers for says it is looking, and the
+    /// clock slows to once a second: there is nothing to hear of.
+    #[test]
+    fn a_download_with_no_peers_says_it_is_looking() {
+        let (mut app, id) = chosen();
+        app.torrents.iter_mut().find(|t| t.id == id).unwrap().state = TorrentState::Paused;
+        probe::click(&mut app, Target::Resume);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while app.torrents.iter().find(|t| t.id == id).unwrap().state == TorrentState::CheckingFiles
+            && std::time::Instant::now() < deadline
+        {
             app.handle_event(&tick());
+            std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(
-            app.torrents
-                .iter()
-                .find(|t| t.id == id)
-                .map_or(0, |t| t.pieces.completed_count()),
-            before,
-            "a paused torrent kept downloading"
-        );
-
-        app.handle_event(&press(Key::Space));
-        assert_eq!(
-            app.torrents.iter().find(|t| t.id == id).map(|t| t.state),
-            Some(TorrentState::Downloading),
-            "and space again should resume it"
-        );
-    }
-
-    /// The swarm the first tick attaches is uneven on purpose, so
-    /// `piece_availability` returns different counts and the picker's
-    /// rarest-first choice is a real choice rather than a tie broken by index.
-    #[test]
-    fn the_attached_swarm_holds_every_piece_but_not_evenly() {
-        let mut app = seeded();
-        let id = app.torrents.first().map(|t| t.id).expect("a torrent");
-        if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id) {
-            t.state = TorrentState::Downloading;
-        }
-        app.attach_simulated_peers(id);
-        app.handle_event(&tick());
-
-        let t = app.torrents.iter().find(|t| t.id == id).expect("there");
-        assert!(t.peers.len() > 1, "one peer is not a swarm");
-        let counts = piece_availability(&t.peers, t.pieces.total_count());
-        assert!(
-            counts.iter().all(|c| *c > 0),
-            "some piece is held by nobody, so it could never be downloaded"
-        );
-        assert!(
-            counts.iter().any(|c| *c != counts[0]),
-            "every piece is equally available, so rarest-first is a no-op: {counts:?}"
-        );
-    }
-
-    // -- the helpers the picker is fed with --
-
-    #[test]
-    fn availability_counts_the_peers_holding_each_piece() {
-        let mut a = PeerInfo::new("1.1.1.1", 1);
-        let mut b = PeerInfo::new("2.2.2.2", 2);
-        // Piece 0 only: bit 7 of byte 0.
-        a.bitfield = vec![0b1000_0000];
-        // Pieces 0 and 1.
-        b.bitfield = vec![0b1100_0000];
-
-        let counts = piece_availability(&[a, b], 3);
-        assert_eq!(counts, vec![2, 1, 0], "got {counts:?}");
-    }
-
-    #[test]
-    fn the_swarm_bitfield_is_the_union_of_the_peers() {
-        let mut a = PeerInfo::new("1.1.1.1", 1);
-        let mut b = PeerInfo::new("2.2.2.2", 2);
-        a.bitfield = vec![0b1000_0000];
-        b.bitfield = vec![0b0100_0000];
-        assert_eq!(swarm_bitfield(&[a, b], 1), vec![0b1100_0000]);
-    }
-
-    /// Every piece is the same size except the last, which is the remainder.
-    #[test]
-    fn the_last_piece_is_the_remainder() {
-        // 1000 bytes in 4 pieces: 250 each, and the last takes what is left.
-        assert_eq!(piece_size(1000, 4, 0), 250);
-        assert_eq!(piece_size(1000, 4, 3), 250);
-        // 1001 bytes in 4: 250 each and 251 at the end.
-        assert_eq!(piece_size(1001, 4, 0), 250);
-        assert_eq!(piece_size(1001, 4, 3), 251);
-        let total: u64 = (0..4).map(|i| piece_size(1001, 4, i)).sum();
-        assert_eq!(total, 1001, "the pieces should sum to the whole");
-    }
-
-    #[test]
-    fn a_torrent_with_no_pieces_has_no_piece_size() {
-        assert_eq!(piece_size(1000, 0, 0), 0, "and does not divide by zero");
+        assert!(texts(&app).iter().any(|t| t == "Looking for peers"));
+        assert_eq!(app.tick_interval(), Some(Duration::from_secs(1)));
     }
 
     // -- the list --
@@ -5067,9 +5999,10 @@ about anything -- it drew {} text command(s)",
 
         app.handle_event(&key_ev(Key::R, true));
         assert!(
-            app.torrents
-                .iter()
-                .any(|t| t.state == TorrentState::Downloading),
+            app.torrents.iter().any(|t| matches!(
+                t.state,
+                TorrentState::Downloading | TorrentState::CheckingFiles
+            )),
             "nothing resumed"
         );
     }
@@ -5180,34 +6113,6 @@ about anything -- it drew {} text command(s)",
         let outer = val.as_dict().unwrap();
         let inner = outer.get("inner").unwrap().as_dict().unwrap();
         assert_eq!(inner.get("key").unwrap().as_int(), Some(42));
-    }
-
-    // SHA-1 tests
-    #[test]
-    fn test_sha1_empty() {
-        let hash = Sha1::digest(b"");
-        assert_eq!(
-            hex_encode(&hash),
-            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
-        );
-    }
-
-    #[test]
-    fn test_sha1_abc() {
-        let hash = Sha1::digest(b"abc");
-        assert_eq!(
-            hex_encode(&hash),
-            "a9993e364706816aba3e25717850c26c9cd0d89d"
-        );
-    }
-
-    #[test]
-    fn test_sha1_long() {
-        let hash = Sha1::digest(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
-        assert_eq!(
-            hex_encode(&hash),
-            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
-        );
     }
 
     // Hex encoding tests
@@ -5566,7 +6471,8 @@ about anything -- it drew {} text command(s)",
         app.pause_torrent(id);
         assert_eq!(app.torrents[0].state, TorrentState::Paused);
         app.resume_torrent(id);
-        assert_eq!(app.torrents[0].state, TorrentState::Downloading);
+        assert_eq!(app.torrents[0].state, TorrentState::CheckingFiles);
+        assert!(app.sessions.contains_key(&id));
     }
 
     #[test]
@@ -5707,18 +6613,12 @@ about anything -- it drew {} text command(s)",
         let mut meta =
             create_sample_torrent("Shouty", 4096, 256, "http://tracker.example.com/announce");
         meta.files = vec![
-            TorrentFile {
-                path: "Some Show/Season 1/Episode 01 - A Very Long Episode Title Indeed \
-                       That Will Certainly Not Fit In The Column.mkv"
-                    .to_string(),
-                length: 4096,
-                md5sum: None,
-            },
-            TorrentFile {
-                path: "readme.txt".to_string(),
-                length: 12,
-                md5sum: None,
-            },
+            TorrentFile::named(
+                "Some Show/Season 1/Episode 01 - A Very Long Episode Title Indeed \
+                       That Will Certainly Not Fit In The Column.mkv",
+                4096,
+            ),
+            TorrentFile::named("readme.txt", 12),
         ];
         let id = app.add_torrent(meta, None);
         app.selected_torrent = Some(id);
@@ -5820,12 +6720,13 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn no_peer_row_cell_escapes_its_column() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
+        let mut frame = Frame::new(900.0, 400.0);
         // Render the panel directly rather than the whole app: a full render
         // puts toolbar and sidebar text at x values that happen to fall inside
         // a column's range, and the assertion would then fail on chrome that
         // was never part of this table.
-        app.render_peers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        app.render_peers(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         // 6 header labels + 2 peers x 6 cells.
         assert_cells_fit(&cmds, PEER_COLUMNS, 0.0, 18, "peers");
     }
@@ -5833,8 +6734,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn no_file_row_cell_escapes_its_column() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_files(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_files(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         // 3 header labels + 2 files x 3 cells.
         assert_cells_fit(&cmds, FILE_COLUMNS, 0.0, 9, "files");
     }
@@ -5842,8 +6744,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn no_tracker_row_cell_escapes_its_column() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_trackers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_trackers(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         // 5 header labels + at least the one over-long tracker's 5 cells.
         assert_cells_fit(&cmds, TRACKER_COLUMNS, 0.0, 10, "trackers");
     }
@@ -5851,8 +6754,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn an_overlong_file_path_keeps_its_filename() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_files(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_files(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         let names = first_column_cells(&cmds, FILE_COLUMNS, 0.0);
         let long = names
             .iter()
@@ -5871,8 +6775,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn a_short_file_path_is_left_alone() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_files(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_files(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         let names = first_column_cells(&cmds, FILE_COLUMNS, 0.0);
         assert!(
             names.iter().any(|n| n == "readme.txt"),
@@ -5883,8 +6788,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn an_overlong_tracker_url_keeps_its_announce_path() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_trackers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_trackers(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         let urls = first_column_cells(&cmds, TRACKER_COLUMNS, 0.0);
         let long = urls
             .iter()
@@ -5899,8 +6805,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn an_overlong_peer_client_name_is_marked_as_cut() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_peers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_peers(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         let edges = column_edges(PEER_COLUMNS, 0.0);
         let (client_x, _) = edges[1];
         let clients: Vec<&String> = cmds
@@ -5998,5 +6905,636 @@ about anything -- it drew {} text command(s)",
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ── The pointer, the dialog, the search, and the file priorities ──
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for TorrentApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+        /// Drawn at the app's own size, which these tests leave at `SIZE`.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame(self.win_width, self.win_height)
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    fn texts(app: &TorrentApp) -> Vec<String> {
+        app.frame(app.win_width, app.win_height)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn press_at(app: &mut TorrentApp, x: f32, y: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// The seeded window with its first transfer chosen.
+    fn chosen() -> (TorrentApp, u32) {
+        let mut app = seeded();
+        let id = app.filtered_torrents()[0].id;
+        app.selected_torrent = Some(id);
+        (app, id)
+    }
+
+    /// The notice was drawn at the top of the window, then painted over by
+    /// the background and the header.
+    #[test]
+    fn the_notice_is_drawn_where_it_can_be_read() {
+        let app = TorrentApp::new();
+        let cmds = app
+            .frame(app.win_width, app.win_height)
+            .into_tree()
+            .commands;
+        for line in TRANSFER_NOTE_LINES {
+            let at = cmds
+                .iter()
+                .position(|c| matches!(c, RenderCommand::Text { text, .. } if text == line))
+                .unwrap_or_else(|| panic!("never drew {line:?}"));
+            let RenderCommand::Text { x, y, .. } = &cmds[at] else {
+                unreachable!()
+            };
+            assert!(
+                *y >= HEADER_H + TAB_H && *x >= SIDEBAR_W,
+                "{line:?} at ({x}, {y})"
+            );
+            for later in &cmds[at + 1..] {
+                if let RenderCommand::FillRect {
+                    x: fx,
+                    y: fy,
+                    width,
+                    height,
+                    color,
+                    ..
+                } = later
+                {
+                    let covers = *fx <= *x && *x < fx + width && *fy <= *y && *y < fy + height;
+                    assert!(!(covers && color.a == 255), "{line:?} is painted over");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_toolbar_answers_the_pointer() {
+        let (mut app, id) = chosen();
+        let state = |app: &TorrentApp| app.torrents.iter().find(|t| t.id == id).unwrap().state;
+        app.torrents.iter_mut().find(|t| t.id == id).unwrap().state = TorrentState::Downloading;
+        assert!(
+            probe::rect_of(&app, Target::Resume).is_none(),
+            "Resume is offered on a running transfer"
+        );
+        probe::click(&mut app, Target::Pause);
+        assert_eq!(state(&app), TorrentState::Paused);
+        probe::click(&mut app, Target::Resume);
+        assert_eq!(state(&app), TorrentState::CheckingFiles);
+        probe::click(&mut app, Target::PauseAll);
+        assert!(app.torrents.iter().all(|t| !matches!(
+            t.state,
+            TorrentState::Downloading | TorrentState::CheckingFiles
+        )));
+        assert!(app.sessions.is_empty(), "Pause all left a download running");
+        probe::click(&mut app, Target::ResumeAll);
+        assert_eq!(state(&app), TorrentState::CheckingFiles);
+        let n = app.torrents.len();
+        probe::click(&mut app, Target::Remove);
+        assert_eq!(app.torrents.len(), n - 1);
+        assert!(!app.torrents.iter().any(|t| t.id == id));
+        probe::click(&mut app, Target::Open);
+        assert!(app.picker.is_open(), "Open\u{2026} opened nothing");
+    }
+
+    #[test]
+    fn the_sidebar_filters_and_labels_answer_the_pointer() {
+        let mut app = seeded();
+        probe::click(&mut app, Target::Filter(TorrentFilter::Paused));
+        assert_eq!(app.filter, TorrentFilter::Paused);
+        let software = app.labels.iter().position(|l| l == "Software").unwrap();
+        probe::click(&mut app, Target::Filter(TorrentFilter::All));
+        probe::click(&mut app, Target::Label(software));
+        assert_eq!(app.selected_label.as_deref(), Some("Software"));
+        assert!(
+            app.filtered_torrents()
+                .iter()
+                .all(|t| t.label == "Software")
+        );
+        assert!(!app.filtered_torrents().is_empty());
+        probe::click(&mut app, Target::Label(software));
+        assert_eq!(
+            app.selected_label, None,
+            "a second press did not show them all"
+        );
+    }
+
+    #[test]
+    fn the_tabs_answer_the_pointer() {
+        let mut app = TorrentApp::new();
+        for tab in Tab::ALL.iter().rev() {
+            probe::click(&mut app, Target::Tab(*tab));
+            assert_eq!(app.active_tab, *tab);
+        }
+    }
+
+    #[test]
+    fn a_column_head_sorts_and_a_second_press_reverses() {
+        let mut app = seeded();
+        probe::click(&mut app, Target::SortBy(SortColumn::Name));
+        assert_eq!(app.sort_column, SortColumn::Name);
+        let ascending = app.sort_ascending;
+        let first = app.filtered_torrents()[0].name.clone();
+        probe::click(&mut app, Target::SortBy(SortColumn::Name));
+        assert_eq!(app.sort_ascending, !ascending);
+        assert_ne!(
+            app.filtered_torrents()[0].name,
+            first,
+            "the order did not turn round"
+        );
+        let arrow = if app.sort_ascending {
+            "Name \u{25B2}"
+        } else {
+            "Name \u{25BC}"
+        };
+        assert!(
+            texts(&app).iter().any(|t| t == arrow),
+            "the head does not say it is sorted"
+        );
+    }
+
+    #[test]
+    fn a_row_press_chooses_and_a_second_shows_its_details() {
+        let mut app = seeded();
+        let id = app.filtered_torrents()[1].id;
+        probe::click(&mut app, Target::Row(id));
+        assert_eq!(app.selected_torrent, Some(id));
+        assert_eq!(app.active_tab, Tab::Transfers);
+        probe::click(&mut app, Target::Row(id));
+        assert_eq!(app.active_tab, Tab::Details);
+    }
+
+    fn many_torrents(n: usize) -> TorrentApp {
+        let mut app = TorrentApp::new();
+        for i in 0..n {
+            let meta =
+                create_sample_torrent(&format!("Item {i:02}"), 1000, 100, "udp://t.example/");
+            app.add_torrent(meta, None);
+        }
+        app.sort_column = SortColumn::Name;
+        app.sort_ascending = true;
+        app
+    }
+
+    /// Rows past the bottom were not drawn, and nothing scrolled.
+    #[test]
+    fn the_transfer_list_scrolls_and_follows_the_selection() {
+        let mut app = many_torrents(40);
+        let (_, rows) = TorrentApp::transfer_pane(app.content_rect());
+        assert!(rows < 40, "the list is not long enough to scroll");
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::TransferList, -3.0),
+            EventResult::Consumed
+        );
+        assert!(app.transfer_scroll > 0);
+        for _ in 0..60 {
+            probe::scroll_at_point(&mut app, Target::TransferList, -3.0);
+        }
+        assert_eq!(app.transfer_scroll, 40 - rows, "the wheel ran past the end");
+        for _ in 0..60 {
+            probe::scroll_at_point(&mut app, Target::TransferList, 3.0);
+        }
+        assert_eq!(app.transfer_scroll, 0);
+        // Newest name first, so the list on screen is not the order the
+        // transfers were added in -- Down must walk the one on screen.
+        app.sort_ascending = false;
+        for _ in 0..30 {
+            probe::key(&mut app, &probe::press(Key::Down));
+        }
+        let chosen = app.selected_torrent.unwrap();
+        assert_eq!(
+            app.filtered_torrents()[29].id,
+            chosen,
+            "Down did not walk the list on screen"
+        );
+        assert!(
+            probe::rect_of(&app, Target::Row(chosen)).is_some(),
+            "the chosen transfer is off screen"
+        );
+    }
+
+    #[test]
+    fn a_magnet_link_is_added_from_the_dialog() {
+        let mut app = TorrentApp::new();
+        probe::key(&mut app, &probe::ctrl(Key::U));
+        assert!(app.show_add_dialog, "Ctrl+U opened nothing");
+        probe::type_str(&mut app, "not a magnet");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        let why = app
+            .magnet_error
+            .clone()
+            .expect("a bad link was taken without a word");
+        assert!(texts(&app).contains(&why), "the reason is not on screen");
+        assert!(app.torrents.is_empty());
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        probe::type_str(
+            &mut app,
+            &format!("magnet:?xt=urn:btih:{hash}&dn=Test%20Film"),
+        );
+        assert!(
+            app.magnet_error.is_none(),
+            "typing did not clear the complaint"
+        );
+        probe::click(&mut app, Target::MagnetAdd);
+        assert!(!app.show_add_dialog);
+        assert_eq!(app.torrents.len(), 1);
+        let t = &app.torrents[0];
+        assert_eq!(t.name, "Test Film");
+        assert_eq!(hex_encode(&t.magnet.as_ref().unwrap().info_hash), hash);
+        assert_eq!(app.selected_torrent, Some(t.id));
+        // Cancel and Escape leave without adding.
+        probe::click(&mut app, Target::AddMagnet);
+        probe::type_str(
+            &mut app,
+            "magnet:?xt=urn:btih:ffffffffffffffffffffffffffffffffffffffff",
+        );
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!app.show_add_dialog);
+        assert_eq!(app.torrents.len(), 1, "Escape added the link");
+    }
+
+    #[test]
+    fn a_press_behind_the_magnet_dialog_reaches_nothing() {
+        let mut app = seeded();
+        let id = app.filtered_torrents()[0].id;
+        let row = probe::rect_of(&app, Target::Row(id)).unwrap();
+        probe::click(&mut app, Target::AddMagnet);
+        let (x, y) = (row.x + 4.0, row.y + 4.0);
+        assert_eq!(
+            app.frame(app.win_width, app.win_height).hit_test(x, y),
+            Some(Target::DialogBackdrop)
+        );
+        assert_eq!(press_at(&mut app, x, y), EventResult::Ignored);
+        assert!(app.show_add_dialog);
+        assert_eq!(
+            app.selected_torrent, None,
+            "the press reached the row behind"
+        );
+        // And its keys are the dialog's: a `1` goes in the link, not the filter.
+        app.filter = TorrentFilter::Paused;
+        probe::type_str(&mut app, "1");
+        assert_eq!(app.filter, TorrentFilter::Paused);
+        assert_eq!(app.magnet_input.text(), "1");
+    }
+
+    #[test]
+    fn the_search_box_filters_and_escape_clears_it() {
+        let mut app = seeded();
+        probe::click(&mut app, Target::Search);
+        assert!(app.search_active);
+        probe::type_str(&mut app, "libre");
+        assert_eq!(app.search_query, "libre");
+        let names: Vec<&str> = app
+            .filtered_torrents()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, ["LibreOffice 7.6.4"]);
+        // Delete is the search's backspace's neighbour, not a removal, while
+        // the box has the keys.
+        let n = app.torrents.len();
+        app.selected_torrent = app.torrents.first().map(|t| t.id);
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(
+            app.torrents.len(),
+            n,
+            "Delete in the search removed a transfer"
+        );
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!app.search_active && app.search_query.is_empty());
+        probe::key(&mut app, &probe::press(Key::Slash));
+        assert!(app.search_active, "/ did not start a search");
+        // A press anywhere else takes the keys back from the box.
+        probe::click(&mut app, Target::TransferList);
+        assert!(!app.search_active, "the search box kept the keys");
+        probe::type_str(&mut app, "q");
+        assert!(
+            app.search_query.is_empty(),
+            "a key went into the search box"
+        );
+    }
+
+    #[test]
+    fn a_label_can_be_given_and_chosen_by() {
+        let (mut app, id) = chosen();
+        let label = |app: &TorrentApp| {
+            app.torrents
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .label
+                .clone()
+        };
+        app.torrents
+            .iter_mut()
+            .find(|t| t.id == id)
+            .unwrap()
+            .label
+            .clear();
+        probe::key(&mut app, &probe::press(Key::L));
+        assert_eq!(label(&app), app.labels[0]);
+        app.active_tab = Tab::Details;
+        probe::click(&mut app, Target::CycleLabel);
+        assert_eq!(label(&app), app.labels[1]);
+        for _ in 1..app.labels.len() {
+            probe::click(&mut app, Target::CycleLabel);
+        }
+        assert_eq!(label(&app), "", "the cycle does not come back to none");
+        probe::click(&mut app, Target::ToggleSequential);
+        assert!(
+            app.torrents
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .sequential_download
+        );
+    }
+
+    /// Two files over four pieces of a hundred bytes: the third piece holds
+    /// the end of the first file and the start of the second.
+    fn two_files() -> (TorrentApp, u32) {
+        let mut app = TorrentApp::new();
+        let mut meta = create_sample_torrent("Pair", 400, 100, "udp://t.example/");
+        meta.files = vec![
+            TorrentFile::named("first.bin", 250),
+            TorrentFile::named("second.bin", 150),
+        ];
+        let id = app.add_torrent(meta, None);
+        app.selected_torrent = Some(id);
+        app.active_tab = Tab::Files;
+        (app, id)
+    }
+
+    /// A file set to Skip was downloaded all the same: nothing carried its
+    /// priority to the pieces the picker reads.
+    #[test]
+    fn a_skipped_file_is_not_downloaded() {
+        let (mut app, id) = two_files();
+        // Normal -> High -> Skip.
+        probe::click(&mut app, Target::FilePriority(0));
+        probe::click(&mut app, Target::FilePriority(0));
+        let t = app.torrents.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(t.file_priorities[0], FilePriority::Skip);
+        assert_eq!(
+            (0..4)
+                .map(|p| t.pieces.priority(p).unwrap())
+                .collect::<Vec<_>>(),
+            [0, 0, 5, 5],
+            "a piece shared with a wanted file was skipped, or a skipped one kept"
+        );
+        assert_eq!(
+            t.wanted(),
+            vec![false, false, true, true],
+            "the download would fetch a skipped file's pieces"
+        );
+    }
+
+    #[test]
+    fn the_list_of_keys_is_modal_to_the_pointer() {
+        let mut app = seeded();
+        let id = app.filtered_torrents()[0].id;
+        let row = probe::rect_of(&app, Target::Row(id)).unwrap();
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help);
+        press_at(&mut app, row.x + 4.0, row.y + 4.0);
+        assert!(!app.show_help, "a press left the list up");
+        assert_eq!(
+            app.selected_torrent, None,
+            "the press went through the list"
+        );
+    }
+
+    #[test]
+    fn enter_shows_the_chosen_transfers_details() {
+        let (mut app, _) = chosen();
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(app.active_tab, Tab::Details);
+    }
+
+    // ------------------------------------------------------------------
+    // A .torrent read as it is: its own bytes hashed, its paths checked
+    // ------------------------------------------------------------------
+
+    /// A whole `.torrent` around `info`, which is written as given.
+    fn raw_torrent(info: &[u8]) -> Vec<u8> {
+        [
+            b"d8:announce20:http://t.example/ann4:info".as_slice(),
+            info,
+            b"e",
+        ]
+        .concat()
+    }
+
+    /// A multi-file torrent in folder `dir` whose `files` list is `files`,
+    /// with one piece's hash -- right for up to 16 KiB of files.
+    fn multi(files: &[u8]) -> Result<TorrentMetainfo, String> {
+        let info = [
+            b"d5:files".as_slice(),
+            files,
+            b"4:name3:dir12:piece lengthi16384e6:pieces20:",
+            &[7; 20],
+            b"e",
+        ]
+        .concat();
+        TorrentMetainfo::from_bencode(&raw_torrent(&info))
+    }
+
+    /// A single-file torrent: `name`, `length` bytes, pieces of
+    /// `piece_length`, with `hashes` piece hashes.
+    fn single(
+        name: &[u8],
+        length: i64,
+        piece_length: i64,
+        hashes: usize,
+    ) -> Result<TorrentMetainfo, String> {
+        let info = [
+            format!("d6:lengthi{length}e4:name{}:", name.len()).as_bytes(),
+            name,
+            format!("12:piece lengthi{piece_length}e6:pieces{}:", hashes * 20).as_bytes(),
+            &vec![7; hashes * 20],
+            b"e",
+        ]
+        .concat();
+        TorrentMetainfo::from_bencode(&raw_torrent(&info))
+    }
+
+    /// **The info hash is taken over the info dictionary's own bytes.** One
+    /// written with its keys out of order -- legal to read, not canonical --
+    /// hashed as re-encoded would be a torrent no tracker or peer knows.
+    #[test]
+    fn the_info_hash_is_over_the_files_own_bytes() {
+        let info = [
+            b"d4:name4:test6:lengthi5e12:piece lengthi16384e6:pieces20:".as_slice(),
+            &[7; 20],
+            b"e",
+        ]
+        .concat();
+        let meta = TorrentMetainfo::from_bencode(&raw_torrent(&info)).unwrap();
+        assert_eq!(meta.info_hash, sha1::sha1(&info));
+        let (value, _) = BencodeParser::parse(&info).unwrap();
+        assert_ne!(
+            meta.info_hash,
+            sha1::sha1(&bencode_encode(&value)),
+            "re-encoding sorted the keys, so this test proves nothing"
+        );
+    }
+
+    /// A path that would climb out of the download's folder, or a part that
+    /// could not be one name, is refused -- the whole torrent, not the file.
+    #[test]
+    fn a_path_that_leaves_the_folder_is_refused() {
+        for (files, what) in [
+            (b"ld6:lengthi5e4:pathl2:..1:xeee".as_slice(), ".."),
+            (b"ld6:lengthi5e4:pathl1:.eee", "."),
+            (b"ld6:lengthi5e4:pathl0:eee", "an empty part"),
+            (b"ld6:lengthi5e4:pathl3:a/beee", "a slash"),
+            (b"ld6:lengthi5e4:pathl3:a\0beee", "a NUL"),
+        ] {
+            let err = multi(files).expect_err(what);
+            assert!(err.contains("outside its folder"), "{what}: {err}");
+        }
+        let err = single(b"..", 5, 16384, 1).expect_err("a name of ..");
+        assert!(err.contains("outside its folder"), "{err}");
+        let ok = multi(b"ld6:lengthi5e4:pathl1:a1:beee").unwrap();
+        assert_eq!(ok.files[0].parts, vec![b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(ok.files[0].path, "a/b");
+    }
+
+    /// A file entry without a length, or with a negative one, is an error:
+    /// skipped, it would shift every byte after it into the wrong file.
+    #[test]
+    fn a_file_without_a_length_is_an_error_not_a_gap() {
+        assert!(
+            multi(b"ld4:pathl1:aeee")
+                .unwrap_err()
+                .contains("without a length")
+        );
+        assert!(multi(b"ld6:lengthi-1e4:pathl1:aeee").is_err());
+        assert!(
+            multi(b"ld6:lengthi5eee")
+                .unwrap_err()
+                .contains("without a path")
+        );
+        assert!(
+            multi(b"ld6:lengthi5e4:pathleee")
+                .unwrap_err()
+                .contains("empty path")
+        );
+        assert!(single(b"a", -5, 16384, 1).is_err());
+    }
+
+    /// One hash a piece, and as many pieces as the files fill; a piece
+    /// length that is not a size, or past what this client holds, is refused.
+    #[test]
+    fn the_pieces_must_fit_the_files() {
+        assert!(single(b"a", 5, 16384, 1).is_ok());
+        assert!(
+            single(b"a", 5, 16384, 2)
+                .unwrap_err()
+                .contains("which is 1")
+        );
+        assert!(
+            single(b"a", 16385, 16384, 1)
+                .unwrap_err()
+                .contains("which is 2")
+        );
+        assert!(
+            single(b"a", 0, 16384, 0).is_ok(),
+            "an empty file has no pieces"
+        );
+        assert!(single(b"a", 5, 0, 1).is_err());
+        assert!(single(b"a", 5, -16384, 1).is_err());
+        let huge = i64::try_from(MAX_PIECE_LENGTH).unwrap() * 2;
+        assert!(
+            single(b"a", 5, huge, 1)
+                .unwrap_err()
+                .contains("more than this client holds")
+        );
+    }
+
+    /// A name that is not UTF-8 is kept as its bytes, and shown with them.
+    #[test]
+    fn a_name_that_is_not_utf8_is_kept_as_its_bytes() {
+        let meta = single(b"caf\xe9", 5, 16384, 1).unwrap();
+        assert_eq!(meta.name_bytes, b"caf\xe9");
+        assert_eq!(meta.name, "caf\\xE9");
+        assert_eq!(meta.files[0].parts, vec![b"caf\xe9".to_vec()]);
+    }
+
+    /// Nesting past the bound is an error, not a stack overflow.
+    #[test]
+    fn deep_nesting_is_refused_not_a_crash() {
+        let err = BencodeParser::parse(&vec![b'l'; 100_000]).unwrap_err();
+        assert!(err.contains("nested"), "{err}");
+        // As deep as the bound allows still reads.
+        let fine = [vec![b'l'; 60], vec![b'e'; 60]].concat();
+        assert!(BencodeParser::parse(&fine).is_ok());
+    }
+
+    /// The span of a dictionary's value is its bytes as written.
+    #[test]
+    fn a_dictionary_values_span_is_its_bytes() {
+        let data = b"d1:ai1e4:infod1:bi2ee1:zi3ee";
+        let span = BencodeParser::dict_value_span(data, "info")
+            .unwrap()
+            .unwrap();
+        assert_eq!(&data[span], b"d1:bi2ee");
+        assert_eq!(BencodeParser::dict_value_span(data, "nope").unwrap(), None);
+        assert!(BencodeParser::dict_value_span(b"li1ee", "info").is_err());
+        assert!(BencodeParser::dict_value_span(b"d1:a", "info").is_err());
+    }
+
+    /// Bytes shown as text: what is not UTF-8 is written `\xNN`.
+    #[test]
+    fn bytes_are_shown_as_they_are() {
+        assert_eq!(shown_bytes(b"plain"), "plain");
+        assert_eq!(shown_bytes("caf\u{e9}".as_bytes()), "caf\u{e9}");
+        assert_eq!(shown_bytes(b"a\xffb\xfe"), "a\\xFFb\\xFE");
     }
 }

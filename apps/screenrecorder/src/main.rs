@@ -3051,7 +3051,8 @@ impl ScreenRecorderApp {
             max_width: Some(col_w),
             overflow: TextOverflow::Ellipsis,
         });
-        let dir_display = self.output.save_directory.to_string_lossy().to_string();
+        let dir_display =
+            quoting::escape_unprintable(self.output.save_directory.as_os_str().as_encoded_bytes());
         cmds.push(RenderCommand::Text {
             x: x + col_w * 2.0,
             y: row2_y + 16.0,
@@ -3465,7 +3466,9 @@ impl ScreenRecorderApp {
         cmds.push(RenderCommand::Text {
             x: x + 8.0,
             y: cy + 8.0,
-            text: self.output.save_directory.to_string_lossy().to_string(),
+            text: quoting::escape_unprintable(
+                self.output.save_directory.as_os_str().as_encoded_bytes(),
+            ),
             font_size: 12.0,
             color: self.palette.text,
             font_weight: FontWeightHint::Regular,

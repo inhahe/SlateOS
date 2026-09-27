@@ -45,6 +45,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -93,6 +94,9 @@ const ALERT_PANEL_FOOTER: f32 = 2.0;
 /// cannot tell is hidden is worse than one alert fewer, since the whole point
 /// of the panel is to say whether anything is wrong.
 const ALERT_MAX_ROWS: usize = 5;
+
+/// Why a priority cannot be changed, in the words the status bar uses.
+const CANNOT_RENICE: &str = "this system cannot yet change another program's priority";
 
 // ============================================================================
 // Ring buffer for time-series data
@@ -705,7 +709,9 @@ impl SysMonitorState {
             let started_secs = stat.starttime_ticks / procinfo::TICKS_PER_SEC;
             out.push(ProcessInfo {
                 pid: u32::try_from(stat.pid).unwrap_or(u32::MAX),
-                name: String::from_utf8_lossy(&stat.comm).into_owned(),
+                // A process names itself with any bytes it likes; shown
+                // as they are, escapes for what is not printable text.
+                name: quoting::escape_unprintable(&stat.comm),
                 status: Self::status_from_proc(stat.state),
                 // Left at zero deliberately: a percentage needs two samples of
                 // the counter and this is one. Inventing a number here is the
@@ -745,16 +751,16 @@ impl SysMonitorState {
         if let Ok(Some(cpu)) = fs.cpu()
             && let Some(model) = cpu.model
         {
-            self.system_info.cpu_model = String::from_utf8_lossy(&model).into_owned();
+            self.system_info.cpu_model = quoting::escape_unprintable(&model);
         }
         if let Ok(Some(name)) = fs.hostname() {
-            self.system_info.hostname = String::from_utf8_lossy(&name).trim().to_string();
+            self.system_info.hostname = quoting::escape_unprintable(name.trim_ascii());
         }
         if let Ok(Some(version)) = fs.version() {
             // `/proc/version` is one long sentence; the kernel release is its
             // third word. Taking the whole line would fill a field the layout
             // gives twenty characters to.
-            let text = String::from_utf8_lossy(&version).into_owned();
+            let text = quoting::escape_unprintable(&version);
             if let Some(release) = text.split_whitespace().nth(2) {
                 self.system_info.kernel_version = release.to_string();
             }
@@ -926,7 +932,7 @@ impl SysMonitorState {
         if self.proc_unreadable && self.processes.is_empty() {
             self.status_message = format!(
                 "Cannot read {} -- nothing here is a measurement of this machine",
-                procinfo::ProcFs::new().root().display()
+                procinfo::ProcFs::new().root().shown()
             );
             self.system_info.process_count = 0;
             self.system_info.running_count = 0;
@@ -1415,8 +1421,13 @@ impl SysMonitorState {
             ContextAction::SetHighPriority
             | ContextAction::SetNormalPriority
             | ContextAction::SetLowPriority => {
-                let level = action.label();
-                self.status_message = format!("{level} for PID {target_pid} (not yet implemented)");
+                // Not wired, on purpose. libc's `setpriority` ignores the pid
+                // it is given and renices the caller, so this would
+                // reprioritise the task manager itself and report that the
+                // chosen process had changed. Waits on
+                // requests/e-ad-renicing-another-process-renices-the-caller.md.
+                self.status_message =
+                    format!("Cannot change PID {target_pid}'s priority: {CANNOT_RENICE}");
             }
         }
     }
@@ -5005,6 +5016,31 @@ mod tests {
 
     /// A monitor showing `n` processes, with the visible list rebuilt so the
     /// scroll bound has something to clamp against.
+    /// The three priority actions say plainly that they cannot, naming the
+    /// process -- not "(not yet implemented)" -- and change nothing.
+    #[test]
+    fn the_priority_actions_say_why_they_cannot() {
+        let mut s = app_with_processes(2);
+        let before: Vec<(u32, ProcessStatus)> =
+            s.processes.iter().map(|p| (p.pid, p.status)).collect();
+        for action in [
+            ContextAction::SetHighPriority,
+            ContextAction::SetNormalPriority,
+            ContextAction::SetLowPriority,
+        ] {
+            s.status_message.clear();
+            s.execute_context_action(action, 7);
+            assert_eq!(
+                s.status_message,
+                "Cannot change PID 7's priority: this system cannot yet change another program's priority",
+                "{action:?}"
+            );
+        }
+        let after: Vec<(u32, ProcessStatus)> =
+            s.processes.iter().map(|p| (p.pid, p.status)).collect();
+        assert_eq!(before, after);
+    }
+
     fn app_with_processes(n: usize) -> SysMonitorState {
         let mut app = SysMonitorState::new();
         app.processes = (0..n)

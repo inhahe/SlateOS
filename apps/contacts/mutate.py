@@ -66,6 +66,13 @@ places and both invisible to all 230 tests that existed at the time:
     show and `Frame::hit` trims a hit box to nothing -- the overrun leaves a
     trace only in the *fills*.  See known-issues.md lesson 107.
 
+The address book, 2026-09-25.  The app kept nothing: the book lived in
+memory and was gone when the window closed, and the only way to keep anyone
+was a vCard export.  Saving an edit also dropped every number, address and
+account the form does not show.  The rows from "a save writes nothing" on
+cover the book it keeps now (design-decisions §1205's kind of file), the
+store's count of its own changes, the edit, and the close.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -78,6 +85,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
+
+ROUND = "an_address_book_written_and_read_again_is_the_same_book"
+REFUSED = "an_address_book_that_cannot_be_read_whole_is_refused_and_says_where"
+KEPT = "what_is_added_is_there_next_time"
+COUNTED = "every_change_to_the_store_is_counted"
+FAILING = "a_save_that_fails_says_so_and_the_next_change_tries_again"
+EDIT_ASKS = "closing_over_a_contact_being_edited_asks_and_save_keeps_it"
+EDIT_LEAVES = "closing_over_an_edit_can_leave_without_it"
+SAVE_ASKS = "closing_while_a_save_fails_asks_first"
+EDITING = "editing_keeps_what_the_form_does_not_show"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -129,8 +146,8 @@ MUTATIONS = [
     # -- what is painted -----------------------------------------------------
     (
         "only the list is filled, leaving the rest of the window bare",
-        "        f.push(fill(l.window, BASE, 0.0));",
-        "        f.push(fill(l.list, BASE, 0.0));",
+        "        f.push(fill(l.window, self.palette.base, 0.0));",
+        "        f.push(fill(l.list, self.palette.base, 0.0));",
         ["the_window_is_painted_edge_to_edge_at_every_size"],
     ),
     (
@@ -329,8 +346,8 @@ MUTATIONS = [
     ),
     (
         "saving an edit writes only what the form holds",
-        "                    updated.favorite = existing.favorite;",
-        "                    updated.favorite = false;",
+        "        let mut c = existing.clone();\n",
+        "        let mut c = existing.clone();\n        c.favorite = false;\n",
         ["saving_an_edit_keeps_what_the_form_does_not_carry"],
     ),
     (
@@ -348,8 +365,8 @@ MUTATIONS = [
     # -- the entry points the platform calls ---------------------------------
     (
         "the picture is drawn at the size it was launched with rather than the given one",
-        "        self.frame(width, height).into_tree()",
-        "        self.frame(WINDOW_WIDTH, WINDOW_HEIGHT).into_tree()",
+        "        let mut tree = self.frame(width, height).into_tree();",
+        "        let mut tree = self.frame(WINDOW_WIDTH, WINDOW_HEIGHT).into_tree();",
         ["the_picture_is_drawn_at_the_size_render_is_given"],
     ),
     (
@@ -368,12 +385,199 @@ MUTATIONS = [
     ),
     (
         "the close button is answered with a redraw",
-        "            Event::CloseRequested => Response::Exit,",
-        "            Event::CloseRequested => Response::Redraw,",
+        "                if self.request_close() {\n                    Response::Exit\n",
+        "                if self.request_close() {\n                    Response::Redraw\n",
         ["the_close_button_closes_the_window_and_nothing_else_does"],
+    ),
+    # -- the address book (2026-09-25) --------------------------------------
+    (
+        "a save writes nothing",
+        "            .and_then(|()| safeio::write_str_atomically(&path, &text));",
+        "            .and_then(|()| Ok::<(), std::io::Error>(()));",
+        [KEPT, EDIT_ASKS],
+    ),
+    (
+        "the file keeps only the first number",
+        "        for phone in &c.phones {",
+        "        for phone in c.phones.iter().take(1) {",
+        [ROUND],
+    ),
+    (
+        "the file loses the accounts",
+        "        for social in &c.social_accounts {",
+        "        for social in c.social_accounts.iter().take(0) {",
+        [ROUND],
+    ),
+    (
+        "the file loses the memberships",
+        "            if store.groups.iter().any(|g| g.id == *gid) {",
+        "            if false {",
+        [ROUND],
+    ),
+    (
+        "the file loses a group's colour",
+        "            colour_hex(group.color),",
+        "            colour_hex(Color::from_hex(0)),",
+        [ROUND],
+    ),
+    (
+        "the file loses the photo",
+        '                .map_or_else(String::new, |path| format!("={}", tsv::escape(path))),',
+        "                .map_or_else(String::new, |_| String::new()),",
+        [ROUND],
+    ),
+    (
+        "a later format is half-read",
+        "    if version > BOOK_FORMAT {",
+        "    if version > BOOK_FORMAT + 100 {",
+        [REFUSED],
+    ),
+    (
+        "a membership of a group that is not there is read",
+        "        if !store.groups.iter().any(|g| g.id == group) {",
+        "        if false {",
+        [REFUSED],
+    ),
+    (
+        "a view of a contact that is not there is read",
+        "        .find(|id| !store.contacts.iter().any(|c| c.id == **id))",
+        "        .find(|_| false)",
+        [REFUSED],
+    ),
+    (
+        "a file too big to read whole is read in part",
+        "        if read.truncated {\n            self.persist = false;\n",
+        "        if false {\n            self.persist = false;\n",
+        ["a_book_too_big_to_read_whole_is_refused"],
+    ),
+    (
+        "a refused book is saved over",
+        "            Err(why) => {\n                self.persist = false;\n",
+        "            Err(why) => {\n",
+        ["a_book_that_cannot_be_read_is_left_as_it_is"],
+    ),
+    (
+        "an event's change is not written",
+        "        self.route_event(event, size);\n        self.keep();\n",
+        "        self.route_event(event, size);\n",
+        [KEPT, FAILING],
+    ),
+    (
+        "a failed save is not said",
+        '                self.store_error = Some(format!("Not saved to {}: {err}", path.display()));',
+        "                drop(err);",
+        [FAILING],
+    ),
+    (
+        "the failure is drawn nowhere",
+        "            Some(error) => (error.as_str(), self.palette.ink(self.palette.red)),",
+        "            Some(_) => (self.status.as_str(), self.palette.subtext0),",
+        [FAILING],
+    ),
+    (
+        "a star is not counted",
+        "        let now_favorite = contact.favorite;\n        self.changed();\n",
+        "        let now_favorite = contact.favorite;\n",
+        [COUNTED, KEPT],
+    ),
+    (
+        "a view is not counted",
+        "            self.recently_viewed.pop_back();\n        }\n        self.changed();\n",
+        "            self.recently_viewed.pop_back();\n        }\n",
+        [COUNTED],
+    ),
+    (
+        "a contact goes in a group that is not there",
+        "        if !self.groups.iter().any(|g| g.id == group_id) {\n            return false;\n        }\n",
+        "",
+        ["a_contact_is_not_put_in_a_group_that_is_not_there"],
+    ),
+    (
+        "an edit drops what the form does not show",
+        "        let mut c = existing.clone();",
+        "        let mut c = Contact::new(existing.id, \"\", \"\");",
+        [EDITING],
+    ),
+    (
+        "a name of its own follows the names",
+        "        if was_default {",
+        "        if true {",
+        [EDITING],
+    ),
+    (
+        "an emptied phone field keeps the number",
+        "            (true, Some(_)) => {\n                c.phones.remove(0);\n            }",
+        "            (true, Some(_)) => {}",
+        [EDITING],
+    ),
+    (
+        "an unchanged form is a change",
+        "                if updated != existing {",
+        "                if true {",
+        ["a_form_saved_unchanged_is_no_change"],
+    ),
+    (
+        "a new contact is given no time",
+        "                built.created_at = now;\n",
+        "",
+        [KEPT],
+    ),
+    (
+        "an import is given no time",
+        "            contact.created_at = now;\n",
+        "",
+        ["test_store_import_vcards"],
+    ),
+    (
+        "a call after a restart is stamped before the kept times",
+        "        self.last_stamp = self.last_stamp.max(latest);\n",
+        "",
+        ["a_call_made_now_is_later_than_every_kept_time"],
+    ),
+    (
+        "the window closes over an edit",
+        "        let (message, prompt) = if self.form_has_changes() {",
+        "        let (message, prompt) = if false {",
+        [EDIT_ASKS, EDIT_LEAVES],
+    ),
+    (
+        "the window closes over a failing save",
+        "        } else if self.unkept() {",
+        "        } else if false {",
+        [SAVE_ASKS],
+    ),
+    (
+        "keys reach the form under the question",
+        "            && matches!(event, Event::Key(_) | Event::Mouse(_))",
+        "            && false",
+        [EDIT_ASKS],
+    ),
+    (
+        "Save leaves while the save still fails",
+        "                self.quit = !self.unkept();",
+        "                self.quit = true;",
+        [SAVE_ASKS],
+    ),
+    (
+        "Save at a close drops the contact being edited",
+        "                if self.form_has_changes() {\n                    self.save_form();\n                }\n",
+        "",
+        [EDIT_ASKS],
+    ),
+    (
+        "Ctrl+S reports before it keeps",
+        "                Key::S => {\n                    self.keep();\n",
+        "                Key::S => {\n",
+        [FAILING],
+    ),
+    (
+        "export is not on Ctrl+E",
+        "                Key::E => self.open_file_dialog(true),\n",
+        "",
+        ["ctrl_s_says_where_the_book_is_kept", "every_advertised_key_does_something"],
     ),
 ]
 
 if __name__ == "__main__":
     only = sys.argv[1:] or None
-    raise SystemExit(sweep(SRC, MUTATIONS, "contacts", timeout=300, only=only))
+    raise SystemExit(sweep(SRC, MUTATIONS, "contacts", timeout=900, only=only))

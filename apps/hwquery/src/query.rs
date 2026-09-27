@@ -75,16 +75,20 @@ impl std::fmt::Display for HwQueryError {
 /// full strings no longer appear in this file's *code*, so `grep
 /// "/sys/hardware/cpu"` finds only prose and reads exactly like "nothing
 /// refers to this". Lane A hit that on 2026-09-14 while looking for the
-/// producer and believed it for about a minute. The twelve are therefore
+/// producer and believed it for about a minute. The names are therefore
 /// written out once, in full, right here, so the grep lands somewhere that
 /// explains itself:
 ///
 /// ```text
-/// /sys/hardware/cpu      /sys/hardware/memory   /sys/hardware/block
-/// /sys/hardware/net      /sys/hardware/pci      /sys/hardware/usb
-/// /sys/hardware/display  /sys/hardware/sound    /sys/hardware/irqs
-/// /sys/hardware/ioports  /sys/hardware/memmap   /sys/hardware/dma
+/// /sys/hardware/usb      /sys/hardware/sound    /sys/hardware/dma
 /// ```
+///
+/// **None of the three exists.** The kernel chose `/sys/devices` so as not to
+/// answer one question from two trees, and the readers of what it does
+/// publish moved there or to `/proc` one by one -- PCI and the memory map
+/// last, on 2026-09-26; twelve names stood in this list before. What is still
+/// read from here is what the kernel publishes nowhere, and so reads as "not
+/// available", which is the truth.
 macro_rules! sysfs {
     ($leaf:literal) => {
         concat!("/sys/hardware", $leaf)
@@ -120,7 +124,15 @@ const SYSDEV_BLOCK: &str = "/sys/devices/block";
 // from `/proc/net/dev`, and lane A has declined to serve a `/sys/devices/net/`
 // because the kernel's `InterfaceInfo` carries no name to key it on.
 /// PCI devices directory.
-const SYSFS_PCI: &str = sysfs!("/pci");
+/// Where the kernel publishes each PCI function: one file per `BB:DD.F`
+/// address, holding `vendor`, `device`, `class` and `subclass` in hex, one
+/// `key: value` to a line (`kernel/src/fs/sysfs.rs`, `gen_pci_device`).
+///
+/// This read `/sys/hardware/pci` -- a tree the kernel never had (it chose
+/// `/sys/devices` so as not to answer one question twice) -- as a single file
+/// of records with fields named `bus`, `vendor_id` and `vendor_name`, none of
+/// which the kernel writes. On SlateOS the PCI list was therefore always empty.
+const SYSDEV_PCI: &str = "/sys/devices/pci";
 /// USB devices directory.
 const SYSFS_USB: &str = sysfs!("/usb");
 // No `/sys/hardware/display` constant: outputs come from
@@ -135,7 +147,13 @@ const SYSFS_SOUND: &str = sysfs!("/sound");
 // `/proc/ioport`, which publishes a row per region with the name and
 // both ends -- every field `IoPortInfo` has.
 /// Memory map from firmware.
-const SYSFS_MEMMAP: &str = sysfs!("/memmap");
+/// Where the kernel publishes the firmware memory map: one directory per
+/// region, numbered in the bootloader's order, holding `start` and `end` (one
+/// past the last byte), both `0x%016x`, and `type` in words.
+///
+/// This read `/sys/hardware/memmap`, which does not exist; the map was always
+/// empty on SlateOS.
+const SYSDEV_MEMMAP: &str = "/sys/devices/memmap";
 /// DMA channels.
 const SYSFS_DMA: &str = sysfs!("/dma");
 /// Running services.
@@ -236,8 +254,10 @@ impl Default for SyscallProvider {
 }
 
 impl SyscallProvider {
-    /// A provider reading under `root` instead of `/`. **Tests only.**
-    #[cfg(test)]
+    /// A provider reading under `root` instead of `/`: a fixture tree.
+    /// **Tests only** -- this crate's, and, through the `testing` feature,
+    /// those of the programs that read hardware through it.
+    #[cfg(any(test, feature = "testing"))]
     pub fn at(root: &str) -> Self {
         Self {
             file_cache: HashMap::new(),
@@ -516,6 +536,139 @@ impl SyscallProvider {
     }
 }
 
+/// One PCI function, from its file under [`SYSDEV_PCI`]: `name` is the
+/// file's name (`BB:DD.F`, which is the address) and `text` what it holds.
+/// `None` for a name that is not an address or a file without both ids.
+pub fn pci_function(name: &str, text: &str) -> Option<PciDeviceInfo> {
+    let (bus, device, function) = parse_bdf(name)?;
+    let fields = key_values(text);
+    let hex = |key: &str| {
+        fields
+            .get(key)
+            .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+    };
+    let (vendor_id, device_id) = (hex("vendor")?, hex("device")?);
+    let class = hex("class").and_then(|c| u8::try_from(c).ok());
+    let subclass = hex("subclass").and_then(|c| u8::try_from(c).ok());
+    Some(PciDeviceInfo {
+        bus,
+        device,
+        function,
+        vendor_id,
+        device_id,
+        class: class.map_or_else(String::new, |c| pci_class_name(c).to_owned()),
+        description: match (class, subclass) {
+            (Some(c), Some(sc)) => pci_subclass_name(c, sc).to_owned(),
+            _ => String::new(),
+        },
+        vendor_name: pci_vendor_name(vendor_id).to_owned(),
+        class_code: class,
+        subclass_code: subclass,
+    })
+}
+
+/// A PCI address as the kernel names its file, `BB:DD.F` in hex.
+fn parse_bdf(name: &str) -> Option<(u8, u8, u8)> {
+    let (bus, rest) = name.split_once(':')?;
+    let (device, function) = rest.split_once('.')?;
+    Some((
+        u8::from_str_radix(bus, 16).ok()?,
+        u8::from_str_radix(device, 16).ok()?,
+        u8::from_str_radix(function, 16).ok()?,
+    ))
+}
+
+/// A file of `key: value` lines, as a map.
+fn key_values(text: &str) -> HashMap<String, String> {
+    text.lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+        .collect()
+}
+
+/// A PCI base class in words, as the PCI specification names it.
+fn pci_class_name(class: u8) -> &'static str {
+    match class {
+        0x00 => "Unclassified device",
+        0x01 => "Mass storage controller",
+        0x02 => "Network controller",
+        0x03 => "Display controller",
+        0x04 => "Multimedia controller",
+        0x05 => "Memory controller",
+        0x06 => "Bridge",
+        0x07 => "Communication controller",
+        0x08 => "Generic system peripheral",
+        0x09 => "Input device controller",
+        0x0A => "Docking station",
+        0x0B => "Processor",
+        0x0C => "Serial bus controller",
+        0x0D => "Wireless controller",
+        0x0E => "Intelligent controller",
+        0x0F => "Satellite communications controller",
+        0x10 => "Encryption controller",
+        0x11 => "Signal processing controller",
+        0x12 => "Processing accelerator",
+        0x13 => "Non-essential instrumentation",
+        0x40 => "Coprocessor",
+        _ => "Unassigned class",
+    }
+}
+
+/// A PCI subclass in words, for the common ones; the base class's name
+/// otherwise, which is true if less specific.
+fn pci_subclass_name(class: u8, subclass: u8) -> &'static str {
+    match (class, subclass) {
+        (0x01, 0x00) => "SCSI storage controller",
+        (0x01, 0x01) => "IDE interface",
+        (0x01, 0x04) => "RAID bus controller",
+        (0x01, 0x05) => "ATA controller",
+        (0x01, 0x06) => "SATA controller",
+        (0x01, 0x07) => "Serial Attached SCSI controller",
+        (0x01, 0x08) => "Non-volatile memory controller",
+        (0x02, 0x00) => "Ethernet controller",
+        (0x03, 0x00) => "VGA compatible controller",
+        (0x03, 0x02) => "3D controller",
+        (0x04, 0x00) => "Multimedia video controller",
+        (0x04, 0x01) => "Multimedia audio controller",
+        (0x04, 0x03) => "Audio device",
+        (0x06, 0x00) => "Host bridge",
+        (0x06, 0x01) => "ISA bridge",
+        (0x06, 0x04) => "PCI bridge",
+        (0x06, 0x80) => "Bridge",
+        (0x07, 0x00) => "Serial controller",
+        (0x07, 0x01) => "Parallel controller",
+        (0x08, 0x05) => "SD host controller",
+        (0x0C, 0x03) => "USB controller",
+        (0x0C, 0x05) => "SMBus",
+        (0x0D, 0x11) => "Bluetooth",
+        _ => pci_class_name(class),
+    }
+}
+
+/// A PCI vendor's name, for the vendors a machine -- or a virtual one --
+/// commonly carries; empty for any other, whose id is still shown.
+fn pci_vendor_name(vendor: u16) -> &'static str {
+    match vendor {
+        0x8086 => "Intel",
+        0x1022 => "AMD",
+        0x1002 => "AMD (ATI)",
+        0x10DE => "NVIDIA",
+        0x1AF4 => "Red Hat (virtio)",
+        0x1B36 => "Red Hat (QEMU)",
+        0x1234 => "QEMU",
+        0x15AD => "VMware",
+        0x80EE => "Oracle VirtualBox",
+        0x1414 => "Microsoft",
+        0x10EC => "Realtek",
+        0x14E4 => "Broadcom",
+        0x168C => "Qualcomm Atheros",
+        0x144D => "Samsung",
+        0x1B21 => "ASMedia",
+        0x1106 => "VIA",
+        _ => "",
+    }
+}
+
 impl HardwareProvider for SyscallProvider {
     fn query_cpu(&self) -> Result<CpuInfo, HwQueryError> {
         self.query_cpu_from_cpuid()
@@ -574,7 +727,13 @@ impl HardwareProvider for SyscallProvider {
 
         let mut disks = Vec::new();
         for entry in dir.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
+            // The name builds the paths read next, so it must be exact: a
+            // device whose name is not text cannot be addressed through them,
+            // and is skipped -- decoded lossily, its reads would have gone to
+            // a path that names nothing.
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
             let base = format!("{SYSDEV_BLOCK}/{name}");
             // A device unregistered between the listing and the read is
             // skipped rather than failing the whole query: the same race a
@@ -687,29 +846,29 @@ impl HardwareProvider for SyscallProvider {
         })
     }
 
+    /// Each PCI function the kernel found, from its file under
+    /// [`SYSDEV_PCI`]: the address from the file's name, the ids and class
+    /// from its lines, and the class and vendor in words from the PCI
+    /// specification's class codes and a table of common vendors (blank for
+    /// one not in it -- the id is still there).
     fn query_pci(&self) -> Result<Vec<PciDeviceInfo>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_PCI)?;
+        let base_dir = self.rooted(SYSDEV_PCI);
+        let dir = std::fs::read_dir(&base_dir).map_err(|_| HwQueryError::NotAvailable {
+            path: base_dir.clone(),
+        })?;
         let mut devices = Vec::new();
-
-        for entry in &entries {
-            devices.push(PciDeviceInfo {
-                bus: Self::field(entry, "bus", 0)?,
-                device: Self::field(entry, "device", 0)?,
-                function: Self::field(entry, "function", 0)?,
-                vendor_id: entry
-                    .get("vendor_id")
-                    .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-                    .unwrap_or(0),
-                device_id: entry
-                    .get("device_id")
-                    .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-                    .unwrap_or(0),
-                class: entry.get("class").cloned().unwrap_or_default(),
-                description: entry.get("description").cloned().unwrap_or_default(),
-                vendor_name: entry.get("vendor_name").cloned().unwrap_or_default(),
-            });
+        for entry in dir.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            // A device that went away between the listing and the read is
+            // skipped, as a disk is in `query_storage`.
+            let Ok(text) = self.read_sysfs(&format!("{SYSDEV_PCI}/{name}")) else {
+                continue;
+            };
+            devices.extend(pci_function(&name, &text));
         }
-
+        devices.sort_by_key(|d| (d.bus, d.device, d.function));
         Ok(devices)
     }
 
@@ -810,25 +969,41 @@ impl HardwareProvider for SyscallProvider {
             .collect())
     }
 
+    /// The firmware memory map, from the regions under [`SYSDEV_MEMMAP`], in
+    /// address order. `end` is the last byte of a region, as this window has
+    /// always shown it; the kernel writes one past it.
     fn query_memory_map(&self) -> Result<Vec<MemoryMapEntry>, HwQueryError> {
-        let entries = self.read_sysfs_dir_entries(SYSFS_MEMMAP)?;
+        let base_dir = self.rooted(SYSDEV_MEMMAP);
+        let dir = std::fs::read_dir(&base_dir).map_err(|_| HwQueryError::NotAvailable {
+            path: base_dir.clone(),
+        })?;
+        let hex = |text: &str| u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok();
         let mut regions = Vec::new();
-
-        for entry in &entries {
+        for entry in dir.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if name.parse::<u32>().is_err() {
+                continue;
+            }
+            let base = format!("{SYSDEV_MEMMAP}/{name}");
+            let read = |leaf: &str| self.read_sysfs(&format!("{base}/{leaf}")).ok();
+            let (Some(start), Some(end)) = (
+                read("start").as_deref().and_then(hex),
+                read("end").as_deref().and_then(hex),
+            ) else {
+                continue;
+            };
             regions.push(MemoryMapEntry {
-                start: entry
-                    .get("start")
-                    .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-                    .unwrap_or(0),
-                end: entry
-                    .get("end")
-                    .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
-                    .unwrap_or(0),
-                region_type: entry.get("type").cloned().unwrap_or_default(),
-                description: entry.get("description").cloned().unwrap_or_default(),
+                start,
+                end: end.saturating_sub(1),
+                region_type: read("type")
+                    .map(|t| t.trim().to_owned())
+                    .unwrap_or_default(),
+                description: String::new(),
             });
         }
-
+        regions.sort_by_key(|r| r.start);
         Ok(regions)
     }
 
@@ -1157,6 +1332,8 @@ impl HardwareProvider for StubProvider {
                 class: "Host Bridge".to_string(),
                 description: "Intel 13th Gen Core Host Bridge".to_string(),
                 vendor_name: "Intel Corporation".to_string(),
+                class_code: None,
+                subclass_code: None,
             },
             PciDeviceInfo {
                 bus: 0,
@@ -1167,6 +1344,8 @@ impl HardwareProvider for StubProvider {
                 class: "VGA Controller".to_string(),
                 description: "AMD Radeon RX 7900 XTX".to_string(),
                 vendor_name: "Advanced Micro Devices".to_string(),
+                class_code: None,
+                subclass_code: None,
             },
         ])
     }

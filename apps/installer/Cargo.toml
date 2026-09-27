@@ -5,6 +5,7 @@ edition = "2024"
 description = "SlateOS Installer — unattended and interactive installation"
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 # A truncated GRUB script is an unbootable machine, so the two writes into
 # the custom-script directory go through the crash-safe write-and-rename path.
 safeio = { path = "../safeio" }

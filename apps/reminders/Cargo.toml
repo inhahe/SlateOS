@@ -3,6 +3,7 @@ name = "reminders"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -19,6 +20,20 @@ safeio = { path = "../safeio" }
 # The zone rules, so "overdue" is judged against the user's clock rather
 # than a private copy of the calendar in this crate.
 tzrules = { path = "../../tzrules" }
+
+# Where the reminders are kept (the settings folder), and the escapes their
+# text is written with -- as the notes library and the calendar keep theirs.
+settingsfile = { path = "../../gui/settingsfile" }
+textfmt = { path = "../../textfmt" }
+
+# The keys a one-line field answers, for the reminder form.
+textline = { path = "../textline" }
+
+# "Your latest changes are not saved", asked the way every editor here asks.
+unsaved = { path = "../unsaved" }
+
+[dev-dependencies]
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

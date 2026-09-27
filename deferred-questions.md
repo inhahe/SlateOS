@@ -336,7 +336,13 @@ The cost is a missed detection in a band no run has yet landed in, and the
 failure is now documented in `known-issues.md` with a script that reproduces it,
 so it cannot be rediscovered as a surprise.
 
-## [C] Where should the weather app get weather, once it can fetch at all? — deferred 2026-09-18
+## [C] Where should the weather app get weather, once it can fetch at all? — deferred 2026-09-18 — PROMOTED 2026-09-26 to `open-questions.md` E-Q2
+
+*Its trigger fired: applications make outbound connections now
+(`apps/netscan`, `apps/dictionary`, and `userspace/pkg` before them). Lane E,
+which owns `apps/**` since the six-lane split, raised it as E-Q2 with the
+option table below and a recommendation. Kept here for its history; answer
+it there.*
 
 **In short:** Our weather app has no weather and no way to get any, and it
 says so plainly in its own window rather than showing invented numbers. So

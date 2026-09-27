@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -15,6 +16,13 @@ oswindow = { path = "../../gui/window" }
 # Ctrl+S writes through `safeio::write_str_atomically`, not `fs::write`, which
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
+
+# A diagram's own file: YAML, as `apps/slides` keeps a deck -- the tree's
+# format for anything a person might open in an editor.
+yamldoc = { path = "../../yamldoc" }
+
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
 
 [lints]
 workspace = true

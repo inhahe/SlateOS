@@ -45,6 +45,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -3343,8 +3344,8 @@ impl AutomatorApp {
         let (name, count) = (macro_.name.clone(), macro_.actions.len());
         let text = serialize_script(&macro_.actions);
         match safeio::write_str_atomically(path, &text) {
-            Ok(()) => format!("Wrote {name}: {count} action(s) to {}", path.display()),
-            Err(err) => format!("Could not write {}: {err}", path.display()),
+            Ok(()) => format!("Wrote {name}: {count} action(s) to {}", path.shown()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
         }
     }
 
@@ -3367,14 +3368,14 @@ impl AutomatorApp {
     pub fn read_script(&mut self, path: &std::path::Path) -> String {
         let read = match safeio::read_to_string_capped(path, MAX_SCRIPT_BYTES) {
             Ok(read) => read,
-            Err(err) => return format!("Could not read {}: {err}", path.display()),
+            Err(err) => return format!("Could not read {}: {err}", path.shown()),
         };
         // Front-loaded: a cut script parses fine and is simply short, so
         // without this the user gets a macro missing its tail and no hint.
         let note = read.note(MAX_SCRIPT_BYTES);
         match parse_script(&read.text) {
             Ok(actions) if actions.is_empty() => {
-                format!("{note}{} holds no actions", path.display())
+                format!("{note}{} holds no actions", path.shown())
             }
             Ok(actions) => {
                 let count = actions.len();
@@ -3392,7 +3393,7 @@ impl AutomatorApp {
                 }
                 format!("{note}Opened {name}: {count} action(s)")
             }
-            Err(why) => format!("{note}Could not read {}: {why}", path.display()),
+            Err(why) => format!("{note}Could not read {}: {why}", path.shown()),
         }
     }
 
@@ -4255,7 +4256,7 @@ mod tests {
 
         assert!(said.starts_with("Could not read"), "said: {said}");
         assert!(
-            said.len() > "Could not read ".len() + path.display().to_string().len() + 2,
+            said.len() > "Could not read ".len() + path.shown().to_string().len() + 2,
             "the parser's reason was dropped: {said}"
         );
         assert_eq!(

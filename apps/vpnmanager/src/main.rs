@@ -31,6 +31,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 
 use std::collections::VecDeque;
 use std::process::ExitCode;
@@ -4325,7 +4326,7 @@ impl VpnManager {
             && !dir.as_os_str().is_empty()
             && let Err(why) = std::fs::create_dir_all(dir)
         {
-            self.status_message = format!("Cannot create {}: {why}", dir.display());
+            self.status_message = format!("Cannot create {}: {why}", dir.shown());
             return Action::Redraw;
         }
         // `write_str_atomically`, not `fs::write`: this replaces a file of the
@@ -4336,7 +4337,7 @@ impl VpnManager {
             Ok(()) => format!(
                 "Exported {} profiles to {}",
                 self.profiles.len(),
-                path.display()
+                path.shown()
             ),
             Err(why) => format!("Export failed: {why}"),
         };
@@ -4353,7 +4354,7 @@ impl VpnManager {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(why) => {
-                self.status_message = format!("Cannot read {}: {why}", path.display());
+                self.status_message = format!("Cannot read {}: {why}", path.shown());
                 return Action::Redraw;
             }
         };
@@ -4373,7 +4374,7 @@ impl VpnManager {
             }
         }
         self.status_message = match first_error {
-            None if added == 0 => format!("No profiles found in {}", path.display()),
+            None if added == 0 => format!("No profiles found in {}", path.shown()),
             None => format!("Imported {added} profiles"),
             Some(why) => format!("Imported {added} profiles; first failure: {why}"),
         };

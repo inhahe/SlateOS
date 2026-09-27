@@ -6,23 +6,36 @@
 //! - Device status indicators (working, warning, error, disabled, unknown)
 //! - Detailed properties panel (name, type, vendor, driver, IRQ, MMIO)
 //! - Driver information (name, version, provider, date)
-//! - Enable/disable devices and driver uninstall
-//! - Scan for hardware changes
+//! - Scan for hardware (F5, and once on opening)
 //! - Device search/filter
 //! - Toolbar with common actions
-//! - Resource view (IRQ assignments, MMIO ranges, DMA channels)
+//! - Resource view (IRQ assignments, MMIO ranges, DMA channels), empty
+//!   until the kernel says which device holds which
 //! - Problem device highlighting
 //! - Driver update check model
 //! - Device event history (connected, disconnected, error)
-//! - Export hardware report
+//! - Export hardware report, to a file the user picks
+//! - Enable, Disable and Uninstall, which say that they cannot: the kernel
+//!   offers no interface for any of them
 //!
-//! Uses the guitk library for UI rendering. Hardware data is gathered
-//! through Slate OS syscalls; stubbed with representative data for initial
-//! development.
+//! Uses the guitk library for UI rendering.
+//!
+//! The devices are the ones the kernel publishes (`inventory`, through
+//! `hwquery`, the reader System Information uses): PCI functions sorted into
+//! branches by class, registered disks, network interfaces, display outputs
+//! and the processor. The kernel says nothing of which driver runs a device,
+//! its IRQ or its memory ranges, and no way to enable, disable or remove one,
+//! so none of those is shown or offered as if it were: a PCI device's status
+//! is "Unknown", with the reason, and the actions that would change a device
+//! say they cannot. (Until 2026-09-15 this window invented the machine; until
+//! 2026-09-26 it showed nothing, saying it could not see the hardware.)
+
+mod inventory;
 
 #[allow(unused_imports)]
 use appearance::{Edge, Palette, Surface};
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::fold;
@@ -32,6 +45,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, con
 use guitk::style::CornerRadii;
 use guitk::{scroll_window, wheel};
 use oswindow::app::Response;
+use pathtext::ShowPath;
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -46,23 +60,34 @@ const SIDEBAR_WIDTH: f32 = 280.0;
 const TITLE_BAR_HEIGHT: f32 = 36.0;
 /// Height of the toolbar.
 const TOOLBAR_HEIGHT: f32 = 38.0;
-/// Height of the banner saying the hardware cannot be seen.
+/// Height of the banner shown while the tree is empty.
 const CANNOT_SEE_HARDWARE_HEIGHT: f32 = 54.0;
 
-/// What the window says instead of listing hardware.
-///
-/// Three lines. The third is the one that costs the most to leave out: an
-/// empty device tree is not read as "nothing was examined", it is read as
-/// "this machine has no devices", which is a claim about the user's computer
-/// that this program is in no position to make.
-const CANNOT_SEE_HARDWARE_LINES: [&str; 3] = [
-    "This program cannot see the machine's hardware.",
-    "It has no way to enumerate devices, read a driver version, or change a device's state.",
-    "The tree is empty because nothing was examined -- not because the machine has no devices.",
-];
+/// The banner's first line, while no device has been read.
+const NOTHING_READ: &str = "No devices were read.";
 
-/// Said when a toolbar action is pressed and cannot be carried out.
-const CANNOT_ACT: &str = "Nothing here can reach the hardware, so nothing was changed";
+/// Its last line, and the one that costs most to leave out: an empty device
+/// tree is read as "this machine has no devices", which is a claim about the
+/// user's computer that nothing here has made.
+const NOT_A_FINDING: &str =
+    "The tree is empty because nothing was read -- not because the machine has no devices.";
+
+/// Said when Enable, Disable or Uninstall is pressed: the kernel has no
+/// interface for any of them, so nothing is changed and nothing claims to be.
+const CANNOT_ACT: &str =
+    "The kernel offers no way to enable, disable or remove a device, so nothing was changed";
+
+/// What a property the kernel does not publish reads as. It was "N/A", which
+/// says the device has none -- no interrupt line, no memory range -- and
+/// nothing here knows that; it knows only that it was not told.
+const NOT_REPORTED: &str = "Not reported";
+
+/// The Driver tab, for every device today. It said "No driver installed",
+/// which is a finding about the machine; the kernel publishes no driver
+/// binding, so the one true thing to say is that.
+const DRIVER_NOT_REPORTED: &str =
+    "Not reported: the kernel does not say which driver, if any, runs this device";
+
 /// Height of the status bar at the bottom.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Height of each tree node row.
@@ -521,7 +546,7 @@ impl DeviceInfo {
     pub fn format_mmio(&self) -> String {
         match self.mmio_range {
             Some((start, end)) => format!("0x{start:08X} - 0x{end:08X}"),
-            None => "N/A".to_string(),
+            None => NOT_REPORTED.to_string(),
         }
     }
 
@@ -529,7 +554,7 @@ impl DeviceInfo {
     pub fn format_irq(&self) -> String {
         match self.irq {
             Some(irq) => format!("IRQ {irq}"),
-            None => "N/A".to_string(),
+            None => NOT_REPORTED.to_string(),
         }
     }
 }
@@ -772,10 +797,18 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ),
     ("Enter / Space", "Open or close the selected category"),
     ("Tab", "Next properties tab"),
-    ("Delete", "Uninstall the selected device"),
+    (
+        "Delete",
+        "Uninstall the selected device (the kernel cannot yet)",
+    ),
 ];
 
 pub struct DeviceManagerState {
+    /// The sources the last scan could not read, with why -- said in the
+    /// window, so an empty branch is not taken for an absent device.
+    pub unreadable: Vec<String>,
+    /// Asks where the hardware report goes.
+    pub picker: FilePicker,
     /// The user's colours, handed over by the framework (§822).
     pub palette: Palette,
     /// Window width.
@@ -863,6 +896,8 @@ impl DeviceManagerState {
         }
 
         Self {
+            unreadable: Vec::new(),
+            picker: FilePicker::default(),
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
@@ -1109,23 +1144,49 @@ impl DeviceManagerState {
         }
     }
 
-    /// Simulate scanning for hardware changes (re-builds tree).
-    /// Rebuild the views over whatever devices are known.
-    ///
-    /// Note what this does *not* do, and never did: look for hardware. It
-    /// recomputes the tree and the resource view from `self.devices`, which
-    /// nothing changes. The toolbar button is labelled "Scan" and the module
-    /// documentation promised "Scan for hardware changes", so the button
-    /// reported a search that had not happened -- and reported it by the
-    /// strongest means available, which is leaving the list exactly as it was
-    /// and letting the user conclude nothing had changed.
+    /// Look at the machine: every device the kernel publishes, read afresh
+    /// (`inventory`). F5, and once on opening.
     pub fn scan_hardware(&mut self) {
+        self.scan_with(&machine());
+    }
+
+    /// [`scan_hardware`](Self::scan_hardware), reading through `provider` --
+    /// the machine, or a test's fixture tree.
+    pub fn scan_with(&mut self, provider: &dyn hwquery::HardwareProvider) {
+        let found = inventory::read(provider);
+        self.devices = found.devices;
+        self.unreadable = found.unreadable;
         self.resource_view = ResourceView::from_devices(&self.devices);
         self.tree_nodes = build_tree_nodes(&self.devices);
+        self.update_checks = self
+            .devices
+            .iter()
+            .map(|d| (d.id, DriverUpdateCheck::new(d.id)))
+            .collect();
+        // Rows are renumbered on every scan, so a selection by row would now
+        // point at some other device.
+        self.selected_tree_index = None;
         self.apply_search_filter();
-        self.notice = Some(String::from(
-            "Cannot scan: nothing here can enumerate hardware. No devices were examined",
-        ));
+        let found = self.devices.len();
+        self.notice = Some(match (found, self.unreadable.is_empty()) {
+            // With nothing found the banner is up, and it names what could
+            // not be read; saying it twice would push the rest off the line.
+            (0, _) => String::from("Found no devices"),
+            (n, true) => format!("Found {n} device(s)"),
+            (n, false) => format!(
+                "Found {n} device(s); could not read {}",
+                self.unreadable.join("; ")
+            ),
+        });
+    }
+
+    /// Write the hardware report to `path`, and say what happened.
+    pub fn write_report(&self, path: &std::path::Path) -> String {
+        let report = self.export_report();
+        match safeio::write_str_atomically(path, &report) {
+            Ok(()) => format!("Wrote {} bytes to {}", report.len(), path.shown()),
+            Err(err) => format!("Could not write {}: {err}", path.shown()),
+        }
     }
 
     /// Add an event to the history.
@@ -1277,30 +1338,30 @@ impl DeviceManagerState {
             // a fresh one. Nothing was removed, so nothing is reinstalled, and
             // the fault they were chasing is exactly where it was.
             //
-            // They are unreachable today in any case, because `selected_device`
-            // has nothing to select, but the refusal is written here rather
-            // than relying on that -- an empty list is a reason, not a
-            // safeguard, and the list stops being empty the day a real
-            // enumerator lands.
+            // The rows are real now (`inventory`), so these are pressed on
+            // real devices -- and the kernel still has no interface for any
+            // of the three, so the refusal stands until it does.
             ToolbarAction::Enable | ToolbarAction::Disable | ToolbarAction::Uninstall => {
                 self.notice = Some(String::from(CANNOT_ACT));
             }
-            ToolbarAction::Export => {
-                // The report is still *built*, and that part is real and
-                // tested -- including the field sanitiser that stops a
-                // hardware-supplied string from redrawing the table. What
-                // never happened is writing it anywhere: the old body ended
-                // with `let _report = ...` and a comment saying a real app
-                // would save it. So Export was a button that discarded its own
-                // output, silently, which reads as a broken button.
-                let report = self.export_report();
-                self.notice = Some(format!(
-                    "Cannot export: no way to write a file. The report would have been {} bytes",
-                    report.len()
-                ));
-            }
+            ToolbarAction::Export => self.picker.open_to_write("hardware-report.txt"),
         }
     }
+}
+
+/// Where a scan looks: the machine this runs on.
+#[cfg(not(test))]
+fn machine() -> hwquery::SyscallProvider {
+    hwquery::SyscallProvider::new()
+}
+
+/// Under test, a root with nothing under it, so that no test's outcome
+/// depends on the computer it runs on -- F5 is pressed by a dozen tests that
+/// are about the keyboard, not the hardware. The tests about the hardware
+/// build their own tree and call [`DeviceManagerState::scan_with`].
+#[cfg(test)]
+fn machine() -> hwquery::SyscallProvider {
+    hwquery::SyscallProvider::at("no-machine-under-test")
 }
 
 impl Default for DeviceManagerState {
@@ -1737,6 +1798,13 @@ pub fn render(state: &DeviceManagerState) -> Vec<RenderCommand> {
     render_status_bar(state, &mut cmds);
     // Last, so nothing paints over it.
     render_cannot_see_hardware(state, &mut cmds);
+    // The picker over all of it: a dialog that takes the keys while painted
+    // under the panes would look like a window that had frozen.
+    cmds.extend(
+        state
+            .picker
+            .render(&state.palette, state.width, state.height),
+    );
 
     if state.show_help {
         guitk::shortcut::render_card(
@@ -1752,11 +1820,9 @@ pub fn render(state: &DeviceManagerState) -> Vec<RenderCommand> {
     cmds
 }
 
-/// Say, in the window, that the hardware cannot be seen.
-///
-/// Drawn whenever the device list is empty, which is every frame today. Keyed
-/// on the list rather than on a constant so that it disappears by itself the
-/// day something fills it, rather than becoming a stale claim of its own.
+/// Say, while the tree is empty, that nothing was read -- and why, if a
+/// source could not be -- rather than leave an empty tree to be read as a
+/// machine with no devices.
 fn render_cannot_see_hardware(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
     if !state.devices.is_empty() {
         return;
@@ -1770,7 +1836,15 @@ fn render_cannot_see_hardware(state: &DeviceManagerState, cmds: &mut Vec<RenderC
         color: state.palette.surface0,
         corner_radii: CornerRadii::ZERO,
     });
-    for (i, line) in CANNOT_SEE_HARDWARE_LINES.iter().enumerate() {
+    let why = if state.unreadable.is_empty() {
+        String::from("Press F5 to look at the machine.")
+    } else {
+        format!("Could not read {}.", state.unreadable.join("; "))
+    };
+    for (i, line) in [NOTHING_READ, why.as_str(), NOT_A_FINDING]
+        .iter()
+        .enumerate()
+    {
         cmds.push(RenderCommand::Text {
             x: 10.0,
             #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
@@ -2440,14 +2514,16 @@ fn render_general_tab(
         ("Category", dev.category.label().to_string()),
         (
             "HW ID",
-            dev.hw_id.clone().unwrap_or_else(|| "N/A".to_string()),
+            dev.hw_id
+                .clone()
+                .unwrap_or_else(|| NOT_REPORTED.to_string()),
         ),
         ("IRQ", dev.format_irq()),
         ("MMIO", dev.format_mmio()),
         (
             "DMA",
             dev.dma_channel
-                .map_or("N/A".to_string(), |c| format!("Channel {c}")),
+                .map_or(NOT_REPORTED.to_string(), |c| format!("Channel {c}")),
         ),
         ("Location", dev.location.clone()),
         (
@@ -2663,7 +2739,7 @@ fn render_driver_tab(
             cmds.push(RenderCommand::Text {
                 x: label_x,
                 y: row_y,
-                text: "No driver installed".to_string(),
+                text: DRIVER_NOT_REPORTED.to_string(),
                 font_size: 12.0,
                 color: state.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
@@ -2840,7 +2916,7 @@ fn render_resources_tab(
         y: row_y,
         text: dev
             .dma_channel
-            .map_or("N/A".to_string(), |c| format!("{c}")),
+            .map_or(NOT_REPORTED.to_string(), |c| format!("{c}")),
         font_size: 11.0,
         color: p.text,
         font_weight: FontWeightHint::Regular,
@@ -3166,13 +3242,29 @@ fn render_status_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
 
     let total = state.devices.len();
     let problems = state.problem_device_count();
-    let enabled = state.enabled_device_count();
     let matching = state.matching_device_count();
 
-    let status_text = if state.search_query.is_empty() {
-        format!("{total} devices | {enabled} enabled | {problems} problem(s)")
+    // How many have no status the kernel reports, where "enabled" was: every
+    // device the kernel lists is "enabled" in the only sense it knows, so the
+    // count said nothing, while "0 problems" beside unknown statuses said too
+    // much without it.
+    let unknown = state
+        .devices
+        .iter()
+        .filter(|d| d.status == DeviceStatus::Unknown)
+        .count();
+    let counts = if state.search_query.is_empty() {
+        format!("{total} devices | {unknown} with no status reported | {problems} problem(s)")
     } else {
-        format!("{matching}/{total} matching | {enabled} enabled | {problems} problem(s)")
+        format!(
+            "{matching}/{total} matching | {unknown} with no status reported | {problems} problem(s)"
+        )
+    };
+    // The last scan's or action's note, beside the counts -- while the tree
+    // has devices, the banner that otherwise carries it is not drawn.
+    let status_text = match (&state.notice, state.devices.is_empty()) {
+        (Some(notice), false) => format!("{counts} | {notice}"),
+        _ => counts,
     };
 
     cmds.push(RenderCommand::Text {
@@ -3193,6 +3285,17 @@ fn render_status_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
 
 /// Handle an event and return the result.
 pub fn handle_event(state: &mut DeviceManagerState, event: &Event) -> EventResult {
+    // The picker takes input first while it is up, or a file name typed into
+    // it would reach the search box behind. `Ignored` covers `Resize`, so the
+    // window still learns its size with the dialog open.
+    match state.picker.handle(event, state.width, state.height) {
+        Picked::Chose(path) => {
+            state.notice = Some(state.write_report(&path));
+            return EventResult::Consumed;
+        }
+        Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+        Picked::Ignored => {}
+    }
     match event {
         Event::Resize { width, height } => {
             state.width = *width as f32;
@@ -3620,7 +3723,10 @@ impl oswindow::app::App for DeviceManagerState {
 }
 
 fn main() -> ExitCode {
-    oswindow::app::launch("devicemanager", &mut DeviceManagerState::new())
+    // Looked at once on opening, as a device manager does; F5 looks again.
+    let mut state = DeviceManagerState::new();
+    state.scan_hardware();
+    oswindow::app::launch("devicemanager", &mut state)
 }
 
 // ============================================================================
@@ -3643,13 +3749,6 @@ mod tests {
 
     use super::*;
 
-    /// The window says it cannot see the hardware, in words.
-    ///
-    /// Emptying the tree is only half the fix. An empty device tree is not
-    /// read as "nothing was examined" -- it is read as "this machine has no
-    /// devices", which is a claim about the user's computer. And a device
-    /// manager is exactly where somebody goes when hardware is not working,
-    /// so that claim lands on the person least able to discount it.
     /// **Every key the card advertises is answered by this window.**
     ///
     /// Two states, because `Esc` and `Enter` mean one thing in the search box
@@ -3731,66 +3830,360 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_window_says_it_cannot_see_the_hardware() {
-        let state = DeviceManagerState::new();
-        let cmds = render(&state);
-        let texts: Vec<&str> = cmds
+    /// Every string the window draws.
+    fn texts(state: &DeviceManagerState) -> Vec<String> {
+        render(state)
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                RenderCommand::Text { text, .. } => Some(text.clone()),
                 _ => None,
             })
-            .collect();
-        for line in CANNOT_SEE_HARDWARE_LINES {
-            assert!(texts.contains(&line), "the window never said {line:?}");
+            .collect()
+    }
+
+    /// **An empty tree says that nothing was read, and why** -- in words.
+    ///
+    /// An empty device tree is not read as "nothing was examined"; it is read
+    /// as "this machine has no devices", which is a claim about the user's
+    /// computer. And a device manager is where somebody goes when hardware is
+    /// not working, so that claim lands on the person least able to discount
+    /// it. Three states: never looked, looked and could read nothing, and a
+    /// full tree -- over which the banner must not stay.
+    #[test]
+    fn an_empty_tree_says_nothing_was_read_and_why() {
+        let fresh = texts(&DeviceManagerState::new());
+        for line in [
+            NOTHING_READ,
+            "Press F5 to look at the machine.",
+            NOT_A_FINDING,
+        ] {
+            assert!(
+                fresh.iter().any(|t| t == line),
+                "the window never said {line:?}"
+            );
         }
+
+        let mut failed = DeviceManagerState::new();
+        failed.scan_hardware(); // under test, a root with nothing in it
+        let shown = texts(&failed);
+        let why = shown
+            .iter()
+            .find(|t| t.starts_with("Could not read "))
+            .unwrap_or_else(|| panic!("no reason was given: {shown:?}"));
+        for source in [
+            "PCI devices",
+            "disks",
+            "network interfaces",
+            "display outputs",
+            "the processor",
+        ] {
+            assert!(
+                why.contains(source),
+                "{source} was not read, and not named: {why}"
+            );
+        }
+        assert!(shown.iter().any(|t| t == NOT_A_FINDING), "{shown:?}");
+
+        let full = texts(&DeviceManagerState::with_sample_devices());
         assert!(
-            CANNOT_SEE_HARDWARE_LINES
-                .iter()
-                .any(|l| l.contains("not because the machine has no devices")),
-            "nothing forecloses reading the empty tree as a finding",
+            !full.iter().any(|t| t == NOTHING_READ || t == NOT_A_FINDING),
+            "the banner stayed over a full tree"
         );
     }
 
-    /// Scan reports that it scanned nothing.
-    ///
-    /// `scan_hardware` never looked for hardware -- it recomputed the tree from
-    /// a list nothing changes. It reported that by the strongest means
-    /// available: leaving the list exactly as it was, so the user concluded
-    /// nothing had changed.
+    /// A machine for a test: what the kernel publishes under `/sys` and
+    /// `/proc`, written into a scratch directory -- a disk, two interfaces
+    /// (one of them loopback) and two outputs, and no PCI or processor tree,
+    /// so both halves of a scan are seen: rows, and sources it could not
+    /// read. The layouts are the kernel's, as `hwquery`'s and `procinfo`'s
+    /// own tests pin them.
+    fn fixture_machine() -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("devicemanager_machine");
+        let write = |rel: &str, text: &str| {
+            let path = dir.dir().join(rel);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("fixture");
+            std::fs::write(path, text).expect("fixture");
+        };
+        write("sys/devices/block/vda/sector_count", "16777216\n");
+        write("sys/devices/block/vda/sector_size", "512\n");
+        write("sys/devices/block/vda/read_only", "0\n");
+        write(
+            "proc/net/dev",
+            "Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo:  123456    1000    0    0    0     0          0         0   123456    1000    0    0    0     0       0          0
+  eth0: 9876543   54321    0    0    0     0          0         0  1234567    7654    0    0    0     0       0          0
+",
+        );
+        write(
+            "proc/monitors",
+            "monitors: 2
+enabled: 1
+layout_mode: extended
+primary_id: 2
+ops: 14
+desktop: 3840x1200 at (-1920,0)
+1: HP-Z24 1920x1080@75Hz pos=(-1920,0) scale=125% HDMI [disabled]
+2: DELL U2412 1920x1200@60Hz pos=(0,0) scale=100% DisplayPort [primary]
+",
+        );
+        dir
+    }
+
+    fn provider_for(dir: &scratchdir::ScratchDir) -> hwquery::SyscallProvider {
+        hwquery::SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"))
+    }
+
+    /// **A scan lists what the kernel publishes**, in the tree, under the
+    /// right branches -- and names, where the user will see it, what it could
+    /// not read. It said "Cannot scan" and listed nothing, whatever the
+    /// machine.
     #[test]
-    fn scan_says_it_examined_nothing() {
+    fn a_scan_lists_the_devices_the_kernel_publishes() {
+        let machine = fixture_machine();
         let mut state = DeviceManagerState::new();
-        state.scan_hardware();
-        let notice = state.notice.clone().expect("Scan said nothing at all");
-        assert!(notice.contains("Cannot scan"), "{notice}");
-        assert!(state.devices.is_empty(), "Scan found devices from nowhere");
+        state.scan_with(&provider_for(&machine));
+
+        let names: Vec<&str> = state.devices.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Disk vda (8.0 GiB)",
+                "Network interface eth0",
+                "Display output HP-Z24",
+                "Display output DELL U2412",
+            ]
+        );
+        let labels: Vec<String> = state.tree_nodes.iter().map(|n| n.label.clone()).collect();
+        for branch in ["Storage", "Network", "Display"] {
+            assert!(
+                labels.iter().any(|l| l.contains(branch)),
+                "no {branch} branch: {labels:?}"
+            );
+        }
+        assert_eq!(state.unreadable.len(), 2, "{:?}", state.unreadable);
         assert!(
-            render(&state).iter().any(|c| matches!(
-                c,
-                RenderCommand::Text { text, .. } if text == &notice
-            )),
-            "the refusal never reached the screen",
+            state.unreadable[0].starts_with("PCI devices"),
+            "{:?}",
+            state.unreadable
+        );
+        assert!(
+            state.unreadable[1].starts_with("the processor"),
+            "{:?}",
+            state.unreadable
+        );
+
+        let notice = state.notice.clone().expect("the scan said nothing");
+        assert!(
+            notice.starts_with("Found 4 device(s); could not read PCI devices"),
+            "{notice}"
+        );
+        let shown = texts(&state);
+        assert!(
+            shown.iter().any(|t| t.contains(&notice)),
+            "what the scan found never reached the screen: {shown:?}"
+        );
+        assert!(
+            !shown.iter().any(|t| t == NOTHING_READ),
+            "the empty-tree banner is up over four devices"
         );
     }
 
-    /// Export says it could not write, and says how big the report was.
-    ///
-    /// The old body ended `let _report = self.export_report();` with a comment
-    /// that a real app would save it -- a button that discarded its own output
-    /// in silence, which reads as a broken button. The report is still built,
-    /// because that part is real and tested.
+    /// A second scan replaces the list rather than adding to it, and lets go
+    /// of the selection, whose row may now be a different device.
     #[test]
-    fn export_admits_it_cannot_write_a_file() {
-        let mut state = DeviceManagerState::with_sample_devices();
-        state.handle_toolbar_action(ToolbarAction::Export);
-        let notice = state.notice.clone().expect("Export said nothing at all");
-        assert!(notice.contains("Cannot export"), "{notice}");
-        assert!(
-            notice.contains("bytes"),
-            "no sign the report was built: {notice}"
+    fn a_rescan_replaces_the_list_and_the_selection() {
+        let machine = fixture_machine();
+        let mut state = DeviceManagerState::new();
+        state.scan_with(&provider_for(&machine));
+        let first = state.devices.len();
+        state.selected_tree_index = Some(1);
+
+        state.scan_with(&provider_for(&machine));
+        assert_eq!(state.devices.len(), first, "a rescan appended to the list");
+        assert_eq!(
+            state.selected_tree_index, None,
+            "the selection survived a renumbering"
         );
+        let ids: Vec<u32> = state.devices.iter().map(|d| d.id).collect();
+        assert_eq!(ids, (1..=4).collect::<Vec<u32>>());
+    }
+
+    /// The status bar counts the devices whose status nobody reported, where
+    /// it counted "enabled" -- which every listed device is, in the only
+    /// sense the kernel knows, so the count said nothing while "0 problems"
+    /// beside it said too much.
+    #[test]
+    fn the_status_bar_counts_the_devices_with_no_status_reported() {
+        let mut state = DeviceManagerState::with_sample_devices();
+        for dev in &mut state.devices {
+            dev.status = DeviceStatus::Working;
+        }
+        state.devices[0].status = DeviceStatus::Unknown;
+        state.devices[2].status = DeviceStatus::Unknown;
+        let total = state.devices.len();
+        let shown = texts(&state);
+        let expected = format!("{total} devices | 2 with no status reported | 0 problem(s)");
+        assert!(
+            shown.iter().any(|t| t.starts_with(&expected)),
+            "{expected:?} is not in {shown:?}"
+        );
+    }
+
+    /// Nothing unknown is drawn as known: on a real row the driver tab and
+    /// the resources say "Not reported", where they said "No driver
+    /// installed" and "N/A" -- findings about the machine nothing had made.
+    #[test]
+    fn what_the_kernel_does_not_say_reads_as_not_reported() {
+        let machine = fixture_machine();
+        let mut state = DeviceManagerState::new();
+        state.scan_with(&provider_for(&machine));
+        let row = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("a device row");
+        state.select_tree_node(row);
+        state.show_resource_view = false;
+
+        state.active_tab = PropertiesTab::Driver;
+        assert!(
+            texts(&state).iter().any(|t| t == DRIVER_NOT_REPORTED),
+            "the driver tab claimed something"
+        );
+        state.active_tab = PropertiesTab::General;
+        let shown = texts(&state);
+        assert!(shown.iter().any(|t| t == NOT_REPORTED), "{shown:?}");
+        assert!(!shown.iter().any(|t| t == "N/A"), "{shown:?}");
+    }
+
+    /// Enable, Disable and Uninstall on a real row change nothing and say
+    /// so -- the refusal was written for the day the list stopped being
+    /// empty, which is today.
+    #[test]
+    fn acting_on_a_real_device_is_refused_in_words() {
+        let machine = fixture_machine();
+        for action in [
+            ToolbarAction::Enable,
+            ToolbarAction::Disable,
+            ToolbarAction::Uninstall,
+        ] {
+            let mut state = DeviceManagerState::new();
+            state.scan_with(&provider_for(&machine));
+            let before: Vec<(bool, DeviceStatus)> = state
+                .devices
+                .iter()
+                .map(|d| (d.enabled, d.status))
+                .collect();
+            let row = state
+                .tree_nodes
+                .iter()
+                .position(|n| n.device_id.is_some())
+                .expect("a device row");
+            state.select_tree_node(row);
+            state.show_resource_view = false;
+            state.handle_toolbar_action(action);
+            let after: Vec<(bool, DeviceStatus)> = state
+                .devices
+                .iter()
+                .map(|d| (d.enabled, d.status))
+                .collect();
+            assert_eq!(before, after, "{action:?} changed a device in name only");
+            assert_eq!(state.notice.as_deref(), Some(CANNOT_ACT), "{action:?}");
+        }
+    }
+
+    /// **Export asks where, and the report reaches the disk.** It said
+    /// "Cannot export: no way to write a file" -- and before that, built the
+    /// report and dropped it.
+    #[test]
+    fn export_asks_where_and_writes_the_report() {
+        let dir = scratchdir::ScratchDir::new("devicemanager_export");
+        let mut state = DeviceManagerState::with_sample_devices();
+        let expected = state.export_report();
+
+        state.handle_toolbar_action(ToolbarAction::Export);
+        assert!(state.picker.is_open(), "Export asked for no destination");
+        state.picker.navigate_to(dir.dir());
+        state
+            .picker
+            .dialog_mut()
+            .expect("the picker is up")
+            .set_filename("report.txt");
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+
+        assert!(!state.picker.is_open(), "the picker stayed up");
+        let back = std::fs::read_to_string(dir.path("report.txt"))
+            .unwrap_or_else(|e| panic!("nothing was written: {e}; said {:?}", state.notice));
+        assert_eq!(back, expected, "what was written is not what was composed");
+        let notice = state.notice.clone().expect("the export said nothing");
+        assert!(
+            notice.starts_with(&format!("Wrote {} bytes to ", expected.len())),
+            "{notice}"
+        );
+        assert!(
+            texts(&state).iter().any(|t| t.contains(&notice)),
+            "the export is invisible"
+        );
+    }
+
+    /// A report that cannot be written says so, and names where.
+    #[test]
+    fn a_report_that_cannot_be_written_says_so() {
+        let dir = scratchdir::ScratchDir::new("devicemanager_export_fails");
+        let state = DeviceManagerState::with_sample_devices();
+        let said = state.write_report(&dir.dir().join("missing").join("report.txt"));
+        assert!(said.starts_with("Could not write "), "{said}");
+        assert!(said.contains("report.txt"), "{said}");
+    }
+
+    /// The open picker is drawn, and takes the keys: a name typed into it
+    /// must not reach the search box behind.
+    #[test]
+    fn the_open_picker_is_drawn_and_takes_the_keys() {
+        let mut state = DeviceManagerState::with_sample_devices();
+        let closed = render(&state).len();
+        state.handle_toolbar_action(ToolbarAction::Export);
+        assert!(
+            render(&state).len() > closed,
+            "the open picker is not drawn"
+        );
+
+        state.search_focused = true;
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::X,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::from("x"),
+            }),
+        );
+        assert!(
+            state.search_query.is_empty(),
+            "a key reached the search box under the picker"
+        );
+
+        handle_event(
+            &mut state,
+            &Event::Resize {
+                width: 1400,
+                height: 900,
+            },
+        );
+        assert!(
+            (state.width - 1400.0).abs() < f32::EPSILON,
+            "a resize did not reach the window under the picker"
+        );
+        assert!(state.picker.is_open(), "a resize closed the picker");
     }
 
     // -- DeviceCategory tests ------------------------------------------------
@@ -4112,7 +4505,7 @@ mod tests {
 
         // PCI-to-ISA bridge (id=9) has no IRQ
         let bridge = devices.iter().find(|d| d.id == 9).expect("exists");
-        assert_eq!(bridge.format_irq(), "N/A");
+        assert_eq!(bridge.format_irq(), NOT_REPORTED);
     }
 
     #[test]
@@ -4123,7 +4516,7 @@ mod tests {
 
         // PS/2 Keyboard has no MMIO
         let kbd = devices.iter().find(|d| d.id == 6).expect("exists");
-        assert_eq!(kbd.format_mmio(), "N/A");
+        assert_eq!(kbd.format_mmio(), NOT_REPORTED);
     }
 
     // -- TreeNode tests ------------------------------------------------------
@@ -4434,13 +4827,33 @@ mod tests {
         assert_eq!(dev.status, DeviceStatus::Warning);
     }
 
+    /// A scan replaces what the list held with what it read -- under test,
+    /// nothing -- where it used to rebuild the tree over the same rows, so
+    /// that a device gone from the machine stayed in the window.
     #[test]
     fn test_state_scan_hardware() {
         let mut state = DeviceManagerState::with_sample_devices();
-        let old_node_count = state.tree_nodes.len();
+        assert!(
+            !state.tree_nodes.is_empty(),
+            "control: the sample fills the tree"
+        );
         state.scan_hardware();
-        // After scan, tree should be rebuilt with same data
-        assert_eq!(state.tree_nodes.len(), old_node_count);
+        assert!(
+            state.devices.is_empty(),
+            "rows survived a scan that read nothing"
+        );
+        assert!(
+            state.tree_nodes.is_empty(),
+            "the tree kept rows the scan did not find"
+        );
+        assert!(
+            state.resource_view.irqs.is_empty(),
+            "the resource view kept a device the scan did not find"
+        );
+        assert!(
+            state.update_checks.is_empty(),
+            "update checks for devices now gone"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Spreadsheet — full-featured spreadsheet application"
 [dependencies]
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -14,6 +15,11 @@ oswindow = { path = "../../gui/window" }
 # sheet on disk as a fragment. Same reasoning as `apps/editor` and
 # `apps/notes`.
 safeio = { path = "../safeio" }
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
+# A workbook's text fields are escaped with `textfmt::tsv`, the record files'
+# four escapes, which the finance ledger and the notes library share.
+textfmt = { path = "../../textfmt" }
 
 [lints]
 workspace = true

@@ -15,26 +15,23 @@
 //! - WHOIS lookup for public IPs
 //! - Simulated traceroute
 //!
-//! **This program has no network access and says so.** Its dependencies are
-//! `appearance`, `guitk` and `oswindow` -- there is no `std::net`, no socket
-//! syscall, nothing that can contact an address. Every operation on the list
-//! above refuses and explains: `start_scan`, `run_traceroute`, `run_whois` and
-//! `send_wol` each set a note saying what could not be done and why.
+//! **It scans for real, as far as an application can.** An application opens
+//! TCP connections and nothing lower -- no ICMP, no raw frames -- so this is a
+//! *connect* scan (`engine`): each address is tried on each port, a host is
+//! up if any port answered, a port is open if it accepted, closed if the host
+//! refused, and "no answer" is said as that rather than guessed at. Ping and
+//! ARP discovery and traceroute need the lower layers, and say so. WHOIS is a
+//! TCP conversation with the registries (`whois`), and Wake-on-LAN a UDP
+//! broadcast.
 //!
-//! The line here used to read "Network I/O is performed through Slate OS
-//! syscalls; simulated with representative data for initial development",
-//! which was false in both halves -- there is no syscall, and the simulation
-//! was removed on 2026-09-15 for inventing hosts and open ports.
-//!
-//! **What survived that removal until 2026-09-18 was the report around the
-//! hosts.** A scan produced a `ScanResult` with the hosts list empty and
-//! everything else filled in, so the panel read "Scanned 254 IPs | 0 hosts up
-//! | 0 open ports | 12.3s", the window *title* read "0 hosts up on
-//! 192.168.1.0/24", and a history entry was filed stamped "2026-05-18
-//! 12:07:13" -- a constant derived from the scan id, not a clock. Nothing was
-//! contacted, so the address count is a count of what it would have tried, the
-//! duration is an estimate, and **"0 hosts up" is a finding about the user's
-//! network.** `start_scan` now refuses like the other three.
+//! Until the tree had sockets this program had no network access at all, and
+//! said so for every operation: its earlier simulation, which invented hosts
+//! and open ports with tuned probabilities, was removed on 2026-09-15, and the
+//! empty report left around it on 2026-09-18 ("0 hosts up" is a finding about
+//! the user's network). Nothing here reports a result it did not observe.
+
+mod engine;
+mod whois;
 
 use appearance::Edge;
 use appearance::Palette;
@@ -57,7 +54,7 @@ use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::collections::VecDeque;
 
@@ -90,7 +87,46 @@ const WINDOW_HEIGHT: f32 = 780.0;
 /// on -- the panel reads the value in order to print the value -- so the
 /// method is not a setting with an effect to reach, and a key for it would
 /// be a control that changes a word.
-const CONFIG_NOT_APPLIED: &str = "not applied: no network access";
+/// The most connections one scan makes: a /24 on every port is 16.7 million,
+/// which would run for days; the window asks for a narrower scan instead.
+const MAX_PROBES: usize = 1_000_000;
+
+/// The most connections open at once, whatever the concurrency setting says.
+const MAX_WORKERS: usize = 256;
+
+/// How long a gentle scan's single connection waits before the next.
+const STEALTH_PAUSE: Duration = Duration::from_millis(100);
+
+/// How many finished scans the history keeps.
+const HISTORY_KEPT: usize = 20;
+
+/// How connections are made unless a test says otherwise: for real in the
+/// program, and not at all in a test build -- a test that forgot to choose a
+/// prober must not scan the network of whoever runs it. (One did, the first
+/// time this scanner was real: seven tests pressed Scan on the default
+/// 192.168.1.0/24 before they were rewritten.)
+#[cfg(not(test))]
+const DEFAULT_PROBER: engine::Prober = engine::tcp;
+#[cfg(test)]
+const DEFAULT_PROBER: engine::Prober = engine::no_network;
+
+/// Where a WHOIS lookup starts: IANA, in the program. In a test build, a
+/// port on this machine nothing listens on, for the same reason as
+/// [`DEFAULT_PROBER`] -- a test must not question the real registries.
+#[cfg(not(test))]
+const DEFAULT_WHOIS: &str = whois::IANA;
+#[cfg(test)]
+const DEFAULT_WHOIS: &str = "127.0.0.1:9";
+
+/// Where a Wake-on-LAN packet goes: every machine on the local network, on
+/// the discard port the magic packet traditionally uses. In a test build,
+/// this machine's discard port, so that no test broadcasts on a real network.
+#[cfg(not(test))]
+const DEFAULT_WOL: std::net::SocketAddrV4 =
+    std::net::SocketAddrV4::new(std::net::Ipv4Addr::BROADCAST, 9);
+#[cfg(test)]
+const DEFAULT_WOL: std::net::SocketAddrV4 =
+    std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 9);
 
 const TITLE_BAR_HEIGHT: f32 = 38.0;
 const CONFIG_PANEL_HEIGHT: f32 = 140.0;
@@ -1363,7 +1399,9 @@ impl ScanProfile {
             Self::Quick => "Top 20 common ports",
             Self::Full => "All 65535 ports",
             Self::Custom => "User-defined port range",
-            Self::Stealth => "SYN scan, randomized order, rate-limited",
+            // Not a SYN scan: that needs raw packets an application cannot
+            // send. What it can do is go slowly and in no particular order.
+            Self::Stealth => "Randomized order, one connection at a time",
         }
     }
 
@@ -1426,7 +1464,8 @@ impl Default for ScanConfig {
             target_input: String::from("192.168.1.0/24"),
             port_input: String::new(),
             profile: ScanProfile::Quick,
-            discovery_method: DiscoveryMethod::PingSweep,
+            // The one this program can do: ping and ARP need raw packets.
+            discovery_method: DiscoveryMethod::TcpConnect,
             timeout_ms: 1000,
             concurrency: 100,
             randomize_order: false,
@@ -1519,7 +1558,9 @@ pub struct HostResult {
     pub ports: Vec<PortResult>,
     pub latency_ms: f32,
     pub is_up: bool,
-    pub ttl: u8,
+    /// The packets' time-to-live, which a TCP connection cannot see: `None`
+    /// for every host this program found.
+    pub ttl: Option<u8>,
     pub vendor: Option<String>,
 }
 
@@ -1826,7 +1867,11 @@ pub fn export_json(result: &ScanResult) -> String {
         json.push_str(&format!("      \"os\": \"{}\",\n", host.os_guess.label()));
         json.push_str(&format!("      \"is_up\": {},\n", host.is_up));
         json.push_str(&format!("      \"latency_ms\": {:.1},\n", host.latency_ms));
-        json.push_str(&format!("      \"ttl\": {},\n", host.ttl));
+        json.push_str(&format!(
+            "      \"ttl\": {},\n",
+            host.ttl
+                .map_or_else(|| String::from("null"), |t| t.to_string())
+        ));
         json.push_str("      \"ports\": [\n");
         for (j, port) in host.ports.iter().enumerate() {
             json.push_str("        {\n");
@@ -2061,6 +2106,26 @@ pub struct NetScanApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The scan under way, if one is.
+    scan: Option<engine::Running>,
+    /// How each connection is made: `engine::tcp`, or a test's stand-in.
+    prober: engine::Prober,
+    /// Wakes the window when a scan's results arrive; the event loop hands
+    /// it over before the first frame.
+    waker: Option<std::task::Waker>,
+    /// When the scan under way started.
+    scan_started: Option<Instant>,
+    /// Probes the scan under way has answered, of how many.
+    probes_done: usize,
+    probes_total: usize,
+    /// Probes that found an open port or a refusal: the scan's evidence.
+    probes_answered: usize,
+    /// The WHOIS server a lookup starts at; see [`DEFAULT_WHOIS`].
+    whois_server: String,
+    /// The lookup under way: its answer arrives here.
+    whois_pending: Option<std::sync::mpsc::Receiver<Result<whois::Answer, String>>>,
+    /// Where a Wake-on-LAN packet is sent; see [`DEFAULT_WOL`].
+    wol_destination: std::net::SocketAddrV4,
 }
 
 impl Default for NetScanApp {
@@ -2095,6 +2160,16 @@ impl Default for NetScanApp {
             results_wheel: wheel::Accumulator::default(),
             ports_wheel: wheel::Accumulator::default(),
             config_field_focus: 0,
+            scan: None,
+            prober: DEFAULT_PROBER,
+            waker: None,
+            scan_started: None,
+            probes_done: 0,
+            probes_total: 0,
+            probes_answered: 0,
+            whois_server: String::from(DEFAULT_WHOIS),
+            whois_pending: None,
+            wol_destination: DEFAULT_WOL,
         }
     }
 }
@@ -2104,17 +2179,17 @@ impl NetScanApp {
         Self::default()
     }
 
-    /// Start a simulated scan with the current configuration.
+    /// Start a scan with the current configuration -- or, if one is under
+    /// way, stop it: the one button does both, and says which.
+    ///
+    /// The target is parsed first, so a typo is reported as a typo; then the
+    /// ports, and the size of the whole job, which is refused past
+    /// [`MAX_PROBES`] rather than started and left running for days.
     pub fn start_scan(&mut self) {
         if self.is_scanning {
+            self.stop_scan();
             return;
         }
-
-        self.results = None;
-
-        // The target is still parsed first, so a typo is reported as a typo
-        // rather than being swallowed by the refusal -- the same order
-        // `run_traceroute` uses, and for the same reason.
         let Some(target) = ScanTarget::parse(&self.config.target_input) else {
             self.scan_note = Some(format!(
                 "Not a scannable target: {}",
@@ -2122,23 +2197,239 @@ impl NetScanApp {
             ));
             return;
         };
-        if target.all_ips().is_empty() {
+        let hosts = target.all_ips();
+        if hosts.is_empty() {
             self.scan_note = Some(format!(
                 "That range contains no addresses: {}",
                 self.config.target_input
             ));
             return;
         }
+        let ports = match self.config.profile {
+            ScanProfile::Custom => parse_port_spec(&self.config.port_input).unwrap_or_default(),
+            profile => profile.ports(),
+        };
+        if ports.is_empty() {
+            self.scan_note = Some(format!(
+                "No ports to scan: \"{}\" names none (e.g. 22,80,8000-8100)",
+                self.config.port_input
+            ));
+            return;
+        }
+        let probes = hosts.len().saturating_mul(ports.len());
+        if probes > MAX_PROBES {
+            self.scan_note = Some(format!(
+                "{} addresses on {} ports is {probes} connections -- narrow the addresses or the ports",
+                hosts.len(),
+                ports.len()
+            ));
+            return;
+        }
 
-        self.scan_note = Some(String::from(
-            "Cannot scan: this program has no network access, so no address was contacted. \
-             That is not a finding that nothing is there.",
-        ));
+        let gentle = self.config.profile == ScanProfile::Stealth;
+        let mut hosts: Vec<[u8; 4]> = hosts.iter().map(|ip| ip.octets).collect();
+        let mut ports = ports;
+        if gentle || self.config.randomize_order {
+            // "SCAN" in ASCII, should the kernel give no seed: the order only
+            // needs to vary, not to be secret.
+            let mut rng = guitk::rng::seeded_from_system(0x5343_414E);
+            shuffle(&mut hosts, &mut rng);
+            shuffle(&mut ports, &mut rng);
+        }
+        let job = engine::Job {
+            hosts,
+            ports,
+            timeout: Duration::from_millis(u64::from(self.config.timeout_ms.max(1))),
+            workers: if gentle {
+                1
+            } else {
+                usize::try_from(self.config.concurrency)
+                    .unwrap_or(MAX_WORKERS)
+                    .clamp(1, MAX_WORKERS)
+            },
+            pause: if gentle {
+                STEALTH_PAUSE
+            } else {
+                Duration::ZERO
+            },
+        };
+
+        let id = self.scan_id_counter;
+        self.scan_id_counter = self.scan_id_counter.saturating_add(1);
+        let total_hosts = u32::try_from(job.hosts.len()).unwrap_or(u32::MAX);
+        let total_ports = u32::try_from(job.ports.len()).unwrap_or(u32::MAX);
+        self.results = Some(ScanResult {
+            id,
+            timestamp: now_stamp(),
+            target_description: self.config.target_input.clone(),
+            profile: self.config.profile,
+            hosts: Vec::new(),
+            total_ips_scanned: total_hosts,
+            total_ports_scanned: total_ports,
+            duration_secs: 0.0,
+        });
+        self.scan_progress = Some(ScanProgress {
+            phase: ScanPhase::PortScan,
+            hosts_scanned: 0,
+            total_hosts,
+            ports_scanned: 0,
+            total_ports,
+            hosts_found: 0,
+            elapsed_secs: 0.0,
+        });
+        self.probes_total = job.probes();
+        self.probes_done = 0;
+        self.probes_answered = 0;
+        self.scan_note = None;
+        self.selected_host_idx = None;
         self.scroll_results_to_top();
         self.detail_port_scroll = 0;
         self.results_wheel.reset();
         self.ports_wheel.reset();
+        self.scan_started = Some(Instant::now());
+        self.scan = Some(engine::Running::start(job, self.prober, self.waker.clone()));
+        self.is_scanning = true;
+    }
+
+    /// Stop the scan under way: no new connection is started. Those already
+    /// connecting finish, and what they find is still shown.
+    pub fn stop_scan(&mut self) {
+        if let Some(scan) = &self.scan {
+            scan.cancel();
+            self.scan_note = Some(String::from("Stopping..."));
+        }
+    }
+
+    /// Take in whatever the scan has found since the last look. Whether
+    /// anything changed, so the caller knows whether to draw.
+    pub fn pump_scan(&mut self) -> bool {
+        let Some(scan) = &self.scan else {
+            return false;
+        };
+        let (reports, finished) = scan.drain();
+        let cancelled = scan.cancelled();
+        let changed = !reports.is_empty() || finished;
+        for report in reports {
+            self.take_report(report);
+        }
+        let elapsed = self
+            .scan_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f32());
+        let total_ports = self
+            .scan_progress
+            .as_ref()
+            .map_or(1, |p| p.total_ports.max(1));
+        let found = self.results.as_ref().map_or(0, |r| r.hosts.len());
+        if let Some(progress) = &mut self.scan_progress {
+            let done = u32::try_from(self.probes_done).unwrap_or(u32::MAX);
+            progress.hosts_scanned = done.checked_div(total_ports).unwrap_or(0);
+            progress.ports_scanned = done.checked_rem(total_ports).unwrap_or(0);
+            progress.hosts_found = u32::try_from(found).unwrap_or(u32::MAX);
+            progress.elapsed_secs = elapsed;
+        }
+        if finished {
+            self.finish_scan(elapsed, cancelled);
+        }
+        changed
+    }
+
+    /// Connections in the last scan that had no answer.
+    #[must_use]
+    pub fn ports_silent(&self) -> usize {
+        self.probes_done.saturating_sub(self.probes_answered)
+    }
+
+    /// One probe's result, into the result being built.
+    fn take_report(&mut self, report: engine::Report) {
+        self.probes_done = self.probes_done.saturating_add(1);
+        let (state, ms, banner) = match report.probe {
+            engine::Probe::Silent => return,
+            engine::Probe::Open { ms, banner } => (PortState::Open, ms, banner),
+            engine::Probe::Closed { ms } => (PortState::Closed, ms, None),
+        };
+        self.probes_answered = self.probes_answered.saturating_add(1);
+        let Some(result) = &mut self.results else {
+            return;
+        };
+        let [a, b, c, d] = report.host;
+        let ip = Ipv4Addr::new(a, b, c, d);
+        // Kept in address order as they arrive, so the table does not jump
+        // about while the scan fills it.
+        let at = match result
+            .hosts
+            .binary_search_by_key(&ip.to_u32(), |h| h.ip.to_u32())
+        {
+            Ok(at) => at,
+            Err(at) => {
+                result.hosts.insert(
+                    at,
+                    HostResult {
+                        ip,
+                        hostname: None,
+                        mac: None,
+                        os_guess: OsGuess::Unknown,
+                        ports: Vec::new(),
+                        latency_ms: ms,
+                        is_up: true,
+                        ttl: None,
+                        vendor: None,
+                    },
+                );
+                at
+            }
+        };
+        let Some(host) = result.hosts.get_mut(at) else {
+            return;
+        };
+        host.latency_ms = host.latency_ms.min(ms);
+        let port = PortResult {
+            port: report.port,
+            state,
+            service: lookup_service(report.port).map(str::to_owned),
+            banner,
+            response_ms: ms,
+        };
+        match host.ports.binary_search_by_key(&report.port, |p| p.port) {
+            Ok(i) => {
+                if let Some(slot) = host.ports.get_mut(i) {
+                    *slot = port;
+                }
+            }
+            Err(i) => host.ports.insert(i, port),
+        }
+        host.os_guess = guess_os(&host.ports);
+    }
+
+    /// The scan has ended -- finished, or stopped: say what it found, and
+    /// file it in the history.
+    fn finish_scan(&mut self, elapsed: f32, cancelled: bool) {
+        self.scan = None;
         self.is_scanning = false;
+        self.scan_started = None;
+        if let Some(progress) = &mut self.scan_progress {
+            progress.phase = ScanPhase::Complete;
+        }
+        let silent = self.ports_silent();
+        let Some(result) = &mut self.results else {
+            return;
+        };
+        result.duration_secs = elapsed;
+        let up = result.hosts.len();
+        let open = result.total_open_ports();
+        let stopped = if cancelled {
+            format!(
+                "Stopped after {} of {} connections. ",
+                self.probes_done, self.probes_total
+            )
+        } else {
+            String::new()
+        };
+        self.scan_note = Some(format!(
+            "{stopped}{up} host(s) answered, {open} open port(s), in {elapsed:.1} s; \
+             {silent} connection(s) had no answer, which is not the same as nothing being there"
+        ));
+        self.history.push_front(result.clone());
+        self.history.truncate(HISTORY_KEPT);
     }
 
     /// Report that a traceroute cannot be run.
@@ -2154,53 +2445,106 @@ impl NetScanApp {
         self.traceroute_result = None;
         self.traceroute_note = Some(if Ipv4Addr::parse(&self.traceroute_target).is_some() {
             String::from(
-                "Cannot trace a route: this program has no network access, so no packet was sent",
+                "Cannot trace a route: that needs ICMP, which an application cannot send, \
+                 so no packet was sent",
             )
         } else {
             format!("Not an IPv4 address: {}", self.traceroute_target)
         });
     }
 
-    /// Report that a WHOIS lookup cannot be run.
+    /// Ask the registries who holds the address typed in: IANA, then the
+    /// registry it names (`whois`). The conversation runs on a thread of its
+    /// own -- a registry can take seconds -- and its answer arrives through
+    /// [`NetScanApp::pump_whois`].
     ///
-    /// It used to answer from the first octet alone: below 100 was "ARIN
-    /// Regional Registry, US", below 150 "RIPE Network Coordination Centre,
-    /// EU", and so on. That is a claim about **who owns an address**, and it
-    /// is acted on -- an abuse report goes to the registry the tool named. A
-    /// wrong one is sent to a party with no power over the host and no reason
-    /// to answer, and the real operator never hears about it.
+    /// It used to answer from the first octet alone -- below 100 was ARIN,
+    /// below 150 RIPE -- which is a claim about who is responsible for an
+    /// address, and is acted on: an abuse report goes to the registry named.
     pub fn run_whois(&mut self) {
         self.whois_result = None;
-        self.whois_note = Some(if Ipv4Addr::parse(&self.whois_target).is_some() {
-            String::from("Cannot look up ownership: this program cannot reach a WHOIS server")
-        } else {
-            format!("Not an IPv4 address: {}", self.whois_target)
-        });
+        let Some(ip) = Ipv4Addr::parse(&self.whois_target) else {
+            self.whois_note = Some(format!("Not an IPv4 address: {}", self.whois_target));
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server = self.whois_server.clone();
+        let waker = self.waker.clone();
+        let spawned = std::thread::Builder::new()
+            .name(String::from("netscan-whois"))
+            .spawn(move || {
+                // The window may have closed and dropped the receiver; then
+                // there is nobody to tell, and nothing else to do.
+                let _ = tx.send(whois::lookup(ip.octets, &server));
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+            });
+        match spawned {
+            Ok(_) => {
+                self.whois_note = Some(format!("Asking {}...", self.whois_server));
+                self.whois_pending = Some(rx);
+            }
+            Err(e) => self.whois_note = Some(format!("Cannot start the lookup: {e}")),
+        }
     }
 
-    /// Report that a Wake-on-LAN packet cannot be sent.
-    ///
-    /// The packet is still *built*, and that part is real: `build_wol_packet`
-    /// produces a correct magic frame and is tested against the specification.
-    /// What never happened was sending it -- there is no UDP socket here -- and
-    /// the button said "Packet Sent!" anyway.
-    ///
-    /// This is the one on this panel with a waiting cost: somebody who believes
-    /// the packet went out sits watching a machine that was never asked to
-    /// wake, and concludes the *machine* is broken.
-    pub fn send_wol(&mut self) {
-        self.wol_note = Some(match parse_mac(&self.wol_target_mac) {
-            Some(mac) => {
-                // Built, checked, and discarded -- keeping the call means the
-                // packet builder stays exercised on the production path rather
-                // than only from tests.
-                let packet = build_wol_packet(&mac);
-                debug_assert_eq!(packet.len(), 102, "a magic packet is 6 + 16 * 6 bytes");
-                // Short and front-loaded: this lands in a sidebar column and
-                // is ellipsised, so the refusal has to be the part that fits.
-                String::from("Cannot send: no socket to broadcast on")
+    /// Take in the WHOIS answer, if it has come. Whether anything changed.
+    pub fn pump_whois(&mut self) -> bool {
+        let Some(pending) = &self.whois_pending else {
+            return false;
+        };
+        let answer = match pending.try_recv() {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(String::from("the lookup ended without an answer"))
             }
-            None => format!("Not a MAC address: {}", self.wol_target_mac),
+        };
+        self.whois_pending = None;
+        let ip = Ipv4Addr::parse(&self.whois_target).unwrap_or(Ipv4Addr::new(0, 0, 0, 0));
+        match answer {
+            Ok(answer) => {
+                let r = answer.record;
+                self.whois_result = Some(WhoisInfo {
+                    ip,
+                    org_name: r.org_name,
+                    country: r.country,
+                    cidr: r.cidr,
+                    net_name: r.net_name,
+                    description: r.description,
+                    abuse_contact: r.abuse_contact,
+                });
+                self.whois_note = Some(format!("As {} records it", answer.server));
+            }
+            Err(why) => self.whois_note = Some(format!("Cannot look up ownership: {why}")),
+        }
+        true
+    }
+
+    /// Send the Wake-on-LAN magic packet for the MAC address typed in, as a
+    /// UDP broadcast on the local network.
+    ///
+    /// "Sent" is all that can be said: whether the machine wakes cannot be
+    /// seen from here, and the note does not pretend otherwise. (The button
+    /// once read "Packet Sent!" when nothing had been sent -- somebody who
+    /// believed it watched a machine that was never asked to wake, and
+    /// concluded the machine was broken.)
+    pub fn send_wol(&mut self) {
+        let Some(mac) = parse_mac(&self.wol_target_mac) else {
+            self.wol_note = Some(format!("Not a MAC address: {}", self.wol_target_mac));
+            return;
+        };
+        let packet = build_wol_packet(&mac);
+        let sent = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|socket| {
+            socket.set_broadcast(true)?;
+            socket.send_to(&packet, self.wol_destination)
+        });
+        // Short and front-loaded: this lands in a sidebar column and is
+        // ellipsised, so what happened has to be the part that fits.
+        self.wol_note = Some(match sent {
+            Ok(_) => format!("Sent to {} for {}", self.wol_destination, mac.display()),
+            Err(e) => format!("Cannot send: {e}"),
         });
     }
 
@@ -2769,11 +3113,10 @@ impl NetScanApp {
             x: PADDING,
             y: method_y,
             text: format!(
-                "Discovery: {}  |  Timeout: {}ms  |  Concurrency: {}  |  {}",
+                "Discovery: {}  |  Timeout: {}ms  |  Concurrency: {}",
                 self.config.discovery_method.label(),
                 self.config.timeout_ms,
                 self.config.concurrency,
-                CONFIG_NOT_APPLIED,
             ),
             color: self.palette.subtext0,
             font_size: 11.0,
@@ -2839,7 +3182,7 @@ impl NetScanApp {
             x: scan_btn_x + 30.0,
             y: scan_btn_y + 9.0,
             text: if self.is_scanning {
-                "Scanning..."
+                "Stop Scan (F5)"
             } else {
                 "Start Scan (F5)"
             }
@@ -2968,12 +3311,12 @@ impl NetScanApp {
         let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
         let table_width = self.window_width - SIDEBAR_WIDTH;
 
-        // Results summary bar, or why there is none.
-        //
-        // The refusal takes the summary's place rather than sitting beside an
-        // empty table: pressing Scan and seeing nothing change is the failure
-        // this whole panel is now for.
-        if let Some(ref result) = self.results {
+        // The live counts while a scan runs; then what it found, in words --
+        // or why there was no scan. The note takes the summary's place rather
+        // than sitting beside it: it is the finished scan's summary, with the
+        // one caveat a table of hosts cannot carry (an address that did not
+        // answer is not an empty one).
+        if let (Some(result), None) = (&self.results, self.scan_note.as_deref()) {
             self.render_summary_bar(tree, content_y, result);
         } else if let Some(note) = self.scan_note.as_deref() {
             tree.push(RenderCommand::Text {
@@ -3470,7 +3813,11 @@ impl NetScanApp {
                 host.vendor.clone().unwrap_or_else(|| "Unknown".to_string()),
             ),
             ("OS Guess:", host.os_guess.label().to_string()),
-            ("TTL:", host.ttl.to_string()),
+            (
+                "TTL:",
+                host.ttl
+                    .map_or_else(|| String::from("unknown"), |t| t.to_string()),
+            ),
             ("Latency:", format!("{:.1} ms", host.latency_ms)),
             ("Open Ports:", host.open_port_count().to_string()),
         ];
@@ -4303,9 +4650,15 @@ impl NetScanApp {
             });
         }
 
-        // WHOIS result display
+        // WHOIS result display, under the note that says whose record it is.
         if let Some(ref info) = self.whois_result {
-            let card_y = btn_y + BUTTON_HEIGHT + 16.0;
+            let card_y = btn_y
+                + BUTTON_HEIGHT
+                + if self.whois_note.is_some() {
+                    40.0
+                } else {
+                    16.0
+                };
 
             self.palette.push_surface(
                 tree,
@@ -4408,6 +4761,25 @@ impl NetScanApp {
     }
 }
 
+/// Now, as the history stamps a scan: `2026-09-26 14:05:09 UTC`.
+fn now_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    format!(
+        "{} UTC",
+        guitk::datetime::stamp_secs(secs, &guitk::tzrules::Tz::utc())
+    )
+}
+
+/// Put `items` in a random order (Fisher-Yates).
+fn shuffle<T>(items: &mut [T], rng: &mut impl guitk::rng::RandomSource) {
+    for i in (1..items.len()).rev() {
+        let j = rng.below(i.saturating_add(1));
+        items.swap(i, j);
+    }
+}
+
 // ============================================================================
 // Parsing Helpers
 // ============================================================================
@@ -4483,23 +4855,43 @@ impl App for NetScanApp {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
-    /// No clock.
-    ///
-    /// The scan is synchronous: `start_scan` fills in the whole result before
-    /// it returns, so there is no interval during which anything on screen is
-    /// changing by itself. A tick would redraw an identical frame.
-    ///
-    /// The `scan_progress` field and the progress bar drawn from it are
-    /// therefore only ever seen at 0% or 100%; making the scan stepwise -- as
-    /// `apps/undelete` now is -- is what would give this a clock, and is
-    /// written up in `known-issues.md`.
+    /// A clock while a scan runs, for its elapsed time -- and, where the
+    /// loop cannot be woken (a test pipe), for taking in its results.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        (self.is_scanning || self.whois_pending.is_some()).then_some(Duration::from_millis(500))
+    }
+
+    /// The scan's workers wake the window as results arrive.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.waker = Some(waker);
+    }
+
+    fn on_wake(&mut self) -> Response {
+        let whois = self.pump_whois();
+        if self.pump_scan() || whois {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
+        }
+        if matches!(event, Event::Tick { .. }) {
+            // The elapsed time moves while scanning, found or not.
+            self.pump_scan();
+            self.pump_whois();
+            return if self.is_scanning || self.scan_progress.is_some() {
+                Response::Redraw
+            } else {
+                Response::Idle
+            };
         }
         match self.handle_event(event) {
             EventResult::Consumed => Response::Redraw,
@@ -4518,8 +4910,9 @@ impl App for NetScanApp {
 }
 
 fn main() -> ExitCode {
+    // No scan at launch: connecting to every address on the network is
+    // something the user asks for, not something opening a window does.
     let mut app = NetScanApp::new();
-    app.start_scan();
     app::launch("netscan", &mut app)
 }
 
@@ -4527,13 +4920,10 @@ fn main() -> ExitCode {
 // Tests (55+)
 // ============================================================================
 
-/// Kept for the real scanner, and used by the tests meanwhile.
-///
-/// `#[cfg(test)]` since 2026-09-15: the only production caller was the
-/// fabricated scan. A TTL and a MAC prefix are real evidence and this is
-/// real inference over them -- what was wrong was the numbers it was fed.
-#[cfg(test)]
-/// Guess OS based on open ports.
+/// A guess at what a host is from which ports are open -- a guess, and shown
+/// as one ("OS Guess"). Only ports that mostly one kind of system opens say
+/// anything; a host whose open ports are all general services (a web server,
+/// SSH) is `Unknown` rather than called Linux by default, as it was.
 fn guess_os(ports: &[PortResult]) -> OsGuess {
     let open_ports: Vec<u16> = ports
         .iter()
@@ -4556,13 +4946,13 @@ fn guess_os(ports: &[PortResult]) -> OsGuess {
     if open_ports.contains(&1883) || open_ports.contains(&8883) {
         return OsGuess::IoTDevice;
     }
-    if open_ports.contains(&22) || open_ports.contains(&111) {
+    // Port 111 is the RPC portmapper, which Unix systems run and little else
+    // does. SSH (22) is everywhere now -- routers, Windows, printers -- so it
+    // decides nothing on its own.
+    if open_ports.contains(&111) {
         return OsGuess::Linux;
     }
-    if open_ports.is_empty() {
-        return OsGuess::Unknown;
-    }
-    OsGuess::Linux
+    OsGuess::Unknown
 }
 
 /// Kept for the real scanner, and used by the tests meanwhile.
@@ -4603,6 +4993,63 @@ mod tests {
     )]
 
     use super::*;
+    use std::net::SocketAddrV4;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A small network: 10.0.0.2 answers on 22 with a banner and refuses
+    /// every other port; 10.0.0.5 answers on 80; nothing else answers.
+    fn lan(addr: SocketAddrV4, _: Duration) -> engine::Probe {
+        match (addr.ip().octets(), addr.port()) {
+            ([10, 0, 0, 2], 22) => engine::Probe::Open {
+                ms: 2.0,
+                banner: Some(String::from("SSH-2.0-test")),
+            },
+            ([10, 0, 0, 2], _) => engine::Probe::Closed { ms: 1.0 },
+            ([10, 0, 0, 5], 80) => engine::Probe::Open {
+                ms: 5.0,
+                banner: None,
+            },
+            _ => engine::Probe::Silent,
+        }
+    }
+
+    /// A network where every connection takes a while and finds nothing.
+    fn slow(_: SocketAddrV4, _: Duration) -> engine::Probe {
+        std::thread::sleep(Duration::from_millis(20));
+        engine::Probe::Silent
+    }
+
+    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+    static MOST_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+    /// Counts how many connections are being made at once.
+    fn counted(_: SocketAddrV4, _: Duration) -> engine::Probe {
+        let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+        MOST_IN_FLIGHT.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(2));
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        engine::Probe::Silent
+    }
+
+    /// Take in the scan's results until it has finished.
+    fn finish(app: &mut NetScanApp) {
+        let deadline = Instant::now() + Duration::from_mins(1);
+        while app.is_scanning {
+            app.pump_scan();
+            assert!(Instant::now() < deadline, "the scan never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// `target` scanned on the small network above, finished.
+    fn scanned(target: &str) -> NetScanApp {
+        let mut app = NetScanApp::new();
+        app.prober = lan;
+        app.config.target_input = String::from(target);
+        app.start_scan();
+        finish(&mut app);
+        app
+    }
 
     // ------------------------------------------------------------------
     // The service table
@@ -4830,23 +5277,13 @@ mod tests {
         );
     }
 
-    /// The title does not report a finding, because there is none to report.
-    ///
-    /// It read "0 hosts up on 192.168.1.0/24 - Network Scanner" after a scan
-    /// that contacted nothing -- a claim about the user's network, in the
-    /// taskbar, where it outlives the window being looked at.
+    /// The title says what a scan found -- and nothing before a scan has.
     #[test]
-    fn the_title_does_not_claim_a_finding() {
-        let mut app = NetScanApp::new();
+    fn the_title_claims_only_what_a_scan_found() {
+        let app = NetScanApp::new();
         assert_eq!(app.title(), "Network Scanner");
-
-        app.start_scan();
-
-        assert_eq!(
-            app.title(),
-            "Network Scanner",
-            "the title reports a scan that did not happen"
-        );
+        let app = scanned("10.0.0.0/29");
+        assert_eq!(app.title(), "2 hosts up on 10.0.0.0/29 - Network Scanner");
     }
 
     // --- IPv4 Parsing and Representation ---
@@ -5140,25 +5577,21 @@ mod tests {
         assert_eq!(guess_os(&ports), OsGuess::Windows);
     }
 
+    /// Only a port that mostly one kind of system opens says what a host is:
+    /// the RPC portmapper says Unix. SSH and a web server say nothing -- they
+    /// run everywhere -- where they used to make every host "Linux".
     #[test]
     fn test_guess_os_linux() {
-        let ports = vec![
-            PortResult {
-                port: 22,
-                state: PortState::Open,
-                service: None,
-                banner: None,
-                response_ms: 1.0,
-            },
-            PortResult {
-                port: 80,
-                state: PortState::Open,
-                service: None,
-                banner: None,
-                response_ms: 1.0,
-            },
-        ];
-        assert_eq!(guess_os(&ports), OsGuess::Linux);
+        let open = |port| PortResult {
+            port,
+            state: PortState::Open,
+            service: None,
+            banner: None,
+            response_ms: 1.0,
+        };
+        assert_eq!(guess_os(&[open(111), open(22)]), OsGuess::Linux);
+        assert_eq!(guess_os(&[open(22), open(80)]), OsGuess::Unknown);
+        assert_eq!(guess_os(&[]), OsGuess::Unknown);
     }
 
     #[test]
@@ -5239,7 +5672,7 @@ mod tests {
                 }],
                 latency_ms: 1.2,
                 is_up: true,
-                ttl: 64,
+                ttl: Some(64),
                 vendor: None,
             }],
             total_ips_scanned: 1,
@@ -5292,7 +5725,7 @@ mod tests {
                 }],
                 latency_ms: 1.2,
                 is_up: true,
-                ttl: 64,
+                ttl: Some(64),
                 vendor: None,
             }],
             total_ips_scanned: 1,
@@ -5457,7 +5890,7 @@ mod tests {
                 ports: vec![],
                 latency_ms: 1.0,
                 is_up: true,
-                ttl: 64,
+                ttl: Some(64),
                 vendor: None,
             }],
             total_ips_scanned: 1,
@@ -5484,7 +5917,7 @@ mod tests {
                 ports: vec![],
                 latency_ms: 1.0,
                 is_up: true,
-                ttl: 64,
+                ttl: Some(64),
                 vendor: None,
             }],
             total_ips_scanned: 1,
@@ -5546,20 +5979,11 @@ mod tests {
         assert!(app.history.is_empty());
     }
 
-    /// The settings line says the settings are not applied, before anything
-    /// is pressed.
-    ///
-    /// `start_scan` refuses and explains, and that refusal takes the results
-    /// summary's place -- but only once Scan has been pressed. Before that
-    /// the window shows a target box, a discovery method, a timeout and a
-    /// concurrency, which is the whole apparatus of a scanner, and said
-    /// nothing. Somebody reading the settings to decide what to scan has not
-    /// pressed anything yet.
+    /// The settings line says how hosts are found, and no longer that the
+    /// settings are not applied: they are.
     #[test]
-    fn the_settings_line_says_they_are_not_applied() {
+    fn the_settings_line_names_how_hosts_are_found() {
         let app = NetScanApp::new();
-        assert!(app.scan_note.is_none(), "control: nothing pressed yet");
-
         let texts: Vec<String> = app
             .render_tree()
             .commands
@@ -5569,67 +5993,69 @@ mod tests {
                 _ => None,
             })
             .collect();
-
         let line = texts
             .iter()
             .find(|t| t.starts_with("Discovery: "))
             .unwrap_or_else(|| panic!("control: the settings line is not drawn: {texts:?}"));
-        // Against the words rather than the constant: comparing with
-        // `CONFIG_NOT_APPLIED` passes with the constant rewritten to "ok".
-        assert!(
-            line.contains("not applied") && line.contains("no network access"),
-            "the settings line does not say they are not applied: {line:?}"
-        );
+        assert!(line.starts_with("Discovery: TCP Connect"), "{line:?}");
+        assert!(!line.contains("not applied"), "{line:?}");
     }
 
-    /// A scan produces no result, because no scan happened.
-    ///
-    /// This asserted `results.is_some()` and `!history.is_empty()` until
-    /// 2026-09-18. Both were true and both were the defect: a `ScanResult`
-    /// filed in a durable history *is* the claim that a scan ran.
+    /// A scan on which nothing answers is a finished scan with a true
+    /// finding -- nobody answered -- and says so without claiming the
+    /// addresses are empty.
     #[test]
     fn test_app_start_scan() {
         let mut app = NetScanApp::new();
+        app.config.target_input = String::from("10.1.1.0/24");
         app.start_scan();
+        assert!(app.is_scanning, "Scan did not start");
+        finish(&mut app);
+        let result = app.results.as_ref().expect("a result");
+        assert!(result.hosts.is_empty());
+        assert_eq!(result.total_ips_scanned, 254);
+        let note = app.scan_note.as_deref().expect("a summary");
+        assert!(note.starts_with("0 host(s) answered"), "{note}");
         assert!(
-            app.results.is_none(),
-            "a scan that contacted nothing produced a result"
+            note.contains("not the same as nothing being there"),
+            "{note}"
         );
-        assert!(app.history.is_empty(), "and filed it in the history");
-        assert!(app.scan_note.is_some(), "and did not say why");
+        assert_eq!(app.history.len(), 1, "the scan was not filed");
     }
 
-    /// A scan says it cannot be run, rather than reporting an empty one.
-    ///
-    /// Two removals, a day apart in spirit. Until 2026-09-15 `start_scan`
-    /// invented hosts and open ports with probabilities tuned to look
-    /// plausible -- 50% for SSH and HTTP, 25% for RDP and SMB -- and two runs
-    /// disagreed, which is what a real scan does, so repeating it could never
-    /// have exposed it. That was removed and the hosts list became empty.
-    ///
-    /// **The report around the hosts stayed**, and that was still a claim:
-    /// "Scanned 254 IPs | 0 hosts up | 0 open ports | 12.3s" in the panel, the
-    /// same count in the window *title*, and a history entry stamped
-    /// "2026-05-18 12:07:13" -- a constant, not a clock. Nothing was scanned,
-    /// so the count of addresses is a count of addresses it would have tried,
-    /// the duration is an estimate, and "0 hosts up" is a finding about the
-    /// user's network. `run_traceroute` in this same file already refused
-    /// outright; the scan is the one that was missed.
+    /// A scan reports the hosts that answered, each with the ports that
+    /// answered -- open with what the service said first, or refused -- and
+    /// nothing for an address that never answered.
     #[test]
-    fn a_scan_says_it_cannot_run_rather_than_reporting_an_empty_one() {
-        let mut app = NetScanApp::new();
-        app.start_scan();
-
-        assert!(app.results.is_none(), "an empty scan report was produced");
-        let note = app.scan_note.as_deref().expect("a reason");
+    fn a_scan_reports_what_answered_and_nothing_else() {
+        let app = scanned("10.0.0.0/29");
+        let result = app.results.as_ref().expect("a result");
+        let ips: Vec<String> = result.hosts.iter().map(|h| h.ip.display()).collect();
+        assert_eq!(ips, ["10.0.0.2", "10.0.0.5"]);
+        let two = &result.hosts[0];
+        let ssh = two.ports.iter().find(|p| p.port == 22).expect("port 22");
+        assert_eq!(ssh.state, PortState::Open);
+        assert_eq!(ssh.banner.as_deref(), Some("SSH-2.0-test"));
+        assert_eq!(ssh.service.as_deref(), Some("ssh"));
         assert!(
-            note.contains("no network access"),
-            "the refusal does not say why: {note:?}"
+            two.ports
+                .iter()
+                .filter(|p| p.port != 22)
+                .all(|p| p.state == PortState::Closed),
+            "{:?}",
+            two.ports
         );
-        assert!(
-            note.contains("not a finding"),
-            "the refusal does not deny the inference: {note:?}"
+        assert_eq!(two.latency_ms, 1.0, "the fastest answer is the latency");
+        let five = &result.hosts[1];
+        assert_eq!(
+            five.ports
+                .iter()
+                .map(|p| (p.port, p.state))
+                .collect::<Vec<_>>(),
+            [(80, PortState::Open)]
         );
+        assert_eq!(result.total_open_ports(), 2);
+        assert!(app.ports_silent() > 0, "control: the rest were silent");
     }
 
     /// A typo is still reported as a typo, not swallowed by the refusal.
@@ -5661,6 +6087,7 @@ mod tests {
             "a route appeared from nowhere"
         );
         let note = app.traceroute_note.expect("no route and no reason given");
+        assert!(note.contains("needs ICMP"), "{note}");
         assert!(note.contains("no packet was sent"), "{note}");
     }
 
@@ -5678,80 +6105,109 @@ mod tests {
         assert!(note.contains("Not an IPv4 address"), "{note}");
     }
 
-    /// The refusal reaches the window, not just the field.
-    ///
-    /// `wol_note` was written and rendered by nothing for three commits, and
-    /// only the write-only-field gate noticed. A note that never reaches the
-    /// screen leaves Scan looking like a button that does nothing, which is
-    /// the failure this panel is now for.
+    /// What a scan found is said on the window, not only kept in a field.
     #[test]
-    fn the_scan_refusal_reaches_the_window() {
-        let mut app = NetScanApp::new();
-        app.start_scan();
-        let note = app
-            .scan_note
-            .clone()
-            .expect("Scan did nothing and said nothing");
-
+    fn the_scan_summary_reaches_the_window() {
+        let app = scanned("10.0.0.0/29");
+        let note = app.scan_note.clone().expect("a summary");
+        assert!(
+            note.starts_with("2 host(s) answered, 2 open port(s)"),
+            "{note}"
+        );
         assert!(
             app.render_tree()
                 .commands
                 .iter()
                 .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == &note)),
-            "the refusal never reached the screen",
+            "the summary never reached the screen",
         );
     }
 
-    /// Wake-on-LAN builds the packet and cannot send it.
-    ///
-    /// The button read "Packet Sent!" and nothing was sent. This is the one on
-    /// that panel with a waiting cost: somebody who believes the packet went
-    /// out watches a machine that was never asked to wake, and concludes the
-    /// machine is broken.
+    /// Wake-on-LAN sends the magic packet -- received here, byte for byte --
+    /// and says only that it was sent, on the window.
     #[test]
-    fn wake_on_lan_does_not_claim_to_have_sent_anything() {
+    fn wake_on_lan_sends_the_magic_packet() {
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let std::net::SocketAddr::V4(at) = listener.local_addr().unwrap() else {
+            panic!("an IPv4 socket has an IPv4 address");
+        };
         let mut app = NetScanApp::new();
+        app.wol_destination = at;
         app.wol_target_mac = "AA:BB:CC:DD:EE:FF".to_string();
         app.send_wol();
-        let note = app
-            .wol_note
-            .clone()
-            .expect("Send did nothing and said nothing");
-        assert!(note.contains("Cannot send"), "{note}");
-
-        // And it reaches the window. `wol_note` was written and rendered by
-        // nothing for three commits; the comment beside the button claimed
-        // otherwise, and only `check-fields-written-never-read` noticed.
+        let mut got = [0_u8; 256];
+        let (n, _) = listener.recv_from(&mut got).expect("no packet arrived");
+        let mac = parse_mac("AA:BB:CC:DD:EE:FF").unwrap();
+        assert_eq!(&got[..n], build_wol_packet(&mac).as_slice());
+        let note = app.wol_note.clone().expect("a note");
+        assert!(note.starts_with("Sent to 127.0.0.1:"), "{note}");
         assert!(
             app.render_tree()
                 .commands
                 .iter()
                 .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == &note)),
-            "the refusal never reached the screen",
+            "the note never reached the screen",
         );
-
-        // And the button never advertises a send.
-        let tree = app.render_tree();
-        assert!(
-            !tree.commands.iter().any(|c| matches!(
-                c,
-                RenderCommand::Text { text, .. } if text.contains("Packet Sent")
-            )),
-            "the button still claims the packet went out",
+        app.wol_target_mac = String::from("not a mac");
+        app.send_wol();
+        assert_eq!(
+            app.wol_note.as_deref(),
+            Some("Not a MAC address: not a mac")
         );
     }
 
+    /// A lookup asks the registry and shows its record, saying whose record it
+    /// is; a registry that cannot be reached is said to be so, and no owner is
+    /// shown.
     #[test]
     fn test_app_run_whois() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = listener.local_addr().unwrap().to_string();
+        let registry = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut byte = [0_u8; 1];
+            while conn.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {}
+            conn.write_all(b"NetName: EXAMPLE\nOrgName: Example Org\nCountry: DE\n")
+                .unwrap();
+        });
+        let mut app = NetScanApp::new();
+        app.whois_server = server.clone();
+        app.whois_target = "8.8.8.8".to_string();
+        app.run_whois();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !app.pump_whois() {
+            assert!(Instant::now() < deadline, "no answer came");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        registry.join().unwrap();
+        let info = app.whois_result.as_ref().expect("a record");
+        assert_eq!(info.org_name, "Example Org");
+        assert_eq!(info.country, "DE");
+        assert_eq!(info.net_name, "EXAMPLE");
+        assert_eq!(
+            info.abuse_contact, "",
+            "nothing filled in that was not said"
+        );
+        assert_eq!(app.whois_note, Some(format!("As {server} records it")));
+
+        // The test build's default server is a port nothing listens on.
         let mut app = NetScanApp::new();
         app.whois_target = "8.8.8.8".to_string();
         app.run_whois();
-        // Was `is_some()`: an owner derived from the first octet alone. That
-        // is a claim about who is responsible for an address, and it is acted
-        // on -- an abuse report goes to the registry the tool named.
+        while !app.pump_whois() {
+            assert!(Instant::now() < deadline, "no refusal came");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(app.whois_result.is_none(), "an owner appeared from nowhere");
-        let note = app.whois_note.expect("no answer and no reason given");
-        assert!(note.contains("Cannot look up ownership"), "{note}");
+        let note = app.whois_note.expect("a reason");
+        assert!(
+            note.starts_with("Cannot look up ownership: cannot reach"),
+            "{note}"
+        );
     }
 
     #[test]
@@ -5807,22 +6263,62 @@ mod tests {
         assert!(app.selected_host().is_some());
     }
 
+    /// F5 starts a scan, and F5 again stops it; a stopped scan says how far
+    /// it got.
     #[test]
     fn test_app_key_f5_starts_scan() {
         let mut app = NetScanApp::new();
-        let event = Event::Key(KeyEvent {
+        app.prober = slow;
+        app.config.concurrency = 2;
+        let f5 = Event::Key(KeyEvent {
             key: Key::F5,
             pressed: true,
             modifiers: Modifiers::NONE,
             text: String::new(),
         });
-        let result = app.handle_event(&event);
-        assert_eq!(result, EventResult::Consumed);
+        assert_eq!(app.handle_event(&f5), EventResult::Consumed);
+        assert!(app.is_scanning, "F5 did not start a scan");
+        assert_eq!(app.handle_event(&f5), EventResult::Consumed);
+        assert_eq!(app.scan_note.as_deref(), Some("Stopping..."));
+        finish(&mut app);
+        let note = app.scan_note.as_deref().expect("a summary");
         assert!(
-            app.scan_note.is_some(),
-            "F5 did not reach the scan, or reached it and said nothing"
+            note.starts_with("Stopped after ") && note.contains(" of 5080 connections"),
+            "{note}"
         );
-        assert!(app.results.is_none(), "F5 produced an empty scan report");
+    }
+
+    /// A scan too large to finish in reasonable time is refused before it
+    /// starts, saying how large it is.
+    #[test]
+    fn a_scan_too_big_to_finish_is_refused() {
+        let mut app = NetScanApp::new();
+        app.config.target_input = String::from("10.0.0.0/16");
+        app.config.profile = ScanProfile::Full;
+        app.start_scan();
+        assert!(!app.is_scanning);
+        let note = app.scan_note.as_deref().expect("a reason");
+        assert!(note.contains("connections -- narrow"), "{note}");
+    }
+
+    /// The gentle profile makes one connection at a time, in no fixed
+    /// order.
+    #[test]
+    fn the_stealth_profile_is_one_connection_at_a_time() {
+        IN_FLIGHT.store(0, std::sync::atomic::Ordering::SeqCst);
+        MOST_IN_FLIGHT.store(0, std::sync::atomic::Ordering::SeqCst);
+        let mut app = NetScanApp::new();
+        app.prober = counted;
+        app.config.target_input = String::from("10.0.0.1");
+        app.config.profile = ScanProfile::Stealth;
+        app.start_scan();
+        finish(&mut app);
+        assert_eq!(
+            MOST_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "more than one connection at once"
+        );
+        assert_eq!(app.probes_done, quick_scan_ports().len());
     }
 
     #[test]
@@ -5896,7 +6392,7 @@ mod tests {
             ],
             latency_ms: 1.0,
             is_up: true,
-            ttl: 64,
+            ttl: Some(64),
             vendor: None,
         };
         assert_eq!(host.open_port_count(), 2);
@@ -5912,7 +6408,7 @@ mod tests {
             ports: vec![],
             latency_ms: 1.0,
             is_up: true,
-            ttl: 64,
+            ttl: Some(64),
             vendor: None,
         };
         assert_eq!(host.display_hostname(), "server-1");
@@ -5925,7 +6421,7 @@ mod tests {
             ports: vec![],
             latency_ms: 1.0,
             is_up: true,
-            ttl: 64,
+            ttl: Some(64),
             vendor: None,
         };
         assert_eq!(host2.display_hostname(), "10.0.0.2");
@@ -5949,7 +6445,7 @@ mod tests {
                     ports: vec![],
                     latency_ms: 1.0,
                     is_up: true,
-                    ttl: 64,
+                    ttl: Some(64),
                     vendor: None,
                 },
                 HostResult {
@@ -5960,7 +6456,7 @@ mod tests {
                     ports: vec![],
                     latency_ms: 1.0,
                     is_up: false,
-                    ttl: 64,
+                    ttl: Some(64),
                     vendor: None,
                 },
             ],
@@ -6216,7 +6712,7 @@ mod tests {
             ports: Vec::new(),
             latency_ms: 12.5,
             is_up: true,
-            ttl: 64,
+            ttl: Some(64),
             vendor: None,
         }
     }

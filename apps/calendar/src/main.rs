@@ -1,7 +1,8 @@
 //! Calendar and scheduling application for SlateOS.
 //!
-//! Provides month/week/day/year views, event creation with recurrence,
-//! categories, reminders, ICS import/export, and a mini-calendar sidebar.
+//! Provides month/week/day/year/agenda views, events added, changed and
+//! deleted in a form (with a repeat and a category), kept in the settings
+//! folder as they change, ICS import/export, and a mini-calendar sidebar.
 //!
 //! Opens as a real window, 1280x720 to start with and resizable from there.
 //! The whole calendar is drawn as a [`Frame`]: every clickable thing records
@@ -9,8 +10,10 @@
 //! boxes back. Nothing here answers "where is that day" twice.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
+use pathtext::ShowPath;
 // The shared civil-date arithmetic. This app used to carry its own: a Zeller's
 // congruence for the weekday, a *separate* Julian day number for differences,
 // its own leap rule, and an ISO week number its own comment admitted was "a
@@ -23,11 +26,15 @@ use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textfmt::tsv;
+use unsaved::{Choice, Question};
 
 // The colours come from the user's palette (822, 838).
 //
@@ -616,23 +623,45 @@ impl CalendarEvent {
         }
     }
 
+    /// Whether the event is on `date`: the day it starts, a day it repeats
+    /// on, or -- for an all-day event of several days -- any day it covers.
+    ///
+    /// A timed event that runs past midnight is on the day it starts only:
+    /// the day and week views place an event by its times, which would be
+    /// wrong on the days after.
     pub fn occurs_on(&self, date: Date) -> bool {
-        if self.all_day && self.start.date == date {
-            return true;
-        }
-        if self.start.date == date {
-            return true;
-        }
-        self.recurrence.matches(self.start.date, date)
+        let span = if self.all_day {
+            i32::try_from(self.end.date.days_since(self.start.date).clamp(0, 366)).unwrap_or(0)
+        } else {
+            0
+        };
+        (0..=span).any(|back| {
+            let origin = date.add_days(back.wrapping_neg());
+            origin == self.start.date || self.recurrence.matches(self.start.date, origin)
+        })
     }
 
-    /// Format as ICS VEVENT.
+    /// The event as an iCalendar `VEVENT`, each line folded at 75 octets as
+    /// RFC 5545 asks.
+    ///
+    /// An all-day event is written as dates (`VALUE=DATE`, the end the day
+    /// after its last), as other calendars write one, rather than as a
+    /// midnight-to-23:59 appointment; a reminder as an alarm, so a calendar
+    /// that can raise one does.
     pub fn to_ics(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push("BEGIN:VEVENT".to_string());
-        lines.push(format!("UID:{}-slateos@calendar", self.id));
-        lines.push(format!("DTSTART:{}", self.start.format_ics()));
-        lines.push(format!("DTEND:{}", self.end.format_ics()));
+        let date = |d: Date| format!("{:04}{:02}{:02}", d.year, d.month, d.day);
+        let mut lines = vec![
+            String::from("BEGIN:VEVENT"),
+            format!("UID:{}-slateos@calendar", self.id),
+        ];
+        if self.all_day {
+            lines.push(format!("DTSTART;VALUE=DATE:{}", date(self.start.date)));
+            let last = self.end.date.max(self.start.date);
+            lines.push(format!("DTEND;VALUE=DATE:{}", date(last.add_days(1))));
+        } else {
+            lines.push(format!("DTSTART:{}", self.start.format_ics()));
+            lines.push(format!("DTEND:{}", self.end.format_ics()));
+        }
         lines.push(format!("SUMMARY:{}", ics_escape(&self.title)));
         if !self.description.is_empty() {
             lines.push(format!("DESCRIPTION:{}", ics_escape(&self.description)));
@@ -646,16 +675,7 @@ impl CalendarEvent {
             RecurrenceRule::Weekly { days } => {
                 let day_strs: Vec<&str> = days
                     .iter()
-                    .filter_map(|d| match d {
-                        0 => Some("SU"),
-                        1 => Some("MO"),
-                        2 => Some("TU"),
-                        3 => Some("WE"),
-                        4 => Some("TH"),
-                        5 => Some("FR"),
-                        6 => Some("SA"),
-                        _ => None,
-                    })
+                    .filter_map(|d| ICS_DAYS.get(usize::try_from(*d).ok()?).copied())
                     .collect();
                 if day_strs.is_empty() {
                     lines.push("RRULE:FREQ=WEEKLY".to_string());
@@ -666,18 +686,62 @@ impl CalendarEvent {
             RecurrenceRule::Monthly => lines.push("RRULE:FREQ=MONTHLY".to_string()),
             RecurrenceRule::Yearly => lines.push("RRULE:FREQ=YEARLY".to_string()),
             RecurrenceRule::BiWeekly => lines.push("RRULE:FREQ=WEEKLY;INTERVAL=2".to_string()),
+            // Every no days is a repeat that never happens, and `INTERVAL=0`
+            // is not one the standard allows.
+            RecurrenceRule::Custom { interval_days: 0 } | RecurrenceRule::None => {}
             RecurrenceRule::Custom { interval_days } => {
                 lines.push(format!("RRULE:FREQ=DAILY;INTERVAL={interval_days}"));
             }
-            RecurrenceRule::None => {}
+        }
+        let trigger = match self.reminder {
+            Reminder::None => None,
+            Reminder::AtTime => Some(String::from("PT0M")),
+            Reminder::MinutesBefore(n) => Some(format!("-PT{n}M")),
+            Reminder::HoursBefore(n) => Some(format!("-PT{n}H")),
+            Reminder::DayBefore => Some(String::from("-P1D")),
+        };
+        if let Some(trigger) = trigger {
+            lines.push(String::from("BEGIN:VALARM"));
+            lines.push(String::from("ACTION:DISPLAY"));
+            lines.push(format!("DESCRIPTION:{}", ics_escape(&self.title)));
+            lines.push(format!("TRIGGER:{trigger}"));
+            lines.push(String::from("END:VALARM"));
         }
         lines.push("END:VEVENT".to_string());
-        lines.join("\r\n")
+        lines
+            .iter()
+            .map(|l| fold_ics_line(l))
+            .collect::<Vec<_>>()
+            .join("\r\n")
     }
 }
 
+/// The weekdays as iCalendar names them, Sunday first, as the model counts.
+const ICS_DAYS: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+
+/// A content line folded as RFC 5545 asks: no line longer than 75 octets,
+/// each continuation starting with a space, and never inside a character.
+fn fold_ics_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut width = 0_usize;
+    for c in line.chars() {
+        let len = c.len_utf8();
+        if width.saturating_add(len) > 75 {
+            out.push_str("\r\n ");
+            width = 1;
+        }
+        out.push(c);
+        width = width.saturating_add(len);
+    }
+    out
+}
+
+/// Text as an iCalendar value: backslash, semicolon, comma and line break
+/// escaped -- a carriage return, alone or before a line feed, as one break.
 fn ics_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
+    s.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\\', "\\\\")
         .replace(';', "\\;")
         .replace(',', "\\,")
         .replace('\n', "\\n")
@@ -687,74 +751,382 @@ fn ics_escape(s: &str) -> String {
 // ICS parser (basic)
 // ============================================================================
 
-pub fn parse_ics(content: &str) -> Vec<CalendarEvent> {
-    let mut events = Vec::new();
-    let mut in_event = false;
-    let mut title = String::new();
-    let mut description = String::new();
-    let mut location: Option<String> = None;
-    let mut dtstart: Option<DateTime> = None;
-    let mut dtend: Option<DateTime> = None;
-    let mut category = EventCategory::Personal;
-    let mut next_id: u64 = 1000;
+/// What an `.ics` import found: the events it could read, and what it had
+/// to leave out or keep in a simpler form -- so the import can say so, since
+/// a calendar missing an appointment looks exactly like one that never had
+/// it.
+#[derive(Debug, Default)]
+pub struct IcsImport {
+    pub events: Vec<CalendarEvent>,
+    /// Events with no start this could read, left out.
+    pub unreadable: usize,
+    /// Events whose times were written for a time zone, or in UTC, kept as
+    /// the clock time written: this calendar has no time zones.
+    pub zoned: usize,
+    /// Events whose repeat this calendar cannot keep as written -- one with
+    /// an end, or a rule it has no name for -- kept as the nearest it has.
+    pub simplified: usize,
+}
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line == "BEGIN:VEVENT" {
-            in_event = true;
-            title.clear();
-            description.clear();
-            location = None;
-            dtstart = None;
-            dtend = None;
-            category = EventCategory::Personal;
-        } else if line == "END:VEVENT" && in_event {
-            if let (Some(start), Some(end)) = (dtstart, dtend) {
-                events.push(CalendarEvent {
-                    id: next_id,
-                    title: ics_unescape(&title),
-                    description: ics_unescape(&description),
-                    category,
-                    start,
-                    end,
-                    all_day: false,
-                    recurrence: RecurrenceRule::None,
-                    reminder: Reminder::None,
-                    location: location.as_deref().map(ics_unescape),
-                    color_override: None,
-                });
-                next_id = next_id.saturating_add(1);
+/// The events in an iCalendar text, as [`import_ics`](parse_ics_report)
+/// reads them.
+pub fn parse_ics(content: &str) -> Vec<CalendarEvent> {
+    parse_ics_report(content).events
+}
+
+/// The logical lines of an iCalendar text: a line beginning with a space or
+/// a tab continues the one before it (RFC 5545's folding), and a line may
+/// end in a carriage return or not.
+fn unfold_ics(content: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in content.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if let Some(rest) = line.strip_prefix(' ').or_else(|| line.strip_prefix('\t'))
+            && let Some(last) = out.last_mut()
+        {
+            last.push_str(rest);
+            continue;
+        }
+        out.push(line.to_owned());
+    }
+    out
+}
+
+/// A content line split into its name (upper case), its parameters (names
+/// upper case, values unquoted) and its value:
+/// `DTSTART;TZID="Europe/Paris":20260926T090000`. The value starts after the
+/// first colon outside a quoted parameter.
+fn split_ics_line(line: &str) -> Option<(String, IcsParams, &str)> {
+    let mut in_quotes = false;
+    let mut cuts = Vec::new();
+    let mut colon = None;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ';' if !in_quotes => cuts.push(i),
+            ':' if !in_quotes => {
+                colon = Some(i);
+                break;
             }
-            in_event = false;
-        } else if in_event {
-            if let Some(val) = line.strip_prefix("SUMMARY:") {
-                title = val.to_string();
-            } else if let Some(val) = line.strip_prefix("DESCRIPTION:") {
-                description = val.to_string();
-            } else if let Some(val) = line.strip_prefix("LOCATION:") {
-                location = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("DTSTART:") {
-                dtstart = parse_ics_datetime(val);
-            } else if let Some(val) = line.strip_prefix("DTEND:") {
-                dtend = parse_ics_datetime(val);
-            } else if let Some(val) = line.strip_prefix("CATEGORIES:") {
-                category = match val.to_ascii_lowercase().as_str() {
-                    "work" => EventCategory::Work,
-                    "health" => EventCategory::Health,
-                    "travel" => EventCategory::Travel,
-                    "birthday" => EventCategory::Birthday,
-                    "holiday" => EventCategory::Holiday,
-                    "meeting" => EventCategory::Meeting,
-                    "deadline" => EventCategory::Deadline,
-                    "social" => EventCategory::Social,
-                    "education" => EventCategory::Education,
-                    _ => EventCategory::Personal,
-                };
-            }
+            _ => {}
         }
     }
+    let colon = colon?;
+    let value = line.get(colon.saturating_add(1)..)?;
+    let name_end = cuts.first().copied().unwrap_or(colon);
+    let name = line.get(..name_end)?.trim().to_ascii_uppercase();
+    let mut params = Vec::new();
+    for (k, &at) in cuts.iter().enumerate() {
+        let until = cuts.get(k.saturating_add(1)).copied().unwrap_or(colon);
+        let Some(part) = line.get(at.saturating_add(1)..until) else {
+            continue;
+        };
+        if let Some((key, val)) = part.split_once('=') {
+            params.push((
+                key.trim().to_ascii_uppercase(),
+                val.trim().trim_matches('"').to_owned(),
+            ));
+        }
+    }
+    Some((name, params, value))
+}
 
-    events
+/// A content line's parameters: names in upper case, values unquoted.
+type IcsParams = Vec<(String, String)>;
+
+/// Parameter `key` of a content line.
+fn ics_param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+/// When a start or an end is: the date and time, whether only a date was
+/// written, and whether the time was written for a zone -- a `TZID`, or `Z`
+/// for UTC.
+fn parse_ics_when(value: &str, params: &[(String, String)]) -> Option<(DateTime, bool, bool)> {
+    let value = value.trim();
+    let date_only = ics_param(params, "VALUE") == Some("DATE")
+        || (value.len() == 8 && value.bytes().all(|b| b.is_ascii_digit()));
+    let zoned = !date_only && (ics_param(params, "TZID").is_some() || value.ends_with('Z'));
+    Some((parse_ics_datetime(value)?, date_only, zoned))
+}
+
+/// An iCalendar duration in minutes -- `PT1H30M`, `P1D`, `-P2W` -- with
+/// seconds dropped.
+fn parse_ics_duration(value: &str) -> Option<i64> {
+    let v = value.trim();
+    let (negative, v) = match v.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, v.strip_prefix('+').unwrap_or(v)),
+    };
+    let v = v.strip_prefix('P')?;
+    let mut minutes: i64 = 0;
+    let mut number = String::new();
+    let mut in_time = false;
+    for c in v.chars() {
+        if c.is_ascii_digit() {
+            number.push(c);
+            continue;
+        }
+        if c == 'T' && number.is_empty() {
+            in_time = true;
+            continue;
+        }
+        let n: i64 = number.parse().ok()?;
+        number.clear();
+        let add = match (c, in_time) {
+            ('W', false) => n.checked_mul(7 * 24 * 60)?,
+            ('D', false) => n.checked_mul(24 * 60)?,
+            ('H', true) => n.checked_mul(60)?,
+            ('M', true) => n,
+            ('S', true) => n.checked_div(60)?,
+            _ => return None,
+        };
+        minutes = minutes.checked_add(add)?;
+    }
+    if !number.is_empty() {
+        return None;
+    }
+    Some(if negative {
+        minutes.saturating_neg()
+    } else {
+        minutes
+    })
+}
+
+/// `at` moved by `minutes`, across midnight as far as it goes.
+fn add_minutes(at: DateTime, minutes: i64) -> DateTime {
+    let total = i64::from(at.time.to_minutes()).saturating_add(minutes);
+    let days = i32::try_from(total.div_euclid(24 * 60)).unwrap_or(0);
+    let minute = u32::try_from(total.rem_euclid(24 * 60)).unwrap_or(0);
+    DateTime::new(at.date.add_days(days), Time::from_minutes(minute))
+}
+
+/// A repeat read from an `RRULE`, and whether it had to be simplified to
+/// fit: this calendar has no repeat with an end (`COUNT`, `UNTIL`), none on
+/// "the second Tuesday", none every three months.
+fn parse_rrule(value: &str) -> (RecurrenceRule, bool) {
+    let mut freq = String::new();
+    let mut interval: u32 = 1;
+    let mut days: Vec<u32> = Vec::new();
+    let mut simplified = false;
+    for part in value.split(';') {
+        let Some((key, val)) = part.split_once('=') else {
+            simplified = true;
+            continue;
+        };
+        match key.trim().to_ascii_uppercase().as_str() {
+            "FREQ" => freq = val.trim().to_ascii_uppercase(),
+            "INTERVAL" => match val.trim().parse::<u32>() {
+                Ok(n) if n > 0 => interval = n,
+                _ => simplified = true,
+            },
+            "BYDAY" => {
+                for day in val.split(',') {
+                    let day = day.trim().to_ascii_uppercase();
+                    match ICS_DAYS.iter().position(|d| *d == day) {
+                        Some(i) => days.extend(u32::try_from(i).ok()),
+                        // "2TU", the second Tuesday: no such repeat here.
+                        None => simplified = true,
+                    }
+                }
+            }
+            "WKST" => {}
+            _ => simplified = true,
+        }
+    }
+    let rule = match (freq.as_str(), interval) {
+        ("DAILY", 1) => RecurrenceRule::Daily,
+        ("DAILY", n) => RecurrenceRule::Custom { interval_days: n },
+        ("WEEKLY", 1) => RecurrenceRule::Weekly { days },
+        ("WEEKLY", 2) if days.is_empty() => RecurrenceRule::BiWeekly,
+        ("WEEKLY", n) if days.is_empty() => RecurrenceRule::Custom {
+            interval_days: n.saturating_mul(7),
+        },
+        ("WEEKLY", _) => {
+            simplified = true;
+            RecurrenceRule::Weekly { days }
+        }
+        ("MONTHLY", n) => {
+            simplified |= n != 1 || !days.is_empty();
+            RecurrenceRule::Monthly
+        }
+        ("YEARLY", n) => {
+            simplified |= n != 1 || !days.is_empty();
+            RecurrenceRule::Yearly
+        }
+        _ => {
+            simplified = true;
+            RecurrenceRule::None
+        }
+    };
+    (rule, simplified)
+}
+
+/// A reminder read from an alarm's `TRIGGER`: how long before the start.
+fn reminder_from_trigger(value: &str) -> Option<Reminder> {
+    let before = parse_ics_duration(value)?.saturating_neg();
+    Some(match before {
+        ..=0 => Reminder::AtTime,
+        1440 => Reminder::DayBefore,
+        m if m % 60 == 0 && m < 1440 => Reminder::HoursBefore(u32::try_from(m / 60).ok()?),
+        m => Reminder::MinutesBefore(u32::try_from(m).ok()?),
+    })
+}
+
+/// One `VEVENT`, as its lines are read.
+#[derive(Default)]
+struct IcsEventDraft {
+    title: String,
+    description: String,
+    location: Option<String>,
+    start: Option<(DateTime, bool, bool)>,
+    end: Option<(DateTime, bool, bool)>,
+    duration: Option<i64>,
+    category: Option<EventCategory>,
+    rule: Option<(RecurrenceRule, bool)>,
+    reminder: Option<Reminder>,
+}
+
+/// The events in an iCalendar text, and what could not be read or kept as
+/// written.
+///
+/// What other calendars write, not only what this one does: folded lines,
+/// parameters (`DTSTART;TZID=...:`, `DTSTART;VALUE=DATE:`), an all-day event
+/// as dates with the day after it as its end, a `DURATION` instead of an end
+/// or neither, a repeat (`RRULE`), several categories, and an alarm -- whose
+/// own `DESCRIPTION` used to overwrite the event's. Before, every event whose
+/// start had a parameter, or had no `DTEND`, was left out without a word:
+/// most of what a phone's calendar exports.
+pub fn parse_ics_report(content: &str) -> IcsImport {
+    let mut report = IcsImport::default();
+    let mut stack: Vec<String> = Vec::new();
+    let mut draft: Option<IcsEventDraft> = None;
+    for line in unfold_ics(content) {
+        let Some((name, params, value)) = split_ics_line(&line) else {
+            continue;
+        };
+        match name.as_str() {
+            "BEGIN" => {
+                let component = value.trim().to_ascii_uppercase();
+                if component == "VEVENT" {
+                    draft = Some(IcsEventDraft::default());
+                }
+                stack.push(component);
+                continue;
+            }
+            "END" => {
+                let component = value.trim().to_ascii_uppercase();
+                if stack.last() == Some(&component) {
+                    stack.pop();
+                }
+                if component == "VEVENT"
+                    && let Some(done) = draft.take()
+                {
+                    match finish_ics_event(done) {
+                        Some((event, zoned, simplified)) => {
+                            report.zoned = report.zoned.saturating_add(usize::from(zoned));
+                            report.simplified =
+                                report.simplified.saturating_add(usize::from(simplified));
+                            report.events.push(event);
+                        }
+                        None => report.unreadable = report.unreadable.saturating_add(1),
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let Some(ev) = draft.as_mut() else {
+            continue;
+        };
+        match stack.last().map(String::as_str) {
+            Some("VEVENT") => match name.as_str() {
+                "SUMMARY" => ev.title = ics_unescape(value),
+                "DESCRIPTION" => ev.description = ics_unescape(value),
+                "LOCATION" => ev.location = Some(ics_unescape(value)),
+                "DTSTART" => ev.start = parse_ics_when(value, &params),
+                "DTEND" => ev.end = parse_ics_when(value, &params),
+                "DURATION" => ev.duration = parse_ics_duration(value),
+                "RRULE" => ev.rule = Some(parse_rrule(value)),
+                "CATEGORIES" if ev.category.is_none() => {
+                    ev.category = value.split(',').find_map(|c| {
+                        let c = ics_unescape(c.trim()).to_lowercase();
+                        EventCategory::all()
+                            .iter()
+                            .copied()
+                            .find(|k| k.label().to_lowercase() == c)
+                    });
+                }
+                _ => {}
+            },
+            Some("VALARM") if name == "TRIGGER" && ev.reminder.is_none() => {
+                // An alarm at a moment rather than before the start has no
+                // reminder here to be.
+                if ics_param(&params, "VALUE") != Some("DATE-TIME") {
+                    ev.reminder = reminder_from_trigger(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    report
+}
+
+/// The event a `VEVENT`'s lines describe -- with whether its times were
+/// zoned and its repeat simplified -- or `None` if it has no start.
+fn finish_ics_event(d: IcsEventDraft) -> Option<(CalendarEvent, bool, bool)> {
+    let (start, all_day, zoned) = d.start?;
+    let end = if all_day {
+        // An all-day event ends the day before its end date: DTEND is the
+        // first day it is not on.
+        let last = match (d.end, d.duration) {
+            (Some((end, _, _)), _) if end.date > start.date => end.date.add_days(-1),
+            (None, Some(minutes)) if minutes > 24 * 60 => {
+                add_minutes(start, minutes.saturating_sub(1)).date
+            }
+            _ => start.date,
+        };
+        DateTime::new(
+            last,
+            Time {
+                hour: 23,
+                minute: 59,
+            },
+        )
+    } else {
+        let end = match (d.end, d.duration) {
+            (Some((end, _, _)), _) => end,
+            (None, Some(minutes)) => add_minutes(start, minutes),
+            (None, None) => start,
+        };
+        end.max(start)
+    };
+    let start = if all_day {
+        DateTime::new(start.date, Time { hour: 0, minute: 0 })
+    } else {
+        start
+    };
+    let (recurrence, simplified) = d.rule.unwrap_or((RecurrenceRule::None, false));
+    Some((
+        CalendarEvent {
+            id: 0,
+            title: d.title,
+            description: d.description,
+            category: d.category.unwrap_or(EventCategory::Personal),
+            start,
+            end,
+            all_day,
+            recurrence,
+            reminder: d.reminder.unwrap_or(Reminder::None),
+            location: d.location.filter(|l| !l.is_empty()),
+            color_override: None,
+        },
+        zoned,
+        simplified,
+    ))
 }
 
 fn parse_ics_datetime(s: &str) -> Option<DateTime> {
@@ -812,7 +1184,10 @@ pub fn generate_ics(events: &[CalendarEvent], calendar_name: &str) -> String {
     lines.push("BEGIN:VCALENDAR".to_string());
     lines.push("VERSION:2.0".to_string());
     lines.push("PRODID:-//SlateOS//Calendar//EN".to_string());
-    lines.push(format!("X-WR-CALNAME:{calendar_name}"));
+    lines.push(fold_ics_line(&format!(
+        "X-WR-CALNAME:{}",
+        ics_escape(calendar_name)
+    )));
 
     for event in events {
         lines.push(event.to_ics());
@@ -830,6 +1205,10 @@ pub fn generate_ics(events: &[CalendarEvent], calendar_name: &str) -> String {
 pub struct EventStore {
     events: Vec<CalendarEvent>,
     next_id: u64,
+    /// How many changes the store has had. The window keeps the events on
+    /// disk and writes them when this moves; counted here, where every change
+    /// happens, rather than by each of the places that make one (§1206).
+    revision: u64,
 }
 
 impl EventStore {
@@ -837,7 +1216,33 @@ impl EventStore {
         Self {
             events: Vec::new(),
             next_id: 1,
+            revision: 0,
         }
+    }
+
+    /// A store holding `events`, as read back from the file: new ids go past
+    /// every id they use.
+    pub fn from_events(events: Vec<CalendarEvent>) -> Self {
+        let next_id = events
+            .iter()
+            .map(|e| e.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        Self {
+            events,
+            next_id,
+            revision: 0,
+        }
+    }
+
+    /// How many changes the store has had.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn add(&mut self, mut event: CalendarEvent) -> u64 {
@@ -845,21 +1250,30 @@ impl EventStore {
         self.next_id = self.next_id.saturating_add(1);
         event.id = id;
         self.events.push(event);
+        self.changed();
         id
     }
 
     pub fn remove(&mut self, id: u64) -> bool {
         let len_before = self.events.len();
         self.events.retain(|e| e.id != id);
-        self.events.len() < len_before
+        let removed = self.events.len() < len_before;
+        if removed {
+            self.changed();
+        }
+        removed
     }
 
     pub fn get(&self, id: u64) -> Option<&CalendarEvent> {
         self.events.iter().find(|e| e.id == id)
     }
 
+    /// Event `id`, to change -- counted as changed: nothing borrows an event
+    /// mutably but to change it.
     pub fn get_mut(&mut self, id: u64) -> Option<&mut CalendarEvent> {
-        self.events.iter_mut().find(|e| e.id == id)
+        let at = self.events.iter().position(|e| e.id == id)?;
+        self.changed();
+        self.events.get_mut(at)
     }
 
     pub fn all(&self) -> &[CalendarEvent] {
@@ -899,14 +1313,18 @@ impl EventStore {
         self.events.iter().filter(|e| e.category == cat).collect()
     }
 
-    /// Search events by title/description.
+    /// Search events by title, notes and place -- without regard to case,
+    /// in any script: `to_ascii_lowercase` left "Été" unfound by "été".
     pub fn search(&self, query: &str) -> Vec<&CalendarEvent> {
-        let lower = query.to_ascii_lowercase();
+        let lower = query.to_lowercase();
         self.events
             .iter()
             .filter(|e| {
-                e.title.to_ascii_lowercase().contains(&lower)
-                    || e.description.to_ascii_lowercase().contains(&lower)
+                e.title.to_lowercase().contains(&lower)
+                    || e.description.to_lowercase().contains(&lower)
+                    || e.location
+                        .as_deref()
+                        .is_some_and(|l| l.to_lowercase().contains(&lower))
             })
             .collect()
     }
@@ -923,14 +1341,16 @@ impl EventStore {
         upcoming
     }
 
-    /// Import events from ICS content.
-    pub fn import_ics(&mut self, content: &str) -> usize {
-        let imported = parse_ics(content);
+    /// Add `imported`, each under a new id. How many.
+    pub fn import_events(&mut self, imported: Vec<CalendarEvent>) -> usize {
         let count = imported.len();
         for mut event in imported {
             event.id = self.next_id;
             self.next_id = self.next_id.saturating_add(1);
             self.events.push(event);
+        }
+        if count > 0 {
+            self.changed();
         }
         count
     }
@@ -944,6 +1364,626 @@ impl EventStore {
 impl Default for EventStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// The kept calendar
+// ============================================================================
+
+/// The first line of the events file, and the format it names.
+const CALENDAR_FORMAT: &str = "slateos-calendar\t1";
+
+/// The largest events file this will read. One cut short would be read as a
+/// calendar missing its last events, with nothing to say so, and the next
+/// change would write the loss back -- so a larger file is refused whole.
+const MAX_CALENDAR_BYTES: usize = 16 * 1024 * 1024;
+
+/// Why nothing is kept, when the environment names no home directory.
+const NO_HOME: &str = "Nothing is kept: no home directory is set";
+
+/// Where the events are kept, or `None` when the environment names no home
+/// directory.
+fn events_path() -> Option<std::path::PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("calendar").join("events.txt"))
+}
+
+/// A date as written: `YYYY-MM-DD`.
+fn date_text(d: Date) -> String {
+    format!("{:04}-{:02}-{:02}", d.year, d.month, d.day)
+}
+
+/// A date read back from `YYYY-MM-DD`, or `None` if it is not one -- a
+/// thirty-first of April included.
+fn parse_date_text(text: &str) -> Option<Date> {
+    let mut parts = text.trim().splitn(3, '-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<u32>().ok()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    Date::new(year, month, day)
+}
+
+/// A time read back from `HH:MM` (or `H:MM`), or `None` if it is not one.
+fn parse_time_text(text: &str) -> Option<Time> {
+    let (h, m) = text.trim().split_once(':')?;
+    if m.len() != 2 {
+        return None;
+    }
+    Time::new(h.parse().ok()?, m.parse().ok()?)
+}
+
+/// A category as written: its name, in lower case.
+fn category_key(c: EventCategory) -> String {
+    c.label().to_lowercase()
+}
+
+/// How a repeat is written: `none`, `daily`, `weekly` (the start's weekday),
+/// `weekly:1,3` (those weekdays, Sunday 0), `biweekly`, `monthly`, `yearly`,
+/// `every:N` (every N days).
+fn repeat_key(rule: &RecurrenceRule) -> String {
+    match rule {
+        RecurrenceRule::None => String::from("none"),
+        RecurrenceRule::Daily => String::from("daily"),
+        RecurrenceRule::Weekly { days } if days.is_empty() => String::from("weekly"),
+        RecurrenceRule::Weekly { days } => format!(
+            "weekly:{}",
+            days.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        RecurrenceRule::BiWeekly => String::from("biweekly"),
+        RecurrenceRule::Monthly => String::from("monthly"),
+        RecurrenceRule::Yearly => String::from("yearly"),
+        RecurrenceRule::Custom { interval_days } => format!("every:{interval_days}"),
+    }
+}
+
+/// A repeat read back from [`repeat_key`]'s spelling.
+fn parse_repeat_key(text: &str) -> Option<RecurrenceRule> {
+    Some(match text {
+        "none" => RecurrenceRule::None,
+        "daily" => RecurrenceRule::Daily,
+        "weekly" => RecurrenceRule::Weekly { days: Vec::new() },
+        "biweekly" => RecurrenceRule::BiWeekly,
+        "monthly" => RecurrenceRule::Monthly,
+        "yearly" => RecurrenceRule::Yearly,
+        _ => {
+            if let Some(days) = text.strip_prefix("weekly:") {
+                let days = days
+                    .split(',')
+                    .map(|d| d.parse::<u32>().ok().filter(|d| *d < 7))
+                    .collect::<Option<Vec<u32>>>()?;
+                RecurrenceRule::Weekly { days }
+            } else {
+                RecurrenceRule::Custom {
+                    interval_days: text.strip_prefix("every:")?.parse().ok()?,
+                }
+            }
+        }
+    })
+}
+
+/// How a reminder is written: `none`, `at`, `minutes:N`, `hours:N`, `day`.
+fn reminder_key(r: Reminder) -> String {
+    match r {
+        Reminder::None => String::from("none"),
+        Reminder::AtTime => String::from("at"),
+        Reminder::MinutesBefore(n) => format!("minutes:{n}"),
+        Reminder::HoursBefore(n) => format!("hours:{n}"),
+        Reminder::DayBefore => String::from("day"),
+    }
+}
+
+/// A reminder read back from [`reminder_key`]'s spelling.
+fn parse_reminder_key(text: &str) -> Option<Reminder> {
+    Some(match text {
+        "none" => Reminder::None,
+        "at" => Reminder::AtTime,
+        "day" => Reminder::DayBefore,
+        _ => {
+            if let Some(n) = text.strip_prefix("minutes:") {
+                Reminder::MinutesBefore(n.parse().ok()?)
+            } else {
+                Reminder::HoursBefore(text.strip_prefix("hours:")?.parse().ok()?)
+            }
+        }
+    })
+}
+
+/// A colour as written: `#RRGGBB`, or `#RRGGBBAA` when it is not opaque.
+fn colour_text(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour_text(text: &str) -> Option<Color> {
+    let hex = text.strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+/// The events as the file holds them: the format line, then one line per
+/// event, in the order they were added.
+///
+/// Tab-separated, one event to a line, as the notes library and the address
+/// book are kept (design-decisions §1205, §1206); the free text -- title,
+/// place, notes -- escaped with `textfmt::tsv`, so a tab or a line break in
+/// them cannot start a new field or a new event.
+fn calendar_text(store: &EventStore) -> String {
+    let mut out = String::from(CALENDAR_FORMAT);
+    out.push('\n');
+    for e in store.all() {
+        let fields = [
+            String::from("event"),
+            e.id.to_string(),
+            date_text(e.start.date),
+            e.start.time.format_24h(),
+            date_text(e.end.date),
+            e.end.time.format_24h(),
+            String::from(if e.all_day { "y" } else { "n" }),
+            category_key(e.category),
+            repeat_key(&e.recurrence),
+            reminder_key(e.reminder),
+            e.color_override
+                .map_or_else(|| String::from("-"), colour_text),
+            tsv::escape(&e.title),
+            tsv::escape(e.location.as_deref().unwrap_or("")),
+            tsv::escape(&e.description),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+    }
+    out
+}
+
+/// The events read back from [`calendar_text`]'s format, or why they cannot
+/// be: read whole or not at all, for the finance ledger's reason
+/// (design-decisions §1202) -- a calendar read in part and kept again would
+/// lose what was not read. The refusal names the line.
+fn parse_calendar(text: &str) -> Result<Vec<CalendarEvent>, String> {
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(first) if first == CALENDAR_FORMAT => {}
+        Some(first) if first.starts_with("slateos-calendar\t") => {
+            return Err(format!(
+                "it is written in a later format ({}) than this version reads",
+                first.trim_start_matches("slateos-calendar\t")
+            ));
+        }
+        _ => return Err(String::from("it is not a SlateOS calendar")),
+    }
+    let mut events: Vec<CalendarEvent> = Vec::new();
+    for (i, line) in lines.enumerate() {
+        let n = i.saturating_add(2);
+        if line.is_empty() {
+            continue;
+        }
+        let bad = |why: &str| format!("line {n}: {why}");
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [
+            kind,
+            id,
+            start_date,
+            start_time,
+            end_date,
+            end_time,
+            all_day,
+            category,
+            repeats,
+            reminder,
+            colour,
+            title,
+            place,
+            notes,
+        ] = fields.as_slice()
+        else {
+            return Err(bad(&format!(
+                "{} fields where an event has 14",
+                fields.len()
+            )));
+        };
+        if *kind != "event" {
+            return Err(bad("it is not an event"));
+        }
+        let id = id
+            .parse::<u64>()
+            .ok()
+            .filter(|&id| id > 0 && id < u64::MAX)
+            .ok_or_else(|| bad("its number is not one"))?;
+        if events.iter().any(|e| e.id == id) {
+            return Err(bad(&format!("another event has its number ({id})")));
+        }
+        let date = |t: &str, what: &str| {
+            parse_date_text(t).ok_or_else(|| bad(&format!("its {what} date is not a date")))
+        };
+        let time = |t: &str, what: &str| {
+            parse_time_text(t).ok_or_else(|| bad(&format!("its {what} time is not a time")))
+        };
+        let start = DateTime::new(date(start_date, "start")?, time(start_time, "start")?);
+        let end = DateTime::new(date(end_date, "end")?, time(end_time, "end")?);
+        let all_day = match *all_day {
+            "y" => true,
+            "n" => false,
+            _ => return Err(bad("whether it lasts all day is not said")),
+        };
+        let category = EventCategory::all()
+            .iter()
+            .copied()
+            .find(|c| category_key(*c) == *category)
+            .ok_or_else(|| {
+                bad(&format!(
+                    "its category ({category}) is not one this version has"
+                ))
+            })?;
+        let recurrence = parse_repeat_key(repeats).ok_or_else(|| {
+            bad(&format!(
+                "how it repeats ({repeats}) is not one this version reads"
+            ))
+        })?;
+        let reminder = parse_reminder_key(reminder).ok_or_else(|| {
+            bad(&format!(
+                "its reminder ({reminder}) is not one this version reads"
+            ))
+        })?;
+        let color_override = match *colour {
+            "-" => None,
+            c => Some(parse_colour_text(c).ok_or_else(|| bad("its colour is not one"))?),
+        };
+        let text = |t: &str, what: &str| {
+            tsv::unescape(t).ok_or_else(|| bad(&format!("its {what} has a broken escape")))
+        };
+        let place = text(place, "place")?;
+        events.push(CalendarEvent {
+            id,
+            title: text(title, "title")?,
+            description: text(notes, "notes")?,
+            category,
+            start,
+            end,
+            all_day,
+            recurrence,
+            reminder,
+            location: (!place.is_empty()).then_some(place),
+            color_override,
+        });
+    }
+    Ok(events)
+}
+
+// ============================================================================
+// The event form
+// ============================================================================
+
+/// The size a form field's text is drawn at, which moving its caret needs.
+const FORM_TEXT_SIZE: f32 = 13.0;
+/// A form row's height.
+const FORM_ROW_H: f32 = 40.0;
+
+/// A field of the event form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormField {
+    Title,
+    Date,
+    AllDay,
+    Starts,
+    Ends,
+    Category,
+    Repeats,
+    Place,
+    Notes,
+}
+
+impl FormField {
+    /// Whether the field is typed into; the others are chosen, a press or
+    /// Left, Right and Space stepping through their values.
+    fn is_text(self) -> bool {
+        !matches!(self, Self::AllDay | Self::Category | Self::Repeats)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Title => "Title",
+            Self::Date => "Date",
+            Self::AllDay => "All day",
+            Self::Starts => "Starts",
+            Self::Ends => "Ends",
+            Self::Category => "Category",
+            Self::Repeats => "Repeats",
+            Self::Place => "Place",
+            Self::Notes => "Notes",
+        }
+    }
+
+    /// What an empty text field says it wants.
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::Title => "What it is",
+            Self::Date => "YYYY-MM-DD",
+            Self::Starts | Self::Ends => "HH:MM, 24-hour",
+            Self::Place | Self::Notes => "Optional",
+            Self::AllDay | Self::Category | Self::Repeats => "",
+        }
+    }
+
+    /// The most characters the field holds.
+    fn capacity(self) -> usize {
+        match self {
+            Self::Title | Self::Place => 200,
+            Self::Notes => 2000,
+            Self::Date => 16,
+            Self::Starts | Self::Ends => 5,
+            Self::AllDay | Self::Category | Self::Repeats => 0,
+        }
+    }
+}
+
+/// The repeats the form offers for any event, in order.
+fn standard_repeats() -> [RecurrenceRule; 6] {
+    [
+        RecurrenceRule::None,
+        RecurrenceRule::Daily,
+        // No days: on the weekday it starts, whatever the date is changed to.
+        RecurrenceRule::Weekly { days: Vec::new() },
+        RecurrenceRule::BiWeekly,
+        RecurrenceRule::Monthly,
+        RecurrenceRule::Yearly,
+    ]
+}
+
+/// A repeat in words.
+fn describe_repeat(rule: &RecurrenceRule) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    match rule {
+        RecurrenceRule::Weekly { days } if days.is_empty() => {
+            String::from("Weekly, on the day it starts")
+        }
+        RecurrenceRule::Weekly { days } => format!(
+            "Weekly on {}",
+            days.iter()
+                .filter_map(|d| DAYS.get(usize::try_from(*d).ok()?).copied())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        RecurrenceRule::Custom { interval_days } => format!("Every {interval_days} days"),
+        other => other.label().to_owned(),
+    }
+}
+
+/// The value `step` places after (or before) `at`, round from the last to
+/// the first.
+fn step_index(at: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        at.saturating_add(1).checked_rem(len).unwrap_or(0)
+    } else {
+        at.checked_sub(1).unwrap_or(len.saturating_sub(1))
+    }
+}
+
+/// A text field holding `value`.
+fn field_with(value: &str) -> TextInput {
+    let mut input = TextInput::new();
+    input.set_text(value);
+    input
+}
+
+/// The form an event is added or changed in.
+///
+/// There was no way to add an event to this calendar: `EventStore::add` had
+/// no caller but the tests and the `.ics` import, and nothing could change
+/// or delete one either.
+#[derive(Clone, Debug)]
+pub struct EventForm {
+    /// The event being changed, or `None` for a new one.
+    pub id: Option<u64>,
+    title: TextInput,
+    date: TextInput,
+    starts: TextInput,
+    ends: TextInput,
+    all_day: bool,
+    category: EventCategory,
+    repeats: RecurrenceRule,
+    /// A repeat the list does not have -- weekly on several days, or every
+    /// so many days, as an imported calendar may say -- offered beside the
+    /// list, so that changing an event's title does not change its repeat.
+    other_repeat: Option<RecurrenceRule>,
+    place: TextInput,
+    notes: TextInput,
+    /// Kept as the event had them: the form does not show them. Nothing in
+    /// this program raises a reminder, so offering to set one would promise
+    /// an alert that never comes.
+    reminder: Reminder,
+    color_override: Option<Color>,
+}
+
+impl EventForm {
+    /// A new event on `date`, from nine to ten.
+    pub fn new_on(date: Date) -> Self {
+        Self {
+            id: None,
+            title: TextInput::new(),
+            date: field_with(&date_text(date)),
+            starts: field_with("09:00"),
+            ends: field_with("10:00"),
+            all_day: false,
+            category: EventCategory::Personal,
+            repeats: RecurrenceRule::None,
+            other_repeat: None,
+            place: TextInput::new(),
+            notes: TextInput::new(),
+            reminder: Reminder::None,
+            color_override: None,
+        }
+    }
+
+    /// Event `e`, to change.
+    pub fn editing(e: &CalendarEvent) -> Self {
+        Self {
+            id: Some(e.id),
+            title: field_with(&e.title),
+            date: field_with(&date_text(e.start.date)),
+            starts: field_with(&e.start.time.format_24h()),
+            ends: field_with(&e.end.time.format_24h()),
+            all_day: e.all_day,
+            category: e.category,
+            repeats: e.recurrence.clone(),
+            other_repeat: (!standard_repeats().contains(&e.recurrence))
+                .then(|| e.recurrence.clone()),
+            place: field_with(e.location.as_deref().unwrap_or("")),
+            notes: field_with(&e.description),
+            reminder: e.reminder,
+            color_override: e.color_override,
+        }
+    }
+
+    /// The fields, in the order Tab walks them: the times only while the
+    /// event is not all day.
+    pub fn fields(&self) -> &'static [FormField] {
+        if self.all_day {
+            &[
+                FormField::Title,
+                FormField::Date,
+                FormField::AllDay,
+                FormField::Category,
+                FormField::Repeats,
+                FormField::Place,
+                FormField::Notes,
+            ]
+        } else {
+            &[
+                FormField::Title,
+                FormField::Date,
+                FormField::AllDay,
+                FormField::Starts,
+                FormField::Ends,
+                FormField::Category,
+                FormField::Repeats,
+                FormField::Place,
+                FormField::Notes,
+            ]
+        }
+    }
+
+    /// Text field `which`, to type into.
+    fn input(&mut self, which: FormField) -> Option<&mut TextInput> {
+        match which {
+            FormField::Title => Some(&mut self.title),
+            FormField::Date => Some(&mut self.date),
+            FormField::Starts => Some(&mut self.starts),
+            FormField::Ends => Some(&mut self.ends),
+            FormField::Place => Some(&mut self.place),
+            FormField::Notes => Some(&mut self.notes),
+            FormField::AllDay | FormField::Category | FormField::Repeats => None,
+        }
+    }
+
+    /// Text field `which`, to read.
+    fn input_ref(&self, which: FormField) -> Option<&TextInput> {
+        match which {
+            FormField::Title => Some(&self.title),
+            FormField::Date => Some(&self.date),
+            FormField::Starts => Some(&self.starts),
+            FormField::Ends => Some(&self.ends),
+            FormField::Place => Some(&self.place),
+            FormField::Notes => Some(&self.notes),
+            FormField::AllDay | FormField::Category | FormField::Repeats => None,
+        }
+    }
+
+    /// The repeats this form offers.
+    fn repeat_choices(&self) -> Vec<RecurrenceRule> {
+        let mut out = standard_repeats().to_vec();
+        out.extend(self.other_repeat.clone());
+        out
+    }
+
+    /// Step chosen field `which` on (`forward`) or back. Whether it is one.
+    fn step(&mut self, which: FormField, forward: bool) -> bool {
+        match which {
+            FormField::AllDay => self.all_day = !self.all_day,
+            FormField::Category => {
+                let all = EventCategory::all();
+                let at = all.iter().position(|c| *c == self.category).unwrap_or(0);
+                if let Some(next) = all.get(step_index(at, all.len(), forward)) {
+                    self.category = *next;
+                }
+            }
+            FormField::Repeats => {
+                let choices = self.repeat_choices();
+                let at = choices.iter().position(|r| *r == self.repeats).unwrap_or(0);
+                if let Some(next) = choices.get(step_index(at, choices.len(), forward)) {
+                    self.repeats = next.clone();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// What chosen field `which` shows.
+    fn choice_label(&self, which: FormField) -> String {
+        match which {
+            FormField::AllDay => String::from(if self.all_day { "Yes" } else { "No" }),
+            FormField::Category => {
+                format!("{} {}", self.category.icon(), self.category.label())
+            }
+            FormField::Repeats => describe_repeat(&self.repeats),
+            _ => String::new(),
+        }
+    }
+
+    /// The event the form describes, or what is wrong with it -- said in
+    /// the form, which stays up to be put right.
+    pub fn to_event(&self) -> Result<CalendarEvent, String> {
+        let title = self.title.text().trim();
+        if title.is_empty() {
+            return Err(String::from("Give it a title"));
+        }
+        let date = parse_date_text(self.date.text())
+            .ok_or("The date is not one -- write it as YYYY-MM-DD, like 2026-09-26")?;
+        let (start, end) = if self.all_day {
+            (
+                Time { hour: 0, minute: 0 },
+                Time {
+                    hour: 23,
+                    minute: 59,
+                },
+            )
+        } else {
+            let starts = parse_time_text(self.starts.text())
+                .ok_or("The start is not a time -- write it as HH:MM, like 09:30")?;
+            let ends = parse_time_text(self.ends.text())
+                .ok_or("The end is not a time -- write it as HH:MM, like 17:00")?;
+            if ends < starts {
+                return Err(String::from("It ends before it starts"));
+            }
+            (starts, ends)
+        };
+        let place = self.place.text().trim();
+        Ok(CalendarEvent {
+            id: self.id.unwrap_or(0),
+            title: title.to_owned(),
+            description: self.notes.text().to_owned(),
+            category: self.category,
+            start: DateTime::new(date, start),
+            end: DateTime::new(date, end),
+            all_day: self.all_day,
+            recurrence: self.repeats.clone(),
+            reminder: self.reminder,
+            location: (!place.is_empty()).then(|| place.to_owned()),
+            color_override: self.color_override,
+        })
     }
 }
 
@@ -1015,6 +2055,25 @@ pub enum Target {
     Day(Date),
     /// A painted event, by its store id.
     Event(u64),
+    /// The top bar's "New event" button.
+    NewEvent,
+    /// A field of the event form: a press gives it the keys, and steps a
+    /// chosen field on.
+    Field(FormField),
+    /// The arrows either side of a chosen field.
+    StepBack(FormField),
+    StepForward(FormField),
+    /// The form's buttons.
+    Save,
+    Cancel,
+    DeleteEvent,
+    /// Around and behind the form's controls: a press does nothing, since
+    /// the form is modal.
+    FormBackdrop,
+    /// The answers to "Delete this event?", and around them.
+    ConfirmDelete,
+    KeepEvent,
+    ConfirmBackdrop,
 }
 
 /// One frame of this app's drawing, carrying the boxes it recorded.
@@ -1037,10 +2096,14 @@ const MIN_VIEW_TAB_PITCH: f32 = 26.0;
 /// Width of the search box, and the least header worth painting.
 const SEARCH_W: f32 = 160.0;
 const MIN_HEADER_W: f32 = 60.0;
-/// Left edge of the header text, immediately right of the Today button.
+/// Left edge of the header text, immediately right of the Today button --
+/// or of the New event button, when there is one, by as much again.
 const HEADER_X: f32 = 160.0;
 /// Right edge of the Today button, which nothing may be placed left of.
 const CHROME_LEFT: f32 = 152.0;
+/// The New event button, after Today, where the bar can spare it.
+const NEW_EVENT_X: f32 = 152.0;
+const NEW_EVENT_W: f32 = 80.0;
 /// Height of a control in the top bar, and its top edge.
 const CHROME_Y: f32 = 10.0;
 const CHROME_H: f32 = 28.0;
@@ -1087,6 +2150,10 @@ pub struct Layout {
     pub nav_back: Rect,
     pub nav_forward: Rect,
     pub today_button: Rect,
+    /// "New event", beside Today -- or `None` in a window too narrow to
+    /// spare it beside the view tabs, which give way to nothing. N adds an
+    /// event either way.
+    pub new_event_button: Option<Rect>,
     /// The header caption, or `None` in a window too narrow to spare the room.
     pub header: Option<Rect>,
     /// The search box, or `None` in a window too narrow to spare the room.
@@ -1098,11 +2165,27 @@ pub struct Layout {
     pub sidebar: Option<Rect>,
     /// Everything below the top bar and right of the sidebar.
     pub content: Rect,
+    /// The strip under the top bar the empty calendar's two lines are drawn
+    /// in, or `None` when there are no lines to draw.
+    pub notice: Option<Rect>,
 }
+
+/// One line of the notice strip, top to top.
+const NOTICE_LINE_H: f32 = 14.0;
 
 impl Layout {
     /// Work out where everything goes in a `width` x `height` window.
     pub fn new(width: f32, height: f32, sidebar_wanted: bool) -> Self {
+        Self::with_notice(width, height, sidebar_wanted, 0)
+    }
+
+    /// [`new`](Self::new), with room under the top bar for `notice_lines`
+    /// lines that nothing else is drawn over.
+    ///
+    /// The lines were drawn at the top of the window, before the top bar,
+    /// which filled the same pixels: in every frame, on no screen. The sidebar
+    /// and the views start below the strip now.
+    pub fn with_notice(width: f32, height: f32, sidebar_wanted: bool, notice_lines: usize) -> Self {
         let window = Rect::new(0.0, 0.0, width, height);
         let top_bar = Rect::new(0.0, 0.0, width, TOP_BAR_H.min(height));
 
@@ -1111,29 +2194,46 @@ impl Layout {
         // narrower, because a tab that is off-screen cannot be pressed and
         // there is no other way to change view.
         let count = CalendarView::all().len() as f32;
-        let room = (width - 8.0 - CHROME_LEFT).max(0.0);
+        // The New event button, where the tabs still have their narrowest
+        // pitch beside it.
+        let new_right = NEW_EVENT_X + NEW_EVENT_W;
+        let new_event_button = (width - 8.0 - MIN_VIEW_TAB_PITCH * count >= new_right + 8.0)
+            .then(|| Rect::new(NEW_EVENT_X, CHROME_Y, NEW_EVENT_W, CHROME_H));
+        let (chrome_left, header_x) = if new_event_button.is_some() {
+            (new_right + 8.0, new_right + 8.0 + (HEADER_X - CHROME_LEFT))
+        } else {
+            (CHROME_LEFT, HEADER_X)
+        };
+        let room = (width - 8.0 - chrome_left).max(0.0);
         let view_tab_pitch = (room / count).clamp(MIN_VIEW_TAB_PITCH, VIEW_TAB_PITCH);
         let tabs_run = view_tab_pitch * count;
-        let view_tabs_x = (width - 8.0 - tabs_run).max(CHROME_LEFT);
+        let view_tabs_x = (width - 8.0 - tabs_run).max(chrome_left);
 
         // What is left between the Today button and the tabs, spent on the
         // search box first and the caption second.
         let mut right = view_tabs_x - 8.0;
-        let search = if right - HEADER_X - MIN_HEADER_W >= SEARCH_W {
+        let search = if right - header_x - MIN_HEADER_W >= SEARCH_W {
             let rect = Rect::new(right - SEARCH_W, CHROME_Y, SEARCH_W, CHROME_H);
             right = rect.x - 8.0;
             Some(rect)
         } else {
             None
         };
-        let header_w = right - HEADER_X;
+        let header_w = right - header_x;
         let header = if header_w >= MIN_HEADER_W {
-            Some(Rect::new(HEADER_X, CHROME_Y, header_w, CHROME_H))
+            Some(Rect::new(header_x, CHROME_Y, header_w, CHROME_H))
         } else {
             None
         };
 
-        let content_top = CONTENT_Y.min(height);
+        #[allow(clippy::cast_precision_loss, reason = "a handful of lines")]
+        let notice_h = if notice_lines == 0 {
+            0.0
+        } else {
+            (notice_lines as f32 * NOTICE_LINE_H + 6.0).min((height - CONTENT_Y).max(0.0))
+        };
+        let notice = (notice_h > 0.0).then(|| Rect::new(0.0, CONTENT_Y, width, notice_h));
+        let content_top = (CONTENT_Y + notice_h).min(height);
         let sidebar = if sidebar_wanted && width - SIDEBAR_W >= MIN_CONTENT_W {
             Some(Rect::new(
                 0.0,
@@ -1158,12 +2258,14 @@ impl Layout {
             nav_back: Rect::new(8.0, 8.0, 32.0, 32.0),
             nav_forward: Rect::new(44.0, 8.0, 32.0, 32.0),
             today_button: Rect::new(84.0, CHROME_Y, 60.0, CHROME_H),
+            new_event_button,
             header,
             search,
             view_tabs_x,
             view_tab_pitch,
             sidebar,
             content,
+            notice,
         }
     }
 
@@ -1263,6 +2365,25 @@ pub struct CalendarApp {
     pub search_focused: bool,
     /// Cleared when the window is closed, which is what stops the loop.
     pub running: bool,
+    /// Whether the events are kept: set by `from_settings`, never by `new`,
+    /// so a window a test makes writes nothing.
+    persist: bool,
+    /// The store's revision when the events were last written or read.
+    kept_revision: u64,
+    /// Why the events are not being kept, when they are not.
+    store_error: Option<String>,
+    /// "Your latest changes are not saved", while it is being asked.
+    question: Option<Question<()>>,
+    /// The event form, while it is up.
+    pub form: Option<EventForm>,
+    /// Which of the form's fields has the keys.
+    pub form_field: FormField,
+    /// What the last Save found wrong with the form.
+    pub form_error: Option<String>,
+    /// The event a delete is waiting on its answer for.
+    pub pending_delete: Option<u64>,
+    /// What was last copied or cut from a field of the form.
+    clipboard: String,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1297,7 +2418,219 @@ impl CalendarApp {
             content_scroll: 0.0,
             search_focused: false,
             running: true,
+            persist: false,
+            kept_revision: 0,
+            store_error: None,
+            question: None,
+            form: None,
+            form_field: FormField::Title,
+            form_error: None,
+            pending_delete: None,
+            clipboard: String::new(),
         }
+    }
+
+    /// The window's calendar: the events kept last time, and every change
+    /// kept from here on.
+    pub fn from_settings(width: f32, height: f32, today: Date) -> Self {
+        let mut app = Self::new(width, height, today);
+        match events_path() {
+            Some(path) => {
+                app.persist = true;
+                app.load_events(&path);
+            }
+            // Nowhere to keep anything, and never will be while this window
+            // is open: said once, and not asked about again at every close.
+            None => app.store_error = Some(String::from(NO_HOME)),
+        }
+        app
+    }
+
+    /// Read the events at `path`; with none there yet, this is a first run.
+    ///
+    /// A file that cannot be read whole is left exactly as it is: nothing is
+    /// saved over it, and the window says so for as long as it is open.
+    fn load_events(&mut self, path: &std::path::Path) {
+        self.load_events_within(path, MAX_CALENDAR_BYTES);
+    }
+
+    /// [`load_events`](Self::load_events) with the size limit given, so a
+    /// test can reach it without writing sixteen megabytes.
+    fn load_events_within(&mut self, path: &std::path::Path, max_bytes: usize) {
+        let refused = |why: String| {
+            format!(
+                "{} was not read ({why}), so nothing is saved over it",
+                path.shown()
+            )
+        };
+        let read = match safeio::read_to_string_capped(path, max_bytes) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                self.persist = false;
+                self.store_error = Some(refused(err.to_string()));
+                return;
+            }
+        };
+        if read.truncated {
+            self.persist = false;
+            self.store_error = Some(refused(format!(
+                "it is larger than {} MiB",
+                max_bytes / (1024 * 1024)
+            )));
+            return;
+        }
+        match parse_calendar(&read.text) {
+            Ok(events) => {
+                self.store = EventStore::from_events(events);
+                self.kept_revision = self.store.revision();
+                self.selected_event_id = None;
+            }
+            Err(why) => {
+                self.persist = false;
+                self.store_error = Some(refused(why));
+            }
+        }
+    }
+
+    /// Write the events, if they have changed since they were last written
+    /// and this window keeps anything.
+    ///
+    /// A failure is kept in `store_error`, drawn under the top bar, and the
+    /// next event tries again.
+    fn keep(&mut self) {
+        if !self.persist || self.store.revision() == self.kept_revision {
+            return;
+        }
+        let Some(path) = events_path() else {
+            self.store_error = Some(String::from(NO_HOME));
+            return;
+        };
+        let text = calendar_text(&self.store);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| safeio::write_str_atomically(&path, &text));
+        match written {
+            Ok(()) => {
+                self.kept_revision = self.store.revision();
+                self.store_error = None;
+            }
+            Err(err) => {
+                self.store_error = Some(format!(
+                    "Your calendar was not saved to {}: {err}",
+                    path.shown()
+                ));
+            }
+        }
+    }
+
+    /// Whether the events hold a change that is not written.
+    fn unkept(&self) -> bool {
+        self.persist && self.store.revision() != self.kept_revision
+    }
+
+    /// Whether the window may close now: at once, unless the events have
+    /// changes a save is failing to write, which closing would lose.
+    fn request_close(&mut self) -> bool {
+        self.keep();
+        if !self.unkept() {
+            return true;
+        }
+        // The question replaces whatever is up: the picker would take the keys
+        // it needs, and be drawn over it.
+        self.picker.close();
+        self.show_help = false;
+        let detail = self.store_error.clone().unwrap_or_default();
+        self.question = Some(Question::new(
+            "Your latest changes to your calendar are not saved.",
+            &format!("{detail} -- try saving again before closing?"),
+            (),
+        ));
+        false
+    }
+
+    /// Act on the close question's answer.
+    fn answer(&mut self, choice: Choice) {
+        match choice {
+            // Leave only if the save now works; if it fails again the error is
+            // on screen and the window stays, which is what Save asked for.
+            Choice::Save => {
+                self.keep();
+                self.running = self.unkept();
+            }
+            Choice::Discard => self.running = false,
+            Choice::Cancel => {}
+        }
+    }
+
+    /// N, or the New event button: a new event on the selected day.
+    pub fn open_new_event(&mut self) {
+        self.form = Some(EventForm::new_on(self.selected_date));
+        self.form_field = FormField::Title;
+        self.form_error = None;
+        self.search_focused = false;
+        self.show_help = false;
+    }
+
+    /// Change event `id`, in the form.
+    pub fn open_edit_event(&mut self, id: u64) {
+        let Some(event) = self.store.get(id) else {
+            return;
+        };
+        self.form = Some(EventForm::editing(event));
+        self.form_field = FormField::Title;
+        self.form_error = None;
+        self.search_focused = false;
+        self.show_help = false;
+    }
+
+    /// Keep what the form holds, or say in the form what is wrong with it.
+    pub fn save_form(&mut self) {
+        let Some(form) = self.form.as_ref() else {
+            return;
+        };
+        match (form.to_event(), form.id) {
+            (Ok(event), Some(id)) => {
+                let date = event.start.date;
+                if let Some(kept) = self.store.get_mut(id) {
+                    *kept = CalendarEvent { id, ..event };
+                }
+                self.select_date(date);
+            }
+            (Ok(event), None) => {
+                let date = event.start.date;
+                let id = self.store.add(event);
+                self.selected_event_id = Some(id);
+                self.select_date(date);
+            }
+            (Err(why), _) => {
+                self.form_error = Some(why);
+                return;
+            }
+        }
+        self.form = None;
+        self.form_error = None;
+        // A search showing results has results that may have changed.
+        self.search();
+        self.clamp_scroll();
+    }
+
+    /// Close the form, keeping nothing it holds.
+    pub fn cancel_form(&mut self) {
+        self.form = None;
+        self.form_error = None;
+    }
+
+    /// Delete event `id` -- after asking, which `pending_delete` holds.
+    pub fn delete_event(&mut self, id: u64) {
+        self.store.remove(id);
+        if self.selected_event_id == Some(id) {
+            self.selected_event_id = None;
+        }
+        self.pending_delete = None;
+        self.search();
+        self.clamp_scroll();
     }
 
     // Navigation
@@ -1388,7 +2721,33 @@ impl CalendarApp {
 
     /// Where everything goes at the current window size.
     pub fn layout(&self) -> Layout {
-        Layout::new(self.width, self.height, self.sidebar_visible)
+        Layout::with_notice(
+            self.width,
+            self.height,
+            self.sidebar_visible,
+            self.notice_lines().len(),
+        )
+    }
+
+    /// What the window has to say under the top bar, each line with whether
+    /// it is a warning: why the events are not being kept, what the last
+    /// import or export did, and -- while there are none -- how to add one.
+    ///
+    /// What the last import or export did was drawn over the top bar, across
+    /// its buttons; it has a line of its own here now.
+    fn notice_lines(&self) -> Vec<(String, bool)> {
+        let mut lines = Vec::new();
+        if let Some(error) = &self.store_error {
+            lines.push((error.clone(), true));
+        }
+        if let Some(note) = &self.last_file_action {
+            let failed = note.starts_with(FILE_FAILED_PREFIX) || note.starts_with("INCOMPLETE");
+            lines.push((note.clone(), failed));
+        }
+        if self.store.is_empty() {
+            lines.push((String::from(NO_EVENTS_LINE), false));
+        }
+        lines
     }
 
     fn week_start(&self, date: Date) -> Date {
@@ -1620,31 +2979,36 @@ impl CalendarApp {
     /// at the moment it is painted.
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let mut frame = Frame::new(width, height);
-        let layout = Layout::new(width, height, self.sidebar_visible);
+        let layout = Layout::with_notice(
+            width,
+            height,
+            self.sidebar_visible,
+            self.notice_lines().len(),
+        );
 
         fill(&mut frame, layout.window, self.palette.base, 0.0);
 
-        // After the background, or it would be painted over. Keyed on the
-        // store being empty so it retires itself at the first real event.
-        if self.store.is_empty() {
-            for (i, line) in NO_EVENTS_LINES.iter().enumerate() {
-                #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
-                let ty = layout.window.y + 1.0 + i as f32 * 11.0;
-                let avail = (layout.window.w - 16.0).max(0.0);
-                if avail <= 0.0 || ty + 11.0 > layout.window.y + layout.window.h {
+        self.draw_top_bar(&mut frame, &layout);
+        // In the strip under the top bar, which nothing else is drawn in.
+        if let Some(strip) = layout.notice {
+            for (i, (line, warning)) in self.notice_lines().into_iter().enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "three lines at most")]
+                let ty = strip.y + 3.0 + i as f32 * NOTICE_LINE_H;
+                let avail = (strip.w - 16.0).max(0.0);
+                if avail <= 0.0 || ty + NOTICE_LINE_H > strip.y + strip.h {
                     break;
                 }
                 frame.push(RenderCommand::Text {
-                    x: layout.window.x + 8.0,
+                    x: strip.x + 8.0,
                     y: ty,
-                    text: (*line).to_string(),
-                    color: if i == 0 {
-                        self.palette.ink(self.palette.yellow)
+                    text: line,
+                    color: if warning {
+                        self.palette.ink(self.palette.red)
                     } else {
                         self.palette.subtext0
                     },
-                    font_size: if i == 0 { 10.0 } else { 9.0 },
-                    font_weight: if i == 0 {
+                    font_size: 11.0,
+                    font_weight: if warning {
                         FontWeightHint::Bold
                     } else {
                         FontWeightHint::Regular
@@ -1654,8 +3018,6 @@ impl CalendarApp {
                 });
             }
         }
-
-        self.draw_top_bar(&mut frame, &layout);
 
         if let Some(bar) = layout.sidebar {
             // Clipped, so a category row pushed below a short sidebar is
@@ -1682,27 +3044,13 @@ impl CalendarApp {
         frame.untranslate();
         frame.unclip();
 
-        // What the last open or save did. This is the one place the user's
-        // calendar leaves the process.
-        if let Some(note) = &self.last_file_action {
-            let avail = (layout.window.w - 16.0).max(0.0);
-            if avail > 0.0 {
-                frame.push(RenderCommand::Text {
-                    x: layout.window.x + 8.0,
-                    y: layout.window.y + 26.0,
-                    text: note.clone(),
-                    color: if note.starts_with(FILE_FAILED_PREFIX) || note.starts_with("INCOMPLETE")
-                    {
-                        self.palette.ink(self.palette.red)
-                    } else {
-                        self.palette.subtext0
-                    },
-                    font_size: 9.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(avail),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
+        // The form, or the question before a delete, over the calendar they
+        // are about. Neither is up with the picker: both take the keys that
+        // would open it.
+        if let Some(form) = &self.form {
+            self.draw_form(&mut frame, form);
+        } else if let Some(id) = self.pending_delete {
+            self.draw_confirm_delete(&mut frame, id);
         }
 
         // Last, so it is above everything.
@@ -1725,6 +3073,338 @@ impl CalendarApp {
         }
 
         frame
+    }
+
+    // ========================================================================
+    // The event form and the question before a delete
+    // ========================================================================
+
+    /// Where the form's card is.
+    fn form_card(&self, form: &EventForm) -> Rect {
+        #[allow(clippy::cast_precision_loss, reason = "nine rows at most")]
+        let rows = form.fields().len() as f32;
+        let card_w = 560.0_f32.min(self.width - 24.0).max(0.0);
+        let card_h = (64.0 + rows * FORM_ROW_H + 96.0)
+            .min(self.height - 24.0)
+            .max(0.0);
+        Rect::new(
+            (self.width - card_w) / 2.0,
+            (self.height - card_h) / 2.0,
+            card_w,
+            card_h,
+        )
+    }
+
+    /// The form over the window: a row per field, what the last Save found
+    /// wrong, and the buttons.
+    fn draw_form(&self, frame: &mut Frame, form: &EventForm) {
+        let window = Rect::new(0.0, 0.0, self.width, self.height);
+        fill(frame, window, Color::rgba(0, 0, 0, 150), 0.0);
+        frame.hit(Target::FormBackdrop, window);
+        let card = self.form_card(form);
+        self.palette
+            .push_surface(frame, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
+        label(
+            frame,
+            card.x + 20.0,
+            card.y + 18.0,
+            if form.id.is_some() {
+                "Change event"
+            } else {
+                "New event"
+            },
+            16.0,
+            self.palette.text,
+            FontWeightHint::Bold,
+            Some((card.w - 40.0).max(0.0)),
+        );
+        let label_w = 100.0;
+        let control_w = (card.w - 40.0 - label_w).max(0.0);
+        let mut y = card.y + 56.0;
+        for &field in form.fields() {
+            label(
+                frame,
+                card.x + 20.0,
+                y + 9.0,
+                field.label(),
+                12.0,
+                self.palette.subtext1,
+                FontWeightHint::Regular,
+                Some(label_w - 8.0),
+            );
+            let rect = Rect::new(card.x + 20.0 + label_w, y, control_w, 32.0);
+            if field.is_text() {
+                self.draw_form_text(frame, form, field, rect);
+            } else {
+                self.draw_form_choice(frame, form, field, rect);
+            }
+            y += FORM_ROW_H;
+        }
+        if let Some(error) = &self.form_error {
+            label(
+                frame,
+                card.x + 20.0,
+                y + 4.0,
+                error.clone(),
+                12.0,
+                self.palette.ink(self.palette.red),
+                FontWeightHint::Bold,
+                Some((card.w - 40.0).max(0.0)),
+            );
+        }
+        let buttons_y = card.bottom() - 46.0;
+        let mut right = card.right() - 20.0;
+        let mut buttons = vec![
+            ("Save", Target::Save, true),
+            ("Cancel", Target::Cancel, false),
+        ];
+        if form.id.is_some() {
+            buttons.push(("Delete", Target::DeleteEvent, false));
+        }
+        for (text, target, primary) in buttons {
+            let rect = Rect::new(right - 80.0, buttons_y, 80.0, 32.0);
+            self.draw_button(frame, rect, text, target, primary);
+            right = rect.x - 8.0;
+        }
+        label(
+            frame,
+            card.x + 20.0,
+            buttons_y + 9.0,
+            "Tab: next field  \u{00B7}  Enter: save  \u{00B7}  Esc: cancel",
+            11.0,
+            self.palette.subtext0,
+            FontWeightHint::Regular,
+            Some((right - card.x - 28.0).max(0.0)),
+        );
+    }
+
+    /// A text field: its box, and what is typed with the caret -- or, while
+    /// it is empty and the keys are elsewhere, what it wants.
+    fn draw_form_text(&self, frame: &mut Frame, form: &EventForm, field: FormField, rect: Rect) {
+        let focused = self.form_field == field;
+        self.palette
+            .push_surface(frame, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
+        stroke(
+            frame,
+            rect,
+            if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
+            4.0,
+            if focused { 2.0 } else { 1.0 },
+        );
+        if let Some(input) = form.input_ref(field) {
+            if input.text().is_empty() && !focused {
+                label(
+                    frame,
+                    rect.x + 8.0,
+                    rect.y + 8.0,
+                    field.placeholder(),
+                    FORM_TEXT_SIZE,
+                    self.palette.subtext0,
+                    FontWeightHint::Regular,
+                    Some((rect.w - 16.0).max(0.0)),
+                );
+            } else {
+                let mut tree = RenderTree::new();
+                textedit::draw(
+                    &mut tree,
+                    &textedit::SingleLine {
+                        text: input.text(),
+                        cursor: if focused {
+                            input.cursor()
+                        } else {
+                            guitk::text::TextCursor::default()
+                        },
+                        selection_anchor: if focused {
+                            input.selection_anchor()
+                        } else {
+                            None
+                        },
+                        focused,
+                        x: rect.x + 8.0,
+                        y: rect.y + 7.0,
+                        width: (rect.w - 16.0).max(0.0),
+                        line_height: 18.0,
+                        font_size: FORM_TEXT_SIZE,
+                        weight: FontWeightHint::Regular,
+                        color: self.palette.text,
+                        selection_bg: self.palette.blue,
+                        selection_fg: self.palette.crust,
+                        caret_width: textedit::CARET_WIDTH,
+                    },
+                );
+                frame.extend(tree.commands);
+            }
+        }
+        frame.hit(Target::Field(field), rect);
+    }
+
+    /// A chosen field: its value between arrows.
+    fn draw_form_choice(&self, frame: &mut Frame, form: &EventForm, field: FormField, rect: Rect) {
+        let focused = self.form_field == field;
+        let value = Rect::new(rect.x + 36.0, rect.y, (rect.w - 72.0).max(0.0), rect.h);
+        self.draw_button(
+            frame,
+            Rect::new(rect.x, rect.y, 32.0, rect.h),
+            "\u{25C0}",
+            Target::StepBack(field),
+            false,
+        );
+        self.draw_button(
+            frame,
+            Rect::new(rect.right() - 32.0, rect.y, 32.0, rect.h),
+            "\u{25B6}",
+            Target::StepForward(field),
+            false,
+        );
+        self.palette.push_surface(
+            frame,
+            value.x,
+            value.y,
+            value.w,
+            value.h,
+            4.0,
+            Surface::Card,
+        );
+        stroke(
+            frame,
+            value,
+            if focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
+            4.0,
+            if focused { 2.0 } else { 1.0 },
+        );
+        let text = form.choice_label(field);
+        label(
+            frame,
+            guitk::text::center_x(
+                &text,
+                value.x + value.w / 2.0,
+                FORM_TEXT_SIZE,
+                FontWeightHint::Regular,
+            )
+            .max(value.x + 8.0),
+            value.y + 8.0,
+            text,
+            FORM_TEXT_SIZE,
+            self.palette.text,
+            FontWeightHint::Regular,
+            Some((value.w - 16.0).max(0.0)),
+        );
+        frame.hit(Target::Field(field), value);
+    }
+
+    /// A button: its face, its word in the middle, and its hit box.
+    fn draw_button(
+        &self,
+        frame: &mut Frame,
+        rect: Rect,
+        text: &str,
+        target: Target,
+        primary: bool,
+    ) {
+        fill(
+            frame,
+            rect,
+            if primary {
+                self.palette.blue
+            } else {
+                self.palette.surface0
+            },
+            4.0,
+        );
+        label(
+            frame,
+            guitk::text::center_x(text, rect.x + rect.w / 2.0, 12.0, FontWeightHint::Bold)
+                .max(rect.x + 4.0),
+            rect.y + rect.h / 2.0 - 7.0,
+            text,
+            12.0,
+            if primary {
+                self.palette.crust
+            } else {
+                self.palette.text
+            },
+            FontWeightHint::Bold,
+            Some((rect.w - 8.0).max(0.0)),
+        );
+        frame.hit(target, rect);
+    }
+
+    /// "Delete this event?", with a button for each answer.
+    fn draw_confirm_delete(&self, frame: &mut Frame, id: u64) {
+        let window = Rect::new(0.0, 0.0, self.width, self.height);
+        fill(frame, window, Color::rgba(0, 0, 0, 160), 0.0);
+        frame.hit(Target::ConfirmBackdrop, window);
+        let card_w = 420.0_f32.min(self.width - 24.0).max(0.0);
+        let card = Rect::new(
+            (self.width - card_w) / 2.0,
+            (self.height - 160.0) / 2.0,
+            card_w,
+            160.0,
+        );
+        self.palette
+            .push_surface(frame, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
+        let (title, repeats) = self.store.get(id).map_or_else(
+            || (String::new(), false),
+            |e| (e.title.clone(), e.recurrence != RecurrenceRule::None),
+        );
+        label(
+            frame,
+            card.x + 20.0,
+            card.y + 20.0,
+            format!("Delete \u{201C}{title}\u{201D}?"),
+            15.0,
+            self.palette.text,
+            FontWeightHint::Bold,
+            Some((card.w - 40.0).max(0.0)),
+        );
+        label(
+            frame,
+            card.x + 20.0,
+            card.y + 48.0,
+            if repeats {
+                "Every time it repeats goes with it."
+            } else {
+                "It cannot be brought back."
+            },
+            12.0,
+            self.palette.subtext0,
+            FontWeightHint::Regular,
+            Some((card.w - 40.0).max(0.0)),
+        );
+        // The keys `handle_confirm_key` answers, where the question is asked.
+        label(
+            frame,
+            card.x + 20.0,
+            card.y + 68.0,
+            "Enter or Y deletes it; Esc or N keeps it.",
+            12.0,
+            self.palette.subtext0,
+            FontWeightHint::Regular,
+            Some((card.w - 40.0).max(0.0)),
+        );
+        let buttons_y = card.bottom() - 48.0;
+        self.draw_button(
+            frame,
+            Rect::new(card.right() - 100.0, buttons_y, 80.0, 32.0),
+            "Delete",
+            Target::ConfirmDelete,
+            true,
+        );
+        self.draw_button(
+            frame,
+            Rect::new(card.right() - 188.0, buttons_y, 80.0, 32.0),
+            "Keep it",
+            Target::KeepEvent,
+            false,
+        );
     }
 
     fn draw_top_bar(&self, frame: &mut Frame, layout: &Layout) {
@@ -1752,6 +3432,21 @@ impl CalendarApp {
             Some(today.w - 8.0),
         );
         frame.hit(Target::TodayButton, today);
+
+        if let Some(new) = layout.new_event_button {
+            fill(frame, new, self.palette.surface0, 4.0);
+            label(
+                frame,
+                new.x + 8.0,
+                new.y + 8.0,
+                "New event",
+                12.0,
+                self.palette.text,
+                FontWeightHint::Regular,
+                Some(new.w - 12.0),
+            );
+            frame.hit(Target::NewEvent, new);
+        }
 
         if let Some(header) = layout.header {
             label(
@@ -2758,8 +4453,29 @@ fn draw_nav_button(frame: &mut Frame, pal: &Palette, rect: Rect, glyph: &str, ta
 // Input
 // ============================================================================
 
-/// The one body both the window and the test probe drive the calendar through.
+/// The one body both the window and the test probe drive the calendar
+/// through -- and after every event, the events are kept if they changed.
 pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
+    let result = route_event(state, event);
+    state.keep();
+    result
+}
+
+/// Hand `event` to whatever has it: the close question, the picker, the event
+/// form, the question before a delete, or the calendar.
+fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
+    // The close question has every key and click while it is up: a key that
+    // reached the calendar under it would be a change made while being asked
+    // about the changes.
+    if let Some(question) = state.question.as_mut()
+        && matches!(event, Event::Key(_) | Event::Mouse(_))
+    {
+        if let Some(choice) = question.handle(event) {
+            state.question = None;
+            state.answer(choice);
+        }
+        return EventResult::Consumed;
+    }
     // The picker takes input first while it is up, or a keystroke meant for
     // a filename lands in the search box behind it.
     //
@@ -2783,6 +4499,33 @@ pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
         Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
         Picked::Ignored => {}
     }
+    // The form and the question before a delete are modal: every key and
+    // every press is theirs while they are up.
+    if state.form.is_some() {
+        match event {
+            Event::Key(key) if key.pressed => return handle_form_key(state, key),
+            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Press(_)) => {
+                let hit = state.target_at(mouse.x, mouse.y);
+                return handle_form_click(state, hit);
+            }
+            Event::Mouse(_) => return EventResult::Ignored,
+            _ => {}
+        }
+    } else if let Some(id) = state.pending_delete {
+        match event {
+            Event::Key(key) if key.pressed => return handle_confirm_key(state, id, key),
+            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Press(_)) => {
+                match state.target_at(mouse.x, mouse.y) {
+                    Some(Target::ConfirmDelete) => state.delete_event(id),
+                    Some(Target::KeepEvent) => state.pending_delete = None,
+                    _ => {}
+                }
+                return EventResult::Consumed;
+            }
+            Event::Mouse(_) => return EventResult::Ignored,
+            _ => {}
+        }
+    }
     match event {
         Event::Key(key) if key.pressed => handle_key(state, key),
         Event::Mouse(mouse) => handle_mouse(state, mouse),
@@ -2802,8 +4545,12 @@ pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
                 _ => EventResult::Ignored,
             }
         }
+        // Closes at once unless the latest changes cannot be saved, which
+        // closing would lose; then the question is up and the window stays.
         Event::CloseRequested => {
-            state.running = false;
+            if state.request_close() {
+                state.running = false;
+            }
             EventResult::Consumed
         }
         _ => EventResult::Ignored,
@@ -2812,7 +4559,7 @@ pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
 
 /// Every key this program answers, and what it does.
 ///
-/// Sixteen bindings and, until this list existed, no way to learn one but
+/// Twenty-odd bindings and, until this list existed, no way to learn one but
 /// reading the source. `W` is the worst of them: it decides which day a week
 /// begins on, which is a question with no universally right answer, and it was
 /// answered once at compile time until the key existed and then answerable
@@ -2832,7 +4579,14 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Scroll the day or week"),
     ("W", "Start the week on Monday or Sunday"),
     ("H", "Show times as 24-hour or 12-hour"),
-    ("Escape", "Clear the selected event"),
+    ("N", "New event on the selected day"),
+    ("Enter", "Change the selected event"),
+    ("Delete", "Delete the selected event (asks first)"),
+    (
+        "Tab / Shift+Tab",
+        "In the event form: next / previous field",
+    ),
+    ("Escape", "Clear the selected event; close the form"),
     ("Ctrl+F", "Search"),
     ("Ctrl+B", "Show or hide the sidebar"),
     ("Ctrl+O / Ctrl+S", "Import / export a calendar file"),
@@ -2877,8 +4631,8 @@ impl CalendarApp {
         }
         let text = self.store.export_ics("SlateOS Calendar");
         match safeio::write_str_atomically(path, &text) {
-            Ok(()) => format!("Wrote {} event(s) to {}", self.store.len(), path.display()),
-            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.display()),
+            Ok(()) => format!("Wrote {} event(s) to {}", self.store.len(), path.shown()),
+            Err(err) => format!("{FILE_FAILED_PREFIX} write {}: {err}", path.shown()),
         }
     }
 
@@ -2887,30 +4641,40 @@ impl CalendarApp {
     /// Adds rather than replaces: importing a colleague's calendar should not
     /// discard your own.
     pub fn read_ics(&mut self, path: &std::path::Path) -> String {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.display()),
+        // Under the cap as it reads: `fs::read_to_string` read the whole file
+        // first, however large, and only then cut it to `MAX_ICS_BYTES`.
+        let read = match safeio::read_to_string_capped(path, MAX_ICS_BYTES) {
+            Ok(read) => read,
+            Err(err) => return format!("{FILE_FAILED_PREFIX} read {}: {err}", path.shown()),
         };
-        let whole = text.len();
-        let truncated = whole > MAX_ICS_BYTES;
-        let body = if truncated {
-            let mut cut = MAX_ICS_BYTES;
-            while cut > 0 && !text.is_char_boundary(cut) {
-                cut = cut.saturating_sub(1);
-            }
-            text.get(..cut).unwrap_or("").to_string()
-        } else {
-            text
-        };
-        let added = self.store.import_ics(&body);
-        if truncated {
+        let (whole, truncated, body) = (read.whole, read.truncated, read.text);
+        let report = parse_ics_report(&body);
+        let (unreadable, zoned, simplified) = (report.unreadable, report.zoned, report.simplified);
+        let added = self.store.import_events(report.events);
+        let mut said = if truncated {
             format!(
                 "INCOMPLETE: {added} event(s) from the first {MAX_ICS_BYTES} bytes of {}, which is {whole} bytes",
-                path.display()
+                path.shown()
             )
         } else {
-            format!("Added {added} event(s) from {}", path.display())
+            format!("Added {added} event(s) from {}", path.shown())
+        };
+        if unreadable > 0 {
+            said.push_str(&format!(
+                "; {unreadable} had no start that could be read, and were left out"
+            ));
         }
+        if zoned > 0 {
+            said.push_str(&format!(
+                "; {zoned} had times for another time zone, kept as the clock time written"
+            ));
+        }
+        if simplified > 0 {
+            said.push_str(&format!(
+                "; {simplified} repeat in a way this calendar cannot keep exactly (an end, or a rule it has no name for), and repeat on"
+            ));
+        }
+        said
     }
 }
 
@@ -3049,8 +4813,135 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
             state.selected_event_id = Option::None;
             EventResult::Consumed
         }
+        Key::N => {
+            state.open_new_event();
+            EventResult::Consumed
+        }
+        // The selected event, if it is still there: a search or a filter can
+        // take it off the screen, but not out of the calendar.
+        Key::Enter => match state.selected_event_id {
+            Some(id) if state.store.get(id).is_some() => {
+                state.open_edit_event(id);
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        },
+        Key::Delete => match state.selected_event_id {
+            Some(id) if state.store.get(id).is_some() => {
+                state.pending_delete = Some(id);
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        },
         _ => EventResult::Ignored,
     }
+}
+
+/// Keys while the event form is up: Tab walks the fields, Enter saves,
+/// Escape leaves, Left, Right and Space step a chosen field, and the rest
+/// edit the text field that has the keys.
+fn handle_form_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
+    let Some(form) = state.form.as_ref() else {
+        return EventResult::Ignored;
+    };
+    let fields = form.fields();
+    if !fields.contains(&state.form_field) {
+        state.form_field = fields.first().copied().unwrap_or(FormField::Title);
+    }
+    match key.key {
+        Key::Tab => {
+            let at = fields
+                .iter()
+                .position(|f| *f == state.form_field)
+                .unwrap_or(0);
+            let next = step_index(at, fields.len(), !key.modifiers.shift);
+            state.form_field = fields.get(next).copied().unwrap_or(state.form_field);
+            EventResult::Consumed
+        }
+        Key::Enter => {
+            state.save_form();
+            EventResult::Consumed
+        }
+        Key::Escape => {
+            state.cancel_form();
+            EventResult::Consumed
+        }
+        Key::Left | Key::Right | Key::Space if !state.form_field.is_text() => {
+            let (field, forward) = (state.form_field, key.key != Key::Left);
+            if let Some(form) = state.form.as_mut()
+                && form.step(field, forward)
+            {
+                state.form_error = None;
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        }
+        _ => {
+            let field = state.form_field;
+            let clipboard = state.clipboard.clone();
+            let Some(input) = state.form.as_mut().and_then(|f| f.input(field)) else {
+                return EventResult::Ignored;
+            };
+            let done =
+                textline::apply_key(input, key, field.capacity(), &clipboard, FORM_TEXT_SIZE);
+            if let Some(copied) = done.copied {
+                state.clipboard = copied;
+            }
+            if done.handled {
+                state.form_error = None;
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        }
+    }
+}
+
+/// A press while the event form is up. Anywhere but its controls it does
+/// nothing: the form is modal, and a press reaching the calendar behind it
+/// would change what it is about.
+fn handle_form_click(state: &mut CalendarApp, hit: Option<Target>) -> EventResult {
+    match hit {
+        Some(Target::Field(field)) => {
+            state.form_field = field;
+            // A press on a chosen value steps it on, as the arrow after it does.
+            if !field.is_text()
+                && let Some(form) = state.form.as_mut()
+            {
+                form.step(field, true);
+            }
+        }
+        Some(Target::StepBack(field) | Target::StepForward(field)) => {
+            state.form_field = field;
+            let forward = matches!(hit, Some(Target::StepForward(_)));
+            if let Some(form) = state.form.as_mut() {
+                form.step(field, forward);
+            }
+        }
+        Some(Target::Save) => state.save_form(),
+        Some(Target::Cancel) => state.cancel_form(),
+        Some(Target::DeleteEvent) => {
+            if let Some(id) = state.form.as_ref().and_then(|f| f.id) {
+                state.cancel_form();
+                state.pending_delete = Some(id);
+            }
+        }
+        _ => {}
+    }
+    EventResult::Consumed
+}
+
+/// Keys while "Delete this event?" is up: Enter or Y deletes it, Escape or N
+/// keeps it; every other key is swallowed, since a key that reached the
+/// calendar would be acted on under a question it has not answered.
+fn handle_confirm_key(state: &mut CalendarApp, id: u64, key: &KeyEvent) -> EventResult {
+    match key.key {
+        Key::Enter | Key::Y => state.delete_event(id),
+        Key::Escape | Key::N => state.pending_delete = None,
+        _ => {}
+    }
+    EventResult::Consumed
 }
 
 fn handle_mouse(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
@@ -3101,9 +4992,32 @@ fn handle_mouse(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
                         };
                     }
                 }
-                Some(Target::Event(id)) => state.selected_event_id = Some(id),
-                // Consumed either way: the click landed on this window.
-                Some(Target::SearchField) | Option::None => {}
+                // A press on the event already selected opens it.
+                Some(Target::Event(id)) => {
+                    if state.selected_event_id == Some(id) {
+                        state.open_edit_event(id);
+                    } else {
+                        state.selected_event_id = Some(id);
+                    }
+                }
+                Some(Target::NewEvent) => state.open_new_event(),
+                // Consumed either way: the click landed on this window. The
+                // form's and the delete question's own targets are drawn only
+                // while they are up, and are handled before this.
+                Some(
+                    Target::SearchField
+                    | Target::Field(_)
+                    | Target::StepBack(_)
+                    | Target::StepForward(_)
+                    | Target::Save
+                    | Target::Cancel
+                    | Target::DeleteEvent
+                    | Target::FormBackdrop
+                    | Target::ConfirmDelete
+                    | Target::KeepEvent
+                    | Target::ConfirmBackdrop,
+                )
+                | Option::None => {}
             }
 
             state.clamp_scroll();
@@ -3169,10 +5083,15 @@ impl App for CalendarApp {
         Some(Duration::from_mins(1))
     }
 
+    /// Closing asks first only when the latest changes cannot be saved; the
+    /// window then waits for the answer (`KeepOpen`) with the question drawn.
     fn on_event(&mut self, event: &Event) -> Response {
         let result = handle_event(self, event);
         if !self.running {
             return Response::Exit;
+        }
+        if matches!(event, Event::CloseRequested) {
+            return Response::KeepOpen;
         }
         match result {
             EventResult::Consumed => Response::Redraw,
@@ -3182,7 +5101,13 @@ impl App for CalendarApp {
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let mut tree = self.frame(width, height).into_tree();
+        // Over everything, the picker included: they are never up together.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+        tree
     }
 }
 
@@ -3228,22 +5153,17 @@ fn today_from_clock() -> Option<Date> {
 // Sample data
 // ============================================================================
 
-/// What the window says instead of listing events.
+/// What the window says while it has no events: how to add one.
 ///
-/// Two lines, two different absences. The first is that nothing here is the
-/// user's; the second is that nothing the user adds survives on its own.
-///
-/// The second line used to read "this app has no filesystem access", which was
-/// true when it was written and false from the moment Ctrl+S opened a save
-/// dialog. A banner that denies a capability the program has is the same
-/// defect as one that claims a capability it lacks, and it is the more
-/// expensive direction: a false promise is found out by trying it, while a
-/// false denial stops the user trying at all. The warning underneath is still
-/// real -- there is no autosave -- so it stays, and now names the remedy.
-const NO_EVENTS_LINES: [&str; 2] = [
-    "No events -- this calendar opened with a Team Standup and four others until 2026-09-15. Nobody had scheduled any of them.",
-    "Nothing is saved automatically -- press Ctrl+S to write an .ics file, or an event added today is gone when the window closes.",
-];
+/// It said two other things until 2026-09-26: that the calendar had opened on
+/// five invented events until 2026-09-15, which had stopped being news, and
+/// that nothing was saved automatically, which stopped being so when the
+/// events came to be kept as they change (design-decisions §1209). A banner
+/// that denies a capability the program has is the same defect as one that
+/// claims a capability it lacks -- and the more expensive direction, since a
+/// false denial stops the user trying at all.
+const NO_EVENTS_LINE: &str =
+    "No events yet -- press N or New event to add one, or Ctrl+O to import an .ics calendar.";
 
 /// A day's worth of events, for tests.
 ///
@@ -3451,8 +5371,9 @@ fn main() -> ExitCode {
         month: 1,
         day: 1,
     });
-    // Opens empty. It used to call `sample_events`.
-    let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
+    // The events kept last time. It used to open on `sample_events`, and
+    // then empty, and kept nothing.
+    let mut app = CalendarApp::from_settings(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
     app::launch("calendar", &mut app)
 }
 
@@ -3682,7 +5603,7 @@ mod tests {
     /// Two absences, two lines. Nothing here is the user's, and nothing the
     /// user adds will survive the window.
     #[test]
-    fn a_fresh_calendar_holds_no_events_and_says_so_twice() {
+    fn a_fresh_calendar_holds_no_events_and_says_how_to_add_one() {
         let today = Date {
             year: 2026,
             month: 5,
@@ -3700,28 +5621,18 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in NO_EVENTS_LINES {
-            assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
-            );
-        }
-        // The cost AND the remedy. This used to require only "gone when the
-        // window closes", and that phrase survived the rewrite that added the
-        // door **by luck** -- it happens to still sit at the end of the new
-        // sentence. So this test never failed, never drew attention to
-        // itself, and never checked the half the banner had just gained. The
-        // fifth of this shape in the tree and the only one found by searching
-        // for the idiom rather than by a red test.
         assert!(
-            NO_EVENTS_LINES
-                .iter()
-                .any(|l| l.contains("gone when the window closes")),
-            "nothing warns that an event added today does not survive",
+            texts.iter().any(|t| t == NO_EVENTS_LINE),
+            "the window never said {NO_EVENTS_LINE:?}"
         );
+        // The remedy, which is the point of the line: the keys that add one.
+        assert!(NO_EVENTS_LINE.contains("press N"));
+        assert!(NO_EVENTS_LINE.contains("Ctrl+O"));
+        // And no claim that nothing is kept, which is no longer so.
         assert!(
-            NO_EVENTS_LINES.iter().any(|l| l.contains("Ctrl+S")),
-            "the warning does not say how to keep the event",
+            !texts
+                .iter()
+                .any(|t| t.contains("gone when the window closes"))
         );
     }
 
@@ -4512,7 +6423,7 @@ mod tests {
     fn test_store_import_ics() {
         let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nDTSTART:20240615T100000\r\nDTEND:20240615T110000\r\nSUMMARY:Imported Event\r\nEND:VEVENT\r\nEND:VCALENDAR";
         let mut store = EventStore::new();
-        let count = store.import_ics(ics);
+        let count = store.import_events(parse_ics(ics));
         assert_eq!(count, 1);
         assert_eq!(store.len(), 1);
         assert_eq!(store.all()[0].title, "Imported Event");
@@ -4979,6 +6890,31 @@ mod tests {
     }
 
     #[test]
+    fn the_new_event_button_gives_way_to_the_view_tabs() {
+        let wide = Layout::new(1280.0, 720.0, true);
+        let button = wide.new_event_button.expect("no New event button at 1280");
+        assert!(
+            button.right() < wide.view_tab(0).x,
+            "the button runs into the tabs"
+        );
+        if let Some(header) = wide.header {
+            assert!(
+                header.x >= button.right(),
+                "the caption is drawn over the button"
+            );
+        }
+        let narrow = Layout::new(320.0, 720.0, true);
+        assert!(
+            narrow.new_event_button.is_none(),
+            "the button crowds the tabs at 320"
+        );
+        // Where it is drawn, it is pressed.
+        let mut app = CalendarApp::new(1280.0, 720.0, Date::new(2026, 9, 26).unwrap());
+        probe::click(&mut app, Target::NewEvent);
+        assert!(app.form.is_some());
+    }
+
+    #[test]
     fn the_view_tabs_never_run_off_the_right_edge() {
         // They are the only way to change view, so they shrink rather than
         // leave the window. Everything else in the bar gives way to them.
@@ -5237,12 +7173,25 @@ mod tests {
     /// a file picker up that would take the next key.
     #[test]
     fn every_advertised_key_does_something() {
+        // The states between which every key has work: the calendar as it
+        // opens, with an event selected (Enter, Delete), and with the event
+        // form up (Tab). "Some reachable state answers it", not "it is taken
+        // now": Enter with nothing selected declines on purpose.
+        let states = || {
+            let plain = sample_app(june_2024());
+            let mut selected = sample_app(june_2024());
+            selected.selected_event_id = selected.store.all().first().map(|e| e.id);
+            let mut form = sample_app(june_2024());
+            form.open_new_event();
+            [plain, selected, form]
+        };
         for (label, what) in SHORTCUTS {
             for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let mut app = sample_app(june_2024());
-                assert_eq!(
-                    handle_event(&mut app, &Event::Key(stroke.clone())),
-                    EventResult::Consumed,
+                let answered = states().iter_mut().any(|app| {
+                    handle_event(app, &Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
                     "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
                     stroke.key
                 );
@@ -5586,5 +7535,950 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let mut app = CalendarApp::new(
+            DEFAULT_WIDTH,
+            DEFAULT_HEIGHT,
+            Date {
+                year: 2026,
+                month: 5,
+                day: 18,
+            },
+        );
+        // Every line the strip can hold at once: a store that is not kept, a
+        // file action, and the empty calendar's line. The file action was
+        // drawn across the top bar's buttons.
+        app.store_error = Some(String::from("Your calendar was not saved to /x: no room"));
+        app.last_file_action = Some(String::from("Could not read /y: gone"));
+        let lines: Vec<String> = app.notice_lines().into_iter().map(|(l, _)| l).collect();
+        assert_eq!(lines.len(), 3, "control: {lines:?}");
+        let commands: Vec<RenderCommand> =
+            app.frame(DEFAULT_WIDTH, DEFAULT_HEIGHT).commands().to_vec();
+        for line in &lines {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !lines.contains(text)
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Events added, changed and deleted in the window, and kept
+    // ------------------------------------------------------------------
+
+    /// Type `text`, one character at a time.
+    fn type_in(app: &mut CalendarApp, text: &str) {
+        probe::type_str(app, text);
+    }
+
+    /// Put `text` in the form's field `field`, over what it held.
+    fn fill_field(app: &mut CalendarApp, field: FormField, text: &str) {
+        app.form_field = field;
+        probe::key(app, &probe::ctrl(Key::A));
+        probe::key(app, &probe::press(Key::Backspace));
+        type_in(app, text);
+    }
+
+    /// Every string the frame draws, joined.
+    fn drawn(app: &CalendarApp) -> String {
+        render(app)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A day in the week of 2026-09-26, the day these tests were written.
+    fn a_saturday() -> Date {
+        Date::new(2026, 9, 26).unwrap()
+    }
+
+    /// An event of every kind the file has to hold: text that needs escaping
+    /// in every free field, a colour, a repeat on named days, a reminder.
+    fn awkward_event(title: &str) -> CalendarEvent {
+        CalendarEvent {
+            id: 0,
+            title: title.to_owned(),
+            description: String::from("two\nlines\tand a tab \\ and a backslash"),
+            category: EventCategory::Birthday,
+            start: DateTime::new(a_saturday(), Time::new(7, 5).unwrap()),
+            end: DateTime::new(a_saturday(), Time::new(23, 59).unwrap()),
+            all_day: false,
+            recurrence: RecurrenceRule::Weekly {
+                days: vec![1, 3, 5],
+            },
+            reminder: Reminder::MinutesBefore(45),
+            location: Some(String::from("Room\t4")),
+            color_override: Some(Color::rgba(1, 2, 3, 200)),
+        }
+    }
+
+    /// The fields of an event a save has to keep, id included.
+    fn describe(e: &CalendarEvent) -> String {
+        format!(
+            "{} {:?} {:?} {:?} {:?} {:?} {} {:?} {:?} {:?} {:?}",
+            e.id,
+            e.title,
+            e.description,
+            e.category,
+            e.start,
+            e.end,
+            e.all_day,
+            e.recurrence,
+            e.reminder,
+            e.location,
+            e.color_override
+        )
+    }
+
+    #[test]
+    fn the_kept_calendar_reads_back_what_it_wrote_whatever_the_text() {
+        let mut store = EventStore::new();
+        store.add(awkward_event(
+            "Tab\there, and a line\nbreak, and \\t written out",
+        ));
+        for (i, (category, rule)) in EventCategory::all()
+            .iter()
+            .zip([
+                RecurrenceRule::None,
+                RecurrenceRule::Daily,
+                RecurrenceRule::Weekly { days: Vec::new() },
+                RecurrenceRule::BiWeekly,
+                RecurrenceRule::Monthly,
+                RecurrenceRule::Yearly,
+                RecurrenceRule::Custom { interval_days: 3 },
+                RecurrenceRule::Custom { interval_days: 0 },
+                RecurrenceRule::Weekly { days: vec![0, 6] },
+                RecurrenceRule::None,
+            ])
+            .enumerate()
+        {
+            let mut e = awkward_event(&format!("Event {i}"));
+            e.category = *category;
+            e.recurrence = rule;
+            e.all_day = i % 2 == 0;
+            e.location = (i % 3 == 0).then(|| String::from("a place"));
+            e.color_override = None;
+            e.reminder = [
+                Reminder::None,
+                Reminder::AtTime,
+                Reminder::HoursBefore(2),
+                Reminder::DayBefore,
+            ][i % 4];
+            store.add(e);
+        }
+        let text = calendar_text(&store);
+        let back = parse_calendar(&text).expect("it reads back");
+        let want: Vec<String> = store.all().iter().map(describe).collect();
+        let got: Vec<String> = back.iter().map(describe).collect();
+        assert_eq!(got, want);
+        // And the same text again: one calendar, one spelling.
+        assert_eq!(calendar_text(&EventStore::from_events(back)), text);
+    }
+
+    #[test]
+    fn a_calendar_that_cannot_be_read_whole_is_refused_and_says_why() {
+        let mut store = EventStore::new();
+        store.add(awkward_event("One"));
+        store.add(awkward_event("Two"));
+        let good = calendar_text(&store);
+        let cases: [(&str, String, &str); 8] = [
+            (
+                "later",
+                good.replacen("slateos-calendar\t1", "slateos-calendar\t2", 1),
+                "later format (2)",
+            ),
+            (
+                "not ours",
+                String::from("BEGIN:VCALENDAR\n"),
+                "not a SlateOS calendar",
+            ),
+            (
+                "short",
+                good.replacen("\tRoom", "", 1),
+                "13 fields where an event has 14",
+            ),
+            (
+                "twins",
+                good.replacen("event\t2\t", "event\t1\t", 1),
+                "another event has its number (1)",
+            ),
+            (
+                "date",
+                good.replacen("2026-09-26", "2026-02-30", 1),
+                "line 2: its start date is not a date",
+            ),
+            (
+                "time",
+                good.replacen("07:05", "7:5", 1),
+                "its start time is not a time",
+            ),
+            (
+                "category",
+                good.replacen("\tbirthday\t", "\tparty\t", 1),
+                "its category (party)",
+            ),
+            (
+                "escape",
+                good.replacen("Room\\t4", "Room\\q4", 1),
+                "its place has a broken escape",
+            ),
+        ];
+        for (name, text, why) in cases {
+            assert_ne!(text, good, "control: case {name} changed nothing");
+            let said = parse_calendar(&text).map(|_| ()).unwrap_err();
+            assert!(said.contains(why), "{name}: {said}");
+        }
+        for (key, what) in [
+            ("weekly:1,3,5", "weekly:1,9"),
+            ("minutes:45", "minutes:x"),
+            ("#010203C8", "#0102"),
+        ] {
+            let text = good.replacen(key, what, 1);
+            assert_ne!(text, good, "control: {key} is in the file");
+            assert!(parse_calendar(&text).is_err(), "{what} was read");
+        }
+    }
+
+    #[test]
+    fn an_event_is_added_in_the_form_and_is_there_next_time() {
+        settingsfile::testing::with_scratch_config("calendar-kept", |_| {
+            let mut app = CalendarApp::from_settings(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+            assert!(app.store_error.is_none(), "{:?}", app.store_error);
+            // An event that changes nothing writes nothing.
+            probe::key(&mut app, &probe::press(Key::Right));
+            assert!(
+                !events_path().unwrap().exists(),
+                "a first run wrote a calendar nobody had touched"
+            );
+            app.select_date(a_saturday());
+            probe::key(&mut app, &probe::press(Key::N));
+            assert!(app.form.is_some(), "N did not open the form");
+            type_in(&mut app, "Dentist");
+            fill_field(&mut app, FormField::Starts, "14:30");
+            fill_field(&mut app, FormField::Ends, "15:15");
+            fill_field(&mut app, FormField::Place, "High St");
+            app.form_field = FormField::Category;
+            probe::key(&mut app, &probe::press(Key::Right));
+            probe::key(&mut app, &probe::press(Key::Enter));
+            assert!(app.form.is_none(), "{:?}", app.form_error);
+            assert_eq!(app.store.len(), 1, "no event was made");
+            let made = app.store.all()[0].clone();
+            assert_eq!(made.title, "Dentist");
+            assert_eq!(
+                made.start,
+                DateTime::new(a_saturday(), Time::new(14, 30).unwrap())
+            );
+            assert_eq!(made.end.time, Time::new(15, 15).unwrap());
+            assert_eq!(made.location.as_deref(), Some("High St"));
+            assert_eq!(
+                made.category,
+                EventCategory::Health,
+                "the category did not step"
+            );
+            assert_eq!(
+                app.selected_event_id,
+                Some(made.id),
+                "the new event is not selected"
+            );
+            assert!(
+                drawn(&app).contains("Dentist"),
+                "the new event is not drawn"
+            );
+
+            let again = CalendarApp::from_settings(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+            assert!(again.store_error.is_none(), "{:?}", again.store_error);
+            let kept: Vec<String> = again.store.all().iter().map(describe).collect();
+            assert_eq!(kept, vec![describe(&made)]);
+
+            // An event added after the restart takes no kept event's number.
+            let mut again = again;
+            let id = again.store.add(awkward_event("Next"));
+            assert_ne!(id, made.id);
+        });
+    }
+
+    #[test]
+    fn a_window_made_by_new_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("calendar-quiet", |dir| {
+            let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+            probe::key(&mut app, &probe::press(Key::N));
+            type_in(&mut app, "Scratch");
+            probe::key(&mut app, &probe::press(Key::Enter));
+            assert_eq!(app.store.len(), 1);
+            assert!(!dir.join("slateos").join("calendar").exists());
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn the_form_says_what_is_wrong_and_keeps_what_was_typed() {
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        probe::key(&mut app, &probe::press(Key::N));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(app.form_error.as_deref(), Some("Give it a title"));
+        assert!(app.form.is_some(), "the form went away with nothing kept");
+        type_in(&mut app, "Lunch");
+        assert!(
+            app.form_error.is_none(),
+            "typing did not clear the complaint"
+        );
+        for (field, text, said) in [
+            (FormField::Date, "2026-02-30", "The date is not one"),
+            (FormField::Starts, "25:00", "The start is not a time"),
+            (FormField::Ends, "noon", "The end is not a time"),
+        ] {
+            fill_field(&mut app, field, text);
+            probe::key(&mut app, &probe::press(Key::Enter));
+            assert!(
+                app.form_error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with(said)),
+                "{text}: {:?}",
+                app.form_error
+            );
+            assert!(drawn(&app).contains(said), "the complaint is not drawn");
+            fill_field(
+                &mut app,
+                field,
+                match field {
+                    FormField::Date => "2026-09-26",
+                    FormField::Starts => "12:00",
+                    _ => "13:00",
+                },
+            );
+        }
+        fill_field(&mut app, FormField::Ends, "11:00");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(app.form_error.as_deref(), Some("It ends before it starts"));
+        assert_eq!(app.store.len(), 0, "a wrong form was kept");
+        // Escape leaves, keeping nothing.
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(app.form.is_none());
+        assert_eq!(app.store.len(), 0);
+    }
+
+    #[test]
+    fn an_all_day_event_has_no_times_to_fill_in() {
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        probe::key(&mut app, &probe::press(Key::N));
+        type_in(&mut app, "Holiday");
+        fill_field(&mut app, FormField::Starts, "garbage");
+        app.form_field = FormField::AllDay;
+        probe::key(&mut app, &probe::press(Key::Space));
+        let fields = app.form.as_ref().unwrap().fields();
+        assert!(!fields.contains(&FormField::Starts) && !fields.contains(&FormField::Ends));
+        // Tab from the All day row goes past the hidden times.
+        probe::key(&mut app, &probe::press(Key::Tab));
+        assert_eq!(app.form_field, FormField::Category);
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(app.form.is_none(), "{:?}", app.form_error);
+        let made = &app.store.all()[0];
+        assert!(made.all_day);
+        assert_eq!(made.start.time, Time::new(0, 0).unwrap());
+        assert_eq!(made.end.time, Time::new(23, 59).unwrap());
+    }
+
+    #[test]
+    fn enter_changes_the_selected_event_and_keeps_its_number() {
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        let id = app.store.add(awkward_event("Old name"));
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Enter)),
+            EventResult::Ignored,
+            "Enter with nothing selected did something"
+        );
+        app.selected_event_id = Some(id);
+        probe::key(&mut app, &probe::press(Key::Enter));
+        let form = app.form.as_ref().expect("Enter did not open the event");
+        assert_eq!(form.id, Some(id));
+        fill_field(&mut app, FormField::Title, "New name");
+        fill_field(&mut app, FormField::Date, "2026-10-01");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(app.form.is_none(), "{:?}", app.form_error);
+        assert_eq!(app.store.len(), 1, "a change made a second event");
+        let e = app.store.get(id).expect("the event lost its number");
+        assert_eq!(e.title, "New name");
+        assert_eq!(e.start.date, Date::new(2026, 10, 1).unwrap());
+        // What the form does not show is kept as it was.
+        assert_eq!(e.reminder, Reminder::MinutesBefore(45));
+        assert_eq!(e.color_override, Some(Color::rgba(1, 2, 3, 200)));
+        assert_eq!(
+            e.recurrence,
+            RecurrenceRule::Weekly {
+                days: vec![1, 3, 5]
+            }
+        );
+        assert_eq!(
+            app.selected_date,
+            Date::new(2026, 10, 1).unwrap(),
+            "the view did not follow"
+        );
+    }
+
+    #[test]
+    fn repeats_step_through_the_list_and_keep_an_imported_one() {
+        let mut e = awkward_event("Pills");
+        e.recurrence = RecurrenceRule::Custom { interval_days: 3 };
+        let mut form = EventForm::editing(&e);
+        assert_eq!(form.choice_label(FormField::Repeats), "Every 3 days");
+        let mut seen = vec![form.choice_label(FormField::Repeats)];
+        for _ in 0..7 {
+            assert!(form.step(FormField::Repeats, true));
+            seen.push(form.choice_label(FormField::Repeats));
+        }
+        assert_eq!(
+            seen,
+            [
+                "Every 3 days",
+                "Does not repeat",
+                "Daily",
+                "Weekly, on the day it starts",
+                "Every 2 weeks",
+                "Monthly",
+                "Yearly",
+                "Every 3 days",
+            ]
+        );
+        form.step(FormField::Repeats, false);
+        assert_eq!(form.choice_label(FormField::Repeats), "Yearly");
+        // A new event's list has no seventh entry.
+        let mut fresh = EventForm::new_on(a_saturday());
+        fresh.step(FormField::Repeats, false);
+        assert_eq!(fresh.choice_label(FormField::Repeats), "Yearly");
+    }
+
+    #[test]
+    fn delete_asks_first_and_each_answer_does_what_it_says() {
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        let id = app.store.add(awkward_event("Doomed"));
+        app.selected_event_id = Some(id);
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(app.pending_delete, Some(id));
+        assert!(
+            drawn(&app).contains("Delete \u{201C}Doomed\u{201D}?"),
+            "the question is not drawn"
+        );
+        // A key under the question reaches nothing.
+        probe::key(&mut app, &probe::press(Key::Num2));
+        assert_eq!(app.view, CalendarView::Month, "a key reached the calendar");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert_eq!(app.pending_delete, None);
+        assert_eq!(app.store.len(), 1, "Escape deleted it");
+        // Keep it, by the button.
+        probe::key(&mut app, &probe::press(Key::Delete));
+        probe::click(&mut app, Target::KeepEvent);
+        assert_eq!(app.store.len(), 1);
+        // Delete, by the button.
+        probe::key(&mut app, &probe::press(Key::Delete));
+        probe::click(&mut app, Target::ConfirmDelete);
+        assert!(app.store.is_empty(), "Delete did not delete");
+        assert_eq!(app.selected_event_id, None);
+        // From the form, too.
+        let id = app.store.add(awkward_event("Also doomed"));
+        app.open_edit_event(id);
+        probe::click(&mut app, Target::DeleteEvent);
+        assert_eq!(app.pending_delete, Some(id));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(app.store.is_empty());
+    }
+
+    #[test]
+    fn the_form_takes_every_key_and_press_while_it_is_up() {
+        let mut app = sample_app(june_2024());
+        probe::click(&mut app, Target::NewEvent);
+        assert!(app.form.is_some(), "the New event button did nothing");
+        // "2" is the week view's key; in the form it is a character.
+        type_in(&mut app, "2");
+        assert_eq!(app.view, CalendarView::Month, "a key reached the calendar");
+        assert_eq!(app.form.as_ref().unwrap().title.text(), "2");
+        // A press beside the card changes nothing behind it.
+        let selected = app.selected_date;
+        let result = app.click_at(
+            5.0,
+            DEFAULT_HEIGHT - 5.0,
+            MouseButton::Left,
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+        );
+        assert_eq!(result, EventResult::Consumed);
+        assert!(app.form.is_some(), "a press beside the form closed it");
+        assert_eq!(app.selected_date, selected);
+        // Its own controls answer.
+        probe::click(&mut app, Target::StepForward(FormField::Category));
+        assert_eq!(app.form.as_ref().unwrap().category, EventCategory::Health);
+        probe::click(&mut app, Target::Field(FormField::Place));
+        assert_eq!(app.form_field, FormField::Place);
+        probe::click(&mut app, Target::Cancel);
+        assert!(app.form.is_none());
+    }
+
+    #[test]
+    fn a_second_press_on_an_event_opens_it() {
+        let mut app = sample_app(june_2024());
+        let id = app
+            .store
+            .events_on(june_2024())
+            .first()
+            .map(|e| e.id)
+            .expect("control: an event on the day");
+        probe::click(&mut app, Target::Event(id));
+        assert_eq!(app.selected_event_id, Some(id));
+        assert!(app.form.is_none(), "the first press opened it");
+        probe::click(&mut app, Target::Event(id));
+        assert_eq!(app.form.as_ref().and_then(|f| f.id), Some(id));
+    }
+
+    #[test]
+    fn a_calendar_file_that_cannot_be_read_is_left_as_it_is() {
+        settingsfile::testing::with_scratch_config("calendar-broken", |_| {
+            let path = events_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let broken = "slateos-calendar\t1\nevent\t1\tnot a date\n";
+            std::fs::write(&path, broken).unwrap();
+            let mut app = CalendarApp::from_settings(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+            let error = app
+                .store_error
+                .clone()
+                .expect("an unreadable file was taken without a word");
+            assert!(error.contains("line 2"), "{error}");
+            assert!(drawn(&app).contains(&error), "the refusal is not on screen");
+            probe::key(&mut app, &probe::press(Key::N));
+            type_in(&mut app, "New");
+            probe::key(&mut app, &probe::press(Key::Enter));
+            assert_eq!(app.store.len(), 1);
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "the unreadable file was saved over"
+            );
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn a_calendar_file_too_big_to_read_whole_is_refused() {
+        settingsfile::testing::with_scratch_config("calendar-big", |_| {
+            let mut store = EventStore::new();
+            store.add(awkward_event("One"));
+            let text = calendar_text(&store);
+            let path = events_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &text).unwrap();
+            let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+            app.persist = true;
+            app.load_events_within(&path, text.len() - 1);
+            assert!(app.store_error.clone().unwrap().contains("larger than"));
+            assert!(!app.persist, "a file read in part would be saved over");
+            let mut whole = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+            whole.persist = true;
+            whole.load_events_within(&path, text.len());
+            assert!(whole.store_error.is_none(), "{:?}", whole.store_error);
+            assert_eq!(whole.store.len(), 1, "control: the whole file reads");
+        });
+    }
+
+    #[test]
+    fn closing_while_a_save_fails_asks_first() {
+        settingsfile::testing::with_scratch_config("calendar-failing", |_| {
+            let mut app = CalendarApp::from_settings(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+            let path = events_path().unwrap();
+            // A directory where the file goes: every write fails.
+            std::fs::create_dir_all(&path).unwrap();
+            probe::key(&mut app, &probe::press(Key::N));
+            type_in(&mut app, "Unkept");
+            probe::key(&mut app, &probe::press(Key::Enter));
+            let error = app.store_error.clone().expect("a failed save said nothing");
+            assert!(
+                error.starts_with("Your calendar was not saved to "),
+                "{error}"
+            );
+            assert!(drawn(&app).contains(&error), "the failure is not on screen");
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            let question: String = app
+                .render(DEFAULT_WIDTH, DEFAULT_HEIGHT)
+                .commands
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                // The question's own words: the strip under the bar says
+                // "was not saved" too, and would pass for it.
+                question.contains("Your latest changes to your calendar are not saved."),
+                "the question is not drawn: {question}"
+            );
+            // A key under the question reaches nothing.
+            probe::key(&mut app, &probe::press(Key::N));
+            assert!(app.form.is_none(), "a key reached the calendar");
+            // Save while it still fails: the window stays.
+            assert!(matches!(
+                app.on_event(&Event::Key(probe::press(Key::S))),
+                Response::Redraw
+            ));
+            assert!(app.running);
+            // Put right, then Save: it goes, and the event is there next time.
+            assert!(matches!(
+                app.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            std::fs::remove_dir(&path).unwrap();
+            assert!(matches!(
+                app.on_event(&Event::Key(probe::press(Key::S))),
+                Response::Exit
+            ));
+            let again = CalendarApp::from_settings(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+            assert_eq!(again.store.len(), 1);
+            // Don't save lets a failing window go.
+            let mut failing = again;
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir_all(&path).unwrap();
+            failing.store.add(awkward_event("Lost"));
+            failing.keep();
+            assert!(matches!(
+                failing.on_event(&Event::CloseRequested),
+                Response::KeepOpen
+            ));
+            assert!(matches!(
+                failing.on_event(&Event::Key(probe::press(Key::D))),
+                Response::Exit
+            ));
+        });
+    }
+
+    #[test]
+    fn a_search_finds_accents_in_any_case_and_places() {
+        let mut store = EventStore::new();
+        store.add(awkward_event("\u{c9}t\u{e9} party"));
+        let mut there = awkward_event("Meeting");
+        there.location = Some(String::from("Gare du Nord"));
+        store.add(there);
+        assert_eq!(
+            store.search("\u{e9}t\u{e9}").len(),
+            1,
+            "case folded only ASCII"
+        );
+        assert_eq!(store.search("gare").len(), 1, "the place is not searched");
+    }
+
+    #[test]
+    fn the_store_counts_its_changes_and_nothing_else() {
+        let mut store = EventStore::new();
+        let r0 = store.revision();
+        let id = store.add(awkward_event("A"));
+        let r1 = store.revision();
+        assert_ne!(r1, r0, "an add was not counted");
+        let _ = store.get(id);
+        let _ = store.search("A");
+        assert_eq!(store.revision(), r1, "reading counted as a change");
+        assert!(!store.remove(id + 99));
+        assert_eq!(store.revision(), r1, "removing nothing counted as a change");
+        assert!(store.get_mut(id + 99).is_none());
+        assert_eq!(store.revision(), r1);
+        store.get_mut(id).unwrap().title = String::from("B");
+        let r2 = store.revision();
+        assert_ne!(r2, r1, "a change through get_mut was not counted");
+        assert!(store.remove(id));
+        assert_ne!(store.revision(), r2, "a remove was not counted");
+        let r3 = store.revision();
+        assert_eq!(store.import_events(parse_ics("nothing here")), 0);
+        assert_eq!(store.revision(), r3, "an import of nothing counted");
+        let ics = generate_ics(&[awkward_event("Imported")], "Elsewhere");
+        assert_eq!(
+            store.import_events(parse_ics(&ics)),
+            1,
+            "control: the import reads"
+        );
+        assert_ne!(store.revision(), r3, "an import was not counted");
+    }
+
+    // ------------------------------------------------------------------
+    // .ics as other calendars write it
+    // ------------------------------------------------------------------
+
+    /// What a phone's or a web calendar's export looks like: a time zone
+    /// block, zoned and UTC times, an all-day event as dates, a DURATION, a
+    /// start with no end, folded lines, a repeat with an end, an alarm with
+    /// its own DESCRIPTION, several categories -- and one event with no start.
+    const FOREIGN_ICS: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//Somebody//Else//EN\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:Europe/Paris\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:19701025T030000\r\n\
+TZOFFSETFROM:+0200\r\n\
+TZOFFSETTO:+0100\r\n\
+END:STANDARD\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\n\
+UID:a@elsewhere\r\n\
+DTSTART;TZID=Europe/Paris:20260928T090000\r\n\
+DTEND;TZID=Europe/Paris:20260928T103000\r\n\
+SUMMARY:Standup with a very long name that goes on and on past the seventy-f\r\n\
+\x20ive octets a line may hold\r\n\
+CATEGORIES:Team,Meeting\r\n\
+RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=10\r\n\
+DESCRIPTION:The real notes\\, with a comma\r\n\
+BEGIN:VALARM\r\n\
+ACTION:DISPLAY\r\n\
+DESCRIPTION:Alarm text that is not the notes\r\n\
+TRIGGER:-PT15M\r\n\
+END:VALARM\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:b@elsewhere\r\n\
+DTSTART;VALUE=DATE:20261224\r\n\
+DTEND;VALUE=DATE:20261227\r\n\
+SUMMARY:Holidays\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:c@elsewhere\r\n\
+DTSTART:20261001T130000Z\r\n\
+DURATION:PT1H30M\r\n\
+SUMMARY:Call\r\n\
+RRULE:FREQ=DAILY;INTERVAL=3\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:d@elsewhere\r\n\
+DTSTART:20261002T080000\r\n\
+SUMMARY:A moment\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:e@elsewhere\r\n\
+SUMMARY:No start at all\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+    #[test]
+    fn an_ics_from_another_calendar_is_read_as_it_was_written() {
+        let report = parse_ics_report(FOREIGN_ICS);
+        assert_eq!(report.events.len(), 4, "{:?}", report.events);
+        assert_eq!(
+            report.unreadable, 1,
+            "the event with no start was not counted"
+        );
+        assert_eq!(report.zoned, 2, "a Paris time and a UTC time");
+        assert_eq!(report.simplified, 1, "the repeat with an end");
+
+        let standup = &report.events[0];
+        assert_eq!(
+            standup.title,
+            "Standup with a very long name that goes on and on past the seventy-five octets a line may hold",
+            "a folded line was not joined"
+        );
+        assert_eq!(
+            standup.description, "The real notes, with a comma",
+            "the alarm's text took the notes' place"
+        );
+        assert_eq!(
+            standup.category,
+            EventCategory::Meeting,
+            "the second category was not tried"
+        );
+        assert_eq!(
+            standup.recurrence,
+            RecurrenceRule::Weekly {
+                days: vec![1, 3, 5]
+            }
+        );
+        assert_eq!(standup.reminder, Reminder::MinutesBefore(15));
+        assert_eq!(standup.start.time, Time::new(9, 0).unwrap());
+        assert_eq!(standup.end.time, Time::new(10, 30).unwrap());
+
+        let holidays = &report.events[1];
+        assert!(holidays.all_day, "a DATE start is an all-day event");
+        assert_eq!(holidays.start.date, Date::new(2026, 12, 24).unwrap());
+        assert_eq!(
+            holidays.end.date,
+            Date::new(2026, 12, 26).unwrap(),
+            "DTEND is the day after the last"
+        );
+        for day in 24..=26 {
+            assert!(
+                holidays.occurs_on(Date::new(2026, 12, day).unwrap()),
+                "not on the {day}th"
+            );
+        }
+        assert!(!holidays.occurs_on(Date::new(2026, 12, 27).unwrap()));
+
+        let call = &report.events[2];
+        assert_eq!(
+            call.end,
+            DateTime::new(Date::new(2026, 10, 1).unwrap(), Time::new(14, 30).unwrap()),
+            "the DURATION was not the end"
+        );
+        assert_eq!(call.recurrence, RecurrenceRule::Custom { interval_days: 3 });
+
+        let moment = &report.events[3];
+        assert_eq!(moment.end, moment.start, "a start with no end is a moment");
+    }
+
+    #[test]
+    fn the_import_says_what_it_could_not_keep() {
+        let dir = std::env::temp_dir().join(format!("slateos-calendar-ics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("elsewhere.ics");
+        std::fs::write(&path, FOREIGN_ICS).unwrap();
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        let said = app.read_ics(&path);
+        assert!(said.starts_with("Added 4 event(s)"), "{said}");
+        assert!(said.contains("1 had no start that could be read"), "{said}");
+        assert!(said.contains("2 had times for another time zone"), "{said}");
+        assert!(
+            said.contains("1 repeat in a way this calendar cannot keep exactly"),
+            "{said}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_exported_calendar_reads_back_as_itself() {
+        let mut all_day = awkward_event("Three days off");
+        all_day.all_day = true;
+        all_day.start = DateTime::new(Date::new(2026, 12, 24).unwrap(), Time::new(0, 0).unwrap());
+        all_day.end = DateTime::new(Date::new(2026, 12, 26).unwrap(), Time::new(23, 59).unwrap());
+        all_day.reminder = Reminder::DayBefore;
+        let mut hours = awkward_event(
+            "A title long enough that its SUMMARY line must be folded somewhere in the middle, twice",
+        );
+        hours.reminder = Reminder::HoursBefore(2);
+        hours.recurrence = RecurrenceRule::BiWeekly;
+        let mut every = awkward_event("Every four days");
+        every.reminder = Reminder::AtTime;
+        every.recurrence = RecurrenceRule::Custom { interval_days: 4 };
+        let mut plain = awkward_event("Plain");
+        plain.reminder = Reminder::None;
+        plain.recurrence = RecurrenceRule::Monthly;
+        let events = [
+            awkward_event("Weekly on three days"),
+            all_day,
+            hours,
+            every,
+            plain,
+        ];
+
+        let ics = generate_ics(&events, "Mine");
+        for line in ics.split("\r\n") {
+            assert!(
+                line.len() <= 75,
+                "a line of {} octets: {line:?}",
+                line.len()
+            );
+        }
+        let back = parse_ics_report(&ics);
+        assert_eq!(back.zoned, 0);
+        assert_eq!(back.simplified, 0);
+        assert_eq!(back.unreadable, 0);
+        // The id and the colour are this calendar's own; the rest goes out
+        // and comes back.
+        let strip = |e: &CalendarEvent| {
+            let mut e = e.clone();
+            e.id = 0;
+            e.color_override = None;
+            describe(&e)
+        };
+        let want: Vec<String> = events.iter().map(strip).collect();
+        let got: Vec<String> = back.events.iter().map(strip).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn durations_and_repeats_are_read_as_the_standard_writes_them() {
+        assert_eq!(parse_ics_duration("PT1H30M"), Some(90));
+        assert_eq!(parse_ics_duration("P1D"), Some(1440));
+        assert_eq!(parse_ics_duration("-P2W"), Some(-20160));
+        assert_eq!(parse_ics_duration("PT45S"), Some(0));
+        assert_eq!(parse_ics_duration("P1DT2H"), Some(1560));
+        assert_eq!(parse_ics_duration("1H"), None);
+        assert_eq!(parse_ics_duration("PT1X"), None);
+        assert_eq!(parse_ics_duration("P1H"), None, "an hour needs its T");
+        assert_eq!(parse_rrule("FREQ=DAILY"), (RecurrenceRule::Daily, false));
+        assert_eq!(
+            parse_rrule("FREQ=WEEKLY;INTERVAL=2"),
+            (RecurrenceRule::BiWeekly, false)
+        );
+        assert_eq!(
+            parse_rrule("FREQ=WEEKLY;INTERVAL=3"),
+            (RecurrenceRule::Custom { interval_days: 21 }, false)
+        );
+        assert_eq!(
+            parse_rrule("FREQ=MONTHLY;BYDAY=2TU"),
+            (RecurrenceRule::Monthly, true)
+        );
+        assert_eq!(
+            parse_rrule("FREQ=YEARLY;UNTIL=20300101"),
+            (RecurrenceRule::Yearly, true)
+        );
+        assert_eq!(parse_rrule("FREQ=HOURLY"), (RecurrenceRule::None, true));
+        assert_eq!(
+            reminder_from_trigger("-PT30M"),
+            Some(Reminder::MinutesBefore(30))
+        );
+        assert_eq!(
+            reminder_from_trigger("-PT2H"),
+            Some(Reminder::HoursBefore(2))
+        );
+        assert_eq!(reminder_from_trigger("-P1D"), Some(Reminder::DayBefore));
+        assert_eq!(reminder_from_trigger("PT0S"), Some(Reminder::AtTime));
+    }
+
+    #[test]
+    fn a_quoted_parameter_may_hold_a_colon() {
+        let (name, params, value) =
+            split_ics_line("DTSTART;TZID=\"America/New_York\";X-NOTE=\"a:b;c\":20260101T090000")
+                .unwrap();
+        assert_eq!(name, "DTSTART");
+        assert_eq!(ics_param(&params, "TZID"), Some("America/New_York"));
+        assert_eq!(ics_param(&params, "X-NOTE"), Some("a:b;c"));
+        assert_eq!(value, "20260101T090000");
     }
 }

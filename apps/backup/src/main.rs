@@ -13,6 +13,7 @@
 //!   backup diff <BACKUP_ID1> <BACKUP_ID2>
 //!   backup info <BACKUP_ID>
 
+use pathtext::ShowPath;
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
@@ -97,6 +98,9 @@ fn sha256_file(path: &Path) -> io::Result<String> {
 /// this tree's shipped defaults, fixtures or YAML use a bracket, and the
 /// operator confirmed the same of their own rules -- so nothing that exists
 /// changes meaning.
+/// Text against text; the tests' way in. The program matches paths' own
+/// bytes (`is_excluded`), with `glob_match_recursive` itself.
+#[cfg(test)]
 fn glob_matches(pattern: &str, path: &str) -> bool {
     glob_match_recursive(pattern.as_bytes(), path.as_bytes())
 }
@@ -416,26 +420,17 @@ fn glob_match_simple(pattern: &[u8], text: &[u8]) -> bool {
 
 /// Check if a path should be excluded based on exclude patterns.
 fn is_excluded(path: &Path, patterns: &[String]) -> bool {
-    // Exclusion patterns are UTF-8 text the user typed, so matching against a
-    // lossy rendering is the only thing that can be meant. This is a selection
-    // heuristic, not an identity check: the ASCII structure a glob keys on
-    // (separators, extensions) survives the conversion exactly, and the
-    // undecodable bytes a pattern could never have named become U+FFFD, which
-    // no pattern contains.
-    let path = path.to_string_lossy();
-    let path = path.as_ref();
-    for pattern in patterns {
-        if glob_matches(pattern, path) {
-            return true;
-        }
-        // Also check just the filename component
-        if let Some(name) = path.rsplit('/').next()
-            && glob_matches(pattern, name)
-        {
-            return true;
-        }
-    }
-    false
+    // Matched against the path's own bytes, which is what the matcher works
+    // on: a byte that is not text is one no pattern names, and nothing is
+    // decoded -- the lossy rendering this matched before turned such bytes
+    // into U+FFFD, which a pattern holding that character would then match.
+    let path = path.as_os_str().as_encoded_bytes();
+    // The file's own name as well as the whole path.
+    let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+    patterns.iter().any(|pattern| {
+        glob_match_recursive(pattern.as_bytes(), path)
+            || glob_match_recursive(pattern.as_bytes(), name)
+    })
 }
 
 // ============================================================================
@@ -478,13 +473,6 @@ impl JsonValue {
     fn as_array(&self) -> Option<&Vec<JsonValue>> {
         match self {
             JsonValue::Array(a) => Some(a),
-            _ => None,
-        }
-    }
-
-    fn as_object(&self) -> Option<&Vec<(String, JsonValue)>> {
-        match self {
-            JsonValue::Object(o) => Some(o),
             _ => None,
         }
     }
@@ -1081,6 +1069,17 @@ impl Manifest {
     }
 }
 
+/// Backup metadata (`meta.json`) format version written into every new record.
+///
+/// Version 1 stored `source` as a plain JSON string, which it had reached
+/// through `to_string_lossy` -- so the record of *which directory was backed
+/// up* named a different directory whenever that path was not text, and
+/// `list --source` could not find it by the name it really had. Version 2
+/// stores it percent-encoded, as [`MANIFEST_VERSION`] 2 does for every file's
+/// path (design-decisions 426). A record with no version is version 1 and is
+/// read verbatim, so every existing backup still lists.
+const META_VERSION: u64 = 2;
+
 /// Metadata about a backup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BackupMeta {
@@ -1091,7 +1090,10 @@ struct BackupMeta {
     /// Unix timestamp when backup was created.
     timestamp: u64,
     /// Source path that was backed up.
-    source: String,
+    ///
+    /// A `PathBuf`, for the reason [`FileEntry::path`] is one: this is the
+    /// record of a directory, and a directory's name need not be text.
+    source: PathBuf,
     /// Parent backup ID (for incremental/differential).
     parent_id: Option<String>,
     /// Number of files in backup.
@@ -1125,6 +1127,10 @@ impl BackupMeta {
             dedup_blobs,
         } = self;
         let mut entries = vec![
+            (
+                "version".to_string(),
+                JsonValue::Number(META_VERSION as f64),
+            ),
             ("id".to_string(), JsonValue::Str(id.clone())),
             (
                 "backup_type".to_string(),
@@ -1134,7 +1140,7 @@ impl BackupMeta {
                 "timestamp".to_string(),
                 JsonValue::Number(*timestamp as f64),
             ),
-            ("source".to_string(), JsonValue::Str(source.clone())),
+            ("source".to_string(), JsonValue::Str(encode_path(source))),
             (
                 "file_count".to_string(),
                 JsonValue::Number(*file_count as f64),
@@ -1168,7 +1174,16 @@ impl BackupMeta {
         let backup_type_str = val.get("backup_type")?.as_str()?;
         let backup_type = BackupType::from_str(backup_type_str)?;
         let timestamp = val.get("timestamp")?.as_u64()?;
-        let source = val.get("source")?.as_str()?.to_string();
+        // See `META_VERSION`: absent is version 1, whose source was written
+        // verbatim; a percent-decode of it would misread a real `%41` in a
+        // directory's name as `A`.
+        let encoded = val.get("version").and_then(|v| v.as_u64()).unwrap_or(1) >= 2;
+        let raw_source = val.get("source")?.as_str()?;
+        let source = if encoded {
+            decode_path(raw_source)
+        } else {
+            PathBuf::from(raw_source)
+        };
         let parent_id = val
             .get("parent_id")
             .and_then(|v| v.as_str())
@@ -1482,10 +1497,17 @@ impl ContentStore {
             if !prefix_entry.file_type()?.is_dir() {
                 continue;
             }
-            let prefix = prefix_entry.file_name().to_string_lossy().to_string();
+            // A blob's name is its hash, in hex: a name that is not text is
+            // not one of the store's, and a lossy decode of it would have been
+            // listed as a hash that names nothing.
+            let Ok(prefix) = prefix_entry.file_name().into_string() else {
+                continue;
+            };
             for blob_entry in fs::read_dir(prefix_entry.path())? {
                 let blob_entry = blob_entry?;
-                let rest = blob_entry.file_name().to_string_lossy().to_string();
+                let Ok(rest) = blob_entry.file_name().into_string() else {
+                    continue;
+                };
                 blobs.push(format!("{}{}", prefix, rest));
             }
         }
@@ -1527,7 +1549,7 @@ fn scan_dir_recursive(
     let read_dir = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) => {
-            eprintln!("warning: cannot read directory {}: {}", dir.display(), e);
+            eprintln!("warning: cannot read directory {}: {}", dir.shown(), e);
             return Ok(());
         }
     };
@@ -1553,7 +1575,7 @@ fn scan_dir_recursive(
             match fs::metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("warning: cannot stat {}: {}", path.display(), e);
+                    eprintln!("warning: cannot stat {}: {}", path.shown(), e);
                     continue;
                 }
             }
@@ -1561,7 +1583,7 @@ fn scan_dir_recursive(
             match fs::symlink_metadata(&path) {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("warning: cannot stat {}: {}", path.display(), e);
+                    eprintln!("warning: cannot stat {}: {}", path.shown(), e);
                     continue;
                 }
             }
@@ -1580,7 +1602,7 @@ fn scan_dir_recursive(
             let hash = match sha256_file(&path) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("warning: cannot hash {}: {}", path.display(), e);
+                    eprintln!("warning: cannot hash {}: {}", path.shown(), e);
                     continue;
                 }
             };
@@ -1591,7 +1613,7 @@ fn scan_dir_recursive(
             // to zero mid-backup reads as "nothing has been copied yet".
             progress.processed_files = progress.processed_files.saturating_add(1);
             progress.processed_bytes = progress.processed_bytes.saturating_add(meta.len());
-            progress.current_file = rel.display().to_string();
+            progress.current_file = rel.shown().to_string();
 
             // Report progress every 100 files
             if progress.processed_files.is_multiple_of(100) {
@@ -1797,7 +1819,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     let source = opts.source.canonicalize().map_err(|e| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            format!("source path {}: {}", opts.source.display(), e),
+            format!("source path {}: {}", opts.source.shown(), e),
         )
     })?;
 
@@ -1841,8 +1863,8 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     println!(
         "Creating {} backup of {} -> {}",
         effective_type,
-        source.display(),
-        opts.dest.display()
+        source.shown(),
+        opts.dest.shown()
     );
 
     // Estimate for progress
@@ -1893,7 +1915,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
             Ok(true) => new_blobs = new_blobs.saturating_add(1),
             Ok(false) => dedup_blobs = dedup_blobs.saturating_add(1),
             Err(e) => {
-                eprintln!("warning: failed to store {}: {}", entry.path.display(), e);
+                eprintln!("warning: failed to store {}: {}", entry.path.shown(), e);
                 continue;
             }
         }
@@ -1934,7 +1956,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
         id: backup_id.clone(),
         backup_type: effective_type,
         timestamp,
-        source: source.to_string_lossy().to_string(),
+        source: source.clone(),
         parent_id,
         file_count: manifest.files.len() as u64,
         total_size,
@@ -1987,7 +2009,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
     println!(
         "Restoring backup {} to {}",
         opts.backup_id,
-        opts.restore_dest.display()
+        opts.restore_dest.shown()
     );
     println!("  Type: {}", meta.backup_type);
     println!("  Files in manifest: {}", manifest.files.len());
@@ -2003,10 +2025,11 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
     let files_to_restore: Vec<&FileEntry> = if let Some(ref pattern) = opts.file_pattern {
         full_files
             .iter()
-            // The pattern is UTF-8 text the user typed, so matching a lossy
-            // rendering of the stored path is a selection heuristic, not an
-            // identity check. The path itself is still restored byte-exactly.
-            .filter(|f| glob_matches(pattern, &f.path.to_string_lossy()))
+            // Against the stored path's own bytes, as the matcher works;
+            // the path itself is restored byte-exactly either way.
+            .filter(|f| {
+                glob_match_recursive(pattern.as_bytes(), f.path.as_os_str().as_encoded_bytes())
+            })
             .collect()
     } else {
         full_files.iter().collect()
@@ -2023,8 +2046,8 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
         let Some(dest_path) = restore_path_within(&opts.restore_dest, &entry.path) else {
             eprintln!(
                 "error: refusing to restore {}: it names a location outside {}",
-                entry.path.display(),
-                opts.restore_dest.display()
+                entry.path.shown(),
+                opts.restore_dest.shown()
             );
             errors = errors.saturating_add(1);
             continue;
@@ -2035,7 +2058,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
         {
             // Counted rather than propagated: one directory the user cannot
             // write must not strand the other several thousand files.
-            eprintln!("error: cannot create {}: {}", parent.display(), e);
+            eprintln!("error: cannot create {}: {}", parent.shown(), e);
             errors = errors.saturating_add(1);
             continue;
         }
@@ -2044,7 +2067,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
             let Some(ref target) = entry.link_target else {
                 eprintln!(
                     "error: {} is recorded as a symlink but the manifest gives no target",
-                    entry.path.display()
+                    entry.path.shown()
                 );
                 errors = errors.saturating_add(1);
                 continue;
@@ -2065,7 +2088,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                 Err(e) => {
                     eprintln!(
                         "error: cannot restore symlink {}: {}",
-                        entry.path.display(),
+                        entry.path.shown(),
                         e
                     );
                     errors = errors.saturating_add(1);
@@ -2082,7 +2105,7 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                 if actual_hash != entry.hash {
                     eprintln!(
                         "error: hash mismatch for {}: expected {}, got {}",
-                        entry.path.display(),
+                        entry.path.shown(),
                         entry.hash,
                         actual_hash
                     );
@@ -2095,18 +2118,14 @@ fn cmd_restore(opts: RestoreOptions) -> io::Result<()> {
                 // the replacement — the one outcome a restore must never
                 // produce.
                 if let Err(e) = safeio::write_atomically(&dest_path, &data) {
-                    eprintln!("error: cannot write {}: {}", dest_path.display(), e);
+                    eprintln!("error: cannot write {}: {}", dest_path.shown(), e);
                     errors = errors.saturating_add(1);
                 } else {
                     restored = restored.saturating_add(1);
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "error: cannot read blob for {}: {}",
-                    entry.path.display(),
-                    e
-                );
+                eprintln!("error: cannot read blob for {}: {}", entry.path.shown(), e);
                 errors = errors.saturating_add(1);
             }
         }
@@ -2205,6 +2224,20 @@ fn reconstruct_full_manifest(
 // Command: list
 // ============================================================================
 
+/// Whether `path` contains `needle` as a run of bytes.
+///
+/// `list --source` is a substring filter the user types. It is asked of the
+/// path's own bytes, not of a decoded copy: a directory whose name is not text
+/// still matches on the parts of it that are, and no decode can make a filter
+/// match a byte the path does not have. On a Windows host the bytes are the
+/// platform's own encoding of the name, in which text is spelled as UTF-8, so
+/// the same holds there.
+fn path_contains(path: &Path, needle: &str) -> bool {
+    let hay = path.as_os_str().as_encoded_bytes();
+    let needle = needle.as_bytes();
+    needle.is_empty() || hay.windows(needle.len()).any(|w| w == needle)
+}
+
 fn cmd_list(dest: &Path, source_filter: Option<&str>) -> io::Result<()> {
     let metas = list_backups(dest)?;
 
@@ -2214,7 +2247,10 @@ fn cmd_list(dest: &Path, source_filter: Option<&str>) -> io::Result<()> {
     }
 
     let filtered: Vec<&BackupMeta> = if let Some(source) = source_filter {
-        metas.iter().filter(|m| m.source.contains(source)).collect()
+        metas
+            .iter()
+            .filter(|m| path_contains(&m.source, source))
+            .collect()
     } else {
         metas.iter().collect()
     };
@@ -2266,7 +2302,7 @@ fn cmd_verify(dest: &Path, backup_id: &str) -> io::Result<()> {
         }
 
         if !store.has_blob(&entry.hash) {
-            eprintln!("  MISSING: {} (hash: {})", entry.path.display(), entry.hash);
+            eprintln!("  MISSING: {} (hash: {})", entry.path.shown(), entry.hash);
             missing = missing.saturating_add(1);
             continue;
         }
@@ -2274,11 +2310,11 @@ fn cmd_verify(dest: &Path, backup_id: &str) -> io::Result<()> {
         match store.verify_blob(&entry.hash) {
             Ok(true) => ok = ok.saturating_add(1),
             Ok(false) => {
-                eprintln!("  CORRUPT: {} (hash: {})", entry.path.display(), entry.hash);
+                eprintln!("  CORRUPT: {} (hash: {})", entry.path.shown(), entry.hash);
                 corrupt = corrupt.saturating_add(1);
             }
             Err(e) => {
-                eprintln!("  ERROR: {} — {}", entry.path.display(), e);
+                eprintln!("  ERROR: {} — {}", entry.path.shown(), e);
                 corrupt = corrupt.saturating_add(1);
             }
         }
@@ -2353,7 +2389,7 @@ fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
         for (child, parent) in &retention.broken_chains {
             eprintln!(
                 "  ! {child} refers to parent {parent}, which is not in {}",
-                opts.dest.display()
+                opts.dest.shown()
             );
         }
     }
@@ -2637,7 +2673,7 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
     println!(
         "Schedule saved: {} -> {} ({})",
         source,
-        dest.display(),
+        dest.shown(),
         interval
     );
     // Said plainly, because the command otherwise reads as a promise. Nothing
@@ -2683,7 +2719,7 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
     if !diff.added.is_empty() {
         println!("Added ({}):", diff.added.len());
         for f in &diff.added {
-            println!("  + {} ({})", f.path.display(), format_size(f.size));
+            println!("  + {} ({})", f.path.shown(), format_size(f.size));
         }
         println!();
     }
@@ -2702,7 +2738,7 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
             } else {
                 ("-", old.size.abs_diff(new.size))
             };
-            println!("  ~ {} ({}{} bytes)", new.path.display(), sign, size_change);
+            println!("  ~ {} ({}{} bytes)", new.path.shown(), sign, size_change);
         }
         println!();
     }
@@ -2710,7 +2746,7 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
     if !diff.deleted.is_empty() {
         println!("Deleted ({}):", diff.deleted.len());
         for f in &diff.deleted {
-            println!("  - {} ({})", f.path.display(), format_size(f.size));
+            println!("  - {} ({})", f.path.shown(), format_size(f.size));
         }
         println!();
     }
@@ -2753,7 +2789,7 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
     println!("Backup: {}", meta.id);
     println!("  Type:       {}", meta.backup_type);
     println!("  Created:    {}", format_timestamp(meta.timestamp));
-    println!("  Source:     {}", meta.source);
+    println!("  Source:     {}", meta.source.shown());
     println!(
         "  Parent:     {}",
         meta.parent_id.as_deref().unwrap_or("(none)")
@@ -2769,9 +2805,16 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
     for entry in &manifest.files {
         // `Path::extension` (unlike splitting on '.') correctly reports no
         // extension for "README" and for a dotfile like ".gitignore".
+        // An extension that is not text is grouped by its bytes (shown as
+        // escapes): two such extensions are two groups, not one.
         let ext = entry.path.extension().map_or_else(
             || "(no ext)".to_string(),
-            |e| e.to_string_lossy().into_owned(),
+            |e| {
+                e.to_str().map_or_else(
+                    || quoting::escape_unprintable(e.as_encoded_bytes()),
+                    str::to_owned,
+                )
+            },
         );
         let (count, size) = by_ext.entry(ext).or_insert((0, 0));
         *count = count.saturating_add(1);
@@ -3292,6 +3335,42 @@ mod tests {
     /// Each is driven end-to-end through the real command rather than through
     /// an extracted helper, so the test exercises the same call the binary
     /// makes and cannot drift away from it.
+    /// Exclusions match the path's own bytes: a pattern still excludes a
+    /// file whose name is not text, and a pattern holding the replacement
+    /// character no longer matches one -- as it did against the lossy form.
+    #[cfg(unix)]
+    #[test]
+    fn an_exclusion_matches_the_paths_own_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = Path::new(std::ffi::OsStr::from_bytes(b"dir/caf\xe9.tmp"));
+        assert!(is_excluded(odd, &[String::from("*.tmp")]));
+        assert!(
+            is_excluded(odd, &[String::from("caf?.tmp")]),
+            "a byte that is not text is one character to `?`"
+        );
+        assert!(
+            !is_excluded(odd, &[String::from("caf\u{FFFD}.tmp")]),
+            "matched the lossy form"
+        );
+    }
+
+    /// The name alone, and the whole path, are both tried.
+    #[test]
+    fn an_exclusion_matches_the_whole_path_or_the_name() {
+        assert!(is_excluded(
+            Path::new("dir/a.tmp"),
+            &[String::from("*.tmp")]
+        ));
+        assert!(is_excluded(
+            Path::new("x/y/a.tmp"),
+            &[String::from("a.tmp")]
+        ));
+        assert!(!is_excluded(
+            Path::new("x/y/a.txt"),
+            &[String::from("*.tmp")]
+        ));
+    }
+
     #[test]
     fn command_level_writes_go_through_safeio() {
         let _guard = audit_lock();
@@ -3794,7 +3873,7 @@ mod tests {
             id: "1700000000-full".to_string(),
             backup_type: BackupType::Full,
             timestamp: 1700000000,
-            source: "/home/user".to_string(),
+            source: PathBuf::from("/home/user"),
             parent_id: None,
             file_count: 42,
             total_size: 1048576,
@@ -3822,7 +3901,7 @@ mod tests {
             id: "1700100000-incremental".to_string(),
             backup_type: BackupType::Incremental,
             timestamp: 1700100000,
-            source: "/home/user".to_string(),
+            source: PathBuf::from("/home/user"),
             parent_id: Some("1700000000-full".to_string()),
             file_count: 5,
             total_size: 4096,
@@ -3843,6 +3922,109 @@ mod tests {
         );
     }
 
+    /// `prefix` followed by one unit that makes a name not text: a lone
+    /// `0xE9` byte where names are bytes, an unpaired surrogate on the Windows
+    /// host this suite also runs on -- so these tests run in the ordinary host
+    /// suite rather than only on a Unix machine.
+    #[cfg(unix)]
+    fn not_text(prefix: &str) -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = prefix.as_bytes().to_vec();
+        bytes.push(0xE9);
+        std::ffi::OsString::from_vec(bytes)
+    }
+
+    #[cfg(windows)]
+    fn not_text(prefix: &str) -> std::ffi::OsString {
+        use std::os::windows::ffi::OsStringExt;
+        let mut units: Vec<u16> = prefix.encode_utf16().collect();
+        units.push(0xD800);
+        std::ffi::OsString::from_wide(&units)
+    }
+
+    /// The record of *which directory was backed up* keeps that directory's
+    /// name when the name is not text. It used to go through
+    /// `to_string_lossy`, so `meta.json` named a directory that does not exist.
+    ///
+    /// The record is checked on every build: it holds the escaped bytes and
+    /// no replacement character. The round trip back to a path is checked
+    /// where names are bytes. On the Windows host `pathcodec` can rebuild only
+    /// valid Unicode (its `os_string_from_bytes` host arm), which is a limit
+    /// of developing on Windows rather than of the record.
+    #[test]
+    fn a_source_whose_name_is_not_text_is_recorded_whole() {
+        // Joined as one `OsString` with `/`, not with `PathBuf::push`: on the
+        // Windows host `push` inserts `\`, which JSON then escapes to `\\`, and
+        // the substring test below would be about the host's separator
+        // rather than about the record.
+        let mut name = std::ffi::OsString::from("/srv/");
+        name.push(not_text("caf"));
+        let source = PathBuf::from(name);
+        assert!(
+            source.to_str().is_none(),
+            "the fixture's name is text after all, so this test proves nothing"
+        );
+        let meta = BackupMeta {
+            id: "1700000000-full".to_string(),
+            backup_type: BackupType::Full,
+            timestamp: 1_700_000_000,
+            source: source.clone(),
+            parent_id: None,
+            file_count: 1,
+            total_size: 1,
+            new_blobs: 1,
+            dedup_blobs: 0,
+        };
+        let record = meta.serialize();
+        assert!(
+            record.contains(&encode_path(&source)),
+            "the record does not hold the source's escaped bytes: {record}"
+        );
+        assert!(
+            !record.contains('\u{FFFD}'),
+            "a replacement character reached the record: {record}"
+        );
+        #[cfg(unix)]
+        {
+            let back = BackupMeta::deserialize(&record).unwrap();
+            assert_eq!(
+                back.source, source,
+                "the source directory's name changed on disk"
+            );
+        }
+    }
+
+    /// A record written before `META_VERSION` 2 stored its source verbatim.
+    /// Reading it as percent-encoded would turn a directory really named
+    /// `100%41` into `100A` -- so an old backup would list under a directory it
+    /// never came from.
+    #[test]
+    fn a_version_1_metadata_record_reads_its_source_verbatim() {
+        let legacy = r#"{"id": "1-full", "backup_type": "full", "timestamp": 1, "source": "/home/100%41", "parent_id": null}"#;
+        let meta = BackupMeta::deserialize(legacy).unwrap();
+        assert_eq!(meta.source, PathBuf::from("/home/100%41"));
+    }
+
+    /// `list --source` matches bytes the path has -- including the text parts
+    /// of a name that is not text -- and never a byte it does not have.
+    #[test]
+    fn the_source_filter_matches_the_bytes_the_path_has() {
+        let mut source = PathBuf::from("/srv/photos");
+        source.push(not_text("caf"));
+        assert!(path_contains(&source, "photos"));
+        assert!(path_contains(&source, "/srv/photos"));
+        assert!(path_contains(&source, "caf"));
+        assert!(path_contains(&source, ""), "an empty filter is no filter");
+        assert!(
+            !path_contains(&source, "caf\u{FFFD}"),
+            "the replacement character a decode would have put there matched"
+        );
+        assert!(
+            !path_contains(Path::new("/a"), "/ab"),
+            "a filter longer than the path matched"
+        );
+    }
+
     // --- Pruning Retention Policy Tests ---
 
     #[test]
@@ -3852,7 +4034,7 @@ mod tests {
                 id: "1".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3863,7 +4045,7 @@ mod tests {
                 id: "2".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 200,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3874,7 +4056,7 @@ mod tests {
                 id: "3".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 300,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3905,7 +4087,7 @@ mod tests {
                 id: "d1_a".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: day * 10 + 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3916,7 +4098,7 @@ mod tests {
                 id: "d1_b".to_string(),
                 backup_type: BackupType::Incremental,
                 timestamp: day * 10 + 200,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3927,7 +4109,7 @@ mod tests {
                 id: "d2_a".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: day * 11 + 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3938,7 +4120,7 @@ mod tests {
                 id: "d3_a".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: day * 12 + 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3971,7 +4153,7 @@ mod tests {
                 id: "1".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3982,7 +4164,7 @@ mod tests {
                 id: "2".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 200,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -4344,7 +4526,7 @@ mod tests {
                 BackupType::Full
             },
             timestamp,
-            source: "/src".to_string(),
+            source: PathBuf::from("/src"),
             parent_id: parent.map(str::to_string),
             file_count: 0,
             total_size: 0,

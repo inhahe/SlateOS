@@ -560,7 +560,11 @@ impl Ctl {
                 match mbs_to_wcs(&encoded, self.utf8) {
                     Some(w) => w,
                     None => {
-                        warn(short, "read failed", &std::io::Error::from_raw_os_error(EILSEQ));
+                        warn(
+                            short,
+                            "read failed",
+                            &std::io::Error::from_raw_os_error(EILSEQ),
+                        );
                         return Err(1);
                     }
                 }

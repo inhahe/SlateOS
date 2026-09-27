@@ -213,7 +213,9 @@ fn detect_by_marks(cxt: &Cxt, virt: &mut Virt) {
         let dom0 = cxt
             .procfs
             .scanf(b"xen/capabilities", b"%255s")
-            .is_ok_and(|v| v.is_some_and(|v| v.first().is_some_and(|s| s.as_bytes() == b"control_d")));
+            .is_ok_and(|v| {
+                v.is_some_and(|v| v.first().is_some_and(|s| s.as_bytes() == b"control_d"))
+            });
         virt.kind = if dom0 { VIRT_TYPE_NONE } else { VIRT_TYPE_PARA };
         virt.vendor = VIRT_VENDOR_XEN;
     } else if has_pci_device(cxt, XEN_PCI) {

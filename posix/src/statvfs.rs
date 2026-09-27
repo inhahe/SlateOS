@@ -149,9 +149,12 @@ fn default_raw() -> [u8; KERNEL_STATVFS_LEN] {
         DEFAULT_INODE_FREE,
         DEFAULT_NAMEMAX,
     ];
-    // The six words from offset 0; the read-only byte stays 0.
-    for (slot, word) in raw.chunks_exact_mut(8).zip(words) {
-        slot.copy_from_slice(&word.to_le_bytes());
+    // The six words from offset 0; the read-only byte stays 0.  `as_chunks_mut`
+    // rather than `chunks_exact_mut(8)`: clippy 1.98's
+    // `chunks_exact_to_as_chunks` refuses a constant width the other way.
+    let (slots, _) = raw.as_chunks_mut::<8>();
+    for (slot, word) in slots.iter_mut().zip(words) {
+        *slot = word.to_le_bytes();
     }
     raw
 }

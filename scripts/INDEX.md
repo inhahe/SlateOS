@@ -166,6 +166,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/ed-diff.sh` | Differential test: our ed against GNU ed. |
 | `scripts/env-diff.sh` | Differential test: our `env` against GNU env. |
 | `scripts/espeak-spike/run.sh` | Cross-compile eSpeak NG and link it against SlateOS's own libc.a. |
+| `scripts/espeak-spike/slatelink.sh` | Relink eSpeak NG's already-built objects against the CURRENT libc.a. |
 | `scripts/expand-diff.sh` | Differential test: our expand against GNU expand. |
 | `scripts/expr-diff.sh` | Differential test: our expr against GNU expr, both run inside WSL. |
 | `scripts/extfloat-cases.py` | Generate cases for `scripts/extfloat-diff.sh`. |
@@ -402,4 +403,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_392 scripts._
+_393 scripts._

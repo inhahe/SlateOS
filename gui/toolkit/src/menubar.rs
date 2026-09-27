@@ -9,6 +9,7 @@
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::listview::ListKey;
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::row_strip::RowStrip;
@@ -428,6 +429,18 @@ impl DropdownPanel {
     /// The offset that brings row `index` fully into view, moving as little as
     /// possible. Unchanged for a row already visible, or one that does not
     /// exist.
+    /// How many rows the panel shows whole at its current scroll: its
+    /// windowful, for Page Up and Page Down.
+    fn rows_in_view(&self, entries: &[MenuBarEntry]) -> usize {
+        let strip = self.strip(entries);
+        let (top, bottom) = (self.viewport_top(), self.viewport_bottom());
+        (0..entries.len())
+            .filter(|&i| {
+                matches!((strip.top(i), strip.height(i)), (Some(t), Some(h)) if t >= top && t + h <= bottom)
+            })
+            .count()
+    }
+
     fn scroll_showing(&self, entries: &[MenuBarEntry], index: usize) -> f32 {
         let strip = self.strip(entries);
         let (Some(top), Some(height)) = (strip.top(index), strip.height(index)) else {
@@ -869,7 +882,7 @@ impl MenuBar {
 
             Key::Up => {
                 if self.open_submenu.is_some() {
-                    self.update_submenu_hover(top_idx, |entries, hover| {
+                    self.update_submenu_hover(top_idx, |entries, hover, _| {
                         next_selectable(entries, hover, -1)
                     });
                 } else {
@@ -880,11 +893,36 @@ impl MenuBar {
 
             Key::Down => {
                 if self.open_submenu.is_some() {
-                    self.update_submenu_hover(top_idx, |entries, hover| {
+                    self.update_submenu_hover(top_idx, |entries, hover, _| {
                         next_selectable(entries, hover, 1)
                     });
                 } else {
                     self.move_dropdown_hover(1, top_idx);
+                }
+                EventResult::Consumed
+            }
+
+            // A windowful of rows, or the ends, of whichever panel has the
+            // keyboard -- `design-decisions.md` §1416.
+            Key::Home | Key::End | Key::PageUp | Key::PageDown => {
+                if let Some(nav) = ListKey::of(event) {
+                    if self.open_submenu.is_some() {
+                        self.update_submenu_hover(top_idx, |entries, hover, page| {
+                            nav.target_where(hover, entries.len(), page, |i| {
+                                entries.get(i).is_some_and(is_selectable)
+                            })
+                        });
+                    } else {
+                        let children = children_of(&self.items, top_idx);
+                        let page = self.dropdown_panel(top_idx).rows_in_view(children);
+                        let hover =
+                            nav.target_where(self.dropdown_hover, children.len(), page, |i| {
+                                children.get(i).is_some_and(is_selectable)
+                            });
+                        if hover.is_some() {
+                            self.set_dropdown_hover(hover, top_idx);
+                        }
+                    }
                 }
                 EventResult::Consumed
             }
@@ -909,7 +947,7 @@ impl MenuBar {
                 // Type-to-jump: letter key jumps to first matching item label.
                 if let Some(ch) = key_to_lower_char(&event.key) {
                     if self.open_submenu.is_some() {
-                        self.update_submenu_hover(top_idx, |entries, _| {
+                        self.update_submenu_hover(top_idx, |entries, _, _| {
                             jump_to_letter(entries, ch)
                         });
                     } else {
@@ -1192,15 +1230,16 @@ impl MenuBar {
     /// open submenu's selection with `pick`, then scroll that submenu so the
     /// selection is on the screen.
     ///
-    /// `pick` rather than a direction because the two callers choose
-    /// differently — one steps by one, the other jumps to a letter — while the
-    /// three lines around the choice (find the deepest submenu, resolve its
-    /// entries, scroll to what was chosen) are identical, and were previously
-    /// written out once per caller.
+    /// `pick` rather than a direction because the callers choose differently —
+    /// one steps by one, one jumps to a letter, one pages — while the three
+    /// lines around the choice (find the deepest submenu, resolve its entries,
+    /// scroll to what was chosen) are identical, and were previously written
+    /// out once per caller. `pick` is handed the entries, the current hover,
+    /// and how many rows the submenu shows whole: its page.
     fn update_submenu_hover(
         &mut self,
         top_idx: usize,
-        pick: impl FnOnce(&[MenuBarEntry], Option<usize>) -> Option<usize>,
+        pick: impl FnOnce(&[MenuBarEntry], Option<usize>, usize) -> Option<usize>,
     ) {
         let root_children = children_of(&self.items, top_idx);
         let Some(ref mut sub) = self.open_submenu else {
@@ -1209,7 +1248,8 @@ impl MenuBar {
         // Resolving the deepest node needs every level above it, so the walk
         // down and the resolve happen together — see [`deepest_with_entries`].
         let (deepest, entries) = deepest_with_entries(root_children, sub);
-        deepest.hover_index = pick(&entries, deepest.hover_index);
+        let page = submenu_panel(&entries, deepest, self.viewport).rows_in_view(&entries);
+        deepest.hover_index = pick(&entries, deepest.hover_index, page);
         if let Some(idx) = deepest.hover_index {
             let panel = submenu_panel(&entries, deepest, self.viewport);
             deepest.scroll = panel.scroll_showing(&entries, idx);
@@ -2582,6 +2622,63 @@ mod tests {
                 .index_at(children_of(&bar.items, 0), panel.viewport_top())
                 .is_some()
         );
+    }
+
+    /// Home and End in an open dropdown reach its first and last rows that
+    /// can be chosen: past the separator and the greyed-out Save As.
+    #[test]
+    fn home_and_end_reach_the_ends_of_an_open_dropdown() {
+        let mut bar = make_bar();
+        open_first_dropdown(&mut bar);
+        bar.handle_key_event(&press(Key::End), SCREEN);
+        assert_eq!(bar.dropdown_hover, Some(3), "Save, not the greyed Save As");
+        bar.handle_key_event(&press(Key::Home), SCREEN);
+        assert_eq!(bar.dropdown_hover, Some(0), "New");
+        bar.handle_key_event(&press(Key::PageDown), SCREEN);
+        assert_eq!(
+            bar.dropdown_hover,
+            Some(3),
+            "a dropdown that fits is one page"
+        );
+    }
+
+    /// In a dropdown taller than the screen, Page Down moves a windowful and
+    /// brings the row it lands on into view.
+    #[test]
+    fn page_down_moves_a_windowful_through_a_tall_dropdown() {
+        let mut bar = tall_bar(200);
+        open_first_dropdown(&mut bar);
+        let page = bar
+            .dropdown_panel(0)
+            .rows_in_view(children_of(&bar.items, 0));
+        assert!(
+            page > 1 && page < 200,
+            "precondition: a page of {page} rows"
+        );
+        bar.handle_key_event(&press(Key::Home), SCREEN);
+        bar.handle_key_event(&press(Key::PageDown), SCREEN);
+        let hover = bar.dropdown_hover.expect("a row is lit");
+        assert_eq!(hover, page);
+        let panel = bar.dropdown_panel(0);
+        let top = panel.row_top(children_of(&bar.items, 0), hover).unwrap();
+        assert!(top >= panel.viewport_top() && top + ITEM_HEIGHT <= panel.viewport_bottom());
+        bar.handle_key_event(&press(Key::End), SCREEN);
+        assert_eq!(bar.dropdown_hover, Some(199));
+    }
+
+    /// The keys work in an open submenu too, on the submenu's rows.
+    #[test]
+    fn home_and_end_work_in_an_open_submenu() {
+        let mut bar = make_bar();
+        bar.handle_key_event(&alt_press(Key::V), SCREEN);
+        bar.handle_key_event(&press(Key::Down), SCREEN);
+        bar.handle_key_event(&press(Key::Right), SCREEN);
+        assert!(bar.open_submenu.is_some(), "precondition: Zoom is open");
+        bar.handle_key_event(&press(Key::End), SCREEN);
+        let hover = |bar: &MenuBar| bar.open_submenu.as_ref().and_then(|s| s.hover_index);
+        assert_eq!(hover(&bar), Some(1), "Zoom Out");
+        bar.handle_key_event(&press(Key::Home), SCREEN);
+        assert_eq!(hover(&bar), Some(0), "Zoom In");
     }
 
     #[test]

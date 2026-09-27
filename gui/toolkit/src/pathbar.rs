@@ -17,6 +17,7 @@
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+use crate::listview::ListKey;
 use crate::osbytes::split_on_slash;
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -585,12 +586,28 @@ impl PathBar {
                 }
                 EventResult::Consumed
             }
+            // The field and its list share the keys the way every field over
+            // a list in the shell does (`design-decisions.md` §1416): Home and
+            // End are the text's; Ctrl+Home and Ctrl+End the list's while it
+            // is showing, the text's otherwise; the page keys the list's.
+            Key::Home | Key::End if event.modifiers.ctrl && self.dropdown_showing() => {
+                if let Some(nav) = ListKey::of(event) {
+                    self.move_completion_to(nav);
+                }
+                EventResult::Consumed
+            }
             Key::Home => {
                 self.move_cursor_home(event.modifiers.shift);
                 EventResult::Consumed
             }
             Key::End => {
                 self.move_cursor_end(event.modifiers.shift);
+                EventResult::Consumed
+            }
+            Key::PageUp | Key::PageDown if self.dropdown_showing() => {
+                if let Some(nav) = ListKey::of(event) {
+                    self.move_completion_to(nav);
+                }
                 EventResult::Consumed
             }
             Key::Backspace => {
@@ -833,6 +850,27 @@ impl PathBar {
             // Nothing selected: Down enters the list from the top.
             None => 0,
         });
+        self.ensure_completion_visible();
+    }
+
+    /// Whether the completion list is on screen with something in it: when
+    /// the page keys and Ctrl+Home/End are the list's.
+    fn dropdown_showing(&self) -> bool {
+        self.dropdown_visible && !self.completions.is_empty()
+    }
+
+    /// A windowful of completions -- the eight the list shows -- or the first
+    /// or last. Clamped, where the arrows wrap: paging past the end of a list
+    /// and arriving at its top is not what a page key means.
+    fn move_completion_to(&mut self, nav: ListKey) {
+        if !self.dropdown_showing() {
+            return;
+        }
+        self.completion_index = nav.target(
+            self.completion_index,
+            self.completions.len(),
+            DROPDOWN_MAX_VISIBLE,
+        );
         self.ensure_completion_visible();
     }
 
@@ -2127,6 +2165,61 @@ mod tests {
         );
         bar.drain_events();
         bar
+    }
+
+    /// The completion list pages eight rows at a time, clamped at its ends, and
+    /// Ctrl+Home/Ctrl+End reach its first and last rows; plain Home and End
+    /// stay the text's (§1416).
+    #[test]
+    fn the_page_keys_and_ctrl_home_end_move_through_the_completions() {
+        let mut bar = PathBar::new("/");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.edit_text = "/".to_string();
+        bar.cursor = 1.into();
+        bar.set_completions(
+            (0..20)
+                .map(|i| CompletionItem {
+                    name: format!("d{i:02}"),
+                    is_directory: true,
+                })
+                .collect(),
+        );
+        assert_eq!(bar.completion_index, Some(0));
+        bar.handle_key_event(&key_press(Key::PageDown));
+        assert_eq!(bar.completion_index, Some(8));
+        bar.handle_key_event(&key_press(Key::PageDown));
+        bar.handle_key_event(&key_press(Key::PageDown));
+        assert_eq!(bar.completion_index, Some(19), "clamped, not wrapped");
+        assert!(
+            (bar.dropdown_scroll..bar.dropdown_scroll + DROPDOWN_MAX_VISIBLE).contains(&19),
+            "the last row is lit but scrolled out of sight"
+        );
+        bar.handle_key_event(&key_press(Key::PageUp));
+        assert_eq!(bar.completion_index, Some(11));
+        bar.handle_key_event(&key_press_ctrl(Key::Home));
+        assert_eq!(bar.completion_index, Some(0));
+        bar.handle_key_event(&key_press_ctrl(Key::End));
+        assert_eq!(bar.completion_index, Some(19));
+
+        // Plain Home is the text's: the caret goes to the start, and the list
+        // keeps its row.
+        bar.handle_key_event(&key_press(Key::Home));
+        assert_eq!(bar.cursor, 0.into());
+        assert_eq!(bar.completion_index, Some(19));
+    }
+
+    /// With no list showing, the page keys are not the bar's to take.
+    #[test]
+    fn with_no_completions_showing_the_page_keys_pass_through() {
+        let mut bar = PathBar::new("/home");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        assert_eq!(
+            bar.handle_key_event(&key_press(Key::PageDown)),
+            EventResult::Ignored
+        );
+        // And Ctrl+Home is the text's again.
+        bar.handle_key_event(&key_press_ctrl(Key::Home));
+        assert_eq!(bar.cursor, 0.into());
     }
 
     /// Type `text` into the bar a character at a time, as a keyboard would.

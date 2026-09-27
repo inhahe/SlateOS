@@ -370,8 +370,11 @@ fn moving_the_caret_ends_an_undo_step() {
     assert_eq!(area.text(), "ab");
 }
 
+/// A new edit after undo leaves nothing to redo on its own branch -- plain
+/// redo does what it always did -- but what was undone is not thrown away:
+/// Alt+Z walks back to it (`design-decisions.md` §1416, the redo tree).
 #[test]
-fn a_new_edit_after_undo_forgets_what_could_be_redone() {
+fn a_new_edit_after_undo_keeps_what_was_undone_on_a_branch_of_its_own() {
     let m = wide(5);
     let mut area = TextArea::new();
     type_text(&mut area, "one", &m);
@@ -379,6 +382,74 @@ fn a_new_edit_after_undo_forgets_what_could_be_redone() {
     type_text(&mut area, "two", &m);
     assert!(!area.can_redo());
     assert!(!area.redo());
+    assert_eq!(area.text(), "two");
+
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::NONE
+    };
+    assert_eq!(
+        area.edit_key(&key_with(Key::Z, alt, ""), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.text(), "one", "the branch undone out of was lost");
+    let alt_shift = Modifiers {
+        alt: true,
+        shift: true,
+        ..Modifiers::NONE
+    };
+    assert_eq!(
+        area.edit_key(&key_with(Key::Z, alt_shift, ""), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.text(), "two", "and forwards in time again");
+}
+
+/// Walking the history in time order reaches every state the text has been
+/// in, across branches, and comes back to where it started.
+///
+/// Typing is one step per word and a newline is a step of its own, so
+/// "a" then Enter is two states; undoing the second newline and typing "c"
+/// starts a branch beside it, and the walk back crosses from one branch to
+/// the other in the order each state was first reached.
+#[test]
+fn earlier_and_later_reach_every_state_across_branches() {
+    let m = wide(5);
+    let mut area = TextArea::new();
+    type_text(&mut area, "a\n", &m);
+    type_text(&mut area, "b\n", &m);
+    area.undo();
+    type_text(&mut area, "c\n", &m);
+    let mut seen = vec![area.text().to_string()];
+    while area.earlier() {
+        seen.push(area.text().to_string());
+    }
+    assert_eq!(seen, ["a\nbc\n", "a\nbc", "a\nb\n", "a\nb", "a\n", "a", ""]);
+    let mut forth = vec![area.text().to_string()];
+    while area.later() {
+        forth.push(area.text().to_string());
+    }
+    assert_eq!(
+        forth,
+        ["", "a", "a\n", "a\nb", "a\nb\n", "a\nbc", "a\nbc\n"]
+    );
+}
+
+/// Ctrl+Alt+Z is AltGr+Z, which types a letter on several layouts: not a
+/// journey through the history.
+#[test]
+fn ctrl_alt_z_is_not_a_history_key() {
+    let m = wide(5);
+    let mut area = TextArea::new();
+    type_text(&mut area, "one", &m);
+    area.undo();
+    type_text(&mut area, "two", &m);
+    let altgr = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::NONE
+    };
+    area.edit_key(&key_with(Key::Z, altgr, ""), &m);
     assert_eq!(area.text(), "two");
 }
 

@@ -52,10 +52,19 @@
 //! replacing one with the other and does not keep copies of the text. Typing
 //! is gathered into one step a word at a time, as is deleting, because an undo
 //! that takes back one letter per press is one nobody uses twice.
+//!
+//! The steps are kept as a tree ([`crate::undo`]), not a line: typing
+//! after undoing starts a branch beside what was undone rather than throwing
+//! it away (`design-decisions.md` §1416). Ctrl+Z and Ctrl+Shift+Z go back and
+//! forth along the branch the user is on, as they always did; Alt+Z and
+//! Alt+Shift+Z walk every state the text has been in, in the order each was
+//! first reached, across branches -- the way back to a branch left behind.
 
 use core::cell::RefCell;
 use core::ops::Range;
 use std::rc::Rc;
+
+use core::num::NonZeroUsize;
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent};
@@ -64,11 +73,19 @@ use crate::style::CornerRadii;
 use crate::text::{self, Affinity, TextCursor};
 use crate::textedit;
 use crate::textinput::KeyEdit;
+use crate::undo::{Travel, UndoHistory};
 
-/// How many edits undo reaches back through. Past this the oldest go; a
-/// history that grew without bound would keep every keystroke of a long
-/// session in memory.
+/// How many steps the history keeps, on every branch together. Past this the
+/// oldest go -- branches the user is not on first; a history that grew without
+/// bound would keep every keystroke of a long session in memory.
 pub const UNDO_DEPTH: usize = 500;
+
+/// [`UNDO_DEPTH`] as the history takes it. The fallback is never used: the
+/// constant is not zero, and a `match` says so without a panic path.
+const UNDO_LIMIT: NonZeroUsize = match NonZeroUsize::new(UNDO_DEPTH) {
+    Some(limit) => limit,
+    None => NonZeroUsize::MIN,
+};
 
 /// What a layout depends on besides the text: the box and the font.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -172,8 +189,7 @@ pub struct TextArea {
     wrap: bool,
     scroll_y: f32,
     clipboard: String,
-    undo: Vec<Edit>,
-    redo: Vec<Edit>,
+    history: UndoHistory<Edit>,
     run: Run,
     /// Bumped by every change to the text, so a layout knows when it is stale.
     revision: u64,
@@ -226,8 +242,7 @@ impl TextArea {
             wrap: true,
             scroll_y: 0.0,
             clipboard: String::new(),
-            undo: Vec::new(),
-            redo: Vec::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             run: Run::None,
             revision: 0,
             layout: RefCell::new(None),
@@ -258,8 +273,7 @@ impl TextArea {
         self.anchor = None;
         self.goal_x = None;
         self.scroll_y = 0.0;
-        self.undo.clear();
-        self.redo.clear();
+        self.history.clear();
         self.run = Run::None;
         self.revision = self.revision.wrapping_add(1);
     }
@@ -338,13 +352,13 @@ impl TextArea {
     /// Whether there is anything to undo.
     #[must_use]
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty()
+        self.history.can_undo()
     }
 
     /// Whether there is anything to redo.
     #[must_use]
     pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
+        self.history.can_redo()
     }
 
     // ---- layout ------------------------------------------------------------
@@ -571,14 +585,17 @@ impl TextArea {
         self.anchor = None;
         self.goal_x = None;
         self.revision = self.revision.wrapping_add(1);
-        self.redo.clear();
         self.record(edit, run);
     }
 
     /// Put `edit` on the undo history, or fold it into the step before it
     /// when both are part of one run of typing or deleting.
+    ///
+    /// Folding happens only at the tip of a branch -- [`UndoHistory::last_mut`]
+    /// refuses a step something was done after -- so a run of typing never
+    /// rewrites a state another branch hangs from.
     fn record(&mut self, edit: Edit, run: Run) {
-        let joined = match (run, self.run, self.undo.last_mut()) {
+        let joined = match (run, self.run, self.history.last_mut()) {
             (Run::Typing, Run::Typing, Some(last)) => {
                 // Typing continues where the last typing ended, and a word
                 // boundary starts a new step: the space after a word joins it,
@@ -619,10 +636,7 @@ impl TextArea {
             _ => false,
         };
         if !joined {
-            self.undo.push(edit);
-            if self.undo.len() > UNDO_DEPTH {
-                self.undo.remove(0);
-            }
+            self.history.record(edit);
         }
         self.run = run;
     }
@@ -710,9 +724,52 @@ impl TextArea {
 
     /// Take back the last step. Returns whether there was one.
     pub fn undo(&mut self) -> bool {
-        let Some(edit) = self.undo.pop() else {
+        let Some(edit) = self.history.undo() else {
             return false;
         };
+        self.revert(&edit);
+        true
+    }
+
+    /// Put back the last step taken back, down the branch last undone out
+    /// of. Returns whether there was one.
+    pub fn redo(&mut self) -> bool {
+        let Some(edit) = self.history.redo() else {
+            return false;
+        };
+        self.reapply(&edit);
+        true
+    }
+
+    /// Go to the state the text was in before this one was first reached,
+    /// on whichever branch -- Alt+Z. Returns whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the state first reached after this one, on whichever branch --
+    /// Alt+Shift+Z. Returns whether there was one.
+    pub fn later(&mut self) -> bool {
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<Edit>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(edit) => self.revert(&edit),
+                Travel::Redo(edit) => self.reapply(&edit),
+            }
+        }
+        moved
+    }
+
+    /// Replace what `edit` inserted with what it removed, and put the caret
+    /// and selection back where they were before it.
+    fn revert(&mut self, edit: &Edit) {
         let end = edit.at.saturating_add(edit.inserted.len());
         if end <= self.text.len()
             && self.text.is_char_boundary(edit.at)
@@ -725,15 +782,10 @@ impl TextArea {
         self.goal_x = None;
         self.run = Run::None;
         self.revision = self.revision.wrapping_add(1);
-        self.redo.push(edit);
-        true
     }
 
-    /// Put back the last step taken back. Returns whether there was one.
-    pub fn redo(&mut self) -> bool {
-        let Some(edit) = self.redo.pop() else {
-            return false;
-        };
+    /// Replace what `edit` removed with what it inserted, the caret after it.
+    fn reapply(&mut self, edit: &Edit) {
         let end = edit.at.saturating_add(edit.removed.len());
         if end <= self.text.len()
             && self.text.is_char_boundary(edit.at)
@@ -746,8 +798,6 @@ impl TextArea {
         self.goal_x = None;
         self.run = Run::None;
         self.revision = self.revision.wrapping_add(1);
-        self.undo.push(edit);
-        true
     }
 
     // ---- caret motion --------------------------------------------------------
@@ -1046,8 +1096,10 @@ impl TextArea {
     /// Everything [`crate::textinput::TextInput::edit_key`] handles, plus what
     /// a box of several lines needs: Up, Down, Page Up and Page Down;
     /// Ctrl+Home and Ctrl+End for the ends of the text; Enter for a new line;
-    /// and undo (Ctrl+Z) and redo (Ctrl+Y, or Ctrl+Shift+Z). The view scrolls
-    /// to keep the caret in sight after each.
+    /// and undo (Ctrl+Z) and redo (Ctrl+Y, or Ctrl+Shift+Z); and, across the
+    /// history's branches, Alt+Z and Alt+Shift+Z to the state before and after
+    /// this one in time. The view scrolls to keep the caret in sight after
+    /// each.
     ///
     /// **Left to the owner:** Tab, which moves the focus between fields rather
     /// than indenting -- a notes box that ate Tab would be a trap for a
@@ -1063,6 +1115,8 @@ impl TextArea {
         }
         let shift = key.modifiers.shift;
         let ctrl = key.modifiers.ctrl && !key.modifiers.alt;
+        // Alt without Ctrl: Ctrl+Alt is AltGr, which types letters.
+        let alt = key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key;
         let before = self.revision;
         let outcome = match key.key {
             Key::A if ctrl => {
@@ -1091,6 +1145,14 @@ impl TextArea {
             }
             Key::Y if ctrl => {
                 self.redo();
+                KeyEdit::Handled
+            }
+            Key::Z if alt && shift => {
+                self.later();
+                KeyEdit::Handled
+            }
+            Key::Z if alt => {
+                self.earlier();
                 KeyEdit::Handled
             }
             Key::Left => {

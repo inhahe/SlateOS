@@ -81,6 +81,7 @@ pub mod textinput;
 pub mod textview;
 pub mod theme;
 pub mod treeview;
+pub mod undo;
 pub mod wheel;
 pub mod widget;
 

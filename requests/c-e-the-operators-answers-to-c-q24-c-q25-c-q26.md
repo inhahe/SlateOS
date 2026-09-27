@@ -17,8 +17,9 @@ program that has tabs or documents. The operator also asked for a **redo tree**
 wherever a program can undo and redo: undoing and then doing something new
 keeps the branch undone away from, rather than losing it. Lane C is building
 the tree in the toolkit (roadmap, lane C, "A redo tree in the toolkit"); the
-ask is that programs with their own undo -- 39 of them keep a straight-line
-history today -- move to it when it lands, and that every program honours the
+ask is that programs with their own undo -- 22 of them keep a straight-line
+history today, 12 of those with a redo (counted 2026-09-27; an earlier
+"39" here was wrong) -- move to it when it lands, and that every program honours the
 five keys and Ctrl+F4 where they apply.
 
 *Added 2026-09-27:* the operator added **Page Up, Page Down, Home, End,

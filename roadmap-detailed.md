@@ -1965,7 +1965,7 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 - [ ] Rope or gap buffer backing (efficient for large files)
 - [ ] Syntax highlighting via tree-sitter integration
 - [ ] Line numbers (toggleable)
-- [ ] Undo/redo stack
+- [ ] Undo/redo stack — *[-] 2026-09-27: the history exists and is a tree, not a stack (`guitk::undo`, `design-decisions.md` §1420), and the multi-line text area uses it; this widget, which would use it too, does not exist yet.*
 - [ ] Multi-cursor support
 - [ ] Selection modes: line, word, block/column
 - [ ] Find/replace (regex-capable)

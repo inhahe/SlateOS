@@ -1890,10 +1890,13 @@ live.
   compositor verb exists). `design.txt` line 1321 names it; §1416 makes it
   available, unbound by default. Then "Sleep the display" in the power menu too.
 
-- `[C]` **A redo tree in the toolkit** -- open (§1416, the operator's
-  addition). One undo/redo history that keeps the branches a user undid away
-  from, for the toolkit's text area first; then offered to the 39 programs
-  that keep their own straight-line undo (lane E adopts).
+- `[C]` **A redo tree in the toolkit** -- done 2026-09-27 (§1416, §1420).
+  `guitk::undo::UndoHistory<E>` keeps every step as a tree: typing after undoing
+  starts a branch beside what was undone instead of discarding it. Ctrl+Z and
+  Ctrl+Shift+Z go along the branch the user is on; Alt+Z and Alt+Shift+Z walk
+  every state in the order it was first reached, across branches. The toolkit's
+  text area is its first user. Offered to the programs that keep their own
+  straight-line undo (lane E adopts; `requests/c-e-the-operators-answers-to-c-q24-c-q25-c-q26.md`).
 
 - `[C]` **A program may ask the password manager for a password -- with a key
   for it, and the user's consent** -- open (C-Q25, §1417). In the credential

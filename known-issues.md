@@ -171214,3 +171214,63 @@ flag), `glyf_shift`, and the phantom-point handling in `outline_into_at`.
 
 **How to see it.** `python gui/font/tools/hint_oracle.py C:\Windows\Fonts\arial.ttf
 --gids 100,118`: every y agrees, every x is off by the same amount.
+
+### [F] AVIF decoding has no committed benchmark, and rav1d runs without dav1d's assembly -- 2026-09-27
+
+**Status:** OPEN (lane F).
+
+**In short:** AVIF pictures decode correctly but more slowly than in Chrome
+or Pillow. rav1d, the AV1 decoder in `gui/video/rav1d`, was vendored as pure
+Rust without dav1d's hand-written assembly, and single-threaded it takes
+1.3 to 2.3 times as long as Pillow's dav1d on the same files (a 1204x800
+photograph: 108 ms against 52 ms; a 2048x1536 grid: 1.65 s against 0.72 s).
+
+**What there is.** `Cargo.toml` builds rav1d and `imagecodec` at `-O3` in
+release (the workspace default is `-Os`), justified by single timing runs on a
+machine shared with five other build lanes; `gui/imagecodec/src/avif/decode.rs`
+decodes tiles under two megapixels on the calling thread (`THREADED_PIXELS`),
+because starting rav1d's workers costs about 5 ms and a still picture gives
+them little to share -- Pillow's dav1d was slower with ten threads than with
+one on the same files.
+
+**The proper fix, in two parts.** (1) A committed benchmark -- AVIF decode
+at a few sizes and depths, best of several runs, single- and multi-threaded
+-- so the `-O3` override and `THREADED_PIXELS` rest on measurements anyone can
+repeat (`performance-targets.md` asks for one on every hot path). (2) SIMD for
+rav1d's hottest DSP routines (motion compensation, inverse transforms, loop
+filter, CDEF, loop restoration), with `std::arch` intrinsics under runtime CPU
+detection, checked sample-for-sample against the scalar code. Part 2 is the
+large one; part 1 should come first so it can measure part 2.
+
+### [F] An AVIF frame coded at another size than its `ispe` is refused -- 2026-09-27
+
+**Status:** OPEN (lane F).
+
+**In short:** a rare kind of AVIF, whose AV1 frame is stored at a different
+size from the size the file declares for it, fails to open with "unsupported";
+Chrome and Pillow rescale the frame and show it. None of the 224 files in the
+test corpus (libavif's test data and the AOM sample set) needs this.
+
+**Where.** `gui/imagecodec/src/avif/decode.rs`, `decode_as`: the check after
+each tile's decode returns `Error::Unsupported("AVIF frame of another size
+than its ispe")` where libavif calls `avifImageScaleWithLimit`.
+
+**The proper fix.** Port libavif's `src/scale.c` and the libyuv functions it
+calls -- `ScalePlane` and `ScalePlane_12` with `kFilterBox`, which choose among
+box downscaling, bilinear upscaling and the special ratios by the sizes -- into
+`avif/libyuv.rs`, and test it against Pillow with a fixture whose `ispe` is
+rewritten after encoding (the way `generate_avif_pixels.py` rewrites `colr`).
+
+### [F] An AVIF sequence decodes to its first frame only -- 2026-09-27
+
+**Status:** OPEN (lane F).
+
+**In short:** an animated AVIF shows as a still picture -- its first frame.
+GIF and WebP animate, through `gif::Animation` and `webp::Animation`.
+
+**The proper fix.** An `avif::Animation` of the same shape (`next_frame`,
+`rewind`, `repeat`), keeping one decoder per track across frames as libavif
+does, reading each frame's duration from the track's `stts` (`setup::Timing`,
+already parsed) and the repetition from `elst`, with a sync-sample check so
+that seeking restarts from a key frame. libavif's `avifDecoderNextImage` and
+`avifDecoderNthImage` are the model; Pillow's `get_frame(n)` is the oracle.

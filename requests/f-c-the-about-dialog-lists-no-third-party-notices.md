@@ -9,10 +9,10 @@ Code this project ported from other people's libraries is only ours to ship
 if their notices ship with it. For the source that is done: every ported file
 in lane F's crates carries its upstream's copyright lines, and each crate has
 a `licenses/` directory with the licence texts and a table of what derives
-from where (`gui/font/licenses/`, `gui/imagecodec/licenses/`, and
-`gui/video/rav1d/` once it lands). But most of those licences also say what a
-**binary** must carry. The BSD licences (libwebp, libavif, dav1d/rav1d,
-Chromium, Skia) require their copyright notice and licence text "in the
+from where (`gui/font/licenses/`, `gui/imagecodec/licenses/`; the vendored
+`gui/video/rav1d/` carries its own `COPYING`). But most of those licences also
+say what a **binary** must carry. The BSD licences (libwebp, libavif, libyuv,
+dav1d/rav1d, Chromium, Skia) require their copyright notice and licence text "in the
 documentation and/or other materials provided with the distribution".
 libjpeg-turbo's IJG licence requires the documentation to say "This software
 is based in part on the work of the Independent JPEG Group". The MIT
@@ -49,11 +49,12 @@ mechanism you build for your own crates. The entries lane F has today:
 | libwebp 1.6.0 | BSD-3-Clause + patent grant | `gui/imagecodec/licenses/libwebp-COPYING`, `libwebp-PATENTS` |
 | RFC 6386 reference decoder | BSD-3-Clause | `gui/imagecodec/licenses/rfc6386-LICENSE.txt` |
 | libavif 1.3.0 (with dav1d's `obu.c`) | BSD-2-Clause | `gui/imagecodec/licenses/libavif-LICENSE.txt` |
+| libyuv (revision libavif 1.3.0 pins) | BSD-3-Clause + patent grant | `gui/imagecodec/licenses/libyuv-LICENSE`, `libyuv-PATENTS` |
 | image-rs 0.25.10 (BMP) | MIT | `gui/imagecodec/licenses/image-rs-LICENSE-MIT` |
 | Chromium (Blink image decoders) | BSD-3-Clause | `gui/imagecodec/licenses/chromium-LICENSE` |
 | Skia (`SkExif`) | BSD-3-Clause | `gui/imagecodec/licenses/skia-LICENSE` |
 | FreeType 2.13.2 (auto-hinter) | FreeType Licence | `gui/font/licenses/FTL.TXT` |
-| rav1d 1.1.0 / dav1d | BSD-2-Clause | `gui/video/rav1d/COPYING` (landing next) |
+| rav1d 1.1.0 / dav1d | BSD-2-Clause | `gui/video/rav1d/COPYING` |
 
 The IJG sentence belongs in the Licenses tab too, as the heading of the
 libjpeg-turbo entry or as its own line: the licence asks for those exact

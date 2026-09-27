@@ -124,7 +124,23 @@ under the BSD-2-Clause licence, reproduced with libavif's other notices in
 | `src/avif/movie.rs` | `src/read.c`: `avifParseMovieBox` and the track parsers |
 | `src/avif/setup.rs` | `src/read.c`: `avifDecoderParse`, `avifDecoderReset`; `src/avif.c`, `src/utils.c`: the clean-aperture crop; `src/gainmap.c`: `avifGainMapValidateMetadata` |
 | `src/avif/obu.rs` | `src/obu.c`, which libavif took from dav1d |
+| `src/avif/decode.rs` | `src/read.c`: `avifDecoderNextImage`, `avifDecoderDecodeTiles` and the grid tile copy; `src/codec_dav1d.c` |
+| `src/avif/convert.rs` | `src/reformat.c`, `src/reformat_libyuv.c`, `src/alpha.c`, `src/colr.c` (the matrix coefficients) |
+
+The AV1 decoding itself is rav1d, a separate crate with its own notices
+(`gui/video/rav1d/COPYING`).
 
 The test fixtures `tests/data/avif_*.avif` are libavif's own test files
 (`tests/data/` at v1.3.0), under the same licence; `tests/data/generate_avif.py`
 names each one and pins it by SHA-256.
+
+## libyuv
+
+Portions of this software are copyright 2011, 2013 and 2015 The LibYuv
+Project Authors, from libyuv at the revision libavif 1.3.0 pins
+(`4db2af62dab48895226be6b52737247e898ebe36`), used under its BSD licence
+(`libyuv-LICENSE`) with its additional patent grant (`libyuv-PATENTS`).
+
+| File | Derived from (libyuv) |
+|---|---|
+| `src/avif/libyuv.rs` | `source/row_common.cc`, `source/scale_common.cc`, `source/scale_any.cc`, `source/convert_argb.cc`, `source/planar_functions.cc` |

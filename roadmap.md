@@ -2517,9 +2517,19 @@ lane C's `guitk`.
   - `[x]` The container, as libavif 1.3.0 reads it (`src/avif/`): items, grids,
     alpha, gain maps, sequences; `dimensions` and `pixel_format` match
     Pillow's libavif on all 224 files of the AOM and libavif corpora.
-  - `[ ]` Decoding: rav1d vendored, YUV to RGB as libavif with libyuv
-    converts it, grids, alpha, crops and turns as Chrome applies them, and
-    sequences as an `Animation`.
+  - `[x]` Decoding: rav1d 1.1.0 vendored in `gui/video/rav1d` (with a safe
+    interface), driven as libavif drives dav1d; grids, alpha, and crops and
+    turns as Chrome applies them; YUV to RGB as libavif converts it, through
+    ports of libyuv's fixed point and libavif's floating point. Bit-exact
+    against Pillow on 39 generated fixtures covering every conversion path,
+    and on every file of the 224-file corpus where Pillow takes the same path.
+  - `[ ]` Sequences as an `Animation` (known-issues.md, "[F] An AVIF sequence
+    decodes to its first frame only").
+  - `[ ]` Frames coded at another size than their `ispe`, rescaled as libavif
+    rescales them (known-issues.md, "[F] An AVIF frame coded at another
+    size").
+  - `[ ]` Speed: a committed benchmark, then SIMD in rav1d (known-issues.md,
+    "[F] AVIF decoding has no committed benchmark").
 
 - `[F]` Port FreeRDP (line ~5058)
 

@@ -28,6 +28,28 @@
 //! -- and used to convert YUV to RGB. It is not otherwise applied: like the
 //! rest of this crate, AVIF has no colour management to feed yet.
 //!
+//! # Decoding, and the pixels
+//!
+//! The AV1 frames are decoded by rav1d, the Rust port of dav1d -- the decoder
+//! libavif, Chrome and Pillow use -- driven as libavif drives dav1d
+//! (`avif/decode.rs`): the same settings, the same send-and-drain loop, a
+//! grid's tiles checked and put together by libavif's rules. A frame whose
+//! size, depth or chroma layout is not the container's is refused, as Chrome
+//! refuses it.
+//!
+//! The conversion to pixels is libavif's `avifImageYUVToRGB` as Chrome calls
+//! it -- 8-bit BGRA, straight alpha, libavif's default upsampling -- with
+//! libyuv's fixed-point arithmetic where libavif hands the picture to libyuv
+//! and libavif's floating point where it does not (`avif/convert.rs`,
+//! `avif/libyuv.rs`). Held to Pillow's decode of the same files, it agrees to
+//! the bit wherever Pillow takes the same path: every picture with alpha, and
+//! every 8-bit colour one (without alpha, Pillow asks libavif for 24-bit RGB,
+//! which libyuv converts from deep or grey pictures by other routes).
+//!
+//! Not yet: a sequence decodes to its first frame only, and a frame coded at
+//! another size than its item's `ispe` -- which libavif rescales with libyuv's
+//! box filter -- is refused as unsupported.
+//!
 //! # Hostile input
 //!
 //! Every box is bounded by its parent before it is read, and the parsers
@@ -45,6 +67,12 @@ use crate::orientation::Orientation;
 use crate::{ColourModel, Image, ImageError, ImageResult, Limits, PixelFormat};
 
 mod container;
+#[cfg(feature = "avif")]
+mod convert;
+#[cfg(feature = "avif")]
+mod decode;
+#[cfg(feature = "avif")]
+mod libyuv;
 mod movie;
 mod obu;
 mod setup;
@@ -74,6 +102,14 @@ pub(crate) enum Error {
     /// `AVIF_RESULT_DECODE_ALPHA_FAILED` before decoding: no ID left for the
     /// alpha grid libavif would make up.
     Alpha(&'static str),
+    /// `AVIF_RESULT_DECODE_COLOR_FAILED` and `..._ALPHA_FAILED`: the AV1
+    /// decoder refused a frame, or produced one the container does not
+    /// describe.
+    #[cfg_attr(
+        not(feature = "avif"),
+        expect(dead_code, reason = "only decoding produces it")
+    )]
+    Decode(&'static str),
 }
 
 impl From<Error> for ImageError {
@@ -83,7 +119,8 @@ impl From<Error> for ImageError {
             | Error::NoContent(what)
             | Error::Alpha(what)
             | Error::Grid(what)
-            | Error::ToneMap(what) => Self::Malformed(what),
+            | Error::ToneMap(what)
+            | Error::Decode(what) => Self::Malformed(what),
             Error::Truncated => Self::Truncated,
             Error::NotAvif => Self::UnknownFormat,
             Error::MissingImage => Self::Malformed("AVIF primary item"),
@@ -160,25 +197,59 @@ pub fn pixel_format(bytes: &[u8]) -> ImageResult<PixelFormat> {
     ))
 }
 
-/// Decode an AVIF: its picture, or a sequence's first frame.
+/// Decode an AVIF: its picture, or a sequence's first frame -- the frame
+/// decoded by rav1d as libavif drives dav1d (`avif/decode.rs`), cropped and
+/// converted to pixels as Chrome has libavif convert them
+/// (`avif/convert.rs`), and turned as it is shown.
 ///
 /// # Errors
 ///
-/// As [`dimensions`], and [`ImageError::TooLarge`] past `limits`. Decoding
-/// the AV1 bitstream itself is not yet built, and reports
-/// [`ImageError::Unsupported`].
+/// As [`dimensions`]; [`ImageError::TooLarge`] past `limits`;
+/// [`ImageError::Malformed`] when the AV1 data does not decode, or decodes to
+/// a frame of another size, depth or chroma layout than the container says;
+/// and [`ImageError::Unsupported`] for a colour matrix libavif does not
+/// convert, or a frame that would have to be rescaled to its `ispe` size.
+#[cfg(feature = "avif")]
 pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     let picture = setup::Picture::read(bytes)?;
     picture.check(limits)?;
-    Err(ImageError::Unsupported("AV1 decoding"))
+    let frame = decode::decode(&picture, 0)?;
+    let frame = match picture.crop() {
+        Some(rect) => frame
+            .view(rect.x, rect.y, rect.width, rect.height)
+            .ok_or(Error::Decode("AVIF clean aperture"))?,
+        None => frame,
+    };
+    let pixels = convert::to_argb(&frame)?;
+    let (width, height) = frame.size();
+    Ok(picture.orientation().apply(Image {
+        width,
+        height,
+        pixels,
+    }))
 }
 
-/// Decode an AVIF already scaled to fit `max_w` x `max_h`: [`decode`], then
+/// Decode an AVIF -- which, built without the `avif` feature, this crate
+/// cannot: the container is read and checked, and the picture reported
+/// unsupported.
+///
+/// # Errors
+///
+/// As [`dimensions`], [`ImageError::TooLarge`] past `limits`, and otherwise
+/// [`ImageError::Unsupported`].
+#[cfg(not(feature = "avif"))]
+pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
+    let picture = setup::Picture::read(bytes)?;
+    picture.check(limits)?;
+    Err(ImageError::Unsupported("AVIF decoding"))
+}
+
+/// Decode an AVIF already scaled to fit `max_w` x `max_h`: [`decode()`], then
 /// the crate's box filter.
 ///
 /// # Errors
 ///
-/// As [`decode`].
+/// As [`decode()`].
 pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> ImageResult<Image> {
     let image = decode(bytes, limits)?;
     crate::scale::shrink_to_fit(image, max_w, max_h)

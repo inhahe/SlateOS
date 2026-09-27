@@ -111,9 +111,12 @@
 //! AVIF, as libavif reads it -- the reader behind Pillow, and the one Chrome's
 //! is ported from: the container with its items, grids, alpha planes, HDR gain
 //! maps and image sequences, accepted or refused by a port of libavif's own
-//! parser, and a picture's size, depth, alpha and turn read from it. Decoding
-//! the AV1 frames themselves is not built yet, and [`decode`] refuses an AVIF
-//! by name until it is. See [`avif`].
+//! parser; the AV1 frames decoded by rav1d (dav1d in Rust) as libavif drives
+//! dav1d; and the YUV converted to pixels by ports of libavif's and libyuv's
+//! arithmetic, so that a picture comes out as Chrome and Pillow show it, to
+//! the last bit. A sequence decodes to its first frame. Built without the
+//! default `avif` feature, the container is still read and [`decode`] refuses
+//! the picture by name. See [`avif`].
 //!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],
@@ -123,8 +126,8 @@
 //! # Where the code comes from
 //!
 //! Most of the decoders are ports of the libraries the browsers and Pillow
-//! run -- libjpeg-turbo, libtiff, libwebp, libavif, Chromium's and image-rs's
-//! BMP and icon readers, Skia's EXIF reader -- because producing exactly their
+//! run -- libjpeg-turbo, libtiff, libwebp, libavif and libyuv, Chromium's and
+//! image-rs's BMP and icon readers, Skia's EXIF reader -- because producing exactly their
 //! pixels is the point. Their notices travel with the code: each ported file
 //! names what it was translated or adapted from, and `licenses/` holds the
 //! licences and a table of what derives from where. Their licences also ask

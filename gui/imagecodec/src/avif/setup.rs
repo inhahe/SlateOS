@@ -156,12 +156,21 @@ pub(crate) struct Picture<'a> {
     pub(crate) irot: Option<u8>,
     pub(crate) imir: Option<u8>,
     /// The colour was premultiplied by the alpha (`prem`).
-    #[expect(dead_code, reason = "read by the AV1 decoding that follows")]
+    #[cfg_attr(
+        not(feature = "avif"),
+        expect(dead_code, reason = "only decoding reads it")
+    )]
     pub(crate) alpha_premultiplied: bool,
     /// Frames: 1 for a still picture.
-    #[expect(dead_code, reason = "read by the AV1 decoding that follows")]
+    #[cfg_attr(
+        not(feature = "avif"),
+        expect(dead_code, reason = "only decoding reads it")
+    )]
     pub(crate) frame_count: u32,
-    #[expect(dead_code, reason = "read by the AV1 decoding that follows")]
+    #[expect(
+        dead_code,
+        reason = "read by the animation that follows the first frame"
+    )]
     pub(crate) timing: Option<Timing>,
 }
 

@@ -137,6 +137,12 @@ SUITE_MARKER = "=== Kernel micro-benchmarks ==="
 #: finished.  0.1 s against a window of a few seconds is a few percent, and
 #: ten small reads per second is far below the noise floor that RESULT P19
 #: warns about (which was about *spawning* processes, not reading bytes).
+#:
+#: It is the latency *asked for*, not the latency had.  A read of the log is a
+#: file-system call, and on a busy Windows host one can take seconds (the
+#: first open of a freshly created file measured a 1.2 ms median and a 100 ms
+#: tail on a merely loaded one, 2026-09-26).  So the record states what was
+#: achieved, `max_observation_gap`, rather than trusting this number.
 POLL_SECONDS = 0.1
 
 #: Iterations of the empty loop between a spinner's liveness checks.  Large
@@ -702,7 +708,12 @@ class Watcher:
         self.completions = []
 
     def feed(self, lines, now):
-        """Record suite benchmark completions; return the names seen."""
+        """Record suite benchmark completions; return the names seen.
+
+        `now` must be the instant the read that returned `lines` *finished*
+        -- see `observed` in `run`'s `consume` for why no earlier instant is
+        an honest stamp.
+        """
         seen = []
         for line in lines:
             if not self.in_suite:
@@ -865,6 +876,30 @@ def run(args):
     # reader who wants to know whether the load really began where the record
     # says it did can look instead of guessing.
     barrier_wait = [None, None]
+    # The read loop's own resolution, measured rather than assumed -- the
+    # companion to `barrier_wait` for the other half of the instrument.
+    #
+    # `read_began` is when the latest read of the log BEGAN.  Every line the
+    # next read returns was completed after that instant (had it been complete
+    # then, that read would have returned it), so it is each new line's lower
+    # bound, kept per completion in `not_before`.  The upper bound is the
+    # completion's own stamp.  `max_gap` is the widest such interval, i.e. the
+    # worst resolution the run actually had.  `max_io` and `max_work` split a
+    # poll's cost into the host's part (file-system calls on a tiny file) and
+    # the controller's own (parsing, and switching the load at an edge), so a
+    # wide gap can be attributed by measurement rather than by argument.
+    read_began = None
+    not_before = []
+    max_gap = None
+    max_io = 0.0
+    max_work = 0.0
+    last_read_io = 0.0
+    # Window lines that arrived in the same read as the trigger -- they had
+    # finished before the load went on -- and lines after the window that
+    # arrived in the same read as the `--until` -- they ran under a load that
+    # was still on.  See `consume`.
+    seen_with_trigger = 0
+    seen_with_until = 0
 
     def snapshot():
         """Read every spinner's (cpu, clock) pair, each under its own lock.
@@ -937,34 +972,77 @@ def run(args):
         record["fired"] = True
         print("=== load applied (whole window) ===", flush=True)
 
-    def consume(now, final=False):
+    def consume(final=False):
         """Read whatever the tail has and act on it. True => stop looping.
 
         `final` marks the one call made *after* the stop-file appeared, where
         the producer is known to have finished.  It differs in exactly one
         way: it will not `fire()`.  See `drain_after_stop` below.
         """
-        nonlocal lines_before_on, first_seen_at
+        nonlocal lines_before_on, first_seen_at, read_began, max_gap, \
+            max_work, last_read_io, seen_with_trigger, seen_with_until
+        lower = read_began
+        began = time.monotonic()
+        read_began = began
         if not tail.opened():
+            last_read_io = time.monotonic() - began
             return False
-        seen = watcher.feed(tail.lines(), now)
+        lines = tail.lines()
+        # THE OBSERVATION INSTANT, taken after the read has returned.  Until
+        # 2026-09-26 every line was stamped with the loop's `now`, sampled at
+        # the top of the poll -- *before* the stop-file check, the open and the
+        # read, each a file-system call.  On an idle host those take
+        # microseconds and the difference was invisible.  On a loaded one a
+        # single call can take seconds, and every line of the batch was then
+        # stamped from before the call began: lines written *during* the stall
+        # carried a time preceding their own existence.  The suite's `spinner
+        # occupancy: a loaded run` caught it inside a boot test -- ten window
+        # completions stamped 1.3178 s, a load fired at 3.6852 s on the very
+        # read that returned them -- and refused the build.  A stamp taken here
+        # is an upper bound that cannot be wrong: every returned line was
+        # complete by now.
+        observed = time.monotonic()
+        last_read_io = observed - began
+        seen = watcher.feed(lines, observed)
+        not_before.extend([lower] * len(seen))
+        if seen and lower is not None:
+            gap = observed - lower
+            if max_gap is None or gap > max_gap:
+                max_gap = gap
         if seen and first_seen_at is None:
             first_seen_at = watcher.completions[0][1]
+        # Lines that share a read are not simultaneous, but they are all in the
+        # past: the trigger's read already holds every window line written
+        # before it returned, and those benchmarks finished before `fire()`
+        # could run.  Counting them is the difference between "the load
+        # covered the window" and "the load covered the window's tail"; when
+        # the count is the whole window, the load covered nothing (see
+        # `window-missed` below).  The mirror image at the other edge is a line
+        # *after* the window in the `--until`'s read: it ran under a load that
+        # was still on.
+        fired_here = released_here = False
         for name in seen:
             if on_at is None:
                 lines_before_on += 1
                 if name == args.at and not final:
                     fire()
+                    fired_here = True
                     record["fired"] = True
                     print(f"=== '{name}' finished: load on ===", flush=True)
             else:
                 if off_at is None:
                     during.append(name)
+                    if fired_here:
+                        seen_with_trigger += 1
+                elif released_here:
+                    seen_with_until += 1
                 if args.until is not None and off_at is None \
                         and name == args.until:
                     release()
+                    released_here = True
                     record["released"] = True
                     print(f"=== '{name}' finished: load off ===", flush=True)
+        max_work = max(max_work, time.monotonic() - observed)
         if final:
             record["drained_after_stop"] = len(seen)
         return off_at is not None and not args.hold
@@ -982,7 +1060,9 @@ def run(args):
                 # closed it.  A void run reported as void beats a void run
                 # reported with a plausible-looking window.
                 break
-            if args.stop_file and os.path.exists(args.stop_file):
+            stopping = bool(args.stop_file) and os.path.exists(args.stop_file)
+            stop_io = time.monotonic() - now
+            if stopping:
                 record["outcome"] = "stopped"
                 # THE FINAL DRAIN (`drain_after_stop`).  Until 2026-09-02 this
                 # broke immediately, discarding every line written since the
@@ -1020,10 +1100,14 @@ def run(args):
                 # load applied now covered nothing at all, and a record saying
                 # `fired` with a zero-length window is worse than the honest
                 # `at-never-matched`.
-                consume(time.monotonic(), final=True)
+                consume(final=True)
+                max_io = max(max_io, stop_io + last_read_io)
                 break
 
-            if consume(now):
+            finished = consume()
+            # One poll's file-system time: the stop-file check and the read.
+            max_io = max(max_io, stop_io + last_read_io)
+            if finished:
                 record["outcome"] = "complete"
                 break
 
@@ -1061,13 +1145,37 @@ def run(args):
             # be compared directly.  This is what makes "when did the load
             # actually become effective" a measurement rather than a guess --
             # the question both void runs turned on and neither could answer.
-            # A completion is stamped with the time the poll *observed* it, so
-            # the benchmark actually finished somewhere in
-            # [stamp - poll_seconds, stamp].  Recorded rather than assumed,
-            # because it is the instrument's real resolution: lines arriving
-            # in one batch share a stamp, and the controller cannot tell which
-            # of them preceded the trigger it fired on in that same batch.
+            #
+            # A completion is stamped with the instant the read that returned
+            # it finished, and paired with the instant the read before it
+            # began: the benchmark finished somewhere in
+            # (`completions_not_before[i]`, `completions[i][1]`].  That is
+            # nominally one poll wide.  It is not *assumed* to be: a stalled
+            # read widens it, and the widest one is `max_observation_gap`.
+            # `null` as a lower bound means the line was in the first read of
+            # the log, before which nothing was observed.
+            #
+            # Lines arriving in one read share a stamp.  The ones in the
+            # trigger's own read had finished before the load went on, and
+            # are counted as `during_seen_with_trigger`; the lines after the
+            # window in the `--until`'s read ran under the load, and are
+            # `after_seen_with_until`.
             "poll_seconds": POLL_SECONDS,
+            "completions_not_before": [
+                round(bound - started, 4) if bound is not None else None
+                for bound in not_before],
+            "max_observation_gap": (round(max_gap, 4)
+                                    if max_gap is not None else None),
+            # The two parts of a poll's cost, worst case each: file-system
+            # calls (the stop-file check and the read -- the host's, on a file
+            # this small) and the controller's own processing of what it read
+            # (parsing, and `fire()`/`release()` with their spinner barriers).
+            # A wide gap with small figures here was spent asleep or
+            # descheduled: the host's too.
+            "max_poll_io_seconds": round(max_io, 4),
+            "max_poll_work_seconds": round(max_work, 4),
+            "during_seen_with_trigger": seen_with_trigger,
+            "after_seen_with_until": seen_with_until,
             "fired_at": round(fired_rel, 4) if fired_rel is not None else None,
             # The same two instants on the raw `time.monotonic()` clock, which
             # is one clock across processes on the hosts this runs on. A
@@ -1108,6 +1216,19 @@ def run(args):
             record["problem"] = "until-never-matched"
         elif args.at is not None and not record["fired"]:
             record["problem"] = "at-never-matched"
+        elif during and seen_with_trigger == len(during):
+            # Every line of the window was already in the log when the trigger
+            # was read, so the load went on after the window had finished and
+            # covered none of it -- a window of zero benchmarks with both edges
+            # present.  Before 2026-09-26 this was reported as a clean run: a
+            # controller held for 2.4 s by one read saw the trigger and the
+            # `--until` together, switched the load on and off 0.1 ms apart,
+            # and exited 0 with ten benchmarks listed as having run under it.
+            #
+            # Ahead of `load-not-applied`, for the reason given above: the
+            # spinners' occupancy over a window that held no benchmark says
+            # nothing about the benchmarks, whatever it reads.
+            record["problem"] = "window-missed"
         elif (occupancy.get("occupancy") is not None
                 and occupancy["occupancy"] < OCCUPANCY_FLOOR):
             # The spinners were nominally running but barely got scheduled, so
@@ -1119,6 +1240,24 @@ def run(args):
         tail.close()
 
     return record
+
+
+def read_gap_of(record, name):
+    """Seconds between the read that first returned `name` and the one before.
+
+    The resolution the record had at that one line -- the figure that says
+    whether a window edge was placed within a poll or within a stall.  `None`
+    when `name` was never seen, or arrived in the first read of the log (there
+    is no earlier read to measure from), or the record predates the bounds.
+    """
+    completions = record.get("completions") or []
+    bounds = record.get("completions_not_before") or []
+    for index, (seen, stamp) in enumerate(completions):
+        if seen == name:
+            if index < len(bounds) and bounds[index] is not None:
+                return stamp - bounds[index]
+            return None
+    return None
 
 
 #: `[bench] MEASURED-AS <scored_name> <live_name>`, emitted by the kernel for
@@ -1447,6 +1586,22 @@ def main(argv=None):
               f"({record['completions_seen']} result lines)")
     print(f"  ran under load    : {record['completions_during']} result "
           f"lines, after {record['completions_before_on']} clean ones")
+    # The two edges' honest corrections to the line above, and the resolution
+    # both are measured at.  Printed only when they say something, except the
+    # resolution, which is the instrument's own figure and always relevant.
+    if record.get("during_seen_with_trigger"):
+        print(f"  finished unloaded : {record['during_seen_with_trigger']} of "
+              f"those were already in the log when the trigger was read -- "
+              f"they finished before the load went on")
+    if record.get("after_seen_with_until"):
+        print(f"  ran past the edge : {record['after_seen_with_until']} result "
+              f"line(s) after the window were already in the log when the "
+              f"release was read -- they ran under the load")
+    if record.get("max_observation_gap") is not None:
+        print(f"  read resolution   : {record['max_observation_gap']:.2f}s at "
+              f"worst between a line's last miss and its first read (polls "
+              f"every {POLL_SECONDS}s; one poll's file-system calls took up "
+              f"to {record['max_poll_io_seconds']:.2f}s)")
     # The fraction is the number to look at when a window turns out to be
     # ungradeable: a stimulus occupying 3% of the suite's wall time cannot
     # perturb a quarter of its benchmarks, however precisely it was triggered.
@@ -1507,6 +1662,15 @@ def main(argv=None):
         print(f"  PROBLEM           : never saw '{args.until}' -- the load was "
               f"applied but never released, so it ran to the end of the boot "
               f"and the window has no right-hand edge.", file=sys.stderr)
+    elif problem == "window-missed":
+        gap = read_gap_of(record, args.at)
+        when = (f"one read {gap:.2f}s after the one before it, where it polls "
+                f"every {POLL_SECONDS}s" if gap is not None
+                else "in the first read of the log")
+        print(f"  PROBLEM           : every result line of the window was "
+              f"already in the log when '{args.at}' was read ({when}) -- the "
+              f"load went on after the window had finished, so it covered "
+              f"none of it.", file=sys.stderr)
     elif problem == "load-not-applied":
         print(f"  PROBLEM           : the window was bounded correctly, but "
               f"the spinners burned only "

@@ -170,6 +170,49 @@ def host_explains(series, t0, t1):
     return None
 
 
+#: Every record `run_controller` has read, in order, so a case can find the
+#: ones its own runs produced (`timing_case` notes the length on entry).
+CONTROLLER_RECORDS = []
+
+
+def controller_explains(records):
+    """Why the host, by holding the load controller, answers for a failure.
+
+    The probe beside a case measures whether *spinners* get CPU.  The
+    controller can be held without CPU being short: each poll is a file-system
+    call, and on a busy Windows host one can take seconds.  That is how this
+    suite failed a boot test on 2026-09-26 -- one read held 2.4 s, the whole
+    window arriving in it, while the probe alongside read a healthy host.
+
+    So the controller times its own file-system calls, and the attribution is
+    a reading: one poll's calls -- a stop-file check and a read of a log a few
+    kilobytes long -- taking a whole poll or more is the host's disk (or its
+    scheduler, stopping the process mid-call), since nothing this code does
+    can make them slow.  That is the whole rule, and its narrowness is the
+    point.  A wide gap between reads with fast calls is *not* excused here: an
+    oversleep is the host's too, but a loop that sleeps or works too long is
+    this code's, and the record cannot tell those apart -- the probe can, and
+    `host_explains` is where that is decided.  Tried first on 2026-09-26 as a
+    median-cadence rule, it could not excuse the very failure it was for: a
+    stall that fills a short run leaves two intervals, and their median is
+    half the stall.
+    """
+    for record in records:
+        io = record.get("max_poll_io_seconds")
+        poll = record.get("poll_seconds")
+        if io is None or poll is None:
+            continue
+        if io >= poll:
+            gap = record.get("max_observation_gap")
+            widened = (f", widening one read's window to {gap:.2f}s"
+                       if gap is not None else "")
+            return (f"one of the load controller's polls spent {io:.2f}s in "
+                    f"file-system calls on a log a few KB long, where it polls "
+                    f"every {poll}s{widened} -- the host held it, not this "
+                    f"code")
+    return None
+
+
 #: Set, to its measured reason, once a subprocess has timed out on a host too
 #: starved to run it (`note_timeout`). Every runner after that declines at
 #: once rather than spending a timeout of its own: at 0.06 of a core
@@ -217,7 +260,7 @@ def live_check_true(label, cond, detail=""):
 
 
 @contextlib.contextmanager
-def timing_case(name, probe=True):
+def timing_case(name, probe=True, attribute=True):
     """A scratch directory for one live case, with the host measured beside it.
 
     The live cases ask physical questions -- was a line read before the stop,
@@ -236,10 +279,23 @@ def timing_case(name, probe=True):
     already set (`HOST_STARVED`) raises `HostStarved`, which ends the case here
     as a named skip.
 
+    The probe cannot see a host that holds the controller *without* starving
+    the CPU -- a file-system call that takes seconds -- so the controller's own
+    account of its cadence is consulted too (`controller_explains`), for every
+    case including the unprobed one: it measures the run, not the host beside
+    it.
+
     `probe=False` is for a case that measures the host itself (the live
     occupancy case): a second pair of spinners would only compete with it.
+
+    `attribute=False` is for a case whose assertions do not depend on timing at
+    all -- one that stages a stall on purpose, above all, where the
+    controller's measurement of that stall would otherwise excuse every
+    failure the case exists to catch.  Its failures always stand; a starved
+    runner and a timeout are still handled as above.
     """
     before = len(FAILURES)
+    records_before = len(CONTROLLER_RECORDS)
     beside = ConcurrentProbe(2) if probe else None
     if beside is not None:
         beside.wait_started()
@@ -260,6 +316,8 @@ def timing_case(name, probe=True):
     new = FAILURES[before:]
     if starved is None and (new or timed_out is not None) and probe:
         starved = host_explains(series, t0, t1)
+    if starved is None and new and attribute:
+        starved = controller_explains(CONTROLLER_RECORDS[records_before:])
     if starved is not None:
         if new:
             del FAILURES[before:]
@@ -384,13 +442,17 @@ def replay(path, names, per_line=0.03, preamble=True):
     return thread
 
 
-def run_controller(serial, extra, wait_for=None, delay=0.0, spinners=0):
+def run_controller(serial, extra, wait_for=None, delay=0.0, spinners=0,
+                   script=CANARY_LOAD):
     """Run the controller as a subprocess; return (record, returncode).
 
     `spinners` defaults to 0 so the suite does not saturate the machine it is
     running on: every test here is about the controller's bookkeeping, which
     is independent of how much CPU the spinners burn.  The one test that is
     *about* the burning passes a real count.
+
+    `script` is for the one case that runs an instrumented copy
+    (`held_controller`).
     """
     if HOST_STARVED is not None:
         raise HostStarved(HOST_STARVED)
@@ -399,7 +461,7 @@ def run_controller(serial, extra, wait_for=None, delay=0.0, spinners=0):
         ready_path = os.path.join(tmp, "ready")
         stop_path = os.path.join(tmp, "stop")
         proc = subprocess.Popen(
-            [sys.executable, CANARY_LOAD, "--serial", serial,
+            [sys.executable, script, "--serial", serial,
              "--spinners", str(spinners), "--timeout", "60",
              "--stop-file", stop_path, "--ready-file", ready_path,
              "--record", record_path, "--hold"] + extra,
@@ -428,6 +490,7 @@ def run_controller(serial, extra, wait_for=None, delay=0.0, spinners=0):
             raise
         with open(record_path, encoding="utf-8") as handle:
             record = json.load(handle)
+        CONTROLLER_RECORDS.append(record)
         return record, proc.returncode, out
 
 
@@ -1067,39 +1130,221 @@ with timing_case("spinner occupancy: a loaded run") as tmpdir:
           len(times), record["completions_seen"])
     check_true("completion times are in order", times == sorted(times),
                "out of order")
+    # `<=`, not `<`: both are rounded to 0.1 ms, and a window whose trigger
+    # and `--until` share one read is switched on and off inside that.
     check_true("the load's own on/off instants are on that clock too",
                record["fired_at"] is not None
                and record["released_at"] is not None
-               and record["fired_at"] < record["released_at"],
+               and record["fired_at"] <= record["released_at"],
                f"{record['fired_at']} -> {record['released_at']}")
     # The window's benchmarks must fall between the two instants, to within
     # the instrument's own resolution.
     #
-    # The tolerance is one poll interval and is not slack: a completion is
-    # stamped when the poll *saw* it, and the trigger line is seen in the same
-    # batch as any line that arrived just after it, so those share a stamp
-    # fractionally *below* `fired_at`.  Asserting strict containment would be
-    # asserting a precision the controller does not have -- exactly the kind
-    # of claim this experiment keeps being burned by.  Propagating the
-    # uncertainty explicitly is the honest version.
+    # A stamp is the instant the read that returned the line *finished*
+    # (`observed` in canary-load.py): an upper bound on when the benchmark
+    # finished, and the earliest the controller could act on it.  So the right
+    # edge is exact -- the release follows the read that saw the `--until`,
+    # which follows every window line -- and the left one is not: the lines
+    # sharing the trigger's read carry that read's stamp, which precedes
+    # `fired_at` by the fire's own latency.  One poll is the resolution the
+    # instrument claims, so one poll is what is asserted there.
+    #
+    # A stall *before* a read no longer counts against it.  Until 2026-09-26
+    # the stamps were taken at the top of the poll, ahead of the stop-file
+    # check, the open and the read; a boot test's loaded host held one of
+    # those for 2.4 s and this check read ten completions 2.37 s before the
+    # fire that the very same read had triggered.
     poll = record["poll_seconds"]
-    during = dict(record["completions"])
-    inside = [during[n] for n in record["during_names"] if n in during]
+    stamp_of = dict(record["completions"])
+    inside = [stamp_of[n] for n in record["during_names"] if n in stamp_of]
     check_true("the window's completions lie inside the load's interval",
-               all(record["fired_at"] - poll <= t
-                   <= record["released_at"] + poll for t in inside),
+               all(record["fired_at"] - poll <= t <= record["released_at"]
+                   for t in inside),
                f"fired {record['fired_at']}, released "
                f"{record['released_at']}, poll {poll}, times {inside}")
     check_true("and none of them precedes the trigger by more than one poll",
                all(t >= record["fired_at"] - poll for t in inside),
                f"fired {record['fired_at']}, times {inside}")
 
+    # Each completion's honest interval: after the read before it began, no
+    # later than its own stamp.  Reads are a poll's sleep apart, so a bound
+    # strictly precedes its stamp even after rounding.
+    bounds = record["completions_not_before"]
+    check("every completion carries a lower bound", len(bounds), len(times))
+    check_true("and each bound precedes its stamp",
+               all(b is None or b < t for b, t in zip(bounds, times)),
+               f"{list(zip(bounds, times))}")
+    widths = [t - b for b, t in zip(bounds, times) if b is not None]
+    gap = record["max_observation_gap"]
+    check_true("the widest interval is the resolution the record states",
+               (not widths and gap is None)
+               or (widths and gap is not None
+                   and abs(max(widths) - gap) <= 2e-4),
+               f"widest {max(widths) if widths else None}, stated {gap}")
+
+    # The lines that arrived in the trigger's own read had finished before the
+    # load went on.  Same read <=> same stamp: distinct reads are at least a
+    # poll's sleep apart.  When that is the whole window the load covered
+    # nothing, and the record must say so rather than list ten benchmarks as
+    # loaded -- which is what it did in the failure above.  Otherwise a
+    # zero-spinner run has no problem at all: in particular it is not accused
+    # of failing to apply a load it never had.
+    trigger_stamp = stamp_of.get("bench_10")
+    shared = sum(1 for t in inside if t == trigger_stamp)
+    check("the window lines in the trigger's read are counted as unloaded",
+          record["during_seen_with_trigger"], shared)
+    check("the run is called a missed window exactly when all of them were",
+          record.get("problem"),
+          "window-missed" if inside and shared == len(inside) else None)
+
     # This run asked for no spinners, so there is nothing to have occupied a
     # core.  The honest report is "not measured", never a reassuring number.
     check("a zero-spinner run reports no occupancy",
           record["host_occupancy"], None)
-    check_true("and is not accused of failing to apply a load it never had",
-               record.get("problem") is None, record.get("problem"))
+
+
+# The deterministic reproduction of that 2026-09-26 failure.  There, one read
+# was held 2.4 s by a loaded host, the whole window arrived in it, and the
+# controller switched the load on and off 0.1 ms apart and exited 0 with ten
+# benchmarks listed as having run under it.  Writing the suite before the
+# controller starts puts the trigger and the whole window in one read by
+# construction -- no host involved, so nothing here is a timing assertion,
+# and nothing here is withdrawn on the host's account either.
+with timing_case("a window already in the log when its trigger is read",
+                 probe=False, attribute=False) as tmpdir:
+    serial = os.path.join(tmpdir, "serial.txt")
+    replay(serial, SUITE, per_line=0.0).join()
+
+    record, rc, out = run_controller(
+        serial, ["--at", "bench_10", "--until", "bench_20"], delay=0.3)
+
+    check("the load still fired on the trigger", record["fired"], True)
+    check("and was released on the --until", record["released"], True)
+    check("every window line is counted as finished before the load went on",
+          record["during_seen_with_trigger"], 10)
+    check("every line after the window as having run under it",
+          record["after_seen_with_until"], len(SUITE) - 21)
+    check("the run is reported as a missed window",
+          record.get("problem"), "window-missed")
+    check("with a failure exit", rc, 1)
+    check_true("and the operator is told the load covered none of it",
+               "covered none of it" in out, out[-600:])
+    stamp_of = dict(record["completions"])
+    shared = {stamp_of[f"bench_{i:02d}"] for i in range(10, 22)}
+    check_true("the trigger, the window and the line after it share one read",
+               len(shared) == 1, f"{sorted(shared)}")
+    check_true("whose stamp does not follow the fire it triggered",
+               stamp_of["bench_10"] <= record["fired_at"],
+               f"stamp {stamp_of['bench_10']}, fired {record['fired_at']}")
+    check_true("and every line in it has the same lower bound",
+               len(set(record["completions_not_before"])) == 1,
+               f"{set(record['completions_not_before'])}")
+
+
+#: The line of `SerialTail.opened` a held copy of the controller waits before.
+OPEN_LINE = '            self._handle = open(self.path, "rb")\n'
+
+
+def held_controller(directory, waiting, gate):
+    """A copy of canary-load.py whose first open of the log waits on `gate`.
+
+    It announces the wait by creating `waiting`, so the caller releases the
+    gate only once the controller is provably inside the call -- the hold is
+    then a fact of the test rather than a race against the host.  Built from
+    the real source, like `check-boot-test-reexec.sh`'s lifted preamble, so it
+    cannot drift from the code it stands for; `None` if the line it hooks has
+    changed shape, which the caller reports by name.
+    """
+    with open(CANARY_LOAD, encoding="utf-8") as handle:
+        source = handle.read()
+    if source.count(OPEN_LINE) != 1:
+        return None
+    hold = (f"            open({waiting!r}, 'w').close()\n"
+            f"            while not os.path.exists({gate!r}):\n"
+            f"                time.sleep(0.01)\n")
+    path = os.path.join(directory, "canary-load-held.py")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(source.replace(OPEN_LINE, hold + OPEN_LINE))
+    return path
+
+
+#: How long the held case keeps the controller inside its open once it is
+#: there: several polls, so the measurement cannot be mistaken for a fast one.
+HOLD_SECONDS = 0.5
+
+# The 2026-09-26 failure end to end: the controller held inside a file-system
+# call while the whole window is written, as the boot test's host held it.
+# The case above reproduces the *window* deterministically; this one
+# reproduces the *hold*, and checks the three things the fix is for -- the
+# stamps come after the hold rather than before it, the controller measures
+# the hold where it happened, and the harness would therefore excuse a timing
+# failure it caused.
+#
+# Every assertion is an ordering the test itself arranged, so none is a
+# timing assertion -- and `attribute=False` is essential rather than tidy:
+# this case stalls the controller's file-system calls on purpose, which is
+# exactly what `controller_explains` excuses, so with attribution on every
+# failure here would be withdrawn and a reverted fix would read as a SKIP.
+with timing_case("a controller held inside its first read",
+                 probe=False, attribute=False) as tmpdir:
+    serial = os.path.join(tmpdir, "serial.txt")
+    waiting = os.path.join(tmpdir, "waiting")
+    gate = os.path.join(tmpdir, "gate")
+    script = held_controller(tmpdir, waiting, gate)
+    check_true("the controller's open can still be found to hold",
+               script is not None,
+               f"SerialTail.opened no longer contains {OPEN_LINE!r} -- "
+               f"update OPEN_LINE to the line that opens the log")
+    if script is not None:
+        gate_opened = []
+
+        def held_replay():
+            replay(serial, SUITE, per_line=0.02).join()
+            deadline = time.monotonic() + 60
+            while not os.path.exists(waiting) \
+                    and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(HOLD_SECONDS)
+            # Stamped just before the gate exists, so every read the
+            # controller completes after the gate is later than this.
+            gate_opened.append(time.monotonic())
+            with open(gate, "w", encoding="utf-8", newline=""):
+                pass
+
+        record, rc, out = run_controller(
+            serial, ["--at", "bench_10", "--until", "bench_20"],
+            wait_for=held_replay, delay=0.3, script=script)
+        check_true("the controller announced its wait",
+                   os.path.exists(waiting), "no waiting marker")
+        check_true("the controller measured the hold where it happened",
+                   record["max_poll_io_seconds"] >= HOLD_SECONDS,
+                   f"max_poll_io_seconds {record['max_poll_io_seconds']}")
+        # The record's times are relative to the controller's start; its
+        # `fired_monotonic` is the same instant on the raw monotonic clock,
+        # which is one clock across processes here (the record's own note on
+        # `fired_monotonic` says so), so the difference moves the
+        # stamps onto the clock `gate_opened` was read from.  Both figures in
+        # the difference are rounded to 0.1 ms, hence the 1 ms of slack.
+        origin = record["fired_monotonic"] - record["fired_at"]
+        stamp_of = dict(record["completions"])
+        inside = [stamp_of[n] for n in record["during_names"]
+                  if n in stamp_of]
+        check_true("the window's stamps come after the hold, not before it",
+                   inside and gate_opened and all(
+                       origin + t >= gate_opened[0] - 1e-3 for t in inside),
+                   f"gate opened {gate_opened}, stamps "
+                   f"{[round(origin + t, 4) for t in inside]}")
+        check_true("and none follows the fire its own read triggered",
+                   all(t <= record["fired_at"] for t in inside),
+                   f"fired {record['fired_at']}, times {inside}")
+        check("the whole window is counted as finished before the load",
+              record["during_seen_with_trigger"], 10)
+        check("so the run is a missed window", record.get("problem"),
+              "window-missed")
+        check("with a failure exit", rc, 1)
+        check_true("and a timing failure in such a run would be excused",
+                   controller_explains([record]) is not None,
+                   f"io {record['max_poll_io_seconds']}")
 
 
 # --------------------------------------------------------------------------
@@ -1604,6 +1849,62 @@ for label, occupancy, headroom, want in [
 
 # occupancy_over and stall_over are unit-tested in test-hostload.py, beside
 # the module they moved to.
+
+# --------------------------------------------------------------------------
+# Controller attribution: when the controller's own timing excuses a failure
+# --------------------------------------------------------------------------
+# The rule `timing_case` applies, on synthetic records, for the reason
+# `attribute_shortfall` is tested that way: the live cases can only provoke it
+# by luck, and a wrong rule excuses real failures silently.
+print()
+print("controller attribution")
+
+POLL = cl.POLL_SECONDS
+
+
+def timed(io, gap=None, work=0.0005):
+    """A record carrying what `controller_explains` reads, and a distractor."""
+    return {"poll_seconds": POLL, "max_poll_io_seconds": io,
+            "max_observation_gap": gap, "max_poll_work_seconds": work}
+
+
+for label, records, excused in [
+    ("fast file-system calls excuse nothing", [timed(0.002, 0.11)], False),
+    # The 2026-09-26 boot-test failure, as `stall_repro` measured it under
+    # the staged controller: one poll 2.42 s inside its calls.
+    ("a poll held for seconds inside its file-system calls is the host's",
+     [timed(2.4184, 2.5308)], True),
+    ("a whole poll inside them is enough", [timed(POLL, 0.21)], True),
+    ("just under a poll is not", [timed(POLL - 0.001, 0.2)], False),
+    # A wide gap with fast calls is an oversleep or a slow loop, and the
+    # record cannot say which -- so it is not this rule's to excuse.
+    ("a wide gap with fast calls is not excused here",
+     [timed(0.002, 2.5)], False),
+    ("nor is slow work of the controller's own",
+     [timed(0.002, 2.5, work=1.2)], False),
+    ("a record predating the timing fields excuses nothing",
+     [{"poll_seconds": POLL}], False),
+    ("no record excuses nothing", [], False),
+    ("one held run among several is enough",
+     [timed(0.002, 0.11), timed(0.5, 0.6)], True),
+]:
+    check(label, controller_explains(records) is not None, excused)
+reason = controller_explains([timed(2.4184, 2.5308)]) or ""
+check_true("the excuse states what was measured, not merely that it was",
+           "2.42s" in reason and "2.53s" in reason and f"{POLL}s" in reason,
+           reason)
+
+# `read_gap_of`: the resolution at one named line, which the controller's
+# `window-missed` message quotes.
+gapped = {"completions": [["a", 1.0], ["b", 3.5]],
+          "completions_not_before": [None, 1.1]}
+check("a line in the first read has no gap to report",
+      cl.read_gap_of(gapped, "a"), None)
+check("a later line's gap is the width of the read that saw it",
+      round(cl.read_gap_of(gapped, "b"), 4), 2.4)
+check("a name never seen has none", cl.read_gap_of(gapped, "zzz"), None)
+check("nor does a record written before the bounds existed",
+      cl.read_gap_of({"completions": [["b", 3.5]]}, "b"), None)
 
 print()
 if SKIPS:

@@ -530,6 +530,47 @@ def test_a_confession_is_derived_when_the_record_does_not_state_it():
               None)
 
 
+def test_a_window_that_arrived_with_its_trigger_is_a_confession():
+    """A window read whole alongside its trigger held no benchmark under load.
+
+    Derived from the completion stamps, which is what lets it convict records
+    written before the controller began saying so itself (2026-09-26): lines
+    returned by one read share one stamp, and distinct reads -- a poll's sleep
+    apart -- never do.
+    """
+    gp = load_module(SCRIPT, "grade_positional")
+    derive = gp.record_problem
+    base = {"at": "b40", "fired": True, "until": "b42", "released": True,
+            "completions_during": 2}
+    missed = {**base, "completions": [["b39", 1.0], ["b40", 2.5], ["b41", 2.5],
+                                      ["b42", 2.5], ["b43", 2.6]]}
+    check("a window read whole with its trigger is a confession",
+          derive(missed), "window-missed")
+    check("and the controller's own statement of it is admitted",
+          derive({"problem": "window-missed"}), "window-missed")
+    check("a window whose tail came in a later read is not",
+          derive({**base, "completions": [["b40", 2.5], ["b41", 2.5],
+                                          ["b42", 2.6]]}), None)
+    check("nor is one read wholly after its trigger",
+          derive({**base, "completions": [["b40", 2.5], ["b41", 2.6],
+                                          ["b42", 2.7]]}), None)
+    check("nor one the completions do not reach the end of",
+          derive({**base, "completions": [["b40", 2.5], ["b41", 2.5]]}), None)
+    check("a record without completions derives nothing", derive(base), None)
+    check("nor does a malformed one",
+          derive({**base, "completions": "b40"}), None)
+    check("nor an empty window",
+          derive({**base, "completions_during": 0,
+                  "completions": [["b40", 2.5]]}), None)
+    check("a missing edge still outranks it",
+          derive({**missed, "released": False}), "until-never-matched")
+    check("and it outranks an occupancy reading, which covered no benchmark",
+          derive({**missed, "host_occupancy": {"occupancy": 0.0}}),
+          "window-missed")
+    check_true("the grader's words for it name the consequence",
+               "covered none of it" in gp.LOAD_RECORD_PROBLEMS["window-missed"])
+
+
 def test_end_to_end_a_confessed_broken_window_is_ungraded_and_exhibited():
     """The verdict cites the record, so the record must be shown with it."""
     gp = load_module(SCRIPT, "grade_positional")

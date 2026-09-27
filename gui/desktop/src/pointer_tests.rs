@@ -630,7 +630,10 @@ fn the_power_button_shuts_down_in_one_click_and_its_caret_holds_the_rest() {
                 .expect("a program")
         )
     );
-    assert!(!shell.start_menu_open, "the menu stayed up over a shut down");
+    assert!(
+        !shell.start_menu_open,
+        "the menu stayed up over a shut down"
+    );
     assert!(!shell.power_menu_open, "the other choices opened as well");
 
     // With a window open, the click asks it to close.
@@ -681,25 +684,26 @@ fn the_power_caret_is_drawn_where_it_is_clicked_and_lit_while_its_menu_shows() {
             })
             .collect()
     };
-    let chevrons = |shell: &DesktopShell, tree: &RenderTree| -> Vec<(String, guitk::color::Color)> {
-        tree.commands
-            .iter()
-            .filter_map(|cmd| match cmd {
-                RenderCommand::Image {
-                    x,
-                    y,
-                    width,
-                    height,
-                    image_id,
-                    ..
-                } if within(*x, *y, *width, *height, caret) => {
-                    let request = shell.icon_request(*image_id).expect("an icon");
-                    Some((request.name.into_owned(), request.color))
-                }
-                _ => None,
-            })
-            .collect()
-    };
+    let chevrons =
+        |shell: &DesktopShell, tree: &RenderTree| -> Vec<(String, guitk::color::Color)> {
+            tree.commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::Image {
+                        x,
+                        y,
+                        width,
+                        height,
+                        image_id,
+                        ..
+                    } if within(*x, *y, *width, *height, caret) => {
+                        let request = shell.icon_request(*image_id).expect("an icon");
+                        Some((request.name.into_owned(), request.color))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
 
     let closed = shell.render_start_menu().expect("open");
     assert_eq!(lit(&closed), Vec::<Rect>::new(), "lit with nothing showing");
@@ -707,7 +711,8 @@ fn the_power_caret_is_drawn_where_it_is_clicked_and_lit_while_its_menu_shows() {
     // Two parts of glass, as the reference's `aero-sm-power-main` and
     // `aero-sm-power-caret`: a wash with a line round each, the caret one of
     // them, and a gap between the two -- not one slab with a chevron on it.
-    let glass = guitk::theme::with_alpha(shell.theme.start_menu_fg, crate::POWER_BUTTON_GLASS_ALPHA);
+    let glass =
+        guitk::theme::with_alpha(shell.theme.start_menu_fg, crate::POWER_BUTTON_GLASS_ALPHA);
     let edge = guitk::theme::with_alpha(shell.theme.start_menu_fg, crate::POWER_BUTTON_EDGE_ALPHA);
     let parts: Vec<Rect> = closed
         .commands
@@ -744,7 +749,10 @@ fn the_power_caret_is_drawn_where_it_is_clicked_and_lit_while_its_menu_shows() {
         })
         .collect();
     assert_eq!(parts.len(), 2, "not two parts of glass: {parts:?}");
-    assert_eq!(parts, lines, "a part without its line, or a line round nothing");
+    assert_eq!(
+        parts, lines,
+        "a part without its line, or a line round nothing"
+    );
     let (main, glass_caret) = (parts[0], parts[1]);
     assert_eq!(glass_caret, caret, "the second part is not the caret");
     assert_eq!((main.x, main.y, main.h), (button.x, button.y, button.h));

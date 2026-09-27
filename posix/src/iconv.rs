@@ -14,7 +14,7 @@
 //! | `UTF-8` | glibc's older, wider UTF-8: up to six bytes and U+7FFFFFFF; overlong forms and surrogates refused |
 //! | `ASCII` (`ANSI_X3.4-1968`) | seven bits; the C locale's character set, and so the empty name's |
 //! | `ISO-8859-1` | Latin-1 |
-//! | `CP1252` (`WINDOWS-1252`) | Latin-1 with printable characters in 0x80-0x9F -- the euro sign is 0x80 -- and 0x81, 0x8D, 0x8F, 0x90, 0x9D unassigned |
+//! | `ISO-8859-2` to `-16`, `CP1250` to `CP1257` (`WINDOWS-1252` and the rest), `KOI8-R`, `KOI8-U`, `IBM437`, `IBM850`, `MACINTOSH`, EBCDIC (`IBM037`, `IBM500`) and the rest of glibc's 141 table-driven 8-bit sets ([`crate::iconv_8bit`]) | one byte a character, by glibc's table; a byte the table leaves out is invalid |
 //! | `UTF-16`, `UTF-32` | a byte-order mark written first, in the machine's order (FF FE on x86-64), and read if there is one; the machine's order without one |
 //! | `UTF-16LE`, `-16BE`, `-32LE`, `-32BE` | no mark written or read |
 //! | `UCS-2` | the machine's order, no mark; `UCS-2BE` the other order |
@@ -61,7 +61,8 @@
 //!   after the round it was in.  glibc's `UCS-4`, `UCS-4LE` and `UCS-2BE`
 //!   decoders, and its `UCS-2BE` encoder for a surrogate, skip without failing.
 //! - A Unicode tag character, U+E0000-U+E007F, is dropped without a word by
-//!   every target that cannot write it (ASCII, Latin-1, CP1252, UCS-2).
+//!   every target that cannot write it (ASCII, Latin-1, the 8-bit tables,
+//!   UCS-2).
 //! - `//TRANSLIT` writes glibc's C-locale substitute -- `"EUR"` for the euro
 //!   sign ([`crate::iconv_translit`]) -- or `?`, in the target's own encoding;
 //!   each counts as one irreversible conversion, which is what a successful
@@ -164,8 +165,9 @@ enum Charset {
     Ascii,
     /// `ISO-8859-1//`.
     Latin1,
-    /// `CP1252//`.
-    Cp1252,
+    /// One of glibc's table-driven 8-bit sets: its index in
+    /// [`crate::iconv_8bit::TABLES`].
+    Table8(u16),
     /// `ISO-10646/UCS4/`: big-endian.
     Ucs4,
     /// `UCS-4LE//`.
@@ -199,7 +201,7 @@ impl Charset {
     /// step writing it asks room for, and a substitute's unit.
     fn unit(self) -> usize {
         match self {
-            Charset::Utf8 | Charset::Ascii | Charset::Latin1 | Charset::Cp1252 => 1,
+            Charset::Utf8 | Charset::Ascii | Charset::Latin1 | Charset::Table8(_) => 1,
             Charset::Ucs2 { .. } | Charset::Unicode | Charset::Utf16(_) => 2,
             Charset::Ucs4 | Charset::Ucs4Le | Charset::Utf32(_) | Charset::Internal => 4,
         }
@@ -257,9 +259,6 @@ const NAMES: &[(&[u8], Charset)] = &[
     (b"CSISOLATIN1//", Charset::Latin1),
     (b"8859_1//", Charset::Latin1),
     (b"OSF00010001//", Charset::Latin1),
-    (b"CP1252//", Charset::Cp1252),
-    (b"MS-ANSI//", Charset::Cp1252),
-    (b"WINDOWS-1252//", Charset::Cp1252),
     (b"ISO-10646/UCS4/", Charset::Ucs4),
     (b"UCS4//", Charset::Ucs4),
     (b"UCS-4//", Charset::Ucs4),
@@ -400,7 +399,11 @@ fn parse_spec(spec: &[u8]) -> (Option<Charset>, bool, bool) {
     } else if name == b"//" {
         Some(Charset::Ascii)
     } else {
-        NAMES.iter().find(|(k, _)| *k == name).map(|&(_, c)| c)
+        NAMES
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|&(_, c)| c)
+            .or_else(|| table8_named(name))
     };
     (charset, translit, ignore)
 }
@@ -418,36 +421,61 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 }
 
 // ---------------------------------------------------------------------------
-// CP1252
+// The 8-bit tables
 // ---------------------------------------------------------------------------
 
-/// CP1252's 0x80-0x9F, from glibc 2.39's `localedata/charmaps/CP1252`; 0 is
-/// unassigned.  Every other byte is its own code point.
-const CP1252_HIGH: [u16; 32] = [
-    0x20AC, 0, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, // 0x80
-    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017D, 0, // 0x88
-    0, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, // 0x90
-    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0, 0x017E, 0x0178, // 0x98
-];
-
-/// The code point of CP1252 byte `b`, `None` if unassigned.
-fn cp1252_decode(b: u8) -> Option<u32> {
-    if b < 0x80 || b >= 0xA0 {
-        return Some(u32::from(b));
-    }
-    let u = *CP1252_HIGH.get(usize::from(b - 0x80))?;
-    (u != 0).then_some(u32::from(u))
+/// The table-driven set a stripped name names, if any.
+fn table8_named(name: &[u8]) -> Option<Charset> {
+    let tables = crate::iconv_8bit::TABLES;
+    let at = tables.iter().position(|t| t.names.contains(&name))?;
+    u16::try_from(at).ok().map(Charset::Table8)
 }
 
-/// The CP1252 byte for `c`, `None` if it has none.
-fn cp1252_encode(c: u32) -> Option<u8> {
-    if c < 0x80 || (0xA0..=0xFF).contains(&c) {
-        return Some(c as u8);
+/// Table `t`.
+fn table8(t: u16) -> Option<&'static crate::iconv_8bit::Table8> {
+    crate::iconv_8bit::TABLES.get(usize::from(t))
+}
+
+/// glibc's 8-bit decoder (`8bit-generic.c`, `8bit-gap.c`), one character: the
+/// byte's code point, or invalid where the table leaves the byte out.
+fn decode_table8(t: u16, s: &[u8]) -> Decoded {
+    let Some(&b) = s.first() else {
+        return Decoded::Incomplete;
+    };
+    match table8(t).and_then(|table| table.to_ucs.get(usize::from(b))) {
+        Some(&0) if b != 0 => Decoded::Illegal(1),
+        Some(&u) => Decoded::Char(u32::from(u), 1),
+        None => Decoded::Illegal(1),
     }
-    let at = CP1252_HIGH
-        .iter()
-        .position(|&u| u != 0 && u32::from(u) == c)?;
-    Some(0x80 + at as u8)
+}
+
+/// Table `t` turned round, into `into`: its (code point, byte) pairs,
+/// sorted by code point for [`encode_table8`]; how many there are.
+fn reverse_index(t: u16, into: &mut [(u16, u8); 256]) -> usize {
+    let Some(table) = table8(t) else {
+        return 0;
+    };
+    let mut n = 0;
+    for (byte, &code) in (0u8..=255).zip(table.to_ucs.iter()) {
+        if byte == 0 || code != 0 {
+            if let Some(slot) = into.get_mut(n) {
+                *slot = (code, byte);
+                n += 1;
+            }
+        }
+    }
+    if let Some(pairs) = into.get_mut(..n) {
+        pairs.sort_unstable_by_key(|&(code, _)| code);
+    }
+    n
+}
+
+/// The byte an 8-bit table writes `c` as, if it has one, from its
+/// [`reverse_index`].
+fn encode_table8(reverse: &[(u16, u8)], c: u32) -> Option<u8> {
+    let c = u16::try_from(c).ok()?;
+    let at = reverse.binary_search_by_key(&c, |&(u, _)| u).ok()?;
+    reverse.get(at).map(|&(_, b)| b)
 }
 
 // ---------------------------------------------------------------------------
@@ -664,10 +692,7 @@ fn decode_loop(from: Charset, swap: bool, ignore: bool, input: &[u8], out: &mut 
             Some(&b) => Decoded::Char(u32::from(b), 1),
             None => Decoded::Incomplete,
         }),
-        Charset::Cp1252 => generic_decode(input, out, ignore, 1, |s| match s.first() {
-            Some(&b) => cp1252_decode(b).map_or(Decoded::Illegal(1), |c| Decoded::Char(c, 1)),
-            None => Decoded::Incomplete,
-        }),
+        Charset::Table8(t) => generic_decode(input, out, ignore, 1, |s| decode_table8(t, s)),
         Charset::Ucs2 { reversed } => {
             generic_decode(input, out, ignore, 2, |s| decode_ucs2(s, reversed))
         }
@@ -836,8 +861,19 @@ enum Encoded {
     Surrogate { quiet: bool },
 }
 
-/// `c` in `to`, at the start of `out`.
-fn encode_char(to: Charset, swap: bool, c: u32, out: &mut [u8]) -> Encoded {
+/// What an encoder knows of its target.
+#[derive(Clone, Copy)]
+struct Target<'a> {
+    set: Charset,
+    /// Whether the target's order is not the machine's.
+    swap: bool,
+    /// An 8-bit table's [`reverse_index`]; empty for any other set.
+    reverse: &'a [(u16, u8)],
+}
+
+/// `c` in the target, at the start of `out`.
+fn encode_char(target: Target, c: u32, out: &mut [u8]) -> Encoded {
+    let swap = target.swap;
     let byte = |b: u8, out: &mut [u8]| match out.first_mut() {
         Some(slot) => {
             *slot = b;
@@ -852,15 +888,15 @@ fn encode_char(to: Charset, swap: bool, c: u32, out: &mut [u8]) -> Encoded {
             Encoded::NoRoom
         }
     };
-    match to {
+    match target.set {
         Charset::Utf8 => encode_utf8(c, out),
         Charset::Ascii if c <= 0x7F => byte(c as u8, out),
         Charset::Latin1 if c <= 0xFF => byte(c as u8, out),
-        Charset::Cp1252 if c < 0xFFFF => match cp1252_encode(c) {
+        Charset::Table8(_) => match encode_table8(target.reverse, c) {
             Some(b) => byte(b, out),
             None => Encoded::Unwritable,
         },
-        Charset::Ascii | Charset::Latin1 | Charset::Cp1252 => Encoded::Unwritable,
+        Charset::Ascii | Charset::Latin1 => Encoded::Unwritable,
         Charset::Ucs2 { reversed } => {
             if c >= 0x1_0000 {
                 Encoded::Unwritable
@@ -959,20 +995,20 @@ fn encode_utf8(c: u32, out: &mut [u8]) -> Encoded {
 /// Every substitute is ASCII, one unit of `to` a character, which glibc
 /// writes by running the step's own loop over it -- so any target can write
 /// it, in its own encoding and byte order.
-fn transliterate(to: Charset, swap: bool, c: u32, out: &mut [u8]) -> Option<usize> {
+fn transliterate(target: Target, c: u32, out: &mut [u8]) -> Option<usize> {
     let table = crate::iconv_translit::C_TRANSLIT;
     let substitute: &[u8] = match table.binary_search_by_key(&c, |&(k, _)| k) {
         Ok(at) => table.get(at).map_or(b"?", |&(_, r)| r.as_bytes()),
         Err(_) => b"?",
     };
-    if substitute.len() * to.unit() > out.len() {
+    if substitute.len() * target.set.unit() > out.len() {
         return None;
     }
     let mut o = 0;
     for &b in substitute {
         // ASCII is every target's, so this writes; a failure would only
         // leave the substitute unwritten, reported as no room.
-        match encode_char(to, swap, u32::from(b), out.get_mut(o..)?) {
+        match encode_char(target, u32::from(b), out.get_mut(o..)?) {
             Encoded::Wrote(n) => o += n,
             _ => return None,
         }
@@ -980,12 +1016,12 @@ fn transliterate(to: Charset, swap: bool, c: u32, out: &mut [u8]) -> Option<usiz
     Some(o)
 }
 
-/// The last step: glibc's INTERNAL form in `input`, into `to` in `out`.
-fn encode_loop(to: Charset, translit: bool, ignore: bool, input: &[u8], out: &mut [u8]) -> Pass {
-    match to {
+/// The last step: glibc's INTERNAL form in `input`, into the target in `out`.
+fn encode_loop(target: Target, translit: bool, ignore: bool, input: &[u8], out: &mut [u8]) -> Pass {
+    match target.set {
         Charset::Ucs4 => encode_ucs4(input, out, true),
         Charset::Ucs4Le => encode_ucs4(input, out, false),
-        _ => generic_encode(to, translit, ignore, input, out),
+        _ => generic_encode(target, translit, ignore, input, out),
     }
 }
 
@@ -994,9 +1030,14 @@ fn encode_loop(to: Charset, translit: bool, ignore: bool, input: &[u8], out: &mu
 /// for the smallest output (`E2BIG`); then the character, or the errors'
 /// handling: a tag character dropped, a substitute (`//TRANSLIT`), a skip
 /// (`//IGNORE`).
-fn generic_encode(to: Charset, translit: bool, ignore: bool, input: &[u8], out: &mut [u8]) -> Pass {
-    let swap = to.target_swap();
-    let min_out = to.unit();
+fn generic_encode(
+    target: Target,
+    translit: bool,
+    ignore: bool,
+    input: &[u8],
+    out: &mut [u8],
+) -> Pass {
+    let min_out = target.set.unit();
     let (mut i, mut o, mut irreversible) = (0, 0, 0);
     let mut status = Status::EmptyInput;
     while i < input.len() {
@@ -1009,7 +1050,7 @@ fn generic_encode(to: Charset, translit: bool, ignore: bool, input: &[u8], out: 
             break;
         }
         let rest = out.get_mut(o..).unwrap_or_default();
-        match encode_char(to, swap, c, rest) {
+        match encode_char(target, c, rest) {
             Encoded::Wrote(n) => {
                 o += n;
                 i += 4;
@@ -1039,7 +1080,7 @@ fn generic_encode(to: Charset, translit: bool, ignore: bool, input: &[u8], out: 
                 }
                 status = Status::IllegalInput;
                 if translit {
-                    match transliterate(to, swap, c, rest) {
+                    match transliterate(target, c, rest) {
                         Some(n) => {
                             // glibc's loop carries on with the result OK, not
                             // "input used up": which is what ends a round.
@@ -1131,6 +1172,9 @@ struct Descriptor {
     /// The first step's output in a two-step conversion: [`CHUNK_BYTES`]
     /// bytes from `malloc`, owned by this descriptor; null in a one-step one.
     chunk: *mut u8,
+    /// An 8-bit table target's [`reverse_index`], `reverse_len` pairs of it.
+    reverse: [(u16, u8); 256],
+    reverse_len: usize,
 }
 
 impl Descriptor {
@@ -1190,7 +1234,12 @@ impl Descriptor {
             mark = width;
         }
         let rest = out.get_mut(mark..).unwrap_or_default();
-        let pass = encode_loop(self.to, self.translit, self.ignore, input, rest);
+        let target = Target {
+            set: self.to,
+            swap: self.to.target_swap(),
+            reverse: self.reverse.get(..self.reverse_len).unwrap_or_default(),
+        };
+        let pass = encode_loop(target, self.translit, self.ignore, input, rest);
         self.mark_pending = false;
         Pass {
             wrote: mark + pass.wrote,
@@ -1309,6 +1358,11 @@ fn allocate(from: Charset, to: Charset, translit: bool, ignore: bool) -> Option<
         unsafe { crate::malloc::free(chunk) };
         return None;
     }
+    let mut reverse = [(0u16, 0u8); 256];
+    let reverse_len = match to {
+        Charset::Table8(t) => reverse_index(t, &mut reverse),
+        _ => 0,
+    };
     // SAFETY: `d` is a fresh block of the descriptor's size, and malloc's
     // alignment suits any type.
     unsafe {
@@ -1320,6 +1374,8 @@ fn allocate(from: Charset, to: Charset, translit: bool, ignore: bool) -> Option<
             from_swap: None,
             mark_pending: true,
             chunk,
+            reverse,
+            reverse_len,
         });
     }
     Some(d)
@@ -2471,7 +2527,6 @@ mod tests {
             (&["UTF-32", "UTF32"], 0, "fffe000041000000e9000000"),
             (&["UTF-32LE", "UTF32LE"], 0, "41000000e9000000"),
             (&["UTF-32BE", "UTF32BE"], 0, "00000041000000e9"),
-            (&["CP1252", "MS-ANSI", "WINDOWS-1252"], 0, "41e9"),
         ];
         let mut count = 0;
         for &(names, r, out) in sets {
@@ -2482,6 +2537,130 @@ mod tests {
             }
         }
         assert_eq!(count, NAMES.len(), "every name in the table, and no other");
+    }
+
+    // -- glibc's table-driven 8-bit sets --
+
+    #[test]
+    fn the_8bit_tables_are_whole() {
+        let tables = crate::iconv_8bit::TABLES;
+        assert_eq!(
+            tables.len(),
+            141,
+            "gen-8bit-modules and gen-8bit-gap-modules"
+        );
+        let mut names: Vec<&[u8]> = NAMES.iter().map(|&(n, _)| n).collect();
+        for (index, t) in tables.iter().enumerate() {
+            let first = std::string::String::from_utf8_lossy(t.names[0]);
+            let mut reverse = [(0u16, 0u8); 256];
+            let n = reverse_index(u16::try_from(index).unwrap(), &mut reverse);
+            let reverse = &reverse[..n];
+            assert!(
+                reverse.windows(2).all(|w| w[0].0 < w[1].0),
+                "{first}: no code point from two bytes"
+            );
+            for &(u, b) in reverse {
+                assert_eq!(t.to_ucs[usize::from(b)], u, "{first}");
+            }
+            let assigned = (0..256).filter(|&b| b == 0 || t.to_ucs[b] != 0).count();
+            assert_eq!(n, assigned, "{first}: a byte for every code point");
+            for &n in t.names {
+                assert_eq!(n.split(|&c| c == b'/').count(), 3, "{first}: two slashes");
+                assert!(!n.iter().any(u8::is_ascii_lowercase), "{first}: upper case");
+                names.push(n);
+            }
+        }
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "no name names two sets");
+    }
+
+    #[test]
+    fn every_8bit_set_opens_by_every_name_and_round_trips() {
+        let all: Vec<u8> = (0..=255).collect();
+        for t in crate::iconv_8bit::TABLES {
+            for &n in t.names {
+                let cd = open_bytes(n, b"UTF-8");
+                assert_ne!(
+                    cd,
+                    ICONV_OPEN_ERR,
+                    "{}",
+                    std::string::String::from_utf8_lossy(n)
+                );
+                assert_eq!(iconv_close(cd), 0);
+            }
+            let name = std::str::from_utf8(t.names[0]).unwrap();
+            let assigned: Vec<u8> = all
+                .iter()
+                .copied()
+                .filter(|&b| b == 0 || t.to_ucs[usize::from(b)] != 0)
+                .collect();
+            let (r, e, left, utf8) = run("UTF-8//IGNORE", name, &all, 1024);
+            let want = if assigned.len() == 256 {
+                (0, OK, 0)
+            } else {
+                (-1, EILSEQ, 0)
+            };
+            assert_eq!((r, e, left), want, "{name}: holes skipped");
+            let (r, e, left, back) = run(name, "UTF-8", &utf8, 1024);
+            assert_eq!((r, e, left, back), (0, OK, 0, assigned), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_8bit_sets_are_glibcs() {
+        #[rustfmt::skip]
+        let cases: &[OneWay] = &[
+            ("ISO-8859-15", b"\xa4", 0, OK, 0, "e282ac"),
+            ("LATIN-9", b"\xa4", 0, OK, 0, "e282ac"),
+            ("KOI8-R", b"\xc1", 0, OK, 0, "d0b0"),
+            ("CP1251", b"\xc0", 0, OK, 0, "d090"),
+            ("WINDOWS-1251", b"\xc0", 0, OK, 0, "d090"),
+            ("MACINTOSH", b"\x80", 0, OK, 0, "c384"),
+            ("IBM037", b"\xc1\x40", 0, OK, 0, "4120"),
+            ("IBM437", b"\xb0", 0, OK, 0, "e29691"),
+            ("KOI8-U", b"\xa4", 0, OK, 0, "d194"),
+            ("ISO-8859-7", b"\xe1", 0, OK, 0, "ceb1"),
+            ("TIS-620", b"\xa1", 0, OK, 0, "e0b881"),
+            ("ISO-8859-3", b"\xa5", -1, EILSEQ, 1, ""),
+        ];
+        for &(from, input, r, e, left, out) in cases {
+            assert_eq!(
+                run("UTF-8", from, input, 32),
+                (r, e, left, hex(out)),
+                "{from}"
+            );
+        }
+        assert_eq!(
+            run("KOI8-R", "UTF-8", "\u{20ac}".as_bytes(), 8),
+            (-1, EILSEQ, 3, Vec::new())
+        );
+        assert_eq!(
+            run("IBM037//TRANSLIT", "UTF-8", "\u{20ac}".as_bytes(), 8),
+            (1, OK, 0, hex("c5e4d9")),
+            "the substitute in EBCDIC"
+        );
+        assert_eq!(
+            run("KOI8-R", "UTF-8", b"a\xf3\xa0\x81\x81b", 8),
+            (0, OK, 0, b"ab".to_vec()),
+            "a tag character dropped"
+        );
+        assert_eq!(
+            run("CP1251", "UTF-8", "\u{410}\u{430}".as_bytes(), 8),
+            (0, OK, 0, hex("c0e0"))
+        );
+        assert_eq!(
+            run("ISO-8859-2", "UTF-8", b"\xef\xbf\xbf", 8),
+            (-1, EILSEQ, 3, Vec::new())
+        );
+        errno::set_errno(0);
+        assert_eq!(
+            open("CP1255", "UTF-8"),
+            ICONV_OPEN_ERR,
+            "glibc's own module, not a table"
+        );
+        assert_eq!(errno::get_errno(), EINVAL);
     }
 
     #[test]

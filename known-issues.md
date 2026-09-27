@@ -170950,3 +170950,16 @@ used them. Deleted.
 **Still missing:** glibc's other character sets: UTF-7, the ISO-8859 family
 beyond Latin-1, the other Windows and IBM code pages, KOI8, and the East Asian
 multibyte sets -- `todo.txt` (lane D).
+
+**Addendum (2026-09-26): glibc's table-driven 8-bit sets convert too** --
+all 141 modules glibc generates from a charmap (iconvdata/Makefile's
+`gen-8bit-modules` and `gen-8bit-gap-modules`): the ISO-8859 family, the
+Windows code pages but CP1255 and CP1258, KOI8-R and KOI8-U, the IBM and DOS
+code pages, the Mac sets, EBCDIC, TIS-620 and the rest, by all 614 of their
+names. The tables are generated from glibc's own charmaps
+(`posix/tools/gen_iconv_8bit.py` → `posix/src/iconv_8bit.rs`), and every
+byte, every writable code point and every name was checked against Ubuntu's
+glibc (design-decisions.md §1117). CP1252, hand-written above, is one of
+them now. Still missing: UTF-7, the 8-bit sets glibc writes by hand (CP1255
+and CP1258, whose combining marks make them stateful, and a dozen more), and
+the East Asian multibyte sets.

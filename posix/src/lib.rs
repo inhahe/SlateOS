@@ -371,6 +371,7 @@ pub mod getopt;
 pub mod glob;
 pub mod grp;
 pub mod iconv;
+pub(crate) mod iconv_8bit;
 pub(crate) mod iconv_translit;
 pub mod ifaddrs;
 pub mod inttypes;

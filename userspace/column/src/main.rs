@@ -51,7 +51,7 @@
 stdfdguard::guard_std_fds!();
 
 use getoptlong::{Opt, Program, Takes};
-use quoting::{escape_unprintable, os_bytes};
+use quoting::{escape_unprintable, escaped_in_quotes, os_bytes};
 use smartcols::{
     ColumnId, FL_HIDDEN, FL_NOEXTREMES, FL_RIGHT, FL_TREE, FL_TRUNC, FL_WRAP, LineId, Table,
     TermForce,
@@ -643,7 +643,10 @@ fn string_to_column(tab: &Table, s: &[u8], short: &[u8]) -> Result<ColumnId, u8>
         tab.column_by_name(s)
     };
     cl.ok_or_else(|| {
-        warnx(short, &format!("undefined column name '{}'", shown(s)));
+        warnx(
+            short,
+            &format!("undefined column name {}", escaped_in_quotes(s)),
+        );
         1
     })
 }

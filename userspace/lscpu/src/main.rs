@@ -91,7 +91,7 @@ mod types;
 mod virt;
 
 use getoptlong::{Opt, Program, Takes};
-use quoting::{escape_unprintable, os_bytes};
+use quoting::{escape_unprintable, escaped_in_quotes, os_bytes};
 use smartcols::{ColumnId, FL_NOEXTREMES, FL_RIGHT, FL_TREE, FL_WRAP, JsonType, LineId, Table};
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -907,7 +907,10 @@ fn gather(cxt: &mut Cxt) -> Result<(), Fatal> {
     cputype::read_vulnerabilities(cxt);
     cputype::read_numas(cxt).map_err(|e| {
         Fatal::Err(
-            format!("Failed to extract the node number: '{}'", shown(&e.0)),
+            format!(
+                "Failed to extract the node number: {}",
+                escaped_in_quotes(&e.0)
+            ),
             io::Error::from_raw_os_error(34),
         )
     })?;

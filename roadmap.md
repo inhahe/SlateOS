@@ -1859,6 +1859,16 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **The bar is the reference's glass, and the tray names its parts** --
+  done 2026-09-26. The bar was one flat colour; it has the reference's
+  `aero-taskbar` glass now -- a line of light along its top edge and another
+  under it, a soft light below them and a shade over its lower half, in
+  translucent white and black over the theme's colour. (Not the shadow the
+  reference casts above the bar: the bar's surface ends at its edge.) The
+  tray's chevron names itself "Show hidden icons", as the reference's
+  `title`, and the clock names the whole date -- except over the calendar it
+  has opened, which shows it already.
+
 - `[C]` **The start button is the reference's orb** -- done 2026-09-26
   (`design-decisions.md` §1408). Round and glossy, in the accent with the
   start picture on it, a ring of light round it and a shadow under it, glowing

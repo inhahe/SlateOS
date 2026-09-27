@@ -275,6 +275,19 @@ fn scroll_rows(acc: &mut wheel::Accumulator, dy: f32) -> i32 {
 
 /// Width of the start button at the left end of the taskbar.
 const START_BUTTON_WIDTH: f32 = 64.0;
+/// The line of light along the bar's top edge, in white: the reference's
+/// `border-top: 1px` at 0.45.
+const TASKBAR_EDGE_LIGHT: u8 = 115;
+/// The line just under it, in white: the reference's `inset 0 1px 0` at 0.5.
+const TASKBAR_INNER_LIGHT: u8 = 128;
+/// The soft light below those, in white: the reference's `inset 0 2px 6px`
+/// glow, taken as one band.
+const TASKBAR_TOP_GLOW: u8 = 18;
+/// How deep that band is.
+const TASKBAR_TOP_GLOW_DEPTH: f32 = 5.0;
+/// The shade over the bar's lower half, in black: the reference's
+/// `inset 0 -12px 22px` at 0.28, taken as one step.
+const TASKBAR_FOOT_SHADE: u8 = 36;
 /// The start orb's diameter: the reference's `aero-orb`, 42. The reference
 /// lets it rise 5 above its bar; this bar's surface ends at its edge, so the
 /// orb is kept inside, [`START_ORB_MARGIN`] clear of the top and bottom.
@@ -794,6 +807,10 @@ enum TooltipKey {
     PowerOptions,
     /// The start orb, a picture alone -- the reference's `title="Start"`.
     Start,
+    /// The tray's chevron: the reference's `title="Show hidden icons"`.
+    TrayOverflow,
+    /// The clock, which is named by the whole date.
+    Clock,
 }
 
 /// What in the open start menu the pointer is over, drawn lit as the
@@ -4966,6 +4983,14 @@ impl DesktopShell {
             Hit::ShowDesktop => Some((TooltipKey::ShowDesktop, "Show desktop".to_string())),
             // The orb is a picture alone, as the reference's, and its `title`.
             Hit::StartButton => Some((TooltipKey::Start, "Start".to_string())),
+            // A chevron alone, and its `title` in the reference.
+            Hit::TrayOverflow => Some((TooltipKey::TrayOverflow, "Show hidden icons".to_string())),
+            // The whole date, as the reference's `title` and every desktop's
+            // clock give it -- but not over the calendar the clock has opened,
+            // which says it already.
+            Hit::Clock if !self.calendar.visible => {
+                Some((TooltipKey::Clock, self.clock_tooltip_at(Self::unix_now())))
+            }
             // The caret is a chevron alone, and says what it opens as the
             // reference's does.
             Hit::PowerCaret => Some((TooltipKey::PowerOptions, "Power options".to_string())),
@@ -7381,8 +7406,9 @@ impl DesktopShell {
         let bar = self.taskbar_rect();
         let mut tree = RenderTree::new();
 
-        // Taskbar background
+        // Taskbar background, and its glass over it.
         fill(&mut tree, bar, self.theme.taskbar_bg);
+        self.draw_taskbar_glass(&mut tree, bar);
 
         self.draw_start_orb(&mut tree);
 
@@ -8263,6 +8289,41 @@ impl DesktopShell {
         );
     }
 
+    /// The bar's glass, as the reference's `aero-taskbar`: a line of light
+    /// along its top edge and another just under it, a soft light below them,
+    /// and a shade over its lower half -- translucent white and black over the
+    /// theme's colour, since the renderer draws no gradients. The reference's
+    /// shadow cast *above* the bar is not drawn: the bar's surface ends at its
+    /// edge.
+    fn draw_taskbar_glass(&self, tree: &mut RenderTree, bar: Rect) {
+        let line = self.scale(1.0).max(1.0);
+        fill(
+            tree,
+            Rect::new(bar.x, bar.y + bar.h / 2.0, bar.w, bar.h / 2.0),
+            with_alpha(Color::BLACK, TASKBAR_FOOT_SHADE),
+        );
+        fill(
+            tree,
+            Rect::new(
+                bar.x,
+                bar.y + 2.0 * line,
+                bar.w,
+                self.scale(TASKBAR_TOP_GLOW_DEPTH).min(bar.h / 2.0),
+            ),
+            with_alpha(Color::WHITE, TASKBAR_TOP_GLOW),
+        );
+        fill(
+            tree,
+            Rect::new(bar.x, bar.y + line, bar.w, line),
+            with_alpha(Color::WHITE, TASKBAR_INNER_LIGHT),
+        );
+        fill(
+            tree,
+            Rect::new(bar.x, bar.y, bar.w, line),
+            with_alpha(Color::WHITE, TASKBAR_EDGE_LIGHT),
+        );
+    }
+
     /// The start button, as the reference's orb (`aero-orb`): a round button
     /// in the accent with the start picture on it, a gloss across its top and
     /// a shade at its foot, a ring of light round it and a shadow under it --
@@ -8996,6 +9057,12 @@ impl DesktopShell {
     /// hole the UTC bug lived in.
     fn clock_string_at(&self, utc_secs: u64) -> String {
         self.clock().format_taskbar(utc_secs, &self.local_zone())
+    }
+
+    /// What the clock is named when the pointer rests on it: the whole date,
+    /// "Saturday, September 26, 2026", in the clock's zone.
+    fn clock_tooltip_at(&self, utc_secs: u64) -> String {
+        self.clock().format_date(utc_secs, &self.local_zone())
     }
 
     /// The taskbar clock's two lines for a given UTC instant: the time, and
@@ -20665,6 +20732,115 @@ mod taskbar_pin_tests {
             MouseEventKind::Move,
         ));
         shell.advance_osd(5_000);
+    }
+
+    // ---- the bar's glass, and the tray's names ----
+
+    /// **The bar is the reference's glass**: a line of light along its top
+    /// edge and another just under it, a soft light below them and a shade
+    /// over its lower half -- all over the bar's colour and under everything
+    /// on it.
+    #[test]
+    fn the_bar_is_glass_as_the_references() {
+        use guitk::render::RenderCommand;
+        let s = shell();
+        let bar = s.taskbar_rect();
+        let tree = s.render_taskbar();
+        let at = |x: f32, y: f32, w: f32, h: f32, color: guitk::color::Color| {
+            tree.commands.iter().position(|c| {
+                matches!(c, RenderCommand::FillRect { x: cx, y: cy, width, height, color: cc, .. }
+                    if (*cx, *cy, *width, *height) == (x, y, w, h) && *cc == color)
+            })
+        };
+        let white = |a: u8| super::with_alpha(guitk::color::Color::WHITE, a);
+        let base = at(bar.x, bar.y, bar.w, bar.h, s.theme.taskbar_bg).expect("no bar");
+        let edge = at(bar.x, bar.y, bar.w, 1.0, white(super::TASKBAR_EDGE_LIGHT))
+            .expect("no line of light along the top edge");
+        let inner = at(
+            bar.x,
+            bar.y + 1.0,
+            bar.w,
+            1.0,
+            white(super::TASKBAR_INNER_LIGHT),
+        )
+        .expect("no line just under it");
+        let foot = at(
+            bar.x,
+            bar.y + bar.h / 2.0,
+            bar.w,
+            bar.h / 2.0,
+            super::with_alpha(guitk::color::Color::BLACK, super::TASKBAR_FOOT_SHADE),
+        )
+        .expect("no shade over the lower half");
+        let glow = tree
+            .commands
+            .iter()
+            .position(|c| {
+                matches!(c, RenderCommand::FillRect { y, width, color, .. }
+                    if *y > bar.y + 1.0 && *y < bar.y + bar.h / 2.0 && (*width - bar.w).abs() < 0.01
+                        && *color == white(super::TASKBAR_TOP_GLOW))
+            })
+            .expect("no soft light under the lines");
+        let orb = s.start_orb_rect();
+        let first_on_it = tree
+            .commands
+            .iter()
+            .position(|c| {
+                matches!(c, RenderCommand::FillRect { x, y, width, height, .. }
+                    if (*x, *y, *width, *height) == (orb.x, orb.y, orb.w, orb.h))
+            })
+            .expect("no orb");
+        for (what, index) in [
+            ("edge", edge),
+            ("inner line", inner),
+            ("foot", foot),
+            ("glow", glow),
+        ] {
+            assert!(
+                base < index && index < first_on_it,
+                "the {what} is not between the bar and what is on it"
+            );
+        }
+    }
+
+    /// **The tray's chevron and clock name themselves**: the chevron as the
+    /// reference's `title` does, the clock by the whole date -- and not over
+    /// the calendar the clock has opened, which says it already.
+    #[test]
+    fn the_chevron_and_the_clock_name_themselves() {
+        let mut s = DesktopShell::new(1024, 768);
+        let flood: Vec<_> = (1..=80)
+            .map(|id| guiremote::tray::TrayIcon {
+                owner: 99,
+                id,
+                glyph: "X".to_string(),
+                tooltip: "x".to_string(),
+            })
+            .collect();
+        s.apply_tray_icons(flood);
+        let chevron = s.tray_overflow_rect().expect("overflowing");
+        rest_on(&mut s, chevron);
+        let tip = format!("{:?}", s.render_tooltip().expect("the chevron has no name"));
+        assert!(tip.contains("Show hidden icons"), "{tip}");
+
+        s.set_system_zone(tzrules::Tz::parse(b"UTC0").expect("a POSIX rule"));
+        datetimesettings::clock::with_time(1_790_424_000, || {
+            let clock = s.clock_rect();
+            rest_on(&mut s, clock);
+            let tip = format!("{:?}", s.render_tooltip().expect("the clock has no name"));
+            assert!(tip.contains("Saturday, September 26, 2026"), "{tip}");
+
+            // Open the calendar from the clock: the name goes.
+            let (x, y) = (clock.x + clock.w / 2.0, clock.y + clock.h / 2.0);
+            s.handle_mouse(&at(x, y, MouseEventKind::Press(MouseButton::Left)));
+            assert!(s.calendar.visible, "the clock did not open the calendar");
+            s.handle_mouse(&at(x + 1.0, y, MouseEventKind::Move));
+            s.advance_osd(5_000);
+            assert!(
+                s.render_tooltip().is_none(),
+                "the date is named over the calendar that shows it"
+            );
+        });
     }
 
     // ---- the start orb ----

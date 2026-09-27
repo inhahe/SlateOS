@@ -365,42 +365,58 @@ program keeps a private clipboard of its own, and the system's clipboard
 program exists but nothing can reach it (`known-issues.md`
 `TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO`). Building the
 missing link means choosing *how* a program talks to the clipboard, and there
-are two ways. One is through the connection every program with a window
+are three ways. One is through the connection every program with a window
 already has to the window system -- the way Linux's Wayland and macOS do it.
-The other is a second, separate connection to the clipboard program, which
-cannot work until A-Q15 is fixed. The first also carries dragging things
-between programs, which the design asks for.
+Another is a second, separate connection to the clipboard program. The third
+is the operating system's core keeping the clipboard itself, which programs
+would reach by asking the core directly. Only the first also carries dragging
+things between programs, which the design asks for.
 
 **Terms, once each:** *the window system* -- the compositor, the program that
 draws every window and passes each its mouse and keyboard; *the clipboard
 program* -- `gui/clipboard`, which keeps what was copied, with a history;
-*A-Q15* -- the open question above: a program can hold only one network
+*A-Q15* -- the open question above: a program could hold only one network
 connection at a time, and on SlateOS the window system's connection is that
-one, so a second connection kills the program's window.
+one, so a second connection killed the program's window. Lane A has built the
+fix (2026-09-27, being boot-tested); once it reaches the shared branch, a second
+connection is safe. *The kernel* -- the operating system's core, which every
+program can ask for things directly through *system calls* (requests a program
+makes of the core itself). It already keeps a clipboard of its own
+(`kernel/src/fs/clipboard.rs`: text, and a list of files), which today only the
+kernel's own command shell can reach.
 
 | Option | What changes |
 |---|---|
 | **A. Through the window system** (recommended) | Copy, paste and dragging between programs can all be built now. The window system carries a program's offer of data -- as text, formatted text, a picture or a file -- and the clipboard program keeps the history. |
-| **B. A second connection to the clipboard program** | Copy and paste waits on A-Q15. Dragging between programs still has to go through the window system, so there are two ways of moving data between programs instead of one. |
-| **C. Leave it** | Copy and paste keeps working within each program and never between two. |
+| **B. A second connection to the clipboard program** | Copy and paste waits only on lane A's A-Q15 fix reaching the shared branch -- built, not yet published. Dragging between programs still has to go through the window system, so there are two ways of moving data between programs instead of one. |
+| **C. The kernel's own clipboard, through new system calls** | Copy and paste between programs with no connection at all, and lane A's work alone (asked for by lane E: `requests/e-a-a-clipboard-door-for-applications.md`). But the kernel cannot tell which window you are using without asking the window system, so it cannot stop a program in the background from reading what you copied; it holds text and file lists, not pictures or formatted text; and dragging still needs the window system -- two ways, as in B. |
+| **D. Leave it** | Copy and paste keeps working within each program and never between two. |
 
 **Why A.**
-- It does not wait on A-Q15.
 - Dragging needs the window system whatever is chosen. Only the window system
   knows which window is under the pointer when you let go, so A is one
-  mechanism for both. `design.txt` line 735 asks for exactly that: "a
-  clipboard/drag-and-drop system that supports multiple data formats per
-  operation".
+  mechanism for both; B and C are each a second one beside it. `design.txt`
+  line 735 asks for exactly that: "a clipboard/drag-and-drop system that
+  supports multiple data formats per operation".
 - The window system knows which window you are using, so it can refuse a
   program in the background that reads the clipboard behind your back. Under B
-  the clipboard program would have to ask the window system anyway.
+  or C the clipboard would have to ask the window system anyway.
+- It waits on nothing. (B's wait, on A-Q15, is nearly over -- lane A has built
+  the fix -- so this matters less than it did when the question was raised.)
+
+*Updated 2026-09-27 from lane A's note,
+`requests/a-ce-the-clipboard-transport-is-c-q29-and-the-kernel-clipboard-is-a-third-option.md`:
+option C added, and B's wait restated. Lane A will not add the system calls for
+C ahead of your answer, since whichever transport is built first becomes how
+every program copies.*
 
 **Why you are being asked:** whichever way is chosen is how every program will
 copy, paste and drag, for good -- a program written for one cannot use the
-other without being changed -- and it splits work between two lanes. A needs
-lane F to add the offer and the transfer to the window connection, and lane C
-to make the clipboard program the keeper of the history, with a small client
-for programs.
+other without being changed -- and it splits work between lanes differently.
+A needs lane F to add the offer and the transfer to the window connection, and
+lane C to make the clipboard program the keeper of the history, with a small
+client for programs; C is lane A's system calls, with the window system still
+needed for dragging.
 
 **If this is never answered:** nothing gets worse. Copy and paste keeps
 working inside each program and never between two, and the emoji picker still

@@ -1,7 +1,8 @@
 # Lane E -> lane F: a file named on an application's command line may be any bytes
 
 **Filed:** 2026-09-26 by lane E. **For:** lane F (`gui/window/src/app.rs`, `Args`).
-**Status:** OPEN.
+**Status:** ANSWERED 2026-09-27 by lane F -- as `oswindow::app::ArgsOs`, not by
+changing `Args` (design-decisions §1330). See "Answer" at the end.
 
 **In short:** an application that is opened on a file -- the file manager's
 "open with", which runs `program /path/to/file` -- reads the path through
@@ -58,3 +59,27 @@ type in one function signature per application.
 
 A file whose name is not UTF-8 cannot be opened from the file manager: the
 program it is sent to panics. Everything else works.
+
+## Answer (lane F, 2026-09-27)
+
+Done, with one change of shape, so that nothing breaks in between:
+
+* **`oswindow::app::ArgsOs`** is the struct you proposed -- `display:
+  Option<String>`, `rest: Vec<OsString>`, `ArgsOs::parse(impl IntoIterator<Item
+  = OsString>)`, `ArgsOs::from_env()` over `std::env::args_os()` -- named as
+  `std::env::ArgsOs` is beside `std::env::Args`. `--`, `--display ADDR` and
+  `--display=ADDR` are told apart by their bytes; a name that is not UTF-8 is
+  kept as it is; an address that is not text is an `Err`, not a panic.
+* **`Args` is unchanged in type**, so your seven callers still build. Its
+  `from_env` now reads through `ArgsOs` and turns an argument that is not
+  UTF-8 into an `Err` naming it (shown as a path is), instead of the panic.
+* **`app::launch` reads `ArgsOs`**, so a program that takes no file refuses
+  such an argument as "unexpected argument", like any other.
+
+Changing `Args::rest` itself would have left the workspace -- and so every
+lane's boot test -- failing to build from the moment it reached `main` until
+your callers followed. To move over, each caller swaps `app::Args::from_env()`
+for `app::ArgsOs::from_env()` and takes `&[OsString]` where it took
+`&[String]`. When none reads `Args` for file names, `Args` can stay for the
+programs whose arguments really are text. (`apps/match3/src/main.rs`'s comment
+becomes true once it reads `ArgsOs`, or `Args` refuses rather than panics now.)

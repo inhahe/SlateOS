@@ -248,6 +248,7 @@ gui/desktop/src/touchpad.rs
 gui/desktop/src/update_settings.rs
 gui/desktop/src/user_accounts.rs
 gui/desktop/src/window_peek.rs
+gui/imagecodec/src/encode.rs
 gui/remote/src/reader.rs
 gui/toolkit/src/context_ext.rs
 gui/toolkit/src/textview.rs

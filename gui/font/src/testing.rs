@@ -179,6 +179,20 @@ pub fn harfbuzz_extents(
     face.glyph_extents_at(gid, coords)
 }
 
+/// Break `text` at spaces as `ScaledFont::wrap` always has, but by shaping
+/// and measuring every candidate line whole, word by word: the rule as first
+/// written, kept as the oracle for the one-shaping `wrap`, which must give the
+/// same lines. For `tests/host_fonts.rs`, which compares the two on the
+/// host's own fonts.
+#[must_use]
+pub fn wrap_by_words(
+    text: &str,
+    max_width: f32,
+    measure: &dyn Fn(&str) -> f32,
+) -> alloc::vec::Vec<alloc::string::String> {
+    crate::shape::wrap_by_words(text, max_width, measure)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

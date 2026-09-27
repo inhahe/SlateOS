@@ -1074,6 +1074,46 @@ impl<T: Transport> Connection<T> {
         })
     }
 
+    /// Replace a `width` by `height` rectangle of the image uploaded under
+    /// `image_id` at `(x, y)` in it, leaving the rest as it was -- the partial
+    /// counterpart of [`Self::upload_image`], for a picture that changes a
+    /// little at a time. `bytes` hold the rectangle's rows, `stride` apart, in
+    /// the format the image was uploaded in. See
+    /// [`RequestBody::PatchImage`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::round_trip`], plus [`ClientError::Refused`] if `window` is not
+    /// yours, holds no image under `image_id`, or the rectangle is empty, not
+    /// wholly inside the image, or not covered by `bytes`. A refused patch
+    /// changes no pixel.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the request's fields, one to one, as `upload_image` takes an upload's"
+    )]
+    pub fn patch_image(
+        &mut self,
+        window: u64,
+        image_id: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        stride: u32,
+        bytes: Vec<u8>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::PatchImage {
+            window,
+            image_id,
+            x,
+            y,
+            width,
+            height,
+            stride,
+            bytes,
+        })
+    }
+
     /// Forget one of this window's uploaded images and release its memory.
     ///
     /// Succeeds whether or not anything was registered under `image_id`, so a
@@ -1379,6 +1419,45 @@ mod tests {
         assert_eq!(
             c.upload_image(7, 9, 4, 4, 16, BufferFormat::Argb8888, vec![0; 64]),
             Err(ClientError::Refused("over the 512-byte limit".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_patch_reaches_the_wire_with_its_rectangle_and_pixels_intact() {
+        let mut c = conn(vec![reply(1, ResponseBody::Ok)]);
+        let pixels: Vec<u8> = (0u8..24).collect();
+        c.patch_image(7, 9, 1, 2, 2, 2, 12, pixels.clone()).unwrap();
+
+        let sent = &c.transport().sent[0];
+        let (reqs, _) = crate::control::decode_requests(sent).unwrap();
+        assert_eq!(
+            reqs[0].body,
+            RequestBody::PatchImage {
+                window: 7,
+                image_id: 9,
+                x: 1,
+                y: 2,
+                width: 2,
+                height: 2,
+                stride: 12,
+                bytes: pixels,
+            }
+        );
+    }
+
+    #[test]
+    fn a_refused_patch_is_an_error_the_caller_can_read() {
+        let mut c = conn(vec![reply(
+            1,
+            ResponseBody::Error {
+                message: "this window holds no image 9".to_string(),
+            },
+        )]);
+        assert_eq!(
+            c.patch_image(7, 9, 0, 0, 1, 1, 4, vec![0; 4]),
+            Err(ClientError::Refused(
+                "this window holds no image 9".to_string()
+            ))
         );
     }
 

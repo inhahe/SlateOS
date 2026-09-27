@@ -67,6 +67,25 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     Ok((features.width, features.height))
 }
 
+/// How the picture stores its pixels: eight bits of red, green and blue,
+/// lossy or lossless, and alpha when `WebPGetFeatures` finds it -- the
+/// extended header's flag, or a lossless stream's own.
+///
+/// # Errors
+///
+/// As [`dimensions`].
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<crate::PixelFormat> {
+    let features = riff::features(bytes)?;
+    let channels = if features.has_alpha { 4 } else { 3 };
+    Ok(crate::PixelFormat::uniform(
+        8,
+        channels,
+        crate::ColourModel::Colour,
+        false,
+        features.has_alpha,
+    ))
+}
+
 /// Decode a WebP: a still picture, or an animation's first frame on its
 /// canvas.
 ///

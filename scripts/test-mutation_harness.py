@@ -5,7 +5,8 @@ table check refuses a row naming a test that does not exist -- up front,
 before a sweep spends a build per row. So the check has to look everywhere a
 test can be: the mutated file, the files beside it, and (since 2026-09-27)
 the crate's integration tests in `tests/`, where a library's public promises
-are pinned.
+are pinned -- and the crate whose tests the sweep runs, which is not the
+mutated file's own when a library is swept by a program that uses it.
 
 Run with no arguments; exits non-zero on the first failure.
 """
@@ -111,6 +112,19 @@ def main() -> int:
         results.append(check(
             "only a src/ directory's crate is searched for tests/",
             check_the_table(SRC, row("only_in_tests"), other), 1))
+    with tempfile.TemporaryDirectory() as d:
+        # A library swept by the tests of a program that uses it: the test is
+        # in the program's crate, in a nested module.
+        lib = crate(Path(d) / "store")
+        user = Path(d) / "app" / "src" / "ui"
+        user.mkdir(parents=True)
+        (user / "form.rs").write_text("#[test]\nfn pinned_by_the_user() {}\n", encoding="utf-8", newline="")
+        results.append(check(
+            "a test in the crate the sweep runs is found",
+            check_the_table(SRC, row("pinned_by_the_user"), lib, [Path(d) / "app" / "src"]), 0))
+        results.append(check(
+            "...and is not found when the sweep runs another crate",
+            check_the_table(SRC, row("pinned_by_the_user"), lib), 1))
     got = failed_tests(CARGO_OUTPUT)
     want = {"closes_when_asked", "saves_on_exit", "a_capture_never_reuses_a_taken_id"}
     ok = got == want

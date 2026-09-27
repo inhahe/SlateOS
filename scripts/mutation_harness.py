@@ -107,6 +107,47 @@ def _throwaway_config_dir():
 REPO = Path(__file__).resolve().parent.parent
 
 
+def package_dir(crate):
+    """The directory holding `crate`'s `Cargo.toml`, or None if cargo cannot say.
+
+    Asked of cargo rather than guessed from the name, because the name is not
+    the path: `apps/calendar` is `calendar`, but the vendored ciphers under
+    `rustcrypto/` and the root crates are not laid out by any one rule.
+
+    None -- a manifest cargo cannot load -- costs only precision: the table
+    check then searches beside the mutated file alone, which can refuse a good
+    row but never accepts a bad one, and the warm-up build that follows fails
+    on the same manifest and says why.
+    """
+    if crate in _PACKAGE_DIRS:
+        return _PACKAGE_DIRS[crate]
+    import json
+
+    found = None
+    try:
+        out = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            cwd=REPO,
+            env=cargo_env(),
+            capture_output=True,
+            timeout=300,
+        )
+        if out.returncode == 0:
+            for pkg in json.loads(out.stdout).get("packages", []):
+                if pkg.get("name") == crate:
+                    found = Path(pkg["manifest_path"]).parent
+                    break
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        # ValueError covers a JSON document cargo did not finish writing.
+        # Each of these leaves `found` None, whose cost is described above.
+        pass
+    _PACKAGE_DIRS[crate] = found
+    return found
+
+
+_PACKAGE_DIRS = {}
+
+
 def build_tests(crate, timeout=1800):
     """Compile the crate's test binaries without running them.
 
@@ -272,7 +313,7 @@ def refuse_a_dirty_start(src, bak):
     sys.exit(2)
 
 
-def check_the_table(original, mutations, src_dir=None):
+def check_the_table(original, mutations, src_dir=None, test_dirs=()):
     """Report every unusable row in the table at once, before any build time.
 
     Four ways a row says nothing, all of them silent at run time:
@@ -284,6 +325,15 @@ def check_the_table(original, mutations, src_dir=None):
       row is scored `SURVIVED` -- a coverage hole reported where there is none.
     * **`expect` names a test that does not exist.**  The expectation can never
       be met, so the row reports `WRONG TESTS` for as long as it survives.
+
+    Tests are looked for beside the mutated file (`src_dir`, and the `tests/`
+    of the crate it is in) and, recursively, in each of `test_dirs` -- which
+    `sweep` fills with the `src/` and `tests/` of the crate whose suite it
+    runs.  The two differ when a library is swept by the tests of a program
+    that uses it: `apps/calendarstore` holds the calendar's file format, and
+    most of what pins that format is the calendar's own tests, in
+    `apps/calendar`.  Searching only beside the mutated file refused all 29 of
+    those rows as naming "no such test".
 
     An **empty** `expect` is not a problem: it is the table's way of saying "no
     named test can report this, because the program dies first" -- maze's
@@ -317,6 +367,16 @@ def check_the_table(original, mutations, src_dir=None):
         if src_dir.name == "src":
             others += sorted((src_dir.parent / "tests").glob("*.rs"))
         for other in others:
+            defined |= set(
+                re.findall(
+                    r"fn\s+([a-z0-9_]+)\s*\(\s*\)",
+                    other.read_text(encoding="utf-8", errors="replace"),
+                )
+            )
+    # ...and anywhere in the crate the sweep runs, nested modules included:
+    # its test binary is built from all of them.
+    for test_dir in test_dirs:
+        for other in sorted(Path(test_dir).rglob("*.rs")):
             defined |= set(
                 re.findall(
                     r"fn\s+([a-z0-9_]+)\s*\(\s*\)",
@@ -399,7 +459,11 @@ def sweep(src, mutations, crate, timeout=240, only=None):
         return 2
 
     # Cheapest check first: one pass over a string, before a compiler is started.
-    problems = check_the_table(original, selected, src.parent)
+    # The tests named are the ones `cargo test -p crate` runs, so they are
+    # looked for in that crate as well as beside the mutated file.
+    pkg = package_dir(crate)
+    test_dirs = [pkg / "src", pkg / "tests"] if pkg is not None else []
+    problems = check_the_table(original, selected, src.parent, test_dirs)
     if problems:
         bak.unlink(missing_ok=True)
         print(f"\n{problems} unusable row(s) in the table.  Fix them first: a row")

@@ -844,17 +844,79 @@ pub extern "C" fn nice(inc: i32) -> i32 {
     new_val
 }
 
+/// Whether `which`/`who` names exactly the calling process -- the one target
+/// the native nice calls reach: `SYS_PROCESS_GET_NICE` and
+/// `SYS_PROCESS_SET_NICE` take no process argument and act on the caller
+/// alone.
+///
+/// Anything else is `Err(errno)`, because acting on the caller instead -- what
+/// these functions did until 2026-09-27 -- reported a change to one process
+/// that had happened to another
+/// (`requests/e-ad-renicing-another-process-renices-the-caller.md`):
+///
+/// - another process: `ESRCH` if there is none by that pid, as Linux says;
+///   `EPERM` if there is, since this library cannot reach it;
+/// - a process group or a user, the caller's own included: `EPERM` (or
+///   `ESRCH` for a group with no member).  On Linux these name every process
+///   in the group or of the user, so doing it to the caller alone would be the
+///   same false success in part.
+///
+/// Linux's order is kept: `which` is checked before this, and the target is
+/// found before any permission test (`kernel/sys.c`, `sys_setpriority`).
+fn prio_target_is_caller(which: i32, who: u32) -> Result<(), i32> {
+    match which {
+        PRIO_PROCESS => {
+            if who == 0 {
+                return Ok(());
+            }
+            // Above `i32::MAX` it cannot be a pid.
+            let Ok(pid) = crate::types::PidT::try_from(who) else {
+                return Err(errno::ESRCH);
+            };
+            if pid == crate::process::getpid() {
+                return Ok(());
+            }
+            Err(target_exists_errno(crate::signal::kill(pid, 0)))
+        }
+        PRIO_PGRP => match crate::types::PidT::try_from(who) {
+            // The caller's own group: it exists, and the caller is in it.
+            Ok(0) => Err(errno::EPERM),
+            Ok(pgrp) if pgrp == crate::process::getpgrp() => Err(errno::EPERM),
+            // `kill(-pgrp, 0)` asks whether the group has a member.
+            Ok(pgrp) => Err(target_exists_errno(crate::signal::kill(pgrp.wrapping_neg(), 0))),
+            Err(_) => Err(errno::ESRCH),
+        },
+        // Whether another user has a process this library cannot tell, and a
+        // refusal is the true half of either answer.
+        _ => Err(errno::EPERM),
+    }
+}
+
+/// The errno for a target that is not the caller, from the `kill(…, 0)` probe
+/// that looked for it: `ESRCH` if nothing is there, `EPERM` if something is.
+fn target_exists_errno(probe: i32) -> i32 {
+    if probe < 0 && errno::get_errno() == errno::ESRCH {
+        errno::ESRCH
+    } else {
+        errno::EPERM
+    }
+}
+
 /// Get the scheduling priority of a process, process group, or user.
 ///
 /// Returns the nice value (which can be negative), so callers must
 /// clear errno before calling and check it after.  On SlateOS this reads the
-/// caller's real kernel nice via `SYS_PROCESS_GET_NICE` (`who` targeting other
-/// processes is not modelled by the native path — the calling process's value
-/// is returned regardless).
+/// caller's real kernel nice via `SYS_PROCESS_GET_NICE`, which is the only
+/// process it can read: any other target fails, as [`prio_target_is_caller`]
+/// says.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
+pub extern "C" fn getpriority(which: i32, who: u32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if let Err(e) = prio_target_is_caller(which, who) {
+        errno::set_errno(e);
         return -1;
     }
     errno::set_errno(0); // Clear errno — return value can be negative.
@@ -865,7 +927,10 @@ pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
 ///
 /// On SlateOS this installs the nice value in the kernel via
 /// `SYS_PROCESS_SET_NICE`, which re-prioritises the process's tasks — the
-/// change is real, not merely stored.  Returns 0 on success, -1 on error.
+/// change is real, not merely stored.  That call reaches the caller only, so
+/// any other target fails (`ESRCH` or `EPERM`, [`prio_target_is_caller`])
+/// rather than renicing the caller in its place.  Returns 0 on success, -1 on
+/// error.
 ///
 /// Phase 169 / §314: Linux's `sys_setpriority` calls `set_one_prio` on each
 /// task in scope.  After clamping `niceval` to `[MIN_NICE, MAX_NICE]`,
@@ -881,9 +946,13 @@ pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
 /// observable by callers that switch on errno.  Equivalent or higher
 /// nice values (lowering priority) are always allowed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
+pub extern "C" fn setpriority(which: i32, who: u32, prio: i32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if let Err(e) = prio_target_is_caller(which, who) {
+        errno::set_errno(e);
         return -1;
     }
     let val = prio.clamp(-20, 19);
@@ -1482,18 +1551,71 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
+    /// The caller, by 0 or by its own pid, is the one target the native call
+    /// reaches.
     #[test]
-    fn getpriority_all_valid_which_values() {
+    fn priority_calls_reach_the_caller_by_zero_or_by_pid() {
         reset_global_state();
-        nice(3);
-        for &which in &[PRIO_PROCESS, PRIO_PGRP, PRIO_USER] {
-            let val = getpriority(which, 0);
-            assert_eq!(
-                val, 3,
-                "getpriority with which={which} should return nice value"
-            );
-            assert_eq!(errno::get_errno(), 0);
+        let me = u32::try_from(crate::process::getpid()).expect("a pid is positive");
+        assert_eq!(setpriority(PRIO_PROCESS, me, 6), 0);
+        assert_eq!(getpriority(PRIO_PROCESS, 0), 6);
+        assert_eq!(setpriority(PRIO_PROCESS, 0, 4), 0);
+        assert_eq!(getpriority(PRIO_PROCESS, me), 4);
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    /// Another process is refused, never renicing the caller in its place:
+    /// the bug `requests/e-ad-renicing-another-process-renices-the-caller.md`
+    /// reported -- `renice -p <pid>` changed `renice` and said it had changed
+    /// `<pid>`.  On the host the probe finds no such process, so `ESRCH`; on
+    /// SlateOS a live one is `EPERM`.
+    #[test]
+    fn priority_calls_refuse_another_process() {
+        reset_global_state();
+        nice(2);
+        let me = crate::process::getpid();
+        let other = u32::try_from(if me == 1 { 2 } else { 1 }).expect("positive");
+        errno::set_errno(0);
+        assert_eq!(setpriority(PRIO_PROCESS, other, 15), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+        assert_eq!(getpriority(PRIO_PROCESS, 0), 2, "the caller is untouched");
+        errno::set_errno(0);
+        assert_eq!(getpriority(PRIO_PROCESS, other), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+        // Not a pid at all.
+        errno::set_errno(0);
+        assert_eq!(setpriority(PRIO_PROCESS, u32::MAX, 15), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    /// A group or a user names more than the caller on Linux, the caller's own
+    /// included, so it is refused rather than done to the caller alone.
+    #[test]
+    fn priority_calls_refuse_groups_and_users() {
+        reset_global_state();
+        nice(1);
+        let own_pgrp = u32::try_from(crate::process::getpgrp()).expect("positive");
+        for (which, who) in [(PRIO_PGRP, 0), (PRIO_PGRP, own_pgrp), (PRIO_USER, 0), (PRIO_USER, 1000)] {
+            errno::set_errno(0);
+            assert_eq!(setpriority(which, who, 10), -1, "which={which} who={who}");
+            assert_eq!(errno::get_errno(), errno::EPERM, "which={which} who={who}");
+            errno::set_errno(0);
+            assert_eq!(getpriority(which, who), -1, "which={which} who={who}");
+            assert_eq!(errno::get_errno(), errno::EPERM, "which={which} who={who}");
         }
+        assert_eq!(getpriority(PRIO_PROCESS, 0), 1, "the caller is untouched");
+    }
+
+    /// Linux checks `which` first: a bad one is `EINVAL` whatever `who` is.
+    #[test]
+    fn priority_calls_check_which_before_who() {
+        reset_global_state();
+        errno::set_errno(0);
+        assert_eq!(setpriority(999, 12345, 5), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(getpriority(-1, 12345), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -----------------------------------------------------------------------

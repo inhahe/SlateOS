@@ -82745,3 +82745,239 @@ A-Q15's "if this is never answered" describes. The known consequences:
 - `D-NETSOCK-SYNC` cannot be proven;
 - a windowed program that opens a second socket loses its display connection.
 The last is why this is lane A's next networking task, not a background one.
+
+**Status, 2026-09-27: steps 1 and 2 are built** (A-Q15 increments 1-3,
+`roadmap.md`). Two sockets at once work in both designs, and the head-of-line
+and late-data witnesses run in every boot, once per design. That makes the
+"until then" list above history, and it retired §941's declaration. Steps 3
+and 4, the full measurement and its reading, are increment 4.
+
+## 973. Every file has one owner, and a gate refuses a tracked file with none
+
+**Date:** 2026-09-27 · **Decided by:** Operator (the operator left the choice of lanes to Claude; the assignments below are Claude's and Claude's to revisit) · **Lane:** A
+
+Answering A-Q11. Relayed by lane F from the operator's answers in lane F's
+session, 2026-09-27; verbatim:
+
+> Assign it to whatever lane you want, if another lane wants to change it too
+> they can request the original lane to do it. And pick a lane for each of the
+> remaining files without lanes, and make a rule somewhere that we don't leave
+> files with ambiguous ownership.
+
+**In short:** the tool that says which agent may edit which file left about a
+thousand files to nobody:
+- the scripts;
+- the request notes;
+- a few dozen small shared libraries;
+- the files at the top of the tree.
+
+Two agents once edited one of them, the push hook, on the same night. The
+operator decided that every file gets exactly one owning lane, and that another
+lane wanting a change asks the owner. A rule stops files from being left
+without an owner again. Which lane gets which file was left to Claude.
+
+**What it obliges.**
+1. **`scripts/hooks/pre-push` is lane A's**, and so are `scripts/run-checker.sh`
+   and `scripts/which-lane.py`. The hook and `scripts/boot-test.sh` run the same
+   gates through one `run_checker`, and A-Q13's answer (§974) moves gates from
+   the boot into the hook, which is lane A's work. One owner for the gate
+   machinery keeps its two call sites consistent. Lane B's claim to the hook
+   dates from the three-lane table; lane B's scope has been userland since
+   2026-09-22.
+2. **The rest of `scripts/`** follows three rules:
+   - a script belongs to the lane whose code it judges or serves;
+   - a test suite goes with the script it tests;
+   - a gate that judges every lane's files belongs to lane A, as part of the
+     gate machinery. Examples are line endings, gates that can refuse, and
+     gates that are wired.
+
+   The result is written into `which-lane.py`'s table, script by script where
+   the directory does not decide it.
+3. **`requests/`: a request belongs to its sender**, the first letter of its
+   name (`a-bc-...` is lane A's). The addressee's status stamp stays allowed,
+   as roadmap.md rule 3's exception already says.
+4. **A root leaf crate goes to the lane whose code depends on it most**,
+   counted from the manifests rather than guessed. This is how `randrange`
+   went to lane E.
+5. **The files at the top of the tree.**
+   - The shared documents stay shared, each under the per-lane rule it already
+     has: `roadmap.md`, `known-issues.md`, `known-issues-resolved.md`,
+     `design-decisions.md`, `open-questions.md`, `deferred-questions.md` and
+     `todo.txt`. A rule that says who writes which part is an owner, not an
+     ambiguity.
+   - The operator's own files are the operator's: `CLAUDE.md`, the design
+     texts, `backups/` and the personal notes.
+   - Everything else gets a lane.
+6. **The rule.** `which-lane.py` answers every tracked path with one of:
+   - a lane;
+   - `operator`;
+   - a named shared-document rule.
+
+   It never answers "nobody". A gate in both the boot test and the push hook
+   refuses a tracked file with no owner, so a new file or directory at the top
+   of the tree gets one in the commit that creates it. `roadmap.md`'s
+   six-agent section states the rule.
+
+## 974. Fast checks run at push time, and a check that raises false alarms is fixed before it is moved there
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended this option) · **Lane:** A
+
+Answering A-Q13. Relayed by lane F, 2026-09-27; verbatim:
+
+> The first, and see if you can "fix the checks" too.
+
+**In short:** when one agent pushed something broken, the fault was found only
+by another agent's full test run. That run was 20 to 40 minutes when the
+question was filed and is over three hours now. The operator chose to move the
+quick checks into the check every push must pass, so the agent who wrote a
+fault sees it within minutes. The checks themselves are to be fixed wherever
+they raise false alarms, since a check that cries wolf teaches agents to
+ignore it.
+
+**What it obliges.**
+1. **An inventory.** It lists every gate the boot test runs that the push hook
+   does not (72 against 48 on 2026-09-27). For each it gives:
+   - its measured cost, from the per-run gate-timing files;
+   - whether it judges the commit being pushed or the working tree.
+2. **Each fast, deterministic gate moves into the hook**, scoped to the paths a
+   push touches, the way the hook's other gates are. The slow ones stay in the
+   boot and are what the gate cache (C-Q11 idea 2) is for.
+3. **"Fix the checks."**
+   - Every recorded false alarm is found in `known-issues.md` and the boot
+     history, and confirmed fixed. A false alarm is a gate refusing a correct
+     tree.
+   - A gate moves into the hook only with a self-test that proves it refuses
+     what it should and passes what it should. The hook already runs those
+     self-tests before it trusts a verdict.
+4. **Cost against catches, as the operator's C-Q11 answer asked.** For each
+   gate, record its cost per run against the faults it has actually caught, so
+   a gate that costs much and catches nothing is visible rather than assumed
+   useful.
+
+## 975. A lock that has another lock taken under it is watched by the deadlock detector; a conversion that costs more than it is worth is reverted, by measurement
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended this option) · **Lane:** A
+
+Answering A-Q16. Relayed by lane F, 2026-09-27; verbatim:
+
+> A, and I think you're also saying to "convert, read the arm, and revert any
+> conversion that costs more than it is worth. The arm now exists to read," so
+> do that.
+
+**In short:** the kernel has a cheap kind of lock that the deadlock detector
+does not watch. The stated reason was that nothing is ever locked while one is
+held. That was measured false: it happens 1256 times per boot, across 89 pairs
+of locks. The operator chose to convert those locks to the watched kind, then
+measure what each conversion costs and undo the ones that cost more than they
+are worth.
+
+**What it obliges.**
+1. **Convert the outer locks.** Every `PreemptSpinMutex` that §949's leaf check
+   finds held while another lock is taken becomes `crate::sync::Mutex`. A lock
+   taken in interrupt context must stay interrupt-safe under its new type, and
+   that is checked per lock before converting, not discovered after.
+2. **Price each conversion.** The price is acquisitions per boot, from the
+   statistics `crate::sync::Mutex` keeps, times the extra cost per acquire,
+   about 235 ns in `bench_lock_primitives`. A conversion that is material on a
+   hot path (syscall entry, the scheduler, an interrupt) is reverted. Its
+   lock order is then pinned another way: written down and checked by a
+   targeted self-test, never left unwatched and undocumented again.
+3. **End state.** The cheap type holds only true leaves. §949's check then
+   reports nothing rather than 24 findings at its cap, so it can fail the boot
+   on a new nesting instead of printing one more line. §70's reason is
+   corrected to say so.
+
+## 976. The display planes' source and destination rectangles are honoured in the scanout path
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended refusing the request instead; the operator chose to make it work) · **Lane:** A
+
+Answering A-Q17. Relayed by lane F, 2026-09-27; the answer was one word, "B".
+
+**In short:** a program can ask the display system to place or stretch a layer,
+such as a video overlay or the mouse pointer, anywhere on the screen. The
+kernel accepted the request, reported success, and ignored it. The operator
+chose to make it work: each layer is drawn where it was asked, at the size it
+was asked.
+
+**What it obliges.**
+1. **Composition on the software backends.** The bootloader framebuffer and
+   virtio-gpu's 2D path compose the enabled planes into the scanout image at
+   flip time, in z-order. For each plane:
+   - its source rectangle is cropped from its framebuffer;
+   - the crop is scaled to its destination rectangle;
+   - the result is clipped to the CRTC (the scanout engine for one display).
+2. **virtio-gpu's cursor plane uses the device's own cursor queue**, so moving
+   the pointer does not recompose the frame.
+3. **Validation at commit time, as Linux does it.** A rectangle outside its
+   framebuffer, or a scale the backend cannot do, is refused with an error. A
+   request is honoured or refused, never accepted and ignored.
+4. **Tests.**
+   - Composition is checked pixel-exactly against a reference scaler.
+   - A boot self-test commits a moved plane and a scaled plane, and reads the
+     scanout back.
+
+   Real GPU backends, such as §263's iGPU, get it as they are written.
+
+## 977. `known-issues.md` gets a section per lane for new entries; the entries already in it stay where they are
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended this option) · **Lane:** A
+
+Answering A-Q18. Relayed by lane F, 2026-09-27; the answer was one word, "A".
+
+**In short:** every agent added new bug entries at the bottom of one shared
+file, so any two that wrote between merges collided there. It happened eleven
+times in one day. The operator chose per-lane sections: each lane adds new
+entries at the end of its own section, so two lanes never write the same
+lines.
+
+**What it obliges.**
+1. **Six sections at the end of `known-issues.md`**, `## Lane A: new entries`
+   through `## Lane F: new entries`. A lane appends at the end of its own
+   section. There are six, not the three the question named, because the tree
+   has had six lanes since 2026-09-22.
+2. **The existing entries do not move.** Moving them would conflict with every
+   lane at once and would need a halt. Left where they are, they cause no
+   conflicts, because nobody appends there any more. An amendment still goes
+   directly under the entry it amends, wherever that is.
+3. **roadmap.md's shared-document row for `known-issues.md` says so**, replacing
+   "new entries go at the end". `check-known-issues-index` walks the headings,
+   and is re-run to prove it still does.
+4. **Every lane is told directly**, since the row they follow today says the
+   opposite.
+
+## 978. The security modules nothing calls are wired in, each one fixed before it is connected
+
+**Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended documenting them as staged first; the operator chose to make them live) · **Lane:** A
+
+Answering A-Q21. Relayed by lane F, 2026-09-27; the answer was one word, "B".
+
+**In short:** several pieces of kernel code whose job is to say "no" are
+written and tested. They check passwords, unlock encrypted disks, decide who
+may reach a file, refuse writes to sealed files and check boot images. Nothing
+uses them except commands typed by hand into the kernel's own shell. The
+operator chose to make them live. Each one is fixed first and then connected,
+because several have faults that are harmless only while nothing calls them.
+
+**What it obliges, module by module.** Each connection is its own change with
+its own test. Each module's `/proc` counters then start to move, which is how
+a boot shows that a module is live.
+- **`secureboot`.** `verify_image` ignores the image's fingerprint and passes
+  everything.
+  - Fix first: a real check against allow and deny lists of image
+    fingerprints. These are UEFI's `db` and `dbx`, and need no certificate
+    code in the kernel.
+  - Then the syscall door that lane B's parked request asks for
+    (`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`).
+  - `userspace/sbctl` claims to create keys and sign images while doing
+    neither. That is lane B's to stop, and lane B is told.
+- **`diskencrypt`.** `unlock_volume` ignores the passphrase. Fix first: real key
+  derivation with a ported, vetted password hash (§539). Then connect it to
+  the mount path.
+- **`sealing`, `capsettings`, `secpolicy`.** Several key their tables by path
+  name, so two names for one file get two answers. Fix first: re-key them by
+  file identity. Then connect them to the VFS permission and write paths.
+- **`authbroker`.** Connected to the login path, once lane B's login has a door
+  to call.
+- **The per-file metadata tables:** `acl`, `fcomment`, `queryable` and `tags`.
+  The question named them as the same shape. They get syscall-layer doors as
+  part of the same work.

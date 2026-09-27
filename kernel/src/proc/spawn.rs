@@ -5102,6 +5102,31 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         }
     }
 
+    // A blocking receive on a quiet connection waits for data that comes late:
+    // the end-to-end half of A-BLOCKING-TCP-RECV-REPORTS-EOF-AFTER-2S, which
+    // needs a listener, a client and the accepted connection alive at once --
+    // possible since A-Q15's shared ring. Loopback inside the daemon, so an
+    // error is a real break and fails the run.
+    match crate::net::socket::self_test_blocking_recv_waits_for_late_data() {
+        // The check prints its own OK line, with the wait it measured.
+        Ok(Some(())) => {}
+        Ok(None) => {
+            serial_println!("[spawn]   net::socket late data: no IPv4 lease -- check skipped");
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: net::socket late data ({:?}) — a blocking recv did not wait \
+                 for data sent after the old two-second cut-off",
+                e
+            );
+            crate::selftest::dispatch_debug(
+                "net::socket late data",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
+        }
+    }
+
     // IPv6 connect parity (D-NETSOCK-SYNC, final gap): OP_CONNECT6 over the daemon.
     // Slirp offers no IPv6 peer or router, so this too drives the in-process
     // loopback — a non-blocking connect to the daemon's own link-local (me.ip6,

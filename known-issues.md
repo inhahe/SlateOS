@@ -171366,11 +171366,19 @@ would never be resent.
   "no data came back", so the would-block that replaced the 0 leaves them
   unchanged.
 
-**Not done: an end-to-end TCP witness.** A blocking `recv` on a connection
-whose peer sends after 2.5 s must return the data. That test needs a listener
-and a client alive at once, which A-Q15 does not allow yet; the same limit
-keeps the head-of-line witness declined. So does loss injection for the
-retransmit, which the daemon has no hook for.
+**The end-to-end TCP witness: added 2026-09-27.**
+`net::socket::self_test_blocking_recv_waits_for_late_data` sets up a
+listener, a client and the accepted connection. A task sends on the client
+2.5 s later, while the test sits in a blocking `recv` on the accepted
+connection. The `recv` must return exactly those bytes, no earlier than the
+send.
+
+It needed a listener and a client alive at once, which A-Q15's shared ring
+(design A, 2026-09-27) made possible. The same change lets the head-of-line
+witness run.
+
+**Still not done:** loss injection for the retransmit. The daemon has no hook
+for it.
 
 
 ### [A] A-VFS-APPEND-RACES: two appends to one file at once could overwrite each other -- 2026-09-26

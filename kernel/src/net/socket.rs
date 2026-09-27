@@ -78,16 +78,6 @@ fn alloc_socket_id() -> SocketId {
 /// `AF_INET6` — the address family whose accept path reads the 18-byte peer form.
 const AF_INET6: u16 = 10;
 
-/// Session-local id under which a listening socket's daemon-side listener is
-/// registered. Each listening socket owns its own ring session, so a single fixed
-/// id is unique within that session (mirrors the boot self-test's `LISTENER_ID`).
-const LISTENER_ID: u32 = 100;
-
-/// First id handed to an accepted connection on a listener's session. Accepted ids
-/// increase from here; the daemon demuxes by 4-tuple, so they need only be unique
-/// within the one session.
-const ACCEPT_ID_BASE: u32 = 101;
-
 /// Opaque handle to a stream socket. Stored as `FdEntry::raw_handle` (a `u64`)
 /// by the Linux fd-table dispatch layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -199,31 +189,31 @@ pub enum ConnectOutcome {
 /// It is a sleeping lock, held across daemon round-trips; see the module's
 /// "Lock discipline".
 ///
-/// On drop, an accepted connection tells the daemon to close *just* its `conn_id`
-/// (`OP_CLOSE`), leaving the shared session — and the listener — alive. The
-/// listener itself closes nothing here; the session is torn down (`OP_STOP`) only
-/// when the last `Arc` reference drops, running [`NetstackConn`]'s own `Drop`.
+/// On drop, each handle tells the daemon to close *just* its own `conn_id`
+/// (`OP_CLOSE`): an accepted connection closes its connection, and the listener
+/// closes its listener, so no new connection queues on a port nobody will accept
+/// from. Accepted connections still open keep working. Whatever remains is
+/// closed when the last `Arc` reference drops, by [`NetstackConn`]'s own `Drop`.
 struct SharedConn {
-    /// The shared ring session (listener + all its accepted connections).
+    /// The shared `NetstackConn` (listener + all its accepted connections).
     session: Arc<KMutex<NetstackConn>>,
-    /// The connection id this socket drives on the shared session — the listener's
-    /// [`LISTENER_ID`] for a listener, or a per-accept id for an accepted socket.
+    /// The id this socket drives -- the listener id for the listener, or its
+    /// own accepted-connection id -- both from `netstack_client::alloc_conn_id`.
     conn_id: u32,
     /// Whether this handle is the listener (whose id is a listener id, not a live
-    /// connection). A listener does not `OP_CLOSE` a connection on drop.
+    /// connection).
     is_listener: bool,
 }
 
 impl Drop for SharedConn {
     fn drop(&mut self) {
-        if self.is_listener {
-            // The listener owns no connection to close; the session teardown
-            // (OP_STOP on the final Arc drop) tears the listener down.
-            return;
-        }
-        // Best-effort: close only this accepted connection id, leaving the shared
-        // listener session alive for its siblings. Runs outside the table lock
-        // (SharedConn is dropped when the owning SocketInner drops).
+        // Best-effort: close only this handle's id. For the listener that is
+        // the listening registration, which the daemon's OP_CLOSE removes along
+        // with any connection still waiting in its backlog; until 2026-09-27 a
+        // listener was only removed with its whole session, so a closed
+        // listening socket kept queuing connections while an accepted one
+        // lived. Runs outside the table lock (SharedConn is dropped when the
+        // owning SocketInner drops).
         let mut guard = self.session.lock();
         let _ = guard.close_conn(self.conn_id);
     }
@@ -290,10 +280,6 @@ struct SocketInner {
     /// so that the daemon -- which answers "timed out" from then on -- cannot
     /// make a later poll latch it again.
     timeout_reported: bool,
-    /// Listener sockets only: the next connection id to hand an accepted connection
-    /// on this listener's session (starts at [`ACCEPT_ID_BASE`], bumped per
-    /// successful [`accept`]). Meaningless for a non-listener.
-    next_accept_id: u32,
 }
 
 impl SocketInner {
@@ -394,7 +380,6 @@ fn create_kind(kind: SockKind, domain: u16) -> KernelResult<SocketHandle> {
         peer_port: 0,
         so_error: 0,
         timeout_reported: false,
-        next_accept_id: ACCEPT_ID_BASE,
     };
     let id = alloc_socket_id();
     let slot = SocketSlot {
@@ -659,6 +644,181 @@ pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool, peek: bool) ->
     got
 }
 
+/// The client socket [`late_sender`] writes to, as a raw handle; 0 when none.
+static LATE_SENDER_SOCKET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Set by [`late_sender`] once its send has returned, however it went.
+static LATE_SENDER_DONE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// How long [`late_sender`] waits before sending: past the two seconds after
+/// which a quiet connection's blocking receive used to report end-of-stream.
+const LATE_SEND_DELAY_MS: u64 = 2_500;
+
+/// What [`late_sender`] sends.
+const LATE_SEND_MSG: &[u8] = b"late-but-not-closed";
+
+/// [`self_test_blocking_recv_waits_for_late_data`]'s peer: sleep past the old
+/// two-second cut-off, then send on the client socket.
+extern "C" fn late_sender(_arg: u64) {
+    crate::sched::sleep_ms(LATE_SEND_DELAY_MS);
+    let raw = LATE_SENDER_SOCKET.load(core::sync::atomic::Ordering::Acquire);
+    if raw != 0 {
+        let client = SocketHandle::from_raw(raw);
+        if send(client, LATE_SEND_MSG, false).is_err() {
+            // The receiver is in a blocking recv that nothing else will end:
+            // close our write side so it reads end-of-stream and the test fails
+            // by name, instead of waiting for the rest of the boot. What went
+            // wrong shows there as missing data; a failed shutdown can only mean
+            // the connection is already gone, which ends the recv too.
+            let _ = shutdown(client, netipc::ring::SHUT_WR);
+        }
+    }
+    LATE_SENDER_DONE.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// A blocking `recv` on a quiet connection waits for data that comes late.
+///
+/// The end-to-end witness known-issues
+/// `A-BLOCKING-TCP-RECV-REPORTS-EOF-AFTER-2S` recorded as not done: until
+/// 2026-09-26 a blocking receive was handed to the daemon, which polled for two
+/// seconds and answered `0`, so any connection quiet for two seconds read as
+/// closed. That fix was proven only on synthetic answers, because a real test
+/// needs a listener, a client and the accepted connection alive at once, and
+/// until A-Q15's shared ring (2026-09-27) a second socket destroyed the first.
+///
+/// A listener, a client connected to it over the daemon's loopback, the
+/// accepted connection; a task sends on the client 2.5 s later, while this one
+/// sits in a blocking `recv` on the accepted connection. The receive must
+/// return exactly those bytes, and not before the send.
+///
+/// Returns `Ok(None)` when the interface has no IPv4 address yet: the loopback
+/// divert keys on a non-zero local IP.
+///
+/// # Errors
+///
+/// `Err` when the setup fails, when the receive returns anything but the late
+/// bytes, or when it returns before they could have been sent.
+pub fn self_test_blocking_recv_waits_for_late_data() -> KernelResult<Option<()>> {
+    /// Loopback port, unused by the other self-tests.
+    const PORT: u16 = 9108;
+    /// Accept retries, as the head-of-line witness uses and for its reason.
+    const ACCEPT_SPINS: u32 = 64;
+    /// Yields allowed for the late sender to finish after the receive.
+    const FINISH_YIELDS: u32 = 4_000;
+
+    let me_ip = crate::net::interface::ip().0;
+    if me_ip == [0, 0, 0, 0] {
+        return Ok(None);
+    }
+
+    fn accept_ready(srv: SocketHandle) -> KernelResult<SocketHandle> {
+        let mut last = KernelError::WouldBlock;
+        for _ in 0..ACCEPT_SPINS {
+            match accept(srv) {
+                Ok((h, _)) => return Ok(h),
+                Err(e) => {
+                    last = e;
+                    crate::sched::yield_now();
+                }
+            }
+        }
+        Err(last)
+    }
+
+    let srv = create(2)?;
+    let setup = (|| {
+        bind_stream(srv, PORT)?;
+        listen(srv, 1)?;
+        let c = create(2)?;
+        if let Err(e) = connect(c, &me_ip, PORT, true) {
+            close(c);
+            return Err(e);
+        }
+        match accept_ready(srv) {
+            Ok(a) => Ok((c, a)),
+            Err(e) => {
+                close(c);
+                Err(e)
+            }
+        }
+    })();
+    let (c, a) = match setup {
+        Ok(pair) => pair,
+        Err(e) => {
+            close(srv);
+            crate::serial_println!(
+                "[netsock]   FAIL: late-data witness setup (listen, connect, accept) failed: {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    LATE_SENDER_DONE.store(false, core::sync::atomic::Ordering::Release);
+    LATE_SENDER_SOCKET.store(c.raw(), core::sync::atomic::Ordering::Release);
+    let start = crate::hrtimer::now_ns();
+    if let Err(e) = crate::sched::spawn(b"late-sender", 16, late_sender, 0, 0) {
+        LATE_SENDER_SOCKET.store(0, core::sync::atomic::Ordering::Release);
+        close(a);
+        close(c);
+        close(srv);
+        return Err(e);
+    }
+
+    let mut buf = [0u8; 32];
+    let got = recv(a, &mut buf, false, false);
+    let waited_ms = crate::hrtimer::now_ns().saturating_sub(start) / 1_000_000;
+
+    // Let the sender finish before its socket goes, however the receive went.
+    for _ in 0..FINISH_YIELDS {
+        if LATE_SENDER_DONE.load(core::sync::atomic::Ordering::Acquire) {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    LATE_SENDER_SOCKET.store(0, core::sync::atomic::Ordering::Release);
+    close(a);
+    close(c);
+    close(srv);
+
+    let data = match got {
+        Ok(n) => usize::try_from(n)
+            .ok()
+            .and_then(|n| buf.get(..n))
+            .unwrap_or(&[]),
+        Err(e) => {
+            crate::serial_println!(
+                "[netsock]   FAIL: a blocking recv on a quiet connection failed after {} ms \
+                 instead of waiting for the data sent at {} ms: {:?}",
+                waited_ms,
+                LATE_SEND_DELAY_MS,
+                e
+            );
+            return Err(e);
+        }
+    };
+    if data != LATE_SEND_MSG || waited_ms < LATE_SEND_DELAY_MS.saturating_sub(100) {
+        crate::serial_println!(
+            "[netsock]   FAIL: a blocking recv returned {} byte(s) after {} ms; wanted the {} \
+             byte(s) sent at {} ms -- an early 0 is the old two-second end-of-stream",
+            data.len(),
+            waited_ms,
+            LATE_SEND_MSG.len(),
+            LATE_SEND_DELAY_MS
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[netsock]   late data: a blocking recv waited {} ms on a quiet connection and \
+         returned the {} byte(s) sent at {} ms: OK",
+        waited_ms,
+        data.len(),
+        LATE_SEND_DELAY_MS
+    );
+    Ok(Some(()))
+}
+
 /// Set by the spawned reader immediately before it blocks, so the main task can
 /// wait for it to be *inside* `recv` rather than merely spawned.
 static HOL_READER_IN_RECV: core::sync::atomic::AtomicBool =
@@ -724,22 +884,21 @@ pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
 
     /// Whether the netstack daemon can hold more than one socket at a time.
     ///
-    /// `false`, and this is A-Q15. Every socket opens its own SHM ring
-    /// (`NetstackConn::open` -> `shm::create`) while the daemon holds a single
-    /// `RingSession` and resets `conns` and `listeners` when a ring arrives on a
-    /// different handle. So creating a second socket destroys the first one's
-    /// listener, and head-of-line blocking -- which needs two live sockets ---
-    /// cannot be observed at all.
+    /// `true` since 2026-09-27: every socket submits on one shared ring
+    /// (`netstack_client`'s `SHARED_RING`, design A of A-Q15, design-decisions
+    /// §972), so the daemon keeps one session with every socket in it. Before,
+    /// each socket opened its own SHM ring while the daemon held a single
+    /// `RingSession` and reset its `conns` and `listeners` whenever a ring
+    /// arrived on a different handle: creating a second socket destroyed the
+    /// first one's listener, and head-of-line blocking -- which needs two live
+    /// sockets -- could not be observed at all.
     ///
     /// It is a **declaration**, deliberately: a constant this test reads is a
     /// reason looked up, which `check-selftest-skips` permits, where a skip
-    /// inferred from `accept` returning an error is one it refuses. The `Ok` arm
-    /// below checks the declaration against reality, so it cannot go stale
-    /// unnoticed.
-    ///
-    /// Set to `true` when the daemon holds per-socket sessions; the case then
-    /// runs for real and A-Q15 can close.
-    const NETSTACK_HOLDS_MULTIPLE_SOCKETS: bool = false;
+    /// inferred from `accept` returning an error is one it refuses. The arms
+    /// below check the declaration against reality, so it cannot go stale
+    /// unnoticed: with it `true`, a failed accept is a regression.
+    const NETSTACK_HOLDS_MULTIPLE_SOCKETS: bool = true;
     const START_YIELDS: u32 = 10_000;
 
     let me_ip = crate::net::interface::ip().0;
@@ -1742,7 +1901,9 @@ pub fn listen(handle: SocketHandle, _backlog: i32) -> KernelResult<()> {
             return Err(KernelError::InvalidArgument);
         }
     };
-    let res = match conn.listen(LISTENER_ID, port) {
+    // An id from the namespace every socket shares on the ring.
+    let listener_id = crate::net::netstack_client::alloc_conn_id();
+    let res = match conn.listen(listener_id, port) {
         Ok(r) => r,
         Err(e) => {
             guard.session = SessionRef::Owned(conn);
@@ -1755,7 +1916,7 @@ pub fn listen(handle: SocketHandle, _backlog: i32) -> KernelResult<()> {
     }
     guard.session = SessionRef::Shared(SharedConn {
         session: Arc::new(KMutex::new(conn)),
-        conn_id: LISTENER_ID,
+        conn_id: listener_id,
         is_listener: true,
     });
     guard.state = SockState::Listening;
@@ -1780,12 +1941,12 @@ pub fn listen(handle: SocketHandle, _backlog: i32) -> KernelResult<()> {
 /// - protocol faults propagated from [`NetstackConn::accept`].
 pub fn accept(handle: SocketHandle) -> KernelResult<(SocketHandle, AcceptedPeer)> {
     let inner = inner_of(handle)?;
-    let mut guard = inner.lock();
+    let guard = inner.lock();
     if guard.state != SockState::Listening {
         return Err(KernelError::InvalidArgument); // EINVAL — not listening
     }
     let domain = guard.domain;
-    let new_id = guard.next_accept_id;
+    let new_id = crate::net::netstack_client::alloc_conn_id();
     let (arc, listener_id) = match &guard.session {
         SessionRef::Shared(s) if s.is_listener => (s.session.clone(), s.conn_id),
         _ => return Err(KernelError::InvalidArgument),
@@ -1826,8 +1987,6 @@ pub fn accept(handle: SocketHandle) -> KernelResult<(SocketHandle, AcceptedPeer)
     if res != 0 {
         return Err(KernelError::InternalError); // -1 unknown listener / id install failed
     }
-    // Consume the id only now that the accept has succeeded.
-    guard.next_accept_id = new_id.checked_add(1).ok_or(KernelError::InternalError)?;
     let (peer_ip, peer_ip6, peer_port) = match peer {
         AcceptedPeer::V4(ip, port) => (ip, None, port),
         AcceptedPeer::V6(ip6, port) => ([0; 4], Some(ip6), port),
@@ -1849,7 +2008,6 @@ pub fn accept(handle: SocketHandle) -> KernelResult<(SocketHandle, AcceptedPeer)
         peer_port,
         so_error: 0,
         timeout_reported: false,
-        next_accept_id: ACCEPT_ID_BASE,
     };
     let id = alloc_socket_id();
     let slot = SocketSlot {

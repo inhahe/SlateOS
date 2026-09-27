@@ -3377,6 +3377,20 @@ impl Listeners {
         }
     }
 
+    /// Unregister the listener `id`, closing every connection still waiting in
+    /// its backlog. `false` if there is no such listener.
+    fn remove(&mut self, id: u32, me: &IfInfo) -> bool {
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|(lid, _)| *lid == id) {
+                if let Some((_, mut l)) = slot.take() {
+                    l.close_all(me);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     /// Borrow the listener registered under `id`, if any.
     fn get_mut(&mut self, id: u32) -> Option<&mut Listener> {
         self.slots
@@ -3760,8 +3774,13 @@ fn ring_tcp_process(
                     c.close(me);
                     0
                 }
-                // Not a TCP connection — it may be a bound UDP datagram socket.
+                // Not a TCP connection — it may be a bound UDP datagram socket,
+                // or a listener. A listener used to go only with the whole
+                // session (OP_STOP); with one ring for every socket the session
+                // is never stopped, so a closed listening socket must be
+                // removable on its own, its unaccepted connections with it.
                 None if udp.remove(sqe.conn_id) => 0,
+                None if listeners.remove(sqe.conn_id, me) => 0,
                 None => -1,
             },
             netipc::ring::OP_LISTEN => {

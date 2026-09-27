@@ -72,6 +72,7 @@ dependencies = [
 name = "arp"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "quoting",
 ]
 
@@ -655,6 +656,7 @@ dependencies = [
 name = "dhcpcd"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "libcall",
  "quoting",
 ]
@@ -1328,6 +1330,7 @@ dependencies = [
 name = "ifconfig"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "quoting",
 ]
 
@@ -1425,6 +1428,7 @@ dependencies = [
 name = "ip"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "quoting",
 ]
 
@@ -1525,6 +1529,10 @@ dependencies = [
  "tzrules",
  "ziparchive",
 ]
+
+[[package]]
+name = "kerror"
+version = "0.1.0"
 
 [[package]]
 name = "keylayout"
@@ -2764,6 +2772,7 @@ dependencies = [
 name = "route"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "usageerror",
 ]
 

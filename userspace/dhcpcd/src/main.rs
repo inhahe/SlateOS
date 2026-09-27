@@ -1334,6 +1334,17 @@ fn configure_static(iface: &str, cfg: &Config) -> bool {
     true
 }
 
+/// What a failed `SYS_NET_IF_CONFIG` call is reported as. The code is the
+/// kernel's own, not Linux's errno: a caller without `CAP_NET_ADMIN`-class
+/// authority gets `PermissionDenied`, -400 (`-1` is `InternalError`).
+fn refusal(ret: i64) -> String {
+    if ret == kerror::PERMISSION_DENIED {
+        "permission denied (need root)".to_string()
+    } else {
+        kerror::describe(ret)
+    }
+}
+
 /// Configure the interface with the acquired lease.
 fn configure_interface(iface: &str, lease: &LeaseInfo, cfg: &Config) {
     if cfg.no_configure {
@@ -1368,14 +1379,7 @@ fn configure_interface(iface: &str, lease: &LeaseInfo, cfg: &Config) {
         );
     }
     if ret < 0 {
-        eprintln!(
-            "dhcpcd: failed to apply lease to {iface}: {}",
-            if ret == -1 {
-                "permission denied (need root)".to_string()
-            } else {
-                format!("error {ret}")
-            }
-        );
+        eprintln!("dhcpcd: failed to apply lease to {iface}: {}", refusal(ret));
     }
 
     // Write resolv.conf.
@@ -2047,6 +2051,18 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    /// The kernel refuses `SYS_NET_IF_CONFIG` with its own codes, not
+    /// Linux's: `PermissionDenied` is -400, and -1 is `InternalError`
+    /// (requests/e-b-five-network-tools-read-a-refusal-as-error-400.md).
+    #[test]
+    fn a_refusal_is_read_with_the_kernel_s_codes() {
+        assert_eq!(refusal(-400), "permission denied (need root)");
+        assert_eq!(refusal(-3), "invalid argument");
+        assert_eq!(refusal(-2), "operation not supported");
+        assert_eq!(refusal(-1), "internal kernel error");
+        assert_eq!(refusal(-9999), "error -9999");
+    }
 
     /// Every errno this call can produce says something specific.
     #[test]

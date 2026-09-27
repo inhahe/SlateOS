@@ -1,0 +1,8 @@
+[package]
+name = "kerror"
+version = "0.1.0"
+edition = "2024"
+description = "The SlateOS kernel's native error codes and their messages, for programs that make native syscalls"
+
+[lints]
+workspace = true

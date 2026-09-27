@@ -613,14 +613,21 @@ fn is_default_route(dest: u32, mask: u32) -> bool {
     dest == 0 && mask == 0
 }
 
-/// Report a failed `SYS_NET_IF_CONFIG` call and exit. `-1` (EPERM) is the most
-/// common failure — the caller lacks the `CAP_NET_ADMIN`-class authority.
-fn config_fail(msg: &str, ret: i64) -> ! {
-    if ret == -1 {
-        eprintln!("{msg}: Operation not permitted (need root)");
+/// What a failed `SYS_NET_IF_CONFIG` or route call is reported as. The code
+/// is the kernel's own, not Linux's errno: a caller without
+/// `CAP_NET_ADMIN`-class authority gets `PermissionDenied`, -400 (`-1` is
+/// `InternalError`). The refusal keeps net-tools' "Operation not permitted".
+fn refusal(ret: i64) -> String {
+    if ret == kerror::PERMISSION_DENIED {
+        "Operation not permitted (need root)".to_string()
     } else {
-        eprintln!("{msg}: error {ret}");
+        kerror::describe(ret)
     }
+}
+
+/// Report a failed configuration call and exit.
+fn config_fail(msg: &str, ret: i64) -> ! {
+    eprintln!("{msg}: {}", refusal(ret));
     process::exit(1);
 }
 
@@ -1029,6 +1036,18 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kernel refuses `SYS_NET_IF_CONFIG` with its own codes, not
+    /// Linux's: `PermissionDenied` is -400, and -1 is `InternalError`
+    /// (requests/e-b-five-network-tools-read-a-refusal-as-error-400.md).
+    #[test]
+    fn a_refusal_is_read_with_the_kernel_s_codes() {
+        assert_eq!(refusal(-400), "Operation not permitted (need root)");
+        assert_eq!(refusal(-3), "invalid argument");
+        assert_eq!(refusal(-2), "operation not supported");
+        assert_eq!(refusal(-1), "internal kernel error");
+        assert_eq!(refusal(-9999), "error -9999");
+    }
 
     #[test]
     fn test_parse_ipv4() {

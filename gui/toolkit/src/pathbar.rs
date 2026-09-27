@@ -8,6 +8,12 @@
 //!
 //! The widget does not perform filesystem I/O. It emits `PathBarEvent::RequestAutoComplete`
 //! and the host provides completions via `set_completions()`.
+//!
+//! Nor does it decide where the host is. A typed path confirmed with Enter is
+//! a *proposal* ([`PathBarEvent::Navigate`]); the bar keeps showing the typed
+//! text until the host answers -- [`PathBar::set_path`] with wherever it went,
+//! or [`PathBar::set_path_valid`]`(false)` when it could not go there, which
+//! leaves the text in a red edge to be corrected rather than retyped.
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
@@ -92,7 +98,14 @@ pub struct CompletionItem {
 /// Events emitted by the path bar for the host to handle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PathBarEvent {
-    /// User navigated to a new path (clicked a breadcrumb or pressed Enter).
+    /// The user asks to go to this path: a crumb clicked, or a typed path
+    /// confirmed with Enter.
+    ///
+    /// A typed path is a proposal, not a move. The bar stays in edit mode
+    /// until the host answers with [`PathBar::set_path`] (it went there, or
+    /// somewhere it prefers) or [`PathBar::set_path_valid`]`(false)` (it
+    /// could not). A crumb is a folder the bar was already showing, so it is
+    /// shown at once.
     Navigate(PathBuf),
     /// Widget requests autocomplete results for the given prefix.
     RequestAutoComplete { prefix: String },
@@ -230,6 +243,10 @@ impl PathBar {
     }
 
     /// Mark whether the current edit text represents a valid path.
+    ///
+    /// The host's answer to a typed [`PathBarEvent::Navigate`] it could not
+    /// follow: the bar keeps the typed text, in a red edge, until the text is
+    /// edited or the edit is abandoned.
     pub fn set_path_valid(&mut self, valid: bool) {
         self.path_invalid = !valid;
     }
@@ -580,6 +597,8 @@ impl PathBar {
 
     /// Called whenever edit text changes — requests autocomplete.
     fn on_text_changed(&mut self) {
+        // Whatever the host refused, it was not this text.
+        self.path_invalid = false;
         // Determine the prefix for autocomplete: everything up to and including the last '/'.
         let prefix = autocomplete_prefix(&self.edit_text, self.cursor.byte);
         self.pending_events.push(PathBarEvent::RequestAutoComplete {
@@ -602,11 +621,24 @@ impl PathBar {
             }
             _ => OsString::from(self.edit_text.clone()),
         };
-        let new_path = normalize_path(&typed);
-        self.path.clone_from(&new_path);
-        self.segments = split_path(self.path.as_os_str());
-        self.pending_events.push(PathBarEvent::Navigate(new_path));
-        self.exit_edit_mode(false);
+        let target = normalize_path(&typed);
+        self.pending_events
+            .push(PathBarEvent::Navigate(target.clone()));
+        if target == self.path {
+            // Already there: there is nothing for the host to confirm.
+            self.exit_edit_mode(false);
+            return;
+        }
+        // Proposed, not committed. The host is the authority on where its
+        // listing is -- the folder may not be there, or not be a folder -- so
+        // the bar waits for its answer: `set_path` shows wherever it went and
+        // leaves edit mode, `set_path_valid(false)` keeps what was typed to be
+        // corrected. Committing here showed the typed folder's crumbs above
+        // the listing of the folder the user was still in, whenever the host
+        // refused -- the explorer's "No such folder" among them.
+        self.dropdown_visible = false;
+        self.completions.clear();
+        self.completion_index = None;
     }
 
     fn navigate_to_segment(&mut self, segment_index: usize) {
@@ -703,6 +735,8 @@ impl PathBar {
         self.dropdown_visible = false;
         self.completions.clear();
         self.completion_index = None;
+        // The text changed, whichever kind of name completed it.
+        self.path_invalid = false;
 
         // Request new completions if we just completed a directory.
         if item.is_directory {
@@ -1824,8 +1858,83 @@ mod tests {
         let events = bar.drain_events();
 
         assert!(events.contains(&PathBarEvent::Navigate(PathBuf::from("/usr/local/bin"))));
+        // Proposed, not yet shown: the host has not answered.
+        assert!(bar.is_editing());
+        assert_eq!(bar.current_path(), Path::new("/home"));
+
+        // The host went there.
+        bar.set_path("/usr/local/bin");
         assert!(!bar.is_editing());
         assert_eq!(bar.current_path(), Path::new("/usr/local/bin"));
+    }
+
+    /// **A typed path the host refuses stays, to be corrected.** The bar used
+    /// to commit on Enter, so when the explorer answered "No such folder" its
+    /// address bar showed the folder that was not there above the listing of
+    /// the one the user was still in -- and the typed text, which the
+    /// explorer's own comment promised to keep, was gone.
+    #[test]
+    fn a_typed_path_the_host_refuses_stays_to_be_corrected() {
+        let palette = Palette::for_mode(false);
+        let mut bar = PathBar::new("/home/user");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.edit_text = "/home/usr".to_string();
+        bar.cursor = bar.edit_text.len().into();
+        bar.handle_key_event(&key_press(Key::Enter));
+        assert!(
+            bar.drain_events()
+                .contains(&PathBarEvent::Navigate(PathBuf::from("/home/usr")))
+        );
+
+        // The host looks and finds nothing there.
+        bar.set_path_valid(false);
+        assert!(bar.is_editing(), "the typed path was thrown away");
+        assert_eq!(bar.edit_text, "/home/usr");
+        assert_eq!(
+            bar.current_path(),
+            Path::new("/home/user"),
+            "the bar shows a folder nobody went to"
+        );
+        let edge = |cmds: &[RenderCommand]| {
+            cmds.iter().find_map(|cmd| match cmd {
+                RenderCommand::StrokeRect { color, .. } => Some(*color),
+                _ => None,
+            })
+        };
+        assert_eq!(edge(&bar.render(&palette, 400, 28)), Some(palette.red));
+
+        // Correcting it takes the red away: whatever was refused, it was not
+        // the new text.
+        bar.handle_key_event(&key_press(Key::Backspace));
+        assert_eq!(bar.edit_text, "/home/us");
+        assert_eq!(edge(&bar.render(&palette, 400, 28)), Some(palette.surface1));
+
+        // And so does correcting it by completion -- a file's name, which
+        // asks for no further completions, as well as a folder's.
+        bar.set_path_valid(false);
+        bar.edit_text = "/home/".to_string();
+        bar.cursor = bar.edit_text.len().into();
+        bar.set_completions(vec![CompletionItem {
+            name: "notes.txt".to_string(),
+            is_directory: false,
+        }]);
+        bar.handle_key_event(&key_press(Key::Tab));
+        assert_eq!(bar.edit_text, "/home/notes.txt");
+        assert_eq!(edge(&bar.render(&palette, 400, 28)), Some(palette.surface1));
+    }
+
+    /// Confirming the path the bar already shows has nothing to wait for.
+    #[test]
+    fn confirming_the_path_already_shown_leaves_edit_mode() {
+        let mut bar = PathBar::new("/home/user");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.drain_events();
+        bar.handle_key_event(&key_press(Key::Enter));
+        assert!(!bar.is_editing());
+        assert!(
+            bar.drain_events()
+                .contains(&PathBarEvent::Navigate(PathBuf::from("/home/user")))
+        );
     }
 
     #[test]

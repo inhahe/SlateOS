@@ -12,21 +12,24 @@
 //!
 //! Uses the guitk library for UI rendering.
 //!
-//! **This app cannot measure anything yet, and says so on screen.** It has no
-//! network access -- no `std::net`, no socket syscall, nothing -- so there is
-//! no traffic it could time. Until 2026-09-15 it ran anyway, synthesising a
-//! download figure that converged on 450 Mbps, an upload figure on 120 Mbps
-//! and a round-trip time on 12.5 ms, and presented them as a result. Nothing
-//! in the window said they were invented.
+//! **It measures the connection it runs on** (`net`): the round trip to a
+//! public test server, timed as TCP connections; then the download and the
+//! upload, counted as bytes over several connections at once for the
+//! configured time. The servers are real, run by the companies named in the
+//! list, which publish these files and upload addresses for exactly this; a
+//! run reaches only the one selected, and only when Start is pressed. A
+//! server that takes no uploads has no upload figure -- "not measured", never
+//! zero, which would be a claim about the line.
 //!
-//! What is real here, and is kept: every statistic (min/max/average RTT,
-//! jitter, packet loss, average/peak/current throughput), the rolling history
-//! with its aggregates, and the text export. Those compute over samples handed
-//! to [`LatencyTester::record_sample`] and [`ThroughputTester::record_bytes`],
-//! which are the two doors a real network stack will come through. They have
-//! no caller in production today, which is the honest state of this app: the
-//! arithmetic is written and tested, and the thing that would feed it is not
-//! built.
+//! Until 2026-09-15 this app invented every figure; until 2026-09-26 it
+//! measured nothing and said so. What was real before is what the network
+//! run now feeds: the statistics (average, peak and current throughput;
+//! minimum, average and maximum round trip, jitter), the rolling history
+//! with its aggregates, and the text export. Plain HTTP, because nothing
+//! here can check a secure server's identity yet; a speed test sends nothing
+//! of the user's.
+
+mod net;
 
 use std::collections::VecDeque;
 use std::f32::consts::PI;
@@ -376,9 +379,6 @@ const SIM_LATENCY_VARIANCE_MS: f64 = 3.0;
 /// the part of the test you wait through.
 #[cfg(test)]
 const LATENCY_PROBE_INTERVAL_SECS: f32 = 0.1;
-/// Fraction of a throughput phase spent ramping up to the target rate.
-#[cfg(test)]
-const THROUGHPUT_RAMP_FRACTION: f64 = 0.2;
 
 // ============================================================================
 // Speed Test Phase
@@ -402,23 +402,6 @@ impl TestKind {
     }
 }
 
-/// Why no figure is shown, in one line, for [`SpeedTestPhase::Unavailable`].
-const CANNOT_MEASURE: &str = "no network stack to send traffic through";
-
-/// What the window says when Start is pressed, one line per element.
-///
-/// Three lines rather than one because the third is the one that matters and
-/// it does not fit beside the others. A blank result strip is read as a
-/// *reading* -- and for a speed test the reading it is read as is zero, which
-/// says the connection is dead. That is a worse untruth than the one being
-/// fixed, so the window states outright that the figures are unknown rather
-/// than low.
-const CANNOT_MEASURE_LINES: [&str; 3] = [
-    "Cannot measure this connection.",
-    "There is no network stack to send traffic through, so nothing was contacted.",
-    "No download, upload or latency figure was produced -- they are unknown, not zero.",
-];
-
 /// Overall phase of the speed test application.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SpeedTestPhase {
@@ -430,14 +413,6 @@ pub enum SpeedTestPhase {
     Complete,
     /// An error occurred during testing.
     Error(String),
-    /// No test was attempted, and why.
-    ///
-    /// Distinct from [`Self::Error`] on purpose: an error is something a run
-    /// hit, and this is the absence of a run. Reported as "Not run" rather
-    /// than "Error" because "Error" would tell a user their *connection*
-    /// failed, which is a claim about their network that this app is in no
-    /// position to make -- it has never sent a packet.
-    Unavailable(String),
 }
 
 impl SpeedTestPhase {
@@ -459,7 +434,6 @@ impl SpeedTestPhase {
             Self::Testing(kind) => kind.label(),
             Self::Complete => "Complete",
             Self::Error(_) => "Error",
-            Self::Unavailable(_) => "Not run",
         }
     }
 }
@@ -468,13 +442,35 @@ impl SpeedTestPhase {
 // Speed Test Result
 // ============================================================================
 
+/// What is producing a run's figures.
+enum Source {
+    /// A measurement over the network.
+    Network(net::Run),
+    /// Test-only: the old random producer. Its figures go straight into the
+    /// testers, as they always did, but every phase change goes through
+    /// [`SpeedTestUI::apply`] like a network run's, so the phase machine the
+    /// tests drive is the one that ships.
+    #[cfg(test)]
+    Simulated,
+}
+
+/// How many latency probes a run sends.
+const LATENCY_PROBES: u32 = 20;
+
+/// The share of a transfer phase given to TCP finding its speed, left out of
+/// the figure the phase reports: a connection starts slow and doubles, and
+/// counting the climb would report a line slower than it is.
+const THROUGHPUT_RAMP_FRACTION: f64 = 0.2;
+
 /// Complete result from a single speed test run.
 #[derive(Clone, Debug)]
 pub struct SpeedTestResult {
     /// Download speed in megabits per second.
     pub download_mbps: f64,
-    /// Upload speed in megabits per second.
-    pub upload_mbps: f64,
+    /// Upload speed in megabits per second; `None` when the server took no
+    /// uploads, so none was measured -- never zero, which would say the line
+    /// cannot send.
+    pub upload_mbps: Option<f64>,
     /// Average round-trip latency in milliseconds.
     pub latency_ms: f64,
     /// Jitter (variation in latency) in milliseconds.
@@ -483,16 +479,28 @@ pub struct SpeedTestResult {
     pub server_name: String,
     /// Unix timestamp when the test completed.
     pub timestamp: u64,
-    /// Percentage of packets lost during the test (0.0-100.0).
-    pub packet_loss_pct: f64,
+    /// Percentage of latency probes that failed or timed out (0.0-100.0).
+    ///
+    /// Probes, not packets: TCP retransmits a lost packet itself, so an
+    /// application cannot count packets lost -- only connections that did
+    /// not come up. It was labelled "packet loss", which it never was.
+    pub failed_probes_pct: f64,
+}
+
+/// An upload figure, or what stands for one that was not measured.
+fn upload_text(mbps: Option<f64>, digits: usize) -> String {
+    mbps.map_or_else(|| String::from("not measured"), |v| format!("{v:.digits$}"))
 }
 
 impl SpeedTestResult {
     /// Format the result as a human-readable summary line.
     fn summary_line(&self) -> String {
         format!(
-            "D:{:.1} U:{:.1} L:{:.1}ms",
-            self.download_mbps, self.upload_mbps, self.latency_ms,
+            "D:{:.1} U:{} L:{:.1}ms",
+            self.download_mbps,
+            self.upload_mbps
+                .map_or_else(|| String::from("--"), |v| format!("{v:.1}")),
+            self.latency_ms,
         )
     }
 
@@ -505,10 +513,10 @@ impl SpeedTestResult {
     /// a folded value cannot begin a line and cannot be read as a header. See
     /// [`guitk::fold`].
     ///
-    /// Today `servers` is filled from a hardcoded `default_servers()`, so this
-    /// is defence in depth rather than a live bug -- but the field is
-    /// *semantically* remote, and it will stop being hardcoded the moment
-    /// server discovery is real.
+    /// Today `servers` is this program's own list, so this is defence in
+    /// depth rather than a live bug -- but the field is *semantically*
+    /// remote, and it will stop being ours the moment servers are found
+    /// rather than listed.
     fn to_text_report(&self) -> String {
         let mut out = String::with_capacity(256);
         out.push_str("--- Speed Test Result ---\n");
@@ -517,10 +525,16 @@ impl SpeedTestResult {
             fold::line(&self.server_name)
         ));
         out.push_str(&format!("Download:     {:.2} Mbps\n", self.download_mbps));
-        out.push_str(&format!("Upload:       {:.2} Mbps\n", self.upload_mbps));
+        out.push_str(&format!(
+            "Upload:       {}\n",
+            self.upload_mbps.map_or_else(
+                || String::from("not measured (the server takes no uploads)"),
+                |v| format!("{v:.2} Mbps")
+            )
+        ));
         out.push_str(&format!("Latency:      {:.2} ms\n", self.latency_ms));
         out.push_str(&format!("Jitter:       {:.2} ms\n", self.jitter_ms));
-        out.push_str(&format!("Packet loss:  {:.1}%\n", self.packet_loss_pct));
+        out.push_str(&format!("Failed probes: {:.1}%\n", self.failed_probes_pct));
         out.push_str(&format!("Timestamp:    {}\n", self.timestamp));
         out
     }
@@ -533,23 +547,17 @@ impl SpeedTestResult {
 /// Configuration for a speed test run.
 #[derive(Clone, Debug)]
 pub struct SpeedTestConfig {
-    /// URL of the test server.
-    pub server_url: String,
-    /// Duration of each test phase in seconds.
+    /// Duration of each transfer phase in seconds.
     pub test_duration_secs: u32,
     /// Number of parallel connections for throughput tests.
     pub num_connections: u32,
-    /// Size of data to transfer for download test in megabytes.
-    pub download_size_mb: u32,
 }
 
 impl Default for SpeedTestConfig {
     fn default() -> Self {
         Self {
-            server_url: String::from("speedtest.slateos.local"),
             test_duration_secs: 10,
             num_connections: 4,
-            download_size_mb: 25,
         }
     }
 }
@@ -557,17 +565,11 @@ impl Default for SpeedTestConfig {
 impl SpeedTestConfig {
     /// Validate that configuration values are within sane ranges.
     fn validate(&self) -> Result<(), String> {
-        if self.server_url.is_empty() {
-            return Err("Server URL cannot be empty".into());
-        }
         if self.test_duration_secs == 0 || self.test_duration_secs > 120 {
             return Err("Test duration must be between 1 and 120 seconds".into());
         }
         if self.num_connections == 0 || self.num_connections > 32 {
             return Err("Connection count must be between 1 and 32".into());
-        }
-        if self.download_size_mb == 0 || self.download_size_mb > 1000 {
-            return Err("Download size must be between 1 and 1000 MB".into());
         }
         Ok(())
     }
@@ -580,50 +582,119 @@ impl SpeedTestConfig {
 /// A server that can be used for speed testing.
 #[derive(Clone, Debug)]
 pub struct TestServer {
-    /// Human-readable name.
+    /// Who runs it.
     pub name: String,
-    /// URL or address.
-    pub url: String,
-    /// Geographic location description.
+    /// Where it is, as its operator says.
     pub location: String,
-    /// Estimated distance in kilometers (for display).
-    pub distance_km: u32,
+    /// Where the traffic goes.
+    pub endpoint: net::Endpoint,
 }
 
-/// Returns the default list of available test servers.
-fn default_servers() -> Vec<TestServer> {
+/// A server of the list, from its parts.
+fn server(
+    name: &str,
+    location: &str,
+    host: &str,
+    download: &str,
+    upload: Option<&str>,
+) -> TestServer {
+    TestServer {
+        name: name.into(),
+        location: location.into(),
+        endpoint: net::Endpoint {
+            host: host.into(),
+            port: 80,
+            download: download.into(),
+            upload: upload.map(String::from),
+        },
+    }
+}
+
+/// The public test servers: each publishes a large file for exactly this,
+/// over plain HTTP, and Tele2 an upload address too. Checked by hand
+/// 2026-09-26 (every one answered; OVH's now redirects to https and was
+/// left out).
+///
+/// The list used to be five invented servers at invented distances --
+/// "Metro East, New York, 50 km" on domains that do not exist.
+#[must_use]
+pub fn real_servers() -> Vec<TestServer> {
     vec![
-        TestServer {
-            name: "Slate OS Central".into(),
-            url: "speedtest.slateos.local".into(),
-            location: "Local Network".into(),
-            distance_km: 0,
-        },
-        TestServer {
-            name: "Metro East".into(),
-            url: "east.speedtest.slateos.net".into(),
-            location: "New York, US".into(),
-            distance_km: 50,
-        },
-        TestServer {
-            name: "Metro West".into(),
-            url: "west.speedtest.slateos.net".into(),
-            location: "Los Angeles, US".into(),
-            distance_km: 3800,
-        },
-        TestServer {
-            name: "Europe".into(),
-            url: "eu.speedtest.slateos.net".into(),
-            location: "Frankfurt, DE".into(),
-            distance_km: 6300,
-        },
-        TestServer {
-            name: "Asia Pacific".into(),
-            url: "apac.speedtest.slateos.net".into(),
-            location: "Tokyo, JP".into(),
-            distance_km: 10800,
-        },
+        server(
+            "Tele2",
+            "Sweden",
+            "speedtest.tele2.net",
+            "/1GB.zip",
+            Some("/upload.php"),
+        ),
+        server(
+            "Hetzner",
+            "Nuremberg, Germany",
+            "nbg1-speed.hetzner.com",
+            "/1GB.bin",
+            None,
+        ),
+        server(
+            "Hetzner",
+            "Ashburn, Virginia, US",
+            "ash-speed.hetzner.com",
+            "/1GB.bin",
+            None,
+        ),
+        server(
+            "Linode",
+            "Newark, New Jersey, US",
+            "speedtest.newark.linode.com",
+            "/100MB-newark.bin",
+            None,
+        ),
+        server(
+            "Linode",
+            "London, UK",
+            "speedtest.london.linode.com",
+            "/100MB-london.bin",
+            None,
+        ),
+        server(
+            "Linode",
+            "Tokyo, Japan",
+            "speedtest.tokyo2.linode.com",
+            "/100MB-tokyo2.bin",
+            None,
+        ),
+        server(
+            "Vultr",
+            "Amsterdam, Netherlands",
+            "ams-nl-ping.vultr.com",
+            "/vultr.com.1000MB.bin",
+            None,
+        ),
+        server(
+            "Thinkbroadband",
+            "United Kingdom",
+            "ipv4.download.thinkbroadband.com",
+            "/1GB.zip",
+            None,
+        ),
     ]
+}
+
+/// The servers the window offers: the real ones -- or, under test, one on a
+/// loopback port where nothing listens, so no test reaches the network.
+#[cfg(not(test))]
+fn default_servers() -> Vec<TestServer> {
+    real_servers()
+}
+
+#[cfg(test)]
+fn default_servers() -> Vec<TestServer> {
+    vec![server(
+        "Nowhere",
+        "loopback",
+        "127.0.0.1",
+        "/big.bin",
+        Some("/upload"),
+    )]
 }
 
 // ============================================================================
@@ -870,6 +941,30 @@ impl ThroughputTester {
         sum / self.samples.len() as f64
     }
 
+    /// Average throughput over the samples after the first `ramp` share of
+    /// the phase -- the rate the line holds once TCP has found it. All of
+    /// them when the phase was too short to leave any after the ramp.
+    #[must_use]
+    pub fn sustained_mbps(&self, ramp: f64) -> f64 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a share of a phase in seconds"
+        )]
+        let from = (f64::from(self.duration_secs) * ramp) as f32;
+        let after: Vec<f64> = self
+            .samples
+            .iter()
+            .filter(|s| s.elapsed_secs > from)
+            .map(|s| s.mbps)
+            .collect();
+        if after.is_empty() {
+            return self.avg_mbps();
+        }
+        #[expect(clippy::cast_precision_loss, reason = "a sample count")]
+        let n = after.len() as f64;
+        after.iter().sum::<f64>() / n
+    }
+
     /// Peak observed throughput in Mbps.
     pub fn peak_mbps(&self) -> f64 {
         self.samples
@@ -1012,13 +1107,16 @@ impl SpeedTestHistory {
         sum / self.results.len() as f64
     }
 
-    /// Average upload speed across all results.
-    pub fn avg_upload(&self) -> f64 {
-        if self.results.is_empty() {
-            return 0.0;
+    /// Average upload speed across the results that measured one; `None`
+    /// when none did.
+    pub fn avg_upload(&self) -> Option<f64> {
+        let measured: Vec<f64> = self.results.iter().filter_map(|r| r.upload_mbps).collect();
+        if measured.is_empty() {
+            return None;
         }
-        let sum: f64 = self.results.iter().map(|r| r.upload_mbps).sum();
-        sum / self.results.len() as f64
+        #[expect(clippy::cast_precision_loss, reason = "a count of at most MAX_HISTORY")]
+        let n = measured.len() as f64;
+        Some(measured.iter().sum::<f64>() / n)
     }
 
     /// Average latency across all results.
@@ -1039,13 +1137,12 @@ impl SpeedTestHistory {
             .unwrap_or(0.0)
     }
 
-    /// Best (highest) upload speed.
-    pub fn best_upload(&self) -> f64 {
+    /// Best (highest) upload speed measured, if any was.
+    pub fn best_upload(&self) -> Option<f64> {
         self.results
             .iter()
-            .map(|r| r.upload_mbps)
+            .filter_map(|r| r.upload_mbps)
             .reduce(f64::max)
-            .unwrap_or(0.0)
     }
 
     /// Best (lowest) latency.
@@ -1066,13 +1163,12 @@ impl SpeedTestHistory {
             .unwrap_or(0.0)
     }
 
-    /// Worst (lowest) upload speed.
-    pub fn worst_upload(&self) -> f64 {
+    /// Worst (lowest) upload speed measured, if any was.
+    pub fn worst_upload(&self) -> Option<f64> {
         self.results
             .iter()
-            .map(|r| r.upload_mbps)
+            .filter_map(|r| r.upload_mbps)
             .reduce(f64::min)
-            .unwrap_or(0.0)
     }
 
     /// Worst (highest) latency.
@@ -1104,10 +1200,10 @@ impl SpeedTestHistory {
             self.worst_download(),
         ));
         out.push_str(&format!(
-            "Upload   (avg/best/worst): {:.1} / {:.1} / {:.1} Mbps\n",
-            self.avg_upload(),
-            self.best_upload(),
-            self.worst_upload(),
+            "Upload   (avg/best/worst): {} / {} / {} Mbps\n",
+            upload_text(self.avg_upload(), 1),
+            upload_text(self.best_upload(), 1),
+            upload_text(self.worst_upload(), 1),
         ));
         out.push_str(&format!(
             "Latency  (avg/best/worst): {:.1} / {:.1} / {:.1} ms\n\n",
@@ -1241,6 +1337,13 @@ pub struct SpeedTestUI {
     start_button_hover: bool,
     /// Whether the export button is hovered.
     export_button_hover: bool,
+    /// The run under way, if one is: the network measurement, or -- under
+    /// test -- the old simulation, turned into the same phase transitions.
+    source: Option<Source>,
+    /// Whether the server took no upload, so the run has no upload figure.
+    upload_skipped: bool,
+    /// Wakes the window when the run reports.
+    waker: Option<std::task::Waker>,
     /// The stream the simulated runs are drawn from.
     ///
     /// One per app rather than one per tester, and seeded once rather than
@@ -1293,6 +1396,9 @@ impl SpeedTestUI {
             height: WINDOW_HEIGHT,
             start_button_hover: false,
             export_button_hover: false,
+            source: None,
+            upload_skipped: false,
+            waker: None,
         }
     }
 
@@ -1318,15 +1424,98 @@ impl SpeedTestUI {
         self.current_latency_ms = 0.0;
         self.probe_timer_secs = 0.0;
 
-        // And stop. There is no network stack to send traffic through, so
-        // there is nothing to time. Until 2026-09-15 this line read
-        // `self.phase = SpeedTestPhase::Testing(TestKind::Latency)` and the
-        // run that followed invented every number it displayed.
-        //
-        // The testers above are still reset, deliberately: whatever a previous
-        // press left on screen is cleared, so the explanation is not sitting
-        // next to a stale figure that looks like it belongs to it.
-        self.phase = SpeedTestPhase::Unavailable(String::from(CANNOT_MEASURE));
+        self.upload_skipped = false;
+        let Some(server) = self.servers.get(self.selected_server) else {
+            self.phase = SpeedTestPhase::Error(String::from("No server is selected"));
+            return;
+        };
+        let plan = net::Plan {
+            probes: LATENCY_PROBES,
+            connections: self.config.num_connections,
+            duration: Duration::from_secs(u64::from(self.config.test_duration_secs)),
+        };
+        match net::Run::start(server.endpoint.clone(), plan, self.waker.clone()) {
+            Ok(run) => {
+                self.source = Some(Source::Network(run));
+                self.phase = SpeedTestPhase::Testing(TestKind::Latency);
+            }
+            Err(e) => {
+                self.source = None;
+                self.phase = SpeedTestPhase::Error(format!("Cannot start the test: {e}"));
+            }
+        }
+    }
+
+    /// Stop the run under way; its connections close at their next check.
+    fn cancel_test(&mut self) {
+        // Dropping a network run cancels it.
+        self.source = None;
+        self.phase = SpeedTestPhase::Idle;
+    }
+
+    /// Take in what the network run has reported. Whether anything changed.
+    pub fn pump(&mut self) -> bool {
+        let reports = match &self.source {
+            Some(Source::Network(run)) => run.drain(),
+            #[cfg(test)]
+            Some(Source::Simulated) => return false,
+            None => return false,
+        };
+        let changed = !reports.is_empty();
+        for report in reports {
+            self.apply(report);
+        }
+        changed
+    }
+
+    /// One report from the run.
+    ///
+    /// Ignored unless a test is running: a cancelled run's last words, still
+    /// in the channel, must not move a window that has gone back to idle.
+    fn apply(&mut self, report: net::Report) {
+        let SpeedTestPhase::Testing(kind) = self.phase else {
+            return;
+        };
+        match report {
+            net::Report::Probe(Some(ms)) => {
+                self.latency_tester.record_sample(ms);
+                self.current_latency_ms = self.latency_tester.avg_rtt().unwrap_or(0.0);
+            }
+            net::Report::Probe(None) => self.latency_tester.record_loss(),
+            net::Report::Moved { bytes, over } => {
+                let tester = match kind {
+                    TestKind::Download => &mut self.download_tester,
+                    TestKind::Upload => &mut self.upload_tester,
+                    TestKind::Latency => return,
+                };
+                let secs = over.as_secs_f64();
+                #[expect(clippy::cast_precision_loss, reason = "a byte count far below 2^52")]
+                let mbps = if secs > 0.0 {
+                    bytes as f64 * 8.0 / secs / 1_000_000.0
+                } else {
+                    tester.current_mbps()
+                };
+                tester.record_bytes(0, bytes);
+                tester.tick(over.as_secs_f32(), mbps);
+                self.current_speed_mbps = mbps;
+                self.graph_points = tester.samples().to_vec();
+            }
+            net::Report::Done(TestKind::Latency) => {
+                self.phase = SpeedTestPhase::Testing(TestKind::Download);
+            }
+            net::Report::Done(TestKind::Download) => {
+                self.phase = SpeedTestPhase::Testing(TestKind::Upload);
+            }
+            net::Report::Done(TestKind::Upload) => {
+                self.source = None;
+                self.finalize_test();
+            }
+            net::Report::NoUpload => self.upload_skipped = true,
+            net::Report::Failed(why) => {
+                self.source = None;
+                self.phase = SpeedTestPhase::Error(why);
+            }
+        }
     }
 
     /// Begin a simulated run, the way Start used to.
@@ -1351,6 +1540,8 @@ impl SpeedTestUI {
         self.current_speed_mbps = 0.0;
         self.current_latency_ms = 0.0;
         self.probe_timer_secs = 0.0;
+        self.upload_skipped = false;
+        self.source = Some(Source::Simulated);
         self.phase = SpeedTestPhase::Testing(TestKind::Latency);
     }
 
@@ -1400,7 +1591,7 @@ impl SpeedTestUI {
                 self.current_speed_mbps = self.download_tester.current_mbps();
                 self.graph_points = self.download_tester.samples().to_vec();
                 if self.download_tester.is_complete() {
-                    self.phase = SpeedTestPhase::Testing(TestKind::Upload);
+                    self.apply(net::Report::Done(TestKind::Download));
                 }
             }
             TestKind::Upload => {
@@ -1409,7 +1600,7 @@ impl SpeedTestUI {
                 self.current_speed_mbps = self.upload_tester.current_mbps();
                 self.graph_points = self.upload_tester.samples().to_vec();
                 if self.upload_tester.is_complete() {
-                    self.finalize_test();
+                    self.apply(net::Report::Done(TestKind::Upload));
                 }
             }
         }
@@ -1440,28 +1631,32 @@ impl SpeedTestUI {
             // Whatever is left in the timer belongs to the download phase's
             // first frame, not to a probe that will never be sent.
             self.probe_timer_secs = 0.0;
-            self.phase = SpeedTestPhase::Testing(TestKind::Download);
+            self.apply(net::Report::Done(TestKind::Latency));
         }
     }
 
     /// Finalize the test and record results.
-    ///
-    /// `#[cfg(test)]` with the run loop that is its only caller.
-    #[cfg(test)]
     fn finalize_test(&mut self) {
-        let server_name = self
-            .servers
-            .get(self.selected_server)
-            .map_or_else(|| "Unknown".into(), |s| s.name.clone());
+        let server_name = self.servers.get(self.selected_server).map_or_else(
+            || "Unknown".into(),
+            |s| format!("{} ({})", s.name, s.location),
+        );
 
         let result = SpeedTestResult {
-            download_mbps: self.download_tester.avg_mbps(),
-            upload_mbps: self.upload_tester.avg_mbps(),
+            download_mbps: self
+                .download_tester
+                .sustained_mbps(THROUGHPUT_RAMP_FRACTION),
+            upload_mbps: (!self.upload_skipped)
+                .then(|| self.upload_tester.sustained_mbps(THROUGHPUT_RAMP_FRACTION)),
             latency_ms: self.latency_tester.avg_rtt().unwrap_or(0.0),
             jitter_ms: self.latency_tester.jitter().unwrap_or(0.0),
             server_name,
-            timestamp: 1747573200, // Placeholder; real impl uses system clock.
-            packet_loss_pct: self.latency_tester.packet_loss_pct(),
+            // Seconds since 1970; a clock set before then is a clock that
+            // cannot say when, and says 0.
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            failed_probes_pct: self.latency_tester.packet_loss_pct(),
         };
 
         self.current_speed_mbps = result.download_mbps;
@@ -1488,9 +1683,6 @@ impl SpeedTestUI {
     pub fn select_server(&mut self, index: usize) {
         if index < self.servers.len() {
             self.selected_server = index;
-            if let Some(server) = self.servers.get(index) {
-                self.config.server_url = server.url.clone();
-            }
         }
         self.server_dropdown_open = false;
     }
@@ -1599,21 +1791,16 @@ impl SpeedTestUI {
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key_event) => self.handle_key(key_event),
-            // A speed test is a measurement over time, so this is the event
-            // that makes the app work at all. It was falling into the
-            // `_ => EventResult::Ignored` arm below; see [`Self::tick`] for
-            // what that cost.
-            //
-            // `Consumed` only while a test is running: an idle window has no
-            // reason to claim the clock, and saying so lets a caller tell a
-            // frame that changed something from one that did not.
-            // Ignored, because no run can be in progress: `start_test` has
-            // had nothing to start since 2026-09-15. It consumed the tick and
-            // advanced a fabricated run before that. Answering `Ignored` is
-            // what lets the compositor tell a frame that changed something
-            // from one that did not, so claiming the tick for a run that
-            // cannot exist would cost a redraw every frame, for ever.
-            Event::Tick { .. } => EventResult::Ignored,
+            // The clock a running test asks for, beside the waker: the run's
+            // thread wakes the window as it reports, and this is the fallback
+            // that keeps a run moving if a wake is ever lost.
+            Event::Tick { .. } => {
+                if self.pump() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             // The layout is derived from these two numbers, so this arm is the
             // difference between an app that resizes and one that paints a
             // wider background around a picture of a 900x720 window.
@@ -1695,7 +1882,7 @@ impl SpeedTestUI {
                     return EventResult::Consumed;
                 }
                 if self.phase.is_testing() {
-                    self.phase = SpeedTestPhase::Idle;
+                    self.cancel_test();
                     return EventResult::Consumed;
                 }
                 EventResult::Ignored
@@ -2264,25 +2451,6 @@ impl SpeedTestUI {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
-            if matches!(self.phase, SpeedTestPhase::Unavailable(_)) {
-                for (i, line) in CANNOT_MEASURE_LINES.iter().enumerate() {
-                    let w = text::measure(line, 12.0, FontWeightHint::Regular).min(r.w);
-                    frame.push(RenderCommand::Text {
-                        x: r.x + (r.w - w).max(0.0) / 2.0,
-                        #[expect(
-                            clippy::cast_precision_loss,
-                            reason = "three lines; the index is 0..3"
-                        )]
-                        y: r.y + 4.0 + i as f32 * 15.0,
-                        text: (*line).to_string(),
-                        color: self.palette.ink(self.palette.yellow),
-                        font_size: 12.0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(r.w),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                }
-            }
             return;
         }
 
@@ -2301,7 +2469,11 @@ impl SpeedTestUI {
             ),
             (
                 "Upload",
-                format!("{:.1} Mbps", self.upload_tester.avg_mbps()),
+                if self.upload_skipped {
+                    String::from("not measured")
+                } else {
+                    format!("{:.1} Mbps", self.upload_tester.avg_mbps())
+                },
                 self.palette.ink(self.palette.mauve),
             ),
             (
@@ -2588,9 +2760,9 @@ impl SpeedTestUI {
                 x: panel.x + 8.0,
                 y: list.bottom() + 6.0,
                 text: format!(
-                    "Avg: {:.0}/{:.0} Mbps, {:.0}ms",
+                    "Avg: {:.0}/{} Mbps, {:.0}ms",
                     self.history.avg_download(),
-                    self.history.avg_upload(),
+                    upload_text(self.history.avg_upload(), 0),
                     self.history.avg_latency(),
                 ),
                 color: self.palette.subtext0,
@@ -2664,6 +2836,23 @@ impl App for SpeedTestUI {
     /// Adopt the user's colours (§822).
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The run's thread wakes the window with each report.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.waker = Some(waker);
+    }
+
+    fn on_wake(&mut self) -> Response {
+        if self.pump() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
     }
 
     fn title(&self) -> String {
@@ -2999,15 +3188,6 @@ mod tests {
     #[test]
     fn config_default_valid() {
         assert!(SpeedTestConfig::default().validate().is_ok());
-    }
-
-    #[test]
-    fn config_empty_url_invalid() {
-        let cfg = SpeedTestConfig {
-            server_url: String::new(),
-            ..SpeedTestConfig::default()
-        };
-        assert!(cfg.validate().is_err());
     }
 
     #[test]
@@ -3478,7 +3658,7 @@ mod tests {
         run_a_full_test(&mut ui);
         let result = ui.history().latest().unwrap();
         assert!(result.download_mbps > 0.0);
-        assert!(result.upload_mbps > 0.0);
+        assert!(result.upload_mbps.is_some_and(|u| u > 0.0));
         assert!(result.latency_ms > 0.0);
     }
 
@@ -3675,8 +3855,12 @@ mod tests {
     #[test]
     fn ui_select_server() {
         let mut ui = SpeedTestUI::new();
+        // The real list, to choose among; nothing is contacted by choosing.
+        ui.servers = real_servers();
         ui.select_server(2);
         assert_eq!(ui.selected_server, 2);
+        ui.select_server(ui.servers.len());
+        assert_eq!(ui.selected_server, 2, "a server past the end was selected");
     }
 
     #[test]
@@ -3711,9 +3895,13 @@ mod tests {
     #[test]
     fn ui_invalid_config_shows_error() {
         let mut ui = SpeedTestUI::new();
-        ui.config.server_url = String::new();
+        ui.config.test_duration_secs = 0;
         ui.start_test();
         assert!(matches!(ui.phase(), SpeedTestPhase::Error(_)));
+        assert!(
+            ui.source.is_none(),
+            "an invalid configuration started a run"
+        );
     }
 
     // --- Server list tests ---
@@ -3724,11 +3912,40 @@ mod tests {
         assert!(!servers.is_empty());
     }
 
+    /// Every real server is named, placed, and addressed as plain HTTP --
+    /// and none is one of the invented `slateos.net` servers the list held.
     #[test]
-    fn default_servers_have_names() {
-        for server in default_servers() {
-            assert!(!server.name.is_empty());
-            assert!(!server.url.is_empty());
+    fn the_real_servers_are_whole() {
+        let servers = real_servers();
+        assert!(servers.len() >= 5);
+        for s in &servers {
+            assert!(!s.name.is_empty() && !s.location.is_empty(), "{s:?}");
+            assert_eq!(s.endpoint.port, 80, "{s:?}");
+            assert!(s.endpoint.download.starts_with('/'), "{s:?}");
+            assert!(
+                s.endpoint
+                    .upload
+                    .as_deref()
+                    .is_none_or(|u| u.starts_with('/')),
+                "{s:?}"
+            );
+            assert!(
+                !s.endpoint.host.contains("slateos"),
+                "an invented server: {s:?}"
+            );
+        }
+        assert!(
+            servers.iter().any(|s| s.endpoint.upload.is_some()),
+            "no server can measure an upload"
+        );
+    }
+
+    /// No test reaches the network: the window a test builds offers only a
+    /// loopback server.
+    #[test]
+    fn no_test_reaches_the_network() {
+        for s in SpeedTestUI::new().servers {
+            assert_eq!(s.endpoint.host, "127.0.0.1", "{s:?}");
         }
     }
 
@@ -4356,10 +4573,6 @@ mod tests {
         );
         assert_eq!(ui.selected_server, last);
         assert!(!ui.server_dropdown_open);
-        assert_eq!(
-            ui.config.server_url, ui.servers[last].url,
-            "selecting a server did not point the config at it",
-        );
     }
 
     /// The list's items only exist while it is open -- the closed picker must
@@ -4412,85 +4625,213 @@ mod tests {
         }
     }
 
-    /// The clock is never armed, because nothing here can measure.
-    ///
-    /// Replaces `the_clock_is_only_armed_while_a_test_runs`, which pressed
-    /// Enter, asserted the app had asked for a 16 ms tick, and drove the run
-    /// to completion through `on_event`. Every step of that was real until
-    /// 2026-09-15 and none of it is now. The property worth guarding has
-    /// inverted: an app that cannot run a test must not ask to be woken sixty
-    /// times a second for one. Getting this wrong costs a wakeup per frame for
-    /// as long as the window is open, on a machine that may be on battery, in
-    /// service of a dial that cannot move.
+    /// The clock is armed while a run is under way and not otherwise.
     #[test]
-    fn the_clock_is_never_armed_because_no_run_can_begin() {
-        let mut ui = SpeedTestUI::with_seed(5);
+    fn the_clock_is_armed_only_while_a_run_is_under_way() {
+        let mut ui = SpeedTestUI::new();
         assert_eq!(ui.tick_interval(), None, "an idle window wants the clock");
         press(&mut ui, Key::Enter);
         assert!(
-            matches!(ui.phase(), SpeedTestPhase::Unavailable(_)),
-            "Enter started something",
+            matches!(ui.phase(), SpeedTestPhase::Testing(TestKind::Latency)),
+            "Enter started nothing: {:?}",
+            ui.phase()
         );
-        assert_eq!(
-            ui.tick_interval(),
-            None,
-            "an app that cannot measure asked for the clock anyway",
-        );
-    }
-
-    /// No tick is ever worth a frame now.
-    ///
-    /// The second half of this used to press Enter and assert the next tick
-    /// answered `Redraw` -- correct then, because a run was advancing. A tick
-    /// that still answered `Redraw` would now be asking for a repaint of a
-    /// picture that cannot change.
-    #[test]
-    fn no_tick_asks_for_a_redraw() {
-        let mut ui = SpeedTestUI::new();
-        for _ in 0..3 {
-            assert!(matches!(
-                ui.on_event(&Event::Tick {
-                    elapsed_ms: FRAME_MS
-                }),
-                Response::Idle,
-            ));
-            press(&mut ui, Key::Enter);
-        }
-    }
-
-    /// Start says what is missing, in the window, in words.
-    ///
-    /// The whole point of the 2026-09-15 change. Before it, this same press
-    /// produced 450 Mbps down, 120 Mbps up and 12.5 ms, all drawn from an RNG,
-    /// with nothing on screen marking them as invented.
-    ///
-    /// Asserts the third line specifically. A blank result strip is read as a
-    /// *reading*, and for a speed test the reading it is read as is zero --
-    /// which says the line is dead. Saying "unknown, not zero" is the part that
-    /// stops one untruth being swapped for a worse one.
-    #[test]
-    fn pressing_start_explains_why_nothing_can_be_measured() {
-        let mut ui = SpeedTestUI::new();
-        press(&mut ui, Key::Enter);
-
-        let SpeedTestPhase::Unavailable(ref why) = *ui.phase() else {
-            panic!("Start produced {:?}, not an explanation", ui.phase());
-        };
-        assert_eq!(why, CANNOT_MEASURE);
-        assert_eq!(ui.history().len(), 0, "a refusal recorded a result");
-
-        for line in CANNOT_MEASURE_LINES {
-            assert!(
-                text_at(&ui, line).is_some(),
-                "the window never said {line:?}",
-            );
-        }
         assert!(
-            CANNOT_MEASURE_LINES
-                .iter()
-                .any(|l| l.contains("unknown, not zero")),
-            "nothing forecloses reading the blank result as 0 Mbps",
+            ui.tick_interval().is_some(),
+            "a running test asked for no clock"
         );
+        press(&mut ui, Key::Escape);
+        assert!(ui.phase().is_idle());
+        assert!(ui.source.is_none(), "the cancelled run is still held");
+        assert_eq!(ui.tick_interval(), None, "the clock outlived the run");
+    }
+
+    /// A tick with nothing reported asks for no frame.
+    #[test]
+    fn a_tick_with_nothing_reported_asks_for_nothing() {
+        let mut ui = SpeedTestUI::new();
+        assert!(matches!(
+            ui.on_event(&Event::Tick {
+                elapsed_ms: FRAME_MS
+            }),
+            Response::Idle,
+        ));
+    }
+
+    /// A fresh window in the testing phase, as a network run leaves it.
+    fn testing() -> SpeedTestUI {
+        let mut ui = SpeedTestUI::new();
+        ui.begin_simulated_run();
+        ui.source = None;
+        ui
+    }
+
+    /// **What the run reports moves the window through its phases**: probes
+    /// into the latency figures, bytes over time into a rate, each phase's
+    /// end into the next, and a server with no upload into an upload that
+    /// reads "not measured" -- in the window, the history and the report.
+    #[test]
+    fn the_runs_reports_move_the_window_through_its_phases() {
+        let mut ui = testing();
+        ui.apply(net::Report::Probe(Some(10.0)));
+        ui.apply(net::Report::Probe(Some(14.0)));
+        ui.apply(net::Report::Probe(None));
+        assert_eq!(ui.latency_tester.sample_count(), 2);
+        assert!((ui.current_latency_ms - 12.0).abs() < 1e-9);
+        ui.apply(net::Report::Done(TestKind::Latency));
+        assert!(matches!(
+            ui.phase(),
+            SpeedTestPhase::Testing(TestKind::Download)
+        ));
+
+        // 1.25 MB in a second is 10 Mbps, whatever the tick rate was.
+        ui.apply(net::Report::Moved {
+            bytes: 1_250_000,
+            over: Duration::from_secs(1),
+        });
+        assert!(
+            (ui.current_speed_mbps - 10.0).abs() < 1e-9,
+            "{}",
+            ui.current_speed_mbps
+        );
+        ui.apply(net::Report::Moved {
+            bytes: 2_500_000,
+            over: Duration::from_millis(500),
+        });
+        assert!(
+            (ui.current_speed_mbps - 40.0).abs() < 1e-9,
+            "{}",
+            ui.current_speed_mbps
+        );
+        assert_eq!(ui.download_tester.total_bytes(), 3_750_000);
+        ui.apply(net::Report::Done(TestKind::Download));
+        assert!(matches!(
+            ui.phase(),
+            SpeedTestPhase::Testing(TestKind::Upload)
+        ));
+
+        ui.apply(net::Report::NoUpload);
+        ui.apply(net::Report::Done(TestKind::Upload));
+        assert!(ui.phase().is_complete());
+        let result = ui.history().latest().expect("a result").clone();
+        assert_eq!(
+            result.upload_mbps, None,
+            "an unmeasured upload was given a figure"
+        );
+        assert!((result.failed_probes_pct - 100.0 / 3.0).abs() < 1e-9);
+        assert!(
+            result.timestamp > 1_700_000_000,
+            "not today's clock: {}",
+            result.timestamp
+        );
+        assert!(
+            text_at(&ui, "not measured").is_some(),
+            "the window gave the upload a figure"
+        );
+        assert!(
+            result
+                .to_text_report()
+                .contains("Upload:       not measured (the server takes no uploads)"),
+            "{}",
+            result.to_text_report()
+        );
+        assert!(ui.history().export_as_text().contains("not measured"));
+    }
+
+    /// A run that fails says why, in the window, and records nothing.
+    #[test]
+    fn a_failed_run_says_why_and_records_nothing() {
+        let mut ui = testing();
+        ui.apply(net::Report::Failed(String::from(
+            "the server answered \"404 Not Found\"",
+        )));
+        assert!(matches!(ui.phase(), SpeedTestPhase::Error(_)));
+        assert!(
+            text_at(&ui, "Error: the server answered \"404 Not Found\"").is_some(),
+            "the failure was not said"
+        );
+        assert_eq!(ui.history().len(), 0);
+        assert!(ui.source.is_none());
+    }
+
+    /// A cancelled run's last reports, still in the channel, move nothing.
+    #[test]
+    fn a_cancelled_runs_last_reports_move_nothing() {
+        let mut ui = testing();
+        ui.apply(net::Report::Done(TestKind::Latency));
+        press(&mut ui, Key::Escape);
+        assert!(ui.phase().is_idle());
+        ui.apply(net::Report::Moved {
+            bytes: 1_000_000,
+            over: Duration::from_secs(1),
+        });
+        ui.apply(net::Report::Done(TestKind::Download));
+        assert!(ui.phase().is_idle(), "a report moved a cancelled window");
+        assert_eq!(ui.download_tester.total_bytes(), 0);
+    }
+
+    /// **A whole run against a real HTTP server** -- on loopback -- measures
+    /// a download, an upload and a round trip, and records them.
+    #[test]
+    fn a_whole_run_against_a_local_server_is_measured() {
+        let srv = net::fake::server("200 OK", 512 * 1024);
+        let mut ui = SpeedTestUI::new();
+        ui.servers = vec![TestServer {
+            name: String::from("Local"),
+            location: String::from("loopback"),
+            endpoint: net::Endpoint {
+                host: String::from("127.0.0.1"),
+                port: srv.port,
+                download: String::from("/big.bin"),
+                upload: Some(String::from("/upload")),
+            },
+        }];
+        ui.config.test_duration_secs = 1;
+        ui.config.num_connections = 2;
+        press(&mut ui, Key::Enter);
+        let give_up = std::time::Instant::now() + Duration::from_mins(1);
+        while !ui.phase().is_complete() {
+            assert!(
+                !matches!(ui.phase(), SpeedTestPhase::Error(_)),
+                "the run failed: {:?}",
+                ui.phase()
+            );
+            assert!(
+                std::time::Instant::now() < give_up,
+                "the run never finished"
+            );
+            ui.pump();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let result = ui.history().latest().expect("a result");
+        assert!(result.download_mbps > 0.0, "{result:?}");
+        assert!(result.upload_mbps.is_some_and(|u| u > 0.0), "{result:?}");
+        assert!(
+            result.latency_ms >= 0.0 && result.failed_probes_pct == 0.0,
+            "{result:?}"
+        );
+        assert_eq!(result.server_name, "Local (loopback)");
+        assert!(srv.gets.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        assert!(srv.posts.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    /// The sustained rate leaves out TCP's climb: samples in the first fifth
+    /// of the phase do not count, unless nothing came after them.
+    #[test]
+    fn the_sustained_rate_leaves_out_the_climb() {
+        let mut t = ThroughputTester::new(1, 10.0);
+        t.tick(1.0, 5.0);
+        t.tick(1.0, 10.0);
+        t.tick(1.0, 100.0);
+        t.tick(1.0, 100.0);
+        assert!(
+            (t.sustained_mbps(0.2) - 100.0).abs() < 1e-9,
+            "{}",
+            t.sustained_mbps(0.2)
+        );
+        let mut short = ThroughputTester::new(1, 10.0);
+        short.tick(1.0, 5.0);
+        assert!((short.sustained_mbps(0.2) - 5.0).abs() < 1e-9);
     }
 
     /// Pointer motion over dead space costs no frame; motion that lights a
@@ -4579,12 +4920,12 @@ mod tests {
     fn make_result(dl: f64, ul: f64, lat: f64) -> SpeedTestResult {
         SpeedTestResult {
             download_mbps: dl,
-            upload_mbps: ul,
+            upload_mbps: Some(ul),
             latency_ms: lat,
             jitter_ms: 1.5,
             server_name: "TestServer".into(),
             timestamp: 1000000,
-            packet_loss_pct: 0.0,
+            failed_probes_pct: 0.0,
         }
     }
 }

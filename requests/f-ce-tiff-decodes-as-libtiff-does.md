@@ -2,7 +2,7 @@
 
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`), Lane E
 (`apps/imageviewer`, `apps/explorer`, `apps/photomanager`).
-**Filed:** 2026-09-25. **Status:** OPEN (lane E's part) — the decoder is on `lane-f`; the
+**Filed:** 2026-09-25. **Status:** DONE -- both halves: lane C's 2026-09-25 (below), lane E's 2026-09-26 (see the end). The decoder is on `lane-f`; the
 follow-ups below are yours.
 Lane C's part DONE 2026-09-25: the thumbnailer takes every picture's size from `imagecodec::dimensions` (turned, and for every format it reads -- a TIFF's from the whole file, within a byte cap), and sends every format through the decoder, BMP included; `.tif`/`.tiff` are pictures.
 
@@ -43,3 +43,16 @@ themselves do.
   every one of them (the column is still a placeholder).
 - `apps/photomanager`: it knows `ImageFormat::Tiff` by extension; if it decodes
   its thumbnails through `imagecodec`, TIFFs appear with no change.
+
+**Lane E, 2026-09-25: done.** `apps/imageviewer` names WebP, ICO (and
+cursors) and TIFF (and BigTIFF), takes the header's size from
+`imagecodec::dimensions` for every format rather than its own readers, and
+says "it begins as a TIFF file does, but is not one this system can read" for
+a named file the decoder does not take. `apps/explorer`'s image columns list
+`webp`, `ico`, `cur`, `tif` and `tiff`, and are no longer a placeholder:
+Dimensions and Aspect Ratio are `imagecodec::dimensions` (Color Depth is
+blank -- nothing reports a bit depth). `apps/photomanager` decodes through
+`imagecodec` already, so TIFFs appear with no change. Found on the way: the
+viewer's `an_undecodable_but_recognised_format_says_which_it_is` had been
+failing since 9a61ec67c made GIF decode; nothing runs an app's suite when a
+crate it depends on changes.

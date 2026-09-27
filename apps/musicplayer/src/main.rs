@@ -27,6 +27,7 @@ use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -73,13 +74,18 @@ const FALLBACK_SEED: u64 = 0x4D55_5349_4350_4C52;
 /// thing it does. Found by `scripts/find-stale-admissions.py`.
 const CANNOT_PLAY_LINES: [&str; 3] = [
     "This player has no music library.",
-    "Ctrl+O opens an M3U playlist and Ctrl+S saves one, but nothing here decodes audio, so a track can be listed and never played.",
+    "Ctrl+O opens an M3U playlist or adds a song, and Ctrl+S saves the list, but nothing here decodes audio, so a track can be listed and never played.",
     "The library is empty because this is unfinished, not because the player is broken.",
 ];
 
 const WINDOW_WIDTH: f32 = 1000.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 const TAB_BAR_HEIGHT: f32 = 44.0;
+/// The strip under the tab bar that says the player cannot play, while the
+/// library is empty, and one line of it. The three lines were drawn at the top
+/// of the window, before the tab bar, which filled the same pixels.
+const NOTICE_H: f32 = 50.0;
+const NOTICE_LINE_H: f32 = 15.0;
 const CONTROLS_HEIGHT: f32 = 80.0;
 const TRACK_ROW_HEIGHT: f32 = 36.0;
 const VOLUME_BAR_WIDTH: f32 = 100.0;
@@ -89,416 +95,16 @@ const SEEK_SECONDS: f32 = 5.0;
 const VISUALIZATION_BARS: usize = 32;
 
 // ============================================================================
-// Audio Format Detection
+// Audio files
 // ============================================================================
 
-/// Supported audio formats.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AudioFormat {
-    Wav,
-    Mp3,
-    Flac,
-    Ogg,
-    Unknown,
-}
-
-impl AudioFormat {
-    /// Detect audio format from the first bytes of a file.
-    pub fn detect(data: &[u8]) -> Self {
-        if data.len() < 12 {
-            return Self::Unknown;
-        }
-
-        // WAV: RIFF....WAVE
-        if data.get(..4) == Some(b"RIFF") && data.get(8..12) == Some(b"WAVE") {
-            return Self::Wav;
-        }
-
-        // FLAC: starts with "fLaC"
-        if data.get(..4) == Some(b"fLaC") {
-            return Self::Flac;
-        }
-
-        // OGG: starts with "OggS"
-        if data.get(..4) == Some(b"OggS") {
-            return Self::Ogg;
-        }
-
-        // MP3: ID3 tag or frame sync bytes
-        if data.get(..3) == Some(b"ID3") {
-            return Self::Mp3;
-        }
-        // Frame sync: first 11 bits set (0xFF followed by 0xE0+)
-        if data.first() == Some(&0xFF)
-            && let Some(&b) = data.get(1)
-            && b & 0xE0 == 0xE0
-        {
-            return Self::Mp3;
-        }
-
-        Self::Unknown
-    }
-
-    /// Human-readable format name.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Wav => "WAV",
-            Self::Mp3 => "MP3",
-            Self::Flac => "FLAC",
-            Self::Ogg => "OGG",
-            Self::Unknown => "Unknown",
-        }
-    }
-}
-
-// ============================================================================
-// WAV Header Parsing
-// ============================================================================
-
-/// Parsed WAV file information.
-#[derive(Clone, Debug)]
-pub struct WavInfo {
-    pub sample_rate: u32,
-    pub channels: u16,
-    pub bits_per_sample: u16,
-    pub duration_secs: f32,
-}
-
-/// Parse WAV RIFF header and fmt chunk.
-pub fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
-    if data.len() < 44 {
-        return None;
-    }
-    // Verify RIFF/WAVE
-    if data.get(..4) != Some(b"RIFF") || data.get(8..12) != Some(b"WAVE") {
-        return None;
-    }
-
-    // Find fmt chunk
-    let mut offset: usize = 12;
-    let mut sample_rate = 0u32;
-    let mut channels = 0u16;
-    let mut bits_per_sample = 0u16;
-    let mut data_size = 0u32;
-    let mut found_fmt = false;
-
-    // Every offset below is `checked_add`, and that is not a lint formality:
-    // this reads a file the user was handed, and `chunk_size` is four bytes out
-    // of it. The advance at the bottom of the loop used to be
-    // `offset += 8 + chunk_size as usize`, which on a crafted size wraps
-    // `offset` back to a small number — and a small offset passes the loop
-    // guard, so the parser reads the same chunks again forever. A media player
-    // that hangs on a malformed file is the cheapest denial of service there
-    // is, and it needs no privileges to deliver: it is an email attachment.
-    let byte = |i: usize| -> Option<u8> { data.get(i).copied() };
-    while offset.checked_add(8).is_some_and(|end| end <= data.len()) {
-        let chunk_id = data.get(offset..offset.checked_add(4)?)?;
-        let chunk_size = u32::from_le_bytes([
-            byte(offset.checked_add(4)?)?,
-            byte(offset.checked_add(5)?)?,
-            byte(offset.checked_add(6)?)?,
-            byte(offset.checked_add(7)?)?,
-        ]);
-
-        if chunk_id == b"fmt " && chunk_size >= 16 {
-            let fmt_start = offset.checked_add(8)?;
-            channels = u16::from_le_bytes([
-                byte(fmt_start.checked_add(2)?)?,
-                byte(fmt_start.checked_add(3)?)?,
-            ]);
-            sample_rate = u32::from_le_bytes([
-                byte(fmt_start.checked_add(4)?)?,
-                byte(fmt_start.checked_add(5)?)?,
-                byte(fmt_start.checked_add(6)?)?,
-                byte(fmt_start.checked_add(7)?)?,
-            ]);
-            bits_per_sample = u16::from_le_bytes([
-                byte(fmt_start.checked_add(14)?)?,
-                byte(fmt_start.checked_add(15)?)?,
-            ]);
-            found_fmt = true;
-        } else if chunk_id == b"data" {
-            data_size = chunk_size;
-        }
-
-        // A chunk that would carry the cursor past the end of `usize` ends the
-        // parse rather than wrapping it. `None` and not `break`, because a
-        // size that large means the file is lying about its own structure and
-        // whatever was read before it is not to be trusted either.
-        offset = offset.checked_add(8)?.checked_add(chunk_size as usize)?;
-        // Chunks are word-aligned.
-        if !offset.is_multiple_of(2) {
-            offset = offset.checked_add(1)?;
-        }
-    }
-
-    if !found_fmt || sample_rate == 0 || channels == 0 || bits_per_sample == 0 {
-        return None;
-    }
-
-    let bytes_per_sample = u32::from(bits_per_sample) / 8;
-    // `checked_div` rather than a `> 0` test two lines up: the guard and the
-    // division are then the same expression, which is what stops them drifting
-    // apart. Both operands come out of the file.
-    let total_samples = data_size
-        .checked_div(bytes_per_sample.saturating_mul(u32::from(channels)))
-        .unwrap_or(0);
-    let duration_secs = if sample_rate > 0 {
-        total_samples as f32 / sample_rate as f32
-    } else {
-        0.0
-    };
-
-    Some(WavInfo {
-        sample_rate,
-        channels,
-        bits_per_sample,
-        duration_secs,
-    })
-}
-
-// ============================================================================
-// FLAC Header Parsing
-// ============================================================================
-
-/// Parsed FLAC STREAMINFO.
-#[derive(Clone, Debug)]
-pub struct FlacInfo {
-    pub sample_rate: u32,
-    pub channels: u8,
-    pub bits_per_sample: u8,
-    pub total_samples: u64,
-    pub duration_secs: f32,
-}
-
-/// Parse FLAC STREAMINFO metadata block.
-pub fn parse_flac_header(data: &[u8]) -> Option<FlacInfo> {
-    // "fLaC" + STREAMINFO block (minimum 42 bytes)
-    if data.len() < 42 || data.get(..4) != Some(b"fLaC") {
-        return None;
-    }
-
-    // First metadata block header at offset 4
-    // byte 4: last-block flag (1 bit) + block type (7 bits) — STREAMINFO = 0
-    let block_type = data.get(4)? & 0x7F;
-    if block_type != 0 {
-        return None; // First block must be STREAMINFO
-    }
-
-    // Block size: 3 bytes at offset 5
-    let block_size =
-        ((*data.get(5)? as u32) << 16) | ((*data.get(6)? as u32) << 8) | (*data.get(7)? as u32);
-    // STREAMINFO starts at offset 8. `checked_add` and `get` rather than `+`
-    // and `[a..b]`: `block_size` is three bytes out of the file, and a length
-    // check standing two statements away from the slice it licenses is a
-    // guarantee that stops holding the moment someone moves either one.
-    let si_end = 8usize.checked_add(block_size as usize)?;
-    if block_size < 34 || data.len() < si_end {
-        return None;
-    }
-    let si = data.get(8..si_end)?;
-    if si.len() < 34 {
-        return None;
-    }
-
-    // Bytes 10-13 + bits: sample rate (20 bits), channels (3 bits), bps (5 bits), total samples (36 bits)
-    // Offset within STREAMINFO: bytes 10..17
-    let sr_hi = (*si.get(10)? as u32) << 12;
-    let sr_mid = (*si.get(11)? as u32) << 4;
-    let sr_lo = (*si.get(12)? as u32) >> 4;
-    let sample_rate = sr_hi | sr_mid | sr_lo;
-
-    let channels = ((*si.get(12)? >> 1) & 0x07).saturating_add(1);
-    let bps_hi = (*si.get(12)? & 0x01) << 4;
-    let bps_lo = *si.get(13)? >> 4;
-    let bits_per_sample = bps_hi | bps_lo.saturating_add(1);
-
-    let total_hi = ((*si.get(13)? & 0x0F) as u64) << 32;
-    let total_lo = ((*si.get(14)? as u64) << 24)
-        | ((*si.get(15)? as u64) << 16)
-        | ((*si.get(16)? as u64) << 8)
-        | (*si.get(17)? as u64);
-    let total_samples = total_hi | total_lo;
-
-    let duration_secs = if sample_rate > 0 {
-        total_samples as f32 / sample_rate as f32
-    } else {
-        0.0
-    };
-
-    Some(FlacInfo {
-        sample_rate,
-        channels,
-        bits_per_sample,
-        total_samples,
-        duration_secs,
-    })
-}
-
-// ============================================================================
-// ID3v2 Tag Parsing (MP3)
-// ============================================================================
-
-/// Parsed ID3v2 metadata.
-#[derive(Clone, Debug, Default)]
-pub struct Id3Tags {
-    pub title: Option<String>,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub year: Option<String>,
-    pub genre: Option<String>,
-    pub track: Option<u32>,
-}
-
-/// Parse ID3v2 tags from MP3 file data.
-pub fn parse_id3v2(data: &[u8]) -> Option<Id3Tags> {
-    if data.len() < 10 || data.get(..3) != Some(b"ID3") {
-        return None;
-    }
-
-    let version_major = *data.get(3)?;
-    // ID3v2 size: 4 bytes synchsafe integer (7 bits per byte)
-    let size = synchsafe_u32(data.get(6..10)?)?;
-    let header_end = 10usize.checked_add(size as usize)?;
-
-    if data.len() < header_end {
-        return None;
-    }
-
-    let mut tags = Id3Tags::default();
-    let mut pos: usize = 10;
-
-    // Skip extended header if present (ID3v2.3+)
-    let flags = *data.get(5)?;
-    if version_major >= 3 && flags & 0x40 != 0 {
-        if pos.checked_add(4)? > header_end {
-            return Some(tags);
-        }
-        let ext_size = u32::from_be_bytes([
-            *data.get(pos)?,
-            *data.get(pos.checked_add(1)?)?,
-            *data.get(pos.checked_add(2)?)?,
-            *data.get(pos.checked_add(3)?)?,
-        ]) as usize;
-        // `ext_size` is a full 32-bit field out of the file. Unchecked, the
-        // advance wraps `pos` back to a small number, and a small `pos` passes
-        // the loop guard below — so the parser walks the same frames forever.
-        pos = pos.checked_add(4)?.checked_add(ext_size)?;
-    }
-
-    while pos.checked_add(10).is_some_and(|end| end <= header_end) {
-        let frame_id = data.get(pos..pos.checked_add(4)?)?;
-        if frame_id.first() == Some(&0) {
-            break; // Padding
-        }
-
-        let frame_size = if version_major >= 4 {
-            synchsafe_u32(data.get(pos.checked_add(4)?..pos.checked_add(8)?)?)? as usize
-        } else {
-            u32::from_be_bytes([
-                *data.get(pos.checked_add(4)?)?,
-                *data.get(pos.checked_add(5)?)?,
-                *data.get(pos.checked_add(6)?)?,
-                *data.get(pos.checked_add(7)?)?,
-            ]) as usize
-        };
-
-        let frame_data_start = pos.checked_add(10)?;
-        // Checked before the comparison below, not after: a sum that has
-        // already wrapped compares as *smaller* than `header_end`, so the
-        // bounds check would wave through a frame that runs off the end.
-        let frame_data_end = frame_data_start.checked_add(frame_size)?;
-
-        if frame_data_end > header_end || frame_size == 0 {
-            break;
-        }
-
-        let frame_content = data.get(frame_data_start..frame_data_end)?;
-
-        match frame_id {
-            b"TIT2" => tags.title = decode_id3_text(frame_content),
-            b"TPE1" => tags.artist = decode_id3_text(frame_content),
-            b"TALB" => tags.album = decode_id3_text(frame_content),
-            b"TDRC" | b"TYER" => tags.year = decode_id3_text(frame_content),
-            b"TCON" => tags.genre = decode_id3_text(frame_content),
-            b"TRCK" => {
-                if let Some(s) = decode_id3_text(frame_content) {
-                    // Track can be "3" or "3/12"
-                    let num_part = s.split('/').next().unwrap_or(&s);
-                    tags.track = num_part.parse().ok();
-                }
-            }
-            _ => {}
-        }
-
-        pos = frame_data_end;
-    }
-
-    Some(tags)
-}
-
-/// Decode synchsafe integer (4 bytes, 7 bits each).
-fn synchsafe_u32(bytes: &[u8]) -> Option<u32> {
-    if bytes.len() < 4 {
-        return None;
-    }
-    Some(
-        ((*bytes.first()? as u32) << 21)
-            | ((*bytes.get(1)? as u32) << 14)
-            | ((*bytes.get(2)? as u32) << 7)
-            | (*bytes.get(3)? as u32),
-    )
-}
-
-/// Decode ID3v2 text frame content.
-fn decode_id3_text(data: &[u8]) -> Option<String> {
-    if data.is_empty() {
-        return None;
-    }
-    let encoding = *data.first()?;
-    let text_bytes = data.get(1..)?;
-    match encoding {
-        0 | 3 => {
-            // ISO-8859-1 or UTF-8
-            String::from_utf8(text_bytes.to_vec()).ok()
-        }
-        1 | 2 => {
-            // UTF-16 (LE or BE with possible BOM)
-            if text_bytes.len() < 2 {
-                return None;
-            }
-            let (start, le) = if text_bytes.get(..2) == Some(&[0xFF, 0xFE]) {
-                (2, true)
-            } else if text_bytes.get(..2) == Some(&[0xFE, 0xFF]) {
-                (2, false)
-            } else {
-                (0, encoding == 2) // encoding 2 = UTF-16BE
-            };
-            let pairs = text_bytes.get(start..)?;
-            let u16_vec: Vec<u16> = pairs
-                .chunks_exact(2)
-                // `chunks_exact(2)` guarantees both bytes, but the guarantee
-                // is in the iterator's name rather than in this expression, so
-                // it is spelled out: a chunk that somehow had one byte reads as
-                // a NUL, which `take_while` then treats as end-of-string.
-                .map(|chunk| {
-                    let (a, b) = (
-                        chunk.first().copied().unwrap_or(0),
-                        chunk.get(1).copied().unwrap_or(0),
-                    );
-                    if le {
-                        u16::from_le_bytes([a, b])
-                    } else {
-                        u16::from_be_bytes([a, b])
-                    }
-                })
-                .take_while(|&c| c != 0)
-                .collect();
-            String::from_utf16(&u16_vec).ok()
-        }
-        _ => None,
-    }
-}
+// What a file is and says about itself is `apps/audiotags`'s: the readers were
+// this binary's own -- WAV, FLAC and ID3v2 -- where nothing else could reach
+// them, unfinished (Latin-1 tags read as UTF-8, a 32-bit FLAC read as 16, no
+// MP3 length, no Ogg, no FLAC tags), and never called: every track showed its
+// file name, "Unknown Artist" and 0:00. They moved, and were finished on the
+// way; the explorer's audio columns read from the same crate.
+pub use audiotags::AudioFormat;
 
 // ============================================================================
 // Track and Playlist Data Structures
@@ -513,8 +119,8 @@ fn decode_id3_text(data: &[u8]) -> Option<String> {
 pub struct M3uExport {
     /// The playlist file's contents.
     pub text: String,
-    /// Tracks omitted because their path contains a line break and therefore
-    /// has no M3U representation.
+    /// Tracks omitted because their path has no M3U representation: it
+    /// contains a line break, or bytes that are not text.
     pub skipped: Vec<PathBuf>,
 }
 
@@ -545,11 +151,14 @@ pub struct Track {
 impl Track {
     /// Create a track from a file path with parsed metadata.
     pub fn from_path(path: PathBuf) -> Self {
-        let filename = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Unknown")
-            .to_string();
+        // The file's name as its bytes. One that was not UTF-8 read
+        // "Unknown", so two such songs looked the same and neither could be
+        // found by its name; a control character in one would break the line
+        // it is drawn on. `escape_unprintable` writes both as escapes.
+        let filename = path.file_stem().map_or_else(
+            || String::from("Unknown"),
+            |stem| quoting::escape_unprintable(stem.as_encoded_bytes()),
+        );
 
         Self {
             path,
@@ -564,42 +173,49 @@ impl Track {
         }
     }
 
-    /// Update track metadata from file header data.
-    pub fn update_from_data(&mut self, data: &[u8]) {
-        self.format = AudioFormat::detect(data);
+    /// Read what the file says about itself -- its tags, its length, its
+    /// format -- onto the track. A file that cannot be read keeps what the
+    /// track has: its name as its title.
+    pub fn read_facts(&mut self) {
+        if let Ok((info, tags)) = audiotags::read_path(&self.path) {
+            self.apply_facts(&info, tags);
+        }
+    }
 
-        match self.format {
-            AudioFormat::Wav => {
-                if let Some(info) = parse_wav_header(data) {
-                    self.duration_secs = info.duration_secs;
-                }
+    /// Take `info` and `tags` onto the track: each field a tag gives, the
+    /// length and the format.
+    pub fn apply_facts(&mut self, info: &audiotags::AudioInfo, tags: audiotags::Tags) {
+        self.format = info.format;
+        if let Some(secs) = info.duration_secs {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "a track's length in seconds is far inside f32's range"
+            )]
+            {
+                self.duration_secs = secs as f32;
             }
-            AudioFormat::Mp3 => {
-                if let Some(tags) = parse_id3v2(data) {
-                    if let Some(title) = tags.title {
-                        self.title = title;
-                    }
-                    if let Some(artist) = tags.artist {
-                        self.artist = artist;
-                    }
-                    if let Some(album) = tags.album {
-                        self.album = album;
-                    }
-                    if let Some(year) = tags.year {
-                        self.year = year;
-                    }
-                    if let Some(genre_val) = tags.genre {
-                        self.genre = genre_val;
-                    }
-                    self.track_number = tags.track;
-                }
+        }
+        let take = |field: &mut String, value: Option<String>| {
+            if let Some(v) = value {
+                *field = v;
             }
-            AudioFormat::Flac => {
-                if let Some(info) = parse_flac_header(data) {
-                    self.duration_secs = info.duration_secs;
-                }
-            }
-            AudioFormat::Ogg | AudioFormat::Unknown => {}
+        };
+        take(&mut self.title, tags.title);
+        take(&mut self.artist, tags.artist);
+        take(&mut self.album, tags.album);
+        take(&mut self.year, tags.year);
+        take(&mut self.genre, tags.genre);
+        if tags.track.is_some() {
+            self.track_number = tags.track;
+        }
+    }
+
+    /// [`read_facts`](Self::read_facts), from the file's bytes rather than
+    /// its path: for tests, which make a file in memory.
+    #[cfg(test)]
+    pub fn update_from_data(&mut self, data: &[u8]) {
+        if let Ok((info, tags)) = audiotags::read(&mut std::io::Cursor::new(data)) {
+            self.apply_facts(&info, tags);
         }
     }
 
@@ -730,11 +346,11 @@ pub struct PlayerState {
     pub status_message: String,
     /// The playlist picker.
     ///
-    /// `load_m3u` and `export_m3u` were both written, both tested, and
+    /// `load_m3u_from` and `export_m3u` were both written, both tested, and
     /// neither had a caller outside the tests: a playlist editor that could
     /// not open or save a playlist. `export_m3u` in particular handles a real
     /// hazard -- an ID3 title containing a newline emits an extra line that
-    /// `load_m3u` reads back as a *file path*, so a downloaded file could
+    /// `load_m3u_from` reads back as a *file path*, so a downloaded file could
     /// inject entries into the user's playlist -- and none of that care could
     /// be reached.
     pub picker: FilePicker,
@@ -1207,16 +823,26 @@ impl PlayerState {
     /// -- i.e. the bottom edge of the non-scrolling column header.
     ///
     /// Content-relative, because that is the space the list is drawn in:
-    /// `render` pushes a `translate(0, TAB_BAR_HEIGHT)` before calling the
+    /// `render` pushes a `translate(0, content_top())` before calling the
     /// per-tab renderer. `row_at` converts a window coordinate into this
     /// space once, rather than each pointer path doing its own arithmetic.
     const fn rows_top() -> f32 {
         TRACK_ROW_HEIGHT
     }
 
+    /// The top of the content area: under the tab bar, and under the notice
+    /// strip while the library is empty.
+    fn content_top(&self) -> f32 {
+        if self.library.is_empty() {
+            TAB_BAR_HEIGHT + NOTICE_H
+        } else {
+            TAB_BAR_HEIGHT
+        }
+    }
+
     /// The height of the content area, between the tab bar and the controls.
     fn content_height(&self) -> f32 {
-        (self.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT).max(0.0)
+        (self.height - self.content_top() - CONTROLS_HEIGHT).max(0.0)
     }
 
     /// The height of the scrolling track-row area.
@@ -1255,7 +881,7 @@ impl PlayerState {
     ///   click in the header strip -- or on the Now Playing tab -- selected
     ///   one too.
     fn row_at(&self, y: f32) -> Option<usize> {
-        let rel = y - TAB_BAR_HEIGHT - Self::rows_top();
+        let rel = y - self.content_top() - Self::rows_top();
         if !rel.is_finite() || rel < 0.0 || rel >= self.rows_height() {
             return None;
         }
@@ -1297,47 +923,82 @@ impl PlayerState {
     /// ours: `artist`/`title` come verbatim from the file's ID3 tags (see
     /// [`Track::update_from_data`]), and this OS permits every byte except
     /// `/` and NUL in a path. Written naively, a track whose ID3 title
-    /// contained a newline emitted an extra line that [`Self::load_m3u`] then
+    /// contained a newline emitted an extra line that [`Self::load_m3u_from`] then
     /// read back as a *file path*, so a downloaded file could inject
     /// arbitrary entries into the user's playlist.
     pub fn export_m3u(&self) -> M3uExport {
         let mut text = String::from("#EXTM3U\n");
         let mut skipped = Vec::new();
         for track in &self.playlist {
-            let path = track.path.display().to_string();
-            // A path containing a line break has no M3U representation at
-            // all. Emitting it anyway would silently point the entry at a
-            // different file, so the track is omitted and reported instead.
-            if path.contains(['\n', '\r']) {
-                skipped.push(track.path.clone());
-                continue;
-            }
+            // The path exactly as it is, or not at all. A path containing a
+            // line break has no M3U representation, and neither has one that
+            // is not text: the file is text, and `load_m3u_from` reads it as such.
+            // Emitting either anyway -- the second with U+FFFD for its odd
+            // bytes, which is what `Path::display` wrote here -- would
+            // silently point the entry at a different file, so the track is
+            // omitted and reported instead.
+            let path = match track.path.to_str() {
+                Some(path) if !path.contains(['\n', '\r']) => path,
+                _ => {
+                    skipped.push(track.path.clone());
+                    continue;
+                }
+            };
             text.push_str(&format!(
                 "#EXTINF:{},{} - {}\n",
                 track.duration_secs as i32,
                 m3u_field(&track.artist),
                 m3u_field(&track.title)
             ));
-            text.push_str(&path);
+            text.push_str(path);
             text.push('\n');
         }
         M3uExport { text, skipped }
     }
 
-    /// Load tracks from M3U content.
+    /// Load tracks from M3U content, replacing the playlist: a relative
+    /// entry taken from `folder` -- the playlist's own, as M3U means it --
+    /// and each track's tags and length read from its file.
     ///
     /// Note that this reads every non-`#` line as a file path, which is what
     /// makes an unsanitised [`Self::export_m3u`] a real injection vector
     /// rather than a cosmetic problem.
-    pub fn load_m3u(&mut self, content: &str) {
+    pub fn load_m3u_from(&mut self, content: &str, folder: Option<&std::path::Path>) {
         self.clear_playlist();
+        self.add_m3u_from(content, folder);
+    }
+
+    /// The tracks an M3U lists, after those the playlist already has, read as
+    /// [`load_m3u_from`](Self::load_m3u_from) reads them. Returns how many
+    /// were added.
+    pub fn add_m3u_from(&mut self, content: &str, folder: Option<&std::path::Path>) -> usize {
+        let before = self.playlist.len();
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let track = Track::from_path(PathBuf::from(trimmed));
+            let entry = PathBuf::from(trimmed);
+            // Only an entry with no root is the list's folder's: `/music/x.mp3`
+            // is where it says on any system, including a host whose absolute
+            // paths also need a drive (there it is still not relative to the
+            // list, and joining would put it on the list's drive).
+            let path = match folder {
+                Some(dir) if entry.is_relative() && !entry.has_root() => dir.join(entry),
+                _ => entry,
+            };
+            let mut track = Track::from_path(path);
+            track.read_facts();
             self.playlist.push(track);
+        }
+        self.playlist.len().saturating_sub(before)
+    }
+
+    /// Make the first of the tracks from `index` on the current one, if none
+    /// is: a song opened by name is the one the window shows.
+    fn show_from(&mut self, index: usize) {
+        if self.current_track_index.is_none() && index < self.playlist.len() {
+            self.current_track_index = Some(index);
         }
     }
 }
@@ -1353,38 +1014,38 @@ pub fn render(state: &PlayerState) -> RenderTree {
     // Background
     tree.fill_rect(0.0, 0.0, state.width, state.height, state.palette.base);
 
-    // After the background, or it would be painted over. Keyed on the library
-    // being empty so it retires itself when a scanner lands.
+    // Tab bar at top
+    render_tab_bar(state, &mut tree);
+
+    // In the strip under the tab bar while the library is empty, which the
+    // content starts below.
     if state.library.is_empty() {
         for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
             tree.push(RenderCommand::Text {
                 x: 10.0,
                 #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                y: 2.0 + i as f32 * 13.0,
+                y: TAB_BAR_HEIGHT + 3.0 + i as f32 * NOTICE_LINE_H,
                 text: (*line).to_string(),
                 color: if i == 0 {
                     state.palette.ink(state.palette.yellow)
                 } else {
                     state.palette.subtext0
                 },
-                font_size: if i == 0 { 12.0 } else { 10.0 },
+                font_size: if i == 0 { 12.0 } else { 11.0 },
                 font_weight: if i == 0 {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(state.width - 20.0),
+                max_width: Some((state.width - 20.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
     }
 
-    // Tab bar at top
-    render_tab_bar(state, &mut tree);
-
     // Main content area
-    let content_y = TAB_BAR_HEIGHT;
-    let content_height = state.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT;
+    let content_y = state.content_top();
+    let content_height = state.content_height();
     tree.clip(0.0, content_y, state.width, content_height);
     tree.translate(0.0, content_y);
 
@@ -2326,14 +1987,87 @@ pub fn open_playlist(state: &mut PlayerState, path: &std::path::Path) -> String 
             // and saying "loaded 40 tracks" about a file holding 900 is
             // telling the user something false.
             let note = read.note(MAX_M3U_BYTES);
-            state.load_m3u(&read.text);
+            state.load_m3u_from(&read.text, path.parent());
             format!(
                 "{note}Opened {} track(s) from {}",
                 state.playlist.len(),
-                path.display()
+                path.shown()
             )
         }
-        Err(err) => format!("Could not read {}: {err}", path.display()),
+        Err(err) => format!("Could not read {}: {err}", path.shown()),
+    }
+}
+
+/// Whether `path` names a playlist rather than a song. By its extension,
+/// because nothing else says so: an M3U is lines of text with no mark of its
+/// own.
+fn is_playlist(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("m3u") || e.eq_ignore_ascii_case("m3u8"))
+}
+
+/// Add the song at `path` to the playlist, read for its tags and length, and
+/// say what happened.
+///
+/// Any file is taken: a format the tag readers do not know -- an M4A, say,
+/// which the associations send here -- is still the file the user asked for,
+/// listed by its name.
+pub fn add_song(state: &mut PlayerState, path: &std::path::Path) -> String {
+    match std::fs::metadata(path) {
+        Ok(md) if md.is_dir() => format!("Could not add {}: it is a folder", path.shown()),
+        Ok(_) => {
+            let mut track = Track::from_path(path.to_path_buf());
+            track.read_facts();
+            let title = track.title.clone();
+            state.playlist.push(track);
+            state.show_from(state.playlist.len().saturating_sub(1));
+            format!("Added {title}")
+        }
+        Err(err) => format!("Could not add {}: {err}", path.shown()),
+    }
+}
+
+/// Add the tracks of the playlist at `path` after those already listed, and
+/// say what happened.
+pub fn add_playlist(state: &mut PlayerState, path: &std::path::Path) -> String {
+    match safeio::read_to_string_capped(path, MAX_M3U_BYTES) {
+        Ok(read) => {
+            let note = read.note(MAX_M3U_BYTES);
+            let first = state.playlist.len();
+            let added = state.add_m3u_from(&read.text, path.parent());
+            state.show_from(first);
+            format!("{note}Added {added} track(s) from {}", path.shown())
+        }
+        Err(err) => format!("Could not read {}: {err}", path.shown()),
+    }
+}
+
+/// List every song and every playlist's tracks named on the command line --
+/// the file manager's "open with" names one -- and say what happened to each.
+pub fn open_arguments(state: &mut PlayerState, paths: &[String]) -> String {
+    paths
+        .iter()
+        .map(|arg| {
+            let path = std::path::Path::new(arg);
+            if is_playlist(path) {
+                add_playlist(state, path)
+            } else {
+                add_song(state, path)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// What the open picker's choice does: a playlist replaces the list, a song
+/// joins it. Every pick was read as a playlist, so a song chosen with Ctrl+O
+/// was "Could not read: stream did not contain valid UTF-8".
+fn open_picked(state: &mut PlayerState, path: &std::path::Path) -> String {
+    if is_playlist(path) {
+        open_playlist(state, path)
+    } else {
+        add_song(state, path)
     }
 }
 
@@ -2344,25 +2078,25 @@ pub fn save_playlist(state: &PlayerState, path: &std::path::Path) -> String {
         Ok(()) => {
             let saved = state.playlist.len().saturating_sub(export.skipped.len());
             if export.skipped.is_empty() {
-                format!("Saved {saved} track(s) to {}", path.display())
+                format!("Saved {saved} track(s) to {}", path.shown())
             } else {
                 // Named, not counted: the user needs to know WHICH tracks are
                 // missing from the file they just wrote, and a count tells
                 // them only that something is.
                 format!(
-                    "Saved {saved} track(s) to {}; left out {} whose path contains a line break: {}",
-                    path.display(),
+                    "Saved {saved} track(s) to {}; left out {} whose path M3U cannot hold (a line break, or bytes that are not text): {}",
+                    path.shown(),
                     export.skipped.len(),
                     export
                         .skipped
                         .iter()
-                        .map(|p| p.display().to_string())
+                        .map(|p| p.shown().to_string())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
             }
         }
-        Err(err) => format!("Could not write {}: {err}", path.display()),
+        Err(err) => format!("Could not write {}: {err}", path.shown()),
     }
 }
 
@@ -2373,7 +2107,7 @@ pub fn handle_event(state: &mut PlayerState, event: &Event) -> bool {
             state.status_message = if state.picker_saves {
                 save_playlist(state, &path)
             } else {
-                open_playlist(state, &path)
+                open_picked(state, &path)
             };
             return true;
         }
@@ -2769,7 +2503,7 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
 
         MouseEventKind::Scroll { dy, .. } => {
             // Scroll track list
-            let content_y = TAB_BAR_HEIGHT;
+            let content_y = state.content_top();
             let content_height = state.content_height();
             if y >= content_y && y < content_y + content_height {
                 let max_scroll = state.max_scroll();
@@ -2957,9 +2691,25 @@ impl App for PlayerState {
 }
 
 fn main() -> ExitCode {
-    // Opens empty. It used to call `load_demo_library`.
+    // Opens empty, or on what it is given. It used to call
+    // `load_demo_library`.
+    //
+    // Parsed here rather than by `app::launch`, which refuses every argument
+    // but `--display`: the file manager opens a song here by naming it, and the
+    // refusal ended the player -- "exit 2, unexpected argument" on a stderr
+    // nobody sees -- before its window opened.
+    let args = match app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("musicplayer: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let mut state = PlayerState::new();
-    app::launch("musicplayer", &mut state)
+    if !args.rest.is_empty() {
+        state.status_message = open_arguments(&mut state, &args.rest);
+    }
+    app::launch_with("musicplayer", args.display.as_deref(), &mut state)
 }
 
 /// A handful of tracks, for tests.
@@ -3096,6 +2846,33 @@ mod tests {
     )]
 
     use super::*;
+
+    /// A song without tags is named by its file, as the file's bytes: a
+    /// control character is escaped rather than drawn, and a name that is
+    /// not UTF-8 keeps its bytes rather than becoming "Unknown".
+    #[test]
+    fn a_song_is_named_by_its_file_as_it_is() {
+        assert_eq!(
+            Track::from_path(PathBuf::from("/m/Blue Train.flac")).title,
+            "Blue Train"
+        );
+        assert_eq!(
+            Track::from_path(PathBuf::from("/m/two\nlines.mp3")).title,
+            r"two\012lines"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let odd =
+                |b: &[u8]| Track::from_path(PathBuf::from(std::ffi::OsStr::from_bytes(b))).title;
+            assert_eq!(odd(b"/m/caf\xe9.mp3"), r"caf\351");
+            assert_ne!(
+                odd(b"/m/a\xfe.mp3"),
+                odd(b"/m/a\xff.mp3"),
+                "two names became one"
+            );
+        }
+    }
 
     /// A fresh player has no library.
     ///
@@ -3989,31 +3766,51 @@ mod tests {
     }
 
     #[test]
-    fn test_wav_header_parsing() {
-        // Minimal valid WAV: 44100 Hz, 2 channels, 16 bits. 1 second of audio is
-        // 44100 * 2 channels * 2 bytes = 176400 bytes of PCM data.
-        let mut data = vec![0u8; 44];
-        data[0..4].copy_from_slice(b"RIFF");
-        data[4..8].copy_from_slice(&(36 + 176400u32).to_le_bytes());
-        data[8..12].copy_from_slice(b"WAVE");
-        // fmt chunk
-        data[12..16].copy_from_slice(b"fmt ");
-        data[16..20].copy_from_slice(&16u32.to_le_bytes()); // chunk size
-        data[20..22].copy_from_slice(&1u16.to_le_bytes()); // PCM
-        data[22..24].copy_from_slice(&2u16.to_le_bytes()); // channels
-        data[24..28].copy_from_slice(&44100u32.to_le_bytes()); // sample rate
-        data[28..32].copy_from_slice(&176400u32.to_le_bytes()); // byte rate
-        data[32..34].copy_from_slice(&4u16.to_le_bytes()); // block align
-        data[34..36].copy_from_slice(&16u16.to_le_bytes()); // bits per sample
-        // data chunk
-        data[36..40].copy_from_slice(b"data");
-        data[40..44].copy_from_slice(&176400u32.to_le_bytes());
+    fn a_track_takes_its_length_from_a_wav_header() {
+        let data = audiotags::testing::wav(44_100, 2, 16, 1, &[(b"INAM", "One Second")]);
+        let mut track = Track::from_path(PathBuf::from("one.wav"));
+        track.update_from_data(&data);
+        assert_eq!(track.format, AudioFormat::Wav);
+        assert_eq!(
+            track.title, "One Second",
+            "the file's own title was not taken"
+        );
+        assert!(
+            (track.duration_secs - 1.0).abs() < 0.01,
+            "{}",
+            track.duration_secs
+        );
+    }
 
-        let info = parse_wav_header(&data).expect("Should parse valid WAV header");
-        assert_eq!(info.sample_rate, 44100);
-        assert_eq!(info.channels, 2);
-        assert_eq!(info.bits_per_sample, 16);
-        assert!((info.duration_secs - 1.0).abs() < 0.01);
+    /// A playlist's tracks read their files: the tags and the length, not the
+    /// file name and 0:00 -- with a relative entry found beside the list.
+    #[test]
+    fn a_playlist_reads_what_its_files_say() {
+        let dir = mp_scratch("tags");
+        // Forty frames at 26.1 ms each: a second and a bit.
+        let file = audiotags::testing::mp3(40, &[(b"TIT2", "Caf\u{e9}"), (b"TPE1", "The Band")]);
+        std::fs::write(dir.join("song.mp3"), &file).unwrap();
+        let list = dir.join("list.m3u");
+        std::fs::write(&list, "#EXTM3U\nsong.mp3\n").unwrap();
+
+        let mut state = PlayerState::new();
+        let said = open_playlist(&mut state, &list);
+        assert!(said.contains("Opened 1 track"), "{said}");
+        let track = &state.playlist[0];
+        assert_eq!(
+            track.path,
+            dir.join("song.mp3"),
+            "a relative entry was not taken from the list's folder"
+        );
+        assert_eq!(track.title, "Caf\u{e9}");
+        assert_eq!(track.artist, "The Band");
+        assert_eq!(track.format, AudioFormat::Mp3);
+        assert!(
+            track.duration_secs > 1.0,
+            "the length was not read: {}",
+            track.duration_secs
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -4092,7 +3889,7 @@ mod tests {
 
     /// A playlist survives a save and an open.
     ///
-    /// `load_m3u` and `export_m3u` were both written, both tested, and neither
+    /// `load_m3u_from` and `export_m3u` were both written, both tested, and neither
     /// had a caller outside the tests: **a playlist editor that could not open
     /// or save a playlist.**
     #[test]
@@ -4112,10 +3909,76 @@ mod tests {
         let paths: Vec<String> = back
             .playlist
             .iter()
-            .map(|t| t.path.display().to_string())
+            .map(|t| t.path.shown().to_string())
             .collect();
         assert_eq!(paths, vec!["/music/one.mp3", "/music/two.mp3"]);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The file manager opens a song here by naming it: every song and every
+    /// playlist named is listed, the first becomes the one the window shows,
+    /// and a name that is not there is said to be so.
+    #[test]
+    fn the_songs_and_playlists_named_on_the_command_line_are_listed() {
+        let dir = mp_scratch("args");
+        let song = dir.join("song.mp3");
+        std::fs::write(&song, audiotags::testing::mp3(40, &[(b"TIT2", "Named")])).unwrap();
+        std::fs::write(dir.join("list.m3u"), "#EXTM3U\nsong.mp3\nsong.mp3\n").unwrap();
+        let arg = |p: PathBuf| p.to_str().expect("a text path").to_owned();
+
+        let mut state = PlayerState::new();
+        let said = open_arguments(
+            &mut state,
+            &[
+                arg(song.clone()),
+                arg(dir.join("list.m3u")),
+                arg(dir.join("gone.mp3")),
+            ],
+        );
+        let titles: Vec<&str> = state.playlist.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["Named", "Named", "Named"], "{said}");
+        assert_eq!(
+            state.current_track_index,
+            Some(0),
+            "the first is the one shown"
+        );
+        assert!(said.contains("Added Named"), "{said}");
+        assert!(said.contains("Added 2 track(s)"), "{said}");
+        assert!(said.contains("Could not add"), "{said}");
+        assert!(said.contains("gone.mp3"), "{said}");
+
+        let mut folder = PlayerState::new();
+        assert!(add_song(&mut folder, &dir).contains("it is a folder"));
+        assert!(folder.playlist.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl+O's choice: a song joins the list, a playlist replaces it. Every
+    /// pick was read as a playlist, so a song could not be opened at all.
+    #[test]
+    fn a_song_picked_to_open_joins_the_list_and_a_playlist_replaces_it() {
+        let dir = mp_scratch("picked");
+        let song = dir.join("Song.MP3");
+        std::fs::write(&song, audiotags::testing::mp3(40, &[(b"TIT2", "Picked")])).unwrap();
+        let list = dir.join("list.M3U8");
+        std::fs::write(&list, "Song.MP3\n").unwrap();
+
+        let mut state = PlayerState::new();
+        state
+            .playlist
+            .push(Track::from_path(PathBuf::from("/music/already.mp3")));
+        let said = open_picked(&mut state, &song);
+        assert_eq!(state.playlist.len(), 2, "{said}");
+        assert_eq!(state.playlist[1].title, "Picked");
+
+        let said = open_picked(&mut state, &list);
+        assert_eq!(
+            state.playlist.len(),
+            1,
+            "a playlist replaces the list: {said}"
+        );
+        assert_eq!(state.playlist[0].title, "Picked");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4123,7 +3986,7 @@ mod tests {
     ///
     /// M3U has no quoting of any kind, so a path containing a line break
     /// cannot be written -- `export_m3u` omits it rather than emitting a line
-    /// that `load_m3u` would read back as a *different file*. The user needs
+    /// that `load_m3u_from` would read back as a *different file*. The user needs
     /// to know WHICH track is missing from the file they just wrote; a count
     /// tells them only that something is.
     #[test]
@@ -4362,7 +4225,7 @@ mod tests {
         state.playlist.push(track);
 
         let m3u = state.export_m3u();
-        // One track in, one track out: `load_m3u` reads every non-`#` line as
+        // One track in, one track out: `load_m3u_from` reads every non-`#` line as
         // a path, so counting them is exactly counting forged entries.
         let paths: Vec<&str> = m3u
             .text
@@ -4373,8 +4236,27 @@ mod tests {
 
         // And the round trip through the reader agrees.
         let mut back = PlayerState::new();
-        back.load_m3u(&m3u.text);
+        back.load_m3u_from(&m3u.text, None);
         assert_eq!(back.playlist.len(), 1);
+    }
+
+    /// A path that is not text is left out and reported like one with a
+    /// line break: written with U+FFFD for its odd bytes, as `display()`
+    /// wrote it, the entry named a file that does not exist.
+    #[cfg(unix)]
+    #[test]
+    fn a_track_whose_path_is_not_text_is_reported_not_silently_wrong() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = PathBuf::from(std::ffi::OsStr::from_bytes(b"/music/caf\xe9.mp3"));
+        let mut state = PlayerState::new();
+        state.playlist.push(Track::from_path(odd.clone()));
+        state
+            .playlist
+            .push(Track::from_path(PathBuf::from("/music/fine.mp3")));
+        let m3u = state.export_m3u();
+        assert_eq!(m3u.skipped, [odd]);
+        assert!(!m3u.text.contains('\u{fffd}'), "{}", m3u.text);
+        assert!(!m3u.text.contains("caf"), "{}", m3u.text);
     }
 
     #[test]
@@ -4392,7 +4274,7 @@ mod tests {
         let m3u = state.export_m3u();
         assert_eq!(m3u.skipped, [PathBuf::from("/music/od\nd.mp3")]);
         let mut back = PlayerState::new();
-        back.load_m3u(&m3u.text);
+        back.load_m3u_from(&m3u.text, None);
         assert_eq!(back.playlist.len(), 1);
         assert_eq!(back.playlist[0].path, PathBuf::from("/music/fine.mp3"));
     }
@@ -4401,7 +4283,7 @@ mod tests {
     fn test_m3u_load() {
         let mut state = PlayerState::new();
         let content = "#EXTM3U\n#EXTINF:180,Artist - Song\n/music/song.mp3\n/music/song2.flac\n";
-        state.load_m3u(content);
+        state.load_m3u_from(content, None);
         assert_eq!(state.playlist.len(), 2);
         assert_eq!(state.playlist[0].path, PathBuf::from("/music/song.mp3"));
         assert_eq!(state.playlist[1].path, PathBuf::from("/music/song2.flac"));
@@ -4474,13 +4356,6 @@ mod tests {
         let state = PlayerState::new();
         let tree = render(&state);
         assert!(!tree.is_empty());
-    }
-
-    #[test]
-    fn test_synchsafe_u32() {
-        assert_eq!(synchsafe_u32(&[0x00, 0x00, 0x02, 0x01]), Some(257));
-        assert_eq!(synchsafe_u32(&[0x00, 0x00, 0x00, 0x7F]), Some(127));
-        assert_eq!(synchsafe_u32(&[0x00, 0x00, 0x01, 0x00]), Some(128));
     }
 
     #[test]
@@ -4584,101 +4459,46 @@ mod tests {
 
     // ---- Malformed input ----
 
-    /// A WAV whose chunk size is enormous ends the parse instead of looping.
-    ///
-    /// The advance used to be `offset += 8 + chunk_size as usize`, and
-    /// `chunk_size` is four bytes out of the file. A size near `usize::MAX`
-    /// wraps `offset` back to a small number, a small offset passes the loop
-    /// guard, and the parser walks the same chunks forever. A media player that
-    /// hangs on a malformed file is the cheapest denial of service there is,
-    /// and it arrives as an email attachment.
-    ///
-    /// This test would not fail on the old code — it would *never finish*,
-    /// which is the point.
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
     #[test]
-    fn a_wav_with_an_absurd_chunk_size_does_not_loop_forever() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"RIFF");
-        data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(b"WAVE");
-        // A chunk claiming the whole address space.
-        data.extend_from_slice(b"fmt ");
-        data.extend_from_slice(&u32::MAX.to_le_bytes());
-        data.resize(64, 0);
-
-        // Returns rather than hangs. What it returns is not the claim —
-        // `None` is the honest answer for a file that lies about its shape.
-        assert!(parse_wav_header(&data).is_none());
-    }
-
-    /// An ID3 extended header claiming a huge size ends the parse.
-    ///
-    /// Same shape as the WAV case, in a different parser: `pos += 4 + ext_size`
-    /// with `ext_size` a full 32-bit field, wrapping `pos` back below the frame
-    /// loop's guard.
-    #[test]
-    fn an_id3_extended_header_with_an_absurd_size_does_not_loop_forever() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"ID3");
-        data.push(4); // version major 4
-        data.push(0); // version minor
-        data.push(0x40); // extended-header flag
-        // Synchsafe size covering the rest.
-        data.extend_from_slice(&[0, 0, 0x01, 0x00]);
-        data.extend_from_slice(&u32::MAX.to_be_bytes()); // ext_size
-        data.resize(200, 0);
-
-        let _ = parse_id3v2(&data);
-    }
-
-    /// A FLAC block size larger than the data is refused, not sliced.
-    #[test]
-    fn a_flac_block_bigger_than_the_file_is_refused() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"fLaC");
-        data.push(0); // STREAMINFO
-        data.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // block size ~16MB
-        data.resize(64, 0);
-        assert!(parse_flac_header(&data).is_none());
-    }
-
-    /// Every truncation of a plausible header is refused rather than panicking.
-    ///
-    /// A sweep rather than a sample: the parsers read a dozen fixed offsets
-    /// each, and a missed bound shows up only at the length that reaches it.
-    #[test]
-    fn no_prefix_of_a_header_panics_any_parser() {
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&36u32.to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&[1, 0, 2, 0]);
-        wav.extend_from_slice(&44_100u32.to_le_bytes());
-        wav.resize(80, 0);
-
-        let mut id3 = Vec::new();
-        id3.extend_from_slice(b"ID3");
-        id3.extend_from_slice(&[4, 0, 0, 0, 0, 0x01, 0x00]);
-        id3.extend_from_slice(b"TIT2");
-        id3.extend_from_slice(&8u32.to_be_bytes());
-        id3.extend_from_slice(&[0, 0]);
-        id3.extend_from_slice(b"Title");
-        id3.resize(200, 0);
-
-        let mut flac = Vec::new();
-        flac.extend_from_slice(b"fLaC");
-        flac.push(0);
-        flac.extend_from_slice(&[0, 0, 34]);
-        flac.resize(64, 0);
-
-        for source in [&wav, &id3, &flac] {
-            for len in 0..source.len() {
-                let prefix = source.get(..len).unwrap_or(&[]);
-                let _ = parse_wav_header(prefix);
-                let _ = parse_id3v2(prefix);
-                let _ = parse_flac_header(prefix);
-            }
+    fn the_warning_lines_are_not_painted_over() {
+        let state = PlayerState::new();
+        let commands: Vec<RenderCommand> = render(&state).commands;
+        for line in CANNOT_PLAY_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !CANNOT_PLAY_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
         }
     }
 }

@@ -3124,6 +3124,117 @@ conflict markers remain. I now assert adjacency (`parent < amendment <
 other`) rather than marker-absence, which covers my own resolutions and not
 anyone else's.
 
+## E-Q1 — [E] Understanding speech needs a data file bigger than the space left on the system disk. Which engine, and does its data ship with the system or install later? — Status: OPEN (raised 2026-09-24)
+
+**In short:** SlateOS is meant to understand speech — dictation and voice
+commands — as well as to speak. Every speech-recognition engine accurate enough
+to be worth having needs a large data file (a "model": what speech sounds like,
+learned from recordings), 40 to 150 MB for English. The disk image SlateOS
+installs from has about 40 MB free today. So two answers are needed: which
+engine to adopt, and whether its model is part of every installed system (the
+image grows) or something a user installs when they first turn dictation on.
+
+Speaking, the other half, is not affected: its engine, eSpeak NG, needs under
+1 MB for English and is being brought up now (`roadmap.md` §5.6).
+
+### Which engine
+
+All three run entirely on the machine; none sends audio anywhere.
+
+| | engine | English model | how well it hears | how it feels to use |
+|---|---|---|---|---|
+| **A** | whisper.cpp (MIT licence) | 75 MB ("tiny") or 142 MB ("base"); larger ones exist, to 1.5 GB | best by a wide margin, and it adds punctuation and capitals itself | text appears a second or two after you pause, a sentence at a time |
+| **B** | Vosk (Apache licence) | 40–50 MB | good, noticeably behind A | words appear while you are still speaking |
+| **C** | PocketSphinx (BSD licence) | about 30 MB | poor at free dictation; fine for a short list of fixed commands | words appear while you are still speaking |
+
+- **A** — *What changes:* dictating a paragraph gives a punctuated paragraph at each pause, with few mistakes.
+- **B** — *What changes:* words stream in live, with more mistakes and no punctuation.
+- **C** — *What changes:* "open mail"-style commands work; dictating prose is frustrating.
+
+### Where its model lives
+
+| | | *What changes* |
+|---|---|---|
+| **1** | in the system image, which grows from 384 MB to 512 MB | dictation works the first time it is switched on, on every install, with no network |
+| **2** | an optional package, offered when dictation is first switched on | the base system stays small; first use needs the package, from the network or the install media |
+
+### Recommendation
+
+**A with 2:** whisper.cpp, with its "base" English model (142 MB) as an
+optional package offered the first time dictation is turned on, and the
+other-language models the same way. Accuracy is what makes dictation usable at
+all, and most people never turn it on, so they should not carry 142 MB for it.
+If you would rather it were always there, **A with 1** and the 75 MB "tiny"
+model is the compact version of the same choice.
+
+**Feasibility, measured 2026-09-25:** whisper.cpp 1.9.4 links against our C
+library and the C++ runtime we use with nothing missing, on the first attempt
+(a quick link test, not yet a committed recipe). So A is possible today; this
+question is only about which engine is right, and where its model lives. It
+does not yet say how fast it runs: the virtual machine the tests boot in has
+none of the wide arithmetic instructions whisper.cpp uses on real hardware, so
+it will be much slower there than on a real computer.
+
+### If never answered
+
+Nothing breaks. Speech output goes ahead without it; speech input stays
+unbuilt. Nothing gets worse with time.
+
+**Where it bites:** `roadmap.md` §5.6 `[E] Speech input / speech output`. Option
+1 is lane D's image recipe (`scripts/create-ext4-rootfs.sh`); option 2 is lane
+B's package manager (`userspace/pkg`).
+
+## E-Q2 — [E] The weather app can fetch forecasts now. From whom, given that whoever supplies them learns where the user is? — Status: OPEN (raised 2026-09-26)
+
+**In short:** The weather app shows no weather: it had no way to reach the
+internet, and says so rather than inventing a forecast. Applications can now
+open internet connections (the network scanner and the dictionary do), so it
+can be made to work — but a forecast is always *for somewhere*, so whichever
+company supplies it is told where the user is, every time the forecast is
+refreshed. Which supplier, if any, is your call.
+
+*Promoted from `deferred-questions.md`, where lane C parked it on 2026-09-18
+until a program could make a network request at all. That trigger has fired.*
+
+| | Option | *What changes* |
+|---|---|---|
+| **A** | Open-Meteo (a free forecast service that needs no account or key) | *Forecasts work as soon as the user names a place; Open-Meteo sees the place's coordinates at each refresh.* |
+| **B** | A commercial service that needs a key | *The same, plus a key this project must obtain, ship and keep secret.* |
+| **C** | Nothing by default; the user types in a service's address | *The app stays empty until someone configures it; no company is contacted unless the user chose it.* |
+| **D** | Never fetch; remove the app | *One fewer app; nothing is ever sent.* |
+
+**One more thing you should know, whichever you pick:** this system has no
+way yet to check a secure (https) site's identity, so a request would go in
+plain text — anyone on the same network could see which place was asked
+about. Open-Meteo answers plain requests (checked 2026-09-26). Waiting for
+secure connections is possible, but nothing on the roadmap delivers them
+soon; the kernel has a TLS implementation that does not check certificates
+(`kernel/src/net/tls.rs`), which is not the same thing.
+
+**Recommendation: A**, with the app asking nothing until the user adds a
+place, saying in the window which service it asks, and letting the user turn
+it off. It is the option under which the app is useful; the user's own
+action (adding a place) is what starts any sending.
+
+**Related decisions already made, which your answer may overrule:** the
+dictionary now looks up words its built-in list lacks at dict.org, when the
+reader asks (design-decisions §1214), and the speed test measures against
+public test servers when Start is pressed (§1215) -- both decided by Claude,
+both contacting a third party only on the user's action. A looked-up word
+reveals less than a location, and a speed test nothing of the user's, but it
+is the same kind of choice. If you would rather no program contacted a third
+party by default, say so here and all three change.
+
+### If never answered
+
+Nothing breaks: the weather app stays empty and says why, as today. Nothing
+gets worse with time.
+
+**Where it bites:** `apps/weather/src/main.rs` (`render_cannot_fetch`); the
+fetch itself would sit on `net/httpclient`'s request/response parsing and a
+plain `TcpStream`, as `userspace/pkg` does.
+
+
 
 
 ## A-Q21 — [A] Seven security modules are built but nothing uses them. Staged for later, or believed to be working? — Status: OPEN

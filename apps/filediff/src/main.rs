@@ -33,6 +33,7 @@ use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+use pathtext::ShowPath;
 // Only the tests build a modifier set by hand; the handlers read the one on
 // the event they were given. `MouseButton` went with it -- it had no reader at
 // all, in either build.
@@ -1192,7 +1193,7 @@ impl FileDiffApp {
         match safeio::read_to_string_capped(path, MAX_DIFF_BYTES) {
             Ok(read) => {
                 let note = read.note(MAX_DIFF_BYTES);
-                let name = path.display().to_string();
+                let name = path.shown().to_string();
                 match side {
                     Side::Left => {
                         self.left_path.clone_from(&name);
@@ -1208,7 +1209,7 @@ impl FileDiffApp {
                 self.recompute_diff();
                 format!("{note}Opened {name}")
             }
-            Err(err) => format!("Could not read {}: {err}", path.display()),
+            Err(err) => format!("Could not read {}: {err}", path.shown()),
         }
     }
 
@@ -1541,32 +1542,6 @@ impl FileDiffApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // After the background, or it would be painted over. Keyed on there
-        // being nothing loaded, so it retires itself when a picker lands.
-        if self.diff.is_none() {
-            for (i, line) in NOTHING_OPEN_YET_LINES.iter().enumerate() {
-                tree.push(RenderCommand::Text {
-                    x: 10.0,
-                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                    y: 4.0 + i as f32 * 14.0,
-                    text: (*line).to_string(),
-                    color: if i == 0 {
-                        self.palette.ink(self.palette.yellow)
-                    } else {
-                        self.palette.subtext0
-                    },
-                    font_size: if i == 0 { 12.0 } else { 10.0 },
-                    font_weight: if i == 0 {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    },
-                    max_width: Some(self.width - 20.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
 
         self.render_toolbar(&mut tree);
 
@@ -2328,16 +2303,36 @@ impl FileDiffApp {
             overflow: TextOverflow::Clip,
         });
 
-        tree.push(RenderCommand::Text {
-            x: center_x - 140.0,
-            y: center_y + 10.0,
-            text: "Open two files to compare them".to_string(),
-            color: self.palette.subtext0,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // What was drawn at the top of the window, before the toolbar -- which
+        // filled the same pixels and covered it. Here, in the empty panes it
+        // is about, where nothing else is drawn; it replaces "Open two files
+        // to compare them", which its second line says better.
+        let avail = (self.width - 32.0).max(0.0);
+        for (i, line) in NOTHING_OPEN_YET_LINES.iter().enumerate() {
+            #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
+            let ty = center_y + 10.0 + i as f32 * 20.0;
+            if avail <= 0.0 || ty + 20.0 > y + height {
+                break;
+            }
+            tree.push(RenderCommand::Text {
+                x: 16.0,
+                y: ty,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 14.0 } else { 12.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(avail),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
     /// Render directory comparison view.
@@ -5247,5 +5242,48 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    /// The warning lines are where they can be seen: nothing drawn after a
+    /// line fills the point it is drawn at. The sweep that added them drew
+    /// them "after the background, or it would be painted over" -- and in
+    /// several apps a bar was then drawn over the same pixels, while a test
+    /// that read the frame's texts said they were there. known-issues.md,
+    /// `[E] Warnings drawn where the next thing drawn covers them`.
+    #[test]
+    fn the_warning_lines_are_not_painted_over() {
+        let app = FileDiffApp::new();
+        let commands: Vec<RenderCommand> = app.render_tree().commands;
+        for line in NOTHING_OPEN_YET_LINES {
+            let (at, x, y, reach) = commands
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| match c {
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        ..
+                    } if text == line => Some((i, *x, *y, x + max_width.unwrap_or(f32::INFINITY))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{line:?} is not drawn"));
+            let covered = commands.iter().skip(at + 1).any(|c| {
+                matches!(c, RenderCommand::FillRect { x: rx, y: ry, width, height, .. }
+                    if x >= *rx && x < rx + width && y >= *ry && y < ry + height)
+            });
+            assert!(!covered, "{line:?} is painted over");
+            // Nor drawn on the same row as other text: a header's title over
+            // a warning is as unreadable as a fill over it.
+            let crowded = commands.iter().any(|c| {
+                matches!(c, RenderCommand::Text { text, x: tx, y: ty, max_width: tw, .. }
+                    if !NOTHING_OPEN_YET_LINES.contains(&text.as_str())
+                        && (ty - y).abs() < 10.0
+                        && *tx < reach
+                        && tx + tw.unwrap_or(f32::INFINITY) > x)
+            });
+            assert!(!crowded, "{line:?} shares its row with other text");
+        }
     }
 }

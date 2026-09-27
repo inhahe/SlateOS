@@ -69,7 +69,33 @@ def cargo_env():
     """
     env = dict(os.environ)
     env["CARGO_INCREMENTAL"] = "0"
+    # The settings directory, pointed somewhere that is thrown away.  A mutant
+    # is by design a program with a guard removed, and the guard an
+    # application keeps its store behind -- "a window a test makes writes
+    # nothing" -- is one of them: with it gone, every test that makes a window
+    # without a scratch configuration writes into whatever directory
+    # `settingsfile::config_dir` names, which is the developer's own.  A
+    # calendar sweep left the sample events in ~/.config/slateos/calendar
+    # that way.  `with_scratch_config` saves and restores this variable, so the
+    # tests that use it are unaffected.
+    env["XDG_CONFIG_HOME"] = _throwaway_config_dir()
     return env
+
+
+_THROWAWAY_CONFIG = []
+
+
+def _throwaway_config_dir():
+    """One temporary settings directory for this sweep, removed at exit."""
+    if not _THROWAWAY_CONFIG:
+        import atexit
+        import shutil
+        import tempfile
+
+        path = tempfile.mkdtemp(prefix="slateos-sweep-config-")
+        atexit.register(shutil.rmtree, path, True)
+        _THROWAWAY_CONFIG.append(path)
+    return _THROWAWAY_CONFIG[0]
 
 # The repository root, from `scripts/mutation_harness.py`.
 #
@@ -155,7 +181,14 @@ def run_tests(crate, timeout):
         cwd=REPO,
         env=cargo_env(),
     )
-    failed = set(re.findall(r"^    tests::(\S+)$", out.stdout, re.M))
+    # A failing test is listed under its whole path: `tests::name` for tests
+    # in the crate root, `input::tests::name` for tests in a module the root
+    # declares.  This read only the first, so a crate whose tests live in a
+    # submodule -- `apps/editor`'s close question is tested in `input.rs` --
+    # had every failure it reported go unread, and each mutant was scored
+    # "caught by a crash": `[ok]`, whatever the tests had actually said.  The
+    # name after `tests::` is what a table's `expect` names.
+    failed = set(re.findall(r"^    (?:[A-Za-z0-9_]+::)*tests::(\S+)$", out.stdout, re.M))
     compiled = "could not compile" not in out.stdout + out.stderr
     timed_out = out.returncode == 124
     # Did a test binary actually start?  Without this the harness cannot tell a
@@ -213,7 +246,7 @@ def refuse_a_dirty_start(src, bak):
     sys.exit(2)
 
 
-def check_the_table(original, mutations):
+def check_the_table(original, mutations, src_dir=None):
     """Report every unusable row in the table at once, before any build time.
 
     Four ways a row says nothing, all of them silent at run time:
@@ -246,6 +279,18 @@ def check_the_table(original, mutations):
     # trusting: it will not match a helper that takes one, and every `#[test]`
     # in the file is of this shape.
     defined = set(re.findall(r"fn\s+([a-z0-9_]+)\s*\(\s*\)", original))
+    # ...and in the files beside it.  A mutation in one module is caught by a
+    # test in another as often as not -- `apps/editor`'s window-closing logic
+    # is in `main.rs` and its tests drive it through `input.rs` -- and a table
+    # naming such a test was refused as naming "no such test".
+    if src_dir is not None:
+        for other in sorted(src_dir.glob("*.rs")):
+            defined |= set(
+                re.findall(
+                    r"fn\s+([a-z0-9_]+)\s*\(\s*\)",
+                    other.read_text(encoding="utf-8", errors="replace"),
+                )
+            )
     problems = 0
     for name, old, new, expect in mutations:
         n = original.count(old)
@@ -307,8 +352,22 @@ def sweep(src, mutations, crate, timeout=240, only=None):
         if not only or any(o in name for o in only)
     ]
 
+    # A filter that names no row is a caller's mistake, not an empty sweep.
+    # Rows read from a file with CRLF endings each kept their `\r`, matched
+    # nothing, and the run reported "OK: all 0 mutation(s) caught" -- a green
+    # verdict on 39 rows of which none had run.  One unmatched name in a long
+    # list would silently drop that row the same way.
+    unmatched = [o for o in only if not any(o in name for name, *_ in mutations)]
+    if unmatched:
+        bak.unlink(missing_ok=True)
+        print(f"\n{len(unmatched)} filter(s) name no row in the table:")
+        for o in unmatched:
+            print(f"  {o!r}")
+        print("Nothing was run.  A filter that selects nothing is not a pass.")
+        return 2
+
     # Cheapest check first: one pass over a string, before a compiler is started.
-    problems = check_the_table(original, selected)
+    problems = check_the_table(original, selected, src.parent)
     if problems:
         bak.unlink(missing_ok=True)
         print(f"\n{problems} unusable row(s) in the table.  Fix them first: a row")

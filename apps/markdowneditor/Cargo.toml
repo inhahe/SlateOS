@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Markdown Editor — split-view editor with live preview"
 [dependencies]
+# Names are shown through `pathtext`: a byte that is not text, or a control
+# character, as an escape -- never as a lossy decode.
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -13,6 +16,8 @@ guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 diffcore = { path = "../diffcore" }
 safeio = { path = "../safeio" }
+# "Unsaved changes -- save them?", asked the way every editor here asks it.
+unsaved = { path = "../unsaved" }
 
 # The same crate again with its `audit` counters on, so the tests can prove a
 # save really went through `safeio` and did not quietly regress to

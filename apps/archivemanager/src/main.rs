@@ -1,7 +1,8 @@
 //! Slate OS Archive Manager
 //!
 //! Graphical archive/compressed file manager supporting multiple formats:
-//! - ZIP, TAR, TAR.GZ, TAR.BZ2, 7Z
+//! - ZIP, TAR and TAR.GZ, read and written; TAR.BZ2, TAR.XZ and 7z
+//!   recognised -- by name or by their bytes -- and refused by name
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
 //! - Create a new, empty archive, then add files to it
@@ -33,9 +34,11 @@
 //!
 //! Uses the guitk library for UI rendering.
 //!
-//! Reading is real for ZIP only, and lives in [`backend`]; the other formats
-//! listed above are modelled but not yet parsed, and say so rather than
-//! pretending.
+//! Reading and writing are real for ZIP, TAR and TAR.GZ, and live in
+//! [`backend`]; TAR.BZ2, TAR.XZ and 7z are modelled but not parsed, and say
+//! so rather than pretending. Their decompressors exist -- in the kernel,
+//! where a module of a binary crate cannot be reached by any program
+//! (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
 
 mod backend;
 
@@ -53,6 +56,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use pathtext::ShowPath;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,10 +80,54 @@ pub enum ArchiveFormat {
     Tar,
     TarGz,
     TarBz2,
+    TarXz,
     SevenZip,
 }
 
 impl ArchiveFormat {
+    /// The names a file in this format goes by, as dialog patterns.
+    ///
+    /// The one table both [`from_path`](Self::from_path) and the file
+    /// dialogs read, so a name the program recognises is always one the Open
+    /// dialog shows. They were two lists: the dialog's said `*.zip` and
+    /// nothing else, so after TAR and TAR.GZ were taught to open, the dialog
+    /// still hid every one of them.
+    pub fn patterns(self) -> &'static [&'static str] {
+        match self {
+            Self::Zip => &["*.zip"],
+            Self::Tar => &["*.tar"],
+            Self::TarGz => &["*.tar.gz", "*.tgz"],
+            Self::TarBz2 => &["*.tar.bz2", "*.tbz2"],
+            Self::TarXz => &["*.tar.xz", "*.txz"],
+            Self::SevenZip => &["*.7z"],
+        }
+    }
+
+    /// Whether this build can read an archive in this format. TAR.BZ2, TAR.XZ
+    /// and 7z are recognised and refused by name: their decompressors are in
+    /// the kernel, where no program can reach them yet.
+    pub fn readable(self) -> bool {
+        matches!(self, Self::Zip | Self::Tar | Self::TarGz)
+    }
+
+    /// Whether this build can write an archive in this format -- today, the
+    /// same three it reads.
+    pub fn writable(self) -> bool {
+        self.readable()
+    }
+
+    /// Every pattern of every format for which `keep` holds, for a dialog's
+    /// filter.
+    fn patterns_where(keep: impl Fn(Self) -> bool) -> Vec<&'static str> {
+        Self::all()
+            .iter()
+            .copied()
+            .filter(|f| keep(*f))
+            .flat_map(Self::patterns)
+            .copied()
+            .collect()
+    }
+
     /// File extension for this format.
     pub fn extension(self) -> &'static str {
         match self {
@@ -87,6 +135,7 @@ impl ArchiveFormat {
             Self::Tar => ".tar",
             Self::TarGz => ".tar.gz",
             Self::TarBz2 => ".tar.bz2",
+            Self::TarXz => ".tar.xz",
             Self::SevenZip => ".7z",
         }
     }
@@ -98,6 +147,7 @@ impl ArchiveFormat {
             Self::Tar => "TAR Archive",
             Self::TarGz => "TAR.GZ Archive",
             Self::TarBz2 => "TAR.BZ2 Archive",
+            Self::TarXz => "TAR.XZ Archive",
             Self::SevenZip => "7-Zip Archive",
         }
     }
@@ -117,22 +167,19 @@ impl ArchiveFormat {
         matches!(self, Self::Zip | Self::SevenZip)
     }
 
-    /// Detect format from file path by examining the extension.
+    /// Detect format from file path by examining the extension, case
+    /// ignored, through [`patterns`](Self::patterns).
     pub fn from_path(path: &Path) -> Option<Self> {
         let name = path.file_name()?.to_str()?.to_lowercase();
-        if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-            Some(Self::TarGz)
-        } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
-            Some(Self::TarBz2)
-        } else if name.ends_with(".tar") {
-            Some(Self::Tar)
-        } else if name.ends_with(".zip") {
-            Some(Self::Zip)
-        } else if name.ends_with(".7z") {
-            Some(Self::SevenZip)
-        } else {
-            None
-        }
+        // No two formats' suffixes end one another (`.tar` does not end
+        // `.tar.gz`), so the order the formats are tried in cannot matter.
+        Self::all().iter().copied().find(|format| {
+            format
+                .patterns()
+                .iter()
+                .filter_map(|p| p.strip_prefix('*'))
+                .any(|suffix| name.ends_with(suffix))
+        })
     }
 
     /// All supported formats.
@@ -142,6 +189,7 @@ impl ArchiveFormat {
             Self::Tar,
             Self::TarGz,
             Self::TarBz2,
+            Self::TarXz,
             Self::SevenZip,
         ]
     }
@@ -199,8 +247,9 @@ pub struct ArchiveEntry {
     pub compressed_size: u64,
     /// Last modification timestamp (seconds since epoch).
     pub modified: u64,
-    /// CRC-32 checksum.
-    pub crc32: u32,
+    /// CRC-32 checksum, where the format keeps one: ZIP does, TAR does not --
+    /// and a column of zeros would read as a checksum of zero.
+    pub crc32: Option<u32>,
     /// Whether this entry is encrypted.
     pub encrypted: bool,
     /// Compression method used for this entry.
@@ -730,6 +779,9 @@ pub struct ArchiveTestResults {
     pub tested: usize,
     pub passed: usize,
     pub failed: usize,
+    /// Where the archive stopped being readable, if it did: the members
+    /// before it can pass and the archive still not be whole.
+    pub damage: Option<String>,
 }
 
 impl ArchiveTestResults {
@@ -740,6 +792,7 @@ impl ArchiveTestResults {
             tested: 0,
             passed: 0,
             failed: 0,
+            damage: None,
         }
     }
 
@@ -764,7 +817,7 @@ impl ArchiveTestResults {
 
     /// Whether all tested entries passed.
     pub fn all_passed(&self) -> bool {
-        self.failed == 0 && self.tested > 0
+        self.failed == 0 && self.tested > 0 && self.damage.is_none()
     }
 
     /// One line for the status bar, naming a failure rather than only
@@ -779,6 +832,16 @@ impl ArchiveTestResults {
     /// like the archive was changing.
     #[must_use]
     pub fn summary(&self) -> String {
+        // The members before a damaged place can all pass; the archive is
+        // still not whole, and that is the more important half of the line.
+        match &self.damage {
+            Some(damage) => format!("{}; but {damage}", self.members_summary()),
+            None => self.members_summary(),
+        }
+    }
+
+    /// [`Self::summary`] for the members alone.
+    fn members_summary(&self) -> String {
         if self.tested == 0 {
             return String::from("Nothing to test — the archive holds no files");
         }
@@ -845,6 +908,10 @@ pub struct ArchiveModel {
     pub is_split: bool,
     /// Comment embedded in the archive (ZIP/7z support this).
     pub comment: String,
+    /// Where a damaged archive stopped being readable, and why: its members
+    /// before that are listed, and nothing after it is. `None` for an archive
+    /// that read to its end.
+    pub damage: Option<String>,
     /// The archive's bytes and the parser's own view of them, where this
     /// model came from a real file. `None` for a model built by hand (the
     /// tests do that, and so does an empty model), and that is the whole
@@ -874,6 +941,7 @@ impl ArchiveModel {
             encrypted: false,
             is_split: false,
             comment: String::new(),
+            damage: None,
             source: None,
             next_id: 1,
         }
@@ -1357,10 +1425,14 @@ impl AppState {
                     )
                 } else {
                     format!(
-                        "{total_files} files, {} dirs | {} -> {} | Ratio: {ratio:.1}% | View: {view} (Ctrl+L)",
+                        "{total_files} files, {} dirs | {} -> {} | Ratio: {ratio:.1}% | View: {view} (Ctrl+L){}",
                         archive.dir_count,
                         ArchiveEntry::format_size(archive.total_size),
                         ArchiveEntry::format_size(archive.total_compressed),
+                        archive
+                            .damage
+                            .as_ref()
+                            .map_or_else(String::new, |d| format!(" | Damaged: {d}")),
                     )
                 }
             }
@@ -2038,7 +2110,9 @@ pub fn render_file_row(
         frame.push(RenderCommand::Text {
             x: x + 4.0,
             y: y + 4.0,
-            text: ArchiveEntry::format_crc(entry.crc32),
+            text: entry
+                .crc32
+                .map_or_else(|| String::from("-"), ArchiveEntry::format_crc),
             color: pal.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -2799,14 +2873,22 @@ impl AppState {
     pub fn open_dialog(&mut self, purpose: DialogPurpose) {
         let start = self.last_directory.clone();
         let mut dialog = match purpose {
+            // Every name the program recognises, the ones it refuses among
+            // them: a `.tar.xz` hidden from the list reads as a file that is
+            // not there, while one chosen is told why it cannot be opened.
             DialogPurpose::OpenArchive => FileDialog::open()
-                .with_filter("Archives", &["*.zip"])
+                .with_filter("Archives", &ArchiveFormat::patterns_where(|_| true))
                 .with_initial_path(&start),
             DialogPurpose::ExtractAll | DialogPurpose::ExtractSelected => {
                 FileDialog::select_folder().with_initial_path(&start)
             }
+            // What can be written, ZIP first: a name typed without an
+            // extension is given the filter's first.
             DialogPurpose::NewArchive => FileDialog::save()
-                .with_filter("Archives", &["*.zip"])
+                .with_filter(
+                    "Archives",
+                    &ArchiveFormat::patterns_where(ArchiveFormat::writable),
+                )
                 .with_initial_path(&start)
                 .with_filename("archive.zip"),
             // No filter: anything on the disk can go *into* an archive, and a
@@ -2902,10 +2984,10 @@ impl AppState {
             // that would leave the window empty with a success on the status
             // line, which reads as "the new archive is open" and is not.
             Ok(()) if self.open_path(path) => {
-                self.status_message = format!("Created {}", path.display());
+                self.status_message = format!("Created {}", path.shown());
             }
             Ok(()) => {}
-            Err(e) => self.status_message = format!("Cannot create {}: {e}", path.display()),
+            Err(e) => self.status_message = format!("Cannot create {}: {e}", path.shown()),
         }
     }
 
@@ -2914,7 +2996,7 @@ impl AppState {
         let add = match backend::read_for_add(path) {
             Ok(a) => a,
             Err(e) => {
-                self.status_message = format!("Cannot add {}: {e}", path.display());
+                self.status_message = format!("Cannot add {}: {e}", path.shown());
                 return;
             }
         };
@@ -3030,7 +3112,7 @@ impl AppState {
                 true
             }
             Err(e) => {
-                self.status_message = format!("Cannot open {}: {e}", path.display());
+                self.status_message = format!("Cannot open {}: {e}", path.shown());
                 false
             }
         }
@@ -3491,8 +3573,8 @@ impl App for AppState {
             Some(archive) => format!(
                 "{} — Archive Manager",
                 archive.path.file_name().map_or_else(
-                    || archive.path.display().to_string(),
-                    |n| n.to_string_lossy().into_owned()
+                    || archive.path.shown().to_string(),
+                    |n| n.shown().to_string()
                 )
             ),
             None => String::from("Archive Manager"),
@@ -3584,20 +3666,50 @@ impl Probe for AppState {
 }
 
 fn main() -> ExitCode {
-    let mut state = AppState::default();
     // A path on the command line is the file manager's "open with" and the
     // shell's `archivemanager foo.zip`. Without one the window comes up
     // empty rather than showing a demo: a fabricated archive on screen looks
     // exactly like a real one, and the first thing a user would do is press
     // Extract on files that do not exist.
-    match std::env::args_os().nth(1) {
-        // A failure has already put its reason in the status line, and the
-        // window still opens: refusing to start because one argument would not
-        // read leaves the user with no way to pick another file.
-        Some(arg) => drop(state.open_path(Path::new(&arg))),
-        None => state.status_message = state.status_text(),
+    //
+    // Parsed by `Args` and handed to `launch_with`. It was read as
+    // `args_os().nth(1)` and then `app::launch` was called -- which parses the
+    // same command line, found the path left over, and refused it: "exit 2,
+    // unexpected argument", before the window opened. The file manager's "open
+    // with" opened nothing at all, and a path of `--display` was taken as a
+    // path.
+    let args = match app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("archivemanager: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut state = AppState::default();
+    open_arguments(&mut state, &args.rest);
+    app::launch_with("archivemanager", args.display.as_deref(), &mut state)
+}
+
+/// Open the archive named on the command line.
+///
+/// A failure has already put its reason in the status line, and the window
+/// still opens: refusing to start because one argument would not read leaves
+/// the user with no way to pick another file. A window holds one archive, so
+/// a second one named is said not to have been opened rather than dropped
+/// without a word.
+fn open_arguments(state: &mut AppState, paths: &[String]) {
+    let Some((first, rest)) = paths.split_first() else {
+        state.status_message = state.status_text();
+        return;
+    };
+    state.open_path(Path::new(first));
+    if !rest.is_empty() {
+        state.status_message = format!(
+            "{} -- {} more not opened: a window holds one archive",
+            state.status_message,
+            rest.len()
+        );
     }
-    app::launch("archivemanager", &mut state)
 }
 
 // ============================================================================
@@ -3629,7 +3741,97 @@ mod tests {
         assert_eq!(ArchiveFormat::Tar.extension(), ".tar");
         assert_eq!(ArchiveFormat::TarGz.extension(), ".tar.gz");
         assert_eq!(ArchiveFormat::TarBz2.extension(), ".tar.bz2");
+        assert_eq!(ArchiveFormat::TarXz.extension(), ".tar.xz");
         assert_eq!(ArchiveFormat::SevenZip.extension(), ".7z");
+    }
+
+    /// Each format's own extension is one of its patterns, and names it --
+    /// so `patterns` and `extension` cannot disagree about a format.
+    #[test]
+    fn every_format_is_recognised_by_its_own_extension() {
+        for format in ArchiveFormat::all() {
+            let ext = format.extension();
+            assert!(
+                format
+                    .patterns()
+                    .iter()
+                    .any(|p| p.strip_prefix('*') == Some(ext)),
+                "{format:?}: {ext} is not among {:?}",
+                format.patterns()
+            );
+            let name = format!("Archive{}", ext.to_uppercase());
+            assert_eq!(
+                ArchiveFormat::from_path(Path::new(&name)),
+                Some(*format),
+                "{name} was not recognised"
+            );
+        }
+    }
+
+    /// **The Open dialog shows every archive the program recognises**, and
+    /// the New dialog offers what it can write. The Open dialog's filter
+    /// said `*.zip` alone, so a `.tar` or a `.tar.gz` -- both opened since
+    /// 2026-09-26 -- never appeared in it.
+    #[test]
+    fn the_dialogs_list_what_the_program_recognises_and_writes() {
+        let open = ArchiveFormat::patterns_where(|_| true);
+        for p in [
+            "*.zip",
+            "*.tar",
+            "*.tar.gz",
+            "*.tgz",
+            "*.tar.bz2",
+            "*.tar.xz",
+            "*.7z",
+        ] {
+            assert!(open.contains(&p), "the Open dialog hides {p}");
+        }
+        let new = ArchiveFormat::patterns_where(ArchiveFormat::writable);
+        assert_eq!(
+            new.first(),
+            Some(&"*.zip"),
+            "a bare name should become a ZIP"
+        );
+        assert!(new.contains(&"*.tar.gz"), "{new:?}");
+        assert!(
+            !new.contains(&"*.7z"),
+            "offered a format it cannot write: {new:?}"
+        );
+
+        // What each dialog, as the program puts it up, lists of a folder
+        // holding one file called `name`.
+        let shows = |purpose: DialogPurpose, name: &str| {
+            let mut state = AppState {
+                last_directory: std::env::temp_dir(),
+                ..AppState::default()
+            };
+            state.open_dialog(purpose);
+            let mut dialog = state.choosing.expect("a dialog").dialog;
+            dialog.set_entries(vec![guitk::dialog::DirEntry {
+                name: OsString::from(name),
+                is_dir: false,
+                size: 1,
+                modified_timestamp: 0,
+                extension: OsString::new(),
+            }]);
+            dialog.entries().len() == 1
+        };
+        let open = DialogPurpose::OpenArchive;
+        for name in ["backup.tar.gz", "backup.tar", "src.tar.xz", "bundle.7z"] {
+            assert!(shows(open, name), "the Open dialog hides {name}");
+        }
+        assert!(!shows(open, "notes.txt"), "control: the filter filters");
+        let new = DialogPurpose::NewArchive;
+        assert!(
+            shows(new, "old.tar.gz"),
+            "the New dialog hides a format it writes"
+        );
+        for name in ["old.7z", "old.tar.xz"] {
+            assert!(
+                !shows(new, name),
+                "the New dialog offers {name}, which it cannot write"
+            );
+        }
     }
 
     #[test]
@@ -3710,6 +3912,18 @@ mod tests {
     }
 
     #[test]
+    fn test_format_from_path_tar_xz() {
+        assert_eq!(
+            ArchiveFormat::from_path(Path::new("src.tar.xz")),
+            Some(ArchiveFormat::TarXz)
+        );
+        assert_eq!(
+            ArchiveFormat::from_path(Path::new("src.txz")),
+            Some(ArchiveFormat::TarXz)
+        );
+    }
+
+    #[test]
     fn test_format_from_path_7z() {
         assert_eq!(
             ArchiveFormat::from_path(Path::new("archive.7z")),
@@ -3737,8 +3951,9 @@ mod tests {
     #[test]
     fn test_format_all() {
         let all = ArchiveFormat::all();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 6);
         assert!(all.contains(&ArchiveFormat::Zip));
+        assert!(all.contains(&ArchiveFormat::TarXz));
         assert!(all.contains(&ArchiveFormat::SevenZip));
     }
 
@@ -3763,7 +3978,7 @@ mod tests {
             size: 1000,
             compressed_size: 600,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Deflate".into(),
             depth: 0,
@@ -3784,7 +3999,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Store".into(),
             depth: 0,
@@ -3805,7 +4020,7 @@ mod tests {
             size: 100,
             compressed_size: 200,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Store".into(),
             depth: 0,
@@ -3872,7 +4087,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -3892,7 +4107,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 2,
@@ -4051,7 +4266,7 @@ mod tests {
             size: 100,
             compressed_size: 80,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4074,7 +4289,7 @@ mod tests {
                 size: 0,
                 compressed_size: 0,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::new(),
                 depth: 0,
@@ -4089,7 +4304,7 @@ mod tests {
                 size: 500,
                 compressed_size: 300,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::new(),
                 depth: 1,
@@ -4274,7 +4489,7 @@ mod tests {
             size: 100,
             compressed_size: 50,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Deflate".into(),
             depth: 0,
@@ -4299,7 +4514,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: "Stored".into(),
             depth: 0,
@@ -4321,7 +4536,7 @@ mod tests {
             size: 1000,
             compressed_size: 400,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4348,7 +4563,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4363,7 +4578,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4388,7 +4603,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4413,7 +4628,7 @@ mod tests {
             size: 100,
             compressed_size: 50,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4428,7 +4643,7 @@ mod tests {
             size: 200,
             compressed_size: 100,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4453,7 +4668,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4468,7 +4683,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4495,7 +4710,7 @@ mod tests {
             size: 10,
             compressed_size: 5,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4510,7 +4725,7 @@ mod tests {
             size: 9999,
             compressed_size: 5000,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4536,7 +4751,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4551,7 +4766,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4574,7 +4789,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 0,
@@ -4589,7 +4804,7 @@ mod tests {
             size: 0,
             compressed_size: 0,
             modified: 0,
-            crc32: 0,
+            crc32: Some(0),
             encrypted: false,
             method: String::new(),
             depth: 1,
@@ -4808,7 +5023,10 @@ mod tests {
             .find(|e| e.path == "README.md")
             .expect("no README.md in the sample");
         assert_eq!(readme.method, "Deflate");
-        assert_ne!(readme.crc32, 0, "the checksum was invented, not computed");
+        assert!(
+            readme.crc32.is_some_and(|c| c != 0),
+            "the checksum was invented, not computed"
+        );
     }
 
     // --- calendar boundaries, asserted through the surface that renders them ---
@@ -5705,6 +5923,41 @@ mod tests {
         );
     }
 
+    /// The file manager opens an archive here by naming it on the command
+    /// line. One window holds one archive: a second named is said not to have
+    /// been opened, and nothing named leaves the window empty and saying so.
+    #[test]
+    fn the_archive_named_on_the_command_line_is_opened() {
+        let dir = write_scratch("args");
+        let path = dir.join("named.zip");
+        std::fs::write(&path, ziparchive::create(&[])).expect("write a fixture");
+        let named = path.to_str().expect("a text path").to_owned();
+
+        let mut state = AppState::default();
+        open_arguments(&mut state, std::slice::from_ref(&named));
+        assert!(state.archive.is_some(), "{}", state.status_message);
+        assert!(
+            !state.status_message.contains("not opened"),
+            "{}",
+            state.status_message
+        );
+
+        let mut two = AppState::default();
+        open_arguments(&mut two, &[named.clone(), named]);
+        assert!(two.archive.is_some());
+        assert!(
+            two.status_message.contains("1 more not opened"),
+            "{}",
+            two.status_message
+        );
+
+        let mut none = AppState::default();
+        open_arguments(&mut none, &[]);
+        assert!(none.archive.is_none());
+        assert_eq!(none.status_message, none.status_text());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn opening_a_file_that_is_not_an_archive_keeps_the_one_that_is_open() {
         let mut state = loaded();
@@ -5919,7 +6172,7 @@ fewer than all {all} entries, and this one shows {in_folder}"
                 compressed_size: 5,
                 is_dir: false,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::from("Deflate"),
                 depth: 0,
@@ -5983,7 +6236,7 @@ fewer than all {all} entries, and this one shows {in_folder}"
                 compressed_size: 5,
                 is_dir: false,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::from("Deflate"),
                 depth: 0,
@@ -6101,7 +6354,7 @@ fewer than all {all} entries, and this one shows {in_folder}"
                 compressed_size: 5,
                 is_dir: false,
                 modified: 0,
-                crc32: 0,
+                crc32: Some(0),
                 encrypted: false,
                 method: String::from("Deflate"),
                 depth: 0,

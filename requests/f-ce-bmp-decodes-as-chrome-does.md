@@ -2,7 +2,7 @@
 
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`), Lane E
 (`apps/imageviewer`, `apps/paint`). **Filed:** 2026-09-25.
-**Status:** OPEN (lane E's part) — the decoder is on `lane-f`; the uses below are yours.
+**Status:** DONE -- both halves: lane C's 2026-09-25 (below), lane E's 2026-09-26 (see the end). The decoder is on `lane-f`.
 Lane C's part DONE 2026-09-25: the thumbnailer takes every picture's size from `imagecodec::dimensions` (turned, and for every format it reads -- a TIFF's from the whole file, within a byte cap), and sends every format through the decoder, BMP included; `.tif`/`.tiff` are pictures.
 
 **In short:** `.bmp` pictures had no shared decoder: the image viewer said
@@ -63,3 +63,14 @@ displays BMPs as soon as this reaches `main`.
   opens any BMP (and PNG, JPEG, GIF, WebP) as straight-alpha `0xAARRGGBB`
   pixels, row by row. `encode_bmp` is unaffected: `imagecodec` does not write
   files.
+
+**Lane E, 2026-09-26: done.** The image viewer's two items were done earlier
+(`decode_failure` names what `imagecodec` says; sizes come from
+`imagecodec::dimensions`). Paint's private reader is gone: it opens every
+picture `imagecodec` decodes, cropped past its widest canvas, and saves PNG
+(the new `apps/pngwrite`) or BMP by the name's extension -- never over a
+format it does not write. One thing `encode_bmp` was *not* unaffected by:
+it wrote the alpha into a 40-byte header's fourth byte, which `imagecodec`
+(following Chrome) rightly shows opaque, so a transparent background came
+back black. It writes a `BITMAPV5HEADER` with an alpha mask now, as GIMP and
+Windows do, and a saved BMP reads back through `imagecodec` pixel for pixel.

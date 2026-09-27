@@ -4,10 +4,26 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# A stored message's flag key names its file exactly (design-decisions §426).
+pathcodec = { path = "../../gui/pathcodec" }
+pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
+
+# The keys a one-line field answers, shared rather than copied.
+textline = { path = "../textline" }
 oswindow = { path = "../../gui/window" }
+
+# Mail kept in files, read with a cap and written -- drafts, flags, a saved
+# message -- without ever truncating what was there before.
+safeio = { path = "../safeio" }
+settingsfile = { path = "../../gui/settingsfile" }
+# The message body: a text field of many lines.
+textarea = { path = "../textarea" }
+
+[dev-dependencies]
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

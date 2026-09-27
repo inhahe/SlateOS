@@ -3,7 +3,7 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`,
 `gui/desktop`), Lane E (`apps/imageviewer`, `apps/photomanager`,
 `apps/explorer`). **Filed:** 2026-09-25.
-**Status:** OPEN (lane E's part) — the decoder is on `lane-f`; the uses below are yours.
+**Status:** DONE -- both halves: lane C's 2026-09-25 (below), lane E's 2026-09-26 (see the end). The decoder is on `lane-f`.
 Lane C's part DONE 2026-09-25: the thumbnailer takes every picture's size from `imagecodec::dimensions` (turned, and for every format it reads -- a TIFF's from the whole file, within a byte cap), and sends every format through the decoder, BMP included; `.tif`/`.tiff` are pictures.
 
 **In short:** GIFs used to show as a plain coloured rectangle in the file
@@ -62,3 +62,15 @@ if animation.frame_count() > 1 && !reduced_motion {
 
 The decoder's choices, and why each follows the browsers rather than Pillow
 where the two differ: `design-decisions.md` §1308.
+
+**Lane E, 2026-09-26: done for the image viewer.** An animated GIF (or WebP)
+plays: a `Player` (`apps/imageviewer/src/player.rs`) runs `gif::Animation`
+on a thread of its own, a frame ahead through a channel one deep, each frame
+turned as the picture is; the window takes each when the one showing has had
+its `display_delay_ms`, and asks the loop for a tick exactly then. The file's
+loop count is honoured (plays after the first, as browsers read it), the last
+frame stays when it ends, Space pauses and resumes it, and with the user's
+animation setting off (`AppearanceSettings::animations_enabled`, through
+`App::appearance_changed`) the first frame is all that shows. The photo
+manager's and the file manager's thumbnails keep the first frame, which is
+what a thumbnail is; neither marks animations yet.

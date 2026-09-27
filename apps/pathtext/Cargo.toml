@@ -1,0 +1,13 @@
+[package]
+name = "pathtext"
+version = "0.1.0"
+edition = "2024"
+description = "How an application shows a path: every byte that is not text escaped, never replaced"
+
+[dependencies]
+# The tree's one renderer for untrusted text; see the crate docs for why an
+# application shows a name through it rather than through `Path::display`.
+quoting = { path = "../../userspace/quoting" }
+
+[lints]
+workspace = true

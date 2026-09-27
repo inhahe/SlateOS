@@ -107,9 +107,11 @@ impl Rect {
         }
         let x0 = i64::from(self.x).min(i64::from(other.x));
         let y0 = i64::from(self.y).min(i64::from(other.y));
-        let x1 = i64::from(self.x).saturating_add(i64::from(self.w))
+        let x1 = i64::from(self.x)
+            .saturating_add(i64::from(self.w))
             .max(i64::from(other.x).saturating_add(i64::from(other.w)));
-        let y1 = i64::from(self.y).saturating_add(i64::from(self.h))
+        let y1 = i64::from(self.y)
+            .saturating_add(i64::from(self.h))
             .max(i64::from(other.y).saturating_add(i64::from(other.h)));
         Self {
             x: i32::try_from(x0).unwrap_or(i32::MIN),
@@ -137,17 +139,38 @@ pub struct FixedRect {
 }
 
 impl FixedRect {
-    /// A rectangle of whole pixels, each value capped at [`MAX_DIMENSION`] so
-    /// its 16.16 form fits.
-    #[must_use]
-    pub fn pixels(x: u32, y: u32, w: u32, h: u32) -> Self {
-        let f = |v: u32| v.min(MAX_DIMENSION) << 16;
-        Self { x: f(x), y: f(y), w: f(w), h: f(h) }
+    /// A rectangle of whole pixels.
+    ///
+    /// Refused rather than narrowed when a value is out of range: a request
+    /// quietly capped to fit is a request shown other than as asked, which is
+    /// what design-decisions §976 rules out. Every value at most
+    /// [`MAX_DIMENSION`] (2^14) keeps each field, and `x + w`, inside `u32` in
+    /// 16.16.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadDimension`] if any value exceeds [`MAX_DIMENSION`].
+    pub fn pixels(x: u32, y: u32, w: u32, h: u32) -> Result<Self, Error> {
+        if x > MAX_DIMENSION || y > MAX_DIMENSION || w > MAX_DIMENSION || h > MAX_DIMENSION {
+            return Err(Error::BadDimension);
+        }
+        // Cannot overflow: each value is at most 2^14, so each shift is at
+        // most 2^30.
+        let f = |v: u32| v << 16;
+        Ok(Self {
+            x: f(x),
+            y: f(y),
+            w: f(w),
+            h: f(h),
+        })
     }
 
     /// The whole of a `w` x `h` framebuffer.
-    #[must_use]
-    pub fn whole(w: u32, h: u32) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadDimension`] if either dimension exceeds [`MAX_DIMENSION`].
+    pub fn whole(w: u32, h: u32) -> Result<Self, Error> {
         Self::pixels(0, 0, w, h)
     }
 }
@@ -196,9 +219,15 @@ impl Limits {
     /// What the software backends accept: nearest-neighbour has no quality
     /// floor, so the limit exists only to bound the cost of a pathological
     /// request.
-    pub const SOFTWARE: Self = Self { max_upscale: 16, max_downscale: 16 };
+    pub const SOFTWARE: Self = Self {
+        max_upscale: 16,
+        max_downscale: 16,
+    };
     /// Unscaled only: a backend or plane that can place but not stretch.
-    pub const UNSCALED: Self = Self { max_upscale: 1, max_downscale: 1 };
+    pub const UNSCALED: Self = Self {
+        max_upscale: 1,
+        max_downscale: 1,
+    };
 }
 
 /// Read-only memory in pages of `page_size` bytes; the last page may be
@@ -381,6 +410,63 @@ pub fn sample(src_start: u32, src_len: u32, dst_len: u32, i: u32) -> u32 {
     u32::try_from(fixed >> 16).unwrap_or(u32::MAX)
 }
 
+/// The destination pixels a layer draws from `region` of its source: the
+/// smallest rectangle holding every destination pixel whose [`sample`] falls
+/// inside `region`, or `None` if none does. `region` is in whole source
+/// pixels, `src` and `dst` are the layer's rectangles.
+///
+/// This is what a partial flush needs: a client that redrew part of its
+/// buffer recomposes only the part of the display that shows it, including
+/// under a scaled or moved layer.
+#[must_use]
+pub fn source_to_dest(region: Rect, src: FixedRect, dst: Rect) -> Option<Rect> {
+    let (x0, x1) = span_to_dest(region.x, region.w, src.x, src.w, dst.w)?;
+    let (y0, y1) = span_to_dest(region.y, region.h, src.y, src.h, dst.h)?;
+    let w = x1.checked_sub(x0)?;
+    let h = y1.checked_sub(y0)?;
+    let x = i32::try_from(i64::from(dst.x).checked_add(i64::from(x0))?).ok()?;
+    let y = i32::try_from(i64::from(dst.y).checked_add(i64::from(y0))?).ok()?;
+    Some(Rect::new(x, y, w, h))
+}
+
+/// Along one axis: the destination offsets `[i0, i1)` whose samples land in
+/// source pixels `[start, start + len)`. `sample` is monotonic in `i`, so the
+/// set is one run; its ends are found by binary search over `[0, dst_len)`,
+/// which keeps this exact for any scale instead of approximating the inverse.
+fn span_to_dest(
+    start: i32,
+    len: u32,
+    src_start: u32,
+    src_len: u32,
+    dst_len: u32,
+) -> Option<(u32, u32)> {
+    if len == 0 || dst_len == 0 {
+        return None;
+    }
+    let lo = i64::from(start);
+    let hi = lo.checked_add(i64::from(len))?;
+    let at = |i: u32| i64::from(sample(src_start, src_len, dst_len, i));
+    // The first i whose sample is >= lo, and the first whose sample is >= hi.
+    let first_at_least = |bound: i64| -> u32 {
+        let (mut a, mut b) = (0u32, dst_len);
+        while a < b {
+            let mid = a.saturating_add(b.saturating_sub(a).checked_div(2).unwrap_or(0));
+            if at(mid) < bound {
+                a = mid.saturating_add(1);
+            } else {
+                b = mid;
+            }
+        }
+        a
+    };
+    let i0 = first_at_least(lo);
+    let i1 = first_at_least(hi);
+    if i0 >= i1 {
+        return None;
+    }
+    Some((i0, i1))
+}
+
 /// One blended channel: `s + d * (255 - a) / 255`, rounded, saturating. The
 /// product is at most `255 * 255 + 127`, far inside a u32.
 fn over(s: u8, d: u8, a: u8) -> u8 {
@@ -410,7 +496,10 @@ pub fn compose(
     layers: &[Layer<'_>],
     background: u32,
 ) -> Result<(), Error> {
-    let target_len = paged_len(target.data.pages.iter().map(|p| p.len()), target.data.page_size)?;
+    let target_len = paged_len(
+        target.data.pages.iter().map(|p| p.len()),
+        target.data.page_size,
+    )?;
     check_buffer(target_len, target.width, target.height, target.pitch)?;
     for layer in layers {
         let s = &layer.source;
@@ -442,7 +531,13 @@ pub fn compose(
 
 /// Copy `len` bytes from `src` at `from` to `dst` at `to`, splitting the run at
 /// both sides' page boundaries. A run that leaves either buffer stops there.
-fn copy_run(src: &Paged<'_>, mut from: usize, dst: &mut PagedMut<'_, '_>, mut to: usize, mut len: usize) {
+fn copy_run(
+    src: &Paged<'_>,
+    mut from: usize,
+    dst: &mut PagedMut<'_, '_>,
+    mut to: usize,
+    mut len: usize,
+) {
     while len > 0 {
         let (Some((sp, so)), Some((dp, dof))) =
             (locate(from, src.page_size), locate(to, dst.page_size))
@@ -489,7 +584,8 @@ fn draw_row(target: &mut Target<'_, '_>, clip: Rect, row: u32, layer: &Layer<'_>
     let diff = |a: i32, b: i32| u32::try_from(i64::from(a).checked_sub(i64::from(b))?).ok();
     // Offsets into the layer, and the target column; non-negative because
     // `part` lies inside both the layer and the clip (which is on screen).
-    let (Some(dy), Some(first), Some(col0)) = (diff(row_i, d.y), diff(part.x, d.x), diff(part.x, 0))
+    let (Some(dy), Some(first), Some(col0)) =
+        (diff(row_i, d.y), diff(part.x, d.x), diff(part.x, 0))
     else {
         return;
     };

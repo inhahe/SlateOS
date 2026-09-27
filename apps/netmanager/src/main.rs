@@ -29,8 +29,13 @@
 //! what was asked for. The kernel allows it to an administrator only, and a
 //! refusal says so and changes nothing.
 //!
+//! **Diagnose checks the machine**: whether a card is up, whether it has an
+//! address and a gateway (from what was read), and then, off the window's
+//! thread, whether a name can be looked up and a connection made -- to
+//! `example.com`, only when asked (design-decisions §1216).
+//!
 //! Still refused in words: switching to DHCP (`dhcpcd` does that), scanning
-//! for Wi-Fi, reaching a VPN and running diagnostics. Each refusal says so
+//! for Wi-Fi and reaching a VPN. Each refusal says so
 //! where it happens, and no list is ever filled with an example.
 
 use appearance::Edge;
@@ -600,6 +605,13 @@ pub struct NetManagerApp {
     /// What carries a change to the kernel: [`kernel_configure`], or a
     /// test's stand-in.
     pub configure: fn(&ConfigChange) -> Result<(), i64>,
+    /// Where Diagnose looks up and connects; a test points it at its own
+    /// listener.
+    pub probe: (String, u16),
+    /// The worker running the network checks, once one has been asked for.
+    diagnoser: Option<offloop::Latest<(String, u16), Vec<DiagnosticResult>>>,
+    /// Wakes the window when the network checks are done.
+    waker: Option<std::task::Waker>,
     /// Under test, the root the interfaces are read under: a scratch tree,
     /// or (by default) a directory that does not exist, so that no test's
     /// outcome depends on the computer it runs on.
@@ -747,6 +759,102 @@ fn refusal(code: i64, what: &str) -> String {
 /// An address typed in dotted form, as the kernel's four bytes.
 fn octets(text: &str) -> Option<[u8; 4]> {
     text.parse::<std::net::Ipv4Addr>().ok().map(|a| a.octets())
+}
+
+/// Where Diagnose looks a name up and connects: design-decisions §1216.
+#[cfg(not(test))]
+const PROBE_HOST: &str = "example.com";
+/// Under test, loopback: nothing any test does leaves the machine.
+#[cfg(test)]
+const PROBE_HOST: &str = "127.0.0.1";
+/// The port Diagnose connects to.
+#[cfg(not(test))]
+const PROBE_PORT: u16 = 80;
+/// Under test, the discard port, which nothing on a test host listens on.
+#[cfg(test)]
+const PROBE_PORT: u16 = 9;
+/// How long the connection check waits.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The checks that need the network: look `host` up, then connect to it.
+/// Run off the window's thread; each is timed. No request is sent -- the
+/// connection is closed once made.
+fn probe_network((host, port): (String, u16)) -> Vec<DiagnosticResult> {
+    use std::net::ToSocketAddrs;
+    let check = |name: &str, status, details: String| DiagnosticResult {
+        name: name.to_owned(),
+        status,
+        details,
+    };
+    let started = std::time::Instant::now();
+    let addrs: Vec<std::net::SocketAddr> = match (host.as_str(), port).to_socket_addrs() {
+        Ok(found) => found.collect(),
+        Err(e) => {
+            return vec![
+                check(
+                    "Name lookup",
+                    DiagnosticStatus::Failed,
+                    format!("{host} could not be looked up: {e}"),
+                ),
+                check(
+                    "Connection",
+                    DiagnosticStatus::Failed,
+                    String::from("Not tried: the name was not found"),
+                ),
+            ];
+        }
+    };
+    let Some(first) = addrs.first() else {
+        return vec![
+            check(
+                "Name lookup",
+                DiagnosticStatus::Failed,
+                format!("{host} has no address"),
+            ),
+            check(
+                "Connection",
+                DiagnosticStatus::Failed,
+                String::from("Not tried: the name has no address"),
+            ),
+        ];
+    };
+    let lookup = check(
+        "Name lookup",
+        DiagnosticStatus::Passed,
+        format!(
+            "{host} is {} ({} ms)",
+            first.ip(),
+            started.elapsed().as_millis()
+        ),
+    );
+    let started = std::time::Instant::now();
+    let mut why = String::new();
+    for addr in &addrs {
+        match std::net::TcpStream::connect_timeout(addr, PROBE_TIMEOUT) {
+            Ok(_) => {
+                return vec![
+                    lookup,
+                    check(
+                        "Connection",
+                        DiagnosticStatus::Passed,
+                        format!(
+                            "Connected to {addr} in {} ms",
+                            started.elapsed().as_millis()
+                        ),
+                    ),
+                ];
+            }
+            Err(e) => why = e.to_string(),
+        }
+    }
+    vec![
+        lookup,
+        check(
+            "Connection",
+            DiagnosticStatus::Failed,
+            format!("Could not connect to {host} port {port}: {why}"),
+        ),
+    ]
 }
 
 /// Whether the interface list is the machine's.
@@ -898,6 +1006,9 @@ impl NetManagerApp {
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             listing: Listing::NotRead,
             configure: kernel_configure,
+            probe: (String::from(PROBE_HOST), PROBE_PORT),
+            diagnoser: None,
+            waker: None,
             #[cfg(test)]
             machine_root: String::from("no-machine-under-test"),
         }
@@ -1281,10 +1392,159 @@ impl NetManagerApp {
     /// is what somebody consults *while troubleshooting*, and this one told
     /// them to look elsewhere for a fault that may well have been here.
     pub fn run_diagnostics(&mut self) {
+        let (host, port) = self.probe.clone();
+        let mut report = self.local_checks();
+        report.push(DiagnosticResult {
+            name: String::from("Name lookup"),
+            status: DiagnosticStatus::Running,
+            details: format!("Looking up {host}"),
+        });
+        report.push(DiagnosticResult {
+            name: String::from("Connection"),
+            status: DiagnosticStatus::Running,
+            details: format!("Connecting to {host} port {port}"),
+        });
+        self.diagnostics = report;
+        self.diagnostics_running = true;
+        self.status_message = format!("Diagnosing: the interface, then {host}");
+        if self.diagnoser.is_none() {
+            // Without the window's waker (a test), the result is collected
+            // by asking for it; nothing needs waking.
+            let waker = self
+                .waker
+                .clone()
+                .unwrap_or_else(|| offloop::channel_waker().0);
+            match offloop::Latest::start("netmanager-diagnose", waker, probe_network) {
+                Ok(worker) => self.diagnoser = Some(worker),
+                Err(e) => {
+                    return self.finish_diagnosis(Self::not_run(&format!("cannot start: {e}")));
+                }
+            }
+        }
+        let asked = self.diagnoser.as_mut().map(|w| w.ask((host, port)).is_ok());
+        if asked != Some(true) {
+            self.finish_diagnosis(Self::not_run("the worker has stopped"));
+        }
+    }
+
+    /// The network checks' results, when they could not be run at all.
+    fn not_run(why: &str) -> Vec<DiagnosticResult> {
+        ["Name lookup", "Connection"]
+            .iter()
+            .map(|name| DiagnosticResult {
+                name: (*name).to_owned(),
+                status: DiagnosticStatus::Failed,
+                details: format!("Not run: {why}"),
+            })
+            .collect()
+    }
+
+    /// Take the network checks' results, if they have arrived.
+    pub fn collect_diagnosis(&mut self) {
+        if let Some(results) = self.diagnoser.as_mut().and_then(offloop::Latest::take) {
+            self.finish_diagnosis(results);
+        }
+    }
+
+    /// Put the network checks' results in place of their Running rows, and
+    /// say how it went.
+    fn finish_diagnosis(&mut self, results: Vec<DiagnosticResult>) {
+        self.diagnostics
+            .retain(|d| d.status != DiagnosticStatus::Running);
+        self.diagnostics.extend(results);
         self.diagnostics_running = false;
-        self.diagnostics = Vec::new();
-        self.status_message =
-            String::from("Cannot run diagnostics: nothing here can send a packet");
+        let failed = self
+            .diagnostics
+            .iter()
+            .filter(|d| d.status == DiagnosticStatus::Failed)
+            .count();
+        self.status_message = if failed == 0 {
+            String::from("Diagnosis finished: nothing failed")
+        } else {
+            format!("Diagnosis finished: {failed} check(s) failed")
+        };
+    }
+
+    /// The checks read from the machine, at once: the card, its address,
+    /// its gateway.
+    fn local_checks(&self) -> Vec<DiagnosticResult> {
+        let check = |name: &str, status, details: String| DiagnosticResult {
+            name: name.to_owned(),
+            status,
+            details,
+        };
+        let iface = self.interfaces.get(self.selected_interface);
+        let card = match (&self.listing, iface) {
+            (_, Some(i)) => match i.state {
+                ConnectionState::Connected => check(
+                    "Network card",
+                    DiagnosticStatus::Passed,
+                    format!("{} is up", i.name),
+                ),
+                ConnectionState::Disconnected => check(
+                    "Network card",
+                    DiagnosticStatus::Failed,
+                    format!("{} is down", i.name),
+                ),
+                _ => check(
+                    "Network card",
+                    DiagnosticStatus::Warning,
+                    format!("The kernel does not say whether {} is up", i.name),
+                ),
+            },
+            (Listing::Read, None) => check(
+                "Network card",
+                DiagnosticStatus::Failed,
+                String::from("The kernel found no network card it has a driver for"),
+            ),
+            (Listing::Unreadable(why), None) => check(
+                "Network card",
+                DiagnosticStatus::Failed,
+                format!("Could not read the interfaces: {why}"),
+            ),
+            (Listing::NotRead, None) => check(
+                "Network card",
+                DiagnosticStatus::Warning,
+                String::from("The interfaces have not been read; press Refresh"),
+            ),
+        };
+        let Some(i) = iface else {
+            return vec![card];
+        };
+        let (ip, gateway) = i.reported.as_ref().map_or(
+            (
+                i.ip_config.ip_address.as_str(),
+                i.ip_config.gateway.as_str(),
+            ),
+            |r| (r.ip_address.as_str(), r.gateway.as_str()),
+        );
+        let address = match ip {
+            NOT_ASSIGNED => check(
+                "Address",
+                DiagnosticStatus::Failed,
+                format!("No address assigned: DHCP has not configured {}", i.name),
+            ),
+            NOT_REPORTED | "" => check(
+                "Address",
+                DiagnosticStatus::Warning,
+                String::from("Not reported"),
+            ),
+            ip => check("Address", DiagnosticStatus::Passed, ip.to_owned()),
+        };
+        let gateway = match gateway {
+            NOT_ASSIGNED => check(
+                "Gateway",
+                DiagnosticStatus::Warning,
+                String::from("None assigned: only the local network can be reached"),
+            ),
+            NOT_REPORTED | "" => check(
+                "Gateway",
+                DiagnosticStatus::Warning,
+                String::from("Not reported"),
+            ),
+            gw => check("Gateway", DiagnosticStatus::Passed, gw.to_owned()),
+        };
+        vec![card, address, gateway]
     }
 
     /// The report `run_diagnostics` used to invent, kept as a fixture.
@@ -3900,6 +4160,20 @@ impl App for NetManagerApp {
         self.palette = *palette;
     }
 
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.waker = Some(waker);
+    }
+
+    /// The network checks are done.
+    fn on_wake(&mut self) -> Response {
+        self.collect_diagnosis();
+        Response::Redraw
+    }
+
     fn title(&self) -> String {
         "Network Manager".to_string()
     }
@@ -4643,18 +4917,108 @@ mod tests {
         // packet loss over 100 pings, MTU 1500 confirmed -- none of which
         // happened. A passing diagnostic is consulted *while troubleshooting*,
         // so it sent people to look elsewhere for a fault that may be here.
+        //
+        // Now it checks: under test the probe is loopback's discard port,
+        // which nothing listens on -- so the connection check must fail, and
+        // say so, rather than pass.
         assert!(app.diagnostics.is_empty());
         app.run_diagnostics();
         assert!(
-            app.diagnostics.is_empty(),
-            "diagnostics appeared from nowhere"
+            app.diagnostics_running,
+            "the network checks were not started"
         );
-        assert!(!app.diagnostics_running);
         assert!(
-            app.status_message.contains("Cannot run diagnostics"),
-            "nothing said why there is no report: {}",
-            app.status_message,
+            app.diagnostics
+                .iter()
+                .any(|d| d.status == DiagnosticStatus::Running),
+            "nothing shows the checks under way"
         );
+        finish(&mut app);
+        let connection = app
+            .diagnostics
+            .iter()
+            .find(|d| d.name == "Connection")
+            .expect("a connection check");
+        assert_eq!(
+            connection.status,
+            DiagnosticStatus::Failed,
+            "{connection:?}"
+        );
+        assert!(
+            app.status_message.contains("failed"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// Collect the network checks, waiting up to ten seconds.
+    fn finish(app: &mut NetManagerApp) {
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.diagnostics_running {
+            assert!(
+                std::time::Instant::now() < give_up,
+                "the checks never finished"
+            );
+            app.collect_diagnosis();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// **Diagnose checks the machine and the network**: a card that is up,
+    /// its address and gateway from what the kernel published, the name
+    /// looked up, and a connection made -- here to a listener on loopback.
+    #[test]
+    fn diagnose_checks_the_card_and_reaches_a_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("its address").port();
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.probe = (String::from("127.0.0.1"), port);
+        app.run_diagnostics();
+        finish(&mut app);
+        let status = |name: &str| {
+            app.diagnostics
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| (d.status, d.details.clone()))
+                .unwrap_or_else(|| panic!("no {name} check: {:?}", app.diagnostics))
+        };
+        assert_eq!(status("Network card").0, DiagnosticStatus::Passed);
+        assert_eq!(
+            status("Address"),
+            (DiagnosticStatus::Passed, String::from("10.0.2.15"))
+        );
+        assert_eq!(
+            status("Gateway"),
+            (DiagnosticStatus::Passed, String::from("10.0.2.2"))
+        );
+        assert_eq!(status("Name lookup").0, DiagnosticStatus::Passed);
+        let (connected, how) = status("Connection");
+        assert_eq!(connected, DiagnosticStatus::Passed, "{how}");
+        assert!(how.contains(&port.to_string()), "{how}");
+        assert_eq!(app.status_message, "Diagnosis finished: nothing failed");
+    }
+
+    /// A card with no address is a failed check that says why -- the
+    /// answer to "why can nothing be reached?".
+    #[test]
+    fn diagnose_names_a_card_with_no_address() {
+        let (_dir, mut app) = app_on(
+            "Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        );
+        app.run_diagnostics();
+        let card = &app.diagnostics[0];
+        assert_eq!(
+            (card.name.as_str(), card.status),
+            ("Network card", DiagnosticStatus::Failed)
+        );
+        let address = &app.diagnostics[1];
+        assert_eq!(address.status, DiagnosticStatus::Failed);
+        assert!(
+            address.details.contains("DHCP has not configured eth0"),
+            "{}",
+            address.details
+        );
+        finish(&mut app);
     }
 
     #[test]
@@ -5429,10 +5793,12 @@ mod tests {
 
         app.diagnostics.clear();
         click(&mut app, Target::Diagnose);
-        assert!(
-            app.diagnostics.is_empty(),
-            "Diagnose produced a report from nowhere"
+        assert_eq!(
+            app.diagnostics.first().map(|d| d.name.as_str()),
+            Some("Network card"),
+            "Diagnose did not check the machine"
         );
+        finish(&mut app);
         assert_eq!(
             app.active_tab,
             DetailTab::Diagnostics,
@@ -6466,10 +6832,13 @@ mod tests {
 
         assert!(rect_of(&app, Target::RunDiagnostics).is_some());
         click(&mut app, Target::RunDiagnostics);
+        assert!(!app.diagnostics.is_empty(), "Run checked nothing");
         assert!(
-            app.diagnostics.is_empty(),
-            "Run produced a report from nowhere"
+            rect_of(&app, Target::RunDiagnostics).is_none(),
+            "the Run button stayed over a report"
         );
+        finish(&mut app);
+        app.diagnostics.clear();
 
         // The hiding rule itself is still right and still worth pinning, so it
         // is checked against a report placed there rather than produced.

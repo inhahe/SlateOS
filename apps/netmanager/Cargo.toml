@@ -6,6 +6,8 @@ description = "SlateOS Network Manager — interfaces, IP, DNS, WiFi, VPN and di
 [dependencies]
 # The machine's interfaces, read as System Information reads them.
 hwquery = { path = "../hwquery" }
+# Diagnose's network checks, off the window's thread.
+offloop = { path = "../offloop" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

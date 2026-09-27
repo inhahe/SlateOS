@@ -1953,9 +1953,11 @@ word; text inside them that says "lane C" is history.
   word; a refusal names the reason in the kernel's own codes (`-400` is
   permission denied -- five lane B tools decode it as Linux's `-1`,
   `requests/e-b-five-network-tools-read-a-refusal-as-error-400.md`).
-  **Next:** Diagnose as real DNS and TCP reachability checks now that apps
-  have `std::net`; switching to DHCP (today it points at `dhcpcd`); Wi-Fi and
-  VPNs stay refused until something publishes them.
+  Diagnose checks the card, its address and gateway from what was read, and
+  then, off the window's thread, looks up and connects to `example.com`
+  (design-decisions §1216), only when asked. **Next:** switching to DHCP
+  (today it points at `dhcpcd`); Wi-Fi and VPNs stay refused until something
+  publishes them.
 
 - `[-]` `[E]` **The Remote Desktop connects over VNC** — 2026-09-26.
   `apps/remotedesktop/src/rfb.rs` speaks RFB 3.8 (RFC 6143) on a socket of

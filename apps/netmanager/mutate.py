@@ -46,6 +46,9 @@ SWITCH = "the_switch_asks_the_kernel_and_shows_its_answer"
 SWITCH_REFUSED = "a_refused_switch_stays_put"
 UNKNOWN_STATE = "an_interface_of_unknown_state_is_not_switched"
 HOST_SWITCH = "test_toggle_enabled"
+DIAG_RUN = "test_run_diagnostics"
+DIAG_OK = "diagnose_checks_the_card_and_reaches_a_server"
+DIAG_NO_ADDRESS = "diagnose_names_a_card_with_no_address"
 
 MAIN = [
     (
@@ -237,6 +240,40 @@ MAIN = [
         "        enabled: a.up != Some(false),",
         "        enabled: true,",
         [SWITCH],
+    ),
+    (
+        "a card that is down passes",
+        '                    "Network card",\n'
+        "                    DiagnosticStatus::Failed,\n"
+        '                    format!("{} is down", i.name),',
+        '                    "Network card",\n'
+        "                    DiagnosticStatus::Passed,\n"
+        '                    format!("{} is down", i.name),',
+        [DIAG_NO_ADDRESS],
+    ),
+    (
+        "no address passes",
+        '                "Address",\n                DiagnosticStatus::Failed,',
+        '                "Address",\n                DiagnosticStatus::Passed,',
+        [DIAG_NO_ADDRESS],
+    ),
+    (
+        "a connection made is reported as failed",
+        '                        "Connection",\n                        DiagnosticStatus::Passed,',
+        '                        "Connection",\n                        DiagnosticStatus::Failed,',
+        [DIAG_OK],
+    ),
+    (
+        "the Running rows are left beside the results",
+        "            .retain(|d| d.status != DiagnosticStatus::Running);",
+        "            .retain(|_| true);",
+        [DIAG_OK, DIAG_RUN],
+    ),
+    (
+        "the checks are never marked under way",
+        "        self.diagnostics_running = true;",
+        "        self.diagnostics_running = false;",
+        [DIAG_RUN],
     ),
 ]
 

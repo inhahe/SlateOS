@@ -23,6 +23,25 @@
 //! spinlock acquire.  Only when contention occurs does the overhead of
 //! the WaitQueue come into play.
 //!
+//! ## Fairness: handoff
+//!
+//! A task woken because the mutex was released has to get scheduled before
+//! it can take it, and the task that released it is still running. If that
+//! task asks again at once, it takes the mutex on the fast path and the
+//! woken waiter finds it held again: for ever, if the holder's loop never
+//! pauses. That is what hung rq15 (2026-09-27): a socket sending without
+//! pause kept the netstack's shared-ring mutex, and a quiet socket waiting
+//! for it never got a turn.
+//!
+//! So a waiter that is woken and still loses sets `starving`, and the next
+//! unlock hands the mutex over instead of freeing it: the state goes to
+//! `HANDOFF`, which the fast path cannot take and only a task that has
+//! already slept on the queue can. The releaser, if it asks again, waits its
+//! turn. As in Linux (`kernel/locking/mutex.c`, `MUTEX_FLAG_HANDOFF`), the
+//! handoff happens only once a waiter has actually been passed over, so an
+//! uncontended mutex -- and a lightly contended one -- keeps the one-CAS
+//! fast path and no forced context switch.
+//!
 //! ## Priority Inheritance
 //!
 //! Currently not implemented.  If a high-priority task blocks on a
@@ -39,7 +58,7 @@
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use super::waitqueue::WaitQueue;
 
@@ -57,13 +76,25 @@ use super::waitqueue::WaitQueue;
 /// Must NOT be acquired in ISR or softirq context (those contexts
 /// cannot sleep).  Only use in normal kernel task context.
 pub struct KMutex<T> {
-    /// Whether the mutex is currently locked.
-    locked: AtomicBool,
+    /// [`UNLOCKED`], [`LOCKED`] or [`HANDOFF`].
+    state: AtomicU8,
+    /// A waiter was woken and still lost the mutex: the next unlock hands it
+    /// over instead of freeing it. See the module docs.
+    starving: AtomicBool,
     /// Waiters blocked on this mutex.
     waiters: WaitQueue,
     /// The protected data.
     data: UnsafeCell<T>,
 }
+
+/// Free: the fast path may take it.
+const UNLOCKED: u8 = 0;
+/// Held.
+const LOCKED: u8 = 1;
+/// Released to a waiter rather than freed: held for whichever task that has
+/// already slept on the queue takes it first. The fast path, and a task that
+/// has only just arrived, cannot.
+const HANDOFF: u8 = 2;
 
 // SAFETY: KMutex provides mutual exclusion via atomic ops + blocking.
 // The UnsafeCell is only accessed through the lock guard.
@@ -74,10 +105,40 @@ impl<T> KMutex<T> {
     /// Create a new unlocked mutex protecting `value`.
     pub const fn new(value: T) -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            state: AtomicU8::new(UNLOCKED),
+            starving: AtomicBool::new(false),
             waiters: WaitQueue::new(),
             data: UnsafeCell::new(value),
         }
+    }
+
+    /// The fast path's one CAS: take the mutex if it is free.
+    fn try_take_free(&self) -> bool {
+        self.state
+            .compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// One attempt by a task in the slow path. Any task may take a free
+    /// mutex; only one that has already slept on the queue (`woken`) may take
+    /// one handed off -- which is what stops the releaser taking it straight
+    /// back. A woken task that still loses asks for the next unlock to be a
+    /// handoff.
+    fn try_acquire(&self, woken: bool) -> bool {
+        if self.try_take_free() {
+            return true;
+        }
+        if woken {
+            if self
+                .state
+                .compare_exchange(HANDOFF, LOCKED, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+            self.starving.store(true, Ordering::Relaxed);
+        }
+        false
     }
 
     /// Acquire the mutex, blocking if it's held by another task.
@@ -90,11 +151,7 @@ impl<T> KMutex<T> {
     /// until it becomes available.
     pub fn lock(&self) -> KMutexGuard<'_, T> {
         // Fast path: try to acquire with a single CAS.
-        if self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
+        if self.try_take_free() {
             return KMutexGuard { mutex: self };
         }
 
@@ -108,11 +165,7 @@ impl<T> KMutex<T> {
     /// Returns `Some(guard)` if the lock was acquired, `None` if it's
     /// currently held by another task.
     pub fn try_lock(&self) -> Option<KMutexGuard<'_, T>> {
-        if self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
+        if self.try_take_free() {
             Some(KMutexGuard { mutex: self })
         } else {
             None
@@ -126,11 +179,7 @@ impl<T> KMutex<T> {
     /// sub-10ms precision.
     pub fn lock_timeout_ns(&self, timeout_ns: u64) -> Option<KMutexGuard<'_, T>> {
         // Fast path: try immediate CAS.
-        if self
-            .locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
+        if self.try_take_free() {
             return Some(KMutexGuard { mutex: self });
         }
 
@@ -141,25 +190,18 @@ impl<T> KMutex<T> {
 
         // Brief adaptive spin (same as lock_slow).
         for _ in 0..40 {
-            if self
-                .locked
-                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
+            if self.try_take_free() {
                 return Some(KMutexGuard { mutex: self });
             }
             core::hint::spin_loop();
         }
 
-        // Block with timeout.
-        let acquired = self.waiters.wait_timeout_ns(
-            || {
-                self.locked
-                    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-            },
-            timeout_ns,
-        );
+        // Block with timeout. A waiter whose time runs out as the mutex is
+        // handed to it still checks once more after waking, and takes it:
+        // a handoff is never left with nobody to take it (see `unlock`).
+        let acquired = self
+            .waiters
+            .wait_timeout_ns_woken(|woken| self.try_acquire(woken), timeout_ns);
 
         if acquired {
             Some(KMutexGuard { mutex: self })
@@ -175,7 +217,7 @@ impl<T> KMutex<T> {
     #[must_use]
     #[allow(dead_code)]
     pub fn is_locked(&self) -> bool {
-        self.locked.load(Ordering::Relaxed)
+        self.state.load(Ordering::Relaxed) != UNLOCKED
     }
 
     /// How many tasks are asleep waiting for this mutex.
@@ -198,29 +240,46 @@ impl<T> KMutex<T> {
         // This helps when the lock holder is on another CPU and will
         // release quickly.  Linux's mutex does something similar.
         for _ in 0..40 {
-            if self
-                .locked
-                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-            {
+            if self.try_take_free() {
                 return;
             }
             core::hint::spin_loop();
         }
 
         // The lock is still held after spinning — block.
-        self.waiters.wait_until(|| {
-            self.locked
-                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-        });
+        self.waiters
+            .wait_until_woken(|woken| self.try_acquire(woken));
     }
 
     /// Release the lock (called by the guard's Drop impl).
+    ///
+    /// Normally frees it and wakes one waiter. If a waiter has been passed
+    /// over, hands it over instead (`HANDOFF`, see the module docs) -- and if
+    /// no waiter is left to take it (the one passed over has timed out), frees
+    /// it after all, so a handoff is never stranded.
     fn unlock(&self) {
-        self.locked.store(false, Ordering::Release);
+        if self.starving.swap(false, Ordering::Relaxed) {
+            self.state.store(HANDOFF, Ordering::Release);
+            if self.waiters.wake_one() {
+                // The woken task runs its check as one that has slept, and
+                // takes it. Another task that has slept may get there first,
+                // which is as fair.
+                return;
+            }
+            // Nobody to hand it to. Unless a waiter took it in the meantime,
+            // free it, and wake anyone who arrived while it was reserved.
+            if self
+                .state
+                .compare_exchange(HANDOFF, UNLOCKED, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.waiters.wake_one();
+            }
+            return;
+        }
+        self.state.store(UNLOCKED, Ordering::Release);
         // Wake one waiter (if any).  The woken task will retry the CAS
-        // in its wait_until predicate.
+        // in its wait predicate.
         self.waiters.wake_one();
     }
 }
@@ -434,10 +493,104 @@ fn self_test_contention() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// The mutex [`self_test_no_starvation`]'s holder never pauses on.
+static HOGGED: KMutex<u64> = KMutex::new(0);
+
+/// Rounds the hog runs: each takes [`HOGGED`], sleeps while holding it, and
+/// asks for it again at once. Far more than a fair mutex ever lets it take
+/// before a waiter's turn.
+const HOG_ROUNDS: u64 = 40;
+
+/// The hog's round now (1-based; 0 before it starts).
+static HOG_ROUND: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Set when the hog has finished all its rounds.
+static HOG_DONE: AtomicBool = AtomicBool::new(false);
+
+/// [`self_test_no_starvation`]'s hog: take the mutex, hold it across a sleep
+/// (as the netstack's ring mutex is held across a daemon round-trip), let it
+/// go, and take it again straight away -- never pausing between.
+extern "C" fn hog(_arg: u64) {
+    for round in 1..=HOG_ROUNDS {
+        let guard = HOGGED.lock();
+        HOG_ROUND.store(round, Ordering::Release);
+        super::sleep_ms(1);
+        drop(guard);
+    }
+    HOG_DONE.store(true, Ordering::Release);
+}
+
+/// A task that never pauses between releasing a `KMutex` and asking for it
+/// again cannot keep a sleeping waiter out for more than a round or two.
+///
+/// The regression test for rq15's hang (2026-09-27): a socket sending without
+/// pause kept the netstack's shared-ring mutex for ever, because the woken
+/// waiter always found it taken again before it could run. With the handoff,
+/// the waiter that loses once is handed the mutex at the next release. So the
+/// waiter here, which asks during the hog's round `r`, must have it by round
+/// `r + 3` (one round for the wake it loses, one for the handoff, one of
+/// slack for scheduling); without the handoff it waits for all
+/// [`HOG_ROUNDS`].
+fn self_test_no_starvation() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::serial_println;
+
+    HOG_ROUND.store(0, Ordering::Release);
+    HOG_DONE.store(false, Ordering::Release);
+    if let Err(e) = super::spawn(b"kmutex-hog", 16, hog, 0, 0) {
+        serial_println!("[kmutex]   FAIL: could not start the hog: {:?}", e);
+        return Err(e);
+    }
+    // Ask only once the hog is going, so there is a holder to lose to.
+    let mut started = false;
+    for _ in 0..CONTENTION_YIELDS {
+        if HOG_ROUND.load(Ordering::Acquire) >= 1 {
+            started = true;
+            break;
+        }
+        super::yield_now();
+    }
+    if !started {
+        serial_println!("[kmutex]   FAIL: the hog never took the mutex");
+        return Err(KernelError::InternalError);
+    }
+    let asked_at = HOG_ROUND.load(Ordering::Acquire);
+    let got_at = {
+        let _guard = HOGGED.lock();
+        HOG_ROUND.load(Ordering::Acquire)
+    };
+    // Let the hog finish before the next test runs, however this went.
+    for _ in 0..CONTENTION_YIELDS.saturating_mul(4) {
+        if HOG_DONE.load(Ordering::Acquire) {
+            break;
+        }
+        super::sleep_ms(1);
+    }
+    if got_at > asked_at.saturating_add(3) {
+        serial_println!(
+            "[kmutex]   FAIL: a waiter that asked during round {} got the mutex only at round {} \
+             of {}: a holder that never pauses starves it",
+            asked_at,
+            got_at,
+            HOG_ROUNDS
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[kmutex]   no starvation: a holder that never paused kept a waiter out from round {} \
+         to round {} of {}, not to the end: OK",
+        asked_at,
+        got_at,
+        HOG_ROUNDS
+    );
+    Ok(())
+}
+
 /// Self-test for the sleeping mutex.
 ///
 /// Single-task acquire/release, `try_lock` and timeout semantics, then
-/// [`self_test_contention`] with a second task.
+/// [`self_test_contention`] with a second task and
+/// [`self_test_no_starvation`] with a holder that never pauses.
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::serial_println;
 
@@ -523,6 +676,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     // --- 7. Contention, with a second task ---
     self_test_contention()?;
+    self_test_no_starvation()?;
 
     serial_println!("[kmutex] Self-test PASSED");
     Ok(())

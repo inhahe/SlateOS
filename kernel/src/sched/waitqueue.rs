@@ -140,10 +140,28 @@ impl WaitQueue {
     where
         F: Fn() -> bool,
     {
+        self.wait_until_woken(|_| condition());
+    }
+
+    /// [`Self::wait_until`], telling `condition` whether this task has
+    /// already slept on this queue during this wait (`true`) or not yet
+    /// (`false`).
+    ///
+    /// A mutex needs the difference to be fair: it hands itself over only to
+    /// a task that has actually waited, never to one that has just arrived --
+    /// otherwise the task releasing it could take it straight back, for ever
+    /// (see [`super::kmutex::KMutex`]).
+    ///
+    /// Must NOT be called from ISR or softirq context.
+    pub fn wait_until_woken<F>(&self, condition: F)
+    where
+        F: Fn(bool) -> bool,
+    {
         // Fast path: condition already satisfied (no registration needed).
-        if condition() {
+        if condition(false) {
             return;
         }
+        let mut woken = false;
 
         let task_id = super::current_task_id();
 
@@ -166,7 +184,7 @@ impl WaitQueue {
             }
 
             // Re-check condition now that we're registered.
-            if condition() {
+            if condition(woken) {
                 // Condition met — unregister and return.
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
@@ -179,6 +197,7 @@ impl WaitQueue {
             // registration and here, pending_wake is set and
             // block_current() returns immediately.
             super::block_current();
+            woken = true;
 
             // Woken up — remove from waiter list (wake_one may have
             // already cleared our slot, but clear defensively).
@@ -190,7 +209,7 @@ impl WaitQueue {
             }
 
             // Re-check condition.
-            if condition() {
+            if condition(woken) {
                 return;
             }
             // Spurious wakeup — loop back, re-register, re-check.
@@ -205,7 +224,16 @@ impl WaitQueue {
     where
         F: Fn() -> bool,
     {
-        if condition() {
+        self.wait_timeout_woken(|_| condition(), timeout_ticks)
+    }
+
+    /// [`Self::wait_timeout`], telling `condition` whether this task has
+    /// already slept during this wait, as [`Self::wait_until_woken`] does.
+    pub fn wait_timeout_woken<F>(&self, condition: F, timeout_ticks: u64) -> bool
+    where
+        F: Fn(bool) -> bool,
+    {
+        if condition(false) {
             return true;
         }
 
@@ -216,6 +244,7 @@ impl WaitQueue {
         let deadline = crate::apic::tick_count().saturating_add(timeout_ticks);
 
         let task_id = super::current_task_id();
+        let mut woken = false;
 
         loop {
             // Register as a waiter BEFORE checking, same as wait_until.
@@ -228,14 +257,14 @@ impl WaitQueue {
                     drop(guard);
                     super::yield_now();
                     if crate::apic::tick_count() >= deadline {
-                        return condition();
+                        return condition(woken);
                     }
                     continue;
                 }
             }
 
             // Re-check condition now that we're registered.
-            if condition() {
+            if condition(woken) {
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
                     *slot = 0;
@@ -253,6 +282,7 @@ impl WaitQueue {
             // clock and would swallow that wake, degrading every
             // `wait_until_timeout` into a full-timeout wait.
             super::sleep_until_tick_interruptible(deadline);
+            woken = true;
 
             // Remove ourselves from the waiter list (we may have been
             // woken by wake_one, or the sleep timed out).
@@ -263,7 +293,7 @@ impl WaitQueue {
                 }
             }
 
-            if condition() {
+            if condition(woken) {
                 return true;
             }
             if crate::apic::tick_count() >= deadline {
@@ -284,7 +314,16 @@ impl WaitQueue {
     where
         F: Fn() -> bool,
     {
-        if condition() {
+        self.wait_timeout_ns_woken(|_| condition(), timeout_ns)
+    }
+
+    /// [`Self::wait_timeout_ns`], telling `condition` whether this task has
+    /// already slept during this wait, as [`Self::wait_until_woken`] does.
+    pub fn wait_timeout_ns_woken<F>(&self, condition: F, timeout_ns: u64) -> bool
+    where
+        F: Fn(bool) -> bool,
+    {
+        if condition(false) {
             return true;
         }
 
@@ -297,11 +336,12 @@ impl WaitQueue {
             let ticks = timeout_ns
                 .saturating_add(9_999_999)
                 .saturating_div(10_000_000);
-            return self.wait_timeout(condition, ticks);
+            return self.wait_timeout_woken(condition, ticks);
         }
 
         let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
         let task_id = super::current_task_id();
+        let mut woken = false;
 
         loop {
             // Register as waiter BEFORE checking condition.
@@ -314,14 +354,14 @@ impl WaitQueue {
                     drop(guard);
                     super::yield_now();
                     if crate::hrtimer::now_ns() >= deadline_ns {
-                        return condition();
+                        return condition(woken);
                     }
                     continue;
                 }
             }
 
             // Re-check condition after registration.
-            if condition() {
+            if condition(woken) {
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
                     *slot = 0;
@@ -337,13 +377,14 @@ impl WaitQueue {
                 if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
                     *slot = 0;
                 }
-                return condition();
+                return condition(woken);
             }
 
             let remaining_ns = deadline_ns.saturating_sub(now_ns);
             // Interruptible: an early `wake_one()` must bring us back here
             // to re-check the condition rather than being slept through.
             super::sleep_ns_interruptible(remaining_ns);
+            woken = true;
 
             // Remove ourselves from the waiter list.
             {
@@ -353,7 +394,7 @@ impl WaitQueue {
                 }
             }
 
-            if condition() {
+            if condition(woken) {
                 return true;
             }
             if crate::hrtimer::now_ns() >= deadline_ns {

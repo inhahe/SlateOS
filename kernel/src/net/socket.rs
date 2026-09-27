@@ -444,15 +444,23 @@ fn inner_of(handle: SocketHandle) -> KernelResult<Arc<KMutex<SocketInner>>> {
 
 /// Connect the socket to `ip:port` via the daemon.
 ///
-/// When `nonblock` is clear, this is a **blocking** connect: it returns
-/// [`ConnectOutcome::Established`] on success, or maps a daemon "no upstream" /
-/// refused result to `ECONNREFUSED` (marking the socket `Failed`).
+/// The daemon is always asked without blocking. If the handshake completes
+/// at once (a fast or loopback peer) the result is
+/// [`ConnectOutcome::Established`]; otherwise the socket enters
+/// [`SockState::Connecting`] and:
 ///
-/// When `nonblock` is set, the connect is issued non-blocking: if the handshake
-/// completes synchronously (fast/loopback peer) it returns
-/// [`ConnectOutcome::Established`]; otherwise it returns
-/// [`ConnectOutcome::InProgress`] (the socket enters [`SockState::Connecting`]) and
-/// the caller polls for `POLLOUT` then checks `SO_ERROR` ([`take_so_error`]).
+/// - with `nonblock` set, the result is [`ConnectOutcome::InProgress`], and
+///   the caller polls for `POLLOUT` then checks `SO_ERROR` ([`take_so_error`]);
+/// - with it clear -- a **blocking** connect -- this waits here, asking the
+///   daemon without blocking ([`wait_connected`]), until the handshake
+///   resolves: [`ConnectOutcome::Established`], or `ECONNREFUSED`.
+///
+/// Until 2026-09-27 a blocking connect asked the daemon to block, and the
+/// daemon did the handshake inside that one request: every other socket
+/// waited for it, for seconds against a peer that does not answer, and the
+/// handshake's reads dropped other connections' frames (known-issues
+/// `A-NETSTACK-CLOSE-BLOCKED-THE-DAEMON-AND-ATE-OTHERS-FRAMES`). A blocking
+/// `recv` was moved out of the daemon the same way on 2026-09-26.
 ///
 /// # Errors
 ///
@@ -461,6 +469,8 @@ fn inner_of(handle: SocketHandle) -> KernelResult<Arc<KMutex<SocketInner>>> {
 /// - `ConnectAlready` — a non-blocking connect is already in progress (Linux
 ///   `EALREADY`).
 /// - `ConnectionRefused` — the daemon could not establish the connection.
+/// - `Interrupted` — a blocking connect's wait was ended by a signal; the
+///   attempt goes on, as in Linux.
 /// - protocol faults propagated from [`NetstackConn::connect`].
 pub fn connect(
     handle: SocketHandle,
@@ -475,14 +485,19 @@ pub fn connect(
         SockState::Connecting => return Err(KernelError::ConnectAlready), // EALREADY
         _ => {}
     }
-    let res = guard.owned_conn_mut()?.connect(ip, port, nonblock)?;
+    let res = guard.owned_conn_mut()?.connect(ip, port, true)?;
     if res == netipc::ring::ERR_IN_PROGRESS {
-        // Non-blocking handshake pending: remember the peer now so getpeername works
-        // once it resolves, and enter Connecting.
+        // Handshake pending: remember the peer now so getpeername works once it
+        // resolves, and enter Connecting.
         guard.state = SockState::Connecting;
         guard.peer_ip = *ip;
         guard.peer_port = port;
-        return Ok(ConnectOutcome::InProgress);
+        drop(guard);
+        return if nonblock {
+            Ok(ConnectOutcome::InProgress)
+        } else {
+            wait_connected(handle)
+        };
     }
     if res < 0 {
         guard.state = SockState::Failed;
@@ -497,9 +512,11 @@ pub fn connect(
 
 /// Connect an `AF_INET6` socket to `ip6:port` via the daemon.
 ///
-/// IPv6 sibling of [`connect`]: identical lifecycle/outcome semantics, but drives
-/// [`NetstackConn::connect6`] (which carries the 16-byte peer address in the ring
-/// data window) and remembers the peer in `peer_ip6` for `getpeername`.
+/// IPv6 sibling of [`connect`]: identical lifecycle/outcome semantics -- the
+/// daemon is always asked without blocking, and a blocking connect waits here
+/// -- but drives [`NetstackConn::connect6`] (which carries the 16-byte peer
+/// address in the ring data window) and remembers the peer in `peer_ip6` for
+/// `getpeername`.
 ///
 /// # Errors
 ///
@@ -508,6 +525,7 @@ pub fn connect(
 /// - `ConnectAlready` — a non-blocking connect is already in progress (Linux
 ///   `EALREADY`).
 /// - `ConnectionRefused` — the daemon could not establish the connection.
+/// - `Interrupted` — a blocking connect's wait was ended by a signal.
 /// - protocol faults propagated from [`NetstackConn::connect6`].
 pub fn connect6(
     handle: SocketHandle,
@@ -522,14 +540,19 @@ pub fn connect6(
         SockState::Connecting => return Err(KernelError::ConnectAlready), // EALREADY
         _ => {}
     }
-    let res = guard.owned_conn_mut()?.connect6(ip6, port, nonblock)?;
+    let res = guard.owned_conn_mut()?.connect6(ip6, port, true)?;
     if res == netipc::ring::ERR_IN_PROGRESS {
-        // Non-blocking handshake pending: remember the peer now so getpeername works
-        // once it resolves, and enter Connecting.
+        // Handshake pending: remember the peer now so getpeername works once it
+        // resolves, and enter Connecting.
         guard.state = SockState::Connecting;
         guard.peer_ip6 = Some(*ip6);
         guard.peer_port = port;
-        return Ok(ConnectOutcome::InProgress);
+        drop(guard);
+        return if nonblock {
+            Ok(ConnectOutcome::InProgress)
+        } else {
+            wait_connected(handle)
+        };
     }
     if res < 0 {
         guard.state = SockState::Failed;
@@ -1418,6 +1441,32 @@ pub fn dgram_recv_from(
 /// The waiting is done here because the daemon never holds a request open
 /// for a blocked client: it serves every client of a session in one loop, so
 /// one client's wait would stall all the others' requests.
+/// Wait, asking the daemon without blocking, for the connect in progress on
+/// `handle` to resolve: `Established` once the socket is writable,
+/// `ConnectionRefused` if the handshake failed, `Interrupted` on a signal (the
+/// attempt goes on, as in Linux). The resolution itself is [`poll_ready`]'s,
+/// which moves the socket to `Connected` or `Failed`.
+fn wait_connected(handle: SocketHandle) -> KernelResult<ConnectOutcome> {
+    let outcome = wait_until(false, || {
+        let (_, writable, error) = poll_ready(handle)?;
+        if error {
+            Err(KernelError::ConnectionRefused)
+        } else if writable {
+            Ok(ConnectOutcome::Established)
+        } else {
+            Err(KernelError::WouldBlock)
+        }
+    });
+    if outcome == Err(KernelError::ConnectionRefused) {
+        // The call that reports the failure consumes it, as Linux's blocking
+        // connect does: SO_ERROR is left for a poller that had no other way
+        // to learn it. `poll_ready` latched it; the only failure `take` can
+        // report is a handle closed meanwhile, which leaves nothing to clear.
+        let _ = take_so_error(handle);
+    }
+    outcome
+}
+
 fn wait_until<T>(nonblock: bool, mut ask: impl FnMut() -> KernelResult<T>) -> KernelResult<T> {
     let pid = crate::ipc::waiters::current_user_pid();
     let mut backoff_ms: u64 = 1;

@@ -2266,6 +2266,10 @@ lane C's `guitk`.
   (2026-09-26, §1328), its `blend`s weighed as HarfBuzz weighs them for
   drawing and as FreeType does for the hinter, checked against both on four
   real fonts fetched for it (`tools/outline_oracle.py`, `hint_oracle.py`).
+  And `glyf` outlines are HarfBuzz's to the last bit (2026-09-26, §1329):
+  built from points as HarfBuzz builds them, varied by 14.3.0's `gvar`
+  arithmetic, and checked against HarfBuzz on every host `.ttf` (200,945
+  glyph-instances) and the variable fonts' named instances.
   A legacy `kern` pair is now *split* between the two glyphs, which is what
   HarfBuzz's `hb_kern_machine_t` does: `kern >> 1` onto the left glyph's
   advance, the remainder onto the right glyph's advance and its offset. The

@@ -2086,7 +2086,7 @@ impl<P: CffPen> Interp<'_, P> {
     // made it is decided in the last bit.
     clippy::float_cmp
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sfnt::Point;
 
@@ -2566,7 +2566,7 @@ mod tests {
     /// An outline as the fixture spells HarfBuzz's drawing: `M`, `L`, `C`,
     /// `Q` and `Z`, with the points' x and y in turn -- a contour with
     /// nothing drawn left out, and a closing line back to its start dropped.
-    fn spelled(commands: &[PathCmd]) -> (String, Vec<f32>) {
+    pub(crate) fn spelled(commands: &[PathCmd]) -> (String, Vec<f32>) {
         let mut contours: Vec<(Point, Vec<PathCmd>)> = Vec::new();
         let mut open: Option<(Point, Vec<PathCmd>)> = None;
         for cmd in commands {

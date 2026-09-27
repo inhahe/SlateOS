@@ -534,6 +534,11 @@ def drawn(data, order, weight):
     rows = []
     for gid, name in enumerate(order):
         e = font.get_glyph_extents(gid)
+        # Drawn twice, the second kept: HarfBuzz's `gvar` scalar cache gives
+        # the first draw to reach a shared tuple its exact scalar and every
+        # later one the cached, 2^-30-rounded value, which is the one the
+        # crate reproduces (`gvar::Scalars::Drawn`).
+        font.draw_glyph_with_pen(gid, Recorder())
         pen = Recorder()
         font.draw_glyph_with_pen(gid, pen)
         contours, cur = [], None
@@ -641,6 +646,10 @@ def rust_bytes(data):
 
 
 def main():
+    # Each face's `head` holds the time it was built, which fontTools takes
+    # from SOURCE_DATE_EPOCH when set: a fixed one keeps the fonts' bytes, and
+    # so this script's output, the same from one run to the next.
+    os.environ.setdefault("SOURCE_DATE_EPOCH", "1790463450")
     g = glyphs()
     ttf, ttf_order = build_ttf(g)
     otf, otf_order = build_otf(g)
@@ -684,18 +693,25 @@ def main():
                 flat = ", ".join(f"{x}, {y}" for (x, y) in points)
                 w(f"    ({float(px)}, {gid}, \"{name}\", &[{flat}]),\n")
             w("];\n\n")
-        rows = drawn(var_cff2, cff2_order, VAR_WEIGHT)
-        w(f"/// HarfBuzz's drawing of each glyph of the VAR_CFF2 face at weight {VAR_WEIGHT}: `(glyph,\n")
-        w("/// name, [x_bearing, y_bearing, width, height], path ops (`M`, `L`, `C`, `Q`, `Z`),\n")
-        w("/// their points' x and y in turn)`, at one unit per font unit; a contour with\n")
-        w("/// nothing drawn is left out, and a closing line back to its start dropped.\n")
+        w("/// HarfBuzz's drawing of one glyph: `(glyph, name, [x_bearing, y_bearing, width,\n")
+        w("/// height], path ops (`M`, `L`, `C`, `Q`, `Z`), their points' x and y in turn)`, at\n")
+        w("/// one unit per font unit; a contour with nothing drawn is left out, and a\n")
+        w("/// closing line back to its start dropped.\n")
         w("pub(crate) type Drawn = (u16, &'static str, [i32; 4], &'static str, &'static [f32]);\n\n")
-        w("/// Each glyph's row: see [`Drawn`].\n")
-        w(f"pub(crate) static VAR_CFF2_DRAWN: [Drawn; {len(rows)}] = [\n")
-        for gid, name, ext, ops, coords in rows:
-            flat = ", ".join(rust_f32(v) for v in coords)
-            w(f"    ({gid}, \"{name}\", [{', '.join(str(v) for v in ext)}], \"{ops}\", &[{flat}]),\n")
-        w("];\n\n")
+        for label, data, order, weight, why in (
+            ("VAR_CFF2_DRAWN", var_cff2, cff2_order, VAR_WEIGHT, "the VAR_CFF2 face"),
+            ("VAR_DRAWN", var, var_order, VAR_WEIGHT, "the VAR face"),
+            # (401 - 400) / 300 is 55 in F2Dot14: a scalar under 2^-6, which
+            # HarfBuzz's scalar cache stores rounded.
+            ("VAR_DRAWN_401", var, var_order, 401, "the VAR face, where the scalar cache rounds"),
+        ):
+            rows = drawn(data, order, weight)
+            w(f"/// HarfBuzz's drawing of each glyph of {why}, at weight {weight}: see [`Drawn`].\n")
+            w(f"pub(crate) static {label}: [Drawn; {len(rows)}] = [\n")
+            for gid, name, ext, ops, coords in rows:
+                flat = ", ".join(rust_f32(v) for v in coords)
+                w(f"    ({gid}, \"{name}\", [{', '.join(str(v) for v in ext)}], \"{ops}\", &[{flat}]),\n")
+            w("];\n\n")
     rustfmt(out)
     print(f"{len(ttf)} + {len(otf)} + {len(var)} + {len(var_nohvar)} + {len(var_cff2)} bytes of font -> {out}")
 

@@ -59,6 +59,7 @@ mod fallback;
 #[cfg(test)]
 mod fixture;
 mod ftcalc;
+mod glyf;
 mod gpos;
 pub mod gsub;
 mod gvar;

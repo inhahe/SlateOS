@@ -216,7 +216,7 @@ impl ScalarCache {
     /// The remembered scalar of region `index`, as HarfBuzz reads it back.
     fn get(&self, index: usize) -> Option<f32> {
         let parts = (*self.values.get(index)?)?;
-        Some(exact_f32(parts) * (1.0 / Self::PARTS))
+        Some(Self::read(parts))
     }
 
     /// Remember `scalar` for region `index`, rounded to 2^-30ths as
@@ -225,8 +225,30 @@ impl ScalarCache {
     /// remembered one part high, as well as a small one rounded.
     fn set(&mut self, index: usize, scalar: f32) {
         if let Some(slot) = self.values.get_mut(index) {
-            *slot = Some(crate::hbcalc::roundf_i32(scalar * Self::PARTS));
+            *slot = Some(Self::parts(scalar));
         }
+    }
+
+    /// What a cache that has remembered `scalar` hands back for it: `scalar`
+    /// stored as [`set`](Self::set) stores it and read as
+    /// [`get`](Self::get) reads it.
+    ///
+    /// For a cache that lives longer than one evaluation, this is the value
+    /// every evaluation but the first sees, and so the one to reproduce:
+    /// `gvar`'s shared tuples, whose cache HarfBuzz keeps for the life of the
+    /// font's instance ([`crate::gvar`]).
+    pub(crate) fn remembered(scalar: f32) -> f32 {
+        Self::read(Self::parts(scalar))
+    }
+
+    /// `scalar` in whole 2^-30ths, as the cache stores it.
+    fn parts(scalar: f32) -> i32 {
+        crate::hbcalc::roundf_i32(scalar * Self::PARTS)
+    }
+
+    /// A stored count of 2^-30ths as a scalar again.
+    fn read(parts: i32) -> f32 {
+        exact_f32(parts) * (1.0 / Self::PARTS)
     }
 }
 

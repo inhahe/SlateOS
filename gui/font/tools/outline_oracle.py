@@ -120,6 +120,22 @@ def normalize(cs):
     return out
 
 
+def first_difference(a, b):
+    """Where two normalized paths first part: the contour, then the first
+    segment within it that differs, as (where, ours, HarfBuzz's)."""
+    if len(a) != len(b):
+        return f"{len(a)} contours, HarfBuzz {len(b)}", a, b
+    for n, ((sa, ga), (sb, gb)) in enumerate(zip(a, b)):
+        if sa != sb:
+            return f"contour {n} start", sa, sb
+        if len(ga) != len(gb):
+            return f"contour {n}: {len(ga)} segments, HarfBuzz {len(gb)}", ga, gb
+        for k, (x, y) in enumerate(zip(ga, gb)):
+            if x != y:
+                return f"contour {n} segment {k}", x, y
+    return "nowhere", a, b
+
+
 def ours(text):
     toks = text.split()
     ops, i = [], 0
@@ -135,6 +151,13 @@ def ours(text):
 
 
 def theirs(font, gid):
+    # HarfBuzz draws through a cache of `gvar`'s shared-tuple scalars that
+    # lasts as long as the font's instance, and stores each in whole 2^-30ths:
+    # the first draw to reach a tuple gets its exact scalar and every later
+    # one the stored value. The crate reproduces the later draws (the steady
+    # state, `gvar::Scalars::Drawn`), so the glyph is drawn once to fill the
+    # cache and compared as drawn the second time.
+    font.draw_glyph_with_pen(gid, Recorder())
     pen = Recorder()
     font.draw_glyph_with_pen(gid, pen)
     ops = []
@@ -186,17 +209,17 @@ def main():
             if box != theirs_box:
                 boxes_bad.append((spec, gid, box, theirs_box))
             if path.startswith("error"):
-                paths_bad.append((spec, gid, path, ""))
+                paths_bad.append((spec, gid, "not drawn", path, ""))
                 continue
             a = normalize(contours(ours(path)))
             b = normalize(contours(theirs(font, gid)))
             if a != b:
-                paths_bad.append((spec, gid, a[:2], b[:2]))
+                paths_bad.append((spec, gid) + first_difference(a, b))
     name = os.path.basename(args.font)
     print(f"{name}: {checked} glyph-instances; paths {checked - len(paths_bad)} agree, "
           f"boxes {checked - len(boxes_bad)} agree")
-    for spec, gid, a, b in paths_bad[:args.show]:
-        print(f"    path {gid} at [{spec or 'default'}]:\n      here     {a}\n      HarfBuzz {b}")
+    for spec, gid, where, a, b in paths_bad[:args.show]:
+        print(f"    path {gid} at [{spec or 'default'}], {where}:\n      here     {a}\n      HarfBuzz {b}")
     for spec, gid, a, b in boxes_bad[:args.show]:
         print(f"    box {gid} at [{spec or 'default'}]: here {a}, HarfBuzz {b}")
     return 1 if paths_bad or boxes_bad else 0

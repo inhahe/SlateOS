@@ -485,7 +485,39 @@ fi
 # same mistake the gate-1 bypass above is careful not to make.)
 skip=0
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || skip=1
-py=$(command -v python3 || command -v python) || skip=1
+# The same interpreter boot-test.sh uses: `python` before `python3`, and never
+# a Windows App Execution Alias (...\Microsoft\WindowsApps\python*.exe) while a
+# real one exists. The alias starts a Store-packaged launcher, which runs --
+# with the interpreter it starts -- outside the caller's Job Object: a gate
+# run through it is invisible to run-timeout's accounting and beyond its
+# kill-on-close (measured 2026-09-26: the job counted 1 process of 3). It
+# also meant pushes and boots were graded by two different Python installs.
+# An alias is still used if it is all there is: a skipped gate is worse.
+#
+# PATH is walked by hand because `command -v` answers only the FIRST match:
+# with the alias ahead of a real interpreter, skipping it left nothing to
+# choose. (test-pre-push-python-choice.py builds exactly that PATH.)
+find_py() {
+    for find_py_name in python python3; do
+        find_py_rest=$PATH
+        while [ -n "$find_py_rest" ]; do
+            find_py_dir=${find_py_rest%%:*}
+            case $find_py_rest in
+                *:*) find_py_rest=${find_py_rest#*:} ;;
+                *) find_py_rest= ;;
+            esac
+            case $find_py_dir in
+                ''|*/[Mm]icrosoft/[Ww]indows[Aa]pps|*/[Mm]icrosoft/[Ww]indows[Aa]pps/*) continue ;;
+            esac
+            if [ -x "$find_py_dir/$find_py_name" ] && [ ! -d "$find_py_dir/$find_py_name" ]; then
+                printf '%s\n' "$find_py_dir/$find_py_name"
+                return 0
+            fi
+        done
+    done
+    command -v python || command -v python3
+}
+py=$(find_py) || skip=1
 [ -n "${py:-}" ] || skip=1
 
 # Does this push add commits touching any of the given paths?

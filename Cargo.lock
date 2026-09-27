@@ -984,6 +984,7 @@ dependencies = [
  "scratchdir",
  "smartcols",
  "stdfdguard",
+ "ulblkid",
  "ulclosestream",
  "ulmount",
  "ulstrutils",

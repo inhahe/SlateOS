@@ -20,9 +20,13 @@
 //! across all devices (which of two devices with the same UUID a lookup
 //! finds first); both are kept -- the second as a sequence number per tag.
 
-use crate::blkid::{self, ProbeFail};
-use crate::fs::{major, makedev, minor};
+use crate::devno::{devno_to_devname, scan_dir};
+use crate::probe::open_nonblock;
+use crate::{PARTS_ENTRY_DETAILS, Probe, SUBLKS_LABEL, SUBLKS_SECTYPE, SUBLKS_TYPE, SUBLKS_UUID};
 use std::path::PathBuf;
+use std::rc::Rc;
+use ulsysfs::canonicalize::{canonicalize_dm_name, canonicalize_path};
+use ulsysfs::{major, makedev, minor};
 
 /// `BLKID_DEV_FIND`: look a device up only.
 pub const DEV_FIND: u32 = 0;
@@ -63,9 +67,6 @@ const CACHE_FILE_OLD: &[u8] = b"/etc/blkid.tab";
 const VG_DIR: &[u8] = b"/proc/lvm/VGs";
 /// `dirlist[]`: where a device's node is looked for by its name.
 const DIRLIST: [&[u8]; 3] = [b"/dev", b"/devfs", b"/devices"];
-/// `devdirs[]`: where a device number is searched for, in reverse order of
-/// importance (a stack).
-const DEVDIRS: [&[u8]; 3] = [b"/devices", b"/devfs", b"/dev"];
 
 /// A path from bytes.
 fn path_of(b: &[u8]) -> PathBuf {
@@ -529,7 +530,7 @@ impl BlkCache {
             .find(|&i| self.dev(i).is_some_and(|d| d.name == devname));
         let mut cn: Option<Vec<u8>> = None;
         if found.is_none()
-            && let Some(c) = crate::cache::canonicalize_path(devname)
+            && let Some(c) = canonicalize_path(devname)
             && c != devname
         {
             found = self
@@ -648,19 +649,20 @@ impl BlkCache {
             self.free_dev(id);
             return None;
         }
-        let file = match blkid::open_nonblock(&name) {
+        let file = match open_nonblock(&name) {
             Ok(f) => f,
-            Err(ProbeFail::Open(e)) => {
-                return self.open_err(id, &std::io::Error::from_raw_os_error(e));
-            }
-            Err(_) => {
-                self.free_dev(id);
-                return None;
-            }
+            Err(e) => return self.open_err(id, &std::io::Error::from_raw_os_error(e)),
         };
-        // Remove what the cache knew, then probe. (Upstream sets the device
-        // on its probe first, and frees the entry if that fails; probing
-        // does both here, and a failure frees the entry just the same.)
+        // A fresh probe for each device, where upstream reuses the cache's
+        // one: `blkid_probe_set_device` resets everything this asks about,
+        // and the filters are reset after each use.
+        let mut pr = Probe::new();
+        if pr.set_device(Some(Rc::new(file)), 0, 0) != 0 {
+            // The device cannot be read.
+            self.free_dev(id);
+            return None;
+        }
+        // Remove what the cache knew, then probe.
         let old: Vec<Vec<u8>> = self
             .dev(id)
             .map(|d| d.tags.iter().map(|t| t.name.clone()).collect())
@@ -668,15 +670,20 @@ impl BlkCache {
         for name in old {
             self.set_tag(id, &name, None);
         }
-        let flags =
-            blkid::SUBLKS_LABEL | blkid::SUBLKS_UUID | blkid::SUBLKS_TYPE | blkid::SUBLKS_SECTYPE;
-        // A fresh probe for each device, where upstream reuses the cache's
-        // one: `blkid_probe_set_device` resets everything this asks about,
-        // and the filters are reset after each use.
-        let Ok(values) = blkid::probe_file(file, flags, Some(blkid::PARTS_ENTRY_DETAILS)) else {
+        pr.enable_superblocks(true);
+        pr.set_superblocks_flags(SUBLKS_LABEL | SUBLKS_UUID | SUBLKS_TYPE | SUBLKS_SECTYPE);
+        pr.enable_partitions(true);
+        pr.set_partitions_flags(PARTS_ENTRY_DETAILS);
+        if pr.do_safeprobe() != 0 {
+            // Found nothing, or an error.
             self.free_dev(id);
             return None;
-        };
+        }
+        let values: Vec<(&'static str, Vec<u8>)> = pr
+            .values()
+            .iter()
+            .map(|v| (v.name, v.as_c_str().to_vec()))
+            .collect();
         let (s, us) = now();
         if let Some(d) = self.dev_mut(id) {
             d.time = s;
@@ -688,14 +695,14 @@ impl BlkCache {
         // `blkid_probe_to_tags`: partition entries' UUID and NAME as
         // PARTUUID and PARTLABEL, the rest but for `*_ID` as they are.
         for (vname, v) in values {
-            if let Some(p) = vname.strip_prefix(b"PART_ENTRY_") {
+            if let Some(p) = vname.strip_prefix("PART_ENTRY_") {
                 match p {
-                    b"UUID" => self.set_tag(id, b"PARTUUID", Some(&v)),
-                    b"NAME" => self.set_tag(id, b"PARTLABEL", Some(&v)),
+                    "UUID" => self.set_tag(id, b"PARTUUID", Some(&v)),
+                    "NAME" => self.set_tag(id, b"PARTLABEL", Some(&v)),
                     _ => {}
                 }
-            } else if !vname.windows(3).any(|w| w == b"_ID") {
-                self.set_tag(id, vname, Some(&v));
+            } else if !vname.contains("_ID") {
+                self.set_tag(id, vname.as_bytes(), Some(&v));
             }
         }
         Some(id)
@@ -992,8 +999,8 @@ impl BlkCache {
     /// node to add, `None` for no node at all.
     fn find_devname(&mut self, ptname: &[u8], devno: u64) -> Option<Result<usize, Vec<u8>>> {
         if ptname.starts_with(b"dm-") && ptname.get(3).is_some_and(u8::is_ascii_digit) {
-            let name = crate::cache::canonicalize_dm_name(ptname)
-                .or_else(|| scan_dir(b"/dev/mapper", devno, None));
+            let name =
+                canonicalize_dm_name(ptname).or_else(|| scan_dir(b"/dev/mapper", devno, None));
             if let Some(n) = name {
                 return Some(Err(n));
             }
@@ -1507,61 +1514,6 @@ impl SplitColon for [u8] {
         };
         Some((v(&a), v(&b)))
     }
-}
-
-/// `blkid__scan_dir(dirname, devno, list, &devname)`: the block device in
-/// `dirname` with this number; with `list`, its subdirectories (not links,
-/// not `.`-names or `shm`) are pushed onto it.
-fn scan_dir(dirname: &[u8], devno: u64, mut list: Option<&mut Vec<Vec<u8>>>) -> Option<Vec<u8>> {
-    let entries = std::fs::read_dir(path_of(dirname)).ok()?;
-    for e in entries.flatten() {
-        let name = quoting::os_bytes(&e.file_name()).into_owned();
-        let Ok(ft) = e.file_type() else {
-            continue;
-        };
-        if !(is_block(&ft) || ft.is_symlink() || ft.is_dir()) {
-            continue;
-        }
-        let path = join(dirname, &name);
-        let Ok(m) = std::fs::metadata(path_of(&path)) else {
-            continue;
-        };
-        if is_block(&m.file_type()) && rdev_of(&m) == devno {
-            return Some(path);
-        }
-        let Some(l) = list.as_deref_mut() else {
-            continue;
-        };
-        if !m.is_dir() || ft.is_symlink() {
-            continue;
-        }
-        if name.first() == Some(&b'.') || (ft.is_dir() && name == b"shm") {
-            continue;
-        }
-        l.push(path);
-    }
-    None
-}
-
-/// `blkid_devno_to_devname(devno)`: through sysfs, else a breadth-first
-/// search of `/dev` (and `/devfs`, `/devices`) for the number.
-fn devno_to_devname(devno: u64) -> Option<Vec<u8>> {
-    if let Some(p) = crate::tab_parse::devno_to_devpath(devno) {
-        return Some(p);
-    }
-    // `scandev_devno_to_devpath`: stacks, so each level is searched in
-    // reverse of the order it was found in.
-    let mut list: Vec<Vec<u8>> = DEVDIRS.iter().map(|d| d.to_vec()).collect();
-    let mut new_list: Vec<Vec<u8>> = Vec::new();
-    while let Some(current) = list.pop() {
-        if let Some(name) = scan_dir(&current, devno, Some(&mut new_list)) {
-            return Some(name);
-        }
-        if list.is_empty() {
-            list = std::mem::take(&mut new_list);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

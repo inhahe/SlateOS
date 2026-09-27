@@ -14,8 +14,11 @@ getoptlong = { path = "../getoptlong" }
 quoting = { path = "../quoting" }
 # libsmartcols: the table, the tree, and the newline-wrapped SOURCES cells.
 smartcols = { path = "../smartcols" }
-# libmount's tables, cache and tags, and libblkid's device cache.
+# libmount's tables, cache and tags.
 ulmount = { path = "../ulmount" }
+# libblkid's device cache, which findmnt holds for -o SOURCES, as upstream's
+# findmnt links libblkid for it.
+ulblkid = { path = "../ulblkid" }
 # string_to_idarray for -o and --poll, strtou32/strtos32 for -N and -w,
 # size_to_human_string for SIZE.
 ulstrutils = { path = "../ulstrutils" }

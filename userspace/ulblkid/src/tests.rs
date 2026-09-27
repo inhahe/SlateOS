@@ -892,6 +892,24 @@ fn ext_types_and_values() {
     );
 }
 
+// ---------------------------------------------------------------- encode
+
+#[test]
+fn strings_encode_as_udev() {
+    use crate::encode::encode_string;
+    assert_eq!(
+        encode_string(b"My Disk", 100),
+        Some(b"My\\x20Disk".to_vec())
+    );
+    assert_eq!(encode_string(b"a\\b", 100), Some(b"a\\x5cb".to_vec()));
+    assert_eq!(
+        encode_string("é".as_bytes(), 100),
+        Some("é".as_bytes().to_vec())
+    );
+    assert_eq!(encode_string(&[0xff], 100), Some(b"\\xff".to_vec()));
+    assert_eq!(encode_string(b"abcdef", 5), None);
+}
+
 // ---------------------------------------------------------------- probe
 
 #[test]

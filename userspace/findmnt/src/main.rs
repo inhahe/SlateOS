@@ -42,8 +42,8 @@ use smartcols::{
 };
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
+use ulblkid::cache::BlkCache;
 use ulclosestream::{Stdout, stderr_write, warn, warnx};
-use ulmount::blkid_cache::BlkCache;
 use ulmount::cache::Cache;
 use ulmount::fs::{Fs, major, makedev, minor};
 use ulmount::optmap::{MS_SHARED, MS_SLAVE, MS_UNBINDABLE};

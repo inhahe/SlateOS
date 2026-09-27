@@ -1,7 +1,9 @@
-//! util-linux 2.39.3's `lib/path.c` and `lib/sysfs.c`: the directory a block
-//! device has under `/sys/dev/block/MAJ:MIN`, its attributes read the way
-//! util-linux reads them, and the conversions between device numbers, kernel
-//! names and `/dev` paths that libblkid, libmount and lsblk all make.
+//! util-linux 2.39.3's `lib/path.c`, `lib/sysfs.c` and `lib/canonicalize.c`:
+//! the directory a block device has under `/sys/dev/block/MAJ:MIN`, its
+//! attributes read the way util-linux reads them, the conversions between
+//! device numbers, kernel names and `/dev` paths that libblkid, libmount and
+//! lsblk all make, and paths made canonical the way both libraries make them
+//! ([`canonicalize`]).
 //!
 //! Upstream this is `libcommon`, linked into every util-linux library and
 //! program; here it is one crate for the same reason. Before it, `ulmount`
@@ -33,6 +35,7 @@
 
 use std::path::PathBuf;
 
+pub mod canonicalize;
 mod path;
 mod sysfs;
 

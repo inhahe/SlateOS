@@ -15,9 +15,12 @@
 //! | [`tab`] | `tab.c`: a table, walked as a list or a tree, and searched |
 //! | [`tab_parse`] | `tab_parse.c`: fstab, mountinfo, swaps and utab files |
 //! | [`tab_diff`] | `tab_diff.c`: what changed between two readings |
-//! | [`cache`] | `cache.c`, `lib/canonicalize.c`: canonical paths and tags |
-//! | [`blkid`] | the part of libblkid a mount table needs: tags by udev link and by probing |
-//! | [`blkid_cache`] | libblkid's device cache, `/run/blkid/blkid.tab` |
+//! | [`cache`] | `cache.c`: canonical paths and tags, each looked up once |
+//! | [`blkid`] | libmount's probing calls into libblkid: a device's tags and type |
+//!
+//! libblkid itself -- probing, its device cache (`/run/blkid/blkid.tab`) and
+//! tag evaluation -- is the `ulblkid` crate, and `lib/canonicalize.c` is
+//! `ulsysfs::canonicalize`.
 //! | [`udev`] | the part of libudev `findmnt` reads LABEL and UUID with |
 //!
 //! Upstream's quirks are kept where they show in what a program prints: a
@@ -26,7 +29,6 @@
 //! map knows as a flag but that carries a value is the filesystem's own.
 
 pub mod blkid;
-pub mod blkid_cache;
 pub mod cache;
 pub mod fs;
 pub mod mangle;

@@ -24,6 +24,11 @@
 //! `wipefs` finds every signature on a device; [`Probe::do_fullprobe`]
 //! gathers everything without the ambiguity check.
 //!
+//! Above the probe sit libblkid's other two layers: the device cache
+//! ([`cache`], `/run/blkid/blkid.tab` -- the devices seen and the tags each
+//! carries, re-probed when stale) and tag evaluation ([`evaluate`] --
+//! `LABEL=root` to a device, through udev's links and then the cache).
+//!
 //! # Fidelity
 //!
 //! The port keeps upstream's behaviour where it shows: the order probers run
@@ -36,8 +41,10 @@
 //! corpus and on images made for the purpose.
 
 mod blkdev;
+pub mod cache;
 pub mod devno;
 pub mod encode;
+pub mod evaluate;
 pub mod partitions;
 mod probe;
 pub mod superblocks;

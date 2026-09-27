@@ -13,7 +13,9 @@
 use crate::blkid;
 use crate::tab::Table;
 use crate::utils;
-use std::path::Path;
+
+/// `lib/canonicalize.c`, which libmount's cache is where callers reach it.
+pub use ulsysfs::canonicalize::{absolute_path, canonicalize_path};
 
 /// `MNT_CACHE_ISTAG`.
 const ISTAG: u32 = 1 << 1;
@@ -42,94 +44,7 @@ pub struct Cache {
     pub mountinfo: Option<Table>,
     /// `cache->bc`: libblkid's cache, made the first time a tag is
     /// evaluated by scanning, and written back when this cache goes.
-    pub bc: Option<crate::blkid_cache::BlkCache>,
-}
-
-/// A path from bytes.
-fn path_of(b: &[u8]) -> std::path::PathBuf {
-    std::path::PathBuf::from(quoting::os_from_bytes(b))
-}
-
-/// Bytes of a path.
-fn bytes_of(p: &Path) -> Vec<u8> {
-    quoting::os_bytes(p.as_os_str()).into_owned()
-}
-
-/// `is_dm_devname(canonical, &name)`: `/dev/dm-N`, a block device.
-fn dm_name(canonical: &[u8]) -> Option<&[u8]> {
-    let slash = canonical.iter().rposition(|&b| b == b'/')?;
-    let name = canonical.get(slash.saturating_add(1)..)?;
-    if !name.starts_with(b"dm-") || !name.get(3).is_some_and(u8::is_ascii_digit) {
-        return None;
-    }
-    if !blkid::is_block_device(&path_of(canonical)) {
-        return None;
-    }
-    Some(name)
-}
-
-/// `canonicalize_dm_name(ptname)`: `/dev/mapper/NAME`, from
-/// `/sys/block/dm-N/dm/name`, if that device exists.
-pub(crate) fn canonicalize_dm_name(ptname: &[u8]) -> Option<Vec<u8>> {
-    let mut sys = b"/sys/block/".to_vec();
-    sys.extend_from_slice(ptname);
-    sys.extend_from_slice(b"/dm/name");
-    let text = std::fs::read(path_of(&sys)).ok()?;
-    // `fgets(name, 256 - sizeof "/dev/mapper")`: at most 243 bytes of the
-    // first line; then its last byte (the newline) off.
-    let line_end = text
-        .iter()
-        .position(|&b| b == b'\n')
-        .map_or(text.len(), |i| i.saturating_add(1));
-    let line = crate::c_str(text.get(..line_end.min(243)).unwrap_or_default());
-    if line.len() <= 1 {
-        return None;
-    }
-    let mut path = b"/dev/mapper/".to_vec();
-    path.extend_from_slice(line.get(..line.len().saturating_sub(1)).unwrap_or_default());
-    path.truncate(255);
-    std::fs::metadata(path_of(&path)).ok().map(|_| path)
-}
-
-/// `canonicalize_path(path)`: `realpath`, or the path as it is when it does
-/// not resolve; `/dev/dm-N` as its `/dev/mapper` name.
-#[must_use]
-pub fn canonicalize_path(path: &[u8]) -> Option<Vec<u8>> {
-    if path.is_empty() {
-        return None;
-    }
-    let Ok(canonical) = std::fs::canonicalize(path_of(path)) else {
-        return Some(path.to_vec());
-    };
-    let canonical = bytes_of(&canonical);
-    if let Some(dm) = dm_name(&canonical).and_then(canonicalize_dm_name) {
-        return Some(dm);
-    }
-    Some(canonical)
-}
-
-/// `is_relative_path(path)` and `absolute_path(path)`: the path made
-/// absolute against the working directory, `./` and a lone `.` cleaned.
-#[must_use]
-pub fn absolute_path(path: &[u8]) -> Option<Vec<u8>> {
-    if path.first() == Some(&b'/') || path.is_empty() {
-        return None;
-    }
-    let cwd = bytes_of(&std::env::current_dir().ok()?);
-    let rest: &[u8] = if let Some(r) = path.strip_prefix(b"./") {
-        r
-    } else if path == b"." {
-        b""
-    } else {
-        path
-    };
-    if rest.is_empty() {
-        return Some(cwd);
-    }
-    let mut res = cwd;
-    res.push(b'/');
-    res.extend_from_slice(rest);
-    Some(res)
+    pub bc: Option<ulblkid::cache::BlkCache>,
 }
 
 impl Cache {
@@ -213,7 +128,7 @@ impl Cache {
         if let Some(p) = self.find_tag(token, value) {
             return Some(p);
         }
-        let dev = blkid::evaluate_tag(token, value, Some(&mut self.bc))?;
+        let dev = ulblkid::evaluate::evaluate_tag(token, Some(value), Some(&mut self.bc))?;
         self.ents.push(Entry {
             key: token.to_vec(),
             tagval: value.to_vec(),
@@ -316,26 +231,6 @@ impl Cache {
 )]
 mod tests {
     use super::*;
-
-    #[test]
-    fn paths_that_do_not_resolve_stay() {
-        assert_eq!(
-            canonicalize_path(b"/nonexistent-ulmount/x"),
-            Some(b"/nonexistent-ulmount/x".to_vec())
-        );
-        assert_eq!(canonicalize_path(b""), None);
-    }
-
-    #[test]
-    fn relative_paths_are_made_absolute() {
-        let cwd = bytes_of(&std::env::current_dir().unwrap_or_default());
-        let mut want = cwd.clone();
-        want.extend_from_slice(b"/x");
-        assert_eq!(absolute_path(b"./x"), Some(want.clone()));
-        assert_eq!(absolute_path(b"x"), Some(want));
-        assert_eq!(absolute_path(b"."), Some(cwd));
-        assert_eq!(absolute_path(b"/x"), None);
-    }
 
     #[test]
     fn resolved_paths_are_remembered() {

@@ -49,7 +49,7 @@
 //! to the design-unit value beside it — or a `VariationIndex`, the same slot
 //! naming a correction that depends on the variable-font *instance* instead.
 //! That makes the pass's answer depend on both, which is why [`Run`] carries a
-//! [`Corrections`](crate::device::Corrections) and why a caller with neither —
+//! [`Corrections`] and why a caller with neither —
 //! an unscaled [`Face`](crate::sfnt::Face) at its default instance — gets the
 //! uncorrected values. See [`device`](crate::device).
 
@@ -960,7 +960,7 @@ fn cursive(
 /// Types 4 and 6: hang the mark at `i` off the glyph at `j`.
 ///
 /// The two subtable shapes are identical — see
-/// [`attachment`](crate::mark::attachment) — so only the choice of `j` differs,
+/// [`attachment`] — so only the choice of `j` differs,
 /// and that is made by the caller.
 fn attach(
     data: &[u8],

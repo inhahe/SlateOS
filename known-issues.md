@@ -5469,7 +5469,8 @@ drawing a plausible wrong glyph:
 * **CFF2** — the variable-font revision. Structurally similar to CFF (no Name
   INDEX, blend operators, an item-variation store), which is exactly why
   running it as CFF would misread it rather than fail. Implementing it means
-  implementing variations, which nothing needs yet.
+  implementing variations, which nothing needs yet. *(Read since 2026-09-26:
+  see "[F] A variable font whose outlines are CFF (`CFF2`) would not open".)*
 * **Type 1 charstrings in a CFF wrapper** — the operator sets overlap but mean
   different things.
 * **The Type 2 arithmetic operators** (`add`, `div`, `random`, the transient
@@ -30370,7 +30371,9 @@ from fontTools' region scalars plus a raw byte parse rather than snapshotted.
 * **`CFF2`.** A `CFF2` face varies through the charstring interpreter, not
   through `gvar`. No face on this host has one, so it is neither implemented
   nor checkable against a real file. `Face::outline_at` falls back to the
-  default outline for a non-`glyf` face rather than pretending.
+  default outline for a non-`glyf` face rather than pretending. *(Read since
+  2026-09-26, checked against real `CFF2` fonts downloaded for the purpose:
+  see "[F] A variable font whose outlines are CFF (`CFF2`) would not open".)*
 
 Six things learned doing the `HVAR`/`MVAR` two thirds of step 4, recorded
 because every one of them bears on the `GDEF` third:
@@ -171681,7 +171684,11 @@ nobody, as it does on a Linux system whose init never made the file.
 
 ### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
 
-**Status:** OPEN — worked around in lane F; the fix is lane A's (`requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`).
+**Status: FIXED 2026-09-26** — lane A's `851d9165b` makes the network daemon
+answer `OP_POLL` for a listener (readable when a connection is waiting), and
+lane F then removed the workaround: `LISTENER_READINESS` is gone, and with it
+`listener_worth_asking` and `accept_deadline`, so on SlateOS too the compositor
+sleeps until a connection or a request wakes it. The original report follows.
 
 **In short:** the compositor now sleeps until there is something to do instead
 of waking sixty times a second to look (design-decisions §1302). On SlateOS it
@@ -171871,12 +171878,23 @@ not parse, and apply it when it does. Parsing it only to refuse it, before
 anything uses profiles, would mean an ICC parser whose one job is to agree
 with skcms on what is malformed -- a second port for a file nobody has.
 
-### [F] A damaged Deflate TIFF strip can decode otherwise than in libtiff -- 2026-09-25
+### [F] A damaged Deflate TIFF strip can decode otherwise than in libtiff -- 2026-09-25 -- **FIXED 2026-09-26**
 
-**Status:** OPEN — waiting on lane A
-(`requests/f-a-deflate-decode-into-a-fixed-buffer-as-libdeflate-does.md`).
+**Status:** FIXED 2026-09-26 — `tiff/read.rs`'s `inflate` is now two calls
+into lane A's fixed-buffer inflates (4e0b7f205, the answer to the request
+below): `deflate::zlib_decompress_into`, libdeflate 1.24's decisions, when
+the reader asks for the whole of a strip or tile, and
+`deflate::zlib_inflate_into`, zlib 1.3's, when it asks for less -- the
+choice `ZIPDecode` makes. Switching over, the fuzzer found one more thing
+this entry had wrong: libtiff's "whole strip" is the strip's *own* rows, so
+the shorter last strip goes to libdeflate too, not to zlib (an
+over-full last strip then shows the strip before it, where libdeflate
+writes nothing). Fixtures `tiff_grey8_deflate_last_strip_holds_more_stored`
+and `..._match` pin that. Checked: 9,000 mutants of the Deflate, ZIP and
+PixarLog fixtures against libtiff 4.7.1, whole pixels compared -- 0
+disagreements.
 
-**In short:** a TIFF whose Deflate-compressed data is longer than its strip,
+**In short (as it was):** a TIFF whose Deflate-compressed data is longer than its strip,
 or damaged after the part the strip needs, can be refused here where libtiff
 shows it, or shown with different pixels in its last strip. Undamaged files
 decode identically; it takes a damaged or hand-made file.
@@ -171900,12 +171918,14 @@ stream or a stream damaged past the strip's end.
 semantics (the request above spells them out); `inflate` becomes a call to it.
 Not a second inflater in `imagecodec`: design-decisions §555.
 
-### [F] A damaged PixarLog TIFF strip can be refused where libtiff shows it -- 2026-09-25
+### [F] A damaged PixarLog TIFF strip can be refused where libtiff shows it -- 2026-09-25 -- **FIXED 2026-09-26**
 
-**Status:** OPEN — waiting on lane A
-(`requests/f-a-zlib-inflate-into-a-fixed-buffer-as-zlib-does.md`).
+**Status:** FIXED 2026-09-26 — `pixarlog::inflate` is a call to lane A's
+`deflate::zlib_inflate_into` (4e0b7f205, the answer to the request below),
+which stops where zlib 1.3 stops; `check_trailer` is gone. Checked with the
+Deflate entry above: 0 disagreements with libtiff in 9,000 mutants.
 
-**In short:** libtiff inflates a PixarLog strip with zlib, which stops as
+**In short (as it was):** libtiff inflates a PixarLog strip with zlib, which stops as
 soon as the strip's buffer is full; the shared `deflate` crate decodes a
 whole Deflate block at a time, so damage after the part of a block the strip
 needs -- or a strip cut just short of its end-of-block code, which zlib
@@ -172082,11 +172102,20 @@ cycles, the minimum of N) and Pillow's `Image.open(...).load()` measured
 with `QueryThreadCycleTime`; `target/jpeg_wip/jpeg_fuzz.py` holds any change
 to libjpeg-turbo's C build.
 
-### [F] Colour glyphs: a dark-mode palette is never chosen -- 2026-09-26
+### [F] Colour glyphs: a dark-mode palette is never chosen -- 2026-09-26 -- **FIXED 2026-09-26**
 
-**Status:** OPEN — lane F's.
+**Status:** FIXED 2026-09-26 (lane F) — both parts. `colr::ColourPalette`
+chooses a palette as CSS's `font-palette` does (`palette_index`: the first
+palette `CPAL` version 1 marks for a light or a dark background, the first
+palette where none is marked), `render` paints with it, and it rides in
+`Rendering`, so `ScaledFont` repaints its colour glyphs -- and only those --
+when it changes. The compositor, which draws every process's text, sets it
+from the theme: `Light` on a light theme, `Dark` on a dark one
+(design-decisions §1327). A `PaintColrGlyph` now cuts the glyph it names to
+that glyph's clip box, under the transform in force, and bounds its canvas by
+it.
 
-**In short:** emoji are drawn in colour whichever way their font stores them
+**In short (as filed):** emoji are drawn in colour whichever way their font stores them
 -- a recipe (`COLR`, variable ones included) or pictures (`CBDT`, `sbix`) --
 and match Chrome. What is not yet honoured is a font's *second* palette: the
 dark-mode colours some colour fonts carry for text on a dark background.
@@ -172723,8 +172752,8 @@ Hebrew, Armenian and Devanagari glyph of six fonts checked at eleven sizes
 (`gui/font/tools/hint_oracle.py`), and on every glyph of two CFF fonts with
 fractional coordinates, both coordinates exact -- small capitals, superscripts
 and the other feature forms included, each sorted into FreeType's style for
-it -- bar the gap filed below: ideographs and the fallback style are left
-unhinted. (Composites with borrowed metrics, which sat a hair off
+it. The gap this first left -- ideographs and the fallback style unhinted --
+is closed too (the entry below). (Composites with borrowed metrics, which sat a hair off
 horizontally, were a placement bug rather than a hinting one, and are fixed:
 see the entry below.)
 
@@ -172753,11 +172782,285 @@ settings and says why not this one).
 **How to see it.** `target/fontcheck modes` draws a line in each rendering
 mode; compare a small size against the same text in Chrome.
 
-### [F] Ideographs, and glyphs no script claims, are drawn unhinted -- 2026-09-26
+### [F] A variable font at another weight was hinted from points a unit off FreeType's -- 2026-09-26 -- **FIXED 2026-09-26**
 
-**Status:** OPEN — lane F's.
+**Status:** FIXED 2026-09-26 (lane F) — the hinter now reads a variable
+glyph as FreeType's loader gives it to FreeType's hinter: the instance in
+FreeType's 16.16 normalization (`Coords::fixed`), `gvar` in FreeType's
+fixed point, each point's delta and each component offset rounded to a
+unit, scaled components by `FT_MulFix`, and the origin moved by the left
+phantom point only without `HVAR` (`Face::load_unscaled`,
+`Gvar::deltas_fixed`). Every glyph agrees with FreeType at fifteen
+instances of eight variable fonts; the hint fixture holds a variable face
+with and without `HVAR` (design-decisions §1325).
 
-**In short:** hinting (fitting text to the pixel grid) now works for nearly
+**In short (as found):** bold or condensed text in a variable font -- Segoe UI
+Variable, Bahnschrift, Noto Sans -- was hinted from glyph points a fraction of
+a font unit off the ones FreeType's hinter sees. Mostly that moved a point a
+64th of a pixel; on a few accented letters it moved a stroke a whole pixel.
+The default weight was never affected.
+
+**Why.** The glyph's points came from the drawing path: `gvar` deltas summed
+exactly and HarfBuzz's `F2Dot14` coordinates, with the final sum rounded
+once. FreeType's loader normalizes in 16.16, sums in its fixed point, rounds
+each point's delta and each component offset separately, and with `HVAR`
+does not move the glyph by its phantom point's delta at all -- where this
+subtracted it. Found by `hint_oracle.py --var` (new): 69% agreement for Noto
+Sans at weight 700, width 87.5.
+
+### [F] A variable font without `HVAR` keeps its default advances at every weight -- 2026-09-26
+
+**In short:** a variable font may leave out its table of advance-width
+changes (`HVAR`) and let each glyph's outline data carry them instead, as
+the positions of its "phantom points". HarfBuzz reads the advance from
+there; this crate ignores them and uses the default advance at every weight,
+so text in such a font keeps its regular letter spacing when set bold. Every
+variable font on this host has `HVAR`, so nothing here shows it.
+
+**Where:** `Face::advance_at` (`gui/font/src/sfnt.rs`) returns the unvaried
+advance whenever the face has no `HVAR`.
+
+**What HarfBuzz 14.3.0 does** (`hb_ot_get_glyph_h_advances`, and
+`glyf_accelerator_t::get_advance_with_var_unscaled`): with `gvar` but no
+`HVAR`, the advance is the right phantom point's x less the left's, where
+`gvar` moved them, by HarfBuzz's `roundf`, clamped at zero; half an em for a
+glyph it cannot read; and read through the same shared-tuple scalar cache as
+drawing (`gvar::Scalars::Drawn`). A `CFF2` face without `HVAR` keeps its
+default advances there too.
+
+**The fix is ready but for its test.** Since 2026-09-26 the phantom points
+carry their real values (`crate::glyf`), so the advance is
+`roundf(right.x - left.x)` over `glyf::points(.., Scalars::Drawn)`, taken in
+`advance_at` when the face has `gvar` and `glyf` but no `HVAR` -- about ten
+lines. (A patch doing so, and one recording HarfBuzz's advances into the
+hint fixture after drawing every glyph to warm its cache, may survive in lane
+F's worktree under `target/glyfpts/deferred/`; `target/` is not kept.) What is missing is a test that can fail: the fixture's two masters
+are both 600 units wide everywhere, so its advances do not vary. The Bold
+master needs other widths for some glyphs -- which changes the `VAR` and
+`VAR_NOHVAR` faces and so every FreeType expectation drawn from them, to be
+regenerated and re-verified with `tools/hint_oracle.py`.
+
+### [F] Glyph outlines were not HarfBuzz's to the bit -- at variable instances, and at the default in 133 of 328 host fonts -- 2026-09-26 -- **FIXED 2026-09-26**
+
+**Status:** FIXED 2026-09-26 (lane F) -- `gui/font/src/glyf.rs` (new) builds a
+`glyf` glyph as HarfBuzz 14.3.0 builds it, points first, and
+`gvar::Gvar::apply` is HarfBuzz's `apply_deltas_to_points` (design-decisions
+§1329).
+
+**In short (as found):** the outlines this crate draws are meant to be
+HarfBuzz's exactly, which is what lets `tools/outline_oracle.py` compare them
+with `==` and call any difference a bug. For TrueType-outline fonts they were
+not. At a variable font's in-between weights a point could sit a few
+millionths of a unit from HarfBuzz's; and at the plain default instance, 133
+of the 328 `.ttf` files on this host drew some glyphs differently -- a
+contour started at another point, a line of no length missing, a scaled
+component's point off in the last bit (`simsunb.ttf`: 8,820 of 12,091 glyphs
+sampled; Arial, Times, Segoe UI, DejaVu: a handful each). Nothing visible on
+screen; but as a reference test the oracle could not be used on these fonts.
+
+**What differed.**
+
+| | Before | HarfBuzz (now) |
+|---|---|---|
+| Order of work | each glyph's path built, then shifted; a component's path transformed | the whole glyph's *points* gathered, varied and shifted; only then the path |
+| Halfway points between two controls | made up before the shift and the component's transform | after both |
+| A component's transform | fused multiply-add | each product rounded, then the sum |
+| A contour that starts off the curve | drawn from its first on-curve point | from its last point |
+| The end of a contour | a line back to the start only if needed | always a line back to its first on-curve point, even of no length |
+| A component placed by matching points | not moved at all | moved so that the two points meet |
+| A `gvar` tuple's scalar | `f32` | `f64`, then `f32`; a shared tuple's as HarfBuzz's draw cache hands it back |
+| Interpolated (IUP) deltas | from unscaled deltas, then scaled | from the scaled deltas |
+| Summing the tuples | all summed, then added | straight into the points when no tuple names its own; otherwise in batches |
+| Packed data | point list longer than the glyph refused; numbers wrapped at 65,536; control `0xC0` read as zeros | as HarfBuzz: kept, summed in 32 bits, 32-bit deltas |
+
+**Checked:** `tools/outline_oracle.py` -- now reporting where two paths first
+part, and drawing each glyph twice so that HarfBuzz's scalar cache is warm --
+over every `.ttf` on the host at its default instance (328 fonts,
+200,945 glyph-instances, every fifth glyph): every path and box agrees but
+the colour-glyph boxes of the entry below. And over the variable fonts at
+their named instances (7 fonts, 18,615 glyph-instances):
+every path and box agrees. The hint fixture pins HarfBuzz's drawing of its variable
+TrueType face at weight 610 and at 401, where the scalar is below 2^-6 and
+the cache rounds it (`glyf::tests`).
+
+**HarfBuzz's own behaviours, reproduced on purpose** (§1329): a cubic
+contour's leftover first control point reaching the next contour
+(`path_builder_t` does not clear `first_offcurve2`); a point-matched
+component's parent point counted from the start of the whole glyph; the
+cycle detector noticing a cyclic composite a level late. *Not* reproduced:
+HarfBuzz's draw cache can hand a tuple with an intermediate region the cached
+0 or 1 of a plain tuple with the same peak, a 0 where the region past its
+peak should give more -- which depends on the glyphs drawn before, so the
+crate weighs the region. The leak and the cache's answer look like HarfBuzz
+bugs, worth reporting upstream; the point counting may be one too (FreeType
+counts from the start of the composite being built, which differs only for a
+nested one).
+
+### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26
+
+**In short:** asked for the ink box of a colour emoji glyph, this crate
+answers with the box of the plain glyph underneath it, while HarfBuzz answers
+with the colour glyph's own. Only the fallback placement of a combining mark
+on a colour glyph reads that box, so a mark on an emoji may sit a little off
+where HarfBuzz would put it.
+
+**Where:** `Face::glyph_extents_at` (`gui/font/src/sfnt.rs`), which knows
+`glyf` and CFF boxes only. HarfBuzz's `hb_font_get_glyph_extents` asks `COLR`
+first (`OT::COLR::get_extents`): a version-1 colour glyph's `ClipBox`, varied
+at the instance, if it has one; otherwise the extents of its paint
+(`hb_paint_extents`), the union of its clipped layers under their transforms.
+
+**Found by:** `tools/outline_oracle.py` over `seguiemj.ttf`, whose boxes
+disagree for 697 of 12,977 glyphs sampled while every path agrees.
+
+**The fix:** measure a `COLR` version-1 glyph as HarfBuzz does, in
+`glyph_extents_at` before the outline box -- `crate::colr` already reads the
+clip boxes and walks the paint graph -- and check it with the same oracle.
+
+### [F] A variable font whose outlines are CFF (`CFF2`) would not open -- 2026-09-26 -- **FIXED 2026-09-26**
+
+**Status:** FIXED 2026-09-26 (lane F) — `gui/font/src/cff.rs` reads `CFF2`
+(`Cff::parse2`) and its charstrings' `blend`s, as each library weighs them
+(design-decisions §1328).
+
+**In short (as found):** a variable font whose letters are drawn as
+PostScript curves rather than TrueType ones -- Adobe's Source Sans, Serif and
+Code, the variable builds of Noto Sans CJK and Source Han -- was refused
+outright: `Face::parse` returned `CffUnsupported("CFF2 table")`, so the font
+could not be used at any weight, not even its default. None is installed on
+this host, which is why nothing had asked.
+
+**What `CFF2` is.** The same charstrings as CFF in a leaner container -- a
+header giving the Top DICT's length, INDEXes counted in 32 bits, always an
+FDArray (FDSelect optional, and with a third format), no charset, no widths,
+no `endchar` -- plus an item variation store, and two operators: `vsindex`
+chooses one of the store's subtables, and `blend` turns each of `n` values
+into its default plus one delta per region of that subtable, weighed at the
+instance. Nothing else in a glyph varies; advances come from `HVAR` as
+before.
+
+**Each library's arithmetic.** The deltas are weighed differently by the two
+libraries the crate follows, and a glyph is read both ways: as HarfBuzz reads
+it for drawing and measuring (`f32` region scalars at its `F2Dot14`
+coordinates, the weighed deltas summed in `f64`), and as FreeType reads it
+for the hinter (a blend vector of `FT_DivFix`ed axis factors multiplied by
+`FT_MulFix`, at its 16.16 coordinates, each delta `FT_MulFix`ed into a 32-bit
+16.16 sum). Where the two refuse a malformed blend differently, each refuses
+as its library does.
+
+**CFF boxes, too.** HarfBuzz measures a CFF glyph by its path in `double`
+and in charstring units -- it reads no `FontMatrix` -- where the crate took
+the box of its `f32` outline, scaled by the matrix. Both CFF and `CFF2`
+boxes are now HarfBuzz's (`Cff::bounds`, `Face::glyph_extents_at`).
+
+**Checked:** `tools/outline_oracle.py` (new) against HarfBuzz's drawing and
+boxes, and `tools/hint_oracle.py --var` against FreeType's hinting, on four
+real `CFF2` fonts at named and in-between instances -- Source Sans 3 VF,
+Source Code VF, Source Serif 4 Variable (two axes, six Font DICTs) and Noto
+Sans JP VF (CID-keyed, eighteen Font DICTs): every path, box and hinted
+point agrees (26,651 glyph-instances drawn; 7,407 and more hinted glyphs per
+instance). The hint fixture gains a `CFF2` face built by fontTools with
+fractional deltas, pinning FreeType's hinting of it and HarfBuzz's drawing.
+
+### [F] Variable fonts were normalized, rounded and measured as HarfBuzz 8 does it, not 14.3.0 -- 2026-09-26 -- **FIXED 2026-09-26**
+
+**Status:** FIXED 2026-09-26 (lane F) — the HarfBuzz-facing arithmetic
+follows HarfBuzz 14.3.0 (the version the crate's oracle, uharfbuzz 0.56,
+runs) step for step, and HarfBuzz's own `roundf` (`floorf(x + 0.5f)`, a half
+up) is `gui/font/src/hbcalc.rs` (design-decisions §1326).
+
+**In short (as found):** a variable font asked for an instance -- Bold, a
+narrower width -- could come out one font unit different from what HarfBuzz
+gives: one glyph of Bahnschrift one unit narrower at every SemiCondensed
+instance (987 in HarfBuzz, 986 here), three of Reem Kufi's kerns one unit
+tighter at weight 550, and marks stacked on a missing-glyph box at Sitka's
+larger optical sizes two units off. A unit is a fraction of a pixel, so
+nothing looked broken; it made the crate disagree with the library it
+claims to match.
+
+**Why.** The code followed HarfBuzz 8 and a misreading of it:
+
+* **Normalizing.** HarfBuzz 14.3.0 rounds to 16.16 first, applies `avar` in
+  `float`, rounds again, and reaches `F2Dot14` by `(c + 2) >> 2`; this
+  rounded once, straight to `F2Dot14`. The two differ on one instance in
+  eight (12.5% of a uniform sweep) -- weight 700 of 100..400..900 is 9831 in
+  HarfBuzz and was 9830 here.
+* **Rounding.** HarfBuzz defines `roundf(x)` as `floorf(x + .5f)`. This took
+  it for the C library's, half away from zero, in normalizing and in the
+  `HVAR`, `MVAR` and `GDEF` deltas (`round_to_i16`): -4.5 was -5 here and is
+  -4 in HarfBuzz.
+* **Stores.** Sums were fused (`mul_add`); HarfBuzz's are not. A region at
+  the default scored 1 if malformed; HarfBuzz scores it 0. An index map with
+  reserved bits was refused and an empty one read as no delta; HarfBuzz reads
+  both.
+* **Extents.** The mark fallback cut a varied glyph's box to whole units;
+  HarfBuzz rounds its edges, then the width and height from them, and calls
+  a box of no area empty. A CFF glyph's box is rounded the same way.
+
+**How it hid.** The host tests' tables came from independent Python
+transcriptions (`variable_survey.py --normalize`, `varstore_oracle.py`)
+written to the same misreading -- the advance oracle even agreed with the
+crate on Bahnschrift's 986.5 by accident, rounding it half to even. Those
+tools now ask uharfbuzz for their numbers. The HarfBuzz shaping sweep had
+been run only at instances whose coordinates happen to round the same way.
+
+**Checked:** `var_fixture.rs` (588 instances of three faces built to reach
+each rule, both libraries), `var_oracle.py` (2,598 instances of 13 real
+variable faces, both libraries, all agreeing), the host tests with their
+tables regenerated from HarfBuzz, and the HarfBuzz shaping sweep -- all 556
+host faces at the default instance (61,046 agree; the one misplacement is
+the long-standing `a<CGJ>b`) and the 7 variable faces at eleven instances.
+
+### [F] A variable font whose `avar` is version 2 loses its whole axis correction -- 2026-09-26 -- **FIXED 2026-09-26**
+
+**Status:** FIXED 2026-09-26 (lane F) — both readings read version 2:
+HarfBuzz's through `VarStore` and `IndexMap` at `roundf(c / 4)`, its
+rows summed through HarfBuzz's scalar cache (`var.rs` `hb_avar2`); FreeType's
+through `FtItemStore`, with FreeType's own refusals, its axis map read only
+after a clean store load, and `delta << 2` added in 16.16 (`ft_avar2`).
+`tools/gen_var_fixture.py` builds a face with two cross-axis mappings and
+records both libraries' answers at 108 instances; every one agrees
+(design-decisions §1326). Doing it found that the HarfBuzz reading had not
+been HarfBuzz 14.3.0's for any face -- the entry below.
+
+**In short (as filed):** a variable font that ships the newer version of its weight
+correction table (`avar` 2) is drawn as if it had no correction at all, so
+"Semibold" can come out lighter or bolder than the designer drew it. No font
+installed here uses version 2, which is new (2023), so nothing on screen is
+wrong today.
+
+**Where.** `gui/font/src/var.rs`, `parse_avar` and `parse_avar_pairs`: each
+returns nothing for any version but 1. Version 2 keeps version 1's segment
+maps at the same place and adds an item variation store (and a delta-set
+index map) whose deltas are added to each normalized coordinate afterwards.
+Dropping the table drops the segment maps too.
+
+**The proper fix.** Read version 2's segment maps as version 1's, then the
+axis-index map and item variation store (`varstore.rs` reads the same
+structures for `HVAR`), and add each axis's delta: in `F2Dot14` for the
+HarfBuzz path (`hb-ot-var-avar-table.hh`), and in 16.16 for FreeType's
+(`ft_var_to_normalized`: `v += delta << 2`, clamped to ±1). Check both
+against their libraries with a font fontTools builds with a designspace
+`<mappings>` element, since no installed one has the table.
+
+### [F] Ideographs, and glyphs no script claims, are drawn unhinted -- 2026-09-26 -- **FIXED 2026-09-26**
+
+**Status:** FIXED 2026-09-26 (lane F) — `gui/font/src/hint/cjk.rs` ports
+`afcjk.c` and `afindic.c`, and `mod.rs` FreeType's dummy system (a glyph it
+will not hint is still scaled from whole font units to 1/64 pixel, which is
+what it does to a Latin style with no measurable zone). The fix was not the
+one proposed below: FreeType's CJK system hints *both* axes in light mode
+(moving a stem by at most 14/64 pixel), so the port does too, which
+`glyph.rs`'s points and passes were made dimension-generic for. One
+FreeType quirk is ported as it behaves: its CJK roundness pass never runs.
+Checked with `hint_oracle.py`: every glyph of Malgun Gothic (10 sizes),
+Microsoft YaHei, MS Gothic, SimSun, Yu Gothic, Microsoft JhengHei,
+SimSun-ExtG and Noto Sans JP (CID-keyed CFF) agrees with FreeType, style,
+points and both coordinates, as do the Latin fonts' fallback-style glyphs;
+the fixture has CJK glyphs drawn for each rule (a wide stroke end, three
+even stems, bars too close together, a ring, a fallback arrow).
+
+**In short (as filed):** hinting (fitting text to the pixel grid) now works for nearly
 every script, but not for Chinese, Japanese and Korean characters, nor for the
 odd glyph in any font that no character reaches directly. Those are drawn
 exactly as they were before hinting existed: correct, a little softer at small

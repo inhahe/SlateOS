@@ -134,7 +134,7 @@ static ALWAYS_COMPLEX: [[u8; 4]; 3] = [*b"khmr", *b"lao ", *b"thai"];
 /// asking for a complex one, because of what the face declares.
 ///
 /// `gsub` is the script tag the face's `GSUB` features were actually taken
-/// from — [`Substitutions::chosen_script`](crate::gsub::Substitutions::chosen_script) —
+/// from — [`Face::gsub_chosen_script`](crate::sfnt::Face::gsub_chosen_script) —
 /// which is the run's own tag if the face registers it, and otherwise whatever
 /// the fallback chain reached. HarfBuzz asks the same question of the same
 /// value, in `hb_ot_shaper_categorize`:
@@ -339,7 +339,21 @@ pub(crate) struct Extents {
 }
 
 impl Extents {
-    /// The box around `x_min .. x_max` by `y_min .. y_max`.
+    /// The box [`Face::glyph_extents_at`](crate::sfnt::Face::glyph_extents_at)
+    /// reports: left edge, top edge, width and height, already rounded as
+    /// HarfBuzz rounds them.
+    pub(crate) fn from_harfbuzz([x_bearing, y_bearing, width, height]: [i32; 4]) -> Self {
+        Self {
+            x_bearing,
+            y_bearing,
+            width,
+            height,
+        }
+    }
+
+    /// The box around `x_min .. x_max` by `y_min .. y_max`: how the tests
+    /// below state a glyph's box, in the four edges a font does.
+    #[cfg(test)]
     pub(crate) fn new(x_min: i32, y_min: i32, x_max: i32, y_max: i32) -> Self {
         Self {
             x_bearing: x_min,
@@ -437,7 +451,7 @@ pub(crate) fn attach_class(ch: char) -> u8 {
 /// Displace `mark` onto `base`, and grow `base` to cover it.
 ///
 /// Returns the mark's offset from the *base glyph's origin* in font units,
-/// `y` upwards — the same thing [`Face::mark_on_base`] returns for a face that
+/// `y` upwards — the same thing [`mark::attachment`] returns for a face that
 /// can answer, so that the caller subtracts the pen travel identically in both
 /// cases.
 ///
@@ -453,7 +467,7 @@ pub(crate) fn attach_class(ch: char) -> u8 {
 /// drawn straddling the join between two glyphs and so hang off whichever edge
 /// of the base the next glyph is on.
 ///
-/// [`Face::mark_on_base`]: crate::sfnt::Face::mark_on_base
+/// [`mark::attachment`]: crate::mark::attachment
 pub(crate) fn place(
     base: &mut Extents,
     mark: &Extents,

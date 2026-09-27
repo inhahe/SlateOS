@@ -9,7 +9,7 @@ use crate::universal::{Category, Cluster};
 
 /// State 0 is dead — nothing leaves it — and state 1 is the
 /// start. A row is indexed by
-/// [`Category`](crate::universal::Category) cast to `usize`, so
+/// [`Category`] cast to `usize`, so
 /// the enum's variant order is part of this table. The width is
 /// written as `Category::COUNT` rather than as a literal so that
 /// a category added to the enum without regenerating this file

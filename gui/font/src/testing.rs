@@ -154,6 +154,31 @@ fn assemble(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
     out
 }
 
+/// A normalized position as FreeType puts it, 16.16 -- the reading the
+/// auto-hinter's points are varied by, beside the `F2Dot14` one
+/// [`Coords::as_slice`](crate::var::Coords::as_slice) gives (see
+/// [`crate::var`]). For `examples/var_dump.rs`, which `tools/var_oracle.py`
+/// checks against FreeType itself; the crate keeps the accessor private,
+/// since no caller should be choosing between the two.
+#[must_use]
+pub fn freetype_coords(coords: &crate::var::Coords) -> &[i32] {
+    coords.fixed()
+}
+
+/// Glyph `gid`'s box as HarfBuzz reports it at `coords`
+/// (`hb_font_get_glyph_extents`, one unit per font unit): left edge, top
+/// edge, width and height, as the mark fallback places marks by. For
+/// `examples/outline_dump.rs`, which `tools/outline_oracle.py` checks against
+/// HarfBuzz itself.
+#[must_use]
+pub fn harfbuzz_extents(
+    face: &crate::sfnt::Face,
+    gid: u16,
+    coords: &crate::var::Coords,
+) -> Option<[i32; 4]> {
+    face.glyph_extents_at(gid, coords)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,10 +192,28 @@ mod tests {
         assert_eq!(face.units_per_em(), 1000);
         assert_eq!(face.glyph_index('A'), Some(1));
         assert_eq!(face.glyph_index('B'), Some(2));
-        let a = colr::render(&face, 1, 0.1, &Coords::default(), 0xFF00_0000).unwrap();
+        let a = colr::render(
+            &face,
+            1,
+            0.1,
+            &Coords::default(),
+            0xFF00_0000,
+            colr::ColourPalette::Normal,
+        )
+        .unwrap();
         assert_eq!((a.left, a.top, a.width, a.height), (10, -10, 10, 10));
         assert!(a.pixels.iter().all(|&p| p == COLOUR_FACE_RED));
-        assert!(colr::render(&face, 2, 0.1, &Coords::default(), 0xFF00_0000).is_none());
+        assert!(
+            colr::render(
+                &face,
+                2,
+                0.1,
+                &Coords::default(),
+                0xFF00_0000,
+                colr::ColourPalette::Normal
+            )
+            .is_none()
+        );
         assert!(!face.outline(2).unwrap().is_empty());
     }
 }

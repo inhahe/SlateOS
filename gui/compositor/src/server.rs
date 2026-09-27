@@ -64,9 +64,9 @@ use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+use guiremote::WaitSet;
 use guiremote::client::Transport;
 use guiremote::socket::{Listener, Socket};
-use guiremote::{LISTENER_READINESS, WaitSet};
 use inputsettings::InputSettings;
 
 use appearance::ColorFilter;
@@ -922,11 +922,9 @@ impl Server {
             if !present.is_open() {
                 break;
             }
-            let now = Instant::now();
-            let wake = earliest(
-                self.next_wake(compositor, present.deadline(), interval, now),
-                accept_deadline(LISTENER_READINESS, now, interval),
-            );
+            // A connection wakes the wait by itself, so nothing about the
+            // listener bounds it.
+            let wake = self.next_wake(compositor, present.deadline(), interval, Instant::now());
             self.wait_for_work(present, wake, interval);
         }
         Ok(())
@@ -1032,8 +1030,7 @@ impl Server {
                     eprintln!("compositor: waiting for work succeeds again");
                     self.wait_failing = false;
                 }
-                self.listener_ready =
-                    listener_worth_asking(LISTENER_READINESS, self.waits.is_ready(listener));
+                self.listener_ready = self.waits.is_ready(listener);
                 for (offset, client) in self.clients.iter_mut().enumerate() {
                     client.readable = self.waits.is_ready(first_client.saturating_add(offset));
                 }
@@ -1048,29 +1045,6 @@ impl Server {
                 std::thread::sleep(timeout.map_or(interval, |t| t.min(interval)));
             }
         }
-    }
-}
-
-/// Whether the tick after a wait should ask the listener for connections.
-///
-/// Only when the wait said one is waiting — where the platform can say so at
-/// all (`reported`, which is [`LISTENER_READINESS`]). Where it cannot, silence
-/// from the listener means nothing, and asking every tick is the only way to
-/// learn anyone connected.
-const fn listener_worth_asking(reported: bool, ready: bool) -> bool {
-    !reported || ready
-}
-
-/// The latest the loop may wait before asking the listener again, where the
-/// platform will not wake it for a connection (`reported` false): one frame,
-/// which is how long a program starting up waited to be accepted before the
-/// loop learned to wait at all. `None` where a connection wakes the loop by
-/// itself.
-fn accept_deadline(reported: bool, now: Instant, interval: Duration) -> Option<Instant> {
-    if reported {
-        None
-    } else {
-        now.checked_add(interval)
     }
 }
 
@@ -2180,10 +2154,7 @@ mod tests {
             !server.clients[0].readable,
             "the wait found the client quiet"
         );
-        assert_eq!(
-            server.listener_ready, !LISTENER_READINESS,
-            "and nobody connecting -- which a platform that cannot say so must not believe"
-        );
+        assert!(!server.listener_ready, "and nobody connecting");
 
         let seq = conn
             .send(RequestBody::CreateWindow(WindowSpec::new("Late", 100, 100)))
@@ -2194,32 +2165,6 @@ mod tests {
         // ...and the next one, not narrowed, does.
         let reply = await_reply(&mut server, &mut compositor, &mut conn, seq);
         assert!(matches!(reply, ResponseBody::WindowCreated { .. }));
-    }
-
-    /// Where the platform reports a connection waiting on the listener, the
-    /// listener is asked only when it does; where it cannot (SlateOS until
-    /// lane A's fix), it is asked every tick, and the loop never waits longer
-    /// than a frame, so a program starting up is still accepted within one.
-    #[test]
-    fn a_listener_the_platform_cannot_vouch_for_is_asked_every_frame() {
-        assert!(listener_worth_asking(true, true));
-        assert!(
-            !listener_worth_asking(true, false),
-            "a reported silence is believed"
-        );
-        assert!(
-            listener_worth_asking(false, false),
-            "an unreported one is not"
-        );
-        assert!(listener_worth_asking(false, true));
-
-        let now = Instant::now();
-        assert_eq!(
-            accept_deadline(true, now, FRAME),
-            None,
-            "the connection wakes the loop"
-        );
-        assert_eq!(accept_deadline(false, now, FRAME), Some(now + FRAME));
     }
 
     /// A connection arriving while the loop waits wakes it, and the client is

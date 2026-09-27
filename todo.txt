@@ -58913,7 +58913,8 @@ is already waiting, not whether the setter exists.
   `pointer_preferences` read it and update
   `the_pointer_does_not_read_a_rival_copy_of_its_settings`:
   `requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`.
-- **On SlateOS the compositor asks its listener every tick and waits at most a
+- **DONE 2026-09-26** (lane A's `851d9165b`, workaround removed): **On SlateOS
+  the compositor asks its listener every tick and waits at most a
   frame** (`guiremote::LISTENER_READINESS`, `gui/compositor/src/server.rs`
   `listener_worth_asking`/`accept_deadline`; design-decisions §1302). SlateOS's
   `poll` never reports a pending connection, so trusting the wait would strand

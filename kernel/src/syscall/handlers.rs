@@ -9412,19 +9412,30 @@ pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // A whole-file write is unbounded by design, so there is no length cap —
-    // but the bounce is not an amplification vector either: `read_user_vec`
-    // validates the source range, which requires the process to have already
-    // committed `data_len` bytes of its own memory.  The kernel copy is
-    // proportional to that, and fails as `OutOfMemory` rather than panicking.
-    // It has to be a copy: `Vfs::write_file` reaches the block layer and
-    // blocks, and a user slice must not be live across that.
-    let data = match crate::mm::user::read_user_vec(args.arg2, data_len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match crate::fs::Vfs::write_file(&path, &data) {
+    // A whole-file write is unbounded by design, so there is no length cap; it
+    // is streamed instead (`stream_user_chunks`). The first chunk replaces
+    // the file -- creating or truncating it, as `Vfs::write_file` does -- and
+    // each later one is written after it. The data has to be copied: the VFS
+    // reaches the block layer and blocks, and a user slice must not be live
+    // across that. Before 2026-09-26 the whole request was copied at once, so
+    // a file over the vmalloc region's 1 GiB could not be written at all.
+    //
+    // Not atomic for readers past the first chunk: a reader can see the file
+    // partly written. Replace a file atomically by writing a temporary one and
+    // renaming it over the original.
+    let mut first = true;
+    let mut offset: u64 = 0;
+    match stream_user_chunks(args.arg2, data_len, |chunk| {
+        if first {
+            // Creates or truncates, even for an empty file.
+            crate::fs::Vfs::write_file(&path, chunk)?;
+            first = false;
+        } else {
+            crate::fs::Vfs::write_at(&path, offset, chunk)?;
+        }
+        offset = offset.saturating_add(chunk.len() as u64);
+        Ok(())
+    }) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -10672,6 +10683,156 @@ pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// The most file data one read or write bounces through the kernel at a
+/// time. The request is streamed: a bounce buffer of at most this many bytes
+/// is filled, handed on and refilled, so the kernel holds no copy
+/// proportional to the request (known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`, class 3). 1 MiB keeps the
+/// per-call VFS overhead negligible next to the data while bounding the
+/// kernel's share.
+const FILE_CALL_CHUNK: usize = 1024 * 1024;
+
+/// A fallibly allocated bounce buffer of `min(len, FILE_CALL_CHUNK)` bytes.
+fn file_bounce(len: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+    let size = len.min(FILE_CALL_CHUNK);
+    let mut buf = alloc::vec::Vec::new();
+    buf.try_reserve_exact(size)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    buf.resize(size, 0);
+    Ok(buf)
+}
+
+/// What a partly completed transfer reports: its count if any bytes moved,
+/// the error if none did -- Linux's rule for a read or write that fails
+/// part-way.
+fn partial_or(total: usize, e: KernelError) -> KernelResult<usize> {
+    if total > 0 { Ok(total) } else { Err(e) }
+}
+
+/// Read up to `len` bytes into user memory at `dst` from `source`, streamed
+/// through one [`FILE_CALL_CHUNK`]-sized bounce buffer. `source` fills the
+/// slice it is given and reports how much it filled, as a file or memfd read
+/// does. Shared by `SYS_FS_READ` and Linux `read(2)` on a memfd.
+///
+/// The caller's whole claim is span-checked first (`check_user_span`), and
+/// each chunk's destination is validated **before** that chunk is read from
+/// the source, so data is never consumed and then lost to a bad address (a
+/// file's offset advances only by what was delivered). Stops at a short read
+/// -- end of file, or all a special file has now -- and returns what was
+/// read.
+pub(crate) fn stream_user_read(
+    dst: u64,
+    len: usize,
+    mut source: impl FnMut(&mut [u8]) -> KernelResult<usize>,
+) -> KernelResult<usize> {
+    crate::mm::user::check_user_span(dst, len)?;
+    let mut buf = file_bounce(len)?;
+    let mut total: usize = 0;
+    while total < len {
+        let want = len.saturating_sub(total).min(FILE_CALL_CHUNK);
+        let at = dst.saturating_add(total as u64);
+        if let Err(e) = crate::mm::user::validate_user_write(at, want) {
+            return partial_or(total, e);
+        }
+        let Some(chunk) = buf.get_mut(..want) else {
+            return partial_or(total, KernelError::InternalError);
+        };
+        let n = match source(chunk) {
+            Ok(n) => n.min(want),
+            Err(e) => return partial_or(total, e),
+        };
+        if n > 0 {
+            // SAFETY: `buf` is a live kernel allocation of at least `want >= n`
+            // bytes, so the source range is valid; `copy_to_user` validates
+            // the destination itself.
+            if let Err(e) = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), at, n) } {
+                return partial_or(total, e);
+            }
+            total = total.saturating_add(n);
+        }
+        if n < want {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Write `len` bytes from user memory at `src` into `sink`, streamed through
+/// one [`FILE_CALL_CHUNK`]-sized bounce buffer. `sink` takes a slice and
+/// reports how much it took, as a file or memfd write does. Shared by
+/// `SYS_FS_WRITE` and Linux `write(2)` on a memfd.
+///
+/// A fault or a failure part-way returns the count already written, as
+/// Linux does. For a file, chunks land one after another at the handle's
+/// offset (or its end, for `APPEND`), which `fs::handle::write` updates after
+/// each: no guarantee is lost that existed, since that path was never atomic
+/// across handles or threads -- its own comment says so.
+pub(crate) fn stream_user_write(
+    src: u64,
+    len: usize,
+    mut sink: impl FnMut(&[u8]) -> KernelResult<usize>,
+) -> KernelResult<usize> {
+    crate::mm::user::check_user_span(src, len)?;
+    let mut buf = file_bounce(len)?;
+    let mut total: usize = 0;
+    while total < len {
+        let want = len.saturating_sub(total).min(FILE_CALL_CHUNK);
+        let at = src.saturating_add(total as u64);
+        let Some(chunk) = buf.get_mut(..want) else {
+            return partial_or(total, KernelError::InternalError);
+        };
+        // SAFETY: `chunk` is a live kernel buffer of exactly `want` bytes;
+        // `copy_from_user` validates the source itself.
+        if let Err(e) = unsafe { crate::mm::user::copy_from_user(at, chunk.as_mut_ptr(), want) } {
+            return partial_or(total, e);
+        }
+        let n = match sink(chunk) {
+            Ok(n) => n.min(want),
+            Err(e) => return partial_or(total, e),
+        };
+        total = total.saturating_add(n);
+        if n < want {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Apply `step` to `len` bytes of user memory at `src`, one bounce-buffer
+/// chunk at a time, for the whole-file calls that report no byte count.
+///
+/// Those calls cannot express a short write, so the whole source is
+/// validated before the first byte goes anywhere (a page walk, no
+/// allocation): a bad pointer fails the call with nothing written, as it did
+/// when the whole request was bounced at once. A failure after that -- a
+/// sibling thread unmapping the buffer mid-call, a full disk -- leaves what
+/// was already written, which a full disk part-way through a single bounce
+/// did too.
+fn stream_user_chunks(
+    src: u64,
+    len: usize,
+    mut step: impl FnMut(&[u8]) -> KernelResult<()>,
+) -> KernelResult<()> {
+    crate::mm::user::validate_user_read(src, len)?;
+    let mut buf = file_bounce(len)?;
+    let mut done: usize = 0;
+    loop {
+        let want = len.saturating_sub(done).min(FILE_CALL_CHUNK);
+        let at = src.saturating_add(done as u64);
+        let chunk = buf.get_mut(..want).ok_or(KernelError::InternalError)?;
+        if want > 0 {
+            // SAFETY: `chunk` is a live kernel buffer of exactly `want` bytes;
+            // `copy_from_user` validates the source itself.
+            unsafe { crate::mm::user::copy_from_user(at, chunk.as_mut_ptr(), want)? };
+        }
+        step(chunk)?;
+        done = done.saturating_add(want);
+        if done >= len {
+            return Ok(());
+        }
+    }
+}
+
 /// `SYS_FS_READ` — read from a file handle at the current offset.
 pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
@@ -10695,11 +10856,11 @@ pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Read into a kernel buffer, then copy out.  Besides keeping raw user
-    // pointers out of the VFS, this makes the staging allocation fallible —
-    // `vec![0u8; buf_cap]` would abort the kernel on a large failed read.
-    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
-        crate::fs::handle::read(handle, buf)
+    // Read through a bounded kernel bounce buffer, then copy out: raw user
+    // pointers stay out of the VFS, and the kernel's copy is at most
+    // `FILE_CALL_CHUNK` however large the request (`stream_user_read`).
+    match stream_user_read(args.arg1, buf_cap, |chunk| {
+        crate::fs::handle::read(handle, chunk)
     }) {
         Ok(n) =>
         {
@@ -10723,13 +10884,18 @@ pub fn sys_fs_write(args: &SyscallArgs) -> SyscallResult {
     }
 
     // The VFS write path takes locks and can sleep on the block layer, so the
-    // payload is copied in first (see `sys_pipe_write`).
-    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
+    // payload is copied in first (see `sys_pipe_write`) -- a bounded chunk at
+    // a time (`stream_user_write`). A zero-length write still asks the
+    // handle, so an unwritable or wrong one says so: Linux's
+    // `write(fd, buf, 0)` on a read-only fd is EBADF, not 0.
+    let written = if data_len == 0 {
+        crate::fs::handle::write(handle, &[])
+    } else {
+        stream_user_write(args.arg1, data_len, |chunk| {
+            crate::fs::handle::write(handle, chunk)
+        })
     };
-
-    match crate::fs::handle::write(handle, &data) {
+    match written {
         Ok(n) =>
         {
             #[allow(clippy::cast_possible_wrap)]
@@ -12408,14 +12574,14 @@ pub fn sys_fs_append(args: &SyscallArgs) -> SyscallResult {
     // prefix of it and told the caller everything was fine.  This syscall
     // reports no byte count, so it cannot express a short write; the only
     // correct options are to append all of it or fail, and it appends all of
-    // it.  See `sys_fs_write_file` for why the unbounded copy is not an
-    // amplification vector.
-    let data = match crate::mm::user::read_user_vec(args.arg2, data_len, usize::MAX) {
-        Ok(d) => d,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    match crate::fs::Vfs::append(&path, &data) {
+    // it -- streamed a bounded chunk at a time (`stream_user_chunks`).
+    //
+    // Each chunk is one atomic `Vfs::append`, so a record up to
+    // `FILE_CALL_CHUNK` never interleaves with another appender's; a longer
+    // one may, at chunk boundaries.
+    match stream_user_chunks(args.arg2, data_len, |chunk| {
+        crate::fs::Vfs::append(&path, chunk)
+    }) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

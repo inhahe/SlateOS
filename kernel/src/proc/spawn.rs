@@ -24289,6 +24289,83 @@ pub fn self_test_callmax_abi() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of streamed file I/O: 2.5 MiB written in one call and read
+/// back with a 2 GiB length arrive whole and in order across the bounce
+/// buffer's chunk boundaries, and a 1.5 GiB write -- bigger than the vmalloc
+/// region -- writes what is mapped. The probe program is
+/// [`elf::build_filestream_abi_test_elf`]; its doc has the table of exit codes.
+pub fn self_test_filestream_abi() -> KernelResult<()> {
+    serial_println!("[spawn] Running streamed file I/O (ring 3) test...");
+
+    let probe_elf = elf::build_filestream_abi_test_elf();
+    let argv: &[&[u8]] = &[b"filestream"];
+    let envp: &[&[u8]] = &[];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-filestream",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&probe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: filestream probe spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // About 8 MiB of file I/O on the memfs, and 2.5 MiB of `rep` scans.
+    let deadline = crate::hrtimer::now_ns().saturating_add(30_000_000_000); // 30 s
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: streamed file I/O (ring 3) — probe did not exit within 30s \
+             (state {:?})",
+            state
+        );
+        let killed = thread::kill_process_threads(result.pid);
+        serial_println!("[spawn]   (killed the probe's {} thread(s))", killed);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    // The probe's file: tidy, not judged.
+    let _ = crate::fs::Vfs::remove("/tmp/.filestream-probe");
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: streamed file I/O (ring 3) — probe {:#04x} disagreed \
+             (exit {:?}); see build_filestream_abi_test_elf's probe table",
+            exit_code.unwrap_or(-1),
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   streamed file I/O (ring 3: 8 probes — 2.5 MiB written in one call \
+         and read back with a 2 GiB length arrive whole and in order across the \
+         bounce buffer's chunks; a 1.5 GiB write from 3 MiB writes the 3 MiB): OK"
+    );
+    Ok(())
+}
+
 /// Path Z end-to-end test: run a **real, prebuilt, dynamically-linked glibc**
 /// Linux binary to completion.
 ///

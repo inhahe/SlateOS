@@ -3685,6 +3685,13 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         proc::spawn::self_test_munmap_abi(),
     );
+    // File reads and writes stream through a bounded bounce buffer
+    // (known-issues.md A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC, class 3).
+    selftest::dispatch_debug(
+        "streamed file I/O (ring 3)",
+        selftest::Severity::Diagnostic,
+        proc::spawn::self_test_filestream_abi(),
+    );
     // Two tasks appending to one file lose no record (known-issues.md
     // A-VFS-APPEND-RACES): the end is found and written under one lock hold.
     selftest::dispatch_debug(

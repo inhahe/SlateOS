@@ -7712,6 +7712,212 @@ pub fn build_callmax_abi_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build the ring-3 probe for streamed file I/O (`SYS_FS_READ`/`SYS_FS_WRITE`
+/// through `FILE_CALL_CHUNK`-sized bounce buffers).
+///
+/// The program has a 3 MiB zero-filled data segment. It fills 2.5 MiB of it
+/// with `A`, `B` and `C` a region apiece -- 1 MiB, 1 MiB, 0.5 MiB, so each
+/// chunk boundary falls between two different bytes -- writes that to a file
+/// in one call, zeroes the segment, reads the file back with a 2 GiB length,
+/// and checks every byte is back where it was. A chunking bug that wrote a
+/// chunk twice or out of order passes a byte count; it does not pass this.
+///
+/// The last call writes 1.5 GiB from the 3 MiB segment: the stream writes
+/// what is mapped and stops at the fault, returning the count, as Linux does.
+/// Before 2026-09-26 every one of these calls bounced the whole request
+/// through one kernel copy (known-issues.md
+/// `A-USER-SIZED-KERNEL-BUFFERS-NOW-REACH-VMALLOC`): the read's 2 GiB
+/// out-buffer was page-walked into the unmapped memory past the segment
+/// (EFAULT), and the 1.5 GiB write could not be allocated at all (ENOMEM).
+///
+/// | Code | Call | Expect |
+/// |---|---|---|
+/// | `0x61` | `fs_open` (610) `/tmp/.filestream-probe`, read+write+create+truncate | a handle |
+/// | `0x62` | `fs_write` (613), 2.5 MiB | `2621440` |
+/// | `0x63` | `fs_seek` (614) to 0 | `0` |
+/// | `0x64` | `fs_read` (612), 2 GiB | `2621440`: a short read at EOF |
+/// | `0x65` | the `A` region back | every byte `A` |
+/// | `0x66` | the `B` region back | every byte `B` |
+/// | `0x67` | the `C` region back | every byte `C` |
+/// | `0x68` | `fs_write`, 1.5 GiB | `3145728`: the mapped 3 MiB, then the fault |
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
+pub fn build_filestream_abi_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+
+    const PHNUM: u64 = 2;
+    let phdr_offset: u64 = 64;
+    let seg_offset: u64 = 64 + PHNUM * 56;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // The path sits at the start of the text segment, the code after it.
+    const PATH: &[u8] = b"/tmp/.filestream-probe";
+    const CODE_AT: u64 = 32; // PATH.len() rounded up
+    const DATA_VADDR: u64 = 0x0000_0050_0000_0000;
+    const DATA_LEN: u64 = 3 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    const WRITTEN: u64 = 2 * MIB + MIB / 2;
+    const TWO_GIB: u64 = 2 * 1024 * MIB;
+    const HUGE: u64 = 1536 * MIB;
+    const OPEN_RW_CREATE_TRUNC: u64 = 0b1111;
+
+    let path_vaddr = load_vaddr;
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    /// `jcc` over an `exit(fail)` block.
+    fn exit_unless(code: &mut alloc::vec::Vec<u8>, jcc: u8, fail: u32) {
+        code.extend_from_slice(&[jcc, 0x0D]); // jcc +13 — over the exit block
+        code.push(0xBF); // mov edi, <fail>
+        code.extend_from_slice(&fail.to_le_bytes());
+        code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+        code.push(0xCC); // int3 — exit does not return
+    }
+
+    /// `movabs rdi, a; movabs rsi, b; movabs rdx, c; mov eax, nr; syscall`.
+    fn call(code: &mut alloc::vec::Vec<u8>, nr: u32, a: Option<u64>, b: u64, c: u64) {
+        match a {
+            Some(v) => {
+                code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, imm64
+                code.extend_from_slice(&v.to_le_bytes());
+            }
+            None => code.extend_from_slice(&[0x48, 0x89, 0xDF]), // mov rdi, rbx
+        }
+        code.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, imm64
+        code.extend_from_slice(&b.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xBA]); // movabs rdx, imm64
+        code.extend_from_slice(&c.to_le_bytes());
+        code.push(0xB8); // mov eax, nr
+        code.extend_from_slice(&nr.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    }
+
+    /// `exit(fail)` unless `rax == expect`.
+    fn expect_rax(code: &mut alloc::vec::Vec<u8>, expect: u64, fail: u32) {
+        code.extend_from_slice(&[0x48, 0xB9]); // movabs rcx, imm64
+        code.extend_from_slice(&expect.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+        exit_unless(code, 0x74, fail); // je
+    }
+
+    /// `rep stosb` of `al = byte` over `[at, at + len)`.
+    fn fill(code: &mut alloc::vec::Vec<u8>, at: u64, len: u64, byte: u8) {
+        code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, imm64
+        code.extend_from_slice(&at.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xB9]); // movabs rcx, imm64
+        code.extend_from_slice(&len.to_le_bytes());
+        code.extend_from_slice(&[0xB0, byte]); // mov al, byte
+        code.extend_from_slice(&[0xF3, 0xAA]); // rep stosb
+    }
+
+    /// `repe scasb` of `al = byte` over `[at, at + len)`; `exit(fail)` on the
+    /// first byte that differs. `len` is never 0, so ZF is always the scan's.
+    fn verify(code: &mut alloc::vec::Vec<u8>, at: u64, len: u64, byte: u8, fail: u32) {
+        code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, imm64
+        code.extend_from_slice(&at.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xB9]); // movabs rcx, imm64
+        code.extend_from_slice(&len.to_le_bytes());
+        code.extend_from_slice(&[0xB0, byte]); // mov al, byte
+        code.extend_from_slice(&[0xF3, 0xAE]); // repe scasb
+        exit_unless(code, 0x74, fail); // je: every byte matched
+    }
+
+    // Open (create, truncate) and keep the handle in rbx.
+    call(
+        &mut code,
+        610,
+        Some(path_vaddr),
+        PATH.len() as u64,
+        OPEN_RW_CREATE_TRUNC,
+    );
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    exit_unless(&mut code, 0x79, 0x61); // jns: a handle
+    code.extend_from_slice(&[0x48, 0x89, 0xC3]); // mov rbx, rax
+
+    // A, B, C a region apiece; one write of all 2.5 MiB.
+    fill(&mut code, DATA_VADDR, MIB, b'A');
+    fill(&mut code, DATA_VADDR + MIB, MIB, b'B');
+    fill(&mut code, DATA_VADDR + 2 * MIB, MIB / 2, b'C');
+    call(&mut code, 613, None, DATA_VADDR, WRITTEN);
+    expect_rax(&mut code, WRITTEN, 0x62);
+
+    // Back to the start; zero the segment so only the read can restore it.
+    call(&mut code, 614, None, 0, 0);
+    expect_rax(&mut code, 0, 0x63);
+    fill(&mut code, DATA_VADDR, WRITTEN, 0);
+    call(&mut code, 612, None, DATA_VADDR, TWO_GIB);
+    expect_rax(&mut code, WRITTEN, 0x64);
+    verify(&mut code, DATA_VADDR, MIB, b'A', 0x65);
+    verify(&mut code, DATA_VADDR + MIB, MIB, b'B', 0x66);
+    verify(&mut code, DATA_VADDR + 2 * MIB, MIB / 2, b'C', 0x67);
+
+    // Bigger than the vmalloc region: the mapped 3 MiB go, then the fault.
+    call(&mut code, 613, None, DATA_VADDR, HUGE);
+    expect_rax(&mut code, DATA_LEN, 0x68);
+
+    // --- every probe agreed -------------------------------------------------
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, SYS_EXIT
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+    code.push(0xCC); // int3
+
+    // --- file image: [path | pad | code] as one R+X segment -----------------
+    let text_len = CODE_AT as usize + code.len();
+    let file_size = seg_offset as usize + text_len;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr + CODE_AT); // e_entry: past the path
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0); // e_shoff
+    write_u32(&mut buf, 48, 0); // e_flags
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, PHNUM as u16); // e_phnum
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0); // e_shnum
+    write_u16(&mut buf, 62, 0); // e_shstrndx
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, seg_offset); // p_offset
+    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, text_len as u64); // p_filesz
+    write_u64(&mut buf, ph + 40, text_len as u64); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    let ph = ph + ELF64_PHDR_SIZE;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_W);
+    write_u64(&mut buf, ph + 8, 0); // p_offset
+    write_u64(&mut buf, ph + 16, DATA_VADDR); // p_vaddr
+    write_u64(&mut buf, ph + 24, 0); // p_paddr
+    write_u64(&mut buf, ph + 32, 0); // p_filesz
+    write_u64(&mut buf, ph + 40, DATA_LEN); // p_memsz
+    write_u64(&mut buf, ph + 48, 0x1000); // p_align
+
+    let text = seg_offset as usize;
+    buf[text..text + PATH.len()].copy_from_slice(PATH);
+    buf[text + CODE_AT as usize..file_size].copy_from_slice(&code);
+
+    buf
+}
+
 /// Build a test ELF for SEH: exception handler catches fault and exits.
 ///
 /// The ELF contains two code regions:

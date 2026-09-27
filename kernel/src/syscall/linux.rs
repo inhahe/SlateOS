@@ -4243,21 +4243,12 @@ fn dispatch_memfd_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         Ok(v) => v,
         Err(_) => return linux_err(errno::EINVAL),
     };
-    if let Err(e) = crate::mm::user::validate_user_read(buf, len_usize) {
-        return linux_err(linux_errno_for(e));
-    }
-    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len_usize) {
-        Ok(v) => v,
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
-    // SAFETY: validate_user_read confirmed [buf, +len) is readable;
-    // copy_from_user re-checks under SMAP.
-    let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len_usize) };
-    if let Err(e) = r {
-        return linux_err(linux_errno_for(e));
-    }
+    // Streamed a bounded chunk at a time (`handlers::stream_user_write`): the
+    // kernel holds at most `FILE_CALL_CHUNK` of the request, not all of it. A
+    // seal that stops a later chunk (`F_SEAL_GROW`) leaves the earlier ones
+    // written and returns their count, as Linux's shmem does page by page.
     let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-    match crate::ipc::memfd::write(h, &kbuf) {
+    match handlers::stream_user_write(buf, len_usize, |chunk| crate::ipc::memfd::write(h, chunk)) {
         Ok(n) =>
         {
             #[allow(clippy::cast_possible_wrap)]
@@ -4279,28 +4270,16 @@ fn dispatch_memfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         Ok(v) => v,
         Err(_) => return linux_err(errno::EINVAL),
     };
-    if let Err(e) = crate::mm::user::validate_user_write(buf, cap_usize) {
-        return linux_err(linux_errno_for(e));
-    }
-    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(cap_usize) {
-        Ok(v) => v,
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
+    // Streamed a bounded chunk at a time (`handlers::stream_user_read`), each
+    // chunk's destination checked before it is read, so the shared offset
+    // advances only by what reached the caller.
     let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-    let n = match crate::ipc::memfd::read(h, &mut kbuf) {
-        Ok(v) => v,
-        Err(crate::error::KernelError::InvalidHandle) => return linux_err(errno::EBADF),
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
-    if n > 0 {
-        // SAFETY: validate_user_write confirmed cap_usize bytes writable.
-        let r = unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n) };
-        if let Err(e) = r {
-            return linux_err(linux_errno_for(e));
-        }
+    match handlers::stream_user_read(buf, cap_usize, |chunk| crate::ipc::memfd::read(h, chunk)) {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(n) => SyscallResult::ok(n as i64),
+        Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
+        Err(e) => linux_err(linux_errno_for(e)),
     }
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(n as i64)
 }
 
 /// Eventfd write: exactly 8 bytes interpreted as a little-endian u64

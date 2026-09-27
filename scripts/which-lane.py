@@ -287,6 +287,14 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("tzrules/", "E"),
     ("yamldoc/", "E"),
     ("ziparchive/", "E"),
+    # Reserved before its first file (lane E, 2026-09-27): the vetted crypto
+    # design-decisions §539 calls for -- RustCrypto's XChaCha20-Poly1305 and
+    # Argon2id, vendored with their upstream revision and published vectors,
+    # one copy for every consumer (apps/credmanager, gui/credentials, and the
+    # kernel's diskencrypt under §978, which is why it must build no_std +
+    # alloc). Lane E vendors and owns it; the older hand-written primitives
+    # above stay lane A's until each consumer has moved over.
+    ("rustcrypto/", "E"),
     # Boot, build and repository configuration: lane A, which owns the boot
     # and the gates.
     ("esp/", "A"),

@@ -299,10 +299,9 @@ apps/musicplayer/src/main.rs:track_number
 # none is on a path a user can currently reach.
 apps/paint/src/main.rs:active_slider
 
-# apps/pdfviewer --
-# Not yet triaged individually. Each is a value computed and discarded, and
-# none is on a path a user can currently reach.
-apps/pdfviewer/src/main.rs:pdf_version
+# apps/pdfviewer -- PAID OFF 2026-09-27. `pdf_version` was written only by
+# `create_sample`, the invented lorem-ipsum document, which is `#[cfg(test)]`
+# now -- so no production code writes it at all.
 
 # apps/photomanager -- PAID OFF 2026-09-15, all seven.
 # Focal length, whether the flash fired, GPS altitude, the writing software,

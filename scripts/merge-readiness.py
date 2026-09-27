@@ -95,9 +95,10 @@ def lane_scope(lane: str) -> list[str]:
     """The prefixes `lane` owns, for the report (carve-outs are in owner_of)."""
     return [p for p, owner in WHICH_LANE.OWNERSHIP if owner == lane]
 
-# Paths that are nobody's subsystem but everybody's verdict: if an incoming commit
-# changes one of these, every lane's gate results were produced by different code
-# than the one now on main.
+# Paths that are everybody's verdict: if an incoming commit changes one of these,
+# every lane's gate results were produced by different code than the one now on
+# main. Since design-decisions §973 each of them also has an owning lane, and to
+# that lane it is "mine" (owner_of wins, below); to the other five it is this.
 SHARED_MACHINERY = ("scripts/", ".githooks/")
 
 
@@ -311,11 +312,22 @@ def self_test() -> int:
             ["userspace/cgroup/src/main.rs"],
             {"mine": [], "machinery": [], "elsewhere": ["userspace/cgroup/src/main.rs"]},
         ),
+        # Since design-decisions §973 every script has an owner, so the
+        # machinery rule is what a script is to every lane but its owner's:
+        # a change to it moves everybody's gate verdicts. To the owner it is
+        # its own, like any other file it owns -- the stronger answer, since
+        # its suite speaks for the script's behaviour.
         (
-            "lane A: a script is shared machinery, not lane scope",
-            "A",
+            "lane B: another lane's script is shared machinery",
+            "B",
             ["scripts/rustlex.py"],
             {"mine": [], "machinery": ["scripts/rustlex.py"], "elsewhere": []},
+        ),
+        (
+            "lane A: a script it owns is its own (§973)",
+            "A",
+            ["scripts/rustlex.py"],
+            {"mine": ["scripts/rustlex.py"], "machinery": [], "elsewhere": []},
         ),
         (
             "boot-test.sh is lane A's own, and beats the scripts/ rule",

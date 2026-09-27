@@ -8,16 +8,16 @@
 //! the tag is in neither. The link must be a block device and is
 //! canonicalized.
 //!
-//! **Probing** reads the device's superblock, which needs read access to
-//! it: for anyone but root it fails with `EACCES`, as upstream's does.
-//! Of libblkid's hundred-odd probers only ext2, ext3, ext4 (and ext4dev
-//! and jbd), SlateOS's filesystems, are here; a device holding anything
-//! else probes as holding nothing, and its tags are found only through
-//! udev (see known-issues TD-B-ULMOUNT-PROBES-ONLY-EXT).
+//! **Probing** is `ulblkid`'s -- the port of libblkid's, every
+//! superblock and partition-table prober -- called as libmount and
+//! libblkid's cache call it. It reads the device, which needs read access
+//! to it: for anyone but root it fails with `EACCES`, as upstream's does.
 
 use crate::blkid_cache::{BlkCache, Config, Eval, cache_filename};
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+pub use ulblkid::{PARTS_ENTRY_DETAILS, SUBLKS_LABEL, SUBLKS_SECTYPE, SUBLKS_TYPE, SUBLKS_UUID};
 
 /// A path from bytes.
 fn path_of(b: &[u8]) -> PathBuf {
@@ -210,170 +210,6 @@ pub fn evaluate_tag(
     None
 }
 
-/// CRC-32C (Castagnoli), reflected, without the final inversion: libblkid's
-/// `crc32c(seed, buf, len)`.
-fn crc32c(seed: u32, data: &[u8]) -> u32 {
-    let mut crc = seed;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0x82F6_3B78 & mask);
-        }
-    }
-    crc
-}
-
-/// A little-endian `u32` of `buf` at `at`.
-fn le32(buf: &[u8], at: usize) -> u32 {
-    let b = |k: usize| buf.get(at.saturating_add(k)).copied().unwrap_or(0);
-    u32::from_le_bytes([b(0), b(1), b(2), b(3)])
-}
-
-/// `EXT3_FEATURE_COMPAT_HAS_JOURNAL`.
-const HAS_JOURNAL: u32 = 0x0004;
-/// `EXT3_FEATURE_INCOMPAT_JOURNAL_DEV`.
-const JOURNAL_DEV: u32 = 0x0008;
-/// `EXT2_FLAGS_TEST_FILESYS`.
-const TEST_FILESYS: u32 = 0x0004;
-/// `EXT4_FEATURE_RO_COMPAT_METADATA_CSUM`.
-const METADATA_CSUM: u32 = 0x0400;
-/// `EXT2_FEATURE_RO_COMPAT_SUPP` (ext3's is the same).
-const RO_COMPAT_SUPP: u32 = 0x0001 | 0x0002 | 0x0004;
-/// `EXT2_FEATURE_INCOMPAT_SUPP`.
-const EXT2_INCOMPAT_SUPP: u32 = 0x0002 | 0x0010;
-/// `EXT3_FEATURE_INCOMPAT_SUPP`.
-const EXT3_INCOMPAT_SUPP: u32 = 0x0002 | 0x0004 | 0x0010;
-
-/// `BLKID_SUBLKS_LABEL`: report LABEL.
-pub const SUBLKS_LABEL: u32 = 1 << 1;
-/// `BLKID_SUBLKS_UUID`: report UUID.
-pub const SUBLKS_UUID: u32 = 1 << 3;
-/// `BLKID_SUBLKS_TYPE`: report TYPE.
-pub const SUBLKS_TYPE: u32 = 1 << 5;
-/// `BLKID_SUBLKS_SECTYPE`: report SEC_TYPE.
-pub const SUBLKS_SECTYPE: u32 = 1 << 6;
-
-/// `blkid_unparse_uuid`: `8-4-4-4-12` lowercase hex; `None` for the all-zero
-/// UUID, which `blkid_probe_set_uuid_as` does not report.
-fn unparse_uuid(uuid: &[u8]) -> Option<Vec<u8>> {
-    if uuid.iter().all(|&b| b == 0) {
-        return None;
-    }
-    let hex: Vec<String> = uuid.iter().map(|b| format!("{b:02x}")).collect();
-    let s = format!(
-        "{}-{}-{}-{}-{}",
-        hex.get(..4).unwrap_or_default().concat(),
-        hex.get(4..6).unwrap_or_default().concat(),
-        hex.get(6..8).unwrap_or_default().concat(),
-        hex.get(8..10).unwrap_or_default().concat(),
-        hex.get(10..16).unwrap_or_default().concat()
-    );
-    Some(s.into_bytes())
-}
-
-/// What libblkid's ext probers report for an ext superblock --
-/// `probe_ext4dev`, `probe_ext4`, `probe_ext3`, `probe_ext2` and
-/// `probe_jbd`, each deciding for itself, then `ext_get_info` -- in
-/// libblkid's order: LABEL, UUID, EXT_JOURNAL, SEC_TYPE, BLOCK_SIZE (never
-/// gated), LOGUUID (a journal device's), then TYPE. `flags` are the
-/// `BLKID_SUBLKS_*` that gate LABEL, UUID, SEC_TYPE and TYPE. `sb` is the
-/// 1024 bytes at offset 1024.
-///
-/// # Errors
-///
-/// [`ProbeFail::Nothing`] when no ext prober claims it,
-/// [`ProbeFail::Ambivalent`] when two do (`blkid_do_safeprobe` refuses a
-/// superblock more than one prober claims).
-pub fn probe_ext(sb: &[u8], flags: u32) -> Result<Values, ProbeFail> {
-    if sb.get(0x38..0x3a) != Some(&[0x53, 0xef][..]) {
-        return Err(ProbeFail::Nothing);
-    }
-    let fc = le32(sb, 0x5c);
-    let fi = le32(sb, 0x60);
-    let frc = le32(sb, 0x64);
-    let s_flags = le32(sb, 0x160);
-    if frc & METADATA_CSUM != 0 {
-        // The checksum covers the superblock up to `s_checksum`, the last
-        // four of its 1024 bytes.
-        let body = sb.get(..0x3fc).ok_or(ProbeFail::Nothing)?;
-        if crc32c(!0, body) != le32(sb, 0x3fc) {
-            return Err(ProbeFail::Nothing);
-        }
-    }
-    let ext3_unsupported = frc & !RO_COMPAT_SUPP != 0 || fi & !EXT3_INCOMPAT_SUPP != 0;
-    // Each prober, in libblkid's list order, with the version it hands
-    // `ext_get_info`.
-    let claims: [(&'static [u8], u32, bool); 5] = [
-        (
-            b"ext4dev",
-            4,
-            fi & JOURNAL_DEV == 0 && s_flags & TEST_FILESYS != 0,
-        ),
-        (
-            b"ext4",
-            4,
-            fi & JOURNAL_DEV == 0 && ext3_unsupported && s_flags & TEST_FILESYS == 0,
-        ),
-        (b"ext3", 3, fc & HAS_JOURNAL != 0 && !ext3_unsupported),
-        (
-            b"ext2",
-            2,
-            fc & HAS_JOURNAL == 0 && frc & !RO_COMPAT_SUPP == 0 && fi & !EXT2_INCOMPAT_SUPP == 0,
-        ),
-        (b"jbd", 2, fi & JOURNAL_DEV != 0),
-    ];
-    let mut matched = claims.iter().filter(|(_, _, m)| *m);
-    let &(ty, ver, _) = matched.next().ok_or(ProbeFail::Nothing)?;
-    if matched.next().is_some() {
-        return Err(ProbeFail::Ambivalent);
-    }
-    let mut values: Values = Vec::new();
-    // `ext_get_info`. The label only when its first byte is not NUL; then
-    // `blkid_probe_set_label`: a C string, trailing white space off, and
-    // nothing if that leaves nothing.
-    if flags & SUBLKS_LABEL != 0 && sb.get(0x78).is_some_and(|&b| b != 0) {
-        let label = crate::c_str(sb.get(0x78..0x88).unwrap_or_default());
-        let end = label
-            .iter()
-            .rposition(|&b| !matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
-            .map_or(0, |i| i.saturating_add(1));
-        if end > 0 {
-            values.push((b"LABEL", label.get(..end).unwrap_or_default().to_vec()));
-        }
-    }
-    let uuid = sb.get(0x68..0x78).unwrap_or_default();
-    if flags & SUBLKS_UUID != 0
-        && let Some(u) = unparse_uuid(uuid)
-    {
-        values.push((b"UUID", u));
-    }
-    if fc & HAS_JOURNAL != 0
-        && let Some(j) = unparse_uuid(sb.get(0xd0..0xe0).unwrap_or_default())
-    {
-        values.push((b"EXT_JOURNAL", j));
-    }
-    if ver != 2 && flags & SUBLKS_SECTYPE != 0 && fi & !EXT2_INCOMPAT_SUPP == 0 {
-        values.push((b"SEC_TYPE", b"ext2".to_vec()));
-    }
-    let log_block_size = le32(sb, 0x18);
-    if log_block_size < 32 {
-        values.push((
-            b"BLOCK_SIZE",
-            (1024u64 << log_block_size).to_string().into_bytes(),
-        ));
-    }
-    if ty == b"jbd"
-        && let Some(u) = unparse_uuid(uuid)
-    {
-        values.push((b"LOGUUID", u));
-    }
-    if flags & SUBLKS_TYPE != 0 {
-        values.push((b"TYPE", ty.to_vec()));
-    }
-    Ok(values)
-}
-
 /// `EINVAL`.
 const EINVAL: i32 = 22;
 /// `EIO`, for an error without an `errno`.
@@ -437,81 +273,48 @@ pub fn open_nonblock(devname: &[u8]) -> Result<std::fs::File, ProbeFail> {
         .map_err(|e| ProbeFail::Open(errno_of(&e)))
 }
 
-/// `blkid_probe_set_device(pr, fd, 0, 0)`: the size to probe -- a block
-/// device's, a regular file's, a UBI volume's 1 -- or why not.
+/// `blkid_probe_set_device(pr, fd, 0, 0)` on the device, the superblocks
+/// chain with `sb_flags`, the partitions chain -- if `pt_flags` asks for it
+/// -- with those, and `blkid_do_safeprobe`: every value found, in
+/// libblkid's order, each string without its NUL. Probing is `ulblkid`'s,
+/// the port of libblkid's.
 ///
 /// # Errors
 ///
-/// [`ProbeFail::Device`]: `EINVAL` for anything else, or the `errno` of
-/// an `fstat` or a size that could not be read.
-pub fn device_size(file: &std::fs::File) -> Result<u64, ProbeFail> {
-    let meta = file
-        .metadata()
-        .map_err(|e| ProbeFail::Device(errno_of(&e)))?;
-    if meta.is_file() {
-        return Ok(meta.len());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
-        let ft = meta.file_type();
-        if ft.is_block_device() {
-            // `blkdev_get_size`.
-            let mut f = file;
-            return f
-                .seek(SeekFrom::End(0))
-                .map_err(|e| ProbeFail::Device(errno_of(&e)));
-        }
-        if ft.is_char_device() {
-            // Only UBI volumes, which are character devices, are probed.
-            let rdev = meta.rdev();
-            let link = format!(
-                "/sys/dev/char/{}:{}",
-                crate::fs::major(rdev),
-                crate::fs::minor(rdev)
-            );
-            let ubi = std::fs::read_link(link)
-                .ok()
-                .and_then(|t| {
-                    t.file_name()
-                        .map(|n| quoting::os_bytes(n).starts_with(b"ubi"))
-                })
-                .unwrap_or(false);
-            return if ubi {
-                Ok(1)
-            } else {
-                Err(ProbeFail::Device(EINVAL))
-            };
-        }
-    }
-    Err(ProbeFail::Device(EINVAL))
-}
-
-/// `blkid_do_safeprobe` with the superblocks chain (as `flags` allow) and
-/// the partitions chain: every value found, in libblkid's order. Only the
-/// ext family is recognised here (known-issues
-/// TD-B-ULMOUNT-PROBES-ONLY-EXT), and no partition table.
-///
-/// # Errors
-///
-/// A read that failed, nothing recognised, or more than one thing.
-pub fn probe_file(file: &std::fs::File, size: u64, flags: u32) -> Result<Values, ProbeFail> {
-    // The ext superblock is the 1024 bytes at 1024.
-    if size < 2048 {
-        return Err(ProbeFail::Nothing);
-    }
-    let mut f = file;
-    let mut sb = vec![0u8; 1024];
-    f.seek(SeekFrom::Start(1024))
-        .map_err(|e| ProbeFail::Io(errno_of(&e)))?;
-    f.read_exact(&mut sb).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            ProbeFail::Nothing
+/// [`ProbeFail::Device`] when the device cannot be probed at all (a
+/// directory, a character device other than UBI -- `EINVAL` -- or one
+/// whose size cannot be read); [`ProbeFail::Io`] for a read that failed;
+/// [`ProbeFail::Nothing`] or [`ProbeFail::Ambivalent`] for what
+/// `blkid_do_safeprobe` found.
+pub fn probe_file(
+    file: std::fs::File,
+    sb_flags: u32,
+    pt_flags: Option<u32>,
+) -> Result<Values, ProbeFail> {
+    let mut pr = ulblkid::Probe::new();
+    if pr.set_device(Some(Rc::new(file)), 0, 0) != 0 {
+        return Err(ProbeFail::Device(if pr.errno != 0 {
+            pr.errno
         } else {
-            ProbeFail::Io(errno_of(&e))
-        }
-    })?;
-    probe_ext(&sb, flags)
+            EINVAL
+        }));
+    }
+    pr.enable_superblocks(true);
+    pr.set_superblocks_flags(sb_flags);
+    if let Some(flags) = pt_flags {
+        pr.enable_partitions(true);
+        pr.set_partitions_flags(flags);
+    }
+    match pr.do_safeprobe() {
+        ulblkid::PROBE_OK => Ok(pr
+            .values()
+            .iter()
+            .map(|v| (v.name.as_bytes(), v.as_c_str().to_vec()))
+            .collect()),
+        ulblkid::PROBE_NONE => Err(ProbeFail::Nothing),
+        ulblkid::PROBE_AMBIGUOUS => Err(ProbeFail::Ambivalent),
+        _ => Err(ProbeFail::Io(if pr.errno != 0 { pr.errno } else { EIO })),
+    }
 }
 
 /// `mnt_cache_read_tags`' probe (`blkid_new_probe_from_filename`, then
@@ -524,8 +327,11 @@ pub fn probe_file(file: &std::fs::File, size: u64, flags: u32) -> Result<Values,
 /// Why there are none (see [`ProbeFail`]).
 pub fn probe_tags(devname: &[u8]) -> Result<Values, ProbeFail> {
     let file = open_nonblock(devname)?;
-    let size = device_size(&file)?;
-    let values = probe_file(&file, size, SUBLKS_LABEL | SUBLKS_UUID | SUBLKS_TYPE)?;
+    let values = probe_file(
+        file,
+        SUBLKS_LABEL | SUBLKS_UUID | SUBLKS_TYPE,
+        Some(PARTS_ENTRY_DETAILS),
+    )?;
     // `tags[]` and `blktags[]`: libmount's names for libblkid's values.
     let names: [(&[u8], &'static [u8]); 5] = [
         (b"LABEL", b"LABEL"),
@@ -544,98 +350,8 @@ pub fn probe_tags(devname: &[u8]) -> Result<Values, ProbeFail> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
-    reason = "tests write a buffer they sized at fixed offsets"
-)]
 mod tests {
     use super::*;
-
-    fn superblock(fc: u32, fi: u32, frc: u32, label: &[u8], uuid: [u8; 16]) -> Vec<u8> {
-        let mut sb = vec![0u8; 1024];
-        sb[0x38] = 0x53;
-        sb[0x39] = 0xef;
-        sb[0x5c..0x60].copy_from_slice(&fc.to_le_bytes());
-        sb[0x60..0x64].copy_from_slice(&fi.to_le_bytes());
-        sb[0x64..0x68].copy_from_slice(&frc.to_le_bytes());
-        sb[0x68..0x78].copy_from_slice(&uuid);
-        sb[0x78..0x78 + label.len()].copy_from_slice(label);
-        sb
-    }
-
-    #[test]
-    #[allow(
-        clippy::indexing_slicing,
-        reason = "fixed offsets in a buffer the test sized"
-    )]
-    fn ext_types_as_libblkid() {
-        let uuid = [
-            0xf3, 0xac, 0x64, 0x74, 0xba, 0x9c, 0x46, 0x8c, 0xb6, 0xd0, 0xe2, 0x1c, 0xa6, 0xbc,
-            0x1d, 0xca,
-        ];
-        let mut sb = superblock(HAS_JOURNAL, 0x0002 | 0x0040, 0x0001, b"root  ", uuid);
-        // A 4096-byte block, and an external journal.
-        sb[0x18] = 2;
-        sb[0xd0] = 0xab;
-        let v = probe_ext(&sb, SUBLKS_LABEL | SUBLKS_UUID | SUBLKS_TYPE).unwrap_or_default();
-        assert_eq!(
-            v,
-            vec![
-                (&b"LABEL"[..], b"root".to_vec()),
-                (
-                    &b"UUID"[..],
-                    b"f3ac6474-ba9c-468c-b6d0-e21ca6bc1dca".to_vec()
-                ),
-                (
-                    &b"EXT_JOURNAL"[..],
-                    b"ab000000-0000-0000-0000-000000000000".to_vec()
-                ),
-                (&b"BLOCK_SIZE"[..], b"4096".to_vec()),
-                (&b"TYPE"[..], b"ext4".to_vec()),
-            ]
-        );
-        // SEC_TYPE only when asked for, and only for a filesystem ext2 could
-        // mount: ext3 without ext4's extents feature.
-        let ext3 = superblock(HAS_JOURNAL, 0x0002, 0x0001, b"", [0; 16]);
-        let names = |sb: &[u8], flags| {
-            probe_ext(sb, flags)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            names(&ext3, SUBLKS_TYPE | SUBLKS_SECTYPE),
-            vec![&b"SEC_TYPE"[..], b"BLOCK_SIZE", b"TYPE"]
-        );
-        assert_eq!(names(&ext3, SUBLKS_TYPE), vec![&b"BLOCK_SIZE"[..], b"TYPE"]);
-        assert_eq!(
-            names(&sb, SUBLKS_SECTYPE),
-            vec![&b"EXT_JOURNAL"[..], b"BLOCK_SIZE"]
-        );
-        let t = |fc, fi, frc| {
-            probe_ext(&superblock(fc, fi, frc, b"", [0; 16]), SUBLKS_TYPE)
-                .ok()
-                .and_then(|v| v.last().map(|(_, t)| t.clone()))
-        };
-        assert_eq!(t(HAS_JOURNAL, 0x0002, 0x0001), Some(b"ext3".to_vec()));
-        assert_eq!(t(0, 0x0002, 0x0001), Some(b"ext2".to_vec()));
-        assert_eq!(t(0, JOURNAL_DEV, 0), Some(b"jbd".to_vec()));
-        let mut bad = superblock(0, 0, METADATA_CSUM, b"", [0; 16]);
-        bad[0x3fc] = 1;
-        assert_eq!(probe_ext(&bad, SUBLKS_TYPE), Err(ProbeFail::Nothing));
-        let mut good = superblock(0, 0, METADATA_CSUM, b"", [0; 16]);
-        let csum = crc32c(!0, &good[..0x3fc]);
-        good[0x3fc..0x400].copy_from_slice(&csum.to_le_bytes());
-        assert!(probe_ext(&good, SUBLKS_TYPE).is_ok());
-    }
-
-    #[test]
-    fn crc32c_is_castagnolis() {
-        // The standard check value, with the final inversion applied here.
-        assert_eq!(!crc32c(!0, b"123456789"), 0xe306_9283);
-    }
 
     #[test]
     fn strings_encode_as_udev() {

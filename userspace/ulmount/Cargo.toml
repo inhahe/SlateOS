@@ -14,6 +14,8 @@ ulstrutils = { path = "../ulstrutils" }
 quoting = { path = "../quoting" }
 # lib/sysfs.c: device numbers to /dev paths, and glibc's makedev.
 ulsysfs = { path = "../ulsysfs" }
+# libblkid's probing: what a device holds, for tags and --verify.
+ulblkid = { path = "../ulblkid" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

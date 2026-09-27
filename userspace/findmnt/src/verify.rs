@@ -566,11 +566,11 @@ fn verify_fstype(vfy: &mut Verify, f: &mut Findmnt, tb: &MntTable, fs: &Fs, out:
     vfy.ok(f, tb, out, &format!("FS type is {shown_real}"));
 }
 
-/// `mnt_get_fstype(devname, &ambi, NULL)`: probed directly, TYPE only.
+/// `mnt_get_fstype(devname, &ambi, NULL)`: probed directly, superblocks
+/// only, TYPE only.
 fn probe_type(devname: &[u8]) -> Result<Vec<u8>, ProbeFail> {
     let file = ulmount::blkid::open_nonblock(devname)?;
-    let size = ulmount::blkid::device_size(&file)?;
-    let values = ulmount::blkid::probe_file(&file, size, ulmount::blkid::SUBLKS_TYPE)?;
+    let values = ulmount::blkid::probe_file(file, ulmount::blkid::SUBLKS_TYPE, None)?;
     values
         .into_iter()
         .find(|(n, _)| *n == b"TYPE")

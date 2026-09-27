@@ -658,11 +658,9 @@ impl BlkCache {
                 return None;
             }
         };
-        let Ok(size) = blkid::device_size(&file) else {
-            self.free_dev(id);
-            return None;
-        };
-        // Remove what the cache knew, then probe.
+        // Remove what the cache knew, then probe. (Upstream sets the device
+        // on its probe first, and frees the entry if that fails; probing
+        // does both here, and a failure frees the entry just the same.)
         let old: Vec<Vec<u8>> = self
             .dev(id)
             .map(|d| d.tags.iter().map(|t| t.name.clone()).collect())
@@ -672,7 +670,10 @@ impl BlkCache {
         }
         let flags =
             blkid::SUBLKS_LABEL | blkid::SUBLKS_UUID | blkid::SUBLKS_TYPE | blkid::SUBLKS_SECTYPE;
-        let Ok(values) = blkid::probe_file(&file, size, flags) else {
+        // A fresh probe for each device, where upstream reuses the cache's
+        // one: `blkid_probe_set_device` resets everything this asks about,
+        // and the filters are reset after each use.
+        let Ok(values) = blkid::probe_file(file, flags, Some(blkid::PARTS_ENTRY_DETAILS)) else {
             self.free_dev(id);
             return None;
         };

@@ -764,7 +764,10 @@ fn blkdev_lock(file: &File, devname: &[u8], lockmode: Option<&[u8]>, short: &[u8
 /// `close(fd)`, its failure reported as upstream reports it.
 #[cfg_attr(
     not(unix),
-    allow(clippy::unnecessary_wraps, reason = "the unix half can fail; this half cannot")
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "the unix half can fail; this half cannot"
+    )
 )]
 fn close_checked(file: File) -> std::io::Result<()> {
     #[cfg(unix)]

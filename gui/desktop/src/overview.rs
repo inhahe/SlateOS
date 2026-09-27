@@ -980,13 +980,14 @@ fn render_thumbnail_card(
         corner_radii: CornerRadii::all(6.0),
     });
 
-    // Title inside card.
-    let title_display: String = layout.title.chars().take(30).collect();
+    // Title inside card, cut at the card's edge with a mark when it does not
+    // fit. It was cut at thirty characters first, unmarked -- so a title of
+    // forty on a card with room for all of it read as a title of thirty.
     let title_color = if is_dimmed { p.overlay0 } else { p.text };
     cmds.push(RenderCommand::Text {
         x: x + dx + 8.0,
         y: y + dy + 8.0,
-        text: title_display,
+        text: layout.title.clone(),
         color: title_color,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
@@ -1967,6 +1968,44 @@ mod tests {
         let mut s = OverviewState::new();
         let action = on_key(&mut s, OverviewKey::Escape);
         assert_eq!(action, OverviewAction::None);
+    }
+
+    /// **A card's title is cut at the card's edge, with a mark -- not at a
+    /// count.** It was cut to thirty characters first, unmarked, so a longer
+    /// title on a card with room for all of it lost its end and read whole.
+    #[test]
+    fn a_cards_title_is_cut_at_its_edge_not_at_thirty_characters() {
+        let title = "Quarterly report, final draft.odt - Writer";
+        let layout = ThumbnailLayout {
+            window_id: 1,
+            desktop_id: 0,
+            title: title.to_string(),
+            is_focused: false,
+            is_minimized: false,
+            render_x: 0.0,
+            render_y: 0.0,
+            render_width: 600.0,
+            render_height: 300.0,
+        };
+        let mut cmds = Vec::new();
+        render_thumbnail_card(&mut cmds, &layout, &Palette::for_mode(false), false, false);
+        let drawn = cmds.iter().find_map(|cmd| match cmd {
+            RenderCommand::Text {
+                text,
+                max_width,
+                overflow,
+                ..
+            } => Some((text.clone(), *max_width, *overflow)),
+            _ => None,
+        });
+        let (text, max_width, overflow) = drawn.expect("the card drew no title");
+        assert_eq!(text, title, "the title was cut before the card's edge");
+        assert!(max_width.is_some());
+        assert_eq!(
+            overflow,
+            TextOverflow::Ellipsis,
+            "a cut would not be marked"
+        );
     }
 
     #[test]

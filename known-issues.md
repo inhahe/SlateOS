@@ -171442,3 +171442,50 @@ to that. A blocking call should not return `EAGAIN` at all.
 **Proper fix.** Loop in `sys_tcp_recv` for a blocking caller: read, and while
 nothing arrives on an open connection, wait -- signal-aware, as
 `wait_until` does -- rather than answering `WouldBlock`.
+
+### [A] A-FORK-MADE-SHARED-MEMORY-COPY-ON-WRITE: after a fork, the parent's next write to a shared-memory region, an io ring, a DMA or display buffer, or device memory went to a private copy -- 2026-09-27
+**Status:** FIXED on lane-a 2026-09-27, awaiting a boot. Found designing
+process-shared futexes (lane D's
+`d-a-futexes-keyed-by-physical-page-for-process-shared-objects`).
+
+**In short:** some memory is meant to be seen by more than one party at once:
+a shared-memory region two programs use to talk, the ring a program shares
+with the kernel, a buffer a device reads, the screen's image. When a program
+that had such memory mapped started a child with `fork`, the kernel quietly
+turned that memory into a private copy for whichever side wrote to it first.
+The program went on writing, and nobody else saw it -- no error, the sharing
+simply stopped. For device memory it was worse: a write copied the device's
+registers into ordinary RAM.
+
+**Where.** `kernel/src/mm/cow.rs` `clone_frame_group` made every writable user
+page copy-on-write in parent and child. The region, the kernel's ring, the
+device or the display engine each hold their own reference to the frame, so
+the copy-on-write fault that followed always copied. Fork also recorded a
+reverse mapping for every frame it shared into the child, these included,
+while the parent's own mapping of them had none. With exactly one mapper,
+`rmap::is_private` called the frame private, and compaction could migrate it:
+the same disconnection, done by the compactor.
+
+**The fix.** A software page-table bit, `PageFlags::SHARED` (bit 10, one of
+the three the hardware leaves to the OS; bit 9 is `COW`), set at the five
+places the kernel maps shared-by-design memory into a process:
+- `SYS_SHM_MAP`;
+- the io ring's setup;
+- `SYS_MMAP` with `MAP_MMIO`;
+- the DRM dumb-buffer map;
+- `mm::dma::alloc_for_user`.
+Fork maps such a page into the child as it is, same frame and permissions,
+leaves the parent's entry writable, and records no reverse mapping for it.
+Compaction's `migrate_page` refuses one. `mark_cow` refuses one. The bit is
+also what process-shared futexes key on (see that commit).
+
+**Tests.** `mm::cow::test_fork_keeps_shared_pages_shared` forks a synthetic
+address space holding a shared page. Both sides must map the one frame
+writable, with no `COW` and no rmap entry, and the reference counts must
+balance through teardown. `mark_cow` must refuse the page.
+
+**Not done.** The Linux ABI still has no writable shared mapping at all
+(`MAP_SHARED | MAP_ANONYMOUS` and writable `MAP_SHARED` of a file are
+`ENOSYS`), and native `SYS_MMAP` ignores `MAP_SHARED`. So the everyday
+POSIX way to share memory with a child -- map it shared, then fork -- does
+not exist yet. The kernel half of it is now right.

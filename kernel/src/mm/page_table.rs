@@ -311,6 +311,28 @@ impl PageFlags {
     /// is cleared.  Setting both COW and WRITABLE is invalid.
     pub const COW: Self = Self(1 << 9);
 
+    /// Shared-by-design marker (software-defined, bit 10).
+    ///
+    /// Set on a user leaf whose frame is *meant* to be seen by more than one
+    /// party: a shared-memory region (`SYS_SHM_MAP`), an io ring's pages, a
+    /// DMA buffer, a scanout buffer, device memory.  Three things read it,
+    /// and each needs exactly this fact, which no other part of the mapping
+    /// records (a `VmaKind::Fixed` VMA covers private eager copies too):
+    ///
+    /// - `fork` maps such a page into the child as it is -- same frame, same
+    ///   permissions -- instead of making it copy-on-write in both address
+    ///   spaces, which would silently disconnect the parent from the region
+    ///   on its first write after the fork (and copy device memory into RAM);
+    /// - compaction never migrates it: moving the frame would disconnect
+    ///   every other party, which the migration cannot see;
+    /// - a futex word on it is keyed by its physical address, so that
+    ///   processes mapping the region at different addresses meet in one
+    ///   wait queue (`ipc::futex::futex_key`).
+    ///
+    /// Invariant: never set together with [`Self::COW`].  A shared page is
+    /// never copied, so it has no copy-on-write state to be in.
+    pub const SHARED: Self = Self(1 << 10);
+
     /// No-execute: instruction fetches cause a page fault.  Requires
     /// `IA32_EFER.NXE` to be enabled (Limine does this).
     pub const NO_EXECUTE: Self = Self(1 << 63);
@@ -422,6 +444,15 @@ impl PageTableEntry {
     #[must_use]
     pub const fn is_cow(self) -> bool {
         self.0 & PageFlags::COW.bits() != 0
+    }
+
+    /// Is this entry marked shared by design ([`PageFlags::SHARED`])?
+    ///
+    /// Such a leaf maps a frame meant to be seen by more than one party; see
+    /// the flag for the three things that must treat it differently.
+    #[must_use]
+    pub const fn is_shared(self) -> bool {
+        self.0 & PageFlags::SHARED.bits() != 0
     }
 
     /// Extract the 4 KiB-aligned physical address from this entry.

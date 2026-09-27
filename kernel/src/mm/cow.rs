@@ -376,6 +376,13 @@ pub unsafe fn mark_cow(pml4_phys: u64, virt: VirtAddr) -> KernelResult<()> {
         return Ok(());
     }
 
+    // A shared-by-design page is never copied: marking it copy-on-write would
+    // hand the next writer a private copy and disconnect it from the other
+    // parties (PageFlags::SHARED's invariant).
+    if pte.is_shared() {
+        return Err(KernelError::InvalidArgument);
+    }
+
     // Build new flags: remove WRITABLE, add COW.
     let mut flags = pte.flags();
     flags = PageFlags::from_bits(flags.bits() & !PageFlags::WRITABLE.bits());
@@ -453,6 +460,15 @@ unsafe fn map_child_pte(
 /// parent into the child, applying copy-on-write semantics.
 ///
 /// For each present PTE in the group:
+/// - **Shared-by-design** pages ([`PageFlags::SHARED`]: a shared-memory
+///   region, an io ring, a DMA or scanout buffer, device memory) are mapped
+///   into the child as they are -- same frame, same permissions -- and the
+///   parent's entry is left alone.  Making them copy-on-write would
+///   disconnect whichever side wrote first from the region (the region, the
+///   kernel's ring or the device still hold the original frame), and for
+///   device memory would copy registers into RAM.  They get no reverse
+///   mapping either: the parent's own mapping of them has none, and a frame
+///   the compactor can find with one mapper looks private and movable.
 /// - **Writable** pages are made copy-on-write in *both* parent and child
 ///   (WRITABLE cleared, COW set).  The first write by either side triggers
 ///   [`resolve_cow_fault`], which copies the page.
@@ -501,6 +517,7 @@ unsafe fn clone_frame_group(
 
         let phys = pte.phys_addr();
         let frame_base = phys & !(FRAME_SIZE as u64 - 1);
+        let shared = pte.is_shared();
 
         // Increment this frame's refcount once per distinct frame in the
         // group (each present sibling may, after a partial CoW resolve in
@@ -529,13 +546,24 @@ unsafe fn clone_frame_group(
                 seen_count += 1;
             }
             // The child now maps this frame; record the reverse mapping so
-            // the reclaimer/compactor can find it.
-            super::rmap::add(frame_base, child_pml4, group_virt_base);
+            // the reclaimer/compactor can find it -- unless the page is shared
+            // by design.  Neither may move such a frame (every other party
+            // would be left holding the old one), and a lone rmap entry for
+            // it is exactly what would make it look private and movable.
+            // rmap::remove at the child's teardown no-ops for a frame with no
+            // entry, so skipping the add keeps teardown symmetric.
+            if !shared {
+                super::rmap::add(frame_base, child_pml4, group_virt_base);
+            }
         }
 
-        // Compute child flags and, for writable pages, downgrade the parent
-        // to CoW as well.
-        let child_entry = if pte.flags().contains(PageFlags::WRITABLE) {
+        // Compute child flags and, for private writable pages, downgrade the
+        // parent to CoW as well.
+        let child_entry = if shared {
+            // Shared by design: the child sees the same frame with the same
+            // permissions, and the parent keeps its writable mapping.
+            PageTableEntry::new(phys, pte.flags())
+        } else if pte.flags().contains(PageFlags::WRITABLE) {
             let mut cow_flags = pte.flags() | PageFlags::COW;
             cow_flags = PageFlags::from_bits(cow_flags.bits() & !PageFlags::WRITABLE.bits());
 
@@ -744,7 +772,132 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Test 5: Address-space duplication for fork().
     test_clone_address_space_cow();
 
+    // Test 6: a page shared by design stays shared across fork().
+    test_fork_keeps_shared_pages_shared()?;
+
     serial_println!("[cow] Self-test PASSED");
+    Ok(())
+}
+
+/// A page shared by design ([`PageFlags::SHARED`]) survives `fork` shared:
+/// the child maps the same frame writable, the parent keeps its writable
+/// mapping, neither is copy-on-write, and the child's mapping gets no
+/// reverse-mapping entry for the compactor to find.  And `mark_cow` refuses
+/// such a page.
+///
+/// The bug this pins (2026-09-27): fork made every writable page
+/// copy-on-write, a shared-memory region's included.  The region holds its
+/// own reference to the frame, so the parent's first write after a fork
+/// copied it and silently left the region; the same happened to io rings,
+/// DMA and scanout buffers, and -- frames the allocator does not own --
+/// device registers were copied into RAM.
+fn test_fork_keeps_shared_pages_shared() -> KernelResult<()> {
+    let virt: u64 = 0x0000_4000_0001_0000; // user half, frame-aligned
+    let shared_rw = PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE
+        | PageFlags::SHARED;
+
+    // The frame's first reference is the "region's", as an SHM region holds
+    // one; the mapping below takes a second, as sys_shm_map does.
+    let region_frame = frame::alloc_frame_zeroed()?;
+    let phys = region_frame.addr();
+    let mut parent: Option<u64> = None;
+    let mut child: Option<u64> = None;
+
+    let outcome = (|| -> KernelResult<()> {
+        let p = page_table::alloc_pml4()?;
+        parent = Some(p);
+        // SAFETY: region_frame is live and ours.  This is the mapping's
+        // reference: the parent's teardown drops it once the mapping exists,
+        // and the error arm below drops it if the mapping cannot be made.
+        unsafe { frame::ref_inc(region_frame)? };
+        // SAFETY: p is a valid PML4 built above; virt is a frame-aligned user
+        // address with nothing mapped at it.
+        if let Err(e) =
+            unsafe { page_table::map_frame(p, VirtAddr::new(virt), region_frame, shared_rw) }
+        {
+            // SAFETY: drops the reference taken above, which no mapping holds.
+            unsafe { frame::free_frame(region_frame)? };
+            return Err(e);
+        }
+        let rmap_before = super::rmap::mapper_count(phys);
+
+        // SAFETY: p is a valid, quiescent PML4 built above.
+        let c = unsafe { clone_address_space_cow(p)? };
+        child = Some(c);
+
+        let refs = frame::refcount(region_frame);
+        if refs != 3 {
+            serial_println!(
+                "[cow]   FAIL: after fork the shared frame has {} references, want 3 \
+                 (region, parent, child)",
+                refs
+            );
+            return Err(KernelError::InternalError);
+        }
+        for (who, pml4) in [("parent", p), ("child", c)] {
+            if page_table::translate(pml4, VirtAddr::new(virt)) != Some(phys) {
+                serial_println!("[cow]   FAIL: the {} does not map the region's frame", who);
+                return Err(KernelError::InternalError);
+            }
+            let flags = page_table::translate_flags(pml4, VirtAddr::new(virt))
+                .unwrap_or(PageFlags::empty());
+            if !flags.contains(PageFlags::WRITABLE)
+                || !flags.contains(PageFlags::SHARED)
+                || flags.contains(PageFlags::COW)
+            {
+                serial_println!(
+                    "[cow]   FAIL: the {}'s shared page is not writable, shared and free of \
+                     COW after fork (flags {:#x})",
+                    who,
+                    flags.bits()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        if super::rmap::mapper_count(phys) != rmap_before {
+            serial_println!("[cow]   FAIL: fork gave a shared frame a reverse mapping");
+            return Err(KernelError::InternalError);
+        }
+        // SAFETY: p is valid and virt is mapped and present.
+        if unsafe { mark_cow(p, VirtAddr::new(virt)) } != Err(KernelError::InvalidArgument) {
+            serial_println!("[cow]   FAIL: mark_cow did not refuse a shared page");
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    })();
+
+    // Teardown, however the test went: each mapping's reference goes with its
+    // address space, leaving the region's.
+    // SAFETY: neither PML4 is loaded in any CR3; no thread uses them.
+    unsafe {
+        if let Some(c) = child {
+            page_table::destroy_user_address_space(c);
+        }
+        if let Some(p) = parent {
+            page_table::destroy_user_address_space(p);
+        }
+    }
+    let left = frame::refcount(region_frame);
+    if left >= 1 {
+        // SAFETY: the region's reference, taken by the allocation above.
+        unsafe { frame::free_frame(region_frame)? };
+    }
+    outcome?;
+    if left != 1 {
+        serial_println!(
+            "[cow]   FAIL: after both teardowns the shared frame had {} references, want 1 \
+             (the region's)",
+            left
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[cow]   fork keeps a shared page shared (same frame, writable, no COW, no rmap): OK"
+    );
     Ok(())
 }
 

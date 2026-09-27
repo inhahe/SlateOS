@@ -250,10 +250,15 @@ pub fn alloc_for_user(
     // Map the DMA buffer into the process's address space.
     // Use write-through caching — x86 PCI DMA is cache-coherent, but
     // write-through avoids subtle ordering issues with device reads.
+    // SHARED: the device reads and writes these frames by physical address,
+    // so they are shared by design -- a fork must not turn them
+    // copy-on-write, or the driver's next write would land in a private copy
+    // the device never sees.
     let flags = PageFlags::PRESENT
         | PageFlags::WRITABLE
         | PageFlags::USER_ACCESSIBLE
-        | PageFlags::WRITE_THROUGH;
+        | PageFlags::WRITE_THROUGH
+        | PageFlags::SHARED;
 
     let hw_pages = alloc_size / 4096;
     for i in 0..hw_pages {

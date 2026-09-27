@@ -1044,9 +1044,16 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
             // SAFETY: pml4_phys is valid, phys is a device MMIO address
             // (not managed by our allocator), virt is in user space.
-            if let Err(e) =
-                unsafe { page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags) }
-            {
+            // SHARED: device memory is shared with the device by definition;
+            // a fork that made it copy-on-write would copy registers into RAM.
+            if let Err(e) = unsafe {
+                page_table::map_frame(
+                    pml4_phys,
+                    VirtAddr::new(va),
+                    phys,
+                    page_flags | PageFlags::SHARED,
+                )
+            } {
                 serial_println!(
                     "[mmap] MMIO map failed at va={:#x} pa={:#x}: {:?}",
                     va,
@@ -2862,7 +2869,12 @@ pub fn sys_shm_map(args: &SyscallArgs) -> SyscallResult {
     };
 
     // User page flags. Always PRESENT + USER + NO_EXECUTE; WRITABLE opt-in.
-    let mut page_flags = PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE;
+    // SHARED: the region is shared by design -- fork keeps the mapping
+    // shared instead of copy-on-write, compaction leaves the frames alone,
+    // and a futex on it is keyed by its physical address, so processes that
+    // map it at different addresses meet in one wait queue.
+    let mut page_flags =
+        PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE | PageFlags::SHARED;
     if flags & MAP_WRITE != 0 {
         page_flags |= PageFlags::WRITABLE;
     }
@@ -13945,10 +13957,14 @@ pub fn sys_io_ring_setup(args: &SyscallArgs) -> SyscallResult {
 
     // The ring is shared data, never code: no execute, and no reason for the
     // kernel to reach it through this mapping (it uses the HHDM view).
+    // SHARED: the kernel reads and writes these frames too, so a fork must
+    // not turn them copy-on-write -- the parent's next submission would land
+    // in a private copy the kernel never sees.
     let page_flags = PageFlags::PRESENT
         | PageFlags::USER_ACCESSIBLE
         | PageFlags::WRITABLE
-        | PageFlags::NO_EXECUTE;
+        | PageFlags::NO_EXECUTE
+        | PageFlags::SHARED;
 
     #[allow(clippy::arithmetic_side_effects)]
     let frame_size = FRAME_SIZE as u64;

@@ -765,6 +765,11 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathcodec",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
 ]
 
 [[package]]

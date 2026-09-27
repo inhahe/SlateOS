@@ -37,7 +37,7 @@ pub(super) fn geometry_ok(sb: &[u8]) -> bool {
         .wrapping_mul(u64::from(agblocks))
         .wrapping_add(XFS_MIN_AG_BLOCKS);
     let rt = rextsize.wrapping_mul(blocksize);
-    if agcount == 0
+    let insane = agcount == 0
         || !(512..=32768).contains(&sectsize)
         || !(9..=15).contains(&sectlog)
         || sectsize != 1 << sectlog
@@ -53,11 +53,8 @@ pub(super) fn geometry_ok(sb: &[u8]) -> bool {
         || imax_pct > 100
         || dblocks == 0
         || dblocks > max_dblocks
-        || dblocks < min_dblocks
-    {
-        return false;
-    }
-    true
+        || dblocks < min_dblocks;
+    !insane
 }
 
 /// `xfs_verify_sb(ondisk, pr, mag)`: the geometry is self-consistent, and a

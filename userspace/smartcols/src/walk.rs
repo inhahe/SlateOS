@@ -158,9 +158,6 @@ impl Table {
                 return false;
             }
         }
-        if self.is_group_child(ln) && !self.is_last_group_child(ln) {
-            return false;
-        }
-        true
+        !(self.is_group_child(ln) && !self.is_last_group_child(ln))
     }
 }

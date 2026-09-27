@@ -66,12 +66,11 @@ paths are held to the same results by its test suite.
    `on_error`, which unwrapped the frame header to ask whether the frame
    refreshed its entropy context -- but `rav1d_decode_frame_exit` has already
    taken the header by then (and released that context if so), so any AV1
-   frame whose tile data failed to decode panicked the decoder. dav1d's C
-   reads the header through a pointer whose reference it has just dropped.
-   `on_error` now skips the context when there is no header. Found by
-   `imagecodec`'s test that decodes every byte-damaged copy of its AVIF
-   fixtures (`a_damaged_file_decodes_or_is_refused_but_never_panics`); worth
-   reporting upstream.
+   frame whose tile data failed to decode panicked the decoder. `on_error`
+   now skips the context when there is no header. Found by `imagecodec`'s
+   test that decodes every byte-damaged copy of its AVIF fixtures
+   (`a_damaged_file_decodes_or_is_refused_but_never_panics`); worth reporting
+   to rav1d.
 
 Every change is marked in the source with `SlateOS (VENDORED.md, change N)`,
 except the formatting and the lifetimes.

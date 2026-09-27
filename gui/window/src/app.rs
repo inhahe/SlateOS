@@ -89,6 +89,7 @@
 //! # }
 //! ```
 
+use std::ffi::OsString;
 use std::process::ExitCode;
 use std::task::Waker;
 use std::time::Duration;
@@ -914,12 +915,129 @@ impl Args {
 
     /// [`Args::parse`] over this process's own arguments, less argv[0].
     ///
+    /// Read as bytes first ([`ArgsOs::from_env`]), so that an argument that is
+    /// not UTF-8 -- a SlateOS file name may be any bytes but `/` and NUL -- is
+    /// an error naming it rather than the panic `std::env::args` would raise
+    /// before the application's window appeared. An application given file
+    /// names should read them with [`ArgsOs`], which takes such a name as it
+    /// is.
+    ///
     /// # Errors
     ///
-    /// As [`Args::parse`].
+    /// As [`ArgsOs::parse`], and for an argument that is not UTF-8.
     pub fn from_env() -> Result<Self, String> {
-        Self::parse(std::env::args().skip(1))
+        let os = ArgsOs::from_env()?;
+        let rest = os
+            .rest
+            .into_iter()
+            .map(|arg| {
+                arg.into_string().map_err(|arg| {
+                    format!(
+                        "the argument `{}` is not UTF-8 text, and this program reads its \
+                         arguments as text",
+                        std::path::Path::new(&arg).display()
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            display: os.display,
+            rest,
+        })
     }
+}
+
+/// [`Args`] with everything but the display option kept as the bytes it is,
+/// as [`std::env::ArgsOs`] is to [`std::env::Args`]: for an application given
+/// file names, which on SlateOS may hold any byte but `/` and NUL. The file
+/// manager's "open with" runs `program /path/to/file`, and a name that is not
+/// UTF-8 must reach the program intact -- not panic it, and not be turned
+/// into other text on the way.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArgsOs {
+    /// The address given with `--display`, if any. An address is text.
+    pub display: Option<String>,
+    /// Everything that was not a display option, in order, exactly as given
+    /// -- file names, usually. An application that takes no arguments should
+    /// say so if this is not empty rather than ignoring it.
+    pub rest: Vec<OsString>,
+}
+
+/// What [`ArgsOs::parse`] makes of one argument.
+enum ArgKind {
+    /// `--`: everything after it is an argument, whatever it looks like.
+    EndOfOptions,
+    /// `--display`, whose address is the next argument.
+    Display,
+    /// `--display=ADDR`.
+    DisplayInline,
+    /// Anything else.
+    Other,
+}
+
+impl ArgsOs {
+    /// Split arguments into a display address and everything else, by the
+    /// rules of [`Args::parse`]: a lone `--` ends option parsing, so a file
+    /// genuinely named `--display` is still openable. The options are told
+    /// apart by their bytes, so an argument that is not UTF-8 is never an
+    /// option and never an error -- it is kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message fit to print if `--display` is given without an
+    /// address, or with one that is not text.
+    pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Result<Self, String> {
+        let mut display = None;
+        let mut rest = Vec::new();
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            let bytes = arg.as_encoded_bytes();
+            let kind = if bytes == b"--" {
+                ArgKind::EndOfOptions
+            } else if bytes == b"--display" {
+                ArgKind::Display
+            } else if bytes.starts_with(b"--display=") {
+                ArgKind::DisplayInline
+            } else {
+                ArgKind::Other
+            };
+            match kind {
+                ArgKind::EndOfOptions => {
+                    rest.extend(args);
+                    break;
+                }
+                ArgKind::Display => {
+                    let addr = args.next().ok_or_else(|| {
+                        "--display needs an address, e.g. --display 127.0.0.1:7373".to_string()
+                    })?;
+                    display = Some(address_text(addr.to_str())?);
+                }
+                ArgKind::DisplayInline => {
+                    // The prefix is ASCII, so the argument is text exactly
+                    // when its address is.
+                    let addr = arg.to_str().and_then(|a| a.strip_prefix("--display="));
+                    display = Some(address_text(addr)?);
+                }
+                ArgKind::Other => rest.push(arg),
+            }
+        }
+        Ok(Self { display, rest })
+    }
+
+    /// [`ArgsOs::parse`] over this process's own arguments, less argv[0].
+    ///
+    /// # Errors
+    ///
+    /// As [`ArgsOs::parse`].
+    pub fn from_env() -> Result<Self, String> {
+        Self::parse(std::env::args_os().skip(1))
+    }
+}
+
+/// A display address, which must be text: it is dialled, not opened.
+fn address_text(addr: Option<&str>) -> Result<String, String> {
+    addr.map(str::to_string)
+        .ok_or_else(|| "--display needs an address that is text, e.g. 127.0.0.1:7373".to_string())
 }
 
 /// Connect to the compositor, reporting a failure in terms a user can act on.
@@ -967,7 +1085,7 @@ fn dial(program: &str, display: Option<&str>) -> Result<Link, ExitCode> {
 /// [`launch_with`] with the display it parsed — `launch` re-parses argv only so
 /// that an application with no arguments of its own needs no ceremony at all.
 pub fn launch<A: App + ?Sized>(program: &str, app: &mut A) -> ExitCode {
-    let args = match Args::from_env() {
+    let args = match ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("{program}: {e}");
@@ -1147,12 +1265,16 @@ impl ThemeWatch {
 /// part of [`launch`] that can be: everything else needs a compositor on the
 /// other end of a socket, and this is the half that decides whether to dial at
 /// all.
-fn leftover_complaint(program: &str, rest: &[String]) -> Option<String> {
+fn leftover_complaint(program: &str, rest: &[OsString]) -> Option<String> {
     let unexpected = rest.first()?;
     // The first one, not all of them: a user who typed two wrong arguments has
     // one mistake to understand, and naming the first is what points at where
-    // the command line went wrong.
-    Some(format!("{program}: unexpected argument `{unexpected}`"))
+    // the command line went wrong. Shown as a path is: a message about the
+    // argument, which may be any bytes, not the argument itself.
+    Some(format!(
+        "{program}: unexpected argument `{}`",
+        std::path::Path::new(unexpected).display()
+    ))
 }
 
 /// [`launch`] with the display address supplied, for an application that has
@@ -2291,7 +2413,7 @@ mod tests {
     #[test]
     fn an_argument_the_application_cannot_use_is_refused_and_named() {
         let complaint =
-            leftover_complaint("settings", &["notes.txt".to_string()]).expect("it must complain");
+            leftover_complaint("settings", &["notes.txt".into()]).expect("it must complain");
         assert!(
             complaint.contains("notes.txt"),
             "the message names the argument: {complaint}"
@@ -2305,8 +2427,8 @@ mod tests {
     /// The first, not a list of all of them: one mistake to understand.
     #[test]
     fn the_first_unusable_argument_is_the_one_reported() {
-        let complaint = leftover_complaint("settings", &["a".to_string(), "b".to_string()])
-            .expect("it must complain");
+        let complaint =
+            leftover_complaint("settings", &["a".into(), "b".into()]).expect("it must complain");
         assert!(
             complaint.contains('a') && !complaint.contains('b'),
             "{complaint}"
@@ -2499,6 +2621,75 @@ mod tests {
     fn a_bare_dash_is_an_argument_and_not_an_option() {
         let args = Args::parse(["-".to_string()]).unwrap();
         assert_eq!(args.rest, vec!["-".to_string()]);
+    }
+
+    /// An argument that is not UTF-8: on SlateOS a byte no UTF-8 sequence
+    /// holds, on the Windows host an unpaired surrogate -- each the platform's
+    /// own way for a file name not to be text.
+    fn not_text() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(b"caf\xE9.txt".to_vec())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0x61, 0xD800, 0x62])
+        }
+    }
+
+    /// A file name that is not text reaches the application exactly as given,
+    /// between two that are -- the file manager's "open with" on a name the
+    /// panic in `std::env::args` used to kill the program over.
+    #[test]
+    fn a_file_name_that_is_not_text_is_kept_as_it_is() {
+        let odd = not_text();
+        assert!(
+            odd.to_str().is_none(),
+            "the test's argument must not be text"
+        );
+        let args = ArgsOs::parse(["a.txt".into(), odd.clone(), "b.txt".into()]).unwrap();
+        assert_eq!(
+            args.rest,
+            vec![OsString::from("a.txt"), odd, "b.txt".into()]
+        );
+        assert_eq!(args.display, None);
+    }
+
+    /// The options are the same as [`Args`]'s, told apart by their bytes.
+    #[test]
+    fn the_os_arguments_take_the_same_options() {
+        let spaced = ArgsOs::parse(["--display".into(), "127.0.0.1:7373".into()]).unwrap();
+        let joined = ArgsOs::parse(["--display=127.0.0.1:7373".into()]).unwrap();
+        assert_eq!(spaced.display.as_deref(), Some("127.0.0.1:7373"));
+        assert_eq!(spaced, joined);
+        let ended = ArgsOs::parse(["--".into(), "--display".into(), not_text()]).unwrap();
+        assert_eq!(ended.rest, vec![OsString::from("--display"), not_text()]);
+        assert!(ArgsOs::parse(["--display".into()]).is_err());
+    }
+
+    /// An address is dialled, not opened, so one that is not text is an
+    /// error, spaced or joined -- not an argument, and not a panic.
+    #[test]
+    fn a_display_address_that_is_not_text_is_refused() {
+        let e = ArgsOs::parse(["--display".into(), not_text()]).unwrap_err();
+        assert!(e.contains("text"), "{e}");
+        let mut joined = OsString::from("--display=");
+        joined.push(not_text());
+        assert!(ArgsOs::parse([joined]).is_err());
+    }
+
+    /// The refusal names the argument that is not text, shown as a path is,
+    /// without the panic -- for a program that reads its arguments as text.
+    #[test]
+    fn a_leftover_that_is_not_text_is_named_in_the_complaint() {
+        let complaint = leftover_complaint("settings", &[not_text()]).unwrap();
+        assert!(
+            complaint.starts_with("settings: unexpected argument `"),
+            "{complaint}"
+        );
+        assert!(complaint.contains('\u{FFFD}'), "{complaint}");
     }
 
     /// The harness must not silently accept an event it cannot route.

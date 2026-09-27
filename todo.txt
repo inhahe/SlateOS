@@ -58832,7 +58832,16 @@ is already waiting, not whether the setter exists.
   of a module that exports C symbols whose name musl's headers define --
   with §1119's table of eleven as its allowlist, each with its reason.
   Scoped like check-libc-abi.py to pushes that touch `posix/src/`.
-- **posix/src: 46 facades whose tests are the only tests of something
+- **`getifaddrs`: the `AF_PACKET` entries** (`posix/src/socket.rs`,
+  `D-POSIX-GETIFADDRS-SHARED-ONE-STATIC-LIST`).  glibc lists, before the
+  `AF_INET` ones, an `AF_PACKET` entry per interface: `ifa_addr` a
+  `sockaddr_ll` with the hardware address (`sll_hatype` `ARPHRD_ETHER`, or
+  `ARPHRD_LOOPBACK` for lo), `ifa_broadaddr` the broadcast MAC, and
+  `ifa_data` a `struct rtnl_link_stats` -- which programs read without a NULL
+  check.  The kernel's record has the MAC (`sys_net_if_info` bytes 16..22);
+  the counters are in `/proc/net/dev` (`kernel/src/fs/netdev.rs`).  Needs
+  `sockaddr_ll` and `rtnl_link_stats` checked against musl (§1011, §1119).
+- **posix/src: 44 facades whose tests are the only tests of something
   live** (the sequel to TD-D-1700-CONSTANT-MODULES-NOTHING-USED).  Nothing
   the library exports reaches these modules -- they re-export socket.rs's,
   unistd.rs's, process.rs's names for Rust callers that cannot exist (only
@@ -58841,13 +58850,14 @@ is already waiting, not whether the setter exists.
   getrandom flag checks (the Phase 80 set: unknown bits, GRND_RANDOM with
   GRND_INSECURE, which check comes first), sys_reboot.rs's 26 (Phase 77),
   sys_personality.rs's 22, mntent.rs's (unistd.rs tests getmntent twice),
-  linux_quota.rs's quotactl tests, netdb.rs's herror, ifaddrs.rs's one test
-  of getifaddrs (socket.rs has none).  The rest duplicate tests the defining
-  module has (arpa_inet.rs, the epoll/eventfd/signalfd/timerfd/inotify
+  linux_quota.rs's quotactl tests, netdb.rs's herror.  The rest duplicate
+  tests the defining module has (arpa_inet.rs, the epoll, eventfd,
+  signalfd, timerfd and inotify
   family, sys_uio.rs, sys_vfs.rs, sys_xattr.rs, ...).  Method: for each,
   move what is not already tested into the defining module's tests, in
   that module's terms, then delete the facade (§1118) -- one family a
-  commit.  net_if_packet.rs goes with ifaddrs.rs, which re-exports from it.
+  commit.  (ifaddrs.rs and net_if_packet.rs went on 2026-09-27, when
+  getifaddrs was fixed and tested in socket.rs.)
   The scan that finds them: comments stripped, roots every module that
   exports a C symbol, what lib.rs names, what another crate imports and
   what a script runs (abi_layout.rs, via check-libc-abi.py).  103 others,

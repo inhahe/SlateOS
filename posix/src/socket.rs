@@ -5886,63 +5886,77 @@ fn parse_port_string(s: *const u8) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// if_nametoindex / if_indextoname — network interface stubs
+// Network interfaces: names, indices and addresses
 // ---------------------------------------------------------------------------
+//
+// This system has two interfaces, numbered as Linux numbers them: the loopback
+// first, then the one NIC. The kernel calls the NIC `eth0`
+// (`kernel/src/fs/netdev.rs`, `NIC_IFACE`) and describes it through
+// `SYS_NET_IF_INFO`, which always answers -- the interface exists whether or
+// not it is up. Until 2026-09-27 `lo` and `eth0` were both index 1, index 1
+// was `eth0` alone, `if_nameindex` listed only `eth0`, and `if_nameindex` and
+// `getifaddrs` handed every caller the same static storage -- rewritten under
+// a caller still reading it, and raced by two threads.
+
+/// The interfaces, in index order: `(index, name)`.
+const INTERFACES: [(u32, &[u8]); 2] = [(1, b"lo"), (2, b"eth0")];
+
+/// Maximum interface name length, the terminating NUL included.
+pub const IF_NAMESIZE: usize = 16;
+
+/// The index of the interface named `name`, if there is one.
+fn interface_index(name: &[u8]) -> Option<u32> {
+    INTERFACES.iter().find(|&&(_, n)| n == name).map(|&(i, _)| i)
+}
 
 /// Convert a network interface name to its index.
 ///
-/// Stub: returns 0 (failure) since our OS doesn't have named network
-/// interfaces yet.  Programs that enumerate interfaces will see this
-/// as "interface not found".
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn if_nametoindex(ifname: *const u8) -> u32 {
-    if ifname.is_null() {
-        return 0; // 0 means "no such interface" per POSIX.
-    }
-
-    // Our kernel has a single network interface named "eth0".
-    // SAFETY: caller guarantees ifname is a valid C string.
-    let len = unsafe { crate::string::strlen(ifname) };
-    let name = unsafe { core::slice::from_raw_parts(ifname, len) };
-    // eth0 = index 1, lo = index 1 (we only have one real interface).
-    u32::from(name == b"eth0" || name == b"lo")
-}
-
-/// Convert a network interface index to its name.
-///
-/// Returns a pointer to `ifname` on success, null on error.
-/// `ifname` must point to a buffer of at least `IF_NAMESIZE` bytes.
+/// Returns 0 for a name no interface has, with `errno` `ENODEV`, as glibc
+/// does (its `SIOCGIFINDEX` answers `ENODEV`); a NULL name is 0 as well.
 ///
 /// # Safety
 ///
-/// `ifname` must point to writable memory of at least `IF_NAMESIZE` bytes.
+/// `ifname` must be NULL or a valid NUL-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn if_nametoindex(ifname: *const u8) -> u32 {
+    if ifname.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's contract: a NUL-terminated string.
+    let name = unsafe { core::ffi::CStr::from_ptr(ifname.cast()) }.to_bytes();
+    if let Some(index) = interface_index(name) {
+        return index;
+    }
+    errno::set_errno(errno::ENODEV);
+    0
+}
+
+/// Convert a network interface index to its name, written into `ifname`.
+///
+/// Returns `ifname`, or NULL with `errno` `ENXIO` for an index no interface
+/// has -- glibc's mapping of the kernel's `ENODEV`.
+///
+/// # Safety
+///
+/// `ifname` must point to writable memory of at least [`IF_NAMESIZE`] bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn if_indextoname(ifindex: u32, ifname: *mut u8) -> *mut u8 {
     if ifname.is_null() {
         errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
     }
-
-    // Index 1 = "eth0" (our only interface).
-    if ifindex == 1 {
-        // SAFETY: caller guarantees ifname has IF_NAMESIZE bytes.
-        let name = b"eth0\0";
-        unsafe {
-            core::ptr::copy_nonoverlapping(name.as_ptr(), ifname, name.len());
-        }
-        ifname
-    } else {
+    let Some(&(_, name)) = INTERFACES.iter().find(|&&(i, _)| i == ifindex) else {
         errno::set_errno(errno::ENXIO);
-        core::ptr::null_mut()
+        return core::ptr::null_mut();
+    };
+    // SAFETY: the caller's contract: `IF_NAMESIZE` writable bytes, and every
+    // name here is shorter than that with its NUL.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), ifname, name.len());
+        *ifname.add(name.len()) = 0;
     }
+    ifname
 }
-
-/// Maximum interface name length.
-pub const IF_NAMESIZE: usize = 16;
-
-// ---------------------------------------------------------------------------
-// if_nameindex / if_freenameindex — interface enumeration
-// ---------------------------------------------------------------------------
 
 /// Entry returned by `if_nameindex`.
 #[repr(C)]
@@ -5953,53 +5967,52 @@ pub struct IfNameindex {
     pub if_name: *mut u8,
 }
 
-/// Static storage for the interface name returned by `if_nameindex`.
-///
-/// Our OS has a single network interface "eth0" (index 1).  We use
-/// static storage to avoid heap allocation (the crate is `no_std`).
-static mut IF_NAMEINDEX_NAMES: [u8; 5] = *b"eth0\0";
+/// `if_nameindex`'s block: the array, its terminator, and the names the
+/// entries point into -- one allocation, so that `if_freenameindex` is `free`.
+#[repr(C)]
+struct NameindexBlock {
+    entries: [IfNameindex; INTERFACES.len() + 1],
+    names: [[u8; IF_NAMESIZE]; INTERFACES.len()],
+}
 
-/// Static array of `IfNameindex` entries: one real entry + sentinel.
-static mut IF_NAMEINDEX_TABLE: [IfNameindex; 2] = [
-    IfNameindex {
-        if_index: 1,
-        if_name: core::ptr::null_mut(),
-    },
-    IfNameindex {
-        if_index: 0,
-        if_name: core::ptr::null_mut(),
-    },
-];
-
-/// Return an array of all network interface names and indices.
-///
-/// Returns a pointer to a zero-terminated array of `IfNameindex`
-/// structures.  The caller must free the result with
-/// `if_freenameindex()`.
-///
-/// Our OS has a single interface "eth0" (index 1).
+/// Return every network interface's index and name: an array ending in an
+/// entry whose index is 0, allocated for this caller.  Free it with
+/// [`if_freenameindex`].  NULL with `ENOMEM` if memory ran out.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn if_nameindex() -> *mut IfNameindex {
-    // SAFETY: Single-threaded.  We patch the if_name pointer to
-    // point into the static name buffer on each call.
+    let block = crate::malloc::calloc(1, size_of::<NameindexBlock>()).cast::<NameindexBlock>();
+    if block.is_null() {
+        errno::set_errno(errno::ENOMEM);
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `block` is a fresh, zeroed allocation of one `NameindexBlock`
+    // (malloc's alignment suits it), used by nothing else; all-zero is a valid
+    // `NameindexBlock` (null names, index 0), so the terminator is already set.
     unsafe {
-        let name_ptr = core::ptr::addr_of_mut!(IF_NAMEINDEX_NAMES).cast::<u8>();
-        let table = core::ptr::addr_of_mut!(IF_NAMEINDEX_TABLE);
-        // First entry: "eth0", index 1.
-        if let Some(entry) = (*table).get_mut(0) {
-            entry.if_name = name_ptr;
+        let names = core::ptr::addr_of_mut!((*block).names).cast::<[u8; IF_NAMESIZE]>();
+        let entries = core::ptr::addr_of_mut!((*block).entries).cast::<IfNameindex>();
+        for (k, &(index, name)) in INTERFACES.iter().enumerate() {
+            let slot = names.add(k).cast::<u8>();
+            core::ptr::copy_nonoverlapping(name.as_ptr(), slot, name.len());
+            entries.add(k).write(IfNameindex {
+                if_index: index,
+                if_name: slot,
+            });
         }
-        // Second entry: sentinel (index 0, name null) — already initialized.
-        (*table).as_mut_ptr()
+        entries
     }
 }
 
-/// Free the array returned by `if_nameindex`.
+/// Free an array [`if_nameindex`] returned.  NULL is ignored.
 ///
-/// Since our implementation uses static storage, this is a no-op.
+/// # Safety
+///
+/// `ptr` is NULL, or an array from [`if_nameindex`] not freed before.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn if_freenameindex(_ptr: *mut IfNameindex) {
-    // No-op: we use static storage, not heap allocation.
+pub unsafe extern "C" fn if_freenameindex(ptr: *mut IfNameindex) {
+    // SAFETY: the caller's contract: the start of one `if_nameindex` block,
+    // which is one `malloc` allocation.
+    unsafe { crate::malloc::free(ptr.cast()) };
 }
 
 // ---------------------------------------------------------------------------
@@ -6019,9 +6032,10 @@ pub struct Ifaddrs {
     pub ifa_addr: *const Sockaddr,
     /// Network mask.
     pub ifa_netmask: *const Sockaddr,
-    /// Broadcast/destination address (union in BSD; we use broadcast).
+    /// Broadcast address (the union's other member is a point-to-point
+    /// link's destination, which neither interface here is).
     pub ifa_broadaddr: *const Sockaddr,
-    /// Interface-specific data (unused).
+    /// Interface-specific data: NULL for an `AF_INET` entry, as in glibc.
     pub ifa_data: *const u8,
 }
 
@@ -6037,140 +6051,153 @@ pub const IFF_RUNNING: u32 = 0x40;
 /// Interface supports broadcast.
 pub const IFF_BROADCAST: u32 = 2;
 
-/// Static storage for getifaddrs (single interface).
-///
-/// We have one physical interface ("eth0") whose address is obtained
-/// from `SYS_NET_STAT` (if configured) and a loopback ("lo").
-static mut IFADDRS_ETH0: Ifaddrs = Ifaddrs {
-    ifa_next: core::ptr::null_mut(),
-    ifa_name: core::ptr::null(),
-    ifa_flags: 0,
-    ifa_addr: core::ptr::null(),
-    ifa_netmask: core::ptr::null(),
-    ifa_broadaddr: core::ptr::null(),
-    ifa_data: core::ptr::null(),
-};
-static mut IFADDRS_LO: Ifaddrs = Ifaddrs {
-    ifa_next: core::ptr::null_mut(),
-    ifa_name: core::ptr::null(),
-    ifa_flags: 0,
-    ifa_addr: core::ptr::null(),
-    ifa_netmask: core::ptr::null(),
-    ifa_broadaddr: core::ptr::null(),
-    ifa_data: core::ptr::null(),
-};
+/// One `getifaddrs` entry: the list node and everything it points at.
+#[repr(C)]
+struct IfaddrsEntry {
+    node: Ifaddrs,
+    addr: SockaddrIn,
+    netmask: SockaddrIn,
+    broadaddr: SockaddrIn,
+    name: [u8; IF_NAMESIZE],
+}
 
-static mut IFADDRS_ETH0_NAME: [u8; 8] = *b"eth0\0\0\0\0";
-static mut IFADDRS_LO_NAME: [u8; 4] = *b"lo\0\0";
-static mut IFADDRS_ETH0_ADDR: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16,
-    sin_port: 0,
-    sin_addr: InAddr { s_addr: 0 },
-    sin_zero: [0; 8],
-};
-static mut IFADDRS_ETH0_MASK: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16,
-    sin_port: 0,
-    sin_addr: InAddr { s_addr: 0 },
-    sin_zero: [0; 8],
-};
-static mut IFADDRS_LO_ADDR: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16,
-    sin_port: 0,
-    sin_addr: InAddr {
-        s_addr: u32::to_be(INADDR_LOOPBACK),
-    },
-    sin_zero: [0; 8],
-};
-static mut IFADDRS_LO_MASK: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16,
-    sin_port: 0,
-    sin_addr: InAddr {
-        s_addr: u32::to_be(0xFF00_0000),
-    },
-    sin_zero: [0; 8],
-};
+/// An IPv4 address or mask, in network byte order, as a `sockaddr_in`.
+fn inet_sockaddr(s_addr: u32) -> SockaddrIn {
+    SockaddrIn {
+        sin_family: AF_INET as u16,
+        sin_port: 0,
+        sin_addr: InAddr { s_addr },
+        sin_zero: [0; 8],
+    }
+}
+
+/// One `getifaddrs` entry's contents, before it is laid out.
+#[derive(Clone, Copy)]
+struct InetRow {
+    name: &'static [u8],
+    flags: u32,
+    /// Address, mask and broadcast address, network byte order.
+    addr: u32,
+    mask: u32,
+    broadcast: Option<u32>,
+}
+
+/// `getifaddrs`'s list, in one allocation: `lo`, then `eth0` if it has an
+/// address -- `Some((address, mask))`, network byte order.  NULL if memory
+/// ran out.
+fn build_ifaddrs(eth0: Option<(u32, u32)>) -> *mut Ifaddrs {
+    let lo = InetRow {
+        name: b"lo",
+        flags: IFF_UP | IFF_LOOPBACK | IFF_RUNNING,
+        addr: u32::to_be(INADDR_LOOPBACK),
+        mask: u32::to_be(0xFF00_0000),
+        broadcast: None,
+    };
+    let (count, second) = match eth0 {
+        Some((addr, mask)) => (
+            2,
+            InetRow {
+                name: b"eth0",
+                flags: IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST,
+                addr,
+                mask,
+                broadcast: Some(addr | !mask),
+            },
+        ),
+        None => (1, lo),
+    };
+    let rows = [lo, second];
+    let block = crate::malloc::calloc(count, size_of::<IfaddrsEntry>()).cast::<IfaddrsEntry>();
+    if block.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `block` is a fresh, zeroed allocation of `count` entries
+    // (malloc's alignment suits them), used by nothing else; each pointer
+    // written points into the same block, which lives until `freeifaddrs`.
+    unsafe {
+        // Last entry first, so each node's `ifa_next` is the one just written.
+        let mut next: *mut Ifaddrs = core::ptr::null_mut();
+        for (k, row) in rows.iter().take(count).enumerate().rev() {
+            let e = block.add(k);
+            core::ptr::addr_of_mut!((*e).addr).write(inet_sockaddr(row.addr));
+            core::ptr::addr_of_mut!((*e).netmask).write(inet_sockaddr(row.mask));
+            let broadaddr = match row.broadcast {
+                Some(b) => {
+                    core::ptr::addr_of_mut!((*e).broadaddr).write(inet_sockaddr(b));
+                    core::ptr::addr_of!((*e).broadaddr).cast::<Sockaddr>()
+                }
+                None => core::ptr::null(),
+            };
+            let slot = core::ptr::addr_of_mut!((*e).name).cast::<u8>();
+            core::ptr::copy_nonoverlapping(row.name.as_ptr(), slot, row.name.len());
+            core::ptr::addr_of_mut!((*e).node).write(Ifaddrs {
+                ifa_next: next,
+                ifa_name: slot,
+                ifa_flags: row.flags,
+                ifa_addr: core::ptr::addr_of!((*e).addr).cast::<Sockaddr>(),
+                ifa_netmask: core::ptr::addr_of!((*e).netmask).cast::<Sockaddr>(),
+                ifa_broadaddr: broadaddr,
+                ifa_data: core::ptr::null(),
+            });
+            next = core::ptr::addr_of_mut!((*e).node);
+        }
+        next
+    }
+}
 
 /// Retrieve a linked list of network interface addresses.
 ///
-/// Populates `*ifap` with a pointer to a linked list of `Ifaddrs`
-/// structures (one per interface).  Our OS exposes "eth0" (the primary
-/// NIC, configured via DHCP) and "lo" (loopback, always 127.0.0.1/8).
+/// Each call allocates its own list, freed with [`freeifaddrs`]: the
+/// loopback, `lo`, 127.0.0.1/8, and then `eth0` with the address and mask
+/// the kernel reports -- if it is up and has one -- and its broadcast
+/// address. `AF_INET` entries only: glibc also lists an `AF_PACKET` entry per
+/// interface (its hardware address, and link statistics in `ifa_data`), which
+/// this does not (`todo.txt`, lane D).
 ///
-/// The returned data is in static storage — `freeifaddrs()` is a no-op.
+/// Returns 0, or -1 with `EFAULT` for a NULL `ifap` or `ENOMEM`.
 ///
 /// # Safety
 ///
-/// `ifap` must be a valid pointer to write the result.
+/// `ifap` must be NULL or valid to write the result.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
     if ifap.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-
-    // Query the kernel for interface configuration (IP, mask, gateway, DNS, MAC, flags).
-    let mut if_info = [0u8; 24];
-    let net_up = syscall2(
-        SYS_NET_IF_INFO,
-        if_info.as_mut_ptr() as u64,
-        if_info.len() as u64,
-    ) == 0
-        && if_info[22] != 0; // byte 22 = flags, bit 0 = up
-
-    // SAFETY: single-threaded, static storage.
-    unsafe {
-        // Set up loopback entry.
-        let lo = core::ptr::addr_of_mut!(IFADDRS_LO);
-        let lo_addr = core::ptr::addr_of_mut!(IFADDRS_LO_ADDR);
-        let lo_mask = core::ptr::addr_of_mut!(IFADDRS_LO_MASK);
-        let lo_name = core::ptr::addr_of_mut!(IFADDRS_LO_NAME);
-        (*lo_addr).sin_addr.s_addr = u32::to_be(INADDR_LOOPBACK);
-        (*lo_mask).sin_addr.s_addr = u32::to_be(0xFF00_0000); // 255.0.0.0
-        (*lo).ifa_name = (*lo_name).as_ptr();
-        (*lo).ifa_flags = IFF_UP | IFF_LOOPBACK | IFF_RUNNING;
-        (*lo).ifa_addr = lo_addr.cast();
-        (*lo).ifa_netmask = lo_mask.cast();
-        (*lo).ifa_broadaddr = core::ptr::null();
-        (*lo).ifa_data = core::ptr::null();
-        (*lo).ifa_next = core::ptr::null_mut();
-
-        if net_up {
-            // Set up eth0 entry with real IP and mask from kernel.
-            let eth0 = core::ptr::addr_of_mut!(IFADDRS_ETH0);
-            let eth0_addr = core::ptr::addr_of_mut!(IFADDRS_ETH0_ADDR);
-            let eth0_mask = core::ptr::addr_of_mut!(IFADDRS_ETH0_MASK);
-            let eth0_name = core::ptr::addr_of_mut!(IFADDRS_ETH0_NAME);
-
-            // if_info[0..4] = IP, [4..8] = mask (already in network byte order).
-            (*eth0_addr).sin_addr.s_addr =
-                u32::from_ne_bytes([if_info[0], if_info[1], if_info[2], if_info[3]]);
-            (*eth0_mask).sin_addr.s_addr =
-                u32::from_ne_bytes([if_info[4], if_info[5], if_info[6], if_info[7]]);
-
-            (*eth0).ifa_name = (*eth0_name).as_ptr();
-            (*eth0).ifa_flags = IFF_UP | IFF_RUNNING | IFF_MULTICAST | IFF_BROADCAST;
-            (*eth0).ifa_addr = eth0_addr.cast();
-            (*eth0).ifa_netmask = eth0_mask.cast();
-            (*eth0).ifa_broadaddr = core::ptr::null();
-            (*eth0).ifa_data = core::ptr::null();
-            (*eth0).ifa_next = lo; // eth0 → lo → NULL
-            *ifap = eth0;
-        } else {
-            // No network — just loopback.
-            *ifap = lo;
-        }
+    // The kernel's record: [0..4] address and [4..8] mask, in network byte
+    // order, [22] bit 0 up (`sys_net_if_info`).
+    let mut info = [0u8; 24];
+    let answered =
+        syscall2(SYS_NET_IF_INFO, info.as_mut_ptr() as u64, info.len() as u64) == 0;
+    let word = |range: core::ops::Range<usize>| {
+        info.get(range)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map_or(0, u32::from_ne_bytes)
+    };
+    let (ip, mask) = (word(0..4), word(4..8));
+    let up = info.get(22).is_some_and(|&f| f & 1 != 0);
+    let eth0 = (answered && up && ip != 0).then_some((ip, mask));
+    let list = build_ifaddrs(eth0);
+    if list.is_null() {
+        errno::set_errno(errno::ENOMEM);
+        return -1;
     }
-
+    // SAFETY: the caller's contract: `ifap` is valid to write.
+    unsafe { *ifap = list };
     0
 }
 
-/// Free memory allocated by `getifaddrs()`.
+/// Free a list [`getifaddrs`] returned.  NULL is ignored.
 ///
-/// No-op: our implementation uses static storage.
+/// # Safety
+///
+/// `ifa` is NULL, or the head of a list from [`getifaddrs`] not freed before.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn freeifaddrs(_ifa: *mut Ifaddrs) {
-    // Static storage — nothing to free.
+pub unsafe extern "C" fn freeifaddrs(ifa: *mut Ifaddrs) {
+    // SAFETY: the caller's contract: the head of a `getifaddrs` list, which
+    // is the start of its one `malloc` allocation.
+    unsafe { crate::malloc::free(ifa.cast()) };
 }
 
 // ---------------------------------------------------------------------------
@@ -9394,24 +9421,20 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    // -- if_nametoindex / if_indextoname --
+    // -- if_nametoindex / if_indextoname: lo is 1, eth0 2, as on Linux --
 
     #[test]
-    fn test_if_nametoindex_eth0() {
-        let idx = unsafe { if_nametoindex(b"eth0\0".as_ptr()) };
-        assert_eq!(idx, 1);
+    fn if_nametoindex_numbers_the_loopback_first() {
+        assert_eq!(unsafe { if_nametoindex(b"lo\0".as_ptr()) }, 1);
+        assert_eq!(unsafe { if_nametoindex(b"eth0\0".as_ptr()) }, 2);
     }
 
     #[test]
-    fn test_if_nametoindex_lo() {
-        let idx = unsafe { if_nametoindex(b"lo\0".as_ptr()) };
-        assert_eq!(idx, 1);
-    }
-
-    #[test]
-    fn test_if_nametoindex_unknown() {
-        let idx = unsafe { if_nametoindex(b"nonexist99\0".as_ptr()) };
-        assert_eq!(idx, 0);
+    fn if_nametoindex_of_no_interface_is_zero_and_enodev() {
+        errno::set_errno(0);
+        assert_eq!(unsafe { if_nametoindex(b"nonexist99\0".as_ptr()) }, 0);
+        assert_eq!(errno::get_errno(), errno::ENODEV);
+        assert_eq!(unsafe { if_nametoindex(b"\0".as_ptr()) }, 0);
     }
 
     #[test]
@@ -9421,60 +9444,143 @@ mod tests {
     }
 
     #[test]
-    fn test_if_indextoname_eth0() {
-        let mut buf = [0u8; 16];
-        let ret = unsafe { if_indextoname(1, buf.as_mut_ptr()) };
-        assert!(!ret.is_null());
-        assert_eq!(&buf[..4], b"eth0");
+    fn if_indextoname_names_each_index() {
+        let mut buf = [0xAAu8; IF_NAMESIZE];
+        assert_eq!(unsafe { if_indextoname(1, buf.as_mut_ptr()) }, buf.as_mut_ptr());
+        assert_eq!(&buf[..3], b"lo\0");
+        let mut buf = [0xAAu8; IF_NAMESIZE];
+        assert_eq!(unsafe { if_indextoname(2, buf.as_mut_ptr()) }, buf.as_mut_ptr());
+        assert_eq!(&buf[..5], b"eth0\0");
     }
 
     #[test]
-    fn test_if_indextoname_unknown() {
-        let mut buf = [0u8; 16];
-        let ret = unsafe { if_indextoname(999, buf.as_mut_ptr()) };
-        assert!(ret.is_null());
+    fn if_indextoname_of_no_interface_is_enxio() {
+        let mut buf = [0u8; IF_NAMESIZE];
+        for index in [0, 3, 999] {
+            errno::set_errno(0);
+            assert!(unsafe { if_indextoname(index, buf.as_mut_ptr()) }.is_null());
+            assert_eq!(errno::get_errno(), errno::ENXIO, "index {index}");
+        }
     }
 
     // -- if_nameindex / if_freenameindex --
 
+    /// Every interface, in index order, then the terminator -- and the names
+    /// agree with `if_nametoindex`.
     #[test]
-    fn test_if_nameindex_returns_non_null() {
+    fn if_nameindex_lists_every_interface() {
         let table = if_nameindex();
         assert!(!table.is_null());
+        let mut seen = Vec::new();
+        for k in 0.. {
+            // SAFETY: the array ends with an index-0 entry, not yet reached.
+            let e = unsafe { &*table.add(k) };
+            if e.if_index == 0 {
+                assert!(e.if_name.is_null());
+                break;
+            }
+            let name = unsafe { c_str_to_slice(e.if_name.cast_const()) }.to_vec();
+            let mut z = name.clone();
+            z.push(0);
+            assert_eq!(unsafe { if_nametoindex(z.as_ptr()) }, e.if_index);
+            seen.push((e.if_index, name));
+        }
+        assert_eq!(seen, vec![(1, b"lo".to_vec()), (2, b"eth0".to_vec())]);
+        unsafe { if_freenameindex(table) };
     }
 
+    /// Each call's array is its own: freeing one leaves another intact.
     #[test]
-    fn test_if_nameindex_first_entry() {
-        let table = if_nameindex();
-        assert!(!table.is_null());
-        // SAFETY: if_nameindex returns a valid static array.
-        let first = unsafe { &*table };
-        assert_eq!(first.if_index, 1, "First interface should be index 1");
-        assert!(!first.if_name.is_null(), "if_name should not be null");
-        let name = unsafe { c_str_to_slice(first.if_name.cast_const()) };
-        assert_eq!(name, b"eth0", "First interface should be eth0");
-    }
-
-    #[test]
-    fn test_if_nameindex_sentinel() {
-        let table = if_nameindex();
-        assert!(!table.is_null());
-        // Second entry should be the sentinel (index = 0).
-        let sentinel = unsafe { &*table.add(1) };
-        assert_eq!(sentinel.if_index, 0, "Sentinel should have index 0");
-    }
-
-    #[test]
-    fn test_if_freenameindex_no_crash() {
-        let table = if_nameindex();
-        if_freenameindex(table);
-        // Should not crash (it's a no-op).
+    fn if_nameindex_gives_each_caller_its_own_array() {
+        let a = if_nameindex();
+        let b = if_nameindex();
+        assert!(!a.is_null() && !b.is_null());
+        assert_ne!(a, b);
+        unsafe { if_freenameindex(a) };
+        let name = unsafe { c_str_to_slice((*b).if_name.cast_const()) };
+        assert_eq!(name, b"lo");
+        unsafe { if_freenameindex(b) };
     }
 
     #[test]
     fn test_if_freenameindex_null() {
-        if_freenameindex(core::ptr::null_mut());
-        // Should not crash.
+        unsafe { if_freenameindex(core::ptr::null_mut()) };
+    }
+
+    // -- getifaddrs / freeifaddrs --
+
+    /// The `sockaddr_in` at `sa`, as (family, address in network order).
+    fn inet_of(sa: *const Sockaddr) -> (u16, u32) {
+        assert!(!sa.is_null());
+        // SAFETY: every address getifaddrs hands out is a `SockaddrIn`.
+        let sin = unsafe { &*sa.cast::<SockaddrIn>() };
+        (sin.sin_family, sin.sin_addr.s_addr)
+    }
+
+    /// With the NIC down (as on the host, where the kernel's record is not
+    /// there to read), the list is the loopback alone.
+    #[test]
+    fn getifaddrs_lists_the_loopback() {
+        let mut list: *mut Ifaddrs = core::ptr::null_mut();
+        assert_eq!(unsafe { getifaddrs(&mut list) }, 0);
+        assert!(!list.is_null());
+        let lo = unsafe { &*list };
+        assert_eq!(unsafe { c_str_to_slice(lo.ifa_name) }, b"lo");
+        assert_eq!(lo.ifa_flags, IFF_UP | IFF_LOOPBACK | IFF_RUNNING);
+        let af = AF_INET as u16;
+        assert_eq!(inet_of(lo.ifa_addr), (af, u32::to_be(INADDR_LOOPBACK)));
+        assert_eq!(inet_of(lo.ifa_netmask), (af, u32::to_be(0xFF00_0000)));
+        assert!(lo.ifa_broadaddr.is_null());
+        assert!(lo.ifa_data.is_null());
+        unsafe { freeifaddrs(list) };
+    }
+
+    /// `eth0`, when it has an address: after `lo`, with its mask and the
+    /// broadcast address they make.
+    #[test]
+    fn getifaddrs_lists_eth0_with_its_broadcast_address() {
+        let ip = u32::from_ne_bytes([10, 0, 2, 15]);
+        let mask = u32::from_ne_bytes([255, 255, 255, 0]);
+        let list = build_ifaddrs(Some((ip, mask)));
+        assert!(!list.is_null());
+        let lo = unsafe { &*list };
+        assert_eq!(unsafe { c_str_to_slice(lo.ifa_name) }, b"lo");
+        assert!(!lo.ifa_next.is_null());
+        let eth0 = unsafe { &*lo.ifa_next };
+        assert_eq!(unsafe { c_str_to_slice(eth0.ifa_name) }, b"eth0");
+        assert_eq!(eth0.ifa_flags, IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST);
+        let af = AF_INET as u16;
+        assert_eq!(inet_of(eth0.ifa_addr), (af, ip));
+        assert_eq!(inet_of(eth0.ifa_netmask), (af, mask));
+        let broadcast = u32::from_ne_bytes([10, 0, 2, 255]);
+        assert_eq!(inet_of(eth0.ifa_broadaddr), (af, broadcast));
+        assert!(eth0.ifa_next.is_null());
+        unsafe { freeifaddrs(list) };
+    }
+
+    /// Each call's list is its own: a second call does not rewrite the first,
+    /// which it did while the list lived in static storage.
+    #[test]
+    fn getifaddrs_gives_each_caller_its_own_list() {
+        let first = build_ifaddrs(Some((u32::from_ne_bytes([10, 0, 2, 15]), !0)));
+        let second = build_ifaddrs(None);
+        assert!(!first.is_null() && !second.is_null());
+        assert_ne!(first, second);
+        // The first list still has both entries after the second call.
+        let lo = unsafe { &*first };
+        assert!(!lo.ifa_next.is_null());
+        unsafe { freeifaddrs(second) };
+        let eth0 = unsafe { &*lo.ifa_next };
+        assert_eq!(unsafe { c_str_to_slice(eth0.ifa_name) }, b"eth0");
+        unsafe { freeifaddrs(first) };
+    }
+
+    #[test]
+    fn getifaddrs_null_is_efault_and_freeifaddrs_null_is_nothing() {
+        errno::set_errno(0);
+        assert_eq!(unsafe { getifaddrs(core::ptr::null_mut()) }, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        unsafe { freeifaddrs(core::ptr::null_mut()) };
     }
 
     #[test]

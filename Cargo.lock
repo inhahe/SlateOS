@@ -295,6 +295,7 @@ name = "calendar"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "calendarstore",
  "guitk",
  "oswindow",
  "pathtext",
@@ -303,6 +304,18 @@ dependencies = [
  "textfmt",
  "textline",
  "unsaved",
+]
+
+[[package]]
+name = "calendarstore"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "guitk",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
+ "textfmt",
 ]
 
 [[package]]
@@ -1723,9 +1736,11 @@ dependencies = [
  "posix",
  "pwkdf",
  "scratchdir",
+ "settingsfile",
  "sha2",
  "tzrules",
  "userdb",
+ "yamldoc",
 ]
 
 [[package]]
@@ -1958,6 +1973,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "settingsfile",
  "unsaved",
 ]
 

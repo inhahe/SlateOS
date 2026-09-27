@@ -605,6 +605,18 @@ impl Table {
         self.format == Format::Json
     }
 
+    /// `scols_table_is_raw`.
+    #[must_use]
+    pub fn is_raw(&self) -> bool {
+        self.format == Format::Raw
+    }
+
+    /// `scols_table_is_export`.
+    #[must_use]
+    pub fn is_export(&self) -> bool {
+        self.format == Format::Export
+    }
+
     /// `scols_table_is_tree`: some column draws the tree.
     #[must_use]
     pub fn is_tree(&self) -> bool {

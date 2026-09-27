@@ -1,10 +1,13 @@
 //! util-linux 2.39.3's `lib/path.c`, `lib/sysfs.c`, `lib/canonicalize.c`
-//! and `lib/ismounted.c`: the directory a block device has under
-//! `/sys/dev/block/MAJ:MIN`, its attributes read the way util-linux reads
-//! them, the conversions between device numbers, kernel names and `/dev`
-//! paths that libblkid, libmount and lsblk all make, paths made canonical
-//! the way both libraries make them ([`canonicalize`]), and whether a device
-//! is mounted or busy ([`ismounted`]).
+//! and `lib/ismounted.c`, and the parts of `lib/blkdev.c` and
+//! `lib/loopdev.c` that read names rather than devices: the directory a
+//! block device has under `/sys/dev/block/MAJ:MIN`, its attributes read the
+//! way util-linux reads them, the conversions between device numbers, kernel
+//! names and `/dev` paths that libblkid, libmount and lsblk all make, the
+//! subsystems and SCSI host a device hangs from, paths made canonical the
+//! way both libraries make them ([`canonicalize`]), whether a device is
+//! mounted or busy ([`ismounted`]), and the file behind a loop device
+//! ([`loopdev`]).
 //!
 //! Upstream this is `libcommon`, linked into every util-linux library and
 //! program; here it is one crate for the same reason. Before it, `ulmount`
@@ -36,8 +39,10 @@
 
 use std::path::PathBuf;
 
+pub mod blkdev;
 pub mod canonicalize;
 pub mod ismounted;
+pub mod loopdev;
 mod path;
 mod sysfs;
 
@@ -49,7 +54,7 @@ pub use sysfs::{
     chrdev_devno_to_devname, devname_dev_to_sys, devname_is_hidden, devname_sys_to_dev,
     devname_to_devno, devname_to_devno_in, devno_count_partitions, devno_is_dm_private,
     devno_is_wholedisk, devno_to_devname, devno_to_devpath, devno_to_wholedisk,
-    is_partition_dirent, new_sysfs_path, stripoff_last_component,
+    is_partition_dirent, new_sysfs_path, next_subsystem, stripoff_last_component,
 };
 
 /// `PATH_MAX`.

@@ -250,6 +250,262 @@ impl PathCxt {
     }
 }
 
+/// `_PATH_SYS_CLASS`.
+const PATH_SYS_CLASS: &[u8] = b"/sys/class";
+/// `_PATH_SYS_SCSI`.
+const PATH_SYS_SCSI: &[u8] = b"/sys/bus/scsi";
+
+/// `readlink(path, buf, PATH_MAX - 1)`: the link's target, at most
+/// `PATH_MAX - 1` bytes of it, or `None`.
+fn readlink_bytes(path: &[u8]) -> Option<Vec<u8>> {
+    let link = std::fs::read_link(path_of(path)).ok()?;
+    let mut bytes = quoting::os_bytes(link.as_os_str()).into_owned();
+    bytes.truncate(PATH_MAX.saturating_sub(1));
+    Some(bytes)
+}
+
+/// `get_subsystem(chain, buf, bufsz)`: the subsystem of the deepest
+/// directory of `chain` that has a `subsystem` link -- the link's last
+/// component -- with `chain` cut, component by component, to that
+/// directory's parent. `None`, and `chain` cut to nothing, when no
+/// directory left in it has one.
+fn get_subsystem(chain: &mut Vec<u8>) -> Option<Vec<u8>> {
+    const LINKNAME: &[u8] = b"/subsystem";
+    if chain.is_empty() {
+        return None;
+    }
+    // `len + sizeof(SUBSYSTEM_LINKNAME) > PATH_MAX`: the terminating NUL
+    // counted.
+    if chain.len().saturating_add(LINKNAME.len()).saturating_add(1) > PATH_MAX {
+        return None;
+    }
+    loop {
+        let mut link = chain.clone();
+        link.extend_from_slice(LINKNAME);
+        let target = readlink_bytes(&link);
+        // The last component off the chain.
+        let slash = chain.iter().rposition(|&b| b == b'/');
+        if let Some(s) = slash {
+            chain.truncate(s);
+        }
+        if let Some(t) = target.filter(|t| !t.is_empty()) {
+            // `basename(buf)`: what follows the last `/`.
+            let start = t
+                .iter()
+                .rposition(|&b| b == b'/')
+                .map_or(0, |i| i.saturating_add(1));
+            return Some(t.get(start..).unwrap_or_default().to_vec());
+        }
+        slash?;
+    }
+}
+
+/// `sysfs_devchain_is_removable(chain)`: the deepest `removable` file in
+/// the chain that says `fixed` (no) or `removable` (yes) -- compared, as
+/// upstream compares it, over no more bytes than the file held.
+fn devchain_is_removable(chain: &[u8]) -> bool {
+    const FILENAME: &[u8] = b"/removable";
+    if chain.is_empty() || chain.len().saturating_add(FILENAME.len()).saturating_add(1) > PATH_MAX
+    {
+        return false;
+    }
+    let mut chain = chain.to_vec();
+    loop {
+        let mut p = chain.clone();
+        p.extend_from_slice(FILENAME);
+        if let Ok(mut f) = std::fs::File::open(path_of(&p))
+            && let Ok(buf) = crate::path::read_all(&mut f, 20)
+            && !buf.is_empty()
+        {
+            let starts = |word: &[u8]| {
+                let n = buf.len().min(word.len());
+                buf.get(..n) == word.get(..n)
+            };
+            if starts(b"fixed") {
+                return false;
+            } else if starts(b"removable") {
+                return true;
+            }
+        }
+        let slash = chain.iter().rposition(|&b| b == b'/');
+        match slash {
+            Some(s) => chain.truncate(s),
+            None => return false,
+        }
+    }
+}
+
+impl PathCxt {
+    /// `sysfs_blkdev_get_devchain(pc, buf, PATH_MAX)`: the device's whole
+    /// path in sysfs, as `/sys/dev/block/` (under the prefix) followed by
+    /// where the device's directory links -- every subsystem it hangs from
+    /// is a directory of it.
+    ///
+    /// Upstream copies the result into the caller's buffer without its
+    /// terminating NUL, which the shorter link read into that buffer
+    /// before left behind it -- so its string runs on into whatever the
+    /// stack held. This one ends where the path does.
+    #[must_use]
+    pub fn blkdev_devchain(&self) -> Option<Vec<u8>> {
+        let link = self.readlink(None).ok().filter(|l| !l.is_empty())?;
+        let mut chain = self.prefix().unwrap_or_default().to_vec();
+        chain.extend_from_slice(PATH_SYS_DEVBLOCK);
+        chain.push(b'/');
+        chain.extend_from_slice(&link);
+        (chain.len() < PATH_MAX).then_some(chain)
+    }
+
+    /// `sysfs_blkdev_is_hotpluggable`: some device in the chain says it is
+    /// removable before one says it is fixed.
+    #[must_use]
+    pub fn blkdev_is_hotpluggable(&self) -> bool {
+        self.blkdev_devchain()
+            .is_some_and(|chain| devchain_is_removable(&chain))
+    }
+
+    /// `sysfs_blkdev_scsi_get_hctl(pc, &h, &c, &t, &l)`: host, channel,
+    /// target and LUN, read once from where the `device` link leads
+    /// (`.../H:C:T:L`) and kept. A device that has none is asked only once:
+    /// every later call fails at once.
+    ///
+    /// # Errors
+    ///
+    /// The `errno` of the link's read, or `EINVAL` -- for a directory with
+    /// no `sysfs_blkdev` dialect, a link not ending in four numbers, or a
+    /// device already found to have none.
+    pub fn blkdev_scsi_hctl(&self) -> Result<[i32; 4], i32> {
+        use crate::path::Hctl;
+        let blk = self.blk.as_ref().ok_or(crate::EINVAL)?;
+        match blk.hctl.get() {
+            Hctl::Failed => return Err(crate::EINVAL),
+            Hctl::Known(h) => return Ok(h),
+            Hctl::Unknown => {}
+        }
+        blk.hctl.set(Hctl::Failed);
+        let link = self.readlink(Some(b"device"))?;
+        let slash = link
+            .iter()
+            .rposition(|&b| b == b'/')
+            .ok_or(crate::EINVAL)?;
+        let hctl = scan_hctl(link.get(slash.saturating_add(1)..).unwrap_or_default())
+            .ok_or(crate::EINVAL)?;
+        blk.hctl.set(Hctl::Known(hctl));
+        Ok(hctl)
+    }
+
+    /// `scsi_host_attribute_path(pc, type, buf, bufsz, attr)`:
+    /// `/sys/class/TYPE_host/hostH[/ATTR]` under the prefix, if it fits in
+    /// `bufsz` with its NUL.
+    fn scsi_host_attribute_path(&self, ty: &[u8], bufsz: usize, attr: Option<&[u8]>) -> Option<Vec<u8>> {
+        let [host, ..] = self.blkdev_scsi_hctl().ok()?;
+        let mut p = self.prefix().unwrap_or_default().to_vec();
+        p.extend_from_slice(PATH_SYS_CLASS);
+        p.push(b'/');
+        p.extend_from_slice(ty);
+        p.extend_from_slice(format!("_host/host{host}").as_bytes());
+        if let Some(a) = attr {
+            p.push(b'/');
+            p.extend_from_slice(a);
+        }
+        (p.len() < bufsz).then_some(p)
+    }
+
+    /// `sysfs_blkdev_scsi_host_strdup_attribute(pc, type, attr)`: the first
+    /// line of the SCSI host's attribute (1023 bytes of it at most) --
+    /// `None` if it is empty.
+    #[must_use]
+    pub fn blkdev_scsi_host_attribute(&self, ty: &[u8], attr: &[u8]) -> Option<Vec<u8>> {
+        let path = self.scsi_host_attribute_path(ty, 1024, Some(attr))?;
+        let text = std::fs::read(path_of(&path)).ok()?;
+        // `fscanf(f, "%1023[^\n]", buf)`: at least one byte before the
+        // first newline, or nothing matched; then `strdup(buf)`, which
+        // stops at a NUL among them.
+        let line = text.split(|&b| b == b'\n').next().unwrap_or_default();
+        let line = line.get(..line.len().min(1023)).unwrap_or_default();
+        (!line.is_empty()).then(|| c_str(line).to_vec())
+    }
+
+    /// `sysfs_blkdev_scsi_host_is(pc, type)`: whether the device's SCSI host
+    /// is of that class -- `/sys/class/TYPE_host/hostH` is a directory.
+    #[must_use]
+    pub fn blkdev_scsi_host_is(&self, ty: &[u8]) -> bool {
+        self.scsi_host_attribute_path(ty, PATH_MAX, None)
+            .and_then(|p| std::fs::metadata(path_of(&p)).ok())
+            .is_some_and(|m| m.is_dir())
+    }
+
+    /// `scsi_attribute_path(pc, buf, bufsz, attr)`:
+    /// `/sys/bus/scsi/devices/H:C:T:L[/ATTR]` under the prefix.
+    fn scsi_attribute_path(&self, attr: Option<&[u8]>) -> Option<Vec<u8>> {
+        let [h, c, t, l] = self.blkdev_scsi_hctl().ok()?;
+        let mut p = self.prefix().unwrap_or_default().to_vec();
+        p.extend_from_slice(PATH_SYS_SCSI);
+        p.extend_from_slice(format!("/devices/{h}:{c}:{t}:{l}").as_bytes());
+        if let Some(a) = attr {
+            p.push(b'/');
+            p.extend_from_slice(a);
+        }
+        (p.len() < PATH_MAX).then_some(p)
+    }
+
+    /// `sysfs_blkdev_scsi_has_attribute(pc, attr)`: the SCSI device has it.
+    #[must_use]
+    pub fn blkdev_scsi_has_attribute(&self, attr: &[u8]) -> bool {
+        self.scsi_attribute_path(Some(attr))
+            .is_some_and(|p| std::fs::metadata(path_of(&p)).is_ok())
+    }
+
+    /// `sysfs_blkdev_scsi_path_contains(pc, pattern)`: where the SCSI
+    /// device's directory links holds `pattern`.
+    #[must_use]
+    pub fn blkdev_scsi_path_contains(&self, pattern: &[u8]) -> bool {
+        let Some(p) = self.scsi_attribute_path(None) else {
+            return false;
+        };
+        if std::fs::metadata(path_of(&p)).is_err() {
+            return false;
+        }
+        readlink_bytes(&p).is_some_and(|link| {
+            pattern.is_empty() || link.windows(pattern.len()).any(|w| w == pattern)
+        })
+    }
+}
+
+/// `sysfs_blkdev_next_subsystem(pc, devchain, &subsys)`: the next subsystem
+/// up the chain [`PathCxt::blkdev_devchain`] gave, which it cuts as it
+/// goes; `None` at the end of it.
+#[must_use]
+pub fn next_subsystem(devchain: &mut Vec<u8>) -> Option<Vec<u8>> {
+    get_subsystem(devchain)
+}
+
+/// `sscanf(hctl, "%u:%u:%u:%u", ...)` into four `int`s: each number as
+/// `strtoul` reads it (a `-` negating it, overflow clamping), its low 32
+/// bits stored, and printed back signed as upstream's `%d` does.
+pub(crate) fn scan_hctl(text: &[u8]) -> Option<[i32; 4]> {
+    let mut pos = 0usize;
+    let mut out = [0i32; 4];
+    for (i, slot) in out.iter_mut().enumerate() {
+        if i > 0 {
+            if text.get(pos) != Some(&b':') {
+                return None;
+            }
+            pos = pos.saturating_add(1);
+        }
+        let v = crate::path::scan_ulong(text, &mut pos)?;
+        // `*(unsigned int *) = num.ul`, then read back as the `int` it is.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "C stores the unsigned long in an int"
+        )]
+        {
+            *slot = v as u32 as i32;
+        }
+    }
+    Some(out)
+}
+
 /// `S_ISBLK(stat(path))` with `st_rdev == devno`.
 fn is_block_numbered(path: &[u8], devno: u64) -> bool {
     #[cfg(unix)]

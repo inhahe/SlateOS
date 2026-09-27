@@ -25,6 +25,23 @@ pub(crate) struct Blkdev {
     pub(crate) devno: u64,
     /// `parent`: the whole disk, for a partition.
     pub(crate) parent: Option<Rc<PathCxt>>,
+    /// `has_hctl`, `hctl_error` and `scsi_*`: the SCSI address, once looked
+    /// for.
+    pub(crate) hctl: Cell<Hctl>,
+}
+
+/// What `sysfs_blkdev_scsi_get_hctl` has learned of the device's SCSI
+/// address.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Hctl {
+    /// Not looked for yet.
+    #[default]
+    Unknown,
+    /// Looked for and not found (`hctl_error`): every later call fails at
+    /// once, as upstream's does.
+    Failed,
+    /// Host, channel, target and LUN (`has_hctl`).
+    Known([i32; 4]),
 }
 
 /// `struct path_cxt`: a directory, read relative to.
@@ -372,6 +389,17 @@ impl PathCxt {
     ///
     /// The `errno` of the open.
     pub fn opendir(&self, path: Option<&[u8]>) -> Result<Vec<DirEntry>, i32> {
+        self.opendir_at(path).map(|(_, entries)| entries)
+    }
+
+    /// [`PathCxt::opendir`], with the directory that was opened -- the
+    /// parent's, when the redirect found it there -- for what upstream then
+    /// asks relative to `dirfd(dir)`.
+    ///
+    /// # Errors
+    ///
+    /// The `errno` of the open.
+    pub fn opendir_at(&self, path: Option<&[u8]>) -> Result<(Vec<u8>, Vec<DirEntry>), i32> {
         let dir = match path {
             Some(p) => self.with_redirect(p, |full| {
                 std::fs::metadata(path_of(full))
@@ -385,7 +413,8 @@ impl PathCxt {
                 self.get_dirfd()?
             }
         };
-        read_dir(&dir)
+        let entries = read_dir(&dir)?;
+        Ok((dir, entries))
     }
 
     /// `ul_path_count_dirents(pc, path)`: 0 when it cannot be read.

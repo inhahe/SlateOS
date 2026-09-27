@@ -222,82 +222,18 @@ fn xstrncpy(src: &[u8], n: usize) -> Vec<u8> {
         .to_vec()
 }
 
-/// `LOOP_GET_STATUS64`.
-#[cfg(unix)]
-const LOOP_GET_STATUS64: u64 = 0x4C05;
-/// `sizeof(struct loop_info64)`.
-#[cfg(unix)]
-const LOOP_INFO64_SIZE: usize = 232;
-
-/// `loopcxt_get_info`: the loop device's `struct loop_info64` --
-/// `lo_device`, `lo_inode` and `lo_file_name` of it -- or `None`.
-fn loop_info(device: &[u8]) -> Option<(u64, u64, Vec<u8>)> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        unsafe extern "C" {
-            fn ioctl(fd: i32, request: u64, ...) -> i32;
-        }
-        let f = std::fs::File::open(path_of(device)).ok()?;
-        let mut info = [0u8; LOOP_INFO64_SIZE];
-        // SAFETY: LOOP_GET_STATUS64 writes one struct loop_info64 (232
-        // bytes) through the pointer, which `info` holds; the descriptor is
-        // open for the call.
-        let rc = unsafe { ioctl(f.as_raw_fd(), LOOP_GET_STATUS64, info.as_mut_ptr()) };
-        if rc < 0 {
-            return None;
-        }
-        let u64_at = |at: usize| {
-            let mut w = [0u8; 8];
-            for (k, b) in w.iter_mut().enumerate() {
-                *b = info.get(at.saturating_add(k)).copied().unwrap_or(0);
-            }
-            u64::from_ne_bytes(w)
-        };
-        // lo_device at 0, lo_inode at 8, lo_file_name at 56 (64 bytes) --
-        // too small for a long name, so upstream marks the cut with a `*`
-        // in its last byte but one, which shows only when the name filled
-        // the field.
-        let mut name = info.get(56..120).unwrap_or_default().to_vec();
-        if let Some(b) = name.get_mut(62) {
-            *b = b'*';
-        }
-        if let Some(b) = name.get_mut(63) {
-            *b = 0;
-        }
-        Some((u64_at(0), u64_at(8), c_str(&name).to_vec()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = device;
-        None
-    }
-}
-
-/// `loopcxt_get_backing_file`: sysfs's `loop/backing_file`, else the name
-/// the kernel was given.
-fn loop_backing_file(device: &[u8]) -> Option<Vec<u8>> {
-    if let Ok(st) = stat(device)
-        && let Some(pc) = crate::new_sysfs_path(st.rdev, None, None)
-        && let Ok(Some(name)) = pc.read_string(b"loop/backing_file")
-    {
-        return Some(name);
-    }
-    loop_info(device).map(|(_, _, name)| name)
-}
-
 /// `loopdev_is_used(device, filename, 0, 0, 0)`: the loop device is backed
 /// by the file -- by device and inode when the kernel says them, else by
 /// name.
 fn loopdev_is_used(device: &[u8], filename: &[u8]) -> bool {
     let st = stat(filename).ok();
     if let Some(st) = st
-        && let Some((dev, ino, _)) = loop_info(device)
+        && let Some((dev, ino, _)) = crate::loopdev::loop_info(device)
     {
         // Device and inode known: the name is not looked at.
         return ino == st.ino && dev == st.dev;
     }
-    loop_backing_file(device).is_some_and(|name| name == filename)
+    crate::loopdev::backing_file(device).is_some_and(|name| name == filename)
 }
 
 /// What a mount-table check found.

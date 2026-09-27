@@ -211,3 +211,125 @@ fn a_partition_reads_its_disks_attributes_and_finds_its_disk() {
     );
     assert!(crate::new_sysfs_path(makedev(9, 9), None, Some(&prefix)).is_none());
 }
+
+/// A fake sysfs holding one SATA disk, `sda` on SCSI host 0 behind a PCI
+/// controller, and a USB stick, `sdb`, whose USB device says it is
+/// removable: the subsystems each hangs from, its SCSI address and host,
+/// and whether it can be unplugged.
+#[cfg(unix)]
+#[test]
+fn a_disks_subsystems_and_scsi_host_are_found_up_its_chain() {
+    use std::os::unix::fs::symlink;
+    let dir = scratchdir::ScratchDir::new("ulsysfs-chain");
+    let root = dir.path("");
+    let w = |p: &str, text: &str| {
+        let full = root.join(p);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    };
+    let l = |target: &str, p: &str| {
+        let full = root.join(p);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        symlink(target, full).unwrap();
+    };
+    let pci = "sys/devices/pci0000:00/0000:00:1f.2";
+    let lun = format!("{pci}/ata1/host0/target0:0:0/0:0:0:0");
+    w(&format!("{lun}/block/sda/dev"), "8:0\n");
+    l("../../../../../../../../../class/block", &format!("{lun}/block/sda/subsystem"));
+    l("../../../0:0:0:0", &format!("{lun}/block/sda/device"));
+    l("../../../../../../../bus/scsi", &format!("{lun}/subsystem"));
+    // A second SCSI link on the way up: "block:scsi:scsi" is not repeated
+    // by the caller, but the chain does hold it.
+    l("../../../../../../bus/scsi", &format!("{pci}/ata1/host0/target0:0:0/subsystem"));
+    l("../../../bus/pci", &format!("{pci}/subsystem"));
+    w(&format!("{pci}/removable"), "fixed\n");
+    w("sys/class/scsi_host/host0/proc_name", "ahci\n");
+    w(&format!("{lun}/vpd_pg80"), "x");
+    // The same directories as links from the top of sysfs see them.
+    let lun_rel = lun.strip_prefix("sys/").unwrap();
+    l(&format!("../../../{lun_rel}"), "sys/bus/scsi/devices/0:0:0:0");
+    l(&format!("../../{lun_rel}/block/sda"), "sys/dev/block/8:0");
+
+    let usb = "sys/devices/pci0000:00/0000:00:14.0/usb1/1-1";
+    let ulun = format!("{usb}/1-1:1.0/host6/target6:0:0/6:0:0:0");
+    w(&format!("{ulun}/block/sdb/dev"), "8:16\n");
+    l("../../../6:0:0:0", &format!("{ulun}/block/sdb/device"));
+    w(&format!("{usb}/removable"), "removable\n");
+    let ulun_rel = ulun.strip_prefix("sys/").unwrap();
+    l(&format!("../../{ulun_rel}/block/sdb"), "sys/dev/block/8:16");
+
+    let prefix = quoting::os_bytes(root.as_os_str()).into_owned();
+    let prefix = prefix.strip_suffix(b"/").unwrap_or(&prefix).to_vec();
+    let sda = crate::new_sysfs_path(makedev(8, 0), None, Some(&prefix)).unwrap();
+
+    let mut chain = sda.blkdev_devchain().unwrap();
+    let mut expect = prefix.clone();
+    expect.extend_from_slice(format!("/sys/dev/block/../../{lun_rel}/block/sda").as_bytes());
+    assert_eq!(chain, expect);
+    let mut subs = Vec::new();
+    while let Some(s) = crate::next_subsystem(&mut chain) {
+        subs.push(String::from_utf8(s).unwrap());
+    }
+    assert_eq!(subs, ["block", "scsi", "scsi", "pci"]);
+    assert!(chain.is_empty());
+
+    assert_eq!(sda.blkdev_scsi_hctl(), Ok([0, 0, 0, 0]));
+    assert!(sda.blkdev_scsi_host_is(b"scsi"));
+    assert!(!sda.blkdev_scsi_host_is(b"fc"));
+    assert_eq!(
+        sda.blkdev_scsi_host_attribute(b"scsi", b"proc_name"),
+        Some(b"ahci".to_vec())
+    );
+    assert_eq!(sda.blkdev_scsi_host_attribute(b"scsi", b"nosuch"), None);
+    assert!(sda.blkdev_scsi_has_attribute(b"vpd_pg80"));
+    assert!(!sda.blkdev_scsi_has_attribute(b"sas_device"));
+    assert!(sda.blkdev_scsi_path_contains(b"pci0000"));
+    assert!(!sda.blkdev_scsi_path_contains(b"usb"));
+    // The controller says fixed before anything says removable.
+    assert!(!sda.blkdev_is_hotpluggable());
+
+    let sdb = crate::new_sysfs_path(makedev(8, 16), None, Some(&prefix)).unwrap();
+    assert_eq!(sdb.blkdev_scsi_hctl(), Ok([6, 0, 0, 0]));
+    assert!(sdb.blkdev_is_hotpluggable());
+    // No sys/bus/scsi entry for it.
+    assert!(!sdb.blkdev_scsi_path_contains(b"usb"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_device_without_a_scsi_address_is_asked_once() {
+    use std::os::unix::fs::symlink;
+    let dir = scratchdir::ScratchDir::new("ulsysfs-nohctl");
+    let root = dir.path("");
+    std::fs::create_dir_all(root.join("sys/devices/virtual/block/loop0")).unwrap();
+    std::fs::write(root.join("sys/devices/virtual/block/loop0/dev"), "7:0\n").unwrap();
+    std::fs::create_dir_all(root.join("sys/dev/block")).unwrap();
+    symlink("../../devices/virtual/block/loop0", root.join("sys/dev/block/7:0")).unwrap();
+    let prefix = quoting::os_bytes(root.as_os_str()).into_owned();
+    let prefix = prefix.strip_suffix(b"/").unwrap_or(&prefix).to_vec();
+    let pc = crate::new_sysfs_path(makedev(7, 0), None, Some(&prefix)).unwrap();
+    assert_eq!(pc.blkdev_scsi_hctl(), Err(crate::ENOENT));
+    // Even once a `device` link appears, the answer stays no.
+    symlink("../../../x/0:0:0:0", root.join("sys/devices/virtual/block/loop0/device")).unwrap();
+    assert_eq!(pc.blkdev_scsi_hctl(), Err(crate::EINVAL));
+    assert!(!pc.blkdev_is_hotpluggable());
+}
+
+#[test]
+fn scsi_types_have_upstreams_names() {
+    assert_eq!(crate::blkdev::scsi_type_to_name(0), Some("disk"));
+    assert_eq!(crate::blkdev::scsi_type_to_name(5), Some("rom"));
+    assert_eq!(crate::blkdev::scsi_type_to_name(0x7f), Some("no-lun"));
+    assert_eq!(crate::blkdev::scsi_type_to_name(0x0a), None);
+    assert_eq!(crate::blkdev::scsi_type_to_name(-1), None);
+}
+
+#[test]
+fn hctl_numbers_scan_as_sscanf_u_does() {
+    use crate::sysfs::scan_hctl;
+    assert_eq!(scan_hctl(b"1:2:3:4"), Some([1, 2, 3, 4]));
+    assert_eq!(scan_hctl(b"1:2:3"), None);
+    assert_eq!(scan_hctl(b"1: 2:3:4"), Some([1, 2, 3, 4]));
+    // `%u` takes a sign, and the low 32 bits are printed back signed.
+    assert_eq!(scan_hctl(b"-1:0:0:4294967296"), Some([-1, 0, 0, 0]));
+}

@@ -102,48 +102,97 @@ fn devnum(dir: &std::path::Path) -> Option<(u32, u32)> {
     Some((major?, minor?))
 }
 
-/// The device's udev database, parsed: its `E:` properties, the last of a
-/// key winning. The database is named for the device number, `b` for a
+/// What udev knows of a device, from its database: `udev_device_new_from_
+/// subsystem_sysname` succeeded, whether or not udev has written anything
+/// about it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Device {
+    /// The `E:KEY=VALUE` properties, the last of a key winning -- and one
+    /// with an empty value removing the key, as systemd's
+    /// `device_add_property_internal_from_string` does.
+    properties: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `udev_device_get_devlinks_list_entry`: each `S:` link as a `/dev/`
+    /// path, once each, sorted as libudev's unique lists are (`strcmp`).
+    pub devlinks: Vec<Vec<u8>>,
+}
+
+impl Device {
+    /// `udev_device_get_property_value(dev, key)`.
+    #[must_use]
+    pub fn property(&self, key: &[u8]) -> Option<&[u8]> {
+        self.properties
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_slice())
+    }
+}
+
+/// `udev_device_new_from_subsystem_sysname(udev, "block", sysname)` and the
+/// database read behind it: `None` when there is no such device (or no
+/// number for it), a [`Device`] with nothing in it when udev has no
+/// database for it. The database is named for the device number, `b` for a
 /// device of the `block` subsystem and `c` for any other.
-fn properties(sysname: &[u8]) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+#[must_use]
+pub fn device(sysname: &[u8]) -> Option<Device> {
     let dir = syspath(sysname)?;
     let (major, minor) = devnum(&dir)?;
+    let mut dev = Device::default();
     if major == 0 {
-        return None;
+        return Some(dev);
     }
-    let subsystem = std::fs::read_link(dir.join("subsystem")).ok()?;
+    let Ok(subsystem) = std::fs::read_link(dir.join("subsystem")) else {
+        return Some(dev);
+    };
     let kind = if subsystem.file_name().is_some_and(|n| n == "block") {
         'b'
     } else {
         'c'
     };
-    let text = std::fs::read(format!("/run/udev/data/{kind}{major}:{minor}")).ok()?;
-    let mut props: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let Ok(text) = std::fs::read(format!("/run/udev/data/{kind}{major}:{minor}")) else {
+        return Some(dev);
+    };
+    parse_db(&text, &mut dev);
+    Some(dev)
+}
+
+/// A udev database file's lines into `dev`: `E:KEY=VALUE` properties and
+/// `S:LINK` device links.
+fn parse_db(text: &[u8], dev: &mut Device) {
     for line in text.split(|&b| b == b'\n') {
-        let Some(kv) = line.strip_prefix(b"E:") else {
-            continue;
-        };
-        let Some(eq) = kv.iter().position(|&b| b == b'=') else {
-            continue;
-        };
-        let key = kv.get(..eq).unwrap_or_default().to_vec();
-        let value = kv.get(eq.saturating_add(1)..).unwrap_or_default().to_vec();
-        match props.iter_mut().find(|(k, _)| *k == key) {
-            Some(slot) => slot.1 = value,
-            None => props.push((key, value)),
+        if let Some(kv) = line.strip_prefix(b"E:") {
+            let Some(eq) = kv.iter().position(|&b| b == b'=') else {
+                continue;
+            };
+            let key = kv.get(..eq).unwrap_or_default().to_vec();
+            let value = kv.get(eq.saturating_add(1)..).unwrap_or_default().to_vec();
+            let at = dev.properties.iter().position(|(k, _)| *k == key);
+            match (at, value.is_empty()) {
+                (Some(i), true) => {
+                    dev.properties.remove(i);
+                }
+                (Some(i), false) => {
+                    if let Some(slot) = dev.properties.get_mut(i) {
+                        slot.1 = value;
+                    }
+                }
+                (None, true) => {}
+                (None, false) => dev.properties.push((key, value)),
+            }
+        } else if let Some(link) = line.strip_prefix(b"S:") {
+            let mut path = b"/dev/".to_vec();
+            path.extend_from_slice(link);
+            dev.devlinks.push(path);
         }
     }
-    Some(props)
+    dev.devlinks.sort();
+    dev.devlinks.dedup();
 }
 
 /// `udev_device_get_property_value(dev, key)` for the block device named
 /// `sysname` -- the device name without `/dev/`, as `findmnt` passes it.
 #[must_use]
 pub fn property(sysname: &[u8], key: &[u8]) -> Option<Vec<u8>> {
-    properties(sysname)?
-        .into_iter()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v)
+    device(sysname)?.property(key).map(<[u8]>::to_vec)
 }
 
 #[cfg(test)]
@@ -163,6 +212,29 @@ mod tests {
         assert!(!path_is_normalized(b"../sda"));
         assert!(!path_is_normalized(b"a//b"));
         assert!(!path_is_normalized(b"a/./b"));
+    }
+
+    #[test]
+    fn a_database_is_read_as_systemd_reads_it() {
+        let mut dev = Device::default();
+        let db: &[&[u8]] = &[
+            b"S:disk/by-uuid/x",
+            b"E:ID_FS_TYPE=ext4",
+            b"E:ID_FS_LABEL=old",
+            b"S:disk/by-id/b",
+            b"E:ID_FS_LABEL=",
+            b"E:ID_FS_TYPE=xfs",
+            b"S:disk/by-id/b",
+            b"I:123",
+        ];
+        parse_db(&db.join(&b'\n'), &mut dev);
+        assert_eq!(dev.property(b"ID_FS_TYPE"), Some(&b"xfs"[..]));
+        // An empty value removes the key.
+        assert_eq!(dev.property(b"ID_FS_LABEL"), None);
+        assert_eq!(
+            dev.devlinks,
+            vec![b"/dev/disk/by-id/b".to_vec(), b"/dev/disk/by-uuid/x".to_vec()]
+        );
     }
 
     #[test]

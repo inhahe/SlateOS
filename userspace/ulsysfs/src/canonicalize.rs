@@ -44,10 +44,26 @@ pub fn is_dm_devname(canonical: &[u8]) -> Option<&[u8]> {
 /// `/sys/block/dm-N/dm/name`, if that path exists.
 #[must_use]
 pub fn canonicalize_dm_name(ptname: &[u8]) -> Option<Vec<u8>> {
-    let mut sys = b"/sys/block/".to_vec();
+    canonicalize_dm_name_in(None, ptname)
+}
+
+/// `__canonicalize_dm_name(prefix, ptname)`: as [`canonicalize_dm_name`],
+/// with sysfs read under `prefix` -- and then, the prefix standing for
+/// another system's root, the `/dev/mapper` path is not required to exist
+/// in this one. Both paths are cut, as upstream's 256-byte buffer cuts
+/// them, to 255 bytes.
+#[must_use]
+pub fn canonicalize_dm_name_in(prefix: Option<&[u8]>, ptname: &[u8]) -> Option<Vec<u8>> {
+    if ptname.is_empty() {
+        return None;
+    }
+    let prefix = prefix.unwrap_or_default();
+    let mut sys = prefix.to_vec();
+    sys.extend_from_slice(b"/sys/block/");
     sys.extend_from_slice(ptname);
     sys.extend_from_slice(b"/dm/name");
-    let text = std::fs::read(path_of(&sys)).ok()?;
+    sys.truncate(255);
+    let text = std::fs::read(path_of(c_str(&sys))).ok()?;
     // `fgets(name, 256 - sizeof "/dev/mapper")`: at most 243 bytes of the
     // first line; then its last byte (the newline) off.
     let line_end = text
@@ -61,6 +77,9 @@ pub fn canonicalize_dm_name(ptname: &[u8]) -> Option<Vec<u8>> {
     let mut path = b"/dev/mapper/".to_vec();
     path.extend_from_slice(line.get(..line.len().saturating_sub(1)).unwrap_or_default());
     path.truncate(255);
+    if !prefix.is_empty() {
+        return Some(path);
+    }
     std::fs::metadata(path_of(&path)).ok().map(|_| path)
 }
 

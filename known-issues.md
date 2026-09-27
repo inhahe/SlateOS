@@ -171321,7 +171321,23 @@ test images, 9 made with mkfs/mkswap/sfdisk, 484 truncated copies.
 What remains for other programs is theirs: `lsblk` and `wipefs` are still
 hand-written and did not use the crate -- `wipefs` is now a port; `lsblk` is TD-B-LSBLK-IS-NOT-A-PORT.
 
-## TD-B-LSBLK-IS-NOT-A-PORT (lane B, 2026-09-27) — **open**
+## TD-B-LSBLK-IS-NOT-A-PORT (lane B, 2026-09-27) — ✅ FIXED 2026-09-27 (lane B)
+
+**Fixed:** `userspace/lsblk` is now util-linux 2.39.3's `lsblk.c`,
+`lsblk-devtree.c`, `lsblk-mnt.c` and `lsblk-properties.c`, ported function by
+function onto `smartcols`, `ulmount`, `ulblkid` and `ulsysfs`.
+`scripts/lsblk-diff.sh` compares it with WSL's `lsblk from util-linux
+2.39.3` in C.UTF-8 and C: util-linux's two `--sysroot` snapshots (an LVM and
+an NVMe machine) with every `.cols` file and 68 option sets each (every
+format, sort, dedup, tree column, width, filter, `--merge`, `--inverse`,
+every column group), the live machine as an ordinary user (udev's database,
+mounts, swap, named devices), and option refusals: **502 agree, 0 differ**.
+One judgment call: udev is asked only where it runs (`/run/udev/data`), so
+on SlateOS, which has none, libblkid is (todo.txt, lane B Judgment Calls,
+2026-09-27). What remains unmeasured is root's libblkid path -- under WSL udev
+always answers first, as it does upstream.
+
+The history, kept:
 
 **In short:** `lsblk` (list block devices) is a hand-written program, not a
 port of util-linux's. It recognises filesystems by its own code where

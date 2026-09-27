@@ -4369,7 +4369,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] useradm: user account management (add/del/mod/passwd/lock/unlock, /etc/users.yaml, SHA-256)
   - [x] monctl: monitor power control (off/on/standby/suspend, brightness, DPMS timers)
   - [x] sysctl: view/modify kernel parameters via /proc/sys/ and /sys/kernel/ (dot notation, config loading)
-  - [x] lsblk: block device lister (tree/flat, filesystem info, mount points, JSON output)
+  - [x] lsblk: block device lister (tree/flat, filesystem info, mount points, JSON output) -- since 2026-09-27 a port of util-linux 2.39.3's `lsblk` on `smartcols` (now with libsmartcols' sorting and `--merge` group chart), `ulmount`, `ulblkid` and `ulsysfs`; `scripts/lsblk-diff.sh`: 502 cases agree (util-linux's `--sysroot` snapshots in every format, the live system, refusals); `scripts/smartcols-diff.sh`: 2954 tables agree with the real libsmartcols.so.1
   - [x] powerctl: power management (shutdown/reboot/suspend/hibernate, schedule, battery status)
   - [x] nslookup: DNS lookup (RFC 1035 packets, A/AAAA/MX/TXT/NS/CNAME/PTR, reverse, custom server)
   - [x] netstat: network connection stats (/proc/net/tcp/udp, TCP states, protocol stats, routing, JSON)

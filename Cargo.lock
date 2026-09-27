@@ -1843,8 +1843,16 @@ dependencies = [
 name = "lsblk"
 version = "0.1.0"
 dependencies = [
- "procinfo",
+ "getoptlong",
  "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulmount",
+ "ulstrutils",
+ "ulsysfs",
 ]
 
 [[package]]

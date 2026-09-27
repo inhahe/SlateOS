@@ -58943,3 +58943,22 @@ is already waiting, not whether the setter exists.
   refresh, measured from the last frame shown (`Server::next_wake`,
   design-decisions §1302). A fixed vblank-aligned grid would not drift, but the
   kernel sends no flip event to align to; revisit when it does.
+
+## Lane B — Judgment Calls (lsblk port, 2026-09-27)
+
+### lsblk asks udev only where udev runs (lane B, 2026-09-27)
+- **What:** `userspace/lsblk/src/props.rs` (`udev_is_running`) reads a
+  device's FSTYPE/LABEL/UUID/... from udev's database only when
+  `/run/udev/data` is a directory; otherwise it goes straight to libblkid
+  (`ulblkid`, root only).
+- **Why:** upstream is built with libudev, whose device lookup succeeds from
+  sysfs alone -- so on a system without udev every device gets properties,
+  all empty, and libblkid is never asked: `lsblk -f` is blank. util-linux
+  built without libudev asks libblkid instead. SlateOS has no udev; the WSL
+  reference runs one. Keying on udev's database gives upstream-with-libudev
+  wherever udev runs (what `scripts/lsblk-diff.sh` measures) and
+  upstream-without-libudev where it does not (SlateOS).
+- **Where it differs from upstream:** only on a Linux system with libudev but
+  no udevd (a container), where upstream shows empty properties and this
+  probes. To reverse: drop the `udev_is_running()` test in
+  `get_properties_by_udev`.

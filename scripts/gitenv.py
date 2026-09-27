@@ -84,7 +84,9 @@ the only thing telling git where its own subcommands live.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sys
 
 # Variables that redirect git to a specific repository, index, object store or
 # config file. Everything here is documented in git(1) "ENVIRONMENT VARIABLES"
@@ -128,9 +130,25 @@ def binds_a_repository(name: str) -> bool:
     return name in REPO_BINDING_VARS or name.startswith(REPO_BINDING_PREFIXES)
 
 
+def _for_a_child():
+    """Tell the gate cache, if it is tracing this process, that the environment
+    is being copied for a child rather than read.
+
+    `scripts/gate-cache.py` treats a walk over the whole environment as reading
+    all of it, which would make every gate that calls `clean_env` uncacheable
+    (and every per-session variable an input). The copy made here only ever
+    reaches a child's environment: a git child's relevant variables are
+    recorded where it starts, and a Python child's reads are traced. Looked up
+    through `sys.modules`, so nothing is imported when no tracer is loaded.
+    """
+    tracer = sys.modules.get("gatecache_trace")
+    return tracer.child_env_copy() if tracer is not None else contextlib.nullcontext()
+
+
 def clean_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """A copy of `base` (default `os.environ`) with those bindings removed."""
-    env = dict(os.environ if base is None else base)
+    with _for_a_child():
+        env = dict(os.environ if base is None else base)
     for name in [n for n in env if binds_a_repository(n)]:
         del env[name]
     return env
@@ -142,7 +160,8 @@ def scrub_environ() -> list[str]:
     Returns the names that were removed, which is worth printing when a test
     harness wants to say why it ignored the environment it was handed.
     """
-    removed = [n for n in os.environ if binds_a_repository(n)]
+    with _for_a_child():
+        removed = [n for n in os.environ if binds_a_repository(n)]
     for name in removed:
         del os.environ[name]
     return removed

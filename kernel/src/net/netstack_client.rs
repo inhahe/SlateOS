@@ -384,6 +384,14 @@ impl NetstackConn {
                 }
                 return Err(KernelError::BrokenPipe);
             }
+            if res == netipc::ring::ERR_TIMED_OUT {
+                // The connection timed out (every resend unanswered). As above:
+                // the short count if any bytes were accepted, else ETIMEDOUT.
+                if total > 0 {
+                    return Ok(total);
+                }
+                return Err(KernelError::TimedOut);
+            }
             if res < 0 {
                 // Peer gone mid-stream: report bytes already queued, or the raw
                 // negative result if nothing has been sent yet.
@@ -471,8 +479,14 @@ impl NetstackConn {
         };
         let res = self.submit_and_reap(&ring, &sqe)?;
         if res == netipc::ring::ERR_WOULD_BLOCK {
-            // Non-blocking recv with nothing ready: the caller's O_NONBLOCK.
+            // Nothing ready. `net::socket` asks this way on purpose and waits
+            // itself (`wait_until`); an O_NONBLOCK caller gets EAGAIN.
             return Err(KernelError::WouldBlock);
+        }
+        if res == netipc::ring::ERR_TIMED_OUT {
+            // Every resend of our last segment went unanswered: the peer is
+            // gone. ETIMEDOUT -- never the 0 that would read as its EOF.
+            return Err(KernelError::TimedOut);
         }
         if res <= 0 {
             return Ok(res);

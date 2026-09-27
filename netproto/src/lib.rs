@@ -35,6 +35,7 @@ pub mod icmpv6;
 pub mod ipv4;
 pub mod ipv6;
 pub mod tcp;
+pub mod tcp_rtx;
 pub mod udp;
 
 /// A 6-byte Ethernet MAC address.

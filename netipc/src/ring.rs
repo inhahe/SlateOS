@@ -334,6 +334,20 @@ pub const ERR_ADDR_IN_USE: i32 = -98;
 /// `sendto(2)` `EMSGSIZE` errno. Distinct from the other sentinels above.
 pub const ERR_MSG_SIZE: i32 = -90;
 
+/// Completion `result` sentinel: the connection has **timed out** -- a segment we
+/// sent was resent until the daemon gave up (`netproto::tcp_rtx::MAX_RETRANSMITS`
+/// unanswered resends), so the peer is presumed gone. Answered by [`OP_RECV`]
+/// with nothing buffered and by [`OP_SEND`]; [`OP_POLL`] reports [`POLL_ERR`].
+/// Numerically mirrors Linux `-ETIMEDOUT`; the kernel maps it to
+/// `KernelError::TimedOut` → the `recv(2)`/`send(2)` `ETIMEDOUT` errno.
+///
+/// Distinct from every sentinel above and, above all, from `0`: an `OP_RECV`
+/// result of `0` means the peer closed its side (EOF) and nothing else. A
+/// receive that found nothing answers [`ERR_WOULD_BLOCK`] whether it was asked
+/// not to block or its own wait ran out -- until 2026-09-26 the latter answered
+/// `0`, and a connection quiet for two seconds read as closed.
+pub const ERR_TIMED_OUT: i32 = -110;
+
 /// [`OP_POLL`] readiness bit: the connection is **readable** — it has buffered
 /// in-order bytes waiting, or the peer has closed (so a `recv` would return `0`
 /// / EOF promptly). Mirrors the sense of Linux `POLLIN`.
@@ -855,6 +869,23 @@ mod tests {
             assert_ne!(s, ERR_BROKEN_PIPE);
         }
         assert_ne!(ERR_ADDR_IN_USE, ERR_MSG_SIZE);
+    }
+
+    #[test]
+    fn timed_out_is_distinct_from_every_other_completion_code() {
+        // Above all from 0: a timed-out connection must never read as EOF.
+        for other in [
+            0,
+            -1,
+            ERR_WOULD_BLOCK,
+            ERR_IN_PROGRESS,
+            ERR_BROKEN_PIPE,
+            ERR_ADDR_IN_USE,
+            ERR_MSG_SIZE,
+        ] {
+            assert_ne!(ERR_TIMED_OUT, other);
+        }
+        assert!(ERR_TIMED_OUT < 0, "a completion error is negative");
     }
 
     #[test]

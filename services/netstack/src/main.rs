@@ -38,6 +38,7 @@
 // ---------------------------------------------------------------------------
 
 const SYS_EXIT: u64 = 1;
+const SYS_CLOCK_MONOTONIC: u64 = 10;
 const SYS_SLEEP: u64 = 11;
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_CHANNEL_SEND: u64 = 201;
@@ -189,6 +190,13 @@ fn exit(code: i64) -> ! {
 
 fn sleep_ns(ns: u64) {
     syscall1(SYS_SLEEP, ns);
+}
+
+/// Nanoseconds since boot (`SYS_CLOCK_MONOTONIC`): the clock TCP's
+/// retransmission timers run on. A failed read is `0`, which only holds the
+/// timers still -- a resend comes late, never early.
+fn now_ns() -> u64 {
+    u64::try_from(syscall0(SYS_CLOCK_MONOTONIC)).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,9 +1254,6 @@ struct TcpConn {
     snd_nxt: u32,
     /// Next sequence number we expect to receive (cumulative ACK point).
     rcv_nxt: u32,
-    /// Peer's initial sequence number; `rcv_nxt == server_isn + 1` means we have
-    /// not yet accepted any in-order data (gates the early retransmit).
-    server_isn: u32,
     /// IPv4 identification counter (incremented per emitted datagram).
     ipid: u16,
     /// Our initial sequence number (the SYN's seq). Retained so a non-blocking
@@ -1297,6 +1302,16 @@ struct TcpConn {
     /// without waiting. The write side stays open, so `send` still works until
     /// [`OP_CLOSE`](netipc::ring::OP_CLOSE).
     read_shut: bool,
+    /// When the segment in `snd_buf` was last sent, and how often it has been
+    /// resent: the retransmission timer, whose policy is `netproto::tcp_rtx`.
+    /// Serviced by [`service_retransmit`](Self::service_retransmit) whenever the
+    /// daemon serves this connection at all.
+    rtx: netproto::tcp_rtx::Retransmit,
+    /// `true` once every resend of the in-flight segment went unanswered: the
+    /// peer is presumed gone. A receive with nothing buffered and a send then
+    /// answer [`ERR_TIMED_OUT`](netipc::ring::ERR_TIMED_OUT) (`ETIMEDOUT`), and
+    /// a poll reports the error bit.
+    timed_out: bool,
 }
 
 impl TcpConn {
@@ -1436,7 +1451,6 @@ impl TcpConn {
             mac,
             snd_nxt,
             rcv_nxt,
-            server_isn,
             ipid,
             isn,
             established: true,
@@ -1450,6 +1464,8 @@ impl TcpConn {
             passive: false,
             write_shut: false,
             read_shut: false,
+            rtx: netproto::tcp_rtx::Retransmit::new(),
+            timed_out: false,
         })
     }
 
@@ -1496,7 +1512,6 @@ impl TcpConn {
             // Provisional; recomputed from `isn` when the handshake completes.
             snd_nxt: isn.wrapping_add(1),
             rcv_nxt: 0,
-            server_isn: 0,
             ipid,
             isn,
             established: false,
@@ -1510,6 +1525,8 @@ impl TcpConn {
             passive: false,
             write_shut: false,
             read_shut: false,
+            rtx: netproto::tcp_rtx::Retransmit::new(),
+            timed_out: false,
         })
     }
 
@@ -1559,7 +1576,6 @@ impl TcpConn {
             mac,
             snd_nxt: isn.wrapping_add(1), // Our SYN consumed one seq.
             rcv_nxt,
-            server_isn: peer_isn,
             ipid,
             isn,
             established: false, // SYN_RCVD until the peer ACKs our SYN-ACK.
@@ -1573,6 +1589,8 @@ impl TcpConn {
             passive: true,
             write_shut: false,
             read_shut: false,
+            rtx: netproto::tcp_rtx::Retransmit::new(),
+            timed_out: false,
         })
     }
 
@@ -1661,7 +1679,6 @@ impl TcpConn {
             mac,
             snd_nxt,
             rcv_nxt,
-            server_isn,
             ipid: seed_ipid,
             isn,
             established: true,
@@ -1675,6 +1692,8 @@ impl TcpConn {
             passive: false,
             write_shut: false,
             read_shut: false,
+            rtx: netproto::tcp_rtx::Retransmit::new(),
+            timed_out: false,
         })
     }
 
@@ -1710,7 +1729,6 @@ impl TcpConn {
             mac,
             snd_nxt: isn.wrapping_add(1),
             rcv_nxt: 0,
-            server_isn: 0,
             ipid: seed_ipid,
             isn,
             established: false,
@@ -1724,6 +1742,8 @@ impl TcpConn {
             passive: false,
             write_shut: false,
             read_shut: false,
+            rtx: netproto::tcp_rtx::Retransmit::new(),
+            timed_out: false,
         })
     }
 
@@ -1762,7 +1782,6 @@ impl TcpConn {
             mac,
             snd_nxt: isn.wrapping_add(1),
             rcv_nxt,
-            server_isn: peer_isn,
             ipid: seed_ipid,
             isn,
             established: false,
@@ -1776,6 +1795,8 @@ impl TcpConn {
             passive: true,
             write_shut: false,
             read_shut: false,
+            rtx: netproto::tcp_rtx::Retransmit::new(),
+            timed_out: false,
         })
     }
 
@@ -1839,6 +1860,7 @@ impl TcpConn {
         self.snd_buf[..payload.len()].copy_from_slice(payload);
         self.snd_buf_len = payload.len();
         self.snd_nxt = self.snd_nxt.wrapping_add(payload.len() as u32);
+        self.rtx.sent(now_ns());
         Some(payload.len())
     }
 
@@ -1890,7 +1912,6 @@ impl TcpConn {
                     && rx.flags & tcp::FLAG_ACK != 0
                     && rx.ack == self.isn.wrapping_add(1)
                 {
-                    self.server_isn = rx.seq;
                     self.snd_nxt = self.isn.wrapping_add(1); // Our SYN consumed one seq.
                     self.rcv_nxt = rx.seq.wrapping_add(1); // Their SYN consumed one.
                     self.ipid = self.ipid.wrapping_add(1);
@@ -1914,8 +1935,18 @@ impl TcpConn {
         // is what lets a full-window send drain and a non-blocking send stop
         // returning EAGAIN. A stale/duplicate ACK carries `rx.ack < snd_nxt`, so it
         // never spuriously clears the window.
-        if self.snd_buf_len > 0 && rx.flags & tcp::FLAG_ACK != 0 && rx.ack == self.snd_nxt {
+        //
+        // After `shutdown(SHUT_WR)` or `close` the peer's ACK also covers our
+        // FIN, which occupies one sequence number that `snd_nxt` does not count
+        // (see [`shutdown`](Self::shutdown)), so it arrives as `snd_nxt + 1`.
+        // Before the retransmission timer ran on its own, an outstanding segment
+        // left uncleared that way was harmless; now it would be resent until the
+        // connection timed out.
+        let acks_all =
+            rx.ack == self.snd_nxt || (self.write_shut && rx.ack == self.snd_nxt.wrapping_add(1));
+        if self.snd_buf_len > 0 && rx.flags & tcp::FLAG_ACK != 0 && acks_all {
             self.snd_buf_len = 0;
+            self.rtx.acked();
         }
         if rx.seq == self.rcv_nxt {
             // In-order segment: buffer any payload (up to capacity), then any FIN.
@@ -1966,29 +1997,40 @@ impl TcpConn {
         n
     }
 
-    /// Early in an idle window (nothing received yet), retransmit the buffered
-    /// send segment up to three times in case our request was lost. Returns `true`
-    /// if it retransmitted (the caller then resets its idle counter). Shared by
-    /// both receive paths.
-    fn maybe_retransmit(&mut self, me: &IfInfo, idle: u32, retransmits: &mut u32) -> bool {
-        if self.snd_buf_len > 0
-            && self.rcv_nxt == self.server_isn.wrapping_add(1)
-            && idle == 40
-            && *retransmits < 3
-        {
-            *retransmits += 1;
-            self.ipid = self.ipid.wrapping_add(1);
-            let seq = self.snd_nxt.wrapping_sub(self.snd_buf_len as u32);
-            self.emit(
-                me,
-                seq,
-                self.rcv_nxt,
-                tcp::FLAG_PSH | tcp::FLAG_ACK,
-                &self.snd_buf[..self.snd_buf_len],
-            );
-            true
-        } else {
-            false
+    /// Resend the in-flight segment if its acknowledgement is overdue, or mark
+    /// the connection timed out once every resend has gone unanswered -- the
+    /// policy is `netproto::tcp_rtx`. Returns `true` if it resent.
+    ///
+    /// Run for every live connection by [`ring_pump`], and by the one-shot
+    /// [`recv`](Self::recv), so the timer advances whenever the daemon serves
+    /// the connection at all -- including for a kernel that waits by asking
+    /// without blocking. It used to run only inside the blocking receive and
+    /// send loops, on a counter local to one call (resend at the 40th idle
+    /// 5 ms poll, at most three times, and only before any reply had arrived),
+    /// so a lost segment was resent only if some caller happened to be blocked
+    /// on that very connection.
+    fn service_retransmit(&mut self, me: &IfInfo, now: u64) -> bool {
+        if self.snd_buf_len == 0 || !self.established || self.timed_out {
+            return false;
+        }
+        match self.rtx.poll(now) {
+            netproto::tcp_rtx::RtxAction::Wait => false,
+            netproto::tcp_rtx::RtxAction::Resend => {
+                self.ipid = self.ipid.wrapping_add(1);
+                let seq = self.snd_nxt.wrapping_sub(self.snd_buf_len as u32);
+                self.emit(
+                    me,
+                    seq,
+                    self.rcv_nxt,
+                    tcp::FLAG_PSH | tcp::FLAG_ACK,
+                    &self.snd_buf[..self.snd_buf_len],
+                );
+                true
+            }
+            netproto::tcp_rtx::RtxAction::GiveUp => {
+                self.timed_out = true;
+                false
+            }
         }
     }
 
@@ -2006,8 +2048,7 @@ impl TcpConn {
         let mut pl = [0u8; MAX_FRAME];
 
         let mut idle = 0u32;
-        let mut retransmits = 0u32;
-        while idle < TCP_DATA_ITERS && !self.peer_fin {
+        while idle < TCP_DATA_ITERS && !self.peer_fin && !self.timed_out {
             let mut got = false;
             while let Some(rx) = self.recv_one_seg(me, &mut frame, &mut pl) {
                 got = true;
@@ -2020,7 +2061,7 @@ impl TcpConn {
                 idle = 0;
             } else {
                 idle = idle.saturating_add(1);
-                if self.maybe_retransmit(me, idle, &mut retransmits) {
+                if self.service_retransmit(me, now_ns()) {
                     idle = 0;
                 }
                 sleep_ns(POLL_SLEEP_NS);
@@ -2753,6 +2794,15 @@ impl RingConns {
             if let Some((_, mut c)) = slot.take() {
                 c.close(me);
             }
+        }
+    }
+
+    /// Run every live connection's retransmission timer at `now`
+    /// ([`TcpConn::service_retransmit`]). Called by [`ring_pump`] after each
+    /// drain, so the timers advance whenever the ring is served.
+    fn service_retransmits(&mut self, me: &IfInfo, now: u64) {
+        for (_, c) in self.slots.iter_mut().flatten() {
+            c.service_retransmit(me, now);
         }
     }
 }
@@ -3797,6 +3847,8 @@ fn ring_tcp_send(
         // client (no send buffering across connect): reject it so the kernel
         // surfaces ENOTCONN rather than us emitting a bad-seq segment.
         Some(c) if !c.established => return -1,
+        // Every resend of the last segment went unanswered: ETIMEDOUT.
+        Some(c) if c.timed_out => return netipc::ring::ERR_TIMED_OUT,
         Some(_) => {}
     }
     let nonblock = sqe.aux & netipc::ring::SEND_NONBLOCK != 0;
@@ -3810,9 +3862,9 @@ fn ring_tcp_send(
             return netipc::ring::ERR_WOULD_BLOCK; // kernel → EAGAIN
         }
         // Blocking send: wait for the outstanding segment to be ACKed, driving its
-        // retransmit while we wait. Bounded by the send deadline.
+        // retransmit while we wait -- `ring_pump` runs the retransmission timers.
+        // Bounded by the send deadline.
         let mut idle = 0u32;
-        let mut retransmits = 0u32;
         loop {
             if idle >= TCP_DATA_ITERS {
                 break;
@@ -3821,15 +3873,10 @@ fn ring_tcp_send(
                 idle = 0;
             } else {
                 idle = idle.saturating_add(1);
-                if conns
-                    .get_mut(target_id)
-                    .is_some_and(|c| c.maybe_retransmit(me, idle, &mut retransmits))
-                {
-                    idle = 0;
-                }
                 sleep_ns(POLL_SLEEP_NS);
             }
             match conns.get_mut(target_id) {
+                Some(c) if c.timed_out => return netipc::ring::ERR_TIMED_OUT,
                 Some(c) if !c.send_window_full() => break, // window drained → send below
                 Some(_) => {}
                 None => return -1, // connection vanished mid-send
@@ -3933,6 +3980,9 @@ fn ring_pump(
             }
         }
     }
+    // Every arrival is in: now the retransmission timers, which an ACK that
+    // just arrived may have stopped.
+    conns.service_retransmits(me, now_ns());
     any
 }
 
@@ -3980,13 +4030,15 @@ fn ring_tcp_recv(
         // segment (or EOF) falls through to the shared copy-out below.
         ring_pump(conns, listeners, me, next_hop_mac);
         match conns.get_mut(target_id) {
+            Some(c) if c.rx_len == 0 && !c.peer_fin && c.timed_out => {
+                return netipc::ring::ERR_TIMED_OUT;
+            }
             Some(c) if c.rx_len == 0 && !c.peer_fin => return netipc::ring::ERR_WOULD_BLOCK,
             Some(_) => {}
             None => return -1,
         }
     } else {
         let mut idle = 0u32;
-        let mut retransmits = 0u32;
         loop {
             // Stop as soon as the target has in-order bytes to deliver (a blocking
             // recv returns available data promptly, like `read(2)` — it must not
@@ -3997,7 +4049,7 @@ fn ring_tcp_recv(
             // control-channel timeout, but on the slower IPv6 loopback path it pushed
             // the round past `RECV_TIMEOUT_NS`, surfacing as a spurious `TimedOut`.
             match conns.get_mut(target_id) {
-                Some(c) if c.rx_len > 0 || c.peer_fin => break,
+                Some(c) if c.rx_len > 0 || c.peer_fin || c.timed_out => break,
                 Some(_) => {}
                 None => break, // connection vanished (shouldn't happen mid-recv)
             }
@@ -4008,14 +4060,25 @@ fn ring_tcp_recv(
                 idle = 0;
             } else {
                 idle = idle.saturating_add(1);
-                if conns
-                    .get_mut(target_id)
-                    .is_some_and(|c| c.maybe_retransmit(me, idle, &mut retransmits))
-                {
-                    idle = 0;
-                }
                 sleep_ns(POLL_SLEEP_NS);
             }
+        }
+        // Nothing to deliver and the stream still open: say why, never `0`,
+        // which means EOF and nothing else. Until 2026-09-26 a wait that
+        // outlasted the deadline fell through to the copy-out and answered `0`,
+        // and every blocking `recv(2)` on a connection quiet for two seconds
+        // reported the peer closed (known-issues.md
+        // `A-BLOCKING-TCP-RECV-REPORTS-EOF-AFTER-2S`). The kernel no longer asks
+        // this way -- it waits itself, asking without blocking -- but the ring
+        // tests in `proc/spawn.rs` do, and they read a short result as "no data
+        // came back" whichever way it is said.
+        match conns.get_mut(target_id) {
+            Some(c) if c.rx_len == 0 && !c.peer_fin && c.timed_out => {
+                return netipc::ring::ERR_TIMED_OUT;
+            }
+            Some(c) if c.rx_len == 0 && !c.peer_fin => return netipc::ring::ERR_WOULD_BLOCK,
+            Some(_) => {}
+            None => return -1,
         }
     }
     let off = sqe.data_off as usize;
@@ -4120,6 +4183,13 @@ fn ring_tcp_poll(
             }
             if !c.established {
                 return 0; // SYN_SENT: not yet writable, keep waiting for POLLOUT.
+            }
+            if c.timed_out {
+                // Ready, in the sense that matters: a recv or a send now answers
+                // ETIMEDOUT at once, so a poller must wake to hear it.
+                return netipc::ring::POLL_ERR
+                    | netipc::ring::POLL_READABLE
+                    | netipc::ring::POLL_WRITABLE;
             }
             // Writable only when the send window has room: our single-outstanding-
             // segment sender cannot accept a new segment while a prior one is still

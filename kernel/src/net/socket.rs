@@ -259,10 +259,16 @@ struct SocketInner {
     peer_ip6: Option<[u8; 16]>,
     /// Remembered peer port.
     peer_port: u16,
-    /// Whether the latched `SO_ERROR` has already been consumed by a
-    /// `getsockopt(SO_ERROR)` read. `SO_ERROR` is one-shot in Linux: the first read
-    /// after a failed connect returns the errno, subsequent reads return `0`.
-    so_error_read: bool,
+    /// The pending socket error, a Linux errno (`0` = none): what
+    /// `getsockopt(SO_ERROR)` reports once and clears, like Linux's `sk_err`.
+    /// `ECONNREFUSED` when a connect fails; `ETIMEDOUT` when an established
+    /// connection times out and a poll is the first to learn it. A `recv` or
+    /// `send` that reports the timeout itself consumes it, as Linux's does.
+    so_error: i32,
+    /// Whether this connection's timeout has been reported, by either route,
+    /// so that the daemon -- which answers "timed out" from then on -- cannot
+    /// make a later poll latch it again.
+    timeout_reported: bool,
     /// Listener sockets only: the next connection id to hand an accepted connection
     /// on this listener's session (starts at [`ACCEPT_ID_BASE`], bumped per
     /// successful [`accept`]). Meaningless for a non-listener.
@@ -365,7 +371,8 @@ fn create_kind(kind: SockKind, domain: u16) -> KernelResult<SocketHandle> {
         peer_ip: [0; 4],
         peer_ip6: None,
         peer_port: 0,
-        so_error_read: false,
+        so_error: 0,
+        timeout_reported: false,
         next_accept_id: ACCEPT_ID_BASE,
     };
     let id = alloc_socket_id();
@@ -473,6 +480,7 @@ pub fn connect(
     }
     if res < 0 {
         guard.state = SockState::Failed;
+        guard.so_error = ECONNREFUSED;
         return Err(KernelError::ConnectionRefused);
     }
     guard.state = SockState::Connected;
@@ -519,6 +527,7 @@ pub fn connect6(
     }
     if res < 0 {
         guard.state = SockState::Failed;
+        guard.so_error = ECONNREFUSED;
         return Err(KernelError::ConnectionRefused);
     }
     guard.state = SockState::Connected;
@@ -529,32 +538,81 @@ pub fn connect6(
 
 /// Send `buf` on a connected socket. Returns the number of bytes accepted.
 ///
-/// When `nonblock` is set (the fd's `O_NONBLOCK` status flag), a send that would
-/// block on a full send window returns [`KernelError::WouldBlock`] (→ `EAGAIN`)
-/// instead of waiting for the peer's ACK; otherwise it blocks up to the daemon's
-/// send deadline.
+/// When `nonblock` is set (the fd's `O_NONBLOCK` status flag), it sends what
+/// the window takes and returns that count, or [`KernelError::WouldBlock`]
+/// (→ `EAGAIN`) if it took nothing. A **blocking** send writes everything, as
+/// Linux's does: it asks the daemon without blocking, and when the window is
+/// full it waits in [`wait_until`] for the peer's ACK and goes on with the
+/// rest. A signal or an error after some bytes went returns their count, as
+/// Linux's does; before any, the `EINTR` or the error.
+///
+/// Until 2026-09-26 a blocking send was handed to the daemon, which waited up
+/// to two seconds for the window and then answered would-block: `EAGAIN` from
+/// a blocking socket, whenever the peer was slow to acknowledge.
 ///
 /// # Errors
 ///
 /// - `InvalidHandle` — closed handle.
 /// - `NotConnected` — the socket is not connected (Linux `ENOTCONN`/`EPIPE`).
 /// - `WouldBlock` — `nonblock` was set and the window was full (→ `EAGAIN`).
+/// - `Interrupted` — a blocking wait was ended by a signal before any byte went.
+/// - `TimedOut` — the connection timed out (→ `ETIMEDOUT`).
 /// - protocol faults propagated from [`NetstackConn::send`].
 pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i32> {
     let inner = inner_of(handle)?;
-    let mut guard = inner.lock();
-    if guard.state != SockState::Connected {
-        return Err(KernelError::NotConnected);
+    let mut sent: usize = 0;
+    loop {
+        let rest = buf.get(sent..).unwrap_or(&[]);
+        let got = wait_until(nonblock, || {
+            let mut guard = inner.lock();
+            if guard.state != SockState::Connected {
+                return Err(KernelError::NotConnected);
+            }
+            guard.with_stream_conn(|c, cid| c.send_on(cid, rest, true))
+        });
+        if got == Err(KernelError::TimedOut) {
+            timeout_reported(&inner);
+        }
+        let count = i32::try_from(sent).unwrap_or(i32::MAX);
+        match got {
+            Ok(n) if n > 0 => {
+                sent = sent.saturating_add(usize::try_from(n).unwrap_or(0));
+                if sent >= buf.len() || nonblock {
+                    return Ok(i32::try_from(sent).unwrap_or(i32::MAX));
+                }
+            }
+            // Nothing accepted, or the daemon's raw failure: what went, else that.
+            Ok(n) => return Ok(if sent > 0 { count } else { n }),
+            Err(e) => return if sent > 0 { Ok(count) } else { Err(e) },
+        }
     }
-    guard.with_stream_conn(|c, cid| c.send_on(cid, buf, nonblock))
+}
+
+/// Record that a connection's timeout has been reported by a call: SO_ERROR's
+/// pending `ETIMEDOUT`, if a poll latched one, is consumed, and no later poll
+/// latches another. Linux clears `sk_err` the same way when a call returns it.
+fn timeout_reported(inner: &Mutex<SocketInner>) {
+    let mut guard = inner.lock();
+    guard.timeout_reported = true;
+    if guard.so_error == ETIMEDOUT {
+        guard.so_error = 0;
+    }
 }
 
 /// Receive up to `buf.len()` bytes on a connected socket. Returns the number of
-/// bytes copied (`0` = peer closed / no data).
+/// bytes copied; `0` means the peer closed its side, and nothing else.
 ///
 /// When `nonblock` is set (the fd's `O_NONBLOCK` status flag), a receive with no
-/// data ready returns [`KernelError::WouldBlock`] (→ `EAGAIN`) instead of blocking
-/// on the daemon; otherwise it blocks up to the daemon's receive deadline.
+/// data ready returns [`KernelError::WouldBlock`] (→ `EAGAIN`). A **blocking**
+/// receive waits in [`wait_until`] -- asking the daemon without blocking --
+/// until data arrives, the peer closes, the connection times out
+/// (`TimedOut` → `ETIMEDOUT`) or a signal interrupts (`EINTR`).
+///
+/// Until 2026-09-26 a blocking receive was handed to the daemon, which polled
+/// for two seconds and then answered `0`, which this returned: every
+/// connection quiet for two seconds read as closed (known-issues.md
+/// `A-BLOCKING-TCP-RECV-REPORTS-EOF-AFTER-2S`), and for those two seconds the
+/// daemon served nobody else.
 ///
 /// When `peek` is set (the caller's `MSG_PEEK`), buffered bytes are copied out
 /// without being consumed, so a subsequent `recv` returns the same data.
@@ -567,11 +625,17 @@ pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i3
 /// - protocol faults propagated from [`NetstackConn::recv`].
 pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool, peek: bool) -> KernelResult<i32> {
     let inner = inner_of(handle)?;
-    let mut guard = inner.lock();
-    if guard.state != SockState::Connected {
-        return Err(KernelError::NotConnected);
+    let got = wait_until(nonblock, || {
+        let mut guard = inner.lock();
+        if guard.state != SockState::Connected {
+            return Err(KernelError::NotConnected);
+        }
+        guard.with_stream_conn(|c, cid| c.recv_on(cid, buf, true, peek))
+    });
+    if got == Err(KernelError::TimedOut) {
+        timeout_reported(&inner);
     }
-    guard.with_stream_conn(|c, cid| c.recv_on(cid, buf, nonblock, peek))
+    got
 }
 
 /// Set by the spawned reader immediately before it blocks, so the main task can
@@ -905,13 +969,24 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
         return Ok((false, true, false));
     }
     match guard.state {
-        SockState::Connected => guard.with_stream_conn(|c, cid| c.poll_on(cid)),
+        SockState::Connected => {
+            let ready = guard.with_stream_conn(|c, cid| c.poll_on(cid))?;
+            // The daemon's error bit on an established connection means it
+            // timed out. Latch ETIMEDOUT for SO_ERROR -- once: the daemon keeps
+            // saying so, and a poller that has read it must not read it again.
+            if ready.2 && !guard.timeout_reported {
+                guard.timeout_reported = true;
+                guard.so_error = ETIMEDOUT;
+            }
+            Ok(ready)
+        }
         SockState::Connecting => {
             let (readable, writable, error) = guard.with_stream_conn(|c, cid| c.poll_on(cid))?;
             // Resolve the pending handshake: an error latches Failed; becoming
             // writable (with no error) means ESTABLISHED. Otherwise stay Connecting.
             if error {
                 guard.state = SockState::Failed;
+                guard.so_error = ECONNREFUSED;
             } else if writable {
                 guard.state = SockState::Connected;
             }
@@ -935,14 +1010,20 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
     }
 }
 
+/// Linux `ECONNREFUSED`: a connect was refused (or its handshake failed).
+const ECONNREFUSED: i32 = 111;
+/// Linux `ETIMEDOUT`: an established connection's resends went unanswered.
+const ETIMEDOUT: i32 = 110;
+
 /// Read and clear the pending socket error (`getsockopt(SOL_SOCKET, SO_ERROR)`).
 ///
-/// Returns the Linux errno for the socket's current error condition and clears it
-/// (a `Failed` socket is left `Failed` — Linux keeps the socket unusable — but
-/// SO_ERROR is a one-shot read, so a second call returns `0`):
-/// - a `Failed` socket returns `ECONNREFUSED` (111) once, then `0`;
-/// - a `Connecting` socket (handshake still pending) returns `0` (no error yet);
-/// - any other state returns `0`.
+/// Returns the pending errno and clears it (a `Failed` socket is left `Failed` —
+/// Linux keeps the socket unusable — but SO_ERROR is a one-shot read, so a second
+/// call returns `0`):
+/// - a failed connect: `ECONNREFUSED` once, then `0`;
+/// - an established connection that timed out, first learned by a poll:
+///   `ETIMEDOUT` once, then `0` (a `recv`/`send` that reported it consumed it);
+/// - otherwise `0`.
 ///
 /// # Errors
 ///
@@ -950,13 +1031,9 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
 pub fn take_so_error(handle: SocketHandle) -> KernelResult<i32> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
-    if guard.state == SockState::Failed && !guard.so_error_read {
-        guard.so_error_read = true;
-        // ECONNREFUSED — the only failure our synchronous/handshake path surfaces.
-        Ok(111)
-    } else {
-        Ok(0)
-    }
+    let pending = guard.so_error;
+    guard.so_error = 0;
+    Ok(pending)
 }
 
 /// Whether the socket is currently connected.
@@ -1749,7 +1826,8 @@ pub fn accept(handle: SocketHandle) -> KernelResult<(SocketHandle, AcceptedPeer)
         peer_ip,
         peer_ip6,
         peer_port,
-        so_error_read: false,
+        so_error: 0,
+        timeout_reported: false,
         next_accept_id: ACCEPT_ID_BASE,
     };
     let id = alloc_socket_id();

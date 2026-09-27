@@ -5368,7 +5368,7 @@ fn main() -> ExitCode {
     // Parsed here rather than by `app::launch`, which refuses every argument
     // but `--display`: the file manager opens a video by naming it, and the
     // refusal ended the player before its window opened.
-    let args = match app::Args::from_env() {
+    let args = match app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("videoplayer: {e}");
@@ -5384,7 +5384,7 @@ fn main() -> ExitCode {
 
 /// Open the videos named on the command line: the first shown, the rest
 /// listed after it. Returns why each that could not be read was not.
-fn open_arguments(app: &mut VideoPlayerApp, paths: &[String]) -> Vec<String> {
+fn open_arguments(app: &mut VideoPlayerApp, paths: &[std::ffi::OsString]) -> Vec<String> {
     let mut failed = Vec::new();
     let mut shown = false;
     for path in paths.iter().map(Path::new) {
@@ -5718,9 +5718,9 @@ test to be about anything -- it drew {} text command(s)",
         );
     }
 
-    /// A scratch path as a command-line argument: its exact text.
-    fn text(path: &std::path::Path) -> String {
-        path.to_str().expect("a scratch path is text").to_owned()
+    /// A scratch path as a command-line argument: exactly its bytes.
+    fn text(path: &std::path::Path) -> std::ffi::OsString {
+        path.as_os_str().to_owned()
     }
 
     /// Stepping through the playlist opens each entry's file: it said "Now

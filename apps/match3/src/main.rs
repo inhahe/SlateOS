@@ -1754,17 +1754,16 @@ fn main() -> ExitCode {
     // instead of being refused as an argument this game does not take. That
     // option belongs to every application equally and is not part of what
     // `refuse_arguments` is about.
-    let args = match app::Args::from_env() {
+    let args = match app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("match3: {e}");
             return ExitCode::from(2);
         }
     };
-    // `Args::from_env` has already refused an argument that is not UTF-8, so
-    // what reaches here is decodable; `escape_ascii` in the refusal still
-    // earns its place for the non-ASCII ones.
-    refuse_arguments(args.rest.first().map(|a| std::ffi::OsStr::new(a.as_str())));
+    // The argument as it was given, bytes and all: the refusal escapes what
+    // is not text rather than the parser refusing it first by another name.
+    refuse_arguments(args.rest.first().map(std::ffi::OsString::as_os_str));
     let mut game = Match3::new();
     app::launch_with("match3", args.display.as_deref(), &mut game)
 }

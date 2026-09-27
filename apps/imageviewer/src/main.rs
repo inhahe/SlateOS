@@ -2830,7 +2830,7 @@ fn main() -> ExitCode {
     // viewer's own argument list; `launch_with` is the entry point for an
     // application that has taken its own arguments, `launch` the one for an
     // application with none.
-    let args = match oswindow::app::Args::from_env() {
+    let args = match oswindow::app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("imageviewer: {e}");

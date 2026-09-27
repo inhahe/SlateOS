@@ -6227,7 +6227,7 @@ fn main() -> std::process::ExitCode {
     // command line, found the path left over, and refused it: "exit 2,
     // unexpected argument", before the window opened. Every "open containing
     // folder" and every association that sends a file here opened nothing.
-    let args = match oswindow::app::Args::from_env() {
+    let args = match oswindow::app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("explorer: {e}");
@@ -6246,7 +6246,7 @@ fn main() -> std::process::ExitCode {
 /// that send an archive or a disk image here mean. Nothing named opens on
 /// `home`, then the root. A window shows one folder, so a second path named is
 /// said not to have been opened rather than dropped without a word.
-fn explorer_for(paths: &[String], home: Option<PathBuf>) -> ExplorerState {
+fn explorer_for(paths: &[std::ffi::OsString], home: Option<PathBuf>) -> ExplorerState {
     let Some((first, rest)) = paths.split_first() else {
         return ExplorerState::new(&home.unwrap_or_else(|| PathBuf::from("/")));
     };
@@ -6653,7 +6653,7 @@ mod tests {
         fs::create_dir_all(dir.join("inner")).expect("mkdir");
         write(&dir.join("a.txt"), "a");
         write(&dir.join("b.txt"), "b");
-        let text = |p: &Path| p.to_str().expect("a text path").to_owned();
+        let text = |p: &Path| p.as_os_str().to_owned();
         let _turn = settingsfile::testing::config_turn();
 
         let folder = explorer_for(&[text(&dir.join("inner"))], None);

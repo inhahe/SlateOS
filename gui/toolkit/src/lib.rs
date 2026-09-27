@@ -23,6 +23,7 @@
 //! Backend (compositor syscalls, framebuffer, etc.)
 //! ```
 
+pub mod button;
 pub mod canvas;
 pub mod color;
 pub mod colorpicker;

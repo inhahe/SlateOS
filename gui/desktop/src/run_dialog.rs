@@ -1021,44 +1021,27 @@ impl RunDialog {
         id: ButtonId,
         primary: bool,
     ) {
-        let hovered = self.hovered_button == Some(id);
-        let bg = if primary {
-            p.accent
-        } else if hovered {
-            p.surface2
+        // The toolkit's button, the reference's Aero button: OK the box's own
+        // action, tinted with the accent. It used to be the only button the
+        // pointer did not light.
+        let kind = if primary {
+            guitk::button::Kind::Primary
         } else {
-            p.surface1
+            guitk::button::Kind::Plain
         };
-        let fg = if primary { p.on_accent() } else { p.text };
-
-        cmds.push(RenderCommand::FillRect {
-            x: bx,
-            y: by,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: bg,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: text::center_x(
-                label,
-                bx + BUTTON_WIDTH / 2.0,
-                BODY_FONT_SIZE,
-                FontWeightHint::Regular,
-            ),
-            y: by + 7.0,
-            text: label.to_string(),
-            color: fg,
-            font_size: BODY_FONT_SIZE,
-            font_weight: if primary {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
+        guitk::button::draw(
+            cmds,
+            p,
+            (bx, by, BUTTON_WIDTH, BUTTON_HEIGHT),
+            label,
+            kind,
+            guitk::button::State {
+                hovered: self.hovered_button == Some(id),
+                ..guitk::button::State::default()
             },
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+            p.base,
+            0.0,
+        );
     }
 
     fn execute_current(&mut self) {
@@ -2068,7 +2051,27 @@ mod tests {
                                 dialog.hovered_button = hovered;
                                 let cmds = dialog.render(&p);
                                 assert!(!cmds.is_empty());
-                                palette_check::assert_drawn_from(&p, &cmds, &[], "run_dialog");
+                                // The buttons' faces are blended from the
+                                // palette by the toolkit's button, against the
+                                // box's ground: declared as what they are.
+                                let mut derived = Vec::new();
+                                for kind in
+                                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary]
+                                {
+                                    for hovered in [false, true] {
+                                        let c = guitk::button::paint(
+                                            &p,
+                                            kind,
+                                            guitk::button::State {
+                                                hovered,
+                                                ..guitk::button::State::default()
+                                            },
+                                            p.base,
+                                        );
+                                        derived.extend([c.upper, c.lower, c.edge, c.ink]);
+                                    }
+                                }
+                                palette_check::assert_drawn_from(&p, &cmds, &derived, "run_dialog");
                             }
                         }
                     }

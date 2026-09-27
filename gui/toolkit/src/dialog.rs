@@ -1927,26 +1927,29 @@ impl FileDialog {
         let cancel_x = width - BUTTON_WIDTH - PADDING;
         let confirm_x = cancel_x - BUTTON_WIDTH - PADDING;
 
-        // Confirm button
+        // The toolkit's buttons (`crate::button`), the reference's Aero
+        // buttons: Open, Save or Select the dialog's own action, tinted with
+        // the accent, and greyed while there is nothing to confirm; Cancel
+        // plain.
         let confirm_enabled = self.confirm().is_some();
-        let confirm_bg = if confirm_enabled {
-            palette.blue
-        } else {
-            palette.surface2
-        };
         let confirm_label = match self.mode {
             DialogMode::Open => "Open",
             DialogMode::Save => "Save",
             DialogMode::SelectFolder => "Select",
         };
-        frame.push(RenderCommand::FillRect {
-            x: confirm_x,
-            y: input_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: confirm_bg,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        crate::button::draw(
+            frame,
+            palette,
+            (confirm_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            confirm_label,
+            crate::button::Kind::Primary,
+            crate::button::State {
+                disabled: !confirm_enabled,
+                ..crate::button::State::default()
+            },
+            palette.surface0,
+            0.0,
+        );
         // Recorded whether or not it is enabled. A disabled Open button that let
         // the click through would be a hole in the dialog exactly where the user
         // aims most confidently; `confirm()` returning `None` is what makes the
@@ -1956,47 +1959,21 @@ impl FileDialog {
             DialogTarget::Confirm,
             Rect::new(confirm_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
         );
-        frame.push(RenderCommand::Text {
-            x: confirm_x + (BUTTON_WIDTH - 30.0) / 2.0,
-            y: input_y + 8.0,
-            text: String::from(confirm_label),
-            color: if confirm_enabled {
-                palette.base
-            } else {
-                palette.overlay0
-            },
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
 
-        // Cancel button
-        // A button is not a card: there is no button role, and sweeping
-        // one in would decide by default that buttons follow the
-        // card/border setting. Left for a decision.
-        frame.push(RenderCommand::FillRect {
-            x: cancel_x,
-            y: input_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: palette.surface1,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        crate::button::draw(
+            frame,
+            palette,
+            (cancel_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            "Cancel",
+            crate::button::Kind::Plain,
+            crate::button::State::default(),
+            palette.surface0,
+            0.0,
+        );
         frame.hit(
             DialogTarget::Cancel,
             Rect::new(cancel_x, input_y, BUTTON_WIDTH, BUTTON_HEIGHT),
         );
-        frame.push(RenderCommand::Text {
-            x: cancel_x + (BUTTON_WIDTH - 42.0) / 2.0,
-            y: input_y + 8.0,
-            text: String::from("Cancel"),
-            color: palette.ink(palette.red),
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
     }
 }
 

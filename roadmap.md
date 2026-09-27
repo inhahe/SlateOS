@@ -1859,6 +1859,14 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **One push button, the reference's** -- done 2026-09-27
+  (`design-decisions.md` §1414). `guitk::button` draws the Aero reference's
+  button in the theme's colours -- a face brighter above, an edge, the label
+  bold; the dialog's own action tinted with the accent, a destructive one
+  red -- with every label held to the text floor on both halves of its
+  face. The toolkit's alert, input and progress dialogs, the Open and Save
+  window's footer and the Run box use it; each drew its own before.
+
 - `[C]` **Alt+Tab is the reference's glass** -- done 2026-09-27
   (`design-decisions.md` §1413). The switcher showed the first twelve
   characters of every title in one row, cut unmarked, and ran off the screen

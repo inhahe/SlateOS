@@ -58820,20 +58820,23 @@ is already waiting, not whether the setter exists.
   knows, so it can be glibc's iconv_prog over the libc's iconv -- asked in
   requests/d-b-the-iconv-program-can-run-on-the-libc.md.
 
-- **posix/src: 150 modules nothing the library exports reaches** (the
-  sequel to TD-D-1700-CONSTANT-MODULES-NOTHING-USED).  A scan of 2026-09-27
-  -- comments stripped; the roots the modules that export C symbols
-  (no_mangle, export_name, global_asm!), what lib.rs names, and the 34 posix
-  modules the 49 files outside posix/ import (crypt 109 times, ed25519 35)
-  -- reached 149 of 299 modules; 150 (about 23,900 lines) are reached from
-  no root.  The constant-only ones are gone (1,703 *_types on 2026-09-26,
-  313 others on 2026-09-27); what is left is mixed: header-named facades
-  that re-export other modules' calls for Rust callers none of which calls
-  them (grp.rs, sys_socket.rs, termios.rs), modules with functions nothing
-  calls (arpa_nameser.rs, sys_select.rs, net_if.rs, and dozens of linux_*
-  ones), linux_* modules of structs, the linux_virtio_* constant modules
-  with linux_virtio_types (kept, checked), three constant modules a staying
-  module names (linux_fs.rs, linux_netfilter.rs, sys_random.rs), and
-  abi_layout.rs, which is tests.  Method: for each family, read what it is
-  and whether anything should call it; delete it (design-decisions.md
-  §1118, after §851) or wire it, and say which, and why, in the commit.
+- **posix/src: 46 facades whose tests are the only tests of something
+  live** (the sequel to TD-D-1700-CONSTANT-MODULES-NOTHING-USED).  Nothing
+  the library exports reaches these modules -- they re-export socket.rs's,
+  unistd.rs's, process.rs's names for Rust callers that cannot exist (only
+  crypt and ed25519 may be imported, §768) -- but their tests call the real
+  functions, and for some they are the only such tests: sys_random.rs's
+  getrandom flag checks (the Phase 80 set: unknown bits, GRND_RANDOM with
+  GRND_INSECURE, which check comes first), sys_reboot.rs's 26 (Phase 77),
+  sys_personality.rs's 22, mntent.rs's (unistd.rs tests getmntent twice),
+  linux_quota.rs's quotactl tests, netdb.rs's herror, ifaddrs.rs's one test
+  of getifaddrs (socket.rs has none).  The rest duplicate tests the defining
+  module has (arpa_inet.rs, the epoll/eventfd/signalfd/timerfd/inotify
+  family, sys_uio.rs, sys_vfs.rs, sys_xattr.rs, ...).  Method: for each,
+  move what is not already tested into the defining module's tests, in
+  that module's terms, then delete the facade (§1118) -- one family a
+  commit.  net_if_packet.rs goes with ifaddrs.rs, which re-exports from it.
+  The scan that finds them: comments stripped, roots every module that
+  exports a C symbol, what lib.rs names, what another crate imports and
+  what a script runs (abi_layout.rs, via check-libc-abi.py).  103 others,
+  whose tests reached nothing live, were deleted on 2026-09-27.

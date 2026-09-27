@@ -3319,9 +3319,16 @@ dependencies = [
 name = "swapon"
 version = "0.1.0"
 dependencies = [
+ "getoptlong",
  "libcall",
- "procinfo",
  "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulmount",
+ "ulstrutils",
 ]
 
 [[package]]

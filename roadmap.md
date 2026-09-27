@@ -4573,7 +4573,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] wpa_supplicant/wpa_cli/wpa_passphrase: WiFi authentication (SHA-1, HMAC, PBKDF2, WPA PSK, state machine, 137 tests)
   - [x] fdisk/gdisk/sfdisk/cfdisk/partprobe: disk partitioning (MBR/GPT, CRC32, GUID, 60+ GPT types, JSON, 137 tests)
   - [x] gdb/gdbserver: debugger (ELF64, breakpoints, watchpoints, x86_64 disassembler, expr eval, GDB remote protocol, 122 tests)
-  - [x] swapon/swapoff/free: swap and memory management (/proc/meminfo, /proc/swaps, human/unit output)
+  - [x] swapon/swapoff/free: swap and memory management (/proc/meminfo, /proc/swaps, human/unit output). **2026-09-27: `swapon` and `swapoff` are now ports of util-linux 2.39.3's** (`userspace/swapon`, `src/bin/swapoff.rs`) on the libmount, libblkid and libsmartcols ports -- `--show`'s table, `-s`, the checks before swapon(2) (permissions, holes, the page size a header was made for, `--fixpgsz` re-making it with mkswap, old software-suspend data), `-a` over fstab with noauto/nofail/pri=/discard=, and swapoff by path, label, UUID and `-a`; `scripts/swapon-diff.sh`, 166 cases, all agreeing.
   - [x] losetup/lodetach: loop device management (sysfs enumeration, setup/detach, JSON output, size parsing)
   - [x] hostnamectl/hostname/domainname/dnsdomainname: hostname management (machine-info, os-release, virtualization detection)
   - [x] useradd/userdel/usermod/groupadd/groupdel/groupmod/newgrp: user management (atomic file I/O, UID/GID auto-assign, skel copy, 106 tests)

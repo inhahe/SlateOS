@@ -171239,10 +171239,12 @@ of a persistent namespace whose owner `-t` filtered out), and so does `lsblk`
 (`scripts/lsblk-diff.sh`: 502 cases on util-linux's `--sysroot` snapshots
 and WSL itself -- a port that needed libsmartcols' sorting and line groups,
 measured on their own against the real library by
-`scripts/smartcols-diff.sh`: 2954 tables); the others still do not use it.
+`scripts/smartcols-diff.sh`: 2954 tables), and so does `swapon`'s `--show`
+(`scripts/swapon-diff.sh`, 166 cases, 2026-09-27); the others still do not use
+it.
 
-**Where:** `losetup` (`--list`), `swapon` (`--show`), `rfkill`,
-`fdisk` (`-l`'s partition table). `rfkill`'s reference, like `lsirq`'s,
+**Where:** `losetup` (`--list`), `rfkill`, `fdisk` (`-l`'s partition
+table). `rfkill`'s reference, like `lsirq`'s,
 is not installed in WSL; `scripts/util-linux-extra.sh` unpacks both without
 root.
 

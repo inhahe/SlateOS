@@ -152,7 +152,6 @@ userspace/service
 userspace/shell
 userspace/shuf
 userspace/ss
-userspace/swapon  # bare deny(clippy::all)
 userspace/sysctl
 userspace/syslogd
 userspace/sysstat  # bare deny(clippy::all)

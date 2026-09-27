@@ -117,7 +117,6 @@ ss:sockstat
 sudo:sudoedit
 sudo:sudoreplay
 sudo:visudo
-swapon:swapoff
 sysstat:cifsiostat
 sysstat:mpstat
 sysstat:pidstat

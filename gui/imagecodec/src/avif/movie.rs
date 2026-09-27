@@ -431,7 +431,7 @@ fn parse_stbl(payload: &[u8]) -> Result<SampleTable<'_>, Error> {
         let body = s.bytes(size).map_err(bad("AVIF stbl box"))?;
         match &kind {
             b"stco" => {
-                parse_chunk_offsets(&mut table, body, false).map_err(bad("AVIF stco box"))?
+                parse_chunk_offsets(&mut table, body, false).map_err(bad("AVIF stco box"))?;
             }
             b"co64" => parse_chunk_offsets(&mut table, body, true).map_err(bad("AVIF co64 box"))?,
             b"stsc" => parse_stsc(&mut table, body)?,

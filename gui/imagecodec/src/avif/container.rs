@@ -152,11 +152,12 @@ pub(super) struct Item {
     /// An essential property this reader does not know: the item must not be
     /// used (ISO/IEC 23008-12 section 10.2.1).
     pub(super) unsupported_essential: bool,
-    /// `iref`: this item is a thumbnail of, the auxiliary image of, a
-    /// description of, and premultiplied by, those items -- 0 for none.
+    /// `iref`: this item is a thumbnail of, the auxiliary image of, and
+    /// premultiplied by, those items -- 0 for none. (A `cdsc` reference, "a
+    /// description of", ties Exif and XMP to their picture, which is all
+    /// libavif uses it for; neither is read here, so it is not kept.)
     pub(super) thumbnail_for: u32,
     pub(super) aux_for: u32,
-    pub(super) desc_for: u32,
     pub(super) prem_by: u32,
     /// `dimg`, read backwards: this item is input `dimg_idx` of item
     /// `dimg_for` -- a grid's tile, or a tone-mapped image's input.
@@ -181,7 +182,6 @@ impl Item {
             unsupported_essential: false,
             thumbnail_for: 0,
             aux_for: 0,
-            desc_for: 0,
             prem_by: 0,
             dimg_for: 0,
             dimg_idx: 0,
@@ -1061,7 +1061,6 @@ fn parse_iref(meta: &mut Meta<'_>, payload: &[u8]) -> Result<(), Error> {
             match &kind {
                 b"thmb" => meta.item_mut(from).thumbnail_for = to,
                 b"auxl" => meta.item_mut(from).aux_for = to,
-                b"cdsc" => meta.item_mut(from).desc_for = to,
                 b"prem" => meta.item_mut(from).prem_by = to,
                 b"dimg" => {
                     // Derived images refer the other way: `to` is input

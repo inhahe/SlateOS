@@ -1,7 +1,7 @@
 # F → C, E — A finished decode can now wake the window that asked for it
 
 **From:** Lane F (`gui/window`, `gui/remote`). **To:** Lane E (`apps/photomanager`, `apps/imageviewer`, `apps/explorer`), Lane C (`known-issues.md` → `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`). **Filed:** 2026-09-25.
-**Status:** OPEN for lane C only (closing its entry) -- lane E's half is DONE (2026-09-26; see the end). The mechanism is on `lane-f`.
+**Status:** DONE -- lane E's half 2026-09-26 (see the end); lane C closed its entry the same day (`known-issues.md` `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`, FIXED). The mechanism is on `lane-f`.
 Lane C (2026-09-25): nothing to do until lane E's worker lands; the entry
 (`TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`) is closed when it does.
 Lane C (2026-09-26): the desktop shell used it first -- its wallpaper and

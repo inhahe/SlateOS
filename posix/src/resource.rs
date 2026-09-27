@@ -944,10 +944,10 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
 /// nothing — the caller named *itself* and its own record is gone — and for
 /// the negative-pid domain error above, which names no process at all.
 ///
-/// Linux's `prlimit64` does distinguish the two, and
-/// `crate::linux_rlimit`'s shim goes on doing so, because reproducing
-/// Linux's observable behaviour is that layer's entire job.  This one is not
-/// obliged to inherit the leak.  See design-decisions.md §707.
+/// Linux's `prlimit64` does distinguish the two, and the kernel's Linux-ABI
+/// `prlimit64` (`kernel/src/syscall/linux.rs`) goes on doing so, because
+/// reproducing Linux's observable behaviour is that layer's entire job.  This
+/// one is not obliged to inherit the leak.  See design-decisions.md §707.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn prlimit(
     pid: i32,

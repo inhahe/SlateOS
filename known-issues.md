@@ -171017,3 +171017,16 @@ constants both; the names no header defines were read by hand against Linux
 the only field-by-field check of `struct tm`'s layout against glibc's; that
 check is in `time.rs`'s own tests now. Any deleted file is one `git show`
 away.
+
+**Addendum (2026-09-27): 313 more, not named `*_types`.** The same kind of
+module under other names -- `linux_acl.rs` to `linux_zswap.rs`, and `ar`,
+`cpio`, `tar`, `sysexits`, `sys_ttydefaults` and the `net_*` header
+transcriptions: constants only, each tested against itself, reached by
+nothing the library exports or any other crate imports. Deleted as a closed
+set -- no module that stays names one -- 47,977 lines, by §1118's rule.
+Three constant modules that staying modules do name (`linux_fs.rs`,
+`linux_netfilter.rs`, `sys_random.rs`) stay for the review of the rest
+(`todo.txt`, lane D). Three doc comments in `syscall.rs` and `resource.rs`
+credited `crate::linux_rlimit` -- a header transcription -- with the Linux-ABI
+`prlimit64`; that is the kernel's (`kernel/src/syscall/linux.rs`), and they
+say so now.

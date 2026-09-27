@@ -562,9 +562,10 @@ pub const SYS_PTY_SET_TERMIOS: u64 = 556;
 /// deliberately: answering `NoSuchProcess` for a dead pid and
 /// `PermissionDenied` for a live one would make this call a process-existence
 /// oracle for any process on the system.  Linux's `prlimit64` does distinguish
-/// them and [`crate::linux_rlimit`] keeps doing so, because reproducing Linux's
-/// observable behaviour is that layer's whole job; the native ABI is not
-/// obliged to inherit the leak.  See §723.
+/// them and the kernel's Linux-ABI `prlimit64` (`kernel/src/syscall/linux.rs`)
+/// keeps doing so, because reproducing Linux's observable behaviour is that
+/// layer's whole job; the native ABI is not obliged to inherit the leak.  See
+/// §723.
 pub const SYS_RLIMIT_GET: u64 = 557;
 
 /// Write one resource limit.  Arguments as for [`SYS_RLIMIT_GET`], with `arg2`
@@ -586,7 +587,7 @@ pub const SYS_RLIMIT_GET: u64 = 557;
 ///
 /// Gate order is **resource before pid** on both calls, so that a caller
 /// probing whether a resource number is understood gets the same answer
-/// whoever they are.  [`crate::linux_rlimit`]'s `prlimit64` keeps Linux's own
+/// whoever they are.  The kernel's Linux-ABI `prlimit64` keeps Linux's own
 /// order (copy-in, pid, permission, resource); the two ABIs agree on outcomes,
 /// not on which of two simultaneous errors wins.
 pub const SYS_RLIMIT_SET: u64 = 558;

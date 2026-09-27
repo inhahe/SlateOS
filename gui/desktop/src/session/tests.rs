@@ -1369,35 +1369,42 @@ fn a_window_list_arriving_with_a_click_is_folded_in_after_it() {
 
 // ---- the intents this loop cannot carry out ----
 
+/// In a scratch configuration since 2026-09-27: starting a program from the
+/// start menu puts it at the top of "Recently used", which the session writes
+/// to `startmenu.yaml` (f0f63e258). The test did not change; the launch it
+/// makes gained a consumer, and until then it wrote the developer's real start
+/// menu -- `scripts/check-scratch-config.py` caught it at the push.
 #[test]
 fn a_start_menu_row_comes_out_as_a_program_to_start() {
-    let (mut session, desktop, _turn) = session();
-    let start = centre(session.shell().start_button_rect());
-    press_at(&desktop, session.panel(), start.0, start.1);
-    session.pump().expect("pump");
+    settingsfile::testing::with_scratch_config("session-start-row", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let start = centre(session.shell().start_button_rect());
+        press_at(&desktop, session.panel(), start.0, start.1);
+        session.pump().expect("pump");
 
-    let first = session.shell().start_row_of_program(0).expect("a program");
-    let row = centre(session.shell().start_menu_row_rect(first));
-    press_at(&desktop, session.popups(), row.0, row.1);
-    session.pump().expect("pump");
-    assert!(
-        session.take_launches().is_empty(),
-        "the press started it before the release could say it was not a drag"
-    );
-    release_at(&desktop, session.popups(), row.0, row.1);
-    session.pump().expect("pump");
+        let first = session.shell().start_row_of_program(0).expect("a program");
+        let row = centre(session.shell().start_menu_row_rect(first));
+        press_at(&desktop, session.popups(), row.0, row.1);
+        session.pump().expect("pump");
+        assert!(
+            session.take_launches().is_empty(),
+            "the press started it before the release could say it was not a drag"
+        );
+        release_at(&desktop, session.popups(), row.0, row.1);
+        session.pump().expect("pump");
 
-    let launched = session.take_launches();
-    assert_eq!(launched.len(), 1, "expected one program, got {launched:?}");
-    assert!(
-        launched[0].program.starts_with("/"),
-        "a launch should name a path, not {:?}",
-        launched[0]
-    );
-    assert!(
-        session.take_launches().is_empty(),
-        "taking the launches twice must not hand out the same program twice"
-    );
+        let launched = session.take_launches();
+        assert_eq!(launched.len(), 1, "expected one program, got {launched:?}");
+        assert!(
+            launched[0].program.starts_with("/"),
+            "a launch should name a path, not {:?}",
+            launched[0]
+        );
+        assert!(
+            session.take_launches().is_empty(),
+            "taking the launches twice must not hand out the same program twice"
+        );
+    });
 }
 
 #[test]

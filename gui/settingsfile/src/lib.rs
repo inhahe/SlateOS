@@ -695,9 +695,13 @@ mod tests {
     #[cfg(feature = "testing")]
     #[test]
     fn a_test_build_refuses_to_write_outside_a_scratch_configuration() {
-        // Not temporary: this crate's own directory. Nothing is written there,
-        // because the refusal comes before the first write.
-        let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("never-written");
+        // Not temporary -- and not writable either: a path under a file. If
+        // the refusal ever went, the store would fail here rather than leave a
+        // settings file in the source tree, which a first version of this test
+        // did under a mutant that removed the refusal.
+        let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("Cargo.toml")
+            .join("under-a-file");
         let real_str = real.to_str().expect("a UTF-8 path").to_string();
         let doc = Document::parse("key: value\n");
         let refused = with_env(Some(&real_str), None, || {

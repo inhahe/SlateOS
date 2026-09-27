@@ -130,7 +130,15 @@ ANY_ENV = re.compile(r"(?:std::)?env::var(?:_os)?\s*\(")
 # about a quarter below that, because this population is meant to SHRINK as
 # reads are replaced with real lookups, and a floor that fires on the fix is
 # worse than no floor. Tighten both when they have room again.
-MIN_FILES = 2000
+#
+# 2026-09-27 (lane D): 546 .rs files, 113 calls. The file count had been
+# counting ~2,150 `posix` modules nothing reached -- 1,703 `*_types` tables
+# and 313 constant modules, deleted (design-decisions.md §1118) -- and fell
+# below the old floor on the deletion, which is this comment's "floor that
+# fires on the fix". Re-measured to about a quarter below the new population,
+# as the env floor was set; the deleted modules read no environment, so
+# `MIN_ENV` stands.
+MIN_FILES = 400
 MIN_ENV = 100
 
 

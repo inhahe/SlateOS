@@ -2605,7 +2605,13 @@ pub unsafe extern "C" fn ungetwc(wc: WcharT, stream: *mut u8) -> WcharT {
         crate::errno::set_errno(crate::errno::EILSEQ);
         return WEOF;
     };
-    if buf.get(..len).unwrap_or(&[]).iter().rev().all(|&b| ws.unget(b)) {
+    if buf
+        .get(..len)
+        .unwrap_or(&[])
+        .iter()
+        .rev()
+        .all(|&b| ws.unget(b))
+    {
         wc
     } else {
         WEOF

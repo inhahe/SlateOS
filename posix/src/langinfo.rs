@@ -540,10 +540,19 @@ mod tests {
     #[test]
     fn the_items_are_musls() {
         assert_eq!(CODESET, 14);
-        assert_eq!((RADIXCHAR, THOUSEP, DECIMAL_POINT), (0x1_0000, 0x1_0001, 0x1_0000));
-        assert_eq!((ABDAY_1, DAY_1, ABMON_1, MON_1), (0x2_0000, 0x2_0007, 0x2_000e, 0x2_001a));
+        assert_eq!(
+            (RADIXCHAR, THOUSEP, DECIMAL_POINT),
+            (0x1_0000, 0x1_0001, 0x1_0000)
+        );
+        assert_eq!(
+            (ABDAY_1, DAY_1, ABMON_1, MON_1),
+            (0x2_0000, 0x2_0007, 0x2_000e, 0x2_001a)
+        );
         assert_eq!((AM_STR, PM_STR), (0x2_0026, 0x2_0027));
-        assert_eq!((D_T_FMT, D_FMT, T_FMT, T_FMT_AMPM), (0x2_0028, 0x2_0029, 0x2_002a, 0x2_002b));
+        assert_eq!(
+            (D_T_FMT, D_FMT, T_FMT, T_FMT_AMPM),
+            (0x2_0028, 0x2_0029, 0x2_002a, 0x2_002b)
+        );
         assert_eq!((ERA, ERA_D_FMT, ALT_DIGITS), (0x2_002c, 0x2_002e, 0x2_002f));
         assert_eq!((ERA_D_T_FMT, ERA_T_FMT), (0x2_0030, 0x2_0031));
         assert_eq!(CRNCYSTR, 0x4_000f);

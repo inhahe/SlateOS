@@ -155,7 +155,9 @@ fn scan_two_ints(buf: &[u8], at: usize) -> (i32, i32, i32) {
         if matches!(s.get(i), Some(b'-' | b'+')) {
             i += 1;
         }
-        let digits = s.get(i..).map_or(0, |r| r.iter().take_while(|c| c.is_ascii_digit()).count());
+        let digits = s
+            .get(i..)
+            .map_or(0, |r| r.iter().take_while(|c| c.is_ascii_digit()).count());
         if digits == 0 {
             // A matching failure: what converted so far.
             return (if k == 0 { 0 } else { 1 }, a, b);
@@ -164,9 +166,13 @@ fn scan_two_ints(buf: &[u8], at: usize) -> (i32, i32, i32) {
         for &d in s.get(i..i + digits).unwrap_or_default() {
             let d = i64::from(d - b'0');
             v = if negative {
-                v.checked_mul(10).and_then(|x| x.checked_sub(d)).unwrap_or(i64::MIN)
+                v.checked_mul(10)
+                    .and_then(|x| x.checked_sub(d))
+                    .unwrap_or(i64::MIN)
             } else {
-                v.checked_mul(10).and_then(|x| x.checked_add(d)).unwrap_or(i64::MAX)
+                v.checked_mul(10)
+                    .and_then(|x| x.checked_add(d))
+                    .unwrap_or(i64::MAX)
             };
         }
         i += digits;
@@ -190,7 +196,10 @@ fn mnt_entry(src: &mut dyn MntLines, buf: &mut [u8], mp: &mut Mntent) -> bool {
             return false;
         }
         let len = nul_at(buf, 0);
-        match buf.get(..len).and_then(|l| l.iter().position(|&b| b == b'\n')) {
+        match buf
+            .get(..len)
+            .and_then(|l| l.iter().position(|&b| b == b'\n'))
+        {
             Some(nl) => {
                 // Chop the newline and any blanks before it.
                 let mut end = nl;
@@ -205,7 +214,10 @@ fn mnt_entry(src: &mut dyn MntLines, buf: &mut [u8], mp: &mut Mntent) -> bool {
                 // Not the whole line was read: read the rest, and forget it.
                 let mut tmp = [0u8; 1024];
                 while src.fgets(&mut tmp) {
-                    if tmp.get(..nul_at(&tmp, 0)).is_some_and(|l| l.contains(&b'\n')) {
+                    if tmp
+                        .get(..nul_at(&tmp, 0))
+                        .is_some_and(|l| l.contains(&b'\n'))
+                    {
                         break;
                     }
                 }
@@ -492,7 +504,12 @@ pub unsafe extern "C" fn addmntent(stream: *mut u8, mnt: *const Mntent) -> i32 {
     let m = unsafe { &*mnt };
     // SAFETY: the caller's contract: each field is NULL or a string.
     let fields = unsafe {
-        [c_bytes(m.mnt_fsname), c_bytes(m.mnt_dir), c_bytes(m.mnt_type), c_bytes(m.mnt_opts)]
+        [
+            c_bytes(m.mnt_fsname),
+            c_bytes(m.mnt_dir),
+            c_bytes(m.mnt_type),
+            c_bytes(m.mnt_opts),
+        ]
     };
     crate::stdio::flockfile(stream.cast());
     mnt_line(fields, m.mnt_freq, m.mnt_passno, &mut |b| {
@@ -542,7 +559,10 @@ pub unsafe extern "C" fn hasmntopt(mnt: *const Mntent, opt: *const u8) -> *mut u
             // SAFETY: `p` is within the string `base` starts.
             return unsafe { base.add(p) };
         }
-        match opts.get(p..).and_then(|r| r.iter().position(|&b| b == b',')) {
+        match opts
+            .get(p..)
+            .and_then(|r| r.iter().position(|&b| b == b','))
+        {
             Some(c) => rest = p + c + 1,
             None => return core::ptr::null_mut(),
         }
@@ -592,12 +612,32 @@ mod tests {
     /// The four strings and two numbers of `m`.
     fn fields(m: &Mntent) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, i32, i32) {
         let s = |p: *mut u8| unsafe { c_bytes(p) }.to_vec();
-        (s(m.mnt_fsname), s(m.mnt_dir), s(m.mnt_type), s(m.mnt_opts), m.mnt_freq, m.mnt_passno)
+        (
+            s(m.mnt_fsname),
+            s(m.mnt_dir),
+            s(m.mnt_type),
+            s(m.mnt_opts),
+            m.mnt_freq,
+            m.mnt_passno,
+        )
     }
 
-    fn entry(fsname: &[u8], dir: &[u8], kind: &[u8], opts: &[u8], freq: i32, passno: i32)
-        -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, i32, i32) {
-        (fsname.to_vec(), dir.to_vec(), kind.to_vec(), opts.to_vec(), freq, passno)
+    fn entry(
+        fsname: &[u8],
+        dir: &[u8],
+        kind: &[u8],
+        opts: &[u8],
+        freq: i32,
+        passno: i32,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, i32, i32) {
+        (
+            fsname.to_vec(),
+            dir.to_vec(),
+            kind.to_vec(),
+            opts.to_vec(),
+            freq,
+            passno,
+        )
     }
 
     /// /proc/mounts' shape: comments, blank lines and lines of blanks are
@@ -609,9 +649,15 @@ mod tests {
         let mut buf = [0u8; 256];
         let mut m = blank_entry();
         assert!(mnt_next(&mut src, &mut buf, &mut m));
-        assert_eq!(fields(&m), entry(b"proc", b"/proc", b"proc", b"rw,nosuid", 0, 0));
+        assert_eq!(
+            fields(&m),
+            entry(b"proc", b"/proc", b"proc", b"rw,nosuid", 0, 0)
+        );
         assert!(mnt_next(&mut src, &mut buf, &mut m));
-        assert_eq!(fields(&m), entry(b"/dev/vda", b"/", b"ext4", b"rw,relatime", 1, 2));
+        assert_eq!(
+            fields(&m),
+            entry(b"/dev/vda", b"/", b"ext4", b"rw,relatime", 1, 2)
+        );
         assert!(!mnt_next(&mut src, &mut buf, &mut m));
     }
 
@@ -623,7 +669,10 @@ mod tests {
         let mut buf = [0u8; 256];
         let mut m = blank_entry();
         assert!(mnt_next(&mut src, &mut buf, &mut m));
-        assert_eq!(fields(&m), entry(b"a b", b"/mnt/x\ty\nz", b"t", b"o\\p\\q", 0, 0));
+        assert_eq!(
+            fields(&m),
+            entry(b"a b", b"/mnt/x\ty\nz", b"t", b"o\\p\\q", 0, 0)
+        );
     }
 
     /// Missing fields are "", missing numbers 0 -- one number, the pass 0.
@@ -730,7 +779,9 @@ mod tests {
     #[test]
     fn addmntent_writes_glibcs_line() {
         let mut out = Vec::new();
-        mnt_line([b"a b", b"/m\tn\no", b"t", b"o\\p"], 1, -2, &mut |b| out.push(b));
+        mnt_line([b"a b", b"/m\tn\no", b"t", b"o\\p"], 1, -2, &mut |b| {
+            out.push(b)
+        });
         assert_eq!(out, b"a\\040b /m\\011n\\012o t o\\134p 1 -2\n".to_vec());
         let mut out = Vec::new();
         mnt_line([b"", b"", b"", b""], i32::MIN, 0, &mut |b| out.push(b));
@@ -746,14 +797,22 @@ mod tests {
         let mut m = blank_entry();
         let mut buf = [0u8; 16];
         errno::set_errno(0);
-        assert!(unsafe { getmntent_r(core::ptr::null_mut(), &mut m, buf.as_mut_ptr(), 0) }.is_null());
+        assert!(
+            unsafe { getmntent_r(core::ptr::null_mut(), &mut m, buf.as_mut_ptr(), 0) }.is_null()
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
         errno::set_errno(0);
         let null_entry = core::ptr::null_mut();
-        assert!(unsafe { getmntent_r(core::ptr::null_mut(), null_entry, buf.as_mut_ptr(), 16) }.is_null());
+        assert!(
+            unsafe { getmntent_r(core::ptr::null_mut(), null_entry, buf.as_mut_ptr(), 16) }
+                .is_null()
+        );
         assert_eq!(errno::get_errno(), errno::EFAULT);
         errno::set_errno(0);
-        assert_eq!(unsafe { addmntent(core::ptr::null_mut(), core::ptr::null()) }, 1);
+        assert_eq!(
+            unsafe { addmntent(core::ptr::null_mut(), core::ptr::null()) },
+            1
+        );
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 

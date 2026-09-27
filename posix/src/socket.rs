@@ -5906,7 +5906,10 @@ pub const IF_NAMESIZE: usize = 16;
 
 /// The index of the interface named `name`, if there is one.
 fn interface_index(name: &[u8]) -> Option<u32> {
-    INTERFACES.iter().find(|&&(_, n)| n == name).map(|&(i, _)| i)
+    INTERFACES
+        .iter()
+        .find(|&&(_, n)| n == name)
+        .map(|&(i, _)| i)
 }
 
 /// Convert a network interface name to its index.
@@ -6168,8 +6171,7 @@ pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
     // The kernel's record: [0..4] address and [4..8] mask, in network byte
     // order, [22] bit 0 up (`sys_net_if_info`).
     let mut info = [0u8; 24];
-    let answered =
-        syscall2(SYS_NET_IF_INFO, info.as_mut_ptr() as u64, info.len() as u64) == 0;
+    let answered = syscall2(SYS_NET_IF_INFO, info.as_mut_ptr() as u64, info.len() as u64) == 0;
     let word = |range: core::ops::Range<usize>| {
         info.get(range)
             .and_then(|b| <[u8; 4]>::try_from(b).ok())
@@ -9454,10 +9456,16 @@ mod tests {
     #[test]
     fn if_indextoname_names_each_index() {
         let mut buf = [0xAAu8; IF_NAMESIZE];
-        assert_eq!(unsafe { if_indextoname(1, buf.as_mut_ptr()) }, buf.as_mut_ptr());
+        assert_eq!(
+            unsafe { if_indextoname(1, buf.as_mut_ptr()) },
+            buf.as_mut_ptr()
+        );
         assert_eq!(&buf[..3], b"lo\0");
         let mut buf = [0xAAu8; IF_NAMESIZE];
-        assert_eq!(unsafe { if_indextoname(2, buf.as_mut_ptr()) }, buf.as_mut_ptr());
+        assert_eq!(
+            unsafe { if_indextoname(2, buf.as_mut_ptr()) },
+            buf.as_mut_ptr()
+        );
         assert_eq!(&buf[..5], b"eth0\0");
     }
 
@@ -9556,7 +9564,10 @@ mod tests {
         assert!(!lo.ifa_next.is_null());
         let eth0 = unsafe { &*lo.ifa_next };
         assert_eq!(unsafe { c_str_to_slice(eth0.ifa_name) }, b"eth0");
-        assert_eq!(eth0.ifa_flags, IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST);
+        assert_eq!(
+            eth0.ifa_flags,
+            IFF_UP | IFF_BROADCAST | IFF_RUNNING | IFF_MULTICAST
+        );
         let af = AF_INET as u16;
         assert_eq!(inet_of(eth0.ifa_addr), (af, ip));
         assert_eq!(inet_of(eth0.ifa_netmask), (af, mask));

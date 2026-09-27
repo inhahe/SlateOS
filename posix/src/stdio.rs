@@ -650,7 +650,11 @@ unsafe fn fd_read(f: *mut File, dst: *mut u8, len: usize) -> usize {
     // SAFETY: as above -- re-borrowed after the flush, which took only
     // `stdout`'s lock and wrote only `stdout`.
     let file = unsafe { &mut *f };
-    let (to, want) = if direct { (dst, len) } else { (file.buf, file.buf_size) };
+    let (to, want) = if direct {
+        (dst, len)
+    } else {
+        (file.buf, file.buf_size)
+    };
     let n = crate::file::read(file.fd, to, want);
     let Ok(got) = usize::try_from(n) else {
         file.flags |= F_ERR;
@@ -684,7 +688,9 @@ fn flush_stdout_for_input(f: *mut File) {
     // SAFETY: `stdout` is static; locked for the check and the flush.
     unsafe {
         let _g = locked(out);
-        if (*out).lbf == i32::from(b'\n') && (*out).flags & F_NOWR == 0 && (*out).wpos != (*out).wbase
+        if (*out).lbf == i32::from(b'\n')
+            && (*out).flags & F_NOWR == 0
+            && (*out).wpos != (*out).wbase
         {
             ((*out).ops.write)(out, core::ptr::null(), 0);
         }
@@ -766,7 +772,11 @@ unsafe fn fd_seek(f: *mut File, off: i64, whence: i32) -> i64 {
 
 unsafe fn fd_close(f: *mut File) -> i32 {
     // SAFETY: as above.
-    if crate::file::close(unsafe { (*f).fd }) < 0 { EOF } else { 0 }
+    if crate::file::close(unsafe { (*f).fd }) < 0 {
+        EOF
+    } else {
+        0
+    }
 }
 
 /// Whether `fd` is a terminal, without disturbing `errno` -- glibc's
@@ -1593,7 +1603,11 @@ pub unsafe extern "C" fn freopen(path: *const u8, mode: *const u8, stream: *mut 
             // SAFETY: locked.
             unsafe { (*f).fd = newfd };
         } else if newfd != fd {
-            let cloexec = if m.flags & F_CLOEXEC != 0 { crate::fcntl::O_CLOEXEC } else { 0 };
+            let cloexec = if m.flags & F_CLOEXEC != 0 {
+                crate::fcntl::O_CLOEXEC
+            } else {
+                0
+            };
             if crate::file::dup3(newfd, fd, cloexec) < 0 {
                 let e = errno::get_errno();
                 crate::file::close(newfd);
@@ -1653,7 +1667,10 @@ fn reopen_fd_path(fd: i32, m: &Mode) -> Result<i32, i32> {
         }
     }
     let mut at = 0usize;
-    for &b in prefix.iter().chain(digits.get(..k).unwrap_or(&[]).iter().rev()) {
+    for &b in prefix
+        .iter()
+        .chain(digits.get(..k).unwrap_or(&[]).iter().rev())
+    {
         if let Some(slot) = path.get_mut(at) {
             *slot = b;
         }
@@ -1661,7 +1678,11 @@ fn reopen_fd_path(fd: i32, m: &Mode) -> Result<i32, i32> {
     }
     // `path` is zeroed past `at`: the terminator is there.
     let newfd = crate::file::open(path.as_ptr(), m.oflags, 0o666);
-    if newfd < 0 { Err(errno::get_errno()) } else { Ok(newfd) }
+    if newfd < 0 {
+        Err(errno::get_errno())
+    } else {
+        Ok(newfd)
+    }
 }
 
 /// The in-place fallback of `freopen(NULL, mode, f)`: the descriptor's
@@ -1755,7 +1776,11 @@ unsafe fn tell_raw(f: *mut File) -> i64 {
     let file = unsafe { &mut *f };
     // SAFETY: the write window, when active.
     let pending = unsafe { pending_bytes(file) } as i64;
-    let whence = if file.flags & F_APP != 0 && pending > 0 { SEEK_END } else { SEEK_CUR };
+    let whence = if file.flags & F_APP != 0 && pending > 0 {
+        SEEK_END
+    } else {
+        SEEK_CUR
+    };
     // SAFETY: `f` is locked.
     let pos = unsafe { (file.ops.seek)(f, 0, whence) };
     if pos < 0 {
@@ -2004,7 +2029,11 @@ unsafe fn fread_items(ptr: *mut u8, size: usize, nmemb: usize, f: *mut File) -> 
     }
     // SAFETY: the caller's contract.
     let got = unsafe { fread_raw(ptr, len, f) };
-    if got == len { nmemb } else { got.checked_div(size).unwrap_or(0) }
+    if got == len {
+        nmemb
+    } else {
+        got.checked_div(size).unwrap_or(0)
+    }
 }
 
 /// Read `nmemb` items of `size` bytes: all of them unless end of file or an
@@ -2058,12 +2087,21 @@ unsafe fn fwrite_items(ptr: *const u8, size: usize, nmemb: usize, f: *mut File) 
     }
     // SAFETY: as above.
     let put = unsafe { fwritex(ptr, len, f) };
-    if put == len { nmemb } else { put.checked_div(size).unwrap_or(0) }
+    if put == len {
+        nmemb
+    } else {
+        put.checked_div(size).unwrap_or(0)
+    }
 }
 
 /// Write `nmemb` items of `size` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn fwrite(ptr: *const u8, size: usize, nmemb: usize, stream: *mut u8) -> usize {
+pub unsafe extern "C" fn fwrite(
+    ptr: *const u8,
+    size: usize,
+    nmemb: usize,
+    stream: *mut u8,
+) -> usize {
     let Some(f) = stream_to_file(stream) else {
         return 0;
     };
@@ -2121,7 +2159,12 @@ unsafe fn fgets_raw(s: *mut u8, n: i32, f: *mut File) -> *mut u8 {
         let file = unsafe { &mut *f };
         if file.rpos != file.rend {
             // SAFETY: the read window.
-            let avail = unsafe { core::slice::from_raw_parts(file.rpos, usize::try_from(file.rend.offset_from(file.rpos)).unwrap_or(0)) };
+            let avail = unsafe {
+                core::slice::from_raw_parts(
+                    file.rpos,
+                    usize::try_from(file.rend.offset_from(file.rpos)).unwrap_or(0),
+                )
+            };
             let (line, nl) = match avail.iter().position(|&b| b == b'\n') {
                 Some(i) => (i.wrapping_add(1), true),
                 None => (avail.len(), false),
@@ -2208,7 +2251,11 @@ unsafe fn fputs_raw(s: *const u8, f: *mut File) -> i32 {
         return EOF;
     }
     // SAFETY: as above; `s` holds `len` bytes.
-    if unsafe { fwritex(s, len, f) } == len { 1 } else { EOF }
+    if unsafe { fwritex(s, len, f) } == len {
+        1
+    } else {
+        EOF
+    }
 }
 
 /// Write a string.
@@ -2312,7 +2359,11 @@ pub extern "C" fn getw(stream: *mut u8) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putw(w: i32, stream: *mut u8) -> i32 {
     // SAFETY: `w` is four bytes.
-    if unsafe { fwrite((&raw const w).cast(), 4, 1, stream) } < 1 { EOF } else { 0 }
+    if unsafe { fwrite((&raw const w).cast(), 4, 1, stream) } < 1 {
+        EOF
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2448,7 +2499,11 @@ pub use gnu_getdelim::getdelim;
 mod gnu_getline {
     /// `getdelim` through a newline.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-    pub unsafe extern "C" fn getline(lineptr: *mut *mut u8, n: *mut usize, stream: *mut u8) -> isize {
+    pub unsafe extern "C" fn getline(
+        lineptr: *mut *mut u8,
+        n: *mut usize,
+        stream: *mut u8,
+    ) -> isize {
         // SAFETY: forwarded.
         unsafe { super::getdelim(lineptr, n, i32::from(b'\n'), stream) }
     }
@@ -2655,7 +2710,11 @@ pub extern "C" fn setvbuf(stream: *mut u8, buf: *mut u8, mode: i32, size: usize)
                     file.buf = file.own_buf;
                     file.buf_size = file.own_size;
                 }
-                file.lbf = if mode == _IOLBF { i32::from(b'\n') } else { EOF };
+                file.lbf = if mode == _IOLBF {
+                    i32::from(b'\n')
+                } else {
+                    EOF
+                };
             }
         }
     }
@@ -2743,7 +2802,11 @@ pub(crate) fn write_stream(stream: *mut u8, data: *const u8, len: usize) -> i64 
     let _g = unsafe { locked(f) };
     // SAFETY: locked; `data` holds `len`.
     let n = unsafe { fwritex(data, len, f) };
-    if n == len { i64::try_from(n).unwrap_or(i64::MAX) } else { -1 }
+    if n == len {
+        i64::try_from(n).unwrap_or(i64::MAX)
+    } else {
+        -1
+    }
 }
 
 /// A stream held for one wide-character call (`fputwc`, `fgetwc`,
@@ -3044,8 +3107,9 @@ mod gnu_fwriting {
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn __fwriting(stream: *mut u8) -> i32 {
         // SAFETY: a live stream.
-        stream_to_file(stream)
-            .map_or(0, |f| unsafe { i32::from((*f).flags & F_NORD != 0 || !(*f).wend.is_null()) })
+        stream_to_file(stream).map_or(0, |f| unsafe {
+            i32::from((*f).flags & F_NORD != 0 || !(*f).wend.is_null())
+        })
     }
 }
 pub use gnu_fwriting::__fwriting;
@@ -3204,7 +3268,11 @@ unsafe fn cookie_read(f: *mut File, dst: *mut u8, len: usize) -> usize {
         return 0;
     };
     let direct = file.buf_size == 0 || len >= file.buf_size;
-    let (to, want) = if direct { (dst, len) } else { (file.buf, file.buf_size) };
+    let (to, want) = if direct {
+        (dst, len)
+    } else {
+        (file.buf, file.buf_size)
+    };
     // SAFETY: the program's callback, with a buffer of `want` bytes.
     let n = unsafe { read(c.cookie, to, want) };
     let Ok(got) = usize::try_from(n) else {
@@ -3351,7 +3419,14 @@ pub(crate) unsafe fn cookie_stream(
         let c = mem.add(STREAM_ALLOC).cast::<Cookie>();
         c.write(Cookie { cookie, io });
         let buf = mem.add(BUF_OFFSET);
-        f.write(File::new(-1, buf, BUF_SIZE, flags | F_INIT, EOF, &COOKIE_OPS));
+        f.write(File::new(
+            -1,
+            buf,
+            BUF_SIZE,
+            flags | F_INIT,
+            EOF,
+            &COOKIE_OPS,
+        ));
         (*f).cookie = c.cast();
         list_add(f);
         Some(f)
@@ -3438,7 +3513,11 @@ pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut u8 {
     if crate::pipe::pipe2(fds.as_mut_ptr(), crate::fcntl::O_CLOEXEC) < 0 {
         return core::ptr::null_mut();
     }
-    let (parent, mut child, child_std) = if rd { (fds[0], fds[1], 1) } else { (fds[1], fds[0], 0) };
+    let (parent, mut child, child_std) = if rd {
+        (fds[0], fds[1], 1)
+    } else {
+        (fds[1], fds[0], 0)
+    };
     let fail = |a: i32, b: i32| {
         let e = errno::get_errno();
         crate::file::close(a);
@@ -3481,8 +3560,13 @@ pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut u8 {
     }
     let mut pid: crate::types::PidT = 0;
     if err == 0 {
-        let argv: [*const u8; 5] =
-            [c"sh".as_ptr().cast(), c"-c".as_ptr().cast(), c"--".as_ptr().cast(), command, core::ptr::null()];
+        let argv: [*const u8; 5] = [
+            c"sh".as_ptr().cast(),
+            c"-c".as_ptr().cast(),
+            c"--".as_ptr().cast(),
+            command,
+            core::ptr::null(),
+        ];
         err = posix_spawn(
             &raw mut pid,
             c"/bin/sh".as_ptr().cast(),
@@ -3622,7 +3706,12 @@ fn dir_exists(path: *const u8) -> bool {
 /// # Safety
 ///
 /// `dir` and `pfx` are C strings or NULL.
-unsafe fn path_search(buf: &mut [u8], dir: *const u8, pfx: *const u8, try_tmpdir: bool) -> Option<usize> {
+unsafe fn path_search(
+    buf: &mut [u8],
+    dir: *const u8,
+    pfx: *const u8,
+    try_tmpdir: bool,
+) -> Option<usize> {
     let mut d: *const u8 = core::ptr::null();
     if try_tmpdir {
         // SAFETY: a C string.
@@ -3686,7 +3775,8 @@ fn gen_tempname_nocreate(buf: &mut [u8], at: usize) -> bool {
     const LETTERS: &[u8; 62] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let saved = errno::get_errno();
     for _ in 0..TMP_MAX {
-        let mut r = u64::from(crate::random::arc4random()) << 32 | u64::from(crate::random::arc4random());
+        let mut r =
+            u64::from(crate::random::arc4random()) << 32 | u64::from(crate::random::arc4random());
         for i in 0..6usize {
             let pick = usize::try_from(r % 62).unwrap_or(0);
             r /= 62;
@@ -3719,13 +3809,18 @@ pub extern "C" fn tmpnam(s: *mut u8) -> *mut u8 {
     static mut NAME: [u8; L_TMPNAM] = [0; L_TMPNAM];
     let mut tmp = [0u8; L_TMPNAM];
     // SAFETY: NULLs for the directory and prefix.
-    let Some(at) = (unsafe { path_search(&mut tmp, core::ptr::null(), core::ptr::null(), false) }) else {
+    let Some(at) = (unsafe { path_search(&mut tmp, core::ptr::null(), core::ptr::null(), false) })
+    else {
         return core::ptr::null_mut();
     };
     if !gen_tempname_nocreate(&mut tmp, at) {
         return core::ptr::null_mut();
     }
-    let out = if s.is_null() { (&raw mut NAME).cast::<u8>() } else { s };
+    let out = if s.is_null() {
+        (&raw mut NAME).cast::<u8>()
+    } else {
+        s
+    };
     // SAFETY: `out` holds `L_tmpnam` bytes -- the static, or the caller's
     // by `tmpnam`'s contract.
     unsafe { core::ptr::copy_nonoverlapping(tmp.as_ptr(), out, L_TMPNAM) };
@@ -3783,7 +3878,11 @@ impl Drop for StdStreamTestGuard {
 /// The caller holds [`STD_STREAM_TEST_LOCK`].
 #[cfg(test)]
 unsafe fn purge_std_streams() {
-    for f in [&raw mut STDIN_FILE, &raw mut STDOUT_FILE, &raw mut STDERR_FILE] {
+    for f in [
+        &raw mut STDIN_FILE,
+        &raw mut STDOUT_FILE,
+        &raw mut STDERR_FILE,
+    ] {
         // SAFETY: the caller's contract; static streams.
         unsafe {
             let file = &mut *f;
@@ -3912,7 +4011,10 @@ mod tests {
     }
 
     fn with_data(data: &[u8]) -> Mem {
-        Mem { data: data.to_vec(), ..Mem::default() }
+        Mem {
+            data: data.to_vec(),
+            ..Mem::default()
+        }
     }
 
     fn flat(writes: &[Vec<u8>]) -> Vec<u8> {
@@ -3929,18 +4031,29 @@ mod tests {
 
     #[test]
     fn fopen_modes_are_glibcs() {
-        use crate::fcntl::{O_APPEND, O_CLOEXEC, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+        use crate::fcntl::{
+            O_APPEND, O_CLOEXEC, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
+        };
         assert_eq!(mode(c"r"), Some((O_RDONLY, F_NOWR)));
         assert_eq!(mode(c"w"), Some((O_WRONLY | O_CREAT | O_TRUNC, F_NORD)));
-        assert_eq!(mode(c"a"), Some((O_WRONLY | O_CREAT | O_APPEND, F_NORD | F_APP)));
+        assert_eq!(
+            mode(c"a"),
+            Some((O_WRONLY | O_CREAT | O_APPEND, F_NORD | F_APP))
+        );
         assert_eq!(mode(c"r+"), Some((O_RDWR, 0)));
         assert_eq!(mode(c"w+"), Some((O_RDWR | O_CREAT | O_TRUNC, 0)));
         assert_eq!(mode(c"a+"), Some((O_RDWR | O_CREAT | O_APPEND, F_APP)));
         // `+` anywhere in the six letters, not only second or third.
         assert_eq!(mode(c"rbe+"), Some((O_RDWR | O_CLOEXEC, F_CLOEXEC)));
         // `x` is O_EXCL: "wx" must not truncate an existing file.
-        assert_eq!(mode(c"wx"), Some((O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, F_NORD)));
-        assert_eq!(mode(c"re"), Some((O_RDONLY | O_CLOEXEC, F_NOWR | F_CLOEXEC)));
+        assert_eq!(
+            mode(c"wx"),
+            Some((O_WRONLY | O_CREAT | O_TRUNC | O_EXCL, F_NORD))
+        );
+        assert_eq!(
+            mode(c"re"),
+            Some((O_RDONLY | O_CLOEXEC, F_NOWR | F_CLOEXEC))
+        );
         // Unknown letters are ignored; `,` ends the letters (`,ccs=`).
         assert_eq!(mode(c"rtq"), Some((O_RDONLY, F_NOWR)));
         assert_eq!(mode(c"r,ccs=UTF-8+"), Some((O_RDONLY, F_NOWR)));
@@ -3960,7 +4073,11 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EFAULT);
         errno::set_errno(0);
         assert!(unsafe { fopen(core::ptr::null(), c"r".as_ptr().cast()) }.is_null());
-        assert_eq!(errno::get_errno(), errno::EFAULT, "open's own answer for a NULL path");
+        assert_eq!(
+            errno::get_errno(),
+            errno::EFAULT,
+            "open's own answer for a NULL path"
+        );
         errno::set_errno(0);
         assert!(unsafe { fopen(c"/x".as_ptr().cast(), c"q".as_ptr().cast()) }.is_null());
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -3987,10 +4104,16 @@ mod tests {
         assert_eq!(unsafe { (*f).flags } & (F_NORD | F_NOWR), 0);
         assert_eq!(fclose(s), 0);
         let s = open_mem(&mut m, c"rx+");
-        assert_ne!(unsafe { (*s.cast::<File>()).flags } & F_NOWR, 0, "glibc does not see this +");
+        assert_ne!(
+            unsafe { (*s.cast::<File>()).flags } & F_NOWR,
+            0,
+            "glibc does not see this +"
+        );
         assert_eq!(fclose(s), 0);
         errno::set_errno(0);
-        assert!(unsafe { fopencookie((&raw mut m).cast(), c"q".as_ptr().cast(), MEM_IO) }.is_null());
+        assert!(
+            unsafe { fopencookie((&raw mut m).cast(), c"q".as_ptr().cast(), MEM_IO) }.is_null()
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
@@ -4002,7 +4125,11 @@ mod tests {
     fn a_fully_buffered_stream_writes_when_full_or_flushed() {
         let mut m = Mem::default();
         let s = open_mem(&mut m, c"w");
-        assert_eq!(unsafe { fputs(c"hello\n".as_ptr().cast(), s) }, 1, "glibc's fputs answers 1");
+        assert_eq!(
+            unsafe { fputs(c"hello\n".as_ptr().cast(), s) },
+            1,
+            "glibc's fputs answers 1"
+        );
         assert_eq!(fputc(i32::from(b'x'), s), i32::from(b'x'));
         assert!(m.writes.is_empty(), "buffered");
         assert_eq!(gnu_fpending::__fpending(s), 7);
@@ -4027,7 +4154,11 @@ mod tests {
         let s = open_mem(&mut m, c"w");
         assert_eq!(setvbuf(s, core::ptr::null_mut(), _IOLBF, 0), 0);
         assert_eq!(unsafe { fputs(c"ab\ncd\nef".as_ptr().cast(), s) }, 1);
-        assert_eq!(flat(&m.writes), b"ab\ncd\n", "through the last newline at once");
+        assert_eq!(
+            flat(&m.writes),
+            b"ab\ncd\n",
+            "through the last newline at once"
+        );
         assert_eq!(gnu_fpending::__fpending(s), 2);
         assert_eq!(fputc(i32::from(b'\n'), s), i32::from(b'\n'));
         assert_eq!(flat(&m.writes), b"ab\ncd\nef\n");
@@ -4071,7 +4202,11 @@ mod tests {
         m.fail_writes = true;
         assert_eq!(fflush(s), EOF);
         assert_eq!(ferror(s), 1);
-        assert_eq!(gnu_fpending::__fpending(s), 0, "glibc empties the buffer either way");
+        assert_eq!(
+            gnu_fpending::__fpending(s),
+            0,
+            "glibc empties the buffer either way"
+        );
         m.fail_writes = false;
         clearerr(s);
         assert_eq!(fflush(s), 0);
@@ -4147,7 +4282,11 @@ mod tests {
         let mut m = with_data(b"abcdefg");
         let s = open_mem(&mut m, c"r");
         let mut out = [0u8; 9];
-        assert_eq!(unsafe { fread(out.as_mut_ptr(), 3, 3, s) }, 2, "7 bytes are two 3-byte items");
+        assert_eq!(
+            unsafe { fread(out.as_mut_ptr(), 3, 3, s) },
+            2,
+            "7 bytes are two 3-byte items"
+        );
         assert_eq!(&out[..7], b"abcdefg");
         assert_eq!(fclose(s), 0);
     }
@@ -4203,7 +4342,10 @@ mod tests {
         let mut buf = [0xffu8; 8];
         assert!(!fgets(buf.as_mut_ptr(), 4, s).is_null());
         assert_eq!(&buf[..4], b"abc\0");
-        assert!(!fgets(buf.as_mut_ptr(), 1, s).is_null(), "n == 1 is the empty string");
+        assert!(
+            !fgets(buf.as_mut_ptr(), 1, s).is_null(),
+            "n == 1 is the empty string"
+        );
         assert_eq!(buf[0], 0);
         assert!(fgets(buf.as_mut_ptr(), 0, s).is_null());
         assert!(fgets(buf.as_mut_ptr(), -3, s).is_null());
@@ -4219,7 +4361,10 @@ mod tests {
         let s = open_mem(&mut m, c"r");
         __fseterr_for_test(s);
         let mut buf = [0u8; 8];
-        assert!(!fgets(buf.as_mut_ptr(), 8, s).is_null(), "the old error does not count");
+        assert!(
+            !fgets(buf.as_mut_ptr(), 8, s).is_null(),
+            "the old error does not count"
+        );
         assert_eq!(&buf[..3], b"ab\0");
         assert_eq!(ferror(s), 1, "and is kept");
         assert_eq!(fclose(s), 0);
@@ -4240,7 +4385,9 @@ mod tests {
         let s = open_mem(&mut m, c"r");
         let mut line: *mut u8 = core::ptr::null_mut();
         let mut n: usize = 0;
-        let got = |line: *mut u8, k: isize| unsafe { core::slice::from_raw_parts(line, k as usize) }.to_vec();
+        let got = |line: *mut u8, k: isize| {
+            unsafe { core::slice::from_raw_parts(line, k as usize) }.to_vec()
+        };
         let k = unsafe { getline(&raw mut line, &raw mut n, s) };
         assert_eq!(got(line, k), b"short\n");
         assert!(n >= 7);
@@ -4261,15 +4408,24 @@ mod tests {
         let s = open_mem(&mut m, c"r");
         errno::set_errno(0);
         let mut n = 0usize;
-        assert_eq!(unsafe { getdelim(core::ptr::null_mut(), &raw mut n, i32::from(b','), s) }, -1);
+        assert_eq!(
+            unsafe { getdelim(core::ptr::null_mut(), &raw mut n, i32::from(b','), s) },
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
         assert_eq!(ferror(s), 1, "glibc marks the stream too");
         // A stream in error reads nothing.
         let mut line: *mut u8 = core::ptr::null_mut();
-        assert_eq!(unsafe { getdelim(&raw mut line, &raw mut n, i32::from(b','), s) }, -1);
+        assert_eq!(
+            unsafe { getdelim(&raw mut line, &raw mut n, i32::from(b','), s) },
+            -1
+        );
         assert!(line.is_null());
         clearerr(s);
-        assert_eq!(unsafe { getdelim(&raw mut line, &raw mut n, i32::from(b','), s) }, 2);
+        assert_eq!(
+            unsafe { getdelim(&raw mut line, &raw mut n, i32::from(b','), s) },
+            2
+        );
         assert_eq!(n, 120, "glibc's first allocation");
         assert_eq!(unsafe { core::slice::from_raw_parts(line, 3) }, b"a,\0");
         unsafe { crate::malloc::free(line) };
@@ -4318,7 +4474,11 @@ mod tests {
         // At end of file the window sits at the top of the buffer, so the
         // whole buffer and the pushback room below it are free.
         for i in 0..(BUF_SIZE + UNGET) {
-            assert_eq!(ungetc(i32::from(b'a' + (i % 26) as u8), s), i32::from(b'a' + (i % 26) as u8), "push {i}");
+            assert_eq!(
+                ungetc(i32::from(b'a' + (i % 26) as u8), s),
+                i32::from(b'a' + (i % 26) as u8),
+                "push {i}"
+            );
         }
         assert_eq!(ungetc(i32::from(b'!'), s), EOF, "no room left");
         assert_eq!(gnu_freadahead::__freadahead(s), BUF_SIZE + UNGET);
@@ -4407,7 +4567,10 @@ mod tests {
     #[test]
     fn a_stream_with_no_seek_cannot_seek() {
         let mut m = with_data(b"ab");
-        let io = CookieIoFunctions { seek: None, ..MEM_IO };
+        let io = CookieIoFunctions {
+            seek: None,
+            ..MEM_IO
+        };
         let s = unsafe { fopencookie((&raw mut m).cast(), c"r".as_ptr().cast(), io) };
         errno::set_errno(0);
         assert_eq!(fseek(s, 0, SEEK_SET), -1);
@@ -4462,11 +4625,18 @@ mod tests {
         let streams: Vec<*mut u8> = ms.iter_mut().map(|m| open_mem(m, c"w")).collect();
         for (i, &s) in streams.iter().enumerate() {
             assert!(!s.is_null(), "stream {i}");
-            assert_eq!(fputc(i32::from(b'0' + (i % 10) as u8), s), i32::from(b'0' + (i % 10) as u8));
+            assert_eq!(
+                fputc(i32::from(b'0' + (i % 10) as u8), s),
+                i32::from(b'0' + (i % 10) as u8)
+            );
         }
         assert_eq!(fflush(core::ptr::null_mut()), 0);
         for (i, m) in ms.iter().enumerate() {
-            assert_eq!(flat(&m.writes), vec![b'0' + (i % 10) as u8], "stream {i} flushed by fflush(NULL)");
+            assert_eq!(
+                flat(&m.writes),
+                vec![b'0' + (i % 10) as u8],
+                "stream {i} flushed by fflush(NULL)"
+            );
         }
         for s in streams {
             assert_eq!(fclose(s), 0);
@@ -4494,7 +4664,10 @@ mod tests {
             -1
         }
         let mut m = Mem::default();
-        let io = CookieIoFunctions { close: Some(bad_close), ..MEM_IO };
+        let io = CookieIoFunctions {
+            close: Some(bad_close),
+            ..MEM_IO
+        };
         let s = unsafe { fopencookie((&raw mut m).cast(), c"w".as_ptr().cast(), io) };
         assert_eq!(fclose(s), -1);
     }
@@ -4545,18 +4718,24 @@ mod tests {
         let mut m = Mem::default();
         let s = open_mem(&mut m, c"w");
         let shared = std::sync::Arc::new(Shared(s));
-        let workers: Vec<_> = [b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"]
-            .into_iter()
-            .map(|line| {
-                let sh = std::sync::Arc::clone(&shared);
-                std::thread::spawn(move || {
-                    let s = sh.0;
-                    for _ in 0..2000 {
-                        assert_eq!(unsafe { fwrite(line.as_ptr(), 1, line.len(), s) }, line.len());
-                    }
-                })
+        let workers: Vec<_> = [
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        ]
+        .into_iter()
+        .map(|line| {
+            let sh = std::sync::Arc::clone(&shared);
+            std::thread::spawn(move || {
+                let s = sh.0;
+                for _ in 0..2000 {
+                    assert_eq!(
+                        unsafe { fwrite(line.as_ptr(), 1, line.len(), s) },
+                        line.len()
+                    );
+                }
             })
-            .collect();
+        })
+        .collect();
         for w in workers {
             w.join().unwrap();
         }
@@ -4564,7 +4743,11 @@ mod tests {
         let all = flat(&m.writes);
         assert_eq!(all.len(), 2 * 2000 * 31);
         for line in all.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
-            assert!(line.iter().all(|&b| b == line[0]) && line.len() == 30, "a torn line: {:?}", String::from_utf8_lossy(line));
+            assert!(
+                line.iter().all(|&b| b == line[0]) && line.len() == 30,
+                "a torn line: {:?}",
+                String::from_utf8_lossy(line)
+            );
         }
     }
 
@@ -4627,12 +4810,28 @@ mod tests {
     fn fsetlocking_says_and_sets_who_locks() {
         let mut m = Mem::default();
         let s = open_mem(&mut m, c"w");
-        assert_eq!(gnu_fsetlocking::__fsetlocking(s, FSETLOCKING_QUERY), FSETLOCKING_INTERNAL);
-        assert_eq!(gnu_fsetlocking::__fsetlocking(s, FSETLOCKING_BYCALLER), FSETLOCKING_INTERNAL);
-        assert_eq!(gnu_fsetlocking::__fsetlocking(s, FSETLOCKING_QUERY), FSETLOCKING_BYCALLER);
+        assert_eq!(
+            gnu_fsetlocking::__fsetlocking(s, FSETLOCKING_QUERY),
+            FSETLOCKING_INTERNAL
+        );
+        assert_eq!(
+            gnu_fsetlocking::__fsetlocking(s, FSETLOCKING_BYCALLER),
+            FSETLOCKING_INTERNAL
+        );
+        assert_eq!(
+            gnu_fsetlocking::__fsetlocking(s, FSETLOCKING_QUERY),
+            FSETLOCKING_BYCALLER
+        );
         assert_eq!(fputc(i32::from(b'a'), s), i32::from(b'a'));
-        assert_eq!(unsafe { (*s.cast::<File>()).lock.count }, 0, "the call took no lock");
-        assert_eq!(gnu_fsetlocking::__fsetlocking(s, FSETLOCKING_INTERNAL), FSETLOCKING_BYCALLER);
+        assert_eq!(
+            unsafe { (*s.cast::<File>()).lock.count },
+            0,
+            "the call took no lock"
+        );
+        assert_eq!(
+            gnu_fsetlocking::__fsetlocking(s, FSETLOCKING_INTERNAL),
+            FSETLOCKING_BYCALLER
+        );
         assert_eq!(fclose(s), 0);
     }
 
@@ -4658,7 +4857,10 @@ mod tests {
         }
         unsafe {
             assert_eq!((*fa).lock.count, 1, "the forking thread's lock stays held");
-            assert_eq!((*fa).lock.owner.load(Ordering::Relaxed), crate::pthread::current_tid());
+            assert_eq!(
+                (*fa).lock.owner.load(Ordering::Relaxed),
+                crate::pthread::current_tid()
+            );
             assert_eq!((*fb).lock.count, 0, "another thread's is released");
             assert_eq!((*fb).lock.word.load(Ordering::Relaxed), 0);
         }
@@ -4727,7 +4929,10 @@ mod tests {
     fn popen_reads_glibcs_mode_letters() {
         for bad in [c"", c"rw", c"x", c"re+", c"ee"] {
             errno::set_errno(0);
-            assert!(unsafe { popen(c"true".as_ptr().cast(), bad.as_ptr().cast()) }.is_null(), "{bad:?}");
+            assert!(
+                unsafe { popen(c"true".as_ptr().cast(), bad.as_ptr().cast()) }.is_null(),
+                "{bad:?}"
+            );
             assert_eq!(errno::get_errno(), errno::EINVAL, "{bad:?}");
         }
         errno::set_errno(0);
@@ -4741,7 +4946,11 @@ mod tests {
 
     #[test]
     fn the_standard_streams_are_three_real_pointers() {
-        let (i, o, e) = (stdin_stream(), stdout_stream(), (&raw mut STDERR_FILE).cast::<u8>());
+        let (i, o, e) = (
+            stdin_stream(),
+            stdout_stream(),
+            (&raw mut STDERR_FILE).cast::<u8>(),
+        );
         assert!(!i.is_null() && !o.is_null() && !e.is_null());
         assert!(i != o && o != e && i != e);
         assert_eq!(stdin.0.cast::<u8>(), i);
@@ -4771,7 +4980,10 @@ mod tests {
         check("fputc", fputc(1, n) == EOF);
         check("fgets", fgets([0u8; 4].as_mut_ptr(), 4, n).is_null());
         check("fputs", unsafe { fputs(c"x".as_ptr().cast(), n) } == EOF);
-        check("fread", unsafe { fread([0u8; 4].as_mut_ptr(), 1, 4, n) } == 0);
+        check(
+            "fread",
+            unsafe { fread([0u8; 4].as_mut_ptr(), 1, 4, n) } == 0,
+        );
         check("fwrite", unsafe { fwrite(b"x".as_ptr(), 1, 1, n) } == 0);
         check("fseek", fseek(n, 0, SEEK_SET) == -1);
         check("ftell", ftell(n) == -1);
@@ -4779,8 +4991,15 @@ mod tests {
         check("ungetc", ungetc(1, n) == EOF);
         check("fileno", fileno(n) == -1);
         check("ferror", ferror(n) == 1);
-        check("setvbuf", setvbuf(n, core::ptr::null_mut(), _IONBF, 0) == EOF);
-        assert_eq!(fflush(n), 0, "fflush(NULL) is every stream, which C defines");
+        check(
+            "setvbuf",
+            setvbuf(n, core::ptr::null_mut(), _IONBF, 0) == EOF,
+        );
+        assert_eq!(
+            fflush(n),
+            0,
+            "fflush(NULL) is every stream, which C defines"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4809,7 +5028,10 @@ mod tests {
         // No directory exists on the host, so glibc's answer is ENOENT.
         let mut buf = [0u8; 64];
         errno::set_errno(0);
-        assert_eq!(unsafe { path_search(&mut buf, core::ptr::null(), core::ptr::null(), false) }, None);
+        assert_eq!(
+            unsafe { path_search(&mut buf, core::ptr::null(), core::ptr::null(), false) },
+            None
+        );
         assert_eq!(errno::get_errno(), errno::ENOENT);
         assert!(tmpnam(core::ptr::null_mut()).is_null());
     }

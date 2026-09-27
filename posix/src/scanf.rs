@@ -100,10 +100,17 @@ use crate::printf::{self, VaList};
 /// `fmt` is a C string; `ap` is NULL or a valid `va_list` matching it.
 unsafe fn scan_with<I: Input>(inp: &mut I, fmt: *const u8, ap: *mut VaList) -> i32 {
     // SAFETY: the caller's contract.
-    let orig = if ap.is_null() { None } else { Some(unsafe { *ap }) };
+    let orig = if ap.is_null() {
+        None
+    } else {
+        Some(unsafe { *ap })
+    };
     // SAFETY: as above.
     let mut seq = unsafe { printf::Args::from_raw(ap) };
-    let mut args = ScanArgs { seq: &mut seq, orig };
+    let mut args = ScanArgs {
+        seq: &mut seq,
+        orig,
+    };
     vscan(inp, fmt, &mut args)
 }
 
@@ -163,7 +170,11 @@ pub unsafe extern "C" fn vfscanf(stream: *mut u8, fmt: *const u8, ap: *mut VaLis
         errno::set_errno(errno::EINVAL);
         return EOF;
     }
-    let mut inp = StreamInput { s, n: 0, ended: false };
+    let mut inp = StreamInput {
+        s,
+        n: 0,
+        ended: false,
+    };
     // SAFETY: the caller's contract.
     unsafe { scan_with(&mut inp, fmt, ap) }
 }
@@ -320,10 +331,20 @@ struct CharBuf {
 
 impl CharBuf {
     const fn new() -> Self {
-        Self { inline: [0; 128], heap: core::ptr::null_mut(), len: 0, cap: 128, failed: false }
+        Self {
+            inline: [0; 128],
+            heap: core::ptr::null_mut(),
+            len: 0,
+            cap: 128,
+            failed: false,
+        }
     }
     fn data(&mut self) -> *mut u8 {
-        if self.heap.is_null() { self.inline.as_mut_ptr() } else { self.heap }
+        if self.heap.is_null() {
+            self.inline.as_mut_ptr()
+        } else {
+            self.heap
+        }
     }
     fn rewind(&mut self) {
         self.len = 0;
@@ -390,16 +411,25 @@ struct Allocs {
 
 impl Allocs {
     const fn new() -> Self {
-        Self { list: core::ptr::null_mut(), len: 0, cap: 0 }
+        Self {
+            list: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        }
     }
     fn push(&mut self, p: *mut *mut u8) -> bool {
         if self.len == self.cap {
-            let cap = if self.cap == 0 { 8 } else { self.cap.saturating_mul(2) };
+            let cap = if self.cap == 0 {
+                8
+            } else {
+                self.cap.saturating_mul(2)
+            };
             let Some(bytes) = cap.checked_mul(core::mem::size_of::<*mut *mut u8>()) else {
                 return false;
             };
             // SAFETY: ours, or null.
-            let nl = unsafe { crate::malloc::realloc(self.list.cast(), bytes) }.cast::<*mut *mut u8>();
+            let nl =
+                unsafe { crate::malloc::realloc(self.list.cast(), bytes) }.cast::<*mut *mut u8>();
             if nl.is_null() {
                 return false;
             }
@@ -507,7 +537,9 @@ impl<I: Input> Engine<'_, '_, '_, I> {
     fn read_int(&mut self) -> usize {
         let mut n: usize = 0;
         while self.fpeek().is_ascii_digit() {
-            n = n.saturating_mul(10).saturating_add(usize::from(self.fpeek().wrapping_sub(b'0')));
+            n = n
+                .saturating_mul(10)
+                .saturating_add(usize::from(self.fpeek().wrapping_sub(b'0')));
             self.fnext();
         }
         n
@@ -735,7 +767,9 @@ impl<I: Input> Engine<'_, '_, '_, I> {
                 let f = (flags & !(SHORT | LONGDBL | CHAR)) | LONG | READ_POINTER;
                 self.number(f, argpos, width, 16)
             }
-            b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' => self.float(flags, argpos, width),
+            b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' => {
+                self.float(flags, argpos, width)
+            }
             b'[' => self.scanset(flags, argpos, width),
             _ => Err(Stop::Conv),
         }
@@ -744,7 +778,13 @@ impl<I: Input> Engine<'_, '_, '_, I> {
     /// glibc's `STRING_ARG`: the destination of a string conversion, or a
     /// fresh `malloc` of `initial` elements of `size` for `%m`.  NULL is a
     /// conversion error, as glibc makes it.
-    fn string_arg(&mut self, flags: u32, argpos: usize, initial: usize, size: usize) -> Result<*mut u8, Stop> {
+    fn string_arg(
+        &mut self,
+        flags: u32,
+        argpos: usize,
+        initial: usize,
+        size: usize,
+    ) -> Result<*mut u8, Stop> {
         let p = self.args.ptr(argpos);
         if flags & MALLOC == 0 {
             if p == 0 {
@@ -850,7 +890,11 @@ impl<I: Input> Engine<'_, '_, '_, I> {
 
     /// Decode one multibyte character starting with `c` (reading more as
     /// needed): glibc's `mbrtowc` loop.  `Err(Encode)` for no character.
-    fn wide_char(&mut self, c: u8, state: &mut crate::wchar::MbstateT) -> Result<crate::wchar::WcharT, Stop> {
+    fn wide_char(
+        &mut self,
+        c: u8,
+        state: &mut crate::wchar::MbstateT,
+    ) -> Result<crate::wchar::WcharT, Stop> {
         let mut byte = c;
         loop {
             let mut wc: crate::wchar::WcharT = 0;
@@ -1291,7 +1335,11 @@ impl<I: Input> Engine<'_, '_, '_, I> {
                 }
             }
             while let Some(d) = cur {
-                let last = self.charbuf.size().checked_sub(1).map(|i| self.charbuf.at(i));
+                let last = self
+                    .charbuf
+                    .size()
+                    .checked_sub(1)
+                    .map(|i| self.charbuf.at(i));
                 if d.is_ascii_digit() {
                     self.charbuf.push(d);
                     got_digit = true;
@@ -1340,7 +1388,11 @@ impl<I: Input> Engine<'_, '_, '_, I> {
             return Err(Stop::NoMem);
         }
         let mut end: *const u8 = core::ptr::null();
-        let p = if flags & SUPPRESS == 0 { self.args.ptr(argpos) } else { 0 };
+        let p = if flags & SUPPRESS == 0 {
+            self.args.ptr(argpos)
+        } else {
+            0
+        };
         // SAFETY: `text` is the terminated text; each store is to the
         // caller's pointer of the type its modifier names.
         unsafe {
@@ -1380,7 +1432,11 @@ impl<I: Input> Engine<'_, '_, '_, I> {
     fn scanset(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
         let mut width = width;
         let wide = flags & LONG != 0;
-        let size = if wide { core::mem::size_of::<crate::wchar::WcharT>() } else { 1 };
+        let size = if wide {
+            core::mem::size_of::<crate::wchar::WcharT>()
+        } else {
+            1
+        };
         let mut cap = 100usize;
         let mut out = core::ptr::null_mut::<u8>();
         if flags & SUPPRESS == 0 {
@@ -1444,7 +1500,9 @@ impl<I: Input> Engine<'_, '_, '_, I> {
                     let mut wc: crate::wchar::WcharT = 0;
                     let byte = c;
                     // SAFETY: one byte; the state is ours.
-                    let n = unsafe { crate::wchar::mbrtowc(&raw mut wc, &raw const byte, 1, &raw mut state) };
+                    let n = unsafe {
+                        crate::wchar::mbrtowc(&raw mut wc, &raw const byte, 1, &raw mut state)
+                    };
                     if n == usize::MAX {
                         errno::set_errno(errno::EILSEQ);
                         return Err(Stop::Encode);
@@ -2710,7 +2768,9 @@ mod tests {
 
     /// A read-only stream over `data`.
     fn reading(data: &mut [u8]) -> *mut u8 {
-        let s = unsafe { crate::stdio_mem::fmemopen(data.as_mut_ptr().cast(), data.len(), b"r\0".as_ptr()) };
+        let s = unsafe {
+            crate::stdio_mem::fmemopen(data.as_mut_ptr().cast(), data.len(), b"r\0".as_ptr())
+        };
         assert!(!s.is_null());
         s
     }
@@ -2732,7 +2792,11 @@ mod tests {
         assert_eq!((a, b), (12, 34));
         let mut rest = [0u8; 16];
         assert!(!crate::stdio::fgets(rest.as_mut_ptr(), 16, s).is_null());
-        assert_eq!(line(&rest), b"\n", "what %d did not use is still there for fgets");
+        assert_eq!(
+            line(&rest),
+            b"\n",
+            "what %d did not use is still there for fgets"
+        );
         assert_eq!(fscanf_va(s, b"%d\0", &[&raw mut a as u64]), 1);
         assert_eq!(a, 56);
         assert_eq!(fscanf_va(s, b"%d\0", &[&raw mut a as u64]), -1, "EOF");
@@ -2744,7 +2808,10 @@ mod tests {
         let mut data = *b"1\n\n  2\n";
         let s = reading(&mut data);
         let (mut a, mut b) = (0i32, 0i32);
-        assert_eq!(fscanf_va(s, b"%d%d\0", &[&raw mut a as u64, &raw mut b as u64]), 2);
+        assert_eq!(
+            fscanf_va(s, b"%d%d\0", &[&raw mut a as u64, &raw mut b as u64]),
+            2
+        );
         assert_eq!((a, b), (1, 2));
         assert_eq!(crate::stdio::fclose(s), 0);
     }
@@ -2785,7 +2852,11 @@ mod tests {
         let mut data = *b"5";
         let s = reading(&mut data);
         assert_eq!(crate::stdio::fwide(s, 1), 1);
-        assert_eq!(fscanf_va(s, b"%d\0", &[&raw mut a as u64]), -1, "a wide stream");
+        assert_eq!(
+            fscanf_va(s, b"%d\0", &[&raw mut a as u64]),
+            -1,
+            "a wide stream"
+        );
         assert_eq!(crate::stdio::fclose(s), 0);
     }
 
@@ -2794,13 +2865,38 @@ mod tests {
     #[test]
     fn h_and_hh_store_only_their_width() {
         let mut shorts = [0x7777u16; 2];
-        assert_eq!(sscanf_va(b"300\0".as_ptr(), b"%hd\0".as_ptr(), &[shorts.as_mut_ptr() as u64]), 1);
+        assert_eq!(
+            sscanf_va(
+                b"300\0".as_ptr(),
+                b"%hd\0".as_ptr(),
+                &[shorts.as_mut_ptr() as u64]
+            ),
+            1
+        );
         assert_eq!(shorts, [300, 0x7777]);
         let mut bytes = [0x77u8; 4];
-        assert_eq!(sscanf_va(b"300\0".as_ptr(), b"%hhu\0".as_ptr(), &[bytes.as_mut_ptr() as u64]), 1);
-        assert_eq!(bytes, [44, 0x77, 0x77, 0x77], "300 as an unsigned char is 44");
+        assert_eq!(
+            sscanf_va(
+                b"300\0".as_ptr(),
+                b"%hhu\0".as_ptr(),
+                &[bytes.as_mut_ptr() as u64]
+            ),
+            1
+        );
+        assert_eq!(
+            bytes,
+            [44, 0x77, 0x77, 0x77],
+            "300 as an unsigned char is 44"
+        );
         let mut n = [0x77u8; 2];
-        assert_eq!(sscanf_va(b"abc\0".as_ptr(), b"abc%hhn\0".as_ptr(), &[n.as_mut_ptr() as u64]), 0);
+        assert_eq!(
+            sscanf_va(
+                b"abc\0".as_ptr(),
+                b"abc%hhn\0".as_ptr(),
+                &[n.as_mut_ptr() as u64]
+            ),
+            0
+        );
         assert_eq!(n, [3, 0x77]);
     }
 
@@ -2809,7 +2905,14 @@ mod tests {
     fn integers_saturate_as_strtol_does() {
         let mut v: i64 = 0;
         errno::set_errno(0);
-        assert_eq!(sscanf_va(b"99999999999999999999\0".as_ptr(), b"%ld\0".as_ptr(), &[&raw mut v as u64]), 1);
+        assert_eq!(
+            sscanf_va(
+                b"99999999999999999999\0".as_ptr(),
+                b"%ld\0".as_ptr(),
+                &[&raw mut v as u64]
+            ),
+            1
+        );
         assert_eq!(v, i64::MAX);
         assert_eq!(errno::get_errno(), errno::ERANGE);
     }
@@ -2821,11 +2924,21 @@ mod tests {
         let mut a: *mut u8 = core::ptr::null_mut();
         let mut b: *mut u8 = core::ptr::null_mut();
         assert_eq!(
-            sscanf_va(b"hello world\0".as_ptr(), b"%ms %ms\0".as_ptr(), &[&raw mut a as u64, &raw mut b as u64]),
+            sscanf_va(
+                b"hello world\0".as_ptr(),
+                b"%ms %ms\0".as_ptr(),
+                &[&raw mut a as u64, &raw mut b as u64]
+            ),
             2
         );
-        assert_eq!(unsafe { core::ffi::CStr::from_ptr(a.cast()) }.to_bytes(), b"hello");
-        assert_eq!(unsafe { core::ffi::CStr::from_ptr(b.cast()) }.to_bytes(), b"world");
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(a.cast()) }.to_bytes(),
+            b"hello"
+        );
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(b.cast()) }.to_bytes(),
+            b"world"
+        );
         unsafe {
             crate::malloc::free(a);
             crate::malloc::free(b);
@@ -2834,14 +2947,29 @@ mod tests {
         let mut input = long.to_vec();
         input.push(0);
         let mut c: *mut u8 = core::ptr::null_mut();
-        assert_eq!(sscanf_va(input.as_ptr(), b"%ms\0".as_ptr(), &[&raw mut c as u64]), 1);
-        assert_eq!(unsafe { core::ffi::CStr::from_ptr(c.cast()) }.to_bytes().len(), 500, "grown past 100");
+        assert_eq!(
+            sscanf_va(input.as_ptr(), b"%ms\0".as_ptr(), &[&raw mut c as u64]),
+            1
+        );
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(c.cast()) }
+                .to_bytes()
+                .len(),
+            500,
+            "grown past 100"
+        );
         unsafe { crate::malloc::free(c) };
         let mut d: *mut u8 = 7 as *mut u8;
-        assert_eq!(sscanf_va(b"\0".as_ptr(), b"%ms\0".as_ptr(), &[&raw mut d as u64]), -1);
+        assert_eq!(
+            sscanf_va(b"\0".as_ptr(), b"%ms\0".as_ptr(), &[&raw mut d as u64]),
+            -1
+        );
         assert!(d.is_null(), "freed and cleared");
         let mut e: *mut u8 = core::ptr::null_mut();
-        assert_eq!(sscanf_va(b"xyz\0".as_ptr(), b"%3mc\0".as_ptr(), &[&raw mut e as u64]), 1);
+        assert_eq!(
+            sscanf_va(b"xyz\0".as_ptr(), b"%3mc\0".as_ptr(), &[&raw mut e as u64]),
+            1
+        );
         assert_eq!(unsafe { core::slice::from_raw_parts(e, 3) }, b"xyz");
         unsafe { crate::malloc::free(e) };
     }
@@ -2849,13 +2977,23 @@ mod tests {
     #[test]
     fn p_reads_a_pointer_and_nil() {
         let mut p: usize = 99;
-        assert_eq!(sscanf_va(b"0x1234\0".as_ptr(), b"%p\0".as_ptr(), &[&raw mut p as u64]), 1);
+        assert_eq!(
+            sscanf_va(b"0x1234\0".as_ptr(), b"%p\0".as_ptr(), &[&raw mut p as u64]),
+            1
+        );
         assert_eq!(p, 0x1234);
-        assert_eq!(sscanf_va(b"(nil)\0".as_ptr(), b"%p\0".as_ptr(), &[&raw mut p as u64]), 1);
+        assert_eq!(
+            sscanf_va(b"(nil)\0".as_ptr(), b"%p\0".as_ptr(), &[&raw mut p as u64]),
+            1
+        );
         assert_eq!(p, 0);
         let mut word = [0u8; 8];
         assert_eq!(
-            sscanf_va(b"(nix)\0".as_ptr(), b"%p%s\0".as_ptr(), &[&raw mut p as u64, word.as_mut_ptr() as u64]),
+            sscanf_va(
+                b"(nix)\0".as_ptr(),
+                b"%p%s\0".as_ptr(),
+                &[&raw mut p as u64, word.as_mut_ptr() as u64]
+            ),
             0,
             "not (nil): a matching failure"
         );
@@ -2865,7 +3003,11 @@ mod tests {
     fn positional_arguments() {
         let (mut a, mut b) = (0i32, 0i32);
         assert_eq!(
-            sscanf_va(b"1 2\0".as_ptr(), b"%2$d %1$d\0".as_ptr(), &[&raw mut a as u64, &raw mut b as u64]),
+            sscanf_va(
+                b"1 2\0".as_ptr(),
+                b"%2$d %1$d\0".as_ptr(),
+                &[&raw mut a as u64, &raw mut b as u64]
+            ),
             2
         );
         assert_eq!((a, b), (2, 1));
@@ -2874,32 +3016,70 @@ mod tests {
     #[test]
     fn b_reads_binary() {
         let mut v = 0u32;
-        assert_eq!(sscanf_va(b"101\0".as_ptr(), b"%b\0".as_ptr(), &[&raw mut v as u64]), 1);
+        assert_eq!(
+            sscanf_va(b"101\0".as_ptr(), b"%b\0".as_ptr(), &[&raw mut v as u64]),
+            1
+        );
         assert_eq!(v, 5);
-        assert_eq!(sscanf_va(b"0b110\0".as_ptr(), b"%b\0".as_ptr(), &[&raw mut v as u64]), 1);
+        assert_eq!(
+            sscanf_va(b"0b110\0".as_ptr(), b"%b\0".as_ptr(), &[&raw mut v as u64]),
+            1
+        );
         assert_eq!(v, 6);
         let mut i = 0i32;
         let mut word = [0u8; 8];
         assert_eq!(
-            sscanf_va(b"0b11\0".as_ptr(), b"%i%s\0".as_ptr(), &[&raw mut i as u64, word.as_mut_ptr() as u64]),
+            sscanf_va(
+                b"0b11\0".as_ptr(),
+                b"%i%s\0".as_ptr(),
+                &[&raw mut i as u64, word.as_mut_ptr() as u64]
+            ),
             2
         );
-        assert_eq!((i, line(&word)), (0, &b"b11"[..]), "%i takes no 0b outside C23 mode");
+        assert_eq!(
+            (i, line(&word)),
+            (0, &b"b11"[..]),
+            "%i takes no 0b outside C23 mode"
+        );
     }
 
     #[test]
     fn wide_conversions_store_wchar_t() {
         let mut w = [0x5555i32; 8];
-        assert_eq!(sscanf_va("é€x y\0".as_ptr(), b"%ls\0".as_ptr(), &[w.as_mut_ptr() as u64]), 1);
+        assert_eq!(
+            sscanf_va(
+                "é€x y\0".as_ptr(),
+                b"%ls\0".as_ptr(),
+                &[w.as_mut_ptr() as u64]
+            ),
+            1
+        );
         assert_eq!(&w[..4], &[0xe9, 0x20ac, i32::from(b'x'), 0]);
         let mut c = [0i32; 2];
-        assert_eq!(sscanf_va("€\0".as_ptr(), b"%lc\0".as_ptr(), &[c.as_mut_ptr() as u64]), 1);
+        assert_eq!(
+            sscanf_va("€\0".as_ptr(), b"%lc\0".as_ptr(), &[c.as_mut_ptr() as u64]),
+            1
+        );
         assert_eq!(c[0], 0x20ac);
         let mut s = [0i32; 8];
-        assert_eq!(sscanf_va("éé-\0".as_ptr(), b"%l[^-]\0".as_ptr(), &[s.as_mut_ptr() as u64]), 1);
+        assert_eq!(
+            sscanf_va(
+                "éé-\0".as_ptr(),
+                b"%l[^-]\0".as_ptr(),
+                &[s.as_mut_ptr() as u64]
+            ),
+            1
+        );
         assert_eq!(&s[..3], &[0xe9, 0xe9, 0]);
         errno::set_errno(0);
-        assert_eq!(sscanf_va(b"\xff\0".as_ptr(), b"%lc\0".as_ptr(), &[c.as_mut_ptr() as u64]), 0);
+        assert_eq!(
+            sscanf_va(
+                b"\xff\0".as_ptr(),
+                b"%lc\0".as_ptr(),
+                &[c.as_mut_ptr() as u64]
+            ),
+            0
+        );
         assert_eq!(errno::get_errno(), errno::EILSEQ);
     }
 
@@ -2910,13 +3090,28 @@ mod tests {
         let mut x = 7u32;
         let mut word = [0u8; 16];
         let two = |x: *mut u32, w: *mut u8| [x as u64, w as u64];
-        assert_eq!(sscanf_va(b"0xZ\0".as_ptr(), b"%x%s\0".as_ptr(), &two(&raw mut x, word.as_mut_ptr())), 2);
-        assert_eq!((x, line(&word)), (0, &b"Z"[..]), "%x consumes 0x before finding no digit");
+        assert_eq!(
+            sscanf_va(
+                b"0xZ\0".as_ptr(),
+                b"%x%s\0".as_ptr(),
+                &two(&raw mut x, word.as_mut_ptr())
+            ),
+            2
+        );
+        assert_eq!(
+            (x, line(&word)),
+            (0, &b"Z"[..]),
+            "%x consumes 0x before finding no digit"
+        );
         let (n, v, rest) = scan_hex("1ex", b"%lf%s\0");
         assert_eq!((n, v, rest.as_str()), (2, 1.0, "x"), "the e is consumed");
         let (n, v, rest) = scan_hex("nan(1)", b"%lf%s\0");
         assert!(v.is_nan());
-        assert_eq!((n, rest.as_str()), (2, "(1)"), "glibc's scanf reads no nan payload");
+        assert_eq!(
+            (n, rest.as_str()),
+            (2, "(1)"),
+            "glibc's scanf reads no nan payload"
+        );
         let (n, _, _) = scan_hex("infinx", b"%lf%s\0");
         assert_eq!(n, 0, "infin is consumed and is no number");
         let (n, v, rest) = scan_hex("infx", b"%lf%s\0");
@@ -2926,18 +3121,61 @@ mod tests {
     #[test]
     fn scansets_are_glibcs() {
         let mut word = [0u8; 16];
-        assert_eq!(sscanf_va(b"z-a!\0".as_ptr(), b"%[z-a]\0".as_ptr(), &[word.as_mut_ptr() as u64]), 1);
+        assert_eq!(
+            sscanf_va(
+                b"z-a!\0".as_ptr(),
+                b"%[z-a]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            1
+        );
         assert_eq!(line(&word), b"z-a", "a reversed range is three members");
-        assert_eq!(sscanf_va(b"b\0".as_ptr(), b"%[z-a]\0".as_ptr(), &[word.as_mut_ptr() as u64]), 0);
-        assert_eq!(sscanf_va(b"abc\0".as_ptr(), b"%[abc\0".as_ptr(), &[word.as_mut_ptr() as u64]), 0, "no closing ]");
+        assert_eq!(
+            sscanf_va(
+                b"b\0".as_ptr(),
+                b"%[z-a]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            0
+        );
+        assert_eq!(
+            sscanf_va(
+                b"abc\0".as_ptr(),
+                b"%[abc\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            0,
+            "no closing ]"
+        );
         // A leading `]` is a member -- and then `]-^` is a range from `]` to
         // `^`, which has no `-` in it, as glibc reads it.
-        assert_eq!(sscanf_va(b"]-^x\0".as_ptr(), b"%[]-^]\0".as_ptr(), &[word.as_mut_ptr() as u64]), 1);
+        assert_eq!(
+            sscanf_va(
+                b"]-^x\0".as_ptr(),
+                b"%[]-^]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            1
+        );
         assert_eq!(line(&word), b"]");
         // A leading `-` is a member, and so is a trailing one.
-        assert_eq!(sscanf_va(b"-a-b\0".as_ptr(), b"%[-a]\0".as_ptr(), &[word.as_mut_ptr() as u64]), 1);
+        assert_eq!(
+            sscanf_va(
+                b"-a-b\0".as_ptr(),
+                b"%[-a]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            1
+        );
         assert_eq!(line(&word), b"-a-");
-        assert_eq!(sscanf_va(b"a-b\0".as_ptr(), b"%[a-]\0".as_ptr(), &[word.as_mut_ptr() as u64]), 1);
+        assert_eq!(
+            sscanf_va(
+                b"a-b\0".as_ptr(),
+                b"%[a-]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            1
+        );
         assert_eq!(line(&word), b"a-");
     }
 
@@ -2946,7 +3184,14 @@ mod tests {
     #[test]
     fn a_null_destination_stops_the_scan() {
         let mut b = 0i32;
-        assert_eq!(sscanf_va(b"1 2\0".as_ptr(), b"%d %d\0".as_ptr(), &[0, &raw mut b as u64]), 0);
+        assert_eq!(
+            sscanf_va(
+                b"1 2\0".as_ptr(),
+                b"%d %d\0".as_ptr(),
+                &[0, &raw mut b as u64]
+            ),
+            0
+        );
         assert_eq!(b, 0);
         assert_eq!(sscanf_va(b"ab\0".as_ptr(), b"%s\0".as_ptr(), &[0]), 0);
     }

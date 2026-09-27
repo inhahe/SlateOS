@@ -5027,7 +5027,10 @@ mod tests {
     #[test]
     fn sysconf_answers_the_thread_limits_by_musls_numbers() {
         assert_eq!((_SC_THREAD_KEYS_MAX, _SC_THREAD_THREADS_MAX), (74, 76));
-        assert_eq!(sysconf(74), i64::from(crate::limits::_POSIX_THREAD_KEYS_MAX));
+        assert_eq!(
+            sysconf(74),
+            i64::from(crate::limits::_POSIX_THREAD_KEYS_MAX)
+        );
         assert_eq!(sysconf(76), 1024);
     }
 
@@ -9273,7 +9276,10 @@ mod tests {
     fn test_grnd_constants() {
         // musl's (and the kernel's) numbers; the mask is exactly their union.
         assert_eq!((GRND_NONBLOCK, GRND_RANDOM, GRND_INSECURE), (1, 2, 4));
-        assert_eq!(GRND_VALID_FLAGS, GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE);
+        assert_eq!(
+            GRND_VALID_FLAGS,
+            GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE
+        );
     }
 
     // getrandom's flag checks, in the kernel's order (drivers/char/random.c,
@@ -9288,7 +9294,11 @@ mod tests {
         let mut buf = [0u8; 16];
         for flags in [0x8000_0000, GRND_NONBLOCK | 0x0008, !0u32] {
             errno::set_errno(0);
-            assert_eq!(getrandom(buf.as_mut_ptr(), buf.len(), flags), -1, "{flags:#x}");
+            assert_eq!(
+                getrandom(buf.as_mut_ptr(), buf.len(), flags),
+                -1,
+                "{flags:#x}"
+            );
             assert_eq!(errno::get_errno(), errno::EINVAL, "{flags:#x}");
         }
     }
@@ -9296,9 +9306,16 @@ mod tests {
     #[test]
     fn test_getrandom_rejects_random_with_insecure() {
         let mut buf = [0u8; 16];
-        for flags in [GRND_RANDOM | GRND_INSECURE, GRND_RANDOM | GRND_INSECURE | GRND_NONBLOCK] {
+        for flags in [
+            GRND_RANDOM | GRND_INSECURE,
+            GRND_RANDOM | GRND_INSECURE | GRND_NONBLOCK,
+        ] {
             errno::set_errno(0);
-            assert_eq!(getrandom(buf.as_mut_ptr(), buf.len(), flags), -1, "{flags:#x}");
+            assert_eq!(
+                getrandom(buf.as_mut_ptr(), buf.len(), flags),
+                -1,
+                "{flags:#x}"
+            );
             assert_eq!(errno::get_errno(), errno::EINVAL, "{flags:#x}");
         }
     }
@@ -9982,7 +9999,11 @@ mod tests {
         ] {
             personality(u64::from(value));
             assert_eq!(current_personality(), value, "{value:#x}");
-            assert_eq!(personality(u64::from(PERSONALITY_QUERY)) as u32, value, "{value:#x}");
+            assert_eq!(
+                personality(u64::from(PERSONALITY_QUERY)) as u32,
+                value,
+                "{value:#x}"
+            );
         }
     }
 

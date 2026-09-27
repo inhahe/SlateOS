@@ -5037,7 +5037,11 @@ mod tests {
         for cmd in REBOOT_CMDS {
             crate::errno::set_errno(0);
             assert_eq!(reboot(cmd as i32), -1, "cmd {cmd:#010x}");
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS, "cmd {cmd:#010x}");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "cmd {cmd:#010x}"
+            );
         }
     }
 
@@ -5047,11 +5051,24 @@ mod tests {
         // Nothing near a command is one; -1 and 1 look tempting and are not;
         // and the magic numbers, passed as the command by a caller who swapped
         // the arguments, are not either.
-        for cmd in [0xDEAD_BEEF, 0x0123_4566, 0x0123_4568, 0xCDEF_0124, 0xFFFF_FFFF, 1, 0x1_0000,
-                    LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2] {
+        for cmd in [
+            0xDEAD_BEEF,
+            0x0123_4566,
+            0x0123_4568,
+            0xCDEF_0124,
+            0xFFFF_FFFF,
+            1,
+            0x1_0000,
+            LINUX_REBOOT_MAGIC1,
+            LINUX_REBOOT_MAGIC2,
+        ] {
             crate::errno::set_errno(0);
             assert_eq!(reboot(cmd as i32), -1, "cmd {cmd:#010x}");
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "cmd {cmd:#010x}");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "cmd {cmd:#010x}"
+            );
             assert!(!reboot_cmd_known(cmd), "cmd {cmd:#010x}");
         }
         for cmd in REBOOT_CMDS {
@@ -5066,7 +5083,11 @@ mod tests {
         for cmd in REBOOT_CMDS {
             crate::errno::set_errno(0);
             assert_eq!(reboot(cmd as i32), -1, "cmd {cmd:#010x}");
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM, "cmd {cmd:#010x}");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EPERM,
+                "cmd {cmd:#010x}"
+            );
         }
     }
 

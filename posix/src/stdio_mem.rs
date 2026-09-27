@@ -54,7 +54,11 @@ struct Fmem {
 unsafe extern "C" fn fmem_read(c: *mut c_void, b: *mut u8, s: usize) -> isize {
     // SAFETY: `fmemopen` made the cookie.
     let c = unsafe { &mut *c.cast::<Fmem>() };
-    let n = if c.pos >= c.maxpos { 0 } else { s.min(c.maxpos.wrapping_sub(c.pos)) };
+    let n = if c.pos >= c.maxpos {
+        0
+    } else {
+        s.min(c.maxpos.wrapping_sub(c.pos))
+    };
     // SAFETY: `pos + n <= maxpos <= size`, and `b` holds `s >= n`.
     unsafe { core::ptr::copy_nonoverlapping(c.buffer.add(c.pos), b, n) };
     c.pos = c.pos.wrapping_add(n);
@@ -63,7 +67,12 @@ unsafe extern "C" fn fmem_read(c: *mut c_void, b: *mut u8, s: usize) -> isize {
 
 unsafe extern "C" fn fmem_write(c: *mut c_void, b: *const u8, s: usize) -> isize {
     // SAFETY: `fmemopen` made the cookie; `b` holds `s` bytes.
-    let (c, last) = unsafe { (&mut *c.cast::<Fmem>(), if s == 0 { 1 } else { *b.add(s.wrapping_sub(1)) }) };
+    let (c, last) = unsafe {
+        (
+            &mut *c.cast::<Fmem>(),
+            if s == 0 { 1 } else { *b.add(s.wrapping_sub(1)) },
+        )
+    };
     let pos = if c.append { c.maxpos } else { c.pos };
     let add_nul = s == 0 || last != 0;
     let mut s = s;
@@ -192,7 +201,14 @@ pub unsafe extern "C" fn fmemopen(buf: *mut c_void, size: usize, mode: *const u8
     let append = m0 == b'a';
     // SAFETY: `st` holds one zeroed `Fmem`.
     unsafe {
-        st.write(Fmem { buffer, mine, append, size, pos: if append { maxpos } else { 0 }, maxpos });
+        st.write(Fmem {
+            buffer,
+            mine,
+            append,
+            size,
+            pos: if append { maxpos } else { 0 },
+            maxpos,
+        });
     }
     let io = CookieIoFunctions {
         read: Some(fmem_read),
@@ -277,7 +293,9 @@ impl<T: Copy + Default> Grow<T> {
             return false;
         }
         // SAFETY: `reserve` made room for `end` elements.
-        unsafe { core::ptr::copy_nonoverlapping(items.as_ptr(), self.buf.add(self.pos), items.len()) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(items.as_ptr(), self.buf.add(self.pos), items.len())
+        };
         self.pos = end;
         if end > self.len {
             self.len = end;
@@ -335,7 +353,12 @@ type MemStream = Grow<u8>;
 
 unsafe extern "C" fn ms_write(c: *mut c_void, b: *const u8, s: usize) -> isize {
     // SAFETY: `open_memstream` made the cookie; `b` holds `s` bytes.
-    let (m, bytes) = unsafe { (&mut *c.cast::<MemStream>(), core::slice::from_raw_parts(b, s)) };
+    let (m, bytes) = unsafe {
+        (
+            &mut *c.cast::<MemStream>(),
+            core::slice::from_raw_parts(b, s),
+        )
+    };
     if m.put(bytes) {
         isize::try_from(s).unwrap_or(isize::MAX)
     } else {
@@ -383,7 +406,14 @@ fn new_grow<T: Copy + Default>(bufp: *mut *mut T, sizep: *mut usize, first: usiz
     }
     // SAFETY: `st` holds one zeroed `Grow<T>`.
     unsafe {
-        st.write(Grow { bufp, sizep, buf, space: first, len: 0, pos: 0 });
+        st.write(Grow {
+            bufp,
+            sizep,
+            buf,
+            space: first,
+            len: 0,
+            pos: 0,
+        });
         (*st).publish();
     }
     st
@@ -404,7 +434,12 @@ pub unsafe extern "C" fn open_memstream(bufloc: *mut *mut u8, sizeloc: *mut usiz
         errno::set_errno(errno::ENOMEM);
         return core::ptr::null_mut();
     }
-    let io = CookieIoFunctions { read: None, write: Some(ms_write), seek: Some(ms_seek), close: Some(ms_close) };
+    let io = CookieIoFunctions {
+        read: None,
+        write: Some(ms_write),
+        seek: Some(ms_seek),
+        close: Some(ms_close),
+    };
     // SAFETY: the callbacks take this cookie.
     let f = unsafe { fopencookie(st.cast(), c"w".as_ptr().cast(), io) };
     if f.is_null() {
@@ -521,10 +556,19 @@ pub unsafe extern "C" fn open_wmemstream(bufloc: *mut *mut WcharT, sizeloc: *mut
     }
     // SAFETY: `st` holds one zeroed `WideMem`; `grow` is moved into it.
     unsafe {
-        st.write(WideMem { grow: grow.read(), partial: [0; 4], have: 0 });
+        st.write(WideMem {
+            grow: grow.read(),
+            partial: [0; 4],
+            have: 0,
+        });
         crate::malloc::free(grow.cast());
     }
-    let io = CookieIoFunctions { read: None, write: Some(wms_write), seek: Some(wms_seek), close: Some(wms_close) };
+    let io = CookieIoFunctions {
+        read: None,
+        write: Some(wms_write),
+        seek: Some(wms_seek),
+        close: Some(wms_close),
+    };
     // SAFETY: the callbacks take this cookie.
     let f = unsafe { fopencookie(st.cast(), c"w".as_ptr().cast(), io) };
     if f.is_null() {
@@ -546,7 +590,9 @@ pub unsafe extern "C" fn open_wmemstream(bufloc: *mut *mut WcharT, sizeloc: *mut
 #[allow(clippy::undocumented_unsafe_blocks)]
 mod tests {
     use super::*;
-    use crate::stdio::{fclose, fflush, fgetc, fputc, fputs, fread, fseek, ftell, SEEK_CUR, SEEK_END, SEEK_SET};
+    use crate::stdio::{
+        SEEK_CUR, SEEK_END, SEEK_SET, fclose, fflush, fgetc, fputc, fputs, fread, fseek, ftell,
+    };
 
     fn s(c: &core::ffi::CStr) -> *const u8 {
         c.as_ptr().cast()
@@ -581,9 +627,16 @@ mod tests {
         let mut buf = [0u8; 4];
         let f = unsafe { fmemopen(buf.as_mut_ptr().cast(), buf.len(), s(c"w")) };
         assert_eq!(unsafe { fputs(s(c"abcdef"), f) }, 1, "buffered");
-        assert_eq!(fflush(f), crate::stdio::EOF, "the far end took four and then refused");
+        assert_eq!(
+            fflush(f),
+            crate::stdio::EOF,
+            "the far end took four and then refused"
+        );
         assert_eq!(crate::stdio::ferror(f), 1);
-        assert_eq!(&buf, b"abc\0", "filling the buffer makes the last byte a NUL, as glibc does");
+        assert_eq!(
+            &buf, b"abc\0",
+            "filling the buffer makes the last byte a NUL, as glibc does"
+        );
         assert_eq!(fclose(f), 0);
     }
 
@@ -595,7 +648,10 @@ mod tests {
         let four = b"wxyz";
         assert_eq!(unsafe { crate::stdio::fwrite(four.as_ptr(), 1, 4, f) }, 4);
         assert_eq!(fflush(f), 0);
-        assert_eq!(&buf, b"wxy\0", "glibc: the NUL goes in iff it fits, over the last byte");
+        assert_eq!(
+            &buf, b"wxy\0",
+            "glibc: the NUL goes in iff it fits, over the last byte"
+        );
         assert_eq!(fclose(f), 0);
     }
 
@@ -629,7 +685,11 @@ mod tests {
         assert_eq!(unsafe { fputs(s(c"mine"), f) }, 1);
         assert_eq!(fseek(f, 0, SEEK_SET), 0);
         let mut out = [0u8; 8];
-        assert_eq!(unsafe { fread(out.as_mut_ptr(), 1, 8, f) }, 4, "reading stops at what was written");
+        assert_eq!(
+            unsafe { fread(out.as_mut_ptr(), 1, 8, f) },
+            4,
+            "reading stops at what was written"
+        );
         assert_eq!(&out[..4], b"mine");
         assert_eq!(fclose(f), 0);
     }
@@ -658,7 +718,10 @@ mod tests {
         assert_eq!(unsafe { fputs(s(c"hello, world"), f) }, 1);
         assert_eq!(fflush(f), 0);
         assert_eq!(n, 12);
-        assert_eq!(unsafe { core::slice::from_raw_parts(p, 13) }, b"hello, world\0");
+        assert_eq!(
+            unsafe { core::slice::from_raw_parts(p, 13) },
+            b"hello, world\0"
+        );
         // The length is the position, as glibc counts it.
         assert_eq!(fseek(f, 5, SEEK_SET), 0);
         assert_eq!(fflush(f), 0);
@@ -670,7 +733,10 @@ mod tests {
         assert_eq!(fputc(i32::from(b'!'), f), i32::from(b'!'));
         assert_eq!(fclose(f), 0);
         assert_eq!(n, 16);
-        assert_eq!(unsafe { core::slice::from_raw_parts(p, 17) }, b"hello, world\0\0\0!\0");
+        assert_eq!(
+            unsafe { core::slice::from_raw_parts(p, 17) },
+            b"hello, world\0\0\0!\0"
+        );
         unsafe { crate::malloc::free(p) };
     }
 
@@ -681,7 +747,10 @@ mod tests {
         let f = unsafe { open_memstream(&raw mut p, &raw mut n) };
         let chunk = [b'z'; 1000];
         for _ in 0..50 {
-            assert_eq!(unsafe { crate::stdio::fwrite(chunk.as_ptr(), 1, chunk.len(), f) }, chunk.len());
+            assert_eq!(
+                unsafe { crate::stdio::fwrite(chunk.as_ptr(), 1, chunk.len(), f) },
+                chunk.len()
+            );
         }
         assert_eq!(fclose(f), 0);
         assert_eq!(n, 50_000);
@@ -724,13 +793,22 @@ mod tests {
         }
         assert_eq!(fflush(f), 0);
         assert_eq!(n, 4, "four characters, whatever their UTF-8 length");
-        assert_eq!(unsafe { core::slice::from_raw_parts(p, 5) }, &[0xe9, 0x20ac, 0x1f600, i32::from(b'x'), 0]);
+        assert_eq!(
+            unsafe { core::slice::from_raw_parts(p, 5) },
+            &[0xe9, 0x20ac, 0x1f600, i32::from(b'x'), 0]
+        );
         assert_eq!(ftell(f), 4);
         assert_eq!(fseek(f, 1, SEEK_SET), 0);
-        assert_eq!(unsafe { crate::wchar::fputwc(i32::from(b'Y'), f) }, i32::from(b'Y'));
+        assert_eq!(
+            unsafe { crate::wchar::fputwc(i32::from(b'Y'), f) },
+            i32::from(b'Y')
+        );
         assert_eq!(fclose(f), 0);
         assert_eq!(n, 2, "trimmed to the position");
-        assert_eq!(unsafe { core::slice::from_raw_parts(p, 3) }, &[0xe9, i32::from(b'Y'), 0]);
+        assert_eq!(
+            unsafe { core::slice::from_raw_parts(p, 3) },
+            &[0xe9, i32::from(b'Y'), 0]
+        );
         unsafe { crate::malloc::free(p.cast()) };
     }
 
@@ -739,7 +817,11 @@ mod tests {
         let mut p: *mut WcharT = core::ptr::null_mut();
         let mut n: usize = 0;
         let f = unsafe { open_wmemstream(&raw mut p, &raw mut n) };
-        assert_eq!(unsafe { fputs(s(c"bytes"), f) }, crate::stdio::EOF, "a wide stream");
+        assert_eq!(
+            unsafe { fputs(s(c"bytes"), f) },
+            crate::stdio::EOF,
+            "a wide stream"
+        );
         assert_eq!(fclose(f), 0);
         assert_eq!(n, 0);
         unsafe { crate::malloc::free(p.cast()) };

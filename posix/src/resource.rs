@@ -883,7 +883,10 @@ fn prio_target_is_caller(which: i32, who: u32) -> Result<(), i32> {
             Ok(0) => Err(errno::EPERM),
             Ok(pgrp) if pgrp == crate::process::getpgrp() => Err(errno::EPERM),
             // `kill(-pgrp, 0)` asks whether the group has a member.
-            Ok(pgrp) => Err(target_exists_errno(crate::signal::kill(pgrp.wrapping_neg(), 0))),
+            Ok(pgrp) => Err(target_exists_errno(crate::signal::kill(
+                pgrp.wrapping_neg(),
+                0,
+            ))),
             Err(_) => Err(errno::ESRCH),
         },
         // Whether another user has a process this library cannot tell, and a
@@ -1595,7 +1598,12 @@ mod tests {
         reset_global_state();
         nice(1);
         let own_pgrp = u32::try_from(crate::process::getpgrp()).expect("positive");
-        for (which, who) in [(PRIO_PGRP, 0), (PRIO_PGRP, own_pgrp), (PRIO_USER, 0), (PRIO_USER, 1000)] {
+        for (which, who) in [
+            (PRIO_PGRP, 0),
+            (PRIO_PGRP, own_pgrp),
+            (PRIO_USER, 0),
+            (PRIO_USER, 1000),
+        ] {
             errno::set_errno(0);
             assert_eq!(setpriority(which, who, 10), -1, "which={which} who={who}");
             assert_eq!(errno::get_errno(), errno::EPERM, "which={which} who={who}");

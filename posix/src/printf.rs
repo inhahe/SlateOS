@@ -250,11 +250,7 @@ fn format_to_sink(sink: Sink, fmt: *const u8, args: &mut Args) -> i32 {
 /// Output goes through the stdio buffer (line-buffered on stdout) so
 /// printf output is properly coalesced with other stdout writes.
 pub(crate) fn _printf_impl(fmt: *const u8, args: &mut Args) -> i32 {
-    format_to_sink(
-        Sink::Stream(crate::stdio::stdout_stream()),
-        fmt,
-        args,
-    )
+    format_to_sink(Sink::Stream(crate::stdio::stdout_stream()), fmt, args)
 }
 
 /// `fprintf(stream, fmt, ...)` — write formatted output to a stream.
@@ -4494,7 +4490,11 @@ mod tests {
     #[test]
     fn vfwprintf_refuses_before_writing() {
         static WRITES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-        unsafe extern "C" fn count_write(_: *mut core::ffi::c_void, _: *const u8, n: usize) -> isize {
+        unsafe extern "C" fn count_write(
+            _: *mut core::ffi::c_void,
+            _: *const u8,
+            n: usize,
+        ) -> isize {
             WRITES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             n as isize
         }
@@ -4507,15 +4507,18 @@ mod tests {
             seek: None,
             close: None,
         };
-        let stream = unsafe {
-            crate::stdio::fopencookie(core::ptr::null_mut(), c"w".as_ptr().cast(), io)
-        };
+        let stream =
+            unsafe { crate::stdio::fopencookie(core::ptr::null_mut(), c"w".as_ptr().cast(), io) };
         assert!(!stream.is_null());
         crate::errno::set_errno(0);
         let n = with_valist(&[0], &[], |ap| unsafe {
             vfwprintf(core::ptr::null_mut(), f.as_ptr(), ap)
         });
-        assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EBADF), "NULL is no stream (§1120)");
+        assert_eq!(
+            (n, crate::errno::get_errno()),
+            (-1, crate::errno::EBADF),
+            "NULL is no stream (§1120)"
+        );
         let n = with_valist(&[0], &[], |_| unsafe {
             vfwprintf(stream, f.as_ptr(), core::ptr::null_mut())
         });
@@ -4535,7 +4538,11 @@ mod tests {
         });
         assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EILSEQ));
         assert_eq!(crate::stdio::fclose(stream), 0);
-        assert_eq!(WRITES.load(core::sync::atomic::Ordering::Relaxed), 0, "nothing reached the far end");
+        assert_eq!(
+            WRITES.load(core::sync::atomic::Ordering::Relaxed),
+            0,
+            "nothing reached the far end"
+        );
     }
 
     /// The buffer need not be zeroed. `format_core` does not terminate what it

@@ -716,7 +716,12 @@ pub(crate) fn inflate_blocks_vec(
 
 /// One block onto `out`: its header, then its contents. `Ok(true)` for the
 /// final block.
-fn block_vec(bits: &mut Bits<'_>, tables: &mut Tables, out: &mut Vec<u8>, limit: usize) -> Result<bool> {
+fn block_vec(
+    bits: &mut Bits<'_>,
+    tables: &mut Tables,
+    out: &mut Vec<u8>,
+    limit: usize,
+) -> Result<bool> {
     let bfinal = bits.take(1)?;
     match bits.take(2)? {
         0 => stored_vec(bits, out, limit)?,

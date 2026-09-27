@@ -22,10 +22,16 @@
 //! speed, the traffic counters, whether the address came from DHCP), and an
 //! address the kernel says there is none of reads "None assigned".
 //!
-//! Everything else in the list above is still refused in words: applying a
-//! configuration, enabling or disabling an adapter, scanning for Wi-Fi,
-//! reaching a VPN and running diagnostics. Each refusal says so where it
-//! happens, and no list is ever filled with an example.
+//! **Apply, Enable and Disable reach the kernel**: a static address, netmask,
+//! gateway and DNS server, and the interface's up/down state, go through
+//! `SYS_NET_IF_CONFIG` -- the call `ifconfig` makes -- and the list is read
+//! again afterwards, so what is shown is what the kernel then says, never
+//! what was asked for. The kernel allows it to an administrator only, and a
+//! refusal says so and changes nothing.
+//!
+//! Still refused in words: switching to DHCP (`dhcpcd` does that), scanning
+//! for Wi-Fi, reaching a VPN and running diagnostics. Each refusal says so
+//! where it happens, and no list is ever filled with an example.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -78,9 +84,8 @@ const NOT_REPORTED: &str = "Not reported";
 /// what is known, so it must not read as [`NOT_REPORTED`].
 const NOT_ASSIGNED: &str = "None assigned";
 
-/// The status-bar form of "nothing here can change the network".
-const CANNOT_CHANGE_NETWORK: &str =
-    "Cannot change the network -- nothing here can configure an interface, scan or connect";
+/// Why a wireless network cannot be joined, for the status bar.
+const CANNOT_REACH_A_RADIO: &str = "nothing here can scan for or join a wireless network";
 
 /// The banner's last line while no interface has been read. It does the
 /// work: an empty interface list claims the machine has no network
@@ -592,6 +597,156 @@ pub struct NetManagerApp {
     palette: Palette,
     /// Whether `interfaces` is the machine's, and if not, why not.
     pub listing: Listing,
+    /// What carries a change to the kernel: [`kernel_configure`], or a
+    /// test's stand-in.
+    pub configure: fn(&ConfigChange) -> Result<(), i64>,
+    /// Under test, the root the interfaces are read under: a scratch tree,
+    /// or (by default) a directory that does not exist, so that no test's
+    /// outcome depends on the computer it runs on.
+    #[cfg(test)]
+    machine_root: String,
+}
+
+/// `SYS_NET_IF_CONFIG` (`kernel/src/syscall/number.rs`): sets the address,
+/// netmask, gateway, DNS server and up/down state of the kernel's network
+/// interface. Administrator only. `userspace/ifconfig` is its other caller.
+#[cfg(target_vendor = "slateos")]
+const SYS_NET_IF_CONFIG: i64 = 856;
+
+/// What a native SlateOS call returns when the caller may not make it
+/// (`KernelError::PermissionDenied`). Not Linux's `-1`: a native call returns
+/// the kernel's own codes.
+const KERNEL_PERMISSION_DENIED: i64 = -400;
+/// `KernelError::InvalidArgument`.
+const KERNEL_INVALID_ARGUMENT: i64 = -3;
+/// `KernelError::NotSupported` -- and what this program answers itself off
+/// SlateOS, where there is no kernel to ask.
+const KERNEL_NOT_SUPPORTED: i64 = -2;
+
+/// Which fields of the record the kernel applies (its byte 17); a clear bit
+/// leaves that field as it is.
+mod config_mask {
+    pub const IP: u8 = 1 << 0;
+    pub const MASK: u8 = 1 << 1;
+    pub const GATEWAY: u8 = 1 << 2;
+    pub const DNS: u8 = 1 << 3;
+    pub const UP: u8 = 1 << 4;
+}
+
+/// A change to the kernel's interface configuration; a `None` field is left
+/// as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConfigChange {
+    pub ip: Option<[u8; 4]>,
+    pub mask: Option<[u8; 4]>,
+    pub gateway: Option<[u8; 4]>,
+    pub dns: Option<[u8; 4]>,
+    pub up: Option<bool>,
+}
+
+impl ConfigChange {
+    /// `SYS_NET_IF_CONFIG`'s 18-byte record: bytes 0-3 the address, 4-7 the
+    /// netmask, 8-11 the gateway, 12-15 the DNS server, 16 up (1) or down
+    /// (0), and 17 which of them to apply.
+    #[must_use]
+    pub fn record(&self) -> [u8; 18] {
+        let quad = |v: Option<[u8; 4]>| v.unwrap_or([0; 4]);
+        let [a0, a1, a2, a3] = quad(self.ip);
+        let [m0, m1, m2, m3] = quad(self.mask);
+        let [g0, g1, g2, g3] = quad(self.gateway);
+        let [d0, d1, d2, d3] = quad(self.dns);
+        let bit = |set: bool, bit: u8| if set { bit } else { 0 };
+        let fields = bit(self.ip.is_some(), config_mask::IP)
+            | bit(self.mask.is_some(), config_mask::MASK)
+            | bit(self.gateway.is_some(), config_mask::GATEWAY)
+            | bit(self.dns.is_some(), config_mask::DNS)
+            | bit(self.up.is_some(), config_mask::UP);
+        [
+            a0,
+            a1,
+            a2,
+            a3,
+            m0,
+            m1,
+            m2,
+            m3,
+            g0,
+            g1,
+            g2,
+            g3,
+            d0,
+            d1,
+            d2,
+            d3,
+            u8::from(self.up == Some(true)),
+            fields,
+        ]
+    }
+}
+
+/// Hand `change` to the kernel: `Err` with its (negative) code when it
+/// refuses.
+///
+/// # Errors
+///
+/// The kernel's refusal, as the code it returned.
+pub fn kernel_configure(change: &ConfigChange) -> Result<(), i64> {
+    let ret = config_call(&change.record());
+    if ret < 0 { Err(ret) } else { Ok(()) }
+}
+
+/// The raw call.
+#[cfg(target_vendor = "slateos")]
+fn config_call(record: &[u8; 18]) -> i64 {
+    let ret: i64;
+    // SAFETY: SYS_NET_IF_CONFIG reads `rsi` (18) bytes from `rdi` and writes
+    // none; `record` is a live 18-byte array for the whole call. The
+    // `syscall` instruction clobbers rcx and r11, which are declared, and
+    // touches no stack.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") SYS_NET_IF_CONFIG => ret,
+            in("rdi") record.as_ptr(),
+            in("rsi") 18_u64,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Off SlateOS there is no kernel to ask, and a raw `syscall` would be some
+/// other kernel's call with this number -- so the answer is "not supported",
+/// as `ifconfig`'s host arm answers.
+#[cfg(not(target_vendor = "slateos"))]
+fn config_call(_record: &[u8; 18]) -> i64 {
+    KERNEL_NOT_SUPPORTED
+}
+
+/// Why the kernel refused a change, in words, from its code. `what` is the
+/// act, as "apply the configuration to eth0".
+fn refusal(code: i64, what: &str) -> String {
+    match code {
+        KERNEL_PERMISSION_DENIED => format!(
+            "Cannot {what}: changing the network needs administrator rights. Nothing was changed"
+        ),
+        KERNEL_NOT_SUPPORTED => format!(
+            "Cannot {what}: this system has no way to configure an interface. Nothing was changed"
+        ),
+        KERNEL_INVALID_ARGUMENT => {
+            format!("Cannot {what}: the kernel refused it as invalid. Nothing was changed")
+        }
+        other => {
+            format!("Cannot {what}: the kernel refused it (code {other}). Nothing was changed")
+        }
+    }
+}
+
+/// An address typed in dotted form, as the kernel's four bytes.
+fn octets(text: &str) -> Option<[u8; 4]> {
+    text.parse::<std::net::Ipv4Addr>().ok().map(|a| a.octets())
 }
 
 /// Whether the interface list is the machine's.
@@ -604,19 +759,6 @@ pub enum Listing {
     Read,
     /// The last read failed, for this reason; the list is empty.
     Unreadable(String),
-}
-
-/// Where the interfaces are read from: the machine.
-#[cfg(not(test))]
-fn machine() -> hwquery::SyscallProvider {
-    hwquery::SyscallProvider::new()
-}
-
-/// Under test, a root with nothing under it, so no test's outcome depends on
-/// the computer it runs on; the tests about reading build their own tree.
-#[cfg(test)]
-fn machine() -> hwquery::SyscallProvider {
-    hwquery::SyscallProvider::at("no-machine-under-test")
 }
 
 /// An address as the summary shows it.
@@ -683,7 +825,9 @@ fn interface_of(a: &hwquery::NetworkAdapterInfo, id: u32) -> NetworkInterface {
         speed_mbps: a.speed_mbps,
         rx_bytes: a.bytes_received,
         tx_bytes: a.bytes_sent,
-        enabled: true,
+        // The switch is the kernel's up/down state; with no word on it, the
+        // interface is listed as enabled, as it is listed at all.
+        enabled: a.up != Some(false),
         dhcp: None,
         reported: Some(ReportedAddresses {
             ip_address: address_text(&a.ipv4),
@@ -753,13 +897,30 @@ impl NetManagerApp {
             wheel: wheel::Accumulator::default(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             listing: Listing::NotRead,
+            configure: kernel_configure,
+            #[cfg(test)]
+            machine_root: String::from("no-machine-under-test"),
         }
+    }
+
+    /// Where the interfaces are read from: the machine.
+    #[cfg(not(test))]
+    #[expect(clippy::unused_self, reason = "the test build reads a field")]
+    fn machine(&self) -> hwquery::SyscallProvider {
+        hwquery::SyscallProvider::new()
+    }
+
+    /// Under test, [`Self::machine_root`].
+    #[cfg(test)]
+    fn machine(&self) -> hwquery::SyscallProvider {
+        hwquery::SyscallProvider::at(&self.machine_root)
     }
 
     /// Read the machine's interfaces, replacing whatever the list held.
     /// Opening and Refresh.
     pub fn read_interfaces(&mut self) {
-        self.read_interfaces_from(&machine());
+        let machine = self.machine();
+        self.read_interfaces_from(&machine);
     }
 
     /// [`read_interfaces`](Self::read_interfaces), from `provider` -- the
@@ -864,15 +1025,44 @@ impl NetManagerApp {
         }
     }
 
-    /// Toggle enabled/disabled state for the selected interface.
+    /// Bring the selected interface up if it is down, or down if it is up,
+    /// through the kernel.
+    ///
+    /// The switch moves only when the kernel says it did: after the change
+    /// the list is read again, so what is shown is `/proc/net`'s word, and a
+    /// refusal leaves everything where it was, with the reason. (Until
+    /// 2026-09-15 it flipped `enabled` and reported success while nothing
+    /// left the struct; until 2026-09-26 it refused outright.)
     pub fn toggle_selected_enabled(&mut self) {
-        // It used to flip `enabled` and set the state to Connecting or
-        // Disconnected, then report the interface's new summary -- bringing a
-        // network interface up or down is about as consequential as this app
-        // gets, and none of it left the struct.
-        if self.interfaces.get(self.selected_interface).is_some() {
-            self.status_message =
-                String::from("Cannot bring an interface up or down: nothing here can reach it");
+        let Some(iface) = self.interfaces.get(self.selected_interface) else {
+            return;
+        };
+        let name = iface.name.clone();
+        let bring_up = match iface.state {
+            ConnectionState::Connected => false,
+            ConnectionState::Disconnected => true,
+            ConnectionState::Connecting | ConnectionState::Error(_) | ConnectionState::Unknown => {
+                self.status_message = format!(
+                    "Cannot bring {name} up or down: the kernel does not say which it is now"
+                );
+                return;
+            }
+        };
+        let (act, done) = if bring_up {
+            (format!("bring {name} up"), format!("Brought {name} up"))
+        } else {
+            (format!("take {name} down"), format!("Took {name} down"))
+        };
+        let change = ConfigChange {
+            up: Some(bring_up),
+            ..ConfigChange::default()
+        };
+        match (self.configure)(&change) {
+            Ok(()) => {
+                self.read_interfaces();
+                self.status_message = done;
+            }
+            Err(code) => self.status_message = refusal(code, &act),
         }
     }
 
@@ -884,24 +1074,83 @@ impl NetManagerApp {
         }
     }
 
-    /// Apply the edited IP configuration to the selected interface.
+    /// Apply the edited IP configuration to the selected interface, through
+    /// the kernel.
     ///
-    /// Validates, then refuses. It used to assign `iface.ip_config` and report
-    /// "IP configuration updated for eth0" -- a write to an in-memory struct
-    /// that nothing reads, described to the user as a change to their machine's
-    /// networking. Somebody fixing a bad address would have believed it took.
+    /// Validates first, and reports a malformed address whether or not the
+    /// change could have been made. A static configuration goes to the
+    /// kernel whole: an empty gateway, or no DNS server, is sent as `0.0.0.0`
+    /// -- none -- rather than left out, which would keep the old one while
+    /// the editor shows it gone. The kernel keeps one DNS server; with
+    /// several listed, the first is the one sent, and the status says so.
     ///
-    /// The validation still runs first, and still reports its own errors,
-    /// because a malformed address is worth telling the user about whether or
-    /// not it could have been applied.
+    /// On success the editor closes and the list is read again, so what is
+    /// shown is what the kernel then says. (Until 2026-09-15 it wrote the
+    /// struct and said "IP configuration updated"; until 2026-09-26 it
+    /// refused outright.) A refusal keeps the editor open with the typed
+    /// text in it, and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// A field that is not an address, no interface selected, DHCP (which
+    /// this cannot switch on), or the kernel's refusal, in words.
     pub fn apply_ip_config(&mut self) -> Result<(), String> {
         self.edit_ip_config.validate()?;
-        if self.interfaces.get(self.selected_interface).is_some() {
-            self.status_message = String::from(CANNOT_CHANGE_NETWORK);
-            Err("Cannot apply an IP configuration: nothing here can reach the interface".into())
-        } else {
-            Err("No interface selected".into())
+        let Some(iface) = self.interfaces.get(self.selected_interface) else {
+            return Err("No interface selected".into());
+        };
+        let name = iface.name.clone();
+        let config = &self.edit_ip_config;
+        if config.dhcp_enabled {
+            return Err(format!(
+                "Cannot switch {name} to DHCP from here: the dhcpcd command does that, run as an administrator"
+            ));
         }
+        let field = |label: &str, text: &str| {
+            octets(text).ok_or_else(|| format!("Not an address: {label} {text}"))
+        };
+        let none = [0_u8; 4];
+        let change = ConfigChange {
+            ip: Some(field("IP", &config.ip_address)?),
+            mask: Some(field("subnet mask", &config.subnet_mask)?),
+            gateway: Some(if config.gateway.is_empty() {
+                none
+            } else {
+                field("gateway", &config.gateway)?
+            }),
+            dns: Some(match config.dns_servers.first() {
+                Some(server) => field("DNS server", server)?,
+                None => none,
+            }),
+            up: None,
+        };
+        let dropped = config.dns_servers.len().saturating_sub(1);
+        let summary = format!(
+            "{} mask {} gateway {} DNS {}",
+            config.ip_address,
+            config.subnet_mask,
+            if config.gateway.is_empty() {
+                "none"
+            } else {
+                &config.gateway
+            },
+            config.dns_servers.first().map_or("none", String::as_str),
+        );
+        if let Err(code) = (self.configure)(&change) {
+            let why = refusal(code, &format!("apply the configuration to {name}"));
+            self.status_message.clone_from(&why);
+            return Err(why);
+        }
+        self.editing_ip = false;
+        self.read_interfaces();
+        self.status_message = if dropped == 0 {
+            format!("Applied to {name}: {summary}")
+        } else {
+            format!(
+                "Applied to {name}: {summary} -- the kernel keeps one DNS server, so the other {dropped} were not sent"
+            )
+        };
+        Ok(())
     }
 
     /// Cancel IP configuration editing.
@@ -991,7 +1240,7 @@ impl NetManagerApp {
         // "Connecting to HomeNetwork..." -- a join attempt against a network
         // invented by `sample_wifi_networks`, reported as though it had begun.
         // Nothing here can reach a radio.
-        self.status_message = format!("Cannot connect to {ssid}: {CANNOT_CHANGE_NETWORK}");
+        self.status_message = format!("Cannot connect to {ssid}: {CANNOT_REACH_A_RADIO}");
         Err(format!(
             "Cannot connect to {ssid}: nothing here can reach a radio"
         ))
@@ -4137,6 +4386,8 @@ mod tests {
         assert_eq!(app.selected_interface, 0);
     }
 
+    /// Off SlateOS the kernel cannot be asked, so the switch stays where it
+    /// was and the status says why -- in the words for "not supported".
     #[test]
     fn test_toggle_enabled() {
         let mut app = NetManagerApp::with_sample_data();
@@ -4146,7 +4397,15 @@ mod tests {
             app.interfaces[0].enabled, was_enabled,
             "the interface switch moved for a change that never reached the interface",
         );
-        assert!(app.status_message.contains("Cannot bring an interface"));
+        assert!(
+            app.status_message
+                .starts_with("Cannot take Ethernet 1 down")
+                && app
+                    .status_message
+                    .contains("no way to configure an interface"),
+            "{}",
+            app.status_message
+        );
     }
 
     #[test]
@@ -5423,6 +5682,239 @@ mod tests {
             "{texts:?}"
         );
         assert!(!texts.iter().any(|t| t.contains("configured")), "{texts:?}");
+    }
+
+    // What a test's kernel was asked, one list per test thread.
+    thread_local! {
+        static ASKED: std::cell::RefCell<Vec<ConfigChange>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A kernel that does what it is asked.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "it stands in for kernel_configure"
+    )]
+    fn obliging(change: &ConfigChange) -> Result<(), i64> {
+        ASKED.with(|asked| asked.borrow_mut().push(*change));
+        Ok(())
+    }
+
+    /// A kernel that refuses a caller who is not an administrator, with the
+    /// code the kernel uses (`KernelError::PermissionDenied`), written out
+    /// rather than borrowed from the constant it is checking.
+    fn refusing(change: &ConfigChange) -> Result<(), i64> {
+        ASKED.with(|asked| asked.borrow_mut().push(*change));
+        Err(-400)
+    }
+
+    /// Stand in for the kernel's change: `/proc/net` under `dir` now says
+    /// `net`.
+    fn the_kernel_now_says(dir: &scratchdir::ScratchDir, net: &str) {
+        std::fs::write(dir.dir().join("proc/net"), net).expect("fixture");
+    }
+
+    fn asked() -> Vec<ConfigChange> {
+        ASKED.with(|asked| asked.borrow().clone())
+    }
+
+    /// An app reading `net` as its machine's `/proc/net`, the tree kept
+    /// alive by the returned directory.
+    fn app_on(net: &str) -> (scratchdir::ScratchDir, NetManagerApp) {
+        let dir = scratchdir::ScratchDir::new("netmanager_apply");
+        std::fs::create_dir_all(dir.dir().join("proc")).expect("fixture");
+        std::fs::write(dir.dir().join("proc/net"), net).expect("fixture");
+        let mut app = NetManagerApp::new();
+        app.machine_root = dir
+            .dir()
+            .to_str()
+            .expect("a scratch path in text")
+            .to_owned();
+        app.read_interfaces();
+        (dir, app)
+    }
+
+    /// The record is the kernel's layout, byte for byte: four addresses, the
+    /// up byte, and a mask naming only the fields that are set.
+    #[test]
+    fn a_change_is_the_kernels_record() {
+        let change = ConfigChange {
+            ip: Some([10, 0, 2, 99]),
+            mask: Some([255, 255, 255, 0]),
+            gateway: None,
+            dns: Some([1, 1, 1, 1]),
+            up: Some(true),
+        };
+        assert_eq!(
+            change.record(),
+            [
+                10, 0, 2, 99, 255, 255, 255, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0b1_1011
+            ]
+        );
+        let down = ConfigChange {
+            up: Some(false),
+            ..ConfigChange::default()
+        };
+        assert_eq!(
+            down.record()[16..],
+            [0, 0b1_0000],
+            "down, and only the up bit"
+        );
+        assert_eq!(
+            ConfigChange::default().record(),
+            [0; 18],
+            "an empty change applies nothing"
+        );
+    }
+
+    /// **Apply reaches the kernel**: the typed address, mask, a cleared
+    /// gateway sent as none, and the first DNS server -- the kernel keeps
+    /// one, and the status says the rest were not sent. The editor closes
+    /// and the list is read again: what shows is the kernel's word.
+    #[test]
+    fn apply_sends_the_configuration_to_the_kernel() {
+        let (dir, mut app) = app_on(ETH0_UP);
+        app.configure = obliging;
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+        app.edit_ip_config.gateway = String::new();
+        app.edit_ip_config.dns_servers = vec![String::from("1.1.1.1"), String::from("9.9.9.9")];
+        the_kernel_now_says(&dir, &ETH0_UP.replace("10.0.2.15", "10.0.2.99"));
+
+        assert_eq!(app.apply_ip_config(), Ok(()));
+        assert_eq!(
+            asked(),
+            [ConfigChange {
+                ip: Some([10, 0, 2, 99]),
+                mask: Some([255, 255, 255, 0]),
+                gateway: Some([0, 0, 0, 0]),
+                dns: Some([1, 1, 1, 1]),
+                up: None,
+            }]
+        );
+        assert!(
+            !app.editing_ip,
+            "the editor stayed open after the change took"
+        );
+        assert!(
+            app.status_message.starts_with(
+                "Applied to eth0: 10.0.2.99 mask 255.255.255.0 gateway none DNS 1.1.1.1"
+            ),
+            "{}",
+            app.status_message
+        );
+        assert!(
+            app.status_message.contains("the other 1 were not sent"),
+            "{}",
+            app.status_message
+        );
+        // Read again: what shows is what the kernel says after the change.
+        assert_eq!(app.interfaces[0].shown_ip_address(), "10.0.2.99");
+    }
+
+    /// A refusal changes nothing and says why in the kernel's terms: the
+    /// editor stays open with the typed address in it.
+    #[test]
+    fn a_refused_apply_says_it_needs_an_administrator() {
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.configure = refusing;
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+        let why = app.apply_ip_config().expect_err("the kernel refused");
+        assert!(why.contains("administrator rights"), "{why}");
+        assert!(why.ends_with("Nothing was changed"), "{why}");
+        assert!(app.editing_ip, "a refused Apply closed the editor");
+        assert_eq!(
+            app.edit_ip_config.ip_address, "10.0.2.99",
+            "the typed text was lost"
+        );
+    }
+
+    /// DHCP cannot be switched on from here, and nothing is sent.
+    #[test]
+    fn apply_does_not_pretend_to_switch_on_dhcp() {
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.configure = obliging;
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = true;
+        let why = app.apply_ip_config().expect_err("DHCP is refused");
+        assert!(why.contains("dhcpcd"), "{why}");
+        assert!(asked().is_empty(), "something was sent for DHCP");
+    }
+
+    /// **Enable and Disable reach the kernel**: an interface that is up is
+    /// taken down, one that is down brought up, and the switch shows what
+    /// the kernel says after the change.
+    #[test]
+    fn the_switch_asks_the_kernel_and_shows_its_answer() {
+        let (dir, mut app) = app_on(ETH0_UP);
+        assert!(
+            app.interfaces[0].enabled,
+            "an interface that is up is enabled"
+        );
+        app.configure = obliging;
+        the_kernel_now_says(&dir, &ETH0_UP.replace("(UP)", "(DOWN)"));
+        app.toggle_selected_enabled();
+        assert_eq!(
+            asked(),
+            [ConfigChange {
+                up: Some(false),
+                ..ConfigChange::default()
+            }]
+        );
+        assert_eq!(app.status_message, "Took eth0 down");
+        assert!(
+            !app.interfaces[0].enabled,
+            "the switch did not follow the kernel's word"
+        );
+
+        let (_down_dir, mut down) =
+            app_on("Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    10.0.2.15\n");
+        assert!(
+            !down.interfaces[0].enabled,
+            "an interface that is down is enabled"
+        );
+        down.configure = obliging;
+        down.toggle_selected_enabled();
+        assert_eq!(asked().last().and_then(|c| c.up), Some(true));
+        assert_eq!(down.status_message, "Brought eth0 up");
+    }
+
+    /// Refused, the switch does not move, and the reason is the kernel's.
+    #[test]
+    fn a_refused_switch_stays_put() {
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.configure = refusing;
+        app.toggle_selected_enabled();
+        assert!(
+            app.interfaces[0].enabled,
+            "the switch moved for a refused change"
+        );
+        assert_eq!(app.interfaces[0].state, ConnectionState::Connected);
+        assert!(
+            app.status_message.starts_with(
+                "Cannot take eth0 down: changing the network needs administrator rights"
+            ),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// With no word from the kernel on whether it is up, there is nothing to
+    /// switch from, and nothing is sent.
+    #[test]
+    fn an_interface_of_unknown_state_is_not_switched() {
+        let (_dir, mut app) = app_on("Interface: eth0\n  MAC:     52:54:00:12:34:56\n");
+        assert_eq!(app.interfaces[0].state, ConnectionState::Unknown);
+        app.configure = obliging;
+        app.toggle_selected_enabled();
+        assert!(asked().is_empty(), "a guess was sent to the kernel");
+        assert!(
+            app.status_message.contains("does not say which it is"),
+            "{}",
+            app.status_message
+        );
     }
 
     /// A fresh app invents nothing.

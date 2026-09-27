@@ -8,7 +8,10 @@ The table covers what changed on 2026-09-26, when the window stopped saying it
 could not see the network and began listing the interfaces the kernel
 publishes (through `hwquery`, from SlateOS's `/proc/net`): the read and what
 it records, the two kinds of absent address, the banner that explains an
-empty list, the status bar's count, and the Wi-Fi and VPN tabs' empty states.
+empty list, the status bar's count, and the Wi-Fi and VPN tabs' empty states;
+and, the same day, Apply, Enable and Disable reaching the kernel through
+`SYS_NET_IF_CONFIG` -- the record, the refusals in the kernel's own codes, and
+the re-read that makes what is shown the kernel's word.
 
 Deliberately absent: the call to `read_interfaces` in `main()`, and the
 `cfg(not(test))` half of `machine()`.  Neither runs under `cargo test` -- the
@@ -35,6 +38,14 @@ NO_CARD = "a_machine_with_no_card_says_none_was_found"
 UNREADABLE = "nothing_readable_is_said_with_why"
 REFRESH = "refresh_reads_the_interfaces_again"
 TABS = "the_empty_tabs_say_nothing_was_examined"
+RECORD = "a_change_is_the_kernels_record"
+APPLY = "apply_sends_the_configuration_to_the_kernel"
+APPLY_REFUSED = "a_refused_apply_says_it_needs_an_administrator"
+NO_DHCP = "apply_does_not_pretend_to_switch_on_dhcp"
+SWITCH = "the_switch_asks_the_kernel_and_shows_its_answer"
+SWITCH_REFUSED = "a_refused_switch_stays_put"
+UNKNOWN_STATE = "an_interface_of_unknown_state_is_not_switched"
+HOST_SWITCH = "test_toggle_enabled"
 
 MAIN = [
     (
@@ -148,6 +159,84 @@ MAIN = [
         '            text: "No VPN connection is listed: nothing here can read one.".into(),',
         '            text: "No VPN connections configured".into(),',
         [TABS],
+    ),
+    (
+        "the record leaves out the DNS server's bit",
+        "            | bit(self.dns.is_some(), config_mask::DNS)\n",
+        "",
+        [RECORD],
+    ),
+    (
+        "down is sent as up",
+        "            u8::from(self.up == Some(true)),",
+        "            u8::from(self.up.is_some()),",
+        [RECORD],
+    ),
+    (
+        "a refusal is taken for success",
+        "    if ret < 0 { Err(ret) } else { Ok(()) }",
+        "    let _ = ret;\n    Ok(())",
+        [HOST_SWITCH],
+    ),
+    (
+        "permission denied is Linux's -1",
+        "const KERNEL_PERMISSION_DENIED: i64 = -400;",
+        "const KERNEL_PERMISSION_DENIED: i64 = -1;",
+        [APPLY_REFUSED, SWITCH_REFUSED],
+    ),
+    (
+        "DHCP is sent as a static configuration",
+        "        if config.dhcp_enabled {\n            return Err(format!(",
+        "        if false {\n            return Err(format!(",
+        [NO_DHCP],
+    ),
+    (
+        "a cleared gateway is not sent as none",
+        "            gateway: Some(if config.gateway.is_empty() {",
+        "            gateway: Some(if config.gateway.is_empty() && false {",
+        [APPLY],
+    ),
+    (
+        "the last DNS server is sent",
+        "            dns: Some(match config.dns_servers.first() {",
+        "            dns: Some(match config.dns_servers.last() {",
+        [APPLY],
+    ),
+    (
+        "the DNS servers not sent are not mentioned",
+        "        let dropped = config.dns_servers.len().saturating_sub(1);",
+        "        let dropped = 0_usize;",
+        [APPLY],
+    ),
+    (
+        "Apply does not read the list again",
+        "        self.editing_ip = false;\n        self.read_interfaces();\n",
+        "        self.editing_ip = false;\n",
+        [APPLY],
+    ),
+    (
+        "the switch does not read the list again",
+        "                self.read_interfaces();\n                self.status_message = done;",
+        "                self.status_message = done;",
+        [SWITCH],
+    ),
+    (
+        "an interface that is up is brought up",
+        "            ConnectionState::Connected => false,",
+        "            ConnectionState::Connected => true,",
+        [SWITCH, SWITCH_REFUSED, HOST_SWITCH],
+    ),
+    (
+        "an interface of unknown state is switched anyway",
+        "                );\n                return;\n            }\n        };\n        let (act, done) = if bring_up {",
+        "                );\n                true\n            }\n        };\n        let (act, done) = if bring_up {",
+        [UNKNOWN_STATE],
+    ),
+    (
+        "the switch ignores the kernel's up/down",
+        "        enabled: a.up != Some(false),",
+        "        enabled: true,",
+        [SWITCH],
     ),
 ]
 

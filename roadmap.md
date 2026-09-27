@@ -1946,11 +1946,16 @@ word; text inside them that says "lane C" is history.
   Refresh: name, kind, link, MAC, address, netmask, gateway and DNS server,
   with "None assigned" for the kernel's `0.0.0.0` and "Not reported" for the
   speed, the counters and DHCP, which nothing publishes. The banner explains
-  an empty list only (not read / unreadable / no card found). **Next:**
-  Apply, Enable and Disable through the kernel's `SYS_NET_IF_CONFIG` (856,
-  net-admin gated -- `userspace/ifconfig` already uses it), and Diagnose as
-  real DNS and TCP reachability checks now that apps have `std::net`; Wi-Fi
-  and VPNs stay refused until something publishes them.
+  an empty list only (not read / unreadable / no card found). Apply (a static
+  address, netmask, gateway and DNS server) and Enable/Disable reach the
+  kernel through `SYS_NET_IF_CONFIG` (856, administrator only -- the call
+  `ifconfig` makes), then read the list again, so what shows is the kernel's
+  word; a refusal names the reason in the kernel's own codes (`-400` is
+  permission denied -- five lane B tools decode it as Linux's `-1`,
+  `requests/e-b-five-network-tools-read-a-refusal-as-error-400.md`).
+  **Next:** Diagnose as real DNS and TCP reachability checks now that apps
+  have `std::net`; switching to DHCP (today it points at `dhcpcd`); Wi-Fi and
+  VPNs stay refused until something publishes them.
 
 - `[x]` `[E]` **The dictionary knows more than thirty words** — 2026-09-26.
   A word the built-in list lacks is looked up in WordNet at dict.org over

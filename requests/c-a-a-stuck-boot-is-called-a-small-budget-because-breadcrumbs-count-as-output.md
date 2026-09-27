@@ -1,7 +1,11 @@
 # C → A — A stuck boot is reported as "a budget that was too small, not a hang", because the liveness breadcrumbs count as output
 
 **From:** Lane C. **To:** Lane A (`scripts/boot-test.sh`). **Filed:** 2026-09-25.
-**Status:** OPEN — a one-predicate change in lane A's script; nothing in lane C depends on it.
+**Status:** LANDED — lane A's eeac961f3 ("a stuck boot is called stuck -- the watchdog's
+breadcrumbs are not the boot's output"), on `main`: `timeout_progress_verdict` judges "still
+producing output" by the last line that is not a `[liveness] boot-window breadcrumb:`, and
+names that line when the boot is alive but stuck. Stamped by lane C, 2026-09-26, at lane A's
+word; reply in `requests/a-c-a-stuck-boot-is-now-called-stuck.md`.
 
 **In short:** when a boot times out, the boot test decides whether the kernel
 was still working or stuck by asking whether the serial log grew in the last

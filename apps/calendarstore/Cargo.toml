@@ -1,0 +1,23 @@
+[package]
+name = "calendarstore"
+version = "0.1.0"
+edition = "2024"
+description = "A calendar's events and the forms they are kept and exchanged in -- the calendar program's, shared with the desktop"
+
+[dependencies]
+# The category colours come from the user's palette (design-decisions 822).
+appearance = { path = "../../gui/appearance" }
+# `Color` for an event's own colour, and the one civil-date implementation.
+guitk = { path = "../../gui/toolkit" }
+# The events file's free text, escaped as every program's record files are.
+textfmt = { path = "../../textfmt" }
+# Where the events are kept: the settings folder.
+settingsfile = { path = "../../gui/settingsfile" }
+# The events file read only up to a cap.
+safeio = { path = "../safeio" }
+
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

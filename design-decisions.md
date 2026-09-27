@@ -33763,6 +33763,240 @@ services" question already sits).
 **What it costs:** one DNS query and one TCP handshake to IANA per click.
 No request is sent over the connection; it is closed once made.
 
+## 1217. System Restore keeps restore points of every program's settings and data, copied into the backup tool's store
+
+**Date:** 2026-09-27
+**Lane:** E
+**Decided by:** Claude (autonomous) -- Claude's to revisit; the system-wide half is `open-questions.md` E-Q3
+
+**In short:** System Restore showed five invented restore points under a
+banner saying they were not real, and could take or restore nothing. It now
+takes real ones -- of the one folder where every program on this system keeps
+both its settings and its data (`~/.config/slateos`: the notes library, the
+calendar, the address book, the appearance settings). A restore point is a
+copy of that folder, kept in the store the backup tool uses; restoring one
+makes the folder match it again, after first keeping the folder as it is as a
+restore point of its own, so a restore can be undone. The system's own files
+-- its programs, boot configuration, services, packages -- are shown and not
+offered: this program cannot read or replace them, and says so.
+
+**Why copies, and why this folder.** `design.txt` asks for snapshots "with
+branching like a VM does" and "options for what to include (files and
+directories, programs, program data, program settings)", and imagines them on
+a copy-on-write filesystem. SlateOS runs on ext4, which has no snapshots, so a
+restore point has to be a copy -- and `apps/snapstore` makes one cheap: a file
+unchanged between points is stored once. Of what the design lists, "program
+data" and "program settings" are the user's own, in one folder the user may
+read and write; they are what a copy can take and put back safely while the
+system runs. Everything else needs privilege and a way to replace files a
+running system is using, which is a different program.
+
+**How a restore behaves, and the choices in it:**
+- *It makes the folder match the point* -- files added since are removed, not
+  just changed files put back. Anything less is not the state the point
+  recorded. What the point could not read when it was taken is never removed.
+- *It keeps the folder first* -- a "Before restoring to ..." point -- so the
+  restore is undone by restoring that. Windows' System Restore does the same.
+- *It cannot be abandoned half-way.* The window stays open, and a close
+  request waits for the work: a folder half restored is worse than either
+  state.
+- *Programs still running may save over what is put back.* The confirmation
+  says to close them first; nothing here can close them.
+
+**Where the list of restore points lives:** in the store's own folder
+(`~/.local/share/slateos/restore-points`), never in the folder a point
+captures -- otherwise restoring an old point would bring back an old list and
+lose every newer point.
+
+**The schedule** runs only while System Restore is open (nothing else on the
+system runs it), is off until turned on, and its retention policy removes only
+the scheduled points: a point somebody took before a risky change is theirs.
+
+**Alternatives:**
+- *Wait for a copy-on-write filesystem* and keep the window a demonstration
+  until then -- years of a program that cannot do what it is for.
+- *Copy the system's files too*, as root -- replacing a live system's files
+  from a user program is the dangerous half, and belongs to E-Q3.
+- *Let the user add any folder* (Documents, projects) -- the design allows it,
+  and the store would; it needs a folder picker and a list of chosen folders,
+  and is the natural next step, not a different design.
+- *Restore without removing added files* -- simpler and safer-sounding, but
+  the result is a state no point ever recorded.
+
+## 1218. The vetted cryptography is RustCrypto's XChaCha20-Poly1305 and Argon2id, vendored whole, with `seal` as the one API over them
+
+**Date:** 2026-09-27
+**Lane:** E
+**Decided by:** Claude (autonomous), inside the operator's §539 (C-Q5: primitives are ported, not written) -- lane A asked lane E to do the port and set the directory and the `no_std` requirement
+
+**In short:** the password manager needs to keep its vault on disk,
+encrypted, and to write an encrypted backup (C-Q25); the system keyring and
+the disk encryption need the same two things. §539 says the cipher and the
+password hash must be taken from code other people have spent years
+attacking, not written here. They are now: RustCrypto's XChaCha20-Poly1305
+(the cipher, which also detects any tampering) and Argon2id (the password
+hash, which makes each guess cost an attacker memory as well as time),
+copied exactly as published to crates.io into `rustcrypto/`, with one small
+crate of ours, `rustcrypto/seal`, that every caller uses.
+
+**Why these two.**
+- *XChaCha20-Poly1305 rather than AES-256-GCM.* AES in software is only
+  safe against a local timing attacker when bitsliced or run on AES-NI; the
+  tree's own `aes` is neither, and ChaCha20 is constant-time by its
+  construction. And its 24-byte nonce can be drawn at random for every
+  message -- GCM's and plain ChaCha20-Poly1305's 12 bytes cannot safely be,
+  over a vault's lifetime of saves, which would push every caller into
+  keeping a counter that must never go backwards (the bug `gui/credentials`
+  already had once).
+- *Argon2id rather than scrypt or PBKDF2.* RFC 9106's recommendation, and
+  resistant both to GPUs (memory-hard) and to side channels (the `id` half).
+  The default, `KdfParams::RECOMMENDED`, is RFC 9106 §4's second setting --
+  64 MiB, three passes, four lanes -- because its first (2 GiB) is more than a
+  small machine can spend on an unlock.
+
+**Why vendor whole crates** rather than port only the arithmetic: the
+published crates are what upstream reviewed, tested and fuzzed; a trimmed copy
+would be ours, and "ours" is what §539 says not to trust. The cost is 23
+crates and 4 MB, most of it trait plumbing and `typenum`. The only change is
+to their manifests (path dependencies; `cpufeatures` loses an aarch64-only
+`libc`), recorded in `rustcrypto/README.md` with each crate's checksum and
+upstream revision.
+
+**Why `seal`, a crate of ours, on top.** Lane C asked for it: one place where
+the cipher, the nonce size and the Argon2 variant are chosen, so the password
+manager and the keyring cannot drift into two vault-key derivations. It takes
+the nonce from the caller because it builds for the kernel too and has no
+randomness of its own.
+
+**What it asks of the kernel** (lane A's to decide): the two vendored ciphers
+need `--cfg chacha20_backend="soft"` and `--cfg poly1305_backend="soft"` on
+`x86_64-unknown-none` -- LLVM aborts on `poly1305`'s AVX2 code for a
+soft-float target -- and `argon2` takes an AVX2 path at run time with no
+switch, so kernel code calling it must save the vector registers or keep AVX
+off in `XCR0`.
+
+**Alternatives:**
+- *libsodium, through C.* The most-reviewed choice, but it brings a C
+  toolchain into every build that needs it, the kernel's included.
+- *Port only the core functions*, dropping the trait crates. Smaller, and no
+  longer upstream's code.
+- *AES-256-GCM on AES-NI.* Fast, but needs `unsafe` intrinsics and a CPU
+  check, and still leaves the 12-byte nonce problem.
+
+## 1219. A format two programs read lives with the program that writes it, even when the second reader is in `gui/`
+
+**Date:** 2026-09-27
+**Lane:** E
+**Decided by:** Claude (autonomous), with lane C -- lane C proposed where it should live and asked for the crate (C-Q19, §1424)
+
+**In short:** the desktop's calendar popup drew event dots from a store of
+its own that nothing ever filled, while the calendar program kept the user's
+real events in `<config>/calendar/events.txt`. For the popup to show them it
+has to read that file -- and the code that reads it lived inside the calendar
+program, which nothing can depend on. It is now its own crate,
+`apps/calendarstore`: the calendar's events, the file they are kept in and
+iCalendar, moved out of `apps/calendar` unchanged. The popup (lane C's) reads
+the file through it. That makes `gui/desktop` depend on a crate under `apps/`
+-- the first dependency in that direction in the tree.
+
+**Why the crate lives in `apps/`, not `gui/`.** The format is the calendar
+program's: it decides what the file holds, changes it, and is the only
+writer. A reader elsewhere depending on the writer's crate means a change to
+the format is one change, made by its owner, that every reader picks up --
+where a copy of the reader in `gui/` would be a second parser of the same file
+that nobody remembers to update. Lane C weighed a request to itself against
+this and chose this ("I'd rather the format sit with its owner than behind a
+request to me").
+
+**The rule it sets:** a shared *data-format* crate lives with the lane that
+writes the data, whatever lane reads it. It is not a licence for `gui/` to
+depend on applications: `calendarstore` holds no window, no drawing and no
+program; it depends only on what `gui/desktop` already does (`guitk`,
+`appearance`, `textfmt`, `settingsfile`, `safeio`).
+
+**Alternatives:**
+- *Move the format into `gui/`* (next to `settingsfile`) -- the owner of the
+  format would then have to file a request for every change to its own file.
+- *A copy of the reader in the desktop* -- two parsers of one file.
+- *The desktop asks the calendar program* over IPC -- only works while the
+  calendar is running, and the popup is exactly what is seen when it is not.
+
+## 1220. A bulk file operation never follows a link: it copies, moves and deletes the link itself
+
+**Date:** 2026-09-27
+**Lane:** E
+**Decided by:** Claude (autonomous)
+
+**In short:** a link (a shortcut to another file or folder -- on Windows a
+junction as well) inside something you copy, move or delete is now copied,
+moved or deleted *as the link*. Before, the file manager went through it:
+deleting a folder that held a link to your Documents deleted the files in
+Documents, moving it copied Documents' files and then deleted them from
+Documents, and a link to a folder above made it scan for ever. None of those
+files had been selected. The price is one case where following would have
+been what you wanted: copy a link onto a USB stick and you get a link, which
+on another machine points at nothing -- to copy what it names, open it and
+copy that.
+
+**The rule.** `apps/explorer/src/fileops.rs` plans with `symlink_metadata`,
+never `metadata`: a link is one action (`PlannedAction::is_link`), made again
+at the destination with the same target, removed with `remove_link`, which
+refuses if the path is no longer a link. The recycle bin's cross-drive
+fallback (`apps/recyclebin`) carries links the same way. A file or a link
+never replaces a folder: `remove_link_or_file` refuses one, where it used to
+remove it whole.
+
+**Alternatives:**
+- *Follow links, as it did* -- the three failures above, the first two with
+  no warning and on files outside the selection.
+- *Follow links for copies, never for deletes and moves* -- a copy that
+  follows a link to a folder above itself is still endless, and a move is a
+  copy and a delete, so the two cannot differ without a move becoming a copy
+  of one thing and a delete of another.
+- *Ask when a link is met* -- the question ("this folder holds a link to
+  Documents: copy the link or what it names?") is a real one, but it is
+  asked in the middle of a copy about something the user did not choose, and
+  the safe answer is the one that needs no question. Worth revisiting if
+  "copy what it names" turns out to be wanted: it would be a menu choice, as
+  "When the name is taken" is.
+
+**Also settled here:** a source whose destination is itself -- a paste back
+into the folder it came from -- is never a taken name: a copy of it is a
+numbered duplicate, a move of it is nothing to do. "Replace it" had made the
+file replace itself and then be deleted as the move's source.
+
+## 1221. The file manager asks what to do with a taken name, unless told once what to do with all of them
+
+**Date:** 2026-09-27
+**Lane:** E
+**Decided by:** Claude (autonomous) -- within C-Q26's answer (option A,
+§1418), which put the choice in `explorer.yaml`
+
+**In short:** when you paste or drop a file into a folder that already has
+one with that name, the file manager now stops and asks: keep both, replace,
+skip, or stop -- with "do the same for every other taken name". Before, it
+always kept both, numbering the new one. The folder menu's "When the name is
+taken" still lets you choose one answer for good (keep both, skip, replace if
+newer, replace), and that choice is kept.
+
+**Why asking is the default.** It is the one choice that decides nothing on
+the user's behalf: keep both leaves numbered copies to sort out later, which
+is rarely what somebody pasting a newer version wanted; replace and skip each
+lose one of the two files. Every mainstream file manager asks, so it is also
+the behaviour a user arrives expecting. Asking loses nothing -- the operation
+waits, and "Stop" leaves everything done so far done.
+
+**Alternatives:**
+- *Keep both by default* (what it did) -- safe, and quiet about the fact
+  that the user now has two files where they meant to have one.
+- *Replace by default* -- what a user pasting a newer version usually
+  wants, and the one default that destroys data when they did not.
+
+**How it is built.** The copy engine's `ConflictPolicy::Ask` stops at the
+file and waits (`OperationExecutor::waiting_on`/`answer`) instead of skipping
+it, as it did; the window draws its own prompt, since `guitk`'s alert offers
+only OK/Cancel/Yes/No.
+
 ## §253 — `requeue` means "re-enqueue if still Running", so every parking call site passes `true`
 
 **Date:** 2026-08-21

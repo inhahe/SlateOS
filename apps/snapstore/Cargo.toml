@@ -1,0 +1,28 @@
+[package]
+name = "snapstore"
+version = "0.1.0"
+edition = "2024"
+description = "A content-addressed store of directory snapshots: what the backup tool and System Restore both keep their copies in"
+
+[dependencies]
+# Names in messages, shown by their bytes rather than a lossy decode.
+pathtext = { path = "../pathtext" }
+# design-decisions 426's path escape, which the manifests on disk are written
+# in: a name that is not text is stored whole.
+pathcodec = { path = "../../gui/pathcodec" }
+# A blob must never appear at its final name until it is complete: the store
+# treats a blob's presence as proof that its content is there.
+safeio = { path = "../safeio" }
+# The content addressing.
+sha2 = { path = "../../sha2" }
+# The calendar a monthly retention policy counts months in.
+tzrules = { path = "../../tzrules" }
+
+[dev-dependencies]
+# The audit counters on, so the tests can prove the store's writes go through
+# `safeio` rather than `fs::write`/`fs::copy`.
+safeio = { path = "../safeio", features = ["audit"] }
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

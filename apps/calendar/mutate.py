@@ -392,7 +392,15 @@ MUTATIONS = [
         "a repeat with an end is not said to be simplified",
         "            \"WKST\" => {}\n            _ => simplified = true,",
         "            \"WKST\" => {}\n            _ => {}",
-        [FOREIGN, RULES],
+        [FOREIGN],
+    ),
+    (
+        # The same break, seen by the store's own test of the rule reader,
+        # which moved to apps/calendarstore with the code it tests.
+        "a repeat with an end is not said to be simplified, to the rule reader",
+        "            \"WKST\" => {}\n            _ => simplified = true,",
+        "            \"WKST\" => {}\n            _ => {}",
+        [RULES],
     ),
     (
         "the weekdays of a repeat are dropped",
@@ -450,6 +458,48 @@ MUTATIONS = [
     ),
 ]
 
+# The model, the events file and iCalendar moved to apps/calendarstore on
+# 2026-09-27, and the rows that break them moved with their code: a row is run
+# against whichever file holds its anchor, and by whichever crate holds the
+# tests it names -- the calendar's own suite still covers most of the store
+# through the program, and the store's suite covers the iCalendar helpers
+# whose tests moved with them.
+STORE_SRC = Path(__file__).resolve().parents[1] / "calendarstore" / "src" / "lib.rs"
+STORE_TESTS = {
+    "test_ics_escape_unescape",
+    "test_parse_ics_datetime",
+    "durations_and_repeats_are_read_as_the_standard_writes_them",
+    "a_quoted_parameter_may_hold_a_colon",
+}
+
+
+def partition(rows):
+    """(file, crate) -> the rows run against that file by that crate's suite."""
+    main_text = SRC.read_text(encoding="utf-8")
+    groups = {}
+    for row in rows:
+        _name, old, _new, tests = row
+        in_main = old in main_text
+        src = SRC if in_main else STORE_SRC
+        in_store = [t for t in tests if t in STORE_TESTS]
+        in_app = [t for t in tests if t not in STORE_TESTS]
+        # A row whose break both suites see is run once by each, naming to
+        # each only the tests it holds.
+        if in_app:
+            groups.setdefault((src, "calendar"), []).append((row[0], old, row[2], in_app))
+        if in_store:
+            name = f"{row[0]}, to the store's own test" if in_app else row[0]
+            groups.setdefault((src, "calendarstore"), []).append((name, old, row[2], in_store))
+    return groups
+
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
-    raise SystemExit(sweep(SRC, MUTATIONS, "calendar", timeout=900, only=only))
+    worst = 0
+    for (src, crate), rows in partition(MUTATIONS).items():
+        mine = [o for o in only if any(o in r[0] for r in rows)] if only else None
+        if only and not mine:
+            continue
+        print(f"\n######## {src.parent.parent.name}/{src.name} by {crate} ########")
+        worst = max(worst, sweep(src, rows, crate, timeout=900, only=mine))
+    raise SystemExit(worst)

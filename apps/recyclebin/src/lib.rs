@@ -95,8 +95,23 @@ pub fn move_path(src: &Path, dest: &Path) -> io::Result<()> {
         }
     }
 
-    if src.is_dir() {
-        copy_tree(src, dest)?;
+    // Links are carried as links and never followed -- the move is of the
+    // entry the user chose, not of whatever it reaches. `src.is_dir()` used to
+    // follow a link to a folder and copy the folder's contents into the bin.
+    let meta = fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        copy_link(src, dest)?;
+        return remove_link(src);
+    }
+    if meta.is_dir() {
+        // A copy that fails part-way is taken back out of the bin: it is a
+        // partial duplicate under a name nobody will look for, and the
+        // original has not been touched.
+        if let Err(e) = copy_tree(src, dest) {
+            // Best effort: the error the caller needs is the copy's.
+            let _ = fs::remove_dir_all(dest);
+            return Err(e);
+        }
         fs::remove_dir_all(src)
     } else {
         fs::copy(src, dest)?;
@@ -104,19 +119,48 @@ pub fn move_path(src: &Path, dest: &Path) -> io::Result<()> {
     }
 }
 
-/// Recursively copy a directory tree.
+/// Recursively copy a directory tree, links as links.
 fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let child_dest = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        // `DirEntry::file_type` does not follow links.
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            copy_link(&entry.path(), &child_dest)?;
+        } else if kind.is_dir() {
             copy_tree(&entry.path(), &child_dest)?;
         } else {
             fs::copy(entry.path(), &child_dest)?;
         }
     }
     Ok(())
+}
+
+/// Make at `dest` a link to what the link `src` names.
+fn copy_link(src: &Path, dest: &Path) -> io::Result<()> {
+    let target = fs::read_link(src)?;
+    #[cfg(windows)]
+    {
+        // Windows makes links to folders and to files differently.
+        if fs::metadata(src).is_ok_and(|m| m.is_dir()) {
+            std::os::windows::fs::symlink_dir(&target, dest)
+        } else {
+            std::os::windows::fs::symlink_file(&target, dest)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::os::unix::fs::symlink(&target, dest)
+    }
+}
+
+/// Remove the link `path` -- the link, never what it names. A Windows link to
+/// a folder (and a junction) goes with `remove_dir`, every other with
+/// `remove_file`.
+fn remove_link(path: &Path) -> io::Result<()> {
+    fs::remove_file(path).or_else(|_| fs::remove_dir(path))
 }
 
 /// Metadata for a recycled item.
@@ -1139,5 +1183,82 @@ mod tests {
                 "round trip failed for {original:?} (encoded as {encoded:?})"
             );
         }
+    }
+
+    /// A link at `link` to the folder `target`: a symbolic link, or on a
+    /// Windows host without the privilege a junction. `None` if neither.
+    fn folder_link(target: &Path, link: &Path) -> Option<()> {
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+                return Some(());
+            }
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .ok()?;
+            (made.status.success()
+                && fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink()))
+            .then_some(())
+        }
+        #[cfg(not(windows))]
+        {
+            std::os::unix::fs::symlink(target, link).ok()
+        }
+    }
+
+    /// The copy a recycle falls back to across drives carries a link as a
+    /// link, or fails and takes its partial copy back out -- never a copy of
+    /// what the link reaches. (2026-09-27: it followed links.)
+    #[test]
+    fn the_cross_drive_copy_never_follows_a_link() {
+        let scratch = temp_dir("copy_tree_link");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("outside")).unwrap();
+        fs::write(root.join("outside").join("keep.txt"), "not selected").unwrap();
+        fs::create_dir_all(root.join("chosen")).unwrap();
+        fs::write(root.join("chosen").join("mine.txt"), "selected").unwrap();
+        if folder_link(&root.join("outside"), &root.join("chosen").join("link")).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        let copied = root.join("bin-data");
+        // A host that can make junctions but not links cannot copy one, and
+        // the copy then fails, which is honest; where it succeeds, the link
+        // arrived as a link.
+        if copy_tree(&root.join("chosen"), &copied).is_ok() {
+            assert!(
+                fs::symlink_metadata(copied.join("link")).is_ok_and(|m| m.file_type().is_symlink()),
+                "the link arrived as something else"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("outside").join("keep.txt")).unwrap(),
+            "not selected"
+        );
+    }
+
+    /// A move of a link across drives moves the link: what it named stays.
+    #[test]
+    fn moving_a_link_moves_the_link_not_what_it_names() {
+        let scratch = temp_dir("move_link");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("outside")).unwrap();
+        fs::write(root.join("outside").join("keep.txt"), "not selected").unwrap();
+        if folder_link(&root.join("outside"), &root.join("shortcut")).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        // Same drive, so the rename path; the fallback is what the test above
+        // covers. Either way the folder named must be untouched.
+        move_path(&root.join("shortcut"), &root.join("moved")).unwrap();
+        assert!(fs::symlink_metadata(root.join("shortcut")).is_err());
+        assert!(fs::symlink_metadata(root.join("moved")).is_ok_and(|m| m.file_type().is_symlink()));
+        assert_eq!(
+            fs::read_to_string(root.join("outside").join("keep.txt")).unwrap(),
+            "not selected"
+        );
     }
 }

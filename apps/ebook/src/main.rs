@@ -1,6 +1,9 @@
 //! Slate OS Ebook Reader
 //!
 //! A plain-text ebook reader with:
+//! - A library of the books the reader has opened (Ctrl+O), kept with each
+//!   one's place, bookmarks and type size in `<config>/ebook/library.txt`
+//!   (`shelf`), so it is the same the next time
 //! - Library view listing books with title, author, progress
 //! - Paginated reading view with configurable font size and line spacing
 //! - Page navigation (Left/Right, PageUp/PageDown, Home/End)
@@ -32,8 +35,14 @@ use guitk::style::CornerRadii;
 use guitk::textfind;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+
+use guitk::dialog::{FilePicker, Picked};
+use pathtext::ShowPath;
+
+mod shelf;
 
 // ============================================================================
 // List geometry
@@ -298,6 +307,76 @@ const OVERLAY_LIST_TOP: f32 = 44.0;
 const TOC_OVERLAY_WIDTH: f32 = 400.0;
 const TOC_OVERLAY_HEIGHT: f32 = 500.0;
 const BOOKMARK_OVERLAY_WIDTH: f32 = 350.0;
+/// The library toolbar's Open button.
+const OPEN_BUTTON_WIDTH: f32 = 120.0;
+/// The card asking whether to take a book out of the library.
+const CONFIRM_WIDTH: f32 = 460.0;
+const CONFIRM_HEIGHT: f32 = 150.0;
+const CONFIRM_BUTTON_WIDTH: f32 = 140.0;
+
+/// A rectangle a click is tested against, the same one it is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Hit {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl Hit {
+    fn contains(self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+}
+
+/// A button's face: the page's colour, outlined, under its label.
+fn push_button(cmds: &mut Vec<RenderCommand>, at: Hit, tc: &ThemeColors) {
+    cmds.push(RenderCommand::FillRect {
+        x: at.x,
+        y: at.y,
+        width: at.width,
+        height: at.height,
+        color: tc.background,
+        corner_radii: CornerRadii::all(SMALL_RADIUS),
+    });
+    cmds.push(RenderCommand::StrokeRect {
+        x: at.x,
+        y: at.y,
+        width: at.width,
+        height: at.height,
+        color: tc.separator,
+        line_width: 1.0,
+        corner_radii: CornerRadii::all(SMALL_RADIUS),
+    });
+}
+
+/// A reading state made to fit a book's text as it is now.
+///
+/// A file can change between one run and the next. A place past its end
+/// would be a page that does not exist, and one inside a character that is
+/// several bytes long is not a place in the text at all: both move back to
+/// the nearest place that is. Bookmarks past the end go.
+fn fit_state(mut state: ReadingState, book: &Book) -> ReadingState {
+    if book.unreadable.is_some() {
+        // Nothing to fit it to: kept as it was, for when the file comes back.
+        return state;
+    }
+    let text = book.text.as_str();
+    let fit = |mut offset: usize| {
+        offset = offset.min(text.len());
+        while !text.is_char_boundary(offset) {
+            offset = offset.saturating_sub(1);
+        }
+        offset
+    };
+    state.offset = fit(state.offset);
+    state.bookmarks.retain(|&mark| mark <= text.len());
+    for mark in &mut state.bookmarks {
+        *mark = fit(*mark);
+    }
+    state.bookmarks.dedup();
+    state
+}
 
 /// Reading time estimate assumes 238 words per minute (average adult).
 const READING_WPM: f32 = 238.0;
@@ -353,6 +432,13 @@ impl FontSizeLevel {
             Self::Medium => "Medium",
             Self::Large => "Large",
         }
+    }
+
+    /// The size a [`label`](Self::label) names, as the library file keeps it.
+    pub fn from_label(label: &str) -> Option<Self> {
+        [Self::Small, Self::Medium, Self::Large]
+            .into_iter()
+            .find(|size| size.label() == label)
     }
 }
 
@@ -539,6 +625,16 @@ pub struct Book {
     pub text: String,
     pub chapters: Vec<Chapter>,
     pub word_count: usize,
+    /// The file it was read from. `None` for a book made in memory, which the
+    /// library does not keep.
+    pub path: Option<PathBuf>,
+    /// Why its file could not be read, for a book on the shelf whose file has
+    /// gone. It stays on the shelf with its place and bookmarks, so it opens
+    /// where it was if the file comes back.
+    pub unreadable: Option<String>,
+    /// What the reader should know about how it was read -- as Windows-1252,
+    /// or only in part.
+    pub notes: Vec<String>,
 }
 
 impl Book {
@@ -554,7 +650,39 @@ impl Book {
             text: text.to_owned(),
             chapters,
             word_count,
+            path: None,
+            unreadable: None,
+            notes: Vec::new(),
         }
+    }
+
+    /// The book in the file at `path`.
+    ///
+    /// Its title and author are the ones the text gives itself, as Project
+    /// Gutenberg's books do; a text that gives none is called by its file's
+    /// name, and has no author rather than an invented one. A file that cannot
+    /// be read is still a book -- an unreadable one, saying why -- so a shelf
+    /// that names it keeps its place.
+    pub fn from_file(path: &Path) -> Self {
+        let named = || {
+            path.file_stem()
+                .map_or_else(|| path.shown().to_string(), |stem| stem.shown().to_string())
+        };
+        let mut book = match shelf::read_book(path, shelf::MAX_BOOK_BYTES) {
+            Ok(read) => {
+                let title = read.title.unwrap_or_else(named);
+                let mut book = Self::new(&title, read.author.as_deref().unwrap_or(""), &read.text);
+                book.notes = read.notes;
+                book
+            }
+            Err(why) => {
+                let mut book = Self::new(&named(), "", "");
+                book.unreadable = Some(why);
+                book
+            }
+        };
+        book.path = Some(path.to_path_buf());
+        book
     }
 
     /// Estimated reading time in minutes.
@@ -740,7 +868,13 @@ fn progress_through(offset: usize, text_len: usize) -> f32 {
 // Sample books
 // ============================================================================
 
-/// Create the built-in sample library with 5 books of different genres.
+/// Five invented books of different genres, for the tests.
+///
+/// Until 2026-09-27 these were the library: every reader opened on "The
+/// Clockwork Garden" by "Eleanor Voss" and four more books that do not exist,
+/// and could open nothing else. The reader opens real files now, and a first
+/// run opens on an empty library that says how to add one.
+#[cfg(test)]
 pub fn sample_library() -> Vec<Book> {
     vec![
         Book::new(
@@ -1104,7 +1238,7 @@ pub fn sample_library() -> Vec<Book> {
 /// [`Chapter`] already stored a `byte_offset` for exactly this reason. The
 /// reading position and the bookmarks were the two places that had not been
 /// given the same treatment.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadingState {
     /// Where the reader is, as a byte offset into the book's text.
     pub offset: usize,
@@ -1170,8 +1304,10 @@ pub enum AppView {
 /// same keys mean different things on them: `Up`/`Down` choose a book in the
 /// library and a chapter in the contents, and `Enter` opens whichever.
 const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+O", "Open a book"),
     ("Up / Down", "Choose a book, a chapter or a bookmark"),
     ("Enter", "Open what is chosen"),
+    ("Delete", "Take the chosen book out of the library"),
     ("Left / Right", "A page back or on, while reading"),
     ("PageUp / PageDown", "The same"),
     ("Home / End", "First / last page"),
@@ -1214,18 +1350,97 @@ pub struct EbookApp {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// Where the library is kept. `None` when there is no home folder to keep
+    /// it in: the library then lasts as long as the window, and says so.
+    shelf_path: Option<PathBuf>,
+    /// Why the library file did not read, when it did not. While this is set
+    /// the file is never written: saving the books that were understood would
+    /// throw away the rest.
+    shelf_error: Option<String>,
+    /// The Open dialog.
+    picker: FilePicker,
+    /// A book asked to be taken out of the library, waiting for a yes or no.
+    confirm_remove: Option<usize>,
+    /// What the last thing done did, or why it could not -- drawn along the
+    /// bottom of the library.
+    pub status: String,
+    /// A close found the library could not be saved and said so; the next
+    /// close goes regardless.
+    close_anyway: bool,
+}
+
+/// Whether the library was kept, and if not, why.
+#[derive(Debug, PartialEq, Eq)]
+enum Kept {
+    /// Written.
+    Saved,
+    /// There is nowhere it may be written -- no home folder, or a library
+    /// file that did not read and must not be written over. The window has
+    /// already said so.
+    Nowhere(String),
+    /// Writing it failed.
+    Failed(String),
 }
 
 impl EbookApp {
-    /// Create a new ebook reader with the sample library.
+    /// The reader, with the library the user keeps.
     pub fn new() -> Self {
-        let library = sample_library();
-        let reading_states = library.iter().map(|_| ReadingState::new()).collect();
+        Self::with_shelf(shelf::shelf_path())
+    }
+
+    /// The reader, with the library kept at `path` (`None`: nowhere).
+    ///
+    /// Every book on it is read now: the library shows how far through each
+    /// one the reader is, which needs its text. A book whose file has gone
+    /// stays on it, unreadable and saying why.
+    pub fn with_shelf(path: Option<PathBuf>) -> Self {
+        let mut app = Self::empty();
+        match path.as_deref().map(shelf::load) {
+            None => {}
+            Some(Ok(books)) => {
+                for shelved in books {
+                    let book = Book::from_file(&shelved.path);
+                    let state = fit_state(shelved.state, &book);
+                    app.library.push(book);
+                    app.reading_states.push(state);
+                }
+            }
+            Some(Err(why)) => {
+                app.status = format!(
+                    "Your library could not be read ({why}), and is left as it is: \
+                     nothing opened now is kept."
+                );
+                app.shelf_error = Some(why);
+            }
+        }
+        app.shelf_path = path;
+        app
+    }
+
+    /// A reader holding the five invented books, kept nowhere, for tests.
+    #[cfg(test)]
+    pub fn with_sample_library() -> Self {
+        let mut app = Self::empty();
+        for book in sample_library() {
+            app.library.push(book);
+            app.reading_states.push(ReadingState::new());
+        }
+        app
+    }
+
+    /// A reader with nothing in it, kept nowhere.
+    fn empty() -> Self {
         Self {
             show_help: false,
+            shelf_path: None,
+            shelf_error: None,
+            picker: FilePicker::new(),
+            confirm_remove: None,
+            status: String::new(),
+            close_anyway: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            library,
-            reading_states,
+            library: Vec::new(),
+            reading_states: Vec::new(),
             selected_book: 0,
             view: AppView::Library,
             theme: ThemeKind::System,
@@ -1621,10 +1836,13 @@ impl EbookApp {
         }
     }
 
-    /// Return to the library view.
+    /// Return to the library view, keeping the place in the book just read.
     pub fn return_to_library(&mut self) {
         self.view = AppView::Library;
         self.close_search();
+        if let Kept::Failed(why) = self.keep() {
+            self.status = why;
+        }
     }
 
     /// Show the table of contents overlay.
@@ -1694,6 +1912,131 @@ impl EbookApp {
         self.reading_states.push(ReadingState::new());
     }
 
+    /// Open the book in the file at `path`, adding it to the library.
+    ///
+    /// A file already in the library is opened where the reader left it
+    /// rather than added twice. A file that cannot be read is not added: it
+    /// says why, and the library is as it was.
+    pub fn open_path(&mut self, path: &Path) {
+        if let Some(index) = self
+            .library
+            .iter()
+            .position(|book| book.path.as_deref() == Some(path))
+        {
+            self.selected_book = index;
+            self.open_selected();
+            return;
+        }
+        let book = Book::from_file(path);
+        if let Some(why) = &book.unreadable {
+            self.status = format!("{} could not be opened: {why}", path.shown());
+            return;
+        }
+        self.status = book.notes.join(" ");
+        self.library.push(book);
+        self.reading_states.push(ReadingState::new());
+        self.selected_book = self.library.len().saturating_sub(1);
+        match self.keep() {
+            Kept::Saved => {}
+            Kept::Nowhere(why) | Kept::Failed(why) => self.status = why,
+        }
+        self.open_book(self.selected_book);
+    }
+
+    /// Open the chosen book -- or, if its file could not be read, try again,
+    /// and say why if it still cannot be.
+    fn open_selected(&mut self) {
+        let index = self.selected_book;
+        let retry = self
+            .library
+            .get(index)
+            .filter(|book| book.unreadable.is_some())
+            .and_then(|book| book.path.clone());
+        if let Some(path) = retry {
+            let book = Book::from_file(&path);
+            if let (Some(slot), Some(state)) = (
+                self.library.get_mut(index),
+                self.reading_states.get_mut(index),
+            ) {
+                *state = fit_state(state.clone(), &book);
+                *slot = book;
+            }
+        }
+        match self.library.get(index) {
+            Some(book) if book.unreadable.is_some() => {
+                self.status = format!(
+                    "{} cannot be read: {}",
+                    book.meta.title,
+                    book.unreadable.as_deref().unwrap_or_default()
+                );
+            }
+            Some(book) => {
+                self.status = book.notes.join(" ");
+                self.open_book(index);
+            }
+            None => {}
+        }
+    }
+
+    /// Ask whether to take the chosen book out of the library.
+    fn ask_to_remove(&mut self) {
+        if self.selected_book < self.library.len() {
+            self.confirm_remove = Some(self.selected_book);
+        }
+    }
+
+    /// Take the book at `index` out of the library. Its file is untouched.
+    pub fn remove_book(&mut self, index: usize) {
+        if index >= self.library.len() || index >= self.reading_states.len() {
+            return;
+        }
+        let book = self.library.remove(index);
+        self.reading_states.remove(index);
+        self.selected_book = self.selected_book.min(self.library.len().saturating_sub(1));
+        self.status = match self.keep() {
+            Kept::Saved => format!(
+                "{} is out of the library. The file itself is where it was.",
+                book.meta.title
+            ),
+            Kept::Nowhere(why) | Kept::Failed(why) => why,
+        };
+    }
+
+    /// Write the library down.
+    fn keep(&mut self) -> Kept {
+        if let Some(why) = &self.shelf_error {
+            return Kept::Nowhere(format!(
+                "Not kept: your library file could not be read ({why}), so it is \
+                 not written over."
+            ));
+        }
+        let Some(path) = self.shelf_path.clone() else {
+            return Kept::Nowhere(
+                "Not kept: there is no home folder to keep your library in, so it \
+                 lasts until this window closes."
+                    .to_string(),
+            );
+        };
+        let books: Vec<shelf::Shelved> = self
+            .library
+            .iter()
+            .zip(&self.reading_states)
+            .filter_map(|(book, state)| {
+                Some(shelf::Shelved {
+                    path: book.path.clone()?,
+                    state: state.clone(),
+                })
+            })
+            .collect();
+        match shelf::save(&path, &books) {
+            Ok(()) => Kept::Saved,
+            Err(e) => Kept::Failed(format!(
+                "Your library could not be saved to {}: {e}",
+                path.shown()
+            )),
+        }
+    }
+
     // --------------------------------------------------------------------
     // Get page text
     // --------------------------------------------------------------------
@@ -1736,6 +2079,23 @@ impl EbookApp {
             }
             return true;
         }
+        if let Some(index) = self.confirm_remove {
+            // Modal too: the question is about one book, and a key that moved
+            // the selection would leave it asking about another.
+            match event.key {
+                Key::Enter | Key::Y => {
+                    self.confirm_remove = None;
+                    self.remove_book(index);
+                }
+                Key::Escape | Key::N => self.confirm_remove = None,
+                _ => {}
+            }
+            return true;
+        }
+        if event.key == Key::O && event.modifiers.ctrl {
+            self.picker.open_to_read();
+            return true;
+        }
 
         match self.view {
             AppView::Library => self.handle_library_key(event),
@@ -1766,7 +2126,11 @@ impl EbookApp {
                 true
             }
             Key::Enter => {
-                self.open_book(self.selected_book);
+                self.open_selected();
+                true
+            }
+            Key::Delete => {
+                self.ask_to_remove();
                 true
             }
             Key::Escape => {
@@ -1947,6 +2311,58 @@ impl EbookApp {
         TOOLBAR_HEIGHT + slot * LIBRARY_ITEM_HEIGHT
     }
 
+    /// The library's Open button, at the right of its toolbar.
+    fn open_button(&self) -> Hit {
+        Hit {
+            x: self.window_width - OPEN_BUTTON_WIDTH - 12.0,
+            y: 6.0,
+            width: OPEN_BUTTON_WIDTH,
+            height: TOOLBAR_HEIGHT - 12.0,
+        }
+    }
+
+    /// The card that asks whether to take a book out of the library.
+    fn confirm_card(&self) -> Hit {
+        let width = CONFIRM_WIDTH.min(self.window_width - 40.0);
+        Hit {
+            x: (self.window_width - width) / 2.0,
+            y: (self.window_height - CONFIRM_HEIGHT) / 2.0,
+            width,
+            height: CONFIRM_HEIGHT,
+        }
+    }
+
+    /// The card's two buttons: take it out, and keep it.
+    fn confirm_buttons(&self) -> (Hit, Hit) {
+        let card = self.confirm_card();
+        let y = card.y + card.height - 44.0;
+        let keep = Hit {
+            x: card.x + card.width - 16.0 - CONFIRM_BUTTON_WIDTH,
+            y,
+            width: CONFIRM_BUTTON_WIDTH,
+            height: 30.0,
+        };
+        let remove = Hit {
+            x: keep.x - 12.0 - CONFIRM_BUTTON_WIDTH,
+            ..keep
+        };
+        (remove, keep)
+    }
+
+    /// A click while the card is up: its buttons answer it, and nothing
+    /// behind it is reachable.
+    fn click_confirm(&mut self, x: f32, y: f32) -> bool {
+        let (remove, keep) = self.confirm_buttons();
+        if remove.contains(x, y) {
+            if let Some(index) = self.confirm_remove.take() {
+                self.remove_book(index);
+            }
+        } else if keep.contains(x, y) {
+            self.confirm_remove = None;
+        }
+        true
+    }
+
     /// Which book, if any, is under a point in the library view.
     pub fn library_book_at(&self, y: f32) -> Option<usize> {
         self.library_window()
@@ -2031,15 +2447,22 @@ impl EbookApp {
     /// Handle a mouse click. Returns true if consumed.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
         if let MouseEventKind::Press(MouseButton::Left) = &event.kind {
+            if self.confirm_remove.is_some() {
+                return self.click_confirm(event.x, event.y);
+            }
             match self.view {
                 AppView::Library => {
+                    if self.open_button().contains(event.x, event.y) {
+                        self.picker.open_to_read();
+                        return true;
+                    }
                     // `library_book_at` is the same window the renderer draws,
                     // so a row that is not on screen cannot be clicked and a
                     // click below the last row does nothing -- rather than
                     // opening whichever book the arithmetic lands on.
                     if let Some(idx) = self.library_book_at(event.y) {
                         self.selected_book = idx;
-                        self.open_book(idx);
+                        self.open_selected();
                         return true;
                     }
                 }
@@ -2096,6 +2519,14 @@ impl EbookApp {
             }
         }
 
+        if let Some(index) = self.confirm_remove {
+            self.render_confirm(index, &tc, &mut cmds);
+        }
+        cmds.extend(
+            self.picker
+                .render(&self.palette, self.window_width, self.window_height),
+        );
+
         if self.show_help {
             guitk::shortcut::render_card(
                 &mut cmds,
@@ -2130,31 +2561,67 @@ impl EbookApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        let count = match self.library.len() {
+            0 => String::new(),
+            1 => "1 book".to_string(),
+            n => format!("{n} books"),
+        };
         cmds.push(RenderCommand::Text {
-            x: self.window_width - 200.0,
-            y: 14.0,
-            // "3 books" beside the word "Library" reads as *your* three
-            // books. There is no way to add a fourth: this crate has no
-            // filesystem access and no file picker, so the library is the
-            // three that shipped with it and always will be.
-            //
-            // Note what this is NOT. The prose in those books is included
-            // content, not a fabrication: it does not claim to describe
-            // anything outside this program, and nobody is misled by reading
-            // it. That is the line between the two, and this is the first app
-            // in twenty-three where the sweep's usual fix did not apply --
-            // `sample_library` stays exactly as it is. What was misleading was
-            // the framing around it, and that is a label.
-            text: format!(
-                "{} included samples -- cannot open your own files yet",
-                self.library.len()
-            ),
+            x: 110.0,
+            y: 15.0,
+            text: count,
             color: tc.text_dim,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(self.window_width - 110.0 - OPEN_BUTTON_WIDTH - 30.0),
+            overflow: TextOverflow::Ellipsis,
         });
+        let open = self.open_button();
+        // A button, not a selection: the row highlight's colour would read as
+        // "this is chosen", so it is drawn in the page's colour and outlined.
+        push_button(cmds, open, tc);
+        cmds.push(RenderCommand::Text {
+            x: open.x + 12.0,
+            y: open.y + 7.0,
+            text: "Open a book".to_string(),
+            color: tc.text,
+            font_size: 13.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(open.width - 16.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        self.render_library_status(tc, cmds);
+        if self.library.is_empty() {
+            // A first run, or a library emptied: say what the window is for
+            // and how to fill it, rather than draw an empty list.
+            let mid = self.window_height / 2.0;
+            for (dy, text, size, color) in [
+                (-30.0, "No books yet".to_string(), 20.0, tc.text),
+                (
+                    4.0,
+                    "Press Ctrl+O, or choose Open a book, to read a plain-text book.".to_string(),
+                    14.0,
+                    tc.text_dim,
+                ),
+                (
+                    28.0,
+                    "It stays here, opening where you left it.".to_string(),
+                    14.0,
+                    tc.text_dim,
+                ),
+            ] {
+                cmds.push(RenderCommand::Text {
+                    x: 40.0,
+                    y: mid + dy,
+                    text,
+                    color,
+                    font_size: size,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(self.window_width - 80.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
 
         // Separator
         cmds.push(RenderCommand::Line {
@@ -2199,11 +2666,19 @@ impl EbookApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Author
+            // Author -- or, for a book that names none, where it is.
+            let byline = if book.meta.author.is_empty() {
+                book.path
+                    .as_deref()
+                    .map(|path| path.shown().to_string())
+                    .unwrap_or_default()
+            } else {
+                book.meta.author.clone()
+            };
             cmds.push(RenderCommand::Text {
                 x: 20.0,
                 y: y + 32.0,
-                text: book.meta.author.clone(),
+                text: byline,
                 color: tc.text_dim,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
@@ -2211,20 +2686,29 @@ impl EbookApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Progress and word count.
-            let progress = self.book_progress(i);
-            let reading_min = book.reading_time_minutes();
-            let info = format!(
-                "{} words | {:.0} min | {:.0}%",
-                book.word_count,
-                reading_min,
-                progress * 100.0
-            );
+            // Progress and word count -- or why the book cannot be read.
+            let (info, info_color) = if let Some(why) = &book.unreadable {
+                (format!("Cannot be read: {why}"), tc.error)
+            } else {
+                let progress = self.book_progress(i);
+                let reading_min = book.reading_time_minutes();
+                let mut info = format!(
+                    "{} words | {:.0} min | {:.0}%",
+                    book.word_count,
+                    reading_min,
+                    progress * 100.0
+                );
+                for note in &book.notes {
+                    info.push_str(" | ");
+                    info.push_str(note);
+                }
+                (info, tc.accent_dim)
+            };
             cmds.push(RenderCommand::Text {
                 x: 20.0,
                 y: y + 50.0,
                 text: info,
-                color: tc.accent_dim,
+                color: info_color,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(self.window_width - 200.0),
@@ -2239,6 +2723,96 @@ impl EbookApp {
                 y2: y + LIBRARY_ITEM_HEIGHT - 1.0,
                 color: tc.separator,
                 width: 0.5,
+            });
+        }
+    }
+
+    /// The line along the bottom of the library: what the last thing done
+    /// did, or why it could not.
+    fn render_library_status(&self, tc: &ThemeColors, cmds: &mut Vec<RenderCommand>) {
+        if self.status.is_empty() {
+            return;
+        }
+        let bar_y = self.window_height - STATUS_BAR_HEIGHT;
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: bar_y,
+            width: self.window_width,
+            height: STATUS_BAR_HEIGHT,
+            color: tc.surface,
+            corner_radii: CornerRadii::ZERO,
+        });
+        cmds.push(RenderCommand::Text {
+            x: 16.0,
+            y: bar_y + 9.0,
+            text: self.status.clone(),
+            color: tc.text,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(self.window_width - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// The card asking whether to take the book at `index` out of the
+    /// library.
+    fn render_confirm(&self, index: usize, tc: &ThemeColors, cmds: &mut Vec<RenderCommand>) {
+        let Some(book) = self.library.get(index) else {
+            return;
+        };
+        let card = self.confirm_card();
+        cmds.push(RenderCommand::FillRect {
+            x: card.x,
+            y: card.y,
+            width: card.width,
+            height: card.height,
+            color: tc.surface,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        cmds.push(RenderCommand::StrokeRect {
+            x: card.x,
+            y: card.y,
+            width: card.width,
+            height: card.height,
+            color: tc.separator,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        cmds.push(RenderCommand::Text {
+            x: card.x + 16.0,
+            y: card.y + 16.0,
+            text: format!(
+                "Take \u{201C}{}\u{201D} out of the library?",
+                book.meta.title
+            ),
+            color: tc.text,
+            font_size: 15.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(card.width - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.push(RenderCommand::Text {
+            x: card.x + 16.0,
+            y: card.y + 44.0,
+            text: "Its place and bookmarks are forgotten. The file stays where it is.".to_string(),
+            color: tc.text_dim,
+            font_size: 13.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(card.width - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let (remove, keep) = self.confirm_buttons();
+        for (button, label) in [(remove, "Take it out (Y)"), (keep, "Keep it (N)")] {
+            push_button(cmds, button, tc);
+            cmds.push(RenderCommand::Text {
+                x: button.x + 12.0,
+                y: button.y + 8.0,
+                text: label.to_string(),
+                color: tc.text,
+                font_size: 13.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(button.width - 16.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
@@ -2790,8 +3364,34 @@ impl App for EbookApp {
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
+        // The Open dialog first: while it is up it takes the keyboard and the
+        // mouse, so a key meant for a file name cannot turn a page behind it.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.open_path(&path);
+                return Response::Redraw;
+            }
+            Picked::Handled | Picked::Cancelled => return Response::Redraw,
+            Picked::Ignored => {}
+        }
         match event {
-            Event::CloseRequested => Response::Exit,
+            Event::CloseRequested => {
+                // The place in the book being read, kept on the way out. A
+                // library that could not be saved says so once, and the next
+                // close goes regardless: the reader is told, not trapped.
+                match self.keep() {
+                    Kept::Failed(why) if !self.close_anyway => {
+                        self.status = format!("{why}. Close again to close anyway.");
+                        self.close_anyway = true;
+                        self.view = AppView::Library;
+                        Response::KeepOpen
+                    }
+                    _ => Response::Exit,
+                }
+            }
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -2861,45 +3461,12 @@ mod tests {
 
     use super::*;
 
-    /// The library header says the books are included, not the user's.
-    ///
-    /// "3 books" beside the word "Library" reads as *your* three books, and
-    /// there is no way to add a fourth: no filesystem access, no file picker.
-    ///
-    /// Deliberately not the sweep's usual fix. The prose in those books is
-    /// included content, not a fabrication -- it makes no claim about anything
-    /// outside this program, and nobody is misled by reading it. A fabrication
-    /// is a claim about something the program cannot observe; bundled content
-    /// is not a claim. `sample_library` stays.
-    #[test]
-    fn the_header_says_the_books_are_included_samples() {
-        let app = EbookApp::new();
-        let texts: Vec<String> = app
-            .render_commands()
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            texts.iter().any(|t| t.contains("included samples")),
-            "the header presents the shipped books as the user's library",
-        );
-        assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("cannot open your own files")),
-            "nothing says the reader has no way to open a file",
-        );
-    }
-
     use guitk::event::Modifiers;
 
     // -- Helpers --
 
     fn make_app() -> EbookApp {
-        EbookApp::new()
+        EbookApp::with_sample_library()
     }
 
     fn make_key(key: Key) -> KeyEvent {
@@ -5125,7 +5692,7 @@ mod tests {
                 .collect()
         }
 
-        let mut app = EbookApp::new();
+        let mut app = EbookApp::with_sample_library();
 
         oswindow::app::App::theme_changed(&mut app, &theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);
@@ -5154,5 +5721,372 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ---- the library the reader keeps (2026-09-27) ----
+    //
+    // Until then the reader opened on five invented books and could open no
+    // other. These are about the real one: what a first run shows, that a book
+    // opened is kept with its place, and that the file it is kept in is never
+    // lost -- not written over when damaged, not skipped on close.
+
+    /// Where a scratch library is kept.
+    fn library_file(scratch: &scratchdir::ScratchDir) -> PathBuf {
+        scratch
+            .dir()
+            .join("config")
+            .join("ebook")
+            .join("library.txt")
+    }
+
+    /// A reader whose library is kept in a scratch folder.
+    fn kept_app(tag: &str) -> (scratchdir::ScratchDir, EbookApp) {
+        let scratch = scratchdir::ScratchDir::new(&format!("ebook_{tag}"));
+        let app = EbookApp::with_shelf(Some(library_file(&scratch)));
+        (scratch, app)
+    }
+
+    /// A book file in the scratch folder.
+    fn book_file(scratch: &scratchdir::ScratchDir, name: &str, text: &str) -> PathBuf {
+        let path = scratch.dir().join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// A text that names itself, long enough to have several pages.
+    fn long_text() -> String {
+        let mut text = String::from("Title: A Long Book\nAuthor: Somebody Real\n\n");
+        for i in 0..400 {
+            text.push_str(&format!(
+                "This is sentence number {i} of a book long enough to have pages.\n"
+            ));
+        }
+        text
+    }
+
+    #[test]
+    fn a_first_run_opens_on_an_empty_library_that_says_how_to_fill_it() {
+        let (_scratch, app) = kept_app("first");
+        assert!(app.library.is_empty());
+        let shown = card_text(&app);
+        assert!(shown.contains("No books yet"), "{shown}");
+        assert!(shown.contains("Ctrl+O"), "{shown}");
+        assert!(
+            !shown.contains("Clockwork"),
+            "an invented book reached a real library"
+        );
+    }
+
+    #[test]
+    fn a_book_opened_is_kept_with_its_place_bookmarks_and_type_size() {
+        let (scratch, mut app) = kept_app("kept");
+        let path = book_file(&scratch, "long.txt", &long_text());
+        app.open_path(&path);
+        assert_eq!(app.view, AppView::Reading);
+        assert_eq!(app.library.len(), 1);
+        assert_eq!(app.library[0].meta.title, "A Long Book");
+        assert_eq!(app.library[0].meta.author, "Somebody Real");
+
+        app.next_page();
+        app.next_page();
+        app.toggle_bookmark();
+        app.increase_font_size();
+        let state = app.reading_states[0].clone();
+        assert!(state.offset > 0, "control: the pages did not turn");
+        assert_eq!(state.bookmarks.len(), 1, "control: no bookmark was set");
+        app.return_to_library();
+
+        let again = EbookApp::with_shelf(Some(library_file(&scratch)));
+        assert_eq!(again.library.len(), 1);
+        assert_eq!(again.library[0].path.as_deref(), Some(path.as_path()));
+        assert_eq!(
+            again.reading_states[0], state,
+            "the place, the bookmarks and the type size did not come back"
+        );
+    }
+
+    #[test]
+    fn closing_keeps_the_place_in_the_book_being_read() {
+        let (scratch, mut app) = kept_app("close");
+        let path = book_file(&scratch, "long.txt", &long_text());
+        app.open_path(&path);
+        app.next_page();
+        let offset = app.current_offset();
+        assert!(offset > 0, "control: the page did not turn");
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+
+        let again = EbookApp::with_shelf(Some(library_file(&scratch)));
+        assert_eq!(again.reading_states[0].offset, offset);
+    }
+
+    #[test]
+    fn a_close_that_cannot_save_says_so_once_and_then_goes() {
+        let (scratch, mut app) = kept_app("cannot_save");
+        // Once the window is open, a file takes the name of the library's
+        // folder, so the folder cannot be made. (Before it opens, the library
+        // would not *read* on Linux -- a path through a file is not "no such
+        // file" there -- which is a different case with its own test.)
+        let folder = library_file(&scratch).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
+        std::fs::write(&folder, "a file, not a folder").unwrap();
+        let path = book_file(&scratch, "long.txt", &long_text());
+        app.open_path(&path);
+        assert!(app.status.contains("could not be saved"), "{}", app.status);
+
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert!(app.status.contains("Close again"), "{}", app.status);
+        assert!(
+            card_text(&app).contains("Close again"),
+            "the reason the window stayed open is not on screen"
+        );
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn a_library_file_that_does_not_read_is_never_written_over() {
+        let scratch = scratchdir::ScratchDir::new("ebook_damaged");
+        let file = library_file(&scratch);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            "# SlateOS ebook library, format 1\nthis line is not a book\n",
+        )
+        .unwrap();
+        let before = std::fs::read(&file).unwrap();
+
+        let mut app = EbookApp::with_shelf(Some(file.clone()));
+        assert!(app.status.contains("could not be read"), "{}", app.status);
+        let path = book_file(&scratch, "long.txt", &long_text());
+        app.open_path(&path);
+        assert_eq!(app.library.len(), 1, "the book still opens");
+        app.return_to_library();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            before,
+            "the library that did not read was written over"
+        );
+    }
+
+    #[test]
+    fn a_book_whose_file_has_gone_keeps_its_place_and_says_why() {
+        let (scratch, mut app) = kept_app("gone");
+        let path = book_file(&scratch, "long.txt", &long_text());
+        app.open_path(&path);
+        app.next_page();
+        let offset = app.current_offset();
+        app.return_to_library();
+        std::fs::remove_file(&path).unwrap();
+
+        let mut again = EbookApp::with_shelf(Some(library_file(&scratch)));
+        assert_eq!(
+            again.library.len(),
+            1,
+            "a book whose file has gone left the library"
+        );
+        assert!(again.library[0].unreadable.is_some());
+        assert!(
+            card_text(&again).contains("Cannot be read"),
+            "{}",
+            card_text(&again)
+        );
+        again.handle_key_event(&make_key(Key::Enter));
+        assert_eq!(again.view, AppView::Library, "a book with no file opened");
+        assert!(again.status.contains("cannot be read"), "{}", again.status);
+
+        // The file comes back: it opens where the reader was.
+        std::fs::write(&path, long_text()).unwrap();
+        again.handle_key_event(&make_key(Key::Enter));
+        assert_eq!(again.view, AppView::Reading);
+        assert_eq!(again.current_offset(), offset);
+    }
+
+    #[test]
+    fn a_book_already_in_the_library_is_opened_not_added_again() {
+        let (scratch, mut app) = kept_app("twice");
+        let path = book_file(&scratch, "long.txt", &long_text());
+        app.open_path(&path);
+        app.next_page();
+        let offset = app.current_offset();
+        app.return_to_library();
+
+        app.open_path(&path);
+        assert_eq!(app.library.len(), 1);
+        assert_eq!(app.view, AppView::Reading);
+        assert_eq!(app.current_offset(), offset, "it opened somewhere else");
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_not_added() {
+        let (scratch, mut app) = kept_app("unreadable");
+        app.open_path(&scratch.dir().join("no such book.txt"));
+        assert!(app.library.is_empty());
+        assert_eq!(app.view, AppView::Library);
+        assert!(app.status.contains("could not be opened"), "{}", app.status);
+    }
+
+    #[test]
+    fn a_book_that_names_no_title_is_called_by_its_file_name() {
+        let (scratch, mut app) = kept_app("untitled");
+        let path = book_file(&scratch, "My Story.txt", "Once upon a time.");
+        app.open_path(&path);
+        assert_eq!(app.library[0].meta.title, "My Story");
+        assert_eq!(app.library[0].meta.author, "", "an author was invented");
+        app.return_to_library();
+        assert!(
+            card_text(&app).contains("My Story.txt"),
+            "a book with no author shows where it is instead: {}",
+            card_text(&app)
+        );
+    }
+
+    #[test]
+    fn how_a_book_was_read_is_shown_with_it() {
+        let (scratch, mut app) = kept_app("notes");
+        let path = scratch.dir().join("old.txt");
+        std::fs::write(&path, b"Title: Old\n\n\x93Quoted\x94 text.").unwrap();
+        app.open_path(&path);
+        assert_eq!(
+            app.library[0].text,
+            "Title: Old\n\n\u{201C}Quoted\u{201D} text."
+        );
+        app.return_to_library();
+        assert!(
+            card_text(&app).contains("Windows-1252"),
+            "{}",
+            card_text(&app)
+        );
+    }
+
+    #[test]
+    fn delete_asks_and_then_takes_the_book_out_but_not_the_file() {
+        let (scratch, mut app) = kept_app("delete");
+        let path = book_file(&scratch, "long.txt", &long_text());
+        app.open_path(&path);
+        app.return_to_library();
+
+        app.handle_key_event(&make_key(Key::Delete));
+        assert!(
+            card_text(&app).contains("out of the library?"),
+            "{}",
+            card_text(&app)
+        );
+        app.handle_key_event(&make_key(Key::Escape));
+        assert_eq!(app.library.len(), 1, "Escape took the book out");
+
+        app.handle_key_event(&make_key(Key::Delete));
+        app.handle_key_event(&make_key(Key::Enter));
+        assert!(app.library.is_empty());
+        assert!(
+            path.exists(),
+            "taking a book out of the library deleted its file"
+        );
+        let again = EbookApp::with_shelf(Some(library_file(&scratch)));
+        assert!(again.library.is_empty(), "taking it out was not kept");
+    }
+
+    #[test]
+    fn the_question_is_modal_and_its_buttons_answer_a_click() {
+        let mut app = make_app();
+        let before = app.library.len();
+        app.handle_key_event(&make_key(Key::Delete));
+        let asked = app.confirm_remove;
+        let chosen = app.selected_book;
+        app.handle_key_event(&make_key(Key::Down));
+        assert_eq!(app.confirm_remove, asked);
+        assert_eq!(
+            app.selected_book, chosen,
+            "a key reached the list behind the question"
+        );
+
+        let (remove, keep) = app.confirm_buttons();
+        click(&mut app, keep.x + 2.0, keep.y + 2.0);
+        assert_eq!(app.library.len(), before);
+        assert!(app.confirm_remove.is_none(), "Keep did not answer");
+
+        app.handle_key_event(&make_key(Key::Delete));
+        // A click beside the card is swallowed, not passed to the list.
+        click(&mut app, 30.0, TOOLBAR_HEIGHT + 10.0);
+        assert_eq!(
+            app.view,
+            AppView::Library,
+            "a click reached the list behind"
+        );
+        assert!(app.confirm_remove.is_some());
+        click(&mut app, remove.x + 2.0, remove.y + 2.0);
+        assert_eq!(app.library.len(), before - 1);
+    }
+
+    #[test]
+    fn ctrl_o_puts_the_open_dialog_up_and_it_takes_the_keys() {
+        let mut app = make_app();
+        assert_eq!(
+            app.on_event(&Event::Key(make_key_with_mod(Key::O, ctrl()))),
+            Response::Redraw
+        );
+        assert!(app.picker.is_open());
+        // Delete would ask to take a book out; with the dialog up it is the
+        // dialog's.
+        app.on_event(&Event::Key(make_key(Key::Delete)));
+        assert!(
+            app.confirm_remove.is_none(),
+            "a key reached the library behind the dialog"
+        );
+        app.on_event(&Event::Key(make_key(Key::Escape)));
+        assert!(!app.picker.is_open(), "Escape did not close the dialog");
+    }
+
+    #[test]
+    fn the_open_button_puts_the_dialog_up() {
+        let mut app = make_app();
+        let open = app.open_button();
+        assert!(click(&mut app, open.x + 4.0, open.y + 4.0));
+        assert!(app.picker.is_open());
+        assert_eq!(
+            app.view,
+            AppView::Library,
+            "the click opened a book as well"
+        );
+        assert!(card_text(&app).contains("Open a book"));
+    }
+
+    #[test]
+    fn a_place_in_a_file_that_changed_moves_to_one_that_exists() {
+        // "é" is two bytes, at 1..3.
+        let book = Book::new("t", "a", "h\u{e9}llo");
+        let state = ReadingState {
+            offset: 2,
+            bookmarks: vec![2, 3, 99],
+            font_size: FontSizeLevel::Small,
+        };
+        let fitted = fit_state(state.clone(), &book);
+        assert_eq!(fitted.offset, 1, "a place inside a character");
+        assert_eq!(
+            fitted.bookmarks,
+            vec![1, 3],
+            "a bookmark past the end stayed"
+        );
+
+        let gone = Book {
+            unreadable: Some("gone".to_string()),
+            ..Book::new("t", "a", "")
+        };
+        assert_eq!(
+            fit_state(state.clone(), &gone),
+            state,
+            "a place was lost while its file was away"
+        );
+    }
+
+    #[test]
+    fn a_type_size_is_known_by_its_label() {
+        for size in [
+            FontSizeLevel::Small,
+            FontSizeLevel::Medium,
+            FontSizeLevel::Large,
+        ] {
+            assert_eq!(FontSizeLevel::from_label(size.label()), Some(size));
+        }
+        assert_eq!(FontSizeLevel::from_label("Huge"), None);
     }
 }

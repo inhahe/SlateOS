@@ -7101,6 +7101,11 @@ mod tests {
 
     /// The reading pane is drawn beside, under, or in place of the list;
     /// "below" drew nothing at all.
+    ///
+    /// The message is looked for *inside the pane*. The list draws a one-line
+    /// preview of every body, so "the body's words are on screen" held with
+    /// no pane at all -- the mutation sweep removed the pane below and this
+    /// test passed.
     #[test]
     fn the_reading_pane_is_drawn_wherever_it_is() {
         let (_dir, mut app) = mail_fixture("pane");
@@ -7112,6 +7117,21 @@ mod tests {
                 drawn(&app).contains("Soup at noon?"),
                 "{position:?} did not show the message"
             );
+        }
+        for position in [ReadingPanePosition::Right, ReadingPanePosition::Bottom] {
+            app.reading_pane_position = position;
+            let pane = probe::rect_of(&app, Target::ReadingPane)
+                .unwrap_or_else(|| panic!("{position:?} drew no reading pane"));
+            let in_pane = app
+                .render_commands(app.width(), app.height())
+                .iter()
+                .any(|c| match c {
+                    RenderCommand::Text { x, y, text, .. } => {
+                        text.contains("Soup at noon?") && pane.contains(*x, *y)
+                    }
+                    _ => false,
+                });
+            assert!(in_pane, "{position:?} did not draw the message in its pane");
         }
         app.reading_pane_position = ReadingPanePosition::Off;
         assert!(

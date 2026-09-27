@@ -56565,6 +56565,32 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
+## ~~explorer: Ask when a pasted name is taken (lane E, 2026-09-27)~~ -- DONE 2026-09-27
+
+**Done:** the executor waits at a taken name and the window asks; "Ask each
+time" is the menu's first choice and the default (design-decisions §1221).
+The original entry, for the record:
+
+The folder menu offers keep both / skip / replace if newer / replace for a
+paste or a drop onto a name the folder already has (C-Q26), and not "Ask",
+because nothing can ask yet:
+
+* `apps/explorer/src/fileops.rs`, copy: `ConflictPolicy::Ask` pushes
+  `FileOpEvent::Conflict` and returns `ActionOutcome::Skipped` -- "In a real
+  async implementation the caller would respond. For now, skip." A move
+  with `Ask` skips without the event.
+* The window has no conflict dialog.
+
+What it wants: the executor stops at the conflicting action in a state that
+says so (`src`, `dest`, and whether it is a copy or a move), `step()` does
+nothing further until the caller answers with keep both / skip / replace
+(and "the same for the rest"), and the answer is applied to that action
+before the loop moves on. The window draws the question when the
+operation it is stepping stops there -- names, sizes and dates of both --
+and "Ask" joins the menu's choices. The comment on
+`columnprefs::CONFLICT_CHOICES` says the executor can pause; it cannot, and
+the comment goes when this is done.
+
 ## credmanager: what a credential manager still cannot do
 
 Adding a credential and copying a field are wired up as of this change. The
@@ -56575,14 +56601,15 @@ what hid the Add button doing nothing.
 
 In rough order of how much a user would miss it:
 
-* **Edit** — `Vault::update_entry` and `get_entry_mut`. The detail view shows a
-  credential and cannot change one, so a password that has been rotated cannot
-  be recorded.
-* **Delete** — `Vault::remove_entry`.
-* **Export and backup** — `export_csv`, `escape_csv`, `serialize_backup`, all
-  advertised in the module doc. There is no filesystem to write to; the
-  clipboard is the sink these can have today, which is what `/copy` already
-  uses.
+* ~~**Edit**~~ — DONE 2026-09-27 (lane E): the entry's Edit button (Ctrl+E)
+  opens the form filled in; saving changes what the form shows and keeps what
+  it does not (a login's one-time-code secret, a card number left alone, its
+  tags, folder, star and creation time).
+* ~~**Delete**~~ — DONE 2026-09-27 (lane E): the entry's Delete button and the
+  Delete key ask first.
+* ~~**Export and backup**~~ — DONE 2026-09-27 (lane E): Settings has Back
+  up, Restore and Export (C-Q25, §1417); `serialize_backup`, which left every
+  password out, is deleted.
 * **Favourites** — `Vault::toggle_star`. The sidebar filters by favourites and
   nothing can set one, so that filter is always empty. Same shape for
   **tags** (`add_tag`/`remove_tag`, and the sidebar's tag list) and
@@ -56594,8 +56621,8 @@ In rough order of how much a user would miss it:
   and never read.
 * **Breach flagging** — `Vault::set_compromised`, which needs a feed to learn
   from as well as a control.
-* **Persistence** — `Vault::from_stored` is the door a loader would come in
-  through. Every launch opens an empty vault, as the module doc says.
+* ~~**Persistence**~~ — DONE 2026-09-27 (lane E): the vault is kept sealed
+  on disk (`src/vaultfile.rs`), and Edit and Delete came with it.
 
 One duplicate to resolve rather than build: `Vault::search_entries` is a second
 full-text search beside the toolbar's, which filters through
@@ -58771,6 +58798,20 @@ test of the fixture, not of the bound.
   `origin/main` (`git show origin/main:gui/toolkit/src/color.rs | grep
   hex_text`). Then each copy goes; files written afterwards carry lowercase
   hex, which the old readers already accept, so old and new files both load.
+
+- **A file named on the command line may be any bytes.** Lane F landed
+  `oswindow::app::ArgsOs` -- `display: Option<String>`, `rest: Vec<OsString>`,
+  `ArgsOs::from_env()` over `args_os()` -- on lane-f as 21c0b3614
+  (`requests/e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`); `Args`
+  keeps its type and now refuses a non-UTF-8 argument by name instead of
+  panicking. **Trigger:** it is on `origin/main` (`git show
+  origin/main:gui/window/src/app.rs | grep "pub struct ArgsOs"`). Then the eight
+  programs that open files named on the command line -- archivemanager, editor,
+  explorer, hexeditor, imageviewer, musicplayer, pdfviewer, videoplayer -- move
+  to `ArgsOs` and take their paths as `PathBuf::from(OsString)`, each with a
+  test opening a file whose name is not UTF-8 (match3 and pinball take text
+  options and stay on `Args`); `known-issues.md` -> `[E] "Open with" opened
+  nothing...` is then FIXED, and the request closes.
 
 - **The terminal has never run on SlateOS.** Its real child -- `forkpty` plus
   `execve` through `libcall::pty` -- is tested only on a Linux host against

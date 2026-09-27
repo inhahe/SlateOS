@@ -220,6 +220,13 @@ members = [
     # `default-members` for the usual reason -- the workspace-root target is
     # x86_64-unknown-none, which has no `std` at all.
     "procinfo",
+    # The plain API over the vendored RustCrypto crates beside it:
+    # XChaCha20-Poly1305 and Argon2id, for everything that keeps a secret at
+    # rest (design-decisions.md §539 -- primitives are ported, not written).
+    # A member, so it takes the workspace lints and its published-vector
+    # tests run with the rest; the vendored crates themselves are excluded
+    # below. no_std + alloc, so kept out of `default-members` like `yamldoc`.
+    "rustcrypto/seal",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project
@@ -245,6 +252,11 @@ default-members = [
     "toolchain/stubs",
 ]
 exclude = [
+    # Vetted cryptography vendored from crates.io exactly as published
+    # (`rustcrypto/README.md`). Not members: they keep their own lint settings
+    # rather than taking this workspace's, and build only as path
+    # dependencies of what uses them. `rustcrypto/seal`, ours, is a member.
+    "rustcrypto",
     # Bare-metal services (target = x86_64-unknown-none). Living in
     # `services/` keeps them outside the `userspace/.cargo/config.toml`
     # build-std blast radius. Each services/* crate is built

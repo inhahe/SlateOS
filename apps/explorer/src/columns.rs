@@ -2248,7 +2248,7 @@ fn format_thousandths(n: u64) -> String {
 ///
 /// UTC, explicitly, because there is no per-process zone plumbing yet
 /// (known-issues `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`).
-fn format_datetime(epoch_secs: u64) -> String {
+pub(crate) fn format_datetime(epoch_secs: u64) -> String {
     guitk::datetime::stamp(
         i64::try_from(epoch_secs).unwrap_or(i64::MAX),
         &guitk::tzrules::Tz::utc(),

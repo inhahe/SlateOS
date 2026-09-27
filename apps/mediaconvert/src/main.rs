@@ -2250,6 +2250,19 @@ impl MediaConvertApp {
             }
         };
         let output_format = self.output_format()?;
+        // Asked twice -- "Convert all" pressed again while the queue runs --
+        // for a file already on its way to this format: a second job would
+        // only write it again as "name (2)", and every file of the list would
+        // be converted twice. A finished job does not count: converting again
+        // after that is a real request.
+        if self.jobs.iter().any(|j| {
+            j.source.id == source_id
+                && j.output_format == output_format
+                && matches!(j.status, JobStatus::Queued | JobStatus::Running)
+        }) {
+            self.status_line = format!("{}: already waiting to be converted", src.file_name);
+            return None;
+        }
         let stem = src.path.file_name().unwrap_or_else(|| src.path.as_os_str());
         let name = self
             .output_naming
@@ -3831,7 +3844,13 @@ mod tests {
         assert!(app.history.is_empty());
     }
 
-    /// One job at a time, and the next one starts when the last finishes.
+    /// One job at a time, and the next one starts when the last finishes --
+    /// on the same tick, not the one after.
+    ///
+    /// Asking again while a job runs is where "one at a time" is decided:
+    /// the queue is started once here and then asked twice more, by the key
+    /// and directly. This test only ever asked once, so a guard that let a
+    /// second job start beside the first survived its mutation.
     #[test]
     fn only_one_job_runs_at_a_time() {
         let dir = Scratch::new("one-at-a-time");
@@ -3841,13 +3860,20 @@ mod tests {
         }
         app.select_profile(profile(&app, "WAV, CD quality"));
         app.handle_event(&key_ev(Key::Enter, true));
+        app.handle_event(&key_ev(Key::Enter, true));
+        assert_eq!(app.jobs.len(), 3, "asking twice queued every file twice");
+        assert!(
+            !app.start_next_job(),
+            "a second job started beside the first"
+        );
         for _ in 0..20_000 {
-            let running = app
-                .jobs
-                .iter()
-                .filter(|j| j.status == JobStatus::Running)
-                .count();
+            let count = |status: JobStatus| app.jobs.iter().filter(|j| j.status == status).count();
+            let running = count(JobStatus::Running);
             assert!(running <= 1, "{running} jobs were running at once");
+            assert!(
+                count(JobStatus::Queued) == 0 || running == 1,
+                "a tick left the queue idle with work waiting"
+            );
             app.handle_event(&tick());
             if app.jobs.iter().all(|j| j.status == JobStatus::Completed) {
                 break;
@@ -3858,6 +3884,34 @@ mod tests {
         let outputs: std::collections::BTreeSet<&PathBuf> =
             app.jobs.iter().map(|j| &j.output_path).collect();
         assert_eq!(outputs.len(), 3, "two jobs were given one output");
+    }
+
+    /// A file already on its way to a format is not queued for it again --
+    /// "Convert all" pressed twice converted every file twice, the second
+    /// time as "name (2)" -- but once it is done, converting it again is a
+    /// real request.
+    #[test]
+    fn a_file_already_on_its_way_is_not_queued_again() {
+        let mut app = MediaConvertApp::new();
+        let id = app.add_source("/x/song.wav", "song.wav", 1, MediaCategory::Audio);
+        app.output_dir = Some(PathBuf::from("/out"));
+        assert!(app.queue_source(id).is_some());
+        assert!(app.queue_source(id).is_none());
+        assert!(
+            app.status_line.contains("already waiting"),
+            "{}",
+            app.status_line
+        );
+        assert_eq!(app.jobs.len(), 1);
+        assert!(app.start_next_job_fixture());
+        assert!(app.queue_source(id).is_none(), "running is on its way too");
+        let job = app.jobs[0].id;
+        assert!(app.complete_job(job, 10));
+        assert!(
+            app.queue_source(id).is_some(),
+            "done, it may be asked for again"
+        );
+        assert_eq!(app.jobs.len(), 2);
     }
 
     /// Two files of one name, from two folders, into one: two outputs, not

@@ -34,8 +34,12 @@ use oswindow::app::{self, App, Response};
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod points;
+use points::{Job, Locations, Update, Worker};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -49,12 +53,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // Layout constants
 // ============================================================================
 
-/// How long one step of a create or restore is shown for.
+/// How often the reports of running work are taken in while it runs.
 ///
-/// The operation is simulated -- see `OperationProgress::simulate_restore` --
-/// so this is the speed of the animation and not of any real work. Slow enough
-/// to read the step name, fast enough that a restore of eight components does
-/// not outlast the user's patience.
+/// Often enough that the bar moves as the files go by; the work itself runs
+/// on its own thread (`points::Worker`), so this paces only the window.
 ///
 /// A `Duration` rather than a count of milliseconds, because the only thing it
 /// is ever used as is a `Duration`.
@@ -65,40 +67,6 @@ const PROGRESS_STEP: Duration = Duration::from_millis(400);
 /// A minute, because `age_display` rounds to minutes: anything shorter redraws
 /// an identical frame, anything longer leaves a countdown visibly stale.
 const CLOCK_STEP: Duration = Duration::from_mins(1);
-
-/// Why a restore cannot be performed.
-///
-/// The worst thing this program could do is the thing it was doing: run a
-/// progress bar through "Verifying snapshot integrity", "Restoring System
-/// Files" and "Applying changes", finish at **Complete**, and change nothing.
-/// Somebody who believes their system was rolled back stops troubleshooting --
-/// and may then undo the thing that would have actually fixed it.
-const CANNOT_RESTORE: &str =
-    "Cannot restore: this program has no filesystem access, so nothing was read or written";
-
-/// Why a snapshot cannot be taken.
-///
-/// The mirror image, and acted on the same way: somebody who believes a
-/// restore point exists proceeds with the risky change it was taken for.
-const CANNOT_CREATE: &str =
-    "Cannot create a snapshot: this program has no filesystem access, so nothing was captured";
-
-/// What the list of snapshots is.
-///
-/// `CANNOT_RESTORE` and `CANNOT_CREATE` appear on a progress overlay, which
-/// is dismissed and gone. The *list* stays, and it is the thing a person
-/// reads: five restore points with dates, sizes and components, one of them
-/// marked as the current system. Nothing on screen said they are a model
-/// this program built at startup rather than snapshots of this machine.
-///
-/// That is the belief the two constants above exist to prevent -- somebody
-/// who thinks a restore point exists proceeds with the risky change it was
-/// taken for -- and a message that has to be provoked before it appears does
-/// not prevent it. This one is always on screen, for the same reason
-/// `apps/screenrecorder` draws its refusal unconditionally: there is no state
-/// in which these entries become real, so a condition here would be one that
-/// is always true.
-const SNAPSHOTS_ARE_NOT_REAL: &str = "Demonstration data: these are not snapshots of this machine, and none of them can restore anything";
 
 const WINDOW_WIDTH: f32 = 1050.0;
 const WINDOW_HEIGHT: f32 = 700.0;
@@ -166,6 +134,9 @@ pub enum SnapshotType {
     PreInstall,
     /// Created by a scheduled policy.
     Scheduled,
+    /// Taken by a restore, of the files as they were just before it: the
+    /// restore's own undo.
+    BeforeRestore,
 }
 
 impl SnapshotType {
@@ -177,6 +148,7 @@ impl SnapshotType {
             Self::PreUpdate => "Pre-Update",
             Self::PreInstall => "Pre-Install",
             Self::Scheduled => "Scheduled",
+            Self::BeforeRestore => "Before Restore",
         }
     }
 
@@ -188,6 +160,7 @@ impl SnapshotType {
             "pre-update" | "preupdate" => Some(Self::PreUpdate),
             "pre-install" | "preinstall" => Some(Self::PreInstall),
             "scheduled" => Some(Self::Scheduled),
+            "before restore" | "beforerestore" => Some(Self::BeforeRestore),
             _ => None,
         }
     }
@@ -200,6 +173,7 @@ impl SnapshotType {
             Self::PreUpdate,
             Self::PreInstall,
             Self::Scheduled,
+            Self::BeforeRestore,
         ]
     }
 
@@ -234,6 +208,7 @@ impl SnapshotType {
             Self::PreUpdate => pal.yellow,
             Self::PreInstall => pal.peach,
             Self::Scheduled => pal.lavender,
+            Self::BeforeRestore => pal.red,
         }
     }
 }
@@ -253,7 +228,9 @@ impl fmt::Display for SnapshotType {
 pub enum SnapshotComponent {
     /// Core OS files and libraries.
     SystemFiles,
-    /// User preferences and settings.
+    /// Every program's settings and data: the one folder programs on this
+    /// system keep both in (`settingsfile::config_dir`). The component a
+    /// restore point can hold -- see `points`.
     UserSettings,
     /// Installed applications and their data.
     InstalledApps,
@@ -278,7 +255,7 @@ impl SnapshotComponent {
     pub fn label(self) -> &'static str {
         match self {
             Self::SystemFiles => "System Files",
-            Self::UserSettings => "User Settings",
+            Self::UserSettings => "Program Settings and Data",
             Self::InstalledApps => "Installed Apps",
             Self::BootConfig => "Boot Config",
             Self::NetworkConfig => "Network Config",
@@ -294,7 +271,9 @@ impl SnapshotComponent {
     pub fn from_label(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().replace(' ', "").as_str() {
             "systemfiles" => Some(Self::SystemFiles),
-            "usersettings" => Some(Self::UserSettings),
+            // The old name reads as the new, so a list written before the
+            // rename still loads.
+            "usersettings" | "programsettingsanddata" => Some(Self::UserSettings),
             "installedapps" => Some(Self::InstalledApps),
             "bootconfig" => Some(Self::BootConfig),
             "networkconfig" => Some(Self::NetworkConfig),
@@ -304,22 +283,6 @@ impl SnapshotComponent {
             "desktopconfig" => Some(Self::DesktopConfig),
             "securitypolicy" => Some(Self::SecurityPolicy),
             _ => None,
-        }
-    }
-
-    /// Estimated size in bytes for this component.
-    pub fn estimated_size_bytes(self) -> u64 {
-        match self {
-            Self::SystemFiles => 2_000_000_000,   // ~2 GB
-            Self::UserSettings => 50_000_000,     // ~50 MB
-            Self::InstalledApps => 5_000_000_000, // ~5 GB
-            Self::BootConfig => 5_000_000,        // ~5 MB
-            Self::NetworkConfig => 2_000_000,     // ~2 MB
-            Self::ServiceConfig => 10_000_000,    // ~10 MB
-            Self::DriverState => 100_000_000,     // ~100 MB
-            Self::PackageState => 200_000_000,    // ~200 MB
-            Self::DesktopConfig => 30_000_000,    // ~30 MB
-            Self::SecurityPolicy => 1_000_000,    // ~1 MB
         }
     }
 
@@ -339,16 +302,10 @@ impl SnapshotComponent {
         ]
     }
 
-    /// The default set of components for a full snapshot.
+    /// The components a new restore point is taken of unless the user says
+    /// otherwise: the ones this system can capture.
     pub fn default_set() -> Vec<Self> {
-        vec![
-            Self::SystemFiles,
-            Self::UserSettings,
-            Self::InstalledApps,
-            Self::BootConfig,
-            Self::NetworkConfig,
-            Self::ServiceConfig,
-        ]
+        vec![Self::UserSettings]
     }
 }
 
@@ -375,7 +332,7 @@ pub struct Snapshot {
     pub timestamp: u64,
     /// How the snapshot was created.
     pub snapshot_type: SnapshotType,
-    /// Estimated total size in bytes.
+    /// The total size of what it holds, measured when it was taken.
     pub size_bytes: u64,
     /// Components included in this snapshot.
     pub components: Vec<SnapshotComponent>,
@@ -385,6 +342,11 @@ pub struct Snapshot {
     pub locked: bool,
     /// Optional tags for organization.
     pub tags: Vec<String>,
+    /// Where each component is kept: the store's id for it.
+    pub stored: BTreeMap<SnapshotComponent, String>,
+    /// How many items could not be read when it was taken, and so are not
+    /// in it (and are never removed by restoring it).
+    pub unread: u64,
 }
 
 impl Snapshot {
@@ -398,18 +360,19 @@ impl Snapshot {
         components: Vec<SnapshotComponent>,
         parent_id: Option<u64>,
     ) -> Self {
-        let size_bytes = components.iter().map(|c| c.estimated_size_bytes()).sum();
         Self {
             id,
             name: name.to_string(),
             description: description.to_string(),
             timestamp,
             snapshot_type,
-            size_bytes,
+            size_bytes: 0,
             components,
             parent_id,
             locked: false,
             tags: Vec::new(),
+            stored: BTreeMap::new(),
+            unread: 0,
         }
     }
 
@@ -447,6 +410,7 @@ impl Snapshot {
 /// Snapshots form a directed tree (each snapshot has at most one parent,
 /// but can have multiple children -- branches). The root(s) are snapshots
 /// with no parent.
+#[derive(Debug)]
 pub struct SnapshotTree {
     snapshots: BTreeMap<u64, Snapshot>,
     /// Maps parent_id -> list of child IDs (sorted by timestamp).
@@ -600,6 +564,50 @@ impl SnapshotTree {
         self.snapshots
             .remove(&id)
             .ok_or(SnapshotError::NotFound(id))
+    }
+
+    /// The id the next point added will get.
+    #[must_use]
+    pub fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// A tree of points read back from disk, each keeping its id.
+    ///
+    /// Two passes, as import does: every point detached, then each linked to
+    /// its parent -- the file need not list a parent before its children, and
+    /// `set_parent` refuses a link that would close a loop.
+    ///
+    /// # Errors
+    ///
+    /// Two points with one id, a parent that is not in the list, a loop, or a
+    /// next id not past every point's.
+    pub fn from_points(points: Vec<Snapshot>, next_id: u64) -> Result<Self, SnapshotError> {
+        let mut tree = Self::new();
+        let mut parents = Vec::new();
+        for mut point in points {
+            if tree.snapshots.contains_key(&point.id) {
+                return Err(SnapshotError::FormatError(format!(
+                    "two restore points have the id {}",
+                    point.id
+                )));
+            }
+            if point.id >= next_id {
+                return Err(SnapshotError::FormatError(format!(
+                    "restore point {} is past the next id {next_id}",
+                    point.id
+                )));
+            }
+            parents.push((point.id, point.parent_id.take()));
+            tree.snapshots.insert(point.id, point);
+        }
+        tree.next_id = next_id;
+        for (id, parent) in parents {
+            if parent.is_some() {
+                tree.set_parent(id, parent)?;
+            }
+        }
+        Ok(tree)
     }
 
     /// Get a snapshot by ID.
@@ -1487,11 +1495,15 @@ impl SnapshotExport {
 // ============================================================================
 
 /// High-level manager combining the tree, scheduling, comparison, and storage.
+#[derive(Debug)]
 pub struct SnapshotManager {
     /// The snapshot tree.
     pub tree: SnapshotTree,
     /// Schedule configuration.
     pub schedule: ScheduleConfig,
+    /// The restore point the files were last taken as or restored to: what
+    /// a new one is taken on top of, in the tree.
+    pub current: Option<u64>,
 }
 
 impl SnapshotManager {
@@ -1500,6 +1512,7 @@ impl SnapshotManager {
         Self {
             tree: SnapshotTree::new(),
             schedule: ScheduleConfig::default(),
+            current: None,
         }
     }
 
@@ -1528,132 +1541,37 @@ impl SnapshotManager {
         self.tree.remove_snapshot(id)
     }
 
-    /// Compare two snapshots by their component sets.
-    /// Generates diff entries based on component differences.
-    pub fn compare_snapshots(
-        &self,
-        older_id: u64,
-        newer_id: u64,
-    ) -> Result<SnapshotDiffResult, SnapshotError> {
-        let older = self
-            .tree
-            .get_snapshot(older_id)
-            .ok_or(SnapshotError::NotFound(older_id))?;
-        let newer = self
-            .tree
-            .get_snapshot(newer_id)
-            .ok_or(SnapshotError::NotFound(newer_id))?;
-
-        let mut entries = Vec::new();
-
-        // Compare component sets.
-        for &comp in &newer.components {
-            if !older.has_component(comp) {
-                entries.push(DiffEntry::ComponentAdded(comp));
-            }
-        }
-        for &comp in &older.components {
-            if !newer.has_component(comp) {
-                entries.push(DiffEntry::ComponentRemoved(comp));
-            }
-        }
-
-        // Simulate file diffs based on component differences and time gap.
-        let time_gap = newer.timestamp.saturating_sub(older.timestamp);
-        if time_gap > 86_400 {
-            // More than a day apart: simulate some file changes.
-            let file_change_count = (time_gap / 86_400).min(20) as usize;
-            for i in 0..file_change_count {
-                match i % 3 {
-                    0 => entries.push(DiffEntry::FileModified(format!(
-                        "/system/lib/module_{}.so",
-                        i
-                    ))),
-                    1 => entries.push(DiffEntry::FileAdded(format!("/system/etc/conf_{}.yaml", i))),
-                    _ => entries.push(DiffEntry::FileRemoved(format!("/tmp/cache_{}.dat", i))),
-                }
-            }
-        }
-
-        // Simulate package diffs.
-        if newer.has_component(SnapshotComponent::InstalledApps)
-            && older.has_component(SnapshotComponent::InstalledApps)
-            && time_gap > 604_800
-        {
-            entries.push(DiffEntry::PackageUpdated {
-                name: "core-libs".to_string(),
-                old_version: "1.2.0".to_string(),
-                new_version: "1.3.0".to_string(),
-            });
-            entries.push(DiffEntry::PackageInstalled("new-tool".to_string()));
-        }
-
-        // Simulate setting changes.
-        if newer.has_component(SnapshotComponent::UserSettings)
-            && older.has_component(SnapshotComponent::UserSettings)
-            && time_gap > 172_800
-        {
-            entries.push(DiffEntry::SettingChanged {
-                key: "display.theme".to_string(),
-                old_value: "dark".to_string(),
-                new_value: "mocha".to_string(),
-            });
-        }
-
-        Ok(SnapshotDiffResult {
-            older_id,
-            newer_id,
-            entries,
-        })
+    /// Whether a scheduled restore point is due now.
+    ///
+    /// It used to *take* one -- added a point to the tree, with a size the
+    /// program had estimated, and nothing on disk behind it. Taking one is
+    /// work for `points::Worker`; this only says when.
+    pub fn schedule_due(&self, now: u64) -> bool {
+        self.schedule.is_due(now) && self.schedule.validate().is_ok()
     }
 
-    /// Check if a scheduled snapshot is due and create one if so.
-    pub fn check_schedule(&mut self, now: u64) -> Result<Option<u64>, SnapshotError> {
-        if !self.schedule.is_due(now) {
-            return Ok(None);
-        }
-        self.schedule.validate()?;
-
-        let name = format!("Scheduled-{}", now);
-        let components = self.schedule.components.clone();
-        let id = self.tree.add_snapshot(
-            &name,
-            "Automatically created by schedule",
-            now,
-            SnapshotType::Scheduled,
-            components,
-            None,
-        )?;
-        self.schedule.last_snapshot_timestamp = now;
-        Ok(Some(id))
-    }
-
-    /// Run retention policy and return IDs of snapshots that were pruned.
-    pub fn apply_retention(&mut self, now: u64) -> Vec<u64> {
-        let snapshot_info: Vec<(u64, u64, u64, bool)> = self
+    /// The scheduled restore points the retention policy would remove, oldest
+    /// first.
+    ///
+    /// Only the schedule's own: a restore point somebody took before a risky
+    /// change, or the one a restore took before it ran, is theirs to delete.
+    /// And never a locked one, the current one, or one with points taken on
+    /// top of it -- the tree would lose its shape.
+    pub fn retention_candidates(&self, now: u64) -> Vec<u64> {
+        let scheduled: Vec<(u64, u64, u64, bool)> = self
             .tree
             .all_ids_by_timestamp()
             .iter()
-            .filter_map(|&id| {
-                self.tree
-                    .get_snapshot(id)
-                    .map(|s| (s.id, s.timestamp, s.size_bytes, s.locked))
-            })
+            .filter_map(|&id| self.tree.get_snapshot(id))
+            .filter(|s| s.snapshot_type == SnapshotType::Scheduled)
+            .map(|s| (s.id, s.timestamp, s.size_bytes, s.locked))
             .collect();
-
-        let to_prune = self
-            .schedule
+        self.schedule
             .retention
-            .snapshots_to_prune(&snapshot_info, now);
-
-        let mut pruned = Vec::new();
-        for id in to_prune {
-            // Only prune leaf snapshots (no children). Skip non-leaf silently.
-            if self.tree.children_of(id).is_empty() && self.tree.remove_snapshot(id).is_ok() {
-                pruned.push(id);
-            }
-        }
-        pruned
+            .snapshots_to_prune(&scheduled, now)
+            .into_iter()
+            .filter(|id| Some(*id) != self.current && self.tree.children_of(*id).is_empty())
+            .collect()
     }
 
     /// Get storage statistics.
@@ -1782,150 +1700,86 @@ impl Default for SnapshotManager {
 }
 
 // ============================================================================
-// Progress simulation
+// Progress
 // ============================================================================
 
-/// Progress state for snapshot creation or restore operations.
-#[derive(Clone, Debug)]
+/// Work on restore points under way -- taking one, restoring one, deleting
+/// one -- and, once it has ended, how it went.
+///
+/// Driven by what `points::Worker` reports. It was a filmstrip: a list of
+/// frames made up in advance from each component's *estimated* size and
+/// played one per tick, over work that did not happen.
+#[derive(Clone, Debug, Default)]
 pub struct OperationProgress {
-    /// Description of the current step.
+    /// What is being done, for the overlay's heading.
+    pub title: String,
+    /// The step under way.
     pub current_step: String,
-    /// Step number (1-based).
-    pub step_index: usize,
-    /// Total number of steps.
-    pub total_steps: usize,
-    /// Bytes processed so far.
-    pub bytes_processed: u64,
-    /// Total bytes to process.
-    pub total_bytes: u64,
-    /// Whether the operation is complete.
+    /// Files done in the step.
+    pub done: u64,
+    /// Files the step has.
+    pub total: u64,
+    /// Whether the work has ended, well or not. The overlay stays up, with
+    /// the outcome, until it is dismissed.
     pub complete: bool,
-    /// Error message if the operation failed.
+    /// Why it stopped, if it failed.
     pub error: Option<String>,
+    /// What is worth knowing about how it went: what could not be read, what
+    /// could not be put back, what was left out.
+    pub notes: Vec<String>,
 }
 
 impl OperationProgress {
-    /// Create initial progress for a snapshot creation.
-    pub fn new_create(components: &[SnapshotComponent]) -> Self {
-        let total_bytes: u64 = components.iter().map(|c| c.estimated_size_bytes()).sum();
+    /// Work begun, with its heading.
+    #[must_use]
+    pub fn new(title: &str) -> Self {
         Self {
-            current_step: "Preparing snapshot...".to_string(),
-            step_index: 0,
-            total_steps: components.len().saturating_add(2), // components + prepare + finalize
-            bytes_processed: 0,
-            total_bytes,
-            complete: false,
-            error: None,
+            title: title.to_string(),
+            current_step: "Starting".to_string(),
+            ..Self::default()
         }
     }
 
-    /// Create initial progress for a restore.
-    pub fn new_restore(snap: &Snapshot) -> Self {
-        Self {
-            current_step: "Preparing restore...".to_string(),
-            step_index: 0,
-            total_steps: snap.component_count().saturating_add(2),
-            bytes_processed: 0,
-            total_bytes: snap.size_bytes,
-            complete: false,
-            error: None,
-        }
-    }
-
-    /// Progress fraction (0.0 to 1.0).
-    ///
-    /// Measured in bytes where there are bytes to measure, in steps where
-    /// there are not, and reported complete when there is neither — a restore
-    /// of an empty snapshot has nothing left to do.
+    /// Progress fraction (0.0 to 1.0): files done of files found, and whole
+    /// once the work has ended.
     #[must_use]
     pub fn fraction(&self) -> f32 {
-        ratio::fraction(self.bytes_processed, self.total_bytes)
-            .or_else(|| ratio::fraction(self.step_index, self.total_steps))
-            .unwrap_or(1.0) as f32
+        if self.complete {
+            return 1.0;
+        }
+        ratio::fraction(self.done, self.total).unwrap_or(0.0) as f32
     }
 
     /// Progress percentage (0 to 100).
+    #[must_use]
     pub fn percentage(&self) -> u32 {
-        (self.fraction() * 100.0) as u32
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a fraction in 0..=1 times 100"
+        )]
+        let pct = (self.fraction() * 100.0).round() as u32;
+        pct.min(100)
     }
 
-    /// Advance to the next step.
-    pub fn advance(&mut self, step_name: &str, bytes_done: u64) {
-        self.step_index = self.step_index.saturating_add(1);
-        self.current_step = step_name.to_string();
-        self.bytes_processed = self.bytes_processed.saturating_add(bytes_done);
+    /// A step reported: its name, and how far through its files it is.
+    pub fn step(&mut self, name: &str, done: u64, total: u64) {
+        name.clone_into(&mut self.current_step);
+        self.done = done;
+        self.total = total;
     }
 
-    /// Mark complete.
-    pub fn finish(&mut self) {
+    /// The work ended well.
+    pub fn finish(&mut self, summary: &str) {
         self.complete = true;
-        self.bytes_processed = self.total_bytes;
-        self.step_index = self.total_steps;
-        self.current_step = "Complete".to_string();
+        summary.clone_into(&mut self.current_step);
     }
 
-    /// Mark failed.
+    /// The work stopped, and why.
     pub fn fail(&mut self, message: &str) {
         self.error = Some(message.to_string());
-    }
-
-    /// Simulate the full creation process, returning intermediate states.
-    /// The creation sequence, for tests.
-    ///
-    /// `#[cfg(test)]` since 2026-09-15.
-    #[cfg(test)]
-    pub fn simulate_create(components: &[SnapshotComponent]) -> Vec<Self> {
-        let mut states = Vec::new();
-        let mut progress = Self::new_create(components);
-        states.push(progress.clone());
-
-        // Prepare step.
-        progress.advance("Analyzing system state...", 0);
-        states.push(progress.clone());
-
-        // One step per component.
-        for comp in components {
-            let step_name = format!("Snapshotting {}...", comp.label());
-            progress.advance(&step_name, comp.estimated_size_bytes());
-            states.push(progress.clone());
-        }
-
-        // Finalize.
-        progress.advance("Finalizing snapshot...", 0);
-        states.push(progress.clone());
-        progress.finish();
-        states.push(progress);
-
-        states
-    }
-
-    /// Simulate the full restore process, returning intermediate states.
-    /// The restore sequence, for tests.
-    ///
-    /// `#[cfg(test)]` since 2026-09-15. The step names and the byte accounting
-    /// are real work and stay tested; what was not real was that any of it
-    /// happened.
-    #[cfg(test)]
-    pub fn simulate_restore(snap: &Snapshot) -> Vec<Self> {
-        let mut states = Vec::new();
-        let mut progress = Self::new_restore(snap);
-        states.push(progress.clone());
-
-        progress.advance("Verifying snapshot integrity...", 0);
-        states.push(progress.clone());
-
-        for comp in &snap.components {
-            let step_name = format!("Restoring {}...", comp.label());
-            progress.advance(&step_name, comp.estimated_size_bytes());
-            states.push(progress.clone());
-        }
-
-        progress.advance("Applying changes...", 0);
-        states.push(progress.clone());
-        progress.finish();
-        states.push(progress);
-
-        states
+        self.complete = true;
+        "Stopped".clone_into(&mut self.current_step);
     }
 }
 
@@ -2018,6 +1872,17 @@ pub enum ToolbarControl {
     Export,
 }
 
+/// A control in the Schedule view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScheduleControl {
+    /// Turn the schedule on or off.
+    Toggle,
+    /// Take restore points less often.
+    Slower,
+    /// Take them more often.
+    Faster,
+}
+
 /// Which text field of the new-snapshot form has the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FormField {
@@ -2036,6 +1901,31 @@ pub enum DialogButton {
     /// Close the dialog and do nothing.
     Cancel,
 }
+
+/// What a piece of running work is for: what to do with what it reports.
+#[derive(Clone, Debug)]
+enum Pending {
+    /// A restore point asked for, or taken by the schedule.
+    Create {
+        name: String,
+        description: String,
+        kind: SnapshotType,
+        /// The schedule's own: no overlay, and the outcome on the status bar.
+        quiet: bool,
+    },
+    /// A restore to `target`. Its first report is the restore point of the
+    /// files as they were before it.
+    Restore { target: u64, name: String },
+    /// A restore point being deleted.
+    Delete {
+        id: u64,
+        /// The retention policy's: no overlay.
+        quiet: bool,
+    },
+}
+
+/// Why work cannot start while other work runs.
+const BUSY: &str = "Other work on restore points is running; wait for it to finish";
 
 /// Main application UI state for the system restore manager.
 /// The keys this program answers, raised by `F1` or `?`.
@@ -2058,6 +1948,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Delete", "Delete it"),
     ("Backspace", "Rub out a letter of the search"),
     ("Esc", "Clear the search, or close a dialog"),
+    ("Space", "Turn the schedule on or off (Schedule view)"),
+    (
+        "Left / Right",
+        "Take restore points more or less often (Schedule view)",
+    ),
     ("F1 / ?", "This list"),
 ];
 
@@ -2088,19 +1983,29 @@ pub struct SystemRestoreUI {
     pub form_components: Vec<bool>,
     /// New snapshot form: snapshot type.
     pub form_type: SnapshotType,
-    /// New snapshot form: parent ID (None = root).
-    pub form_parent_id: Option<u64>,
-    /// Current simulated timestamp for demo purposes.
+    /// The clock, in seconds since the epoch: what ages, countdowns and the
+    /// schedule are measured against. Set by the tick, from the wall clock.
     pub current_timestamp: u64,
     /// Which form field the keyboard is typing into.
     pub form_field: FormField,
-    /// The remaining frames of a running operation.
-    ///
-    /// `OperationProgress::simulate_create` and `simulate_restore` each return
-    /// the whole filmstrip at once; the tick shows one frame per step. Neither
-    /// had a caller, so the progress overlay -- which the renderer draws in
-    /// full, with a bar and a step name -- could never appear.
-    pub pending_steps: std::collections::VecDeque<OperationProgress>,
+    /// Where restore points are taken from and kept.
+    locations: Locations,
+    /// The work running now, and what its reports are for.
+    work: Option<(Worker, Pending)>,
+    /// Why the list of restore points could not be read, if it could not.
+    /// Shown, and nothing is written over the file while it stands.
+    load_error: Option<String>,
+    /// How much disk the store takes, as last measured.
+    store_bytes: Option<u64>,
+    /// The comparison of the selected and the compared restore point, and for
+    /// which pair -- worked out when the pair changes, not on every frame.
+    compare_cache: Option<((u64, u64), Result<SnapshotDiffResult, String>)>,
+    /// Asked to close while work ran: close when it ends.
+    close_when_done: bool,
+    /// Scheduled restore points the retention policy is removing, one by one.
+    deletions: std::collections::VecDeque<u64>,
+    /// What the status bar says about the last thing done in the background.
+    pub status: String,
     /// How wide the window is, in pixels.
     ///
     /// Every layout in this file used the `WINDOW_WIDTH` constant directly, so
@@ -2122,93 +2027,40 @@ pub struct SystemRestoreUI {
 }
 
 impl SystemRestoreUI {
-    /// Create a new UI state with demo data.
+    /// The window over this user's restore points.
     pub fn new() -> Self {
-        let mut manager = SnapshotManager::new();
-        let base_ts = 1_700_000_000u64;
+        Self::with_locations(Locations::from_env())
+    }
 
-        // Create demo snapshot tree.
-        let root_id = manager
-            .create_snapshot(
-                "Initial Setup",
-                "Clean install with base system",
-                base_ts,
-                SnapshotType::Manual,
-                SnapshotComponent::default_set(),
-                None,
-            )
-            .unwrap_or(0);
-
-        let after_update_id = manager
-            .create_snapshot(
-                "After System Update v1.1",
-                "System updated to version 1.1 with security patches",
-                base_ts + 86_400 * 7,
-                SnapshotType::PreUpdate,
-                vec![
-                    SnapshotComponent::SystemFiles,
-                    SnapshotComponent::BootConfig,
-                    SnapshotComponent::PackageState,
-                ],
-                Some(root_id),
-            )
-            .unwrap_or(0);
-
-        let _dev_branch = manager
-            .create_snapshot(
-                "Dev Tools Installed",
-                "Added development toolchain and IDE",
-                base_ts + 86_400 * 10,
-                SnapshotType::PreInstall,
-                vec![
-                    SnapshotComponent::InstalledApps,
-                    SnapshotComponent::UserSettings,
-                    SnapshotComponent::PackageState,
-                ],
-                Some(after_update_id),
-            )
-            .unwrap_or(0);
-
-        let _weekly_auto = manager
-            .create_snapshot(
-                "Weekly Auto Backup",
-                "Scheduled weekly snapshot",
-                base_ts + 86_400 * 14,
-                SnapshotType::Scheduled,
-                SnapshotComponent::default_set(),
-                Some(after_update_id),
-            )
-            .unwrap_or(0);
-
-        let _net_config = manager
-            .create_snapshot(
-                "Network Reconfigured",
-                "Changed to static IP and new DNS settings",
-                base_ts + 86_400 * 20,
-                SnapshotType::Manual,
-                vec![
-                    SnapshotComponent::NetworkConfig,
-                    SnapshotComponent::ServiceConfig,
-                ],
-                Some(root_id),
-            )
-            .unwrap_or(0);
-
-        // Set up a default schedule.
-        manager.schedule = ScheduleConfig {
-            enabled: true,
-            frequency: ScheduleFrequency::Weekly,
-            components: SnapshotComponent::default_set(),
-            retention: RetentionPolicy::new(10, 30 * 86_400, 50_000_000_000),
-            last_snapshot_timestamp: base_ts + 86_400 * 14,
+    /// The window over the restore points kept at `locations`.
+    ///
+    /// It used to open on five invented restore points -- "Initial Setup",
+    /// "After System Update v1.1" and the rest -- under a banner saying they
+    /// were not real, with a weekly schedule switched on that took a new
+    /// invented one within a minute. It opens on what is kept, which on a
+    /// first run is nothing.
+    #[must_use]
+    pub fn with_locations(locations: Locations) -> Self {
+        let (manager, load_error) = match &locations.store {
+            Some(store) => match points::load(store) {
+                Ok(manager) => (manager, None),
+                Err(why) => (SnapshotManager::new(), Some(why)),
+            },
+            None => (SnapshotManager::new(), None),
         };
-
-        Self {
+        let selected_id = manager
+            .current
+            .or_else(|| manager.tree.all_ids_by_timestamp().last().copied());
+        let form_components = SnapshotComponent::all()
+            .iter()
+            .map(|c| c.source(&locations).is_ok())
+            .collect();
+        let mut ui = Self {
             show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             manager,
             view_mode: ViewMode::Tree,
-            selected_id: Some(root_id),
+            selected_id,
             compare_id: None,
             search_query: String::new(),
             type_filter: None,
@@ -2217,15 +2069,113 @@ impl SystemRestoreUI {
             scroll_offset: 0.0,
             form_name: String::new(),
             form_description: String::new(),
-            form_components: vec![true; SnapshotComponent::all().len()],
+            form_components,
             form_type: SnapshotType::Manual,
-            form_parent_id: None,
-            current_timestamp: base_ts + 86_400 * 25,
+            current_timestamp: 0,
             form_field: FormField::Name,
-            pending_steps: std::collections::VecDeque::new(),
+            locations,
+            work: None,
+            load_error,
+            store_bytes: None,
+            compare_cache: None,
+            close_when_done: false,
+            deletions: std::collections::VecDeque::new(),
+            status: String::new(),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
-        }
+        };
+        ui.measure_store();
+        ui
+    }
+
+    /// A window holding a tree of five restore points, for tests.
+    ///
+    /// Most of this program's tests are about the list, the tree, the
+    /// selection, the views and the dialogs -- all of which need *restore
+    /// points*, not specifically real ones, and none of which should touch
+    /// the disk. This is the tree `new` used to open on; it has nothing in
+    /// the store behind it, so restoring one of these says so.
+    ///
+    /// The window's folders are scratch folders of its own, so what a test
+    /// does is kept somewhere -- and nowhere a person keeps anything. They
+    /// are handed back with it: the test holds them for as long as it uses
+    /// the window, and they are removed when it drops them.
+    #[cfg(test)]
+    pub fn with_sample_restore_points() -> (scratchdir::ScratchDir, Self) {
+        let scratch = scratchdir::ScratchDir::new("systemrestore_sample");
+        let mut ui = Self::with_locations(Locations {
+            settings: Some(scratch.dir().join("settings")),
+            store: Some(scratch.dir().join("store")),
+        });
+        let base_ts = 1_700_000_000u64;
+        let manager = &mut ui.manager;
+        let mut add =
+            |name: &str, desc: &str, days: u64, kind, comps: Vec<SnapshotComponent>, parent| {
+                manager
+                    .create_snapshot(
+                        name,
+                        desc,
+                        base_ts.saturating_add(86_400_u64.saturating_mul(days)),
+                        kind,
+                        comps,
+                        parent,
+                    )
+                    .unwrap_or(0)
+            };
+        let root_id = add(
+            "Initial Setup",
+            "Clean install with base system",
+            0,
+            SnapshotType::Manual,
+            SnapshotComponent::default_set(),
+            None,
+        );
+        let after_update_id = add(
+            "After System Update v1.1",
+            "System updated to version 1.1 with security patches",
+            7,
+            SnapshotType::PreUpdate,
+            vec![
+                SnapshotComponent::SystemFiles,
+                SnapshotComponent::BootConfig,
+                SnapshotComponent::PackageState,
+            ],
+            Some(root_id),
+        );
+        add(
+            "Dev Tools Installed",
+            "Added development toolchain and IDE",
+            10,
+            SnapshotType::PreInstall,
+            vec![
+                SnapshotComponent::InstalledApps,
+                SnapshotComponent::UserSettings,
+                SnapshotComponent::PackageState,
+            ],
+            Some(after_update_id),
+        );
+        add(
+            "Weekly Auto Backup",
+            "Scheduled weekly snapshot",
+            14,
+            SnapshotType::Scheduled,
+            SnapshotComponent::default_set(),
+            Some(after_update_id),
+        );
+        add(
+            "Network Reconfigured",
+            "Changed to static IP and new DNS settings",
+            20,
+            SnapshotType::Manual,
+            vec![
+                SnapshotComponent::NetworkConfig,
+                SnapshotComponent::ServiceConfig,
+            ],
+            Some(root_id),
+        );
+        ui.selected_id = Some(root_id);
+        ui.current_timestamp = base_ts + 86_400 * 25;
+        (scratch, ui)
     }
 
     /// Get the list of visible snapshot IDs based on current filters.
@@ -2233,16 +2183,12 @@ impl SystemRestoreUI {
         self.visible_rows().into_iter().map(|(id, _)| id).collect()
     }
 
-    /// Estimated size for the new snapshot form based on selected components.
-    pub fn form_estimated_size(&self) -> u64 {
-        let all_components = SnapshotComponent::all();
-        self.form_components
-            .iter()
-            .enumerate()
-            .filter(|(_, selected)| **selected)
-            .filter_map(|(i, _)| all_components.get(i))
-            .map(|c| c.estimated_size_bytes())
-            .sum()
+    /// The folders a restore point taken from the form would hold.
+    pub fn form_sources(&self) -> Vec<PathBuf> {
+        self.form_selected_components()
+            .into_iter()
+            .filter_map(|c| c.source(&self.locations).ok())
+            .collect()
     }
 
     /// Get selected components from the form.
@@ -2481,6 +2427,16 @@ impl SystemRestoreUI {
 
     /// Handle one event from the window.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        let result = self.dispatch(event);
+        // The comparison follows the pair, however the pair changed: a key,
+        // a click, a deletion. Worked out here rather than when drawn, which
+        // happens far more often and must not read the store.
+        self.refresh_compare();
+        result
+    }
+
+    /// Route one event.
+    fn dispatch(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
@@ -2500,25 +2456,23 @@ impl SystemRestoreUI {
         }
     }
 
-    /// One step of whatever is running, or one minute of the clock.
+    /// Take in what the running work has reported, and the time.
     ///
-    /// The two are separate because they happen at different rates: a running
-    /// operation steps every `PROGRESS_STEP_MS`, and the clock only needs
-    /// re-reading once a minute. `tick_interval` returns whichever is current,
-    /// so this arrives at the right rate for whichever is happening.
+    /// The work reports as it goes, so this arrives often while it runs
+    /// (`tick_interval`), and once a minute otherwise, for the clock and the
+    /// schedule.
     fn handle_tick(&mut self) -> EventResult {
-        if self.progress.is_some() {
-            return self.advance_operation();
-        }
+        let polled = self.poll_work();
         // Re-read rather than added to, so the clock survives a suspend and
-        // does not drift: `Event::Tick` says how long the harness *intended* to
-        // wait, and a laptop that was shut for an hour would otherwise wake up
-        // an hour behind and take an hour to catch up, taking every scheduled
-        // snapshot it had missed one minute apart.
-        let Some(now) = system_now_secs() else {
-            return EventResult::Ignored;
-        };
-        self.tick_to(now)
+        // does not drift: a laptop shut for an hour would otherwise wake an
+        // hour behind.
+        let ticked =
+            system_now_secs().is_some_and(|now| self.tick_to(now) == EventResult::Consumed);
+        if polled || ticked {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
     }
 
     /// What a tick does, given the time. Separate from [`Self::handle_tick`]
@@ -2533,47 +2487,363 @@ impl SystemRestoreUI {
         EventResult::Consumed
     }
 
-    /// Take a scheduled snapshot if one is due, and prune by the retention
-    /// policy.
+    /// Start the schedule's work if any is due: first a removal the retention
+    /// policy asked for, then a scheduled restore point.
     ///
-    /// This is the program's whole purpose and nothing called it. A snapshot
-    /// manager with automatic snapshots configured, a retention policy, a
-    /// countdown to the next one on screen, and no clock to run any of it.
+    /// Only while this window is open -- there is no service to run it
+    /// otherwise, and the Schedule view says so.
     fn run_schedule(&mut self, now: u64) {
-        // A failure to take a scheduled snapshot is the schedule being
-        // misconfigured -- no components selected -- which the Schedule view
-        // already shows. Retrying every minute and reporting nothing is what
-        // any scheduler does with a job it cannot run.
-        if let Ok(Some(id)) = self.manager.check_schedule(now) {
-            self.selected_id = Some(id);
+        if self.work.is_some() || self.cannot_write().is_some() {
+            return;
         }
-        // After, not before: a snapshot taken this minute must be in the tree
-        // when the retention policy counts how many there are, or a policy of
-        // "keep 5" would keep 5 and then admit a 6th.
-        let pruned = self.manager.apply_retention(now);
-        if self.selected_id.is_some_and(|id| pruned.contains(&id)) {
-            self.selected_id = None;
+        while let Some(id) = self.deletions.pop_front() {
+            if self.manager.tree.get_snapshot(id).is_some() {
+                self.start_delete(id, true);
+                return;
+            }
+        }
+        if !self.manager.schedule_due(now) {
+            return;
+        }
+        // Marked before it runs, so one that fails is tried at the next
+        // interval rather than every minute; the failure is on the status bar.
+        self.manager.schedule.last_snapshot_timestamp = now;
+        if !self.save() {
+            return;
+        }
+        let components = self.manager.schedule.components.clone();
+        self.status = "Taking the scheduled restore point...".to_string();
+        self.start(
+            Job::Create { components },
+            Pending::Create {
+                name: format!("Scheduled, {}", format_timestamp_short(now)),
+                description: "Taken by the schedule".to_string(),
+                kind: SnapshotType::Scheduled,
+                quiet: true,
+            },
+            None,
+        );
+    }
+
+    /// Take in every report the running work has sent; whether any came.
+    fn poll_work(&mut self) -> bool {
+        let Some((worker, pending)) = &self.work else {
+            return false;
+        };
+        let updates = worker.updates();
+        if updates.is_empty() {
+            return false;
+        }
+        let pending = pending.clone();
+        for update in updates {
+            self.apply(&pending, update);
+        }
+        true
+    }
+
+    /// One report from the running work.
+    fn apply(&mut self, pending: &Pending, update: Update) {
+        match update {
+            Update::Step { name, done, total } => {
+                if let Some(progress) = &mut self.progress {
+                    progress.step(&name, done, total);
+                }
+            }
+            Update::Captured(captured) => self.captured(pending, &captured),
+            Update::Restored { changed, errors } => {
+                let Pending::Restore { target, name } = pending else {
+                    return;
+                };
+                self.work = None;
+                self.manager.current = Some(*target);
+                self.selected_id = Some(*target);
+                let saved = self.save();
+                let summary =
+                    format!("Restored to \u{201c}{name}\u{201d}: {changed} file(s) changed");
+                if let Some(progress) = &mut self.progress {
+                    progress.finish(&summary);
+                    if !errors.is_empty() {
+                        progress.notes.push(format!(
+                            "{} could not be put back:",
+                            plural(errors.len(), "item", "items")
+                        ));
+                        progress.notes.extend(
+                            errors
+                                .iter()
+                                .map(|(path, why)| format!("{}: {why}", shown_path(path))),
+                        );
+                    }
+                    if !saved {
+                        progress.notes.push(self.status.clone());
+                    }
+                }
+                self.after_work();
+            }
+            Update::Deleted => {
+                let Pending::Delete { id, quiet } = pending else {
+                    return;
+                };
+                self.work = None;
+                let name = self
+                    .manager
+                    .tree
+                    .get_snapshot(*id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                self.remove_point(*id);
+                self.save();
+                if *quiet {
+                    self.status = format!(
+                        "Removed \u{201c}{name}\u{201d}, by the schedule's retention policy"
+                    );
+                } else if let Some(progress) = &mut self.progress {
+                    progress.finish(&format!("Deleted \u{201c}{name}\u{201d}"));
+                }
+                self.after_work();
+            }
+            Update::Failed(why) => {
+                self.work = None;
+                match &mut self.progress {
+                    Some(progress) => progress.fail(&why),
+                    None => self.status = why,
+                }
+                self.after_work();
+            }
         }
     }
 
-    /// Show the next state of the running operation, or finish it.
-    fn advance_operation(&mut self) -> EventResult {
-        if self.progress.is_none() {
-            return EventResult::Ignored;
+    /// A restore point taken: the one asked for, or the one a restore takes of
+    /// the files before it starts.
+    fn captured(&mut self, pending: &Pending, captured: &points::Captured) {
+        let mut notes = Vec::new();
+        if !captured.unread.is_empty() {
+            notes.push(format!(
+                "{} could not be read, so it is not in the restore point, and a restore will leave it as it is:",
+                plural(captured.unread.len(), "item", "items")
+            ));
+            notes.extend(
+                captured
+                    .unread
+                    .iter()
+                    .map(|(path, why)| format!("{}: {why}", shown_path(path))),
+            );
         }
-        // Running out of frames is the end, and it is the *only* end. A test
-        // for `progress.complete` used to stand in front of this, on the theory
-        // that a finished operation should close on the frame that says so --
-        // but the finished frame is the last one in the filmstrip, so the queue
-        // is empty on exactly the tick that check would have fired, and a
-        // mutation that deleted the check changed nothing anyone could see. Two
-        // conditions for one event is one condition that is never the reason.
-        let Some(next) = self.pending_steps.pop_front() else {
-            self.progress = None;
-            return EventResult::Consumed;
+        for (c, why) in &captured.skipped {
+            notes.push(format!("{} was not kept: {why}", c.label()));
+        }
+        match pending {
+            Pending::Create {
+                name,
+                description,
+                kind,
+                quiet,
+            } => {
+                self.work = None;
+                let added = self.add_point(name, description, *kind, captured);
+                let saved = self.save();
+                if *quiet {
+                    self.status = match added {
+                        Some(_) if saved => format!("Took \u{201c}{name}\u{201d}"),
+                        Some(_) => self.status.clone(),
+                        None => {
+                            "The scheduled restore point could not be added to the list".to_string()
+                        }
+                    };
+                    if *kind == SnapshotType::Scheduled {
+                        let now = self.current_timestamp.max(captured.taken_at);
+                        self.deletions
+                            .extend(self.manager.retention_candidates(now));
+                    }
+                } else if let Some(progress) = &mut self.progress {
+                    match added {
+                        Some(_) => progress.finish(&format!("Took \u{201c}{name}\u{201d}")),
+                        None => progress
+                            .fail("The restore point was taken but could not be added to the list"),
+                    }
+                    progress.notes.extend(notes);
+                    if !saved {
+                        progress.notes.push(self.status.clone());
+                    }
+                }
+                self.after_work();
+            }
+            Pending::Restore { name, .. } => {
+                // The work goes on to the restore; this is its undo.
+                let before = format!("Before restoring to \u{201c}{name}\u{201d}");
+                self.add_point(
+                    &before,
+                    "Taken by the restore, of the files as they were just before it",
+                    SnapshotType::BeforeRestore,
+                    captured,
+                );
+                self.save();
+                if let Some(progress) = &mut self.progress {
+                    progress.notes.extend(notes);
+                }
+            }
+            Pending::Delete { .. } => {}
+        }
+    }
+
+    /// Add a restore point for what was captured, on top of the current one,
+    /// and make it current. `None` if the tree refused it.
+    fn add_point(
+        &mut self,
+        name: &str,
+        description: &str,
+        kind: SnapshotType,
+        captured: &points::Captured,
+    ) -> Option<u64> {
+        let parent = self
+            .manager
+            .current
+            .filter(|id| self.manager.tree.get_snapshot(*id).is_some());
+        let components = captured.stored.keys().copied().collect();
+        let id = self
+            .manager
+            .tree
+            .add_snapshot(
+                name,
+                description,
+                captured.taken_at,
+                kind,
+                components,
+                parent,
+            )
+            .ok()?;
+        if let Some(point) = self.manager.tree.get_snapshot_mut(id) {
+            point.size_bytes = captured.size;
+            point.stored.clone_from(&captured.stored);
+            point.unread = u64::try_from(captured.unread.len()).unwrap_or(u64::MAX);
+        }
+        self.manager.current = Some(id);
+        self.selected_id = Some(id);
+        Some(id)
+    }
+
+    /// Take a restore point out of the tree, keeping its branches: what was
+    /// taken on top of it now hangs from its parent. Every restore point
+    /// holds all its files, so none depends on another's.
+    fn remove_point(&mut self, id: u64) {
+        let tree = &mut self.manager.tree;
+        let parent = tree.get_snapshot(id).and_then(|p| p.parent_id);
+        for child in tree.children_of(id).to_vec() {
+            // Moving a child to its grandparent cannot close a loop.
+            let _ = tree.set_parent(child, parent);
+        }
+        if tree.remove_snapshot(id).is_err() {
+            return;
+        }
+        if self.manager.current == Some(id) {
+            self.manager.current = parent;
+        }
+        if self.selected_id == Some(id) {
+            self.selected_id = parent;
+        }
+        if self.compare_id == Some(id) {
+            self.compare_id = None;
+        }
+        self.reanchor_selection();
+    }
+
+    /// What follows every piece of work: the store measured again, the
+    /// comparison worked out again, and the window closed if it was asked to.
+    fn after_work(&mut self) {
+        self.measure_store();
+        self.compare_cache = None;
+        self.refresh_compare();
+    }
+
+    /// Why nothing may be written, if something forbids it.
+    fn cannot_write(&self) -> Option<String> {
+        if let Some(why) = &self.load_error {
+            return Some(format!(
+                "{why}. Nothing is written over it: repair or remove {} first",
+                self.locations
+                    .store
+                    .as_ref()
+                    .map_or_else(String::new, |s| shown_path(&s.join("points.json")))
+            ));
+        }
+        if self.locations.store.is_none() {
+            return Some(points::NO_HOME.to_string());
+        }
+        None
+    }
+
+    /// Save the list. A failure is said on the status bar; what is in the
+    /// window stands.
+    fn save(&mut self) -> bool {
+        if let Some(why) = self.cannot_write() {
+            self.status = why;
+            return false;
+        }
+        let Some(store) = self.locations.store.clone() else {
+            return false;
         };
-        self.progress = Some(next);
-        EventResult::Consumed
+        match points::save(&store, &self.manager) {
+            Ok(()) => true,
+            Err(e) => {
+                self.status = format!("The list of restore points could not be saved: {e}");
+                false
+            }
+        }
+    }
+
+    /// Start `job`, for `pending`, under an overlay headed `title` -- or with
+    /// none, for the schedule's quiet work.
+    fn start(&mut self, job: Job, pending: Pending, title: Option<&str>) {
+        self.progress = title.map(OperationProgress::new);
+        self.work = Some((Worker::start(job, self.locations.clone()), pending));
+    }
+
+    /// Refuse to start, and say why on the overlay.
+    fn refuse(&mut self, title: &str, why: &str) {
+        let mut progress = OperationProgress::new(title);
+        progress.fail(why);
+        self.progress = Some(progress);
+    }
+
+    /// Measure how much disk the store takes.
+    fn measure_store(&mut self) {
+        self.store_bytes = self
+            .locations
+            .store
+            .as_ref()
+            .and_then(|root| points::store_bytes(&snapstore::Store::at(root)).ok());
+    }
+
+    /// Work out the comparison of the selected and the compared restore point,
+    /// if the pair has changed.
+    fn refresh_compare(&mut self) {
+        let (Some(a), Some(b)) = (self.selected_id, self.compare_id) else {
+            self.compare_cache = None;
+            return;
+        };
+        if self
+            .compare_cache
+            .as_ref()
+            .is_some_and(|(key, _)| *key == (a, b))
+        {
+            return;
+        }
+        let tree = &self.manager.tree;
+        let result = match (tree.get_snapshot(a), tree.get_snapshot(b)) {
+            (Some(x), Some(y)) => {
+                let (older, newer) = if x.timestamp <= y.timestamp {
+                    (x, y)
+                } else {
+                    (y, x)
+                };
+                match &self.locations.store {
+                    Some(root) => points::compare(&snapstore::Store::at(root), older, newer)
+                        .map_err(|e| format!("They could not be compared: {e}")),
+                    None => Err(points::NO_HOME.to_string()),
+                }
+            }
+            _ => Err("One of them is no longer in the list".to_string()),
+        };
+        self.compare_cache = Some(((a, b), result));
     }
 
     /// Handle a key press.
@@ -2594,13 +2864,13 @@ impl SystemRestoreUI {
             return EventResult::Consumed;
         }
 
-        if self.progress.is_some() {
-            // An operation is running and the window is showing a progress
-            // overlay over everything. Escape abandons it; nothing else reaches
-            // through.
-            if key.key == Key::Escape {
+        if let Some(progress) = &self.progress {
+            // The overlay is modal. While the work runs nothing reaches
+            // through, and nothing abandons it: it was Escape, over a
+            // filmstrip, but real work stopped half-way is a folder half
+            // restored. Once it has ended, Enter or Escape puts it away.
+            if progress.complete && matches!(key.key, Key::Escape | Key::Enter) {
                 self.progress = None;
-                self.pending_steps.clear();
                 return EventResult::Consumed;
             }
             return EventResult::Ignored;
@@ -2647,6 +2917,17 @@ impl SystemRestoreUI {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+
+        // The schedule's controls, in its view. Space is a character the
+        // search box would take anywhere else.
+        if self.view_mode == ViewMode::Schedule {
+            match key.key {
+                Key::Space => return self.schedule_control(ScheduleControl::Toggle),
+                Key::Left => return self.schedule_control(ScheduleControl::Slower),
+                Key::Right => return self.schedule_control(ScheduleControl::Faster),
+                _ => {}
+            }
         }
 
         match key.key {
@@ -2764,8 +3045,11 @@ impl SystemRestoreUI {
     /// Handle a left click.
     fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
         // A progress overlay covers the window: nothing behind it can be
-        // clicked, and it has no buttons of its own.
-        if self.progress.is_some() {
+        // clicked. Once the work has ended, a click puts it away.
+        if let Some(progress) = &self.progress {
+            if progress.complete {
+                self.progress = None;
+            }
             return EventResult::Consumed;
         }
 
@@ -2806,6 +3090,16 @@ impl SystemRestoreUI {
             return EventResult::Consumed;
         }
 
+        if self.view_mode == ViewMode::Schedule
+            && let Some(control) = self
+                .schedule_controls()
+                .into_iter()
+                .find(|(rect, _)| rect.contains(x, y))
+                .map(|(_, control)| control)
+        {
+            return self.schedule_control(control);
+        }
+
         if let Some(id) = self
             .row_rects()
             .into_iter()
@@ -2829,6 +3123,74 @@ impl SystemRestoreUI {
         }
 
         EventResult::Ignored
+    }
+
+    /// Where the Schedule view's controls are drawn: the on/off badge, and
+    /// the arrows either side of how often.
+    ///
+    /// One law for the drawing and the pointer, as `toolbar_controls` is: the
+    /// badge's box is the one `render_schedule_view` fills, and the arrows sit
+    /// in the frequency row it draws.
+    fn schedule_controls(&self) -> Vec<(Rect, ScheduleControl)> {
+        let y = self.content_top();
+        let value_x = PADDING + 180.0;
+        let row_y = y + PADDING + 66.0;
+        vec![
+            (
+                Rect::new(PADDING, y + PADDING + 30.0, 80.0, 24.0),
+                ScheduleControl::Toggle,
+            ),
+            (
+                Rect::new(value_x - 26.0, row_y - 2.0, 20.0, 20.0),
+                ScheduleControl::Slower,
+            ),
+            (
+                Rect::new(value_x + 80.0, row_y - 2.0, 20.0, 20.0),
+                ScheduleControl::Faster,
+            ),
+        ]
+    }
+
+    /// Change the schedule, and keep the change.
+    ///
+    /// The view drew a schedule that nothing could change: it opened switched
+    /// on, weekly, with a record of automatic snapshots nobody had taken, and
+    /// no key or click reached it.
+    fn schedule_control(&mut self, control: ScheduleControl) -> EventResult {
+        if let Some(why) = self.cannot_write() {
+            self.status = why;
+            return EventResult::Consumed;
+        }
+        let schedule = &mut self.manager.schedule;
+        let all = ScheduleFrequency::all();
+        let at = all
+            .iter()
+            .position(|f| *f == schedule.frequency)
+            .unwrap_or(0);
+        match control {
+            ScheduleControl::Toggle => schedule.enabled = !schedule.enabled,
+            // Slower is towards Monthly, the end of the list.
+            ScheduleControl::Slower => {
+                if let Some(next) = all.get(at.saturating_add(1)) {
+                    schedule.frequency = *next;
+                }
+            }
+            ScheduleControl::Faster => {
+                if let Some(next) = at.checked_sub(1).and_then(|i| all.get(i)) {
+                    schedule.frequency = *next;
+                }
+            }
+        }
+        self.status = if self.manager.schedule.enabled {
+            format!(
+                "Restore points are taken {} while System Restore is open",
+                self.manager.schedule.frequency.label().to_lowercase()
+            )
+        } else {
+            "The schedule is off".to_string()
+        };
+        self.save();
+        EventResult::Consumed
     }
 
     /// Do what a toolbar control says.
@@ -2874,73 +3236,122 @@ impl SystemRestoreUI {
         self.dialog = DialogKind::None;
     }
 
-    /// Start creating a snapshot from the form.
+    /// Take a restore point, from the form.
     fn begin_create(&mut self) {
-        let components = self.form_selected_components();
+        let title = "Taking a restore point";
+        if let Some(why) = self.cannot_write() {
+            return self.refuse(title, &why);
+        }
+        if self.work.is_some() {
+            return self.refuse(title, BUSY);
+        }
+        let components: Vec<SnapshotComponent> = self
+            .form_selected_components()
+            .into_iter()
+            .filter(|c| c.source(&self.locations).is_ok())
+            .collect();
         if components.is_empty() {
-            // Nothing to snapshot. The form shows the estimated size as zero,
-            // which is the same statement.
-            return;
+            return self.refuse(
+                title,
+                "None of the chosen components can be kept on this system",
+            );
         }
-        // Refused. `OperationProgress::fail` already existed for exactly this
-        // and had no caller on either path.
-        let mut progress = OperationProgress::new_create(&components);
-        progress.fail(CANNOT_CREATE);
-        self.progress = Some(progress);
-        self.pending_steps = std::collections::VecDeque::new();
-
         let name = if self.form_name.trim().is_empty() {
-            format!("Snapshot {}", self.manager.tree.count().saturating_add(1))
+            format!(
+                "Restore point {}",
+                self.manager.tree.count().saturating_add(1)
+            )
         } else {
-            self.form_name.clone()
+            self.form_name.trim().to_string()
         };
-        if let Ok(id) = self.manager.create_snapshot(
-            &name,
-            &self.form_description,
-            self.current_timestamp,
-            self.form_type,
-            components,
-            self.form_parent_id,
-        ) {
-            self.selected_id = Some(id);
-        }
+        self.start(
+            Job::Create { components },
+            Pending::Create {
+                name,
+                description: self.form_description.trim().to_string(),
+                kind: self.form_type,
+                quiet: false,
+            },
+            Some(title),
+        );
     }
 
-    /// Start restoring a snapshot.
+    /// Put the files back as restore point `id` holds them -- after keeping
+    /// them as they are, as a restore point of their own.
     fn begin_restore(&mut self, id: u64) {
-        let Some(snap) = self.manager.tree.get_snapshot(id) else {
+        let Some(point) = self.manager.tree.get_snapshot(id).cloned() else {
             return;
         };
-        // Refused, and refused *before* the progress bar rather than during
-        // it. A bar that runs and then reports trouble has already told the
-        // user that something was happening to their system.
-        //
-        // The Export and Import paths in this same file were already honest --
-        // "Closing the dialog is honest; pretending to write a file would not
-        // be." Somebody applied exactly the right reasoning there and not
-        // here, which is the sweep's most common shape: the instance is easy
-        // to see, the class is not.
-        let mut progress = OperationProgress::new_restore(snap);
-        progress.fail(CANNOT_RESTORE);
-        self.progress = Some(progress);
-        self.pending_steps = std::collections::VecDeque::new();
+        let title = format!("Restoring \u{201c}{}\u{201d}", point.name);
+        if let Some(why) = self.cannot_write() {
+            return self.refuse(&title, &why);
+        }
+        if self.work.is_some() {
+            return self.refuse(&title, BUSY);
+        }
+        if point.stored.is_empty() {
+            return self.refuse(
+                &title,
+                "This restore point holds nothing that can be put back",
+            );
+        }
         self.selected_id = Some(id);
+        self.start(
+            Job::Restore { point },
+            Pending::Restore {
+                target: id,
+                name: self
+                    .manager
+                    .tree
+                    .get_snapshot(id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default(),
+            },
+            Some(&title),
+        );
     }
 
-    /// Delete a snapshot, and leave the selection somewhere real.
+    /// Delete a restore point: its files from the store, then it from the list.
     fn delete(&mut self, id: u64) {
-        if self.manager.delete_snapshot(id).is_err() {
-            // Locked, or the root of a tree with children. The lock is shown on
-            // the row and the error is what the lock is for.
+        self.start_delete(id, false);
+    }
+
+    /// Delete restore point `id`; `quiet` for the retention policy's.
+    fn start_delete(&mut self, id: u64, quiet: bool) {
+        let Some(point) = self.manager.tree.get_snapshot(id).cloned() else {
+            return;
+        };
+        let title = format!("Deleting \u{201c}{}\u{201d}", point.name);
+        let refused = if let Some(why) = self.cannot_write() {
+            Some(why)
+        } else if self.work.is_some() {
+            Some(BUSY.to_string())
+        } else if point.locked {
+            Some("It is locked. Unlock it first (Ctrl+L)".to_string())
+        } else {
+            None
+        };
+        if let Some(why) = refused {
+            if quiet {
+                self.status = format!("{title}: {why}");
+            } else {
+                self.refuse(&title, &why);
+            }
             return;
         }
-        if self.selected_id == Some(id) {
-            self.selected_id = None;
+        if point.stored.is_empty() {
+            // Nothing in the store: only the list changes.
+            self.remove_point(id);
+            self.save();
+            return;
         }
-        if self.compare_id == Some(id) {
-            self.compare_id = None;
-        }
-        self.reanchor_selection();
+        self.start(
+            Job::Delete {
+                stored: point.stored.values().cloned().collect(),
+            },
+            Pending::Delete { id, quiet },
+            (!quiet).then_some(title.as_str()),
+        );
     }
 
     /// Lock or unlock the selected snapshot.
@@ -2952,6 +3363,10 @@ impl SystemRestoreUI {
         let Some(id) = self.selected_id else {
             return;
         };
+        if let Some(why) = self.cannot_write() {
+            self.status = why;
+            return;
+        }
         let locked = self
             .manager
             .tree
@@ -2966,18 +3381,20 @@ impl SystemRestoreUI {
         // above has just established is not the case.
         debug_assert!(result.is_ok(), "the id came from the tree");
         drop(result);
+        self.save();
     }
 
-    /// Open the new-snapshot form, aimed at the selected snapshot.
+    /// Open the new-restore-point form.
+    ///
+    /// No parent to choose: a restore point is of the files as they are, and
+    /// it is taken on top of the one they were last taken as or restored to.
+    /// The form offered "branch from the selection", which described a
+    /// simulation -- files cannot be taken as they were in another point.
     fn open_create_dialog(&mut self) {
         self.dialog = DialogKind::CreateSnapshot;
         self.form_field = FormField::Name;
         self.form_name.clear();
         self.form_description.clear();
-        // Branching from what is selected, which is what makes the tree a tree.
-        // Left at `None` the form always added another root, and the branching
-        // this program is built around could not be reached.
-        self.form_parent_id = self.selected_id;
     }
 
     /// Move through the views. `delta` is in tabs, and it wraps.
@@ -3093,45 +3510,22 @@ impl SystemRestoreUI {
         }
     }
 
-    /// Move the sample timeline so that it ends where it was designed to, just
-    /// before `now`.
-    ///
-    /// The samples are laid out against a fixed origin -- November 2023 -- so
-    /// that tests can name exact instants, and `current_timestamp` was that
-    /// origin plus 25 days. Nothing ever moved it. Every age on screen ("3 days
-    /// ago"), every countdown in the schedule view ("next in 4h"), and every
-    /// cleanup suggestion was measured against a constant, so none of them
-    /// could change and all of them were fiction.
-    ///
-    /// Anchoring shifts every snapshot by the same amount, which preserves the
-    /// intervals *between* them -- the tree's shape, the ages relative to one
-    /// another, the schedule's spacing -- while putting the newest one 25 days
-    /// behind today rather than 25 days behind a date three years past. The
-    /// alternative, leaving the samples in 2023 and setting only the clock,
-    /// would be equally truthful and would open on a screen where everything is
-    /// years old and every scheduled snapshot is years overdue.
-    ///
-    /// Kept out of `new` so that `new` stays deterministic: a constructor that
-    /// reads the wall clock is a constructor no test can assert against.
-    pub fn anchor_to(&mut self, now: u64) {
-        let origin = self.current_timestamp;
-        for id in self.manager.tree.all_ids_by_timestamp() {
-            if let Some(snap) = self.manager.tree.get_snapshot_mut(id) {
-                snap.timestamp = shift(snap.timestamp, origin, now);
-            }
-        }
-        // The schedule's clock moves with the snapshots it made, or the next
-        // automatic snapshot would be three years overdue the moment the
-        // window opened.
-        self.manager.schedule.last_snapshot_timestamp =
-            shift(self.manager.schedule.last_snapshot_timestamp, origin, now);
-        self.current_timestamp = now;
-    }
-
     /// Advance the clock. Called from the tick, and it is the whole of what the
     /// tick does when no operation is running.
     pub fn set_now(&mut self, now: u64) {
         self.current_timestamp = now;
+    }
+
+    /// What a restore point holds, in the header: every program's settings
+    /// and data, and where they are.
+    fn header_note(&self) -> String {
+        match SnapshotComponent::UserSettings.source(&self.locations) {
+            Ok(dir) => format!(
+                "Restore points of every program's settings and data ({})",
+                shown_path(&dir)
+            ),
+            Err(why) => why.to_string(),
+        }
     }
 
     /// Render the header bar.
@@ -3159,13 +3553,18 @@ impl SystemRestoreUI {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // What those snapshots are. Beside the count rather than under
-        // it: the count is the claim this qualifies.
+        // What the restore points hold, or why the list could not be read.
+        // Beside the count rather than under it: the count is the claim this
+        // qualifies.
+        let (note, note_color) = match &self.load_error {
+            Some(why) => (why.clone(), self.palette.ink(self.palette.red)),
+            None => (self.header_note(), self.palette.subtext0),
+        };
         rt.push(RenderCommand::Text {
             x: 360.0,
             y: HEADER_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
-            text: SNAPSHOTS_ARE_NOT_REAL.to_owned(),
-            color: self.palette.ink(self.palette.yellow),
+            text: note,
+            color: note_color,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some((self.window_width - 380.0).max(120.0)),
@@ -3476,6 +3875,21 @@ impl SystemRestoreUI {
                     overflow: TextOverflow::Ellipsis,
                 });
 
+                // Which one the files are now: what a restore would go back
+                // from, and what the next restore point is taken on top of.
+                if self.manager.current == Some(*id) {
+                    rt.push(RenderCommand::Text {
+                        x: self.window_width - 200.0,
+                        y: row_y + TREE_ROW_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
+                        text: "Current".to_string(),
+                        color: self.palette.ink(self.palette.green),
+                        font_size: FONT_SIZE_SMALL,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: Some(70.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+
                 // Lock indicator.
                 if snap.locked {
                     let lock_x = self.window_width - 60.0;
@@ -3637,15 +4051,31 @@ impl SystemRestoreUI {
             overflow: TextOverflow::Ellipsis,
         });
 
-        if let (Some(sid), Some(cid)) = (self.selected_id, self.compare_id) {
-            if let Ok(diff) = self.manager.compare_snapshots(sid, cid) {
+        if self.selected_id.is_some() && self.compare_id.is_some() {
+            if let Some((_, Err(why))) = &self.compare_cache {
+                rt.push(RenderCommand::Text {
+                    x: panel_x,
+                    y: y + PADDING + 24.0,
+                    text: why.clone(),
+                    color: self.palette.ink(self.palette.red),
+                    font_size: FONT_SIZE,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(panel_width),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+            if let Some((_, Ok(diff))) = &self.compare_cache {
                 // Summary.
-                let summary = format!(
-                    "{} additions, {} removals, {} modifications",
-                    diff.addition_count(),
-                    diff.removal_count(),
-                    diff.modification_count(),
-                );
+                let summary = if diff.is_empty() {
+                    "The two hold the same files".to_string()
+                } else {
+                    format!(
+                        "{} additions, {} removals, {} modifications",
+                        diff.addition_count(),
+                        diff.removal_count(),
+                        diff.modification_count(),
+                    )
+                };
                 rt.push(RenderCommand::Text {
                     x: panel_x,
                     y: y + PADDING + 24.0,
@@ -3748,17 +4178,61 @@ impl SystemRestoreUI {
             overflow: TextOverflow::Ellipsis,
         });
 
+        // What the controls are, beside the badge they act on.
+        rt.push(RenderCommand::Text {
+            x: panel_x + 96.0,
+            y: y + PADDING + 35.0,
+            text: "Space, or a click on it, turns it on or off; Left and Right change how often"
+                .to_string(),
+            color: self.palette.subtext0,
+            font_size: FONT_SIZE_SMALL,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(panel_width - 100.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
         // Frequency.
         let mut info_y = y + PADDING + 66.0;
         let label_x = panel_x + 8.0;
         let value_x = panel_x + 180.0;
 
+        let components = schedule
+            .components
+            .iter()
+            .map(|c| c.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let retention = format!(
+            "{} -- of scheduled restore points only; one you take yourself is never removed by it",
+            schedule.retention.summary()
+        );
         let rows = [
             ("Frequency:", schedule.frequency.label()),
-            ("Components:", &format!("{}", schedule.components.len())),
-            ("Retention:", &schedule.retention.summary()),
+            ("Components:", components.as_str()),
+            ("Retention:", retention.as_str()),
+            (
+                "Runs:",
+                "Only while System Restore is open -- nothing on this system runs it otherwise",
+            ),
         ];
 
+        for (rect, control) in self.schedule_controls() {
+            let glyph = match control {
+                ScheduleControl::Toggle => continue,
+                ScheduleControl::Slower => "<",
+                ScheduleControl::Faster => ">",
+            };
+            rt.push(RenderCommand::Text {
+                x: rect.x + 6.0,
+                y: rect.y + 2.0,
+                text: glyph.to_string(),
+                color: self.palette.ink(self.palette.lavender),
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(rect.w),
+                overflow: TextOverflow::Clip,
+            });
+        }
         for (label, value) in &rows {
             rt.push(RenderCommand::Text {
                 x: label_x,
@@ -4079,7 +4553,11 @@ impl SystemRestoreUI {
         let detail_labels = [
             ("Size:", snap.size_display()),
             ("Age:", snap.age_display(self.current_timestamp)),
-            ("Components:", format!("{}", snap.component_count())),
+            if snap.unread > 0 {
+                ("Unread:", format!("{} not in it", snap.unread))
+            } else {
+                ("Components:", format!("{}", snap.component_count()))
+            },
             (
                 "Locked:",
                 if snap.locked { "Yes" } else { "No" }.to_string(),
@@ -4300,8 +4778,11 @@ impl SystemRestoreUI {
             Surface::Strip(Edge::Top),
         );
 
-        // Left: view mode and filter info.
-        let filter_text = if let Some(ft) = self.type_filter {
+        // Left: what the background work last said, if anything; the view
+        // and filter otherwise.
+        let filter_text = if !self.status.is_empty() {
+            self.status.clone()
+        } else if let Some(ft) = self.type_filter {
             format!("View: {} | Filter: {}", self.view_mode.label(), ft.label())
         } else {
             format!("View: {}", self.view_mode.label())
@@ -4319,11 +4800,21 @@ impl SystemRestoreUI {
 
         // Center: storage summary.
         let stats = self.manager.storage_stats();
-        let storage_text = format!(
-            "{} snapshots | {} total",
-            stats.snapshot_count,
-            stats.total_display(),
-        );
+        // What the points hold, and what the store takes on disk -- less,
+        // since a file unchanged between points is kept once.
+        let storage_text = match self.store_bytes {
+            Some(disk) => format!(
+                "{} restore points | {} held, {} on disk",
+                stats.snapshot_count,
+                stats.total_display(),
+                format_bytes(disk),
+            ),
+            None => format!(
+                "{} restore points | {} held",
+                stats.snapshot_count,
+                stats.total_display(),
+            ),
+        };
         rt.push(RenderCommand::Text {
             x: text::center_x(
                 &storage_text,
@@ -4336,14 +4827,14 @@ impl SystemRestoreUI {
             color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
+            max_width: Some(320.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Right: schedule status.
         let schedule_text = if self.manager.schedule.enabled {
             format!(
-                "Schedule: {} (active)",
+                "Schedule: {} (while open)",
                 self.manager.schedule.frequency.label()
             )
         } else {
@@ -4554,11 +5045,18 @@ impl SystemRestoreUI {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
+            // A component this system cannot keep is drawn faint: it is
+            // listed so what a restore point does not hold is in plain view.
+            let unavailable = !checked;
             rt.push(RenderCommand::Text {
                 x: cx + CHECKBOX_SIZE + 4.0,
                 y: cy + 1.0,
                 text: comp.label().to_string(),
-                color: self.palette.text,
+                color: if unavailable {
+                    self.palette.overlay0
+                } else {
+                    self.palette.text
+                },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_width - CHECKBOX_SIZE - 8.0),
@@ -4566,13 +5064,26 @@ impl SystemRestoreUI {
             });
         }
 
-        // Estimated size.
+        // What it will hold. The estimate here was a figure per component
+        // for an invented machine; the size is measured when it is taken.
         let est_y = dy + dialog_h - 70.0;
-        let est_size = format_bytes(self.form_estimated_size());
+        let sources = self.form_sources();
+        let holds = if sources.is_empty() {
+            "None of these can be kept on this system".to_string()
+        } else {
+            format!(
+                "Keeps {}; the others need the system's permission",
+                sources
+                    .iter()
+                    .map(|p| shown_path(p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         rt.push(RenderCommand::Text {
             x: dx + PADDING,
             y: est_y,
-            text: format!("Estimated size: {}", est_size),
+            text: holds,
             color: self.palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -4666,7 +5177,7 @@ impl SystemRestoreUI {
             rt.push(RenderCommand::Text {
                 x: dx + PADDING,
                 y: dy + 44.0,
-                text: format!("Restore to \"{}\"?", snap.name),
+                text: format!("Restore to \u{201c}{}\u{201d}?", snap.name),
                 color: self.palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -4677,7 +5188,14 @@ impl SystemRestoreUI {
             rt.push(RenderCommand::Text {
                 x: dx + PADDING,
                 y: dy + 70.0,
-                text: "Warning: This will revert system state to this snapshot.".to_string(),
+                text: if snap.stored.is_empty() {
+                    "This restore point holds nothing that can be put back.".to_string()
+                } else {
+                    format!(
+                        "Every program's settings and data go back to {}; files added since are removed.",
+                        format_timestamp_short(snap.timestamp)
+                    )
+                },
                 color: self.palette.ink(self.palette.red),
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -4688,7 +5206,9 @@ impl SystemRestoreUI {
             rt.push(RenderCommand::Text {
                 x: dx + PADDING,
                 y: dy + 94.0,
-                text: format!("Components affected: {}", snap.component_count()),
+                text:
+                    "Close other programs first: one still running may save over what is put back."
+                        .to_string(),
                 color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
@@ -4699,7 +5219,19 @@ impl SystemRestoreUI {
             rt.push(RenderCommand::Text {
                 x: dx + PADDING,
                 y: dy + 114.0,
-                text: format!("Size: {}", snap.size_display()),
+                text: if snap.unread > 0 {
+                    format!(
+                        "Holds {}; {} it could not read are left as they are",
+                        snap.size_display(),
+                        plural(
+                            usize::try_from(snap.unread).unwrap_or(usize::MAX),
+                            "item",
+                            "items"
+                        )
+                    )
+                } else {
+                    format!("Holds {}", snap.size_display())
+                },
                 color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
@@ -4720,7 +5252,8 @@ impl SystemRestoreUI {
             rt.push(RenderCommand::Text {
                 x: dx + PADDING + 8.0,
                 y: dy + 146.0,
-                text: "Tip: A snapshot of current state will be created automatically.".to_string(),
+                text: "The files as they are now are kept first, as a restore point of their own, so this can be undone."
+                    .to_string(),
                 color: self.palette.ink(self.palette.lavender),
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
@@ -5184,12 +5717,13 @@ impl SystemRestoreUI {
             rt.push(RenderCommand::Text {
                 x: ox + PADDING,
                 y: bar_y + 28.0,
-                text: format!(
-                    "Step {} of {} | {}",
-                    progress.step_index,
-                    progress.total_steps,
-                    format_bytes(progress.bytes_processed),
-                ),
+                text: if progress.complete {
+                    "Enter or Esc closes this".to_string()
+                } else if progress.total > 0 {
+                    format!("{} of {} files", progress.done, progress.total)
+                } else {
+                    progress.title.clone()
+                },
                 color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
@@ -5197,12 +5731,25 @@ impl SystemRestoreUI {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Error message if any.
-            if let Some(err) = &progress.error {
+            // Error message if any; otherwise the first thing worth knowing
+            // about how it went, with a count of the rest.
+            let footer = progress.error.clone().or_else(|| {
+                progress.notes.first().map(|first| {
+                    if progress.notes.len() > 1 {
+                        format!(
+                            "{first} (and {} more)",
+                            progress.notes.len().saturating_sub(1)
+                        )
+                    } else {
+                        first.clone()
+                    }
+                })
+            });
+            if let Some(err) = footer {
                 rt.push(RenderCommand::Text {
                     x: ox + PADDING,
                     y: oy + overlay_h - 24.0,
-                    text: err.clone(),
+                    text: err,
                     color: self.palette.ink(self.palette.red),
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
@@ -5227,6 +5774,21 @@ impl Default for SystemRestoreUI {
 /// Format bytes to a human-readable string.
 fn format_bytes(bytes: u64) -> String {
     guitk::bytes::iec(bytes)
+}
+
+/// `n` of a thing, in words: "1 item", "3 items".
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// A path as the window shows it: by its bytes, with escapes where it is not
+/// text -- never a lossy decode, which would show two names as one.
+fn shown_path(path: &Path) -> String {
+    pathtext::ShowPath::shown(path).to_string()
 }
 
 /// Format a duration in seconds to a short human-readable string.
@@ -5348,28 +5910,11 @@ fn ancestry_first_visible(name_widths: &[f32], budget: f32) -> usize {
 // main
 // ============================================================================
 
-/// `t`, moved by the same amount that carries `origin` to `now`.
-///
-/// Saturating in both directions: the shift is normally forwards by about three
-/// years, but a machine whose clock is behind the sample origin shifts
-/// backwards, and a timestamp that would go below zero is clamped rather than
-/// wrapping to the far future -- which would put a snapshot after the ones that
-/// come after it and invert the tree's order on screen.
-fn shift(t: u64, origin: u64, now: u64) -> u64 {
-    // Both differences are guarded by the branch they are in; written
-    // saturating so the guard is in the operator rather than beside it.
-    if now >= origin {
-        t.saturating_add(now.saturating_sub(origin))
-    } else {
-        t.saturating_sub(origin.saturating_sub(now))
-    }
-}
-
 /// The wall clock, in seconds since the epoch.
 ///
 /// `None` if the system clock is before 1970 or cannot be read, in which case
-/// the caller keeps the sample timeline's own origin. Refusing to answer is
-/// better than answering zero: an age measured against 1970 reads "56 years
+/// the caller keeps the clock it had. Refusing to answer is better than
+/// answering zero: an age measured against 1970 reads "56 years
 /// ago" for every snapshot, which looks like data rather than a missing clock.
 fn system_now_secs() -> Option<u64> {
     SystemTime::now()
@@ -5432,7 +5977,9 @@ impl App for SystemRestoreUI {
         // asserts the clock goes back to once a minute -- it was written for
         // the end of a simulated restore and holds just as well for one that
         // never starts.
-        if self.progress.as_ref().is_some_and(|p| p.error.is_none()) {
+        // Often while work runs, so its reports reach the overlay as they
+        // come; once a minute otherwise, for the clock and the schedule.
+        if self.work.is_some() {
             Some(PROGRESS_STEP)
         } else {
             Some(CLOCK_STEP)
@@ -5441,9 +5988,20 @@ impl App for SystemRestoreUI {
 
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            // Closing now would end the work where it stands -- a folder half
+            // restored. The window stays until it is done, and says so.
+            if self.work.is_some() {
+                self.close_when_done = true;
+                self.status = "Closing when the work in progress is done".to_string();
+                return Response::KeepOpen;
+            }
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        let result = self.handle_event(event);
+        if self.close_when_done && self.work.is_none() {
+            return Response::Exit;
+        }
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -5462,7 +6020,7 @@ impl App for SystemRestoreUI {
 fn main() -> ExitCode {
     let mut ui = SystemRestoreUI::new();
     if let Some(now) = system_now_secs() {
-        ui.anchor_to(now);
+        ui.set_now(now);
     }
     app::launch("systemrestore", &mut ui)
 }
@@ -5528,18 +6086,21 @@ mod tests {
 
     /// **Every key the list advertises is one this program answers.**
     ///
-    /// Two states, because `Esc`, `Enter`, `Tab` and `Backspace` are claimed
+    /// Three states, because `Esc`, `Enter`, `Tab` and `Backspace` are claimed
     /// by the dialog handler when a dialog is up and by the list when it is
     /// not -- the same keys, two different jobs, and the dialog branch returns
-    /// before the main match.
+    /// before the main match -- and `Space`, `Left` and `Right` are the
+    /// Schedule view's.
     #[test]
     fn every_advertised_key_does_something() {
         for (label, what) in SHORTCUTS {
             for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let answered = [false, true].into_iter().any(|in_dialog| {
-                    let mut ui = SystemRestoreUI::new();
-                    if in_dialog {
-                        ui.open_create_dialog();
+                let answered = [0, 1, 2].into_iter().any(|state| {
+                    let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+                    match state {
+                        1 => ui.open_create_dialog(),
+                        2 => ui.view_mode = ViewMode::Schedule,
+                        _ => {}
                     }
                     ui.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
                 });
@@ -5559,7 +6120,7 @@ mod tests {
     /// on an app that had lost `Ctrl+N` altogether.
     #[test]
     fn the_shortcut_list_reaches_the_window() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         assert!(
             !card_text(&ui).contains("F1 or ? closes this"),
             "the list is up before anybody asked for it"
@@ -5601,7 +6162,7 @@ mod tests {
     /// update.
     #[test]
     fn ctrl_f_narrows_the_list_by_snapshot_type() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let all = ui.visible_ids().len();
         assert!(all > 0, "control: the fixture has no snapshots");
         assert!(
@@ -5681,44 +6242,6 @@ working filter from a broken one"
             .unwrap_or_default()
     }
 
-    /// The window says what the list of snapshots is.
-    ///
-    /// `CANNOT_RESTORE` and `CANNOT_CREATE` are drawn on a progress overlay,
-    /// which has to be provoked and is then dismissed. The list stays: five
-    /// restore points with dates, sizes and components, one marked as the
-    /// current system, and nothing saying they are a model this program built
-    /// at startup. That is precisely the belief those two constants exist to
-    /// prevent.
-    #[test]
-    fn the_window_says_the_snapshots_are_not_real() {
-        let ui = SystemRestoreUI::new();
-        let texts: Vec<String> = ui
-            .render_tree()
-            .commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-
-        assert!(
-            texts.iter().any(|t| t.ends_with(" snapshots")),
-            "control: the header must be claiming a number of snapshots for \
-this test to be about anything -- it drew {} text command(s)",
-            texts.len()
-        );
-        // Against the words, not the constant: `t == SNAPSHOTS_ARE_NOT_REAL`
-        // passes with the constant rewritten to "Snapshots", which is the
-        // same defect wearing this test as cover.
-        assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("Demonstration data") && t.contains("restore anything")),
-            "the window lists restore points and does not say they are not real"
-        );
-    }
-
     fn press_ctrl(k: Key) -> Event {
         Event::Key(KeyEvent {
             key: k,
@@ -5751,130 +6274,10 @@ this test to be about anything -- it drew {} text command(s)",
 
     // -- the clock --
 
-    /// Every age, every countdown and every cleanup suggestion was measured
-    /// against `current_timestamp`, and nothing ever moved it: it was a
-    /// constant 25 days after a fixed November 2023 origin.
-    #[test]
-    fn anchoring_moves_the_whole_timeline_and_keeps_its_shape() {
-        let mut ui = SystemRestoreUI::new();
-        let before: Vec<(u64, u64)> = ui
-            .manager
-            .tree
-            .all_ids_by_timestamp()
-            .into_iter()
-            .filter_map(|id| ui.manager.tree.get_snapshot(id).map(|s| (id, s.timestamp)))
-            .collect();
-        let origin = ui.current_timestamp;
-
-        let now = origin + 90 * 86_400;
-        ui.anchor_to(now);
-
-        assert_eq!(
-            ui.current_timestamp, now,
-            "the clock should be the one given"
-        );
-        for (id, was) in before {
-            let is = ui
-                .manager
-                .tree
-                .get_snapshot(id)
-                .expect("still there")
-                .timestamp;
-            assert_eq!(
-                is,
-                was + 90 * 86_400,
-                "every snapshot moves by the same amount, so the intervals \
-                 between them -- which is what every age on screen is about -- \
-                 are unchanged"
-            );
-        }
-    }
-
-    /// The schedule's own clock moves with the snapshots it took, or the next
-    /// automatic snapshot is years overdue the moment the window opens.
-    #[test]
-    fn anchoring_moves_the_schedule_with_it() {
-        let mut ui = SystemRestoreUI::new();
-        let origin = ui.current_timestamp;
-        let before = ui.manager.schedule.last_snapshot_timestamp;
-
-        // The property that matters is not whether it is due -- the sample
-        // schedule is weekly and last ran 11 days before the origin, so it is
-        // already overdue, and the first tick after the window opens takes one.
-        // It is that anchoring does not *change* whether it is due, because the
-        // schedule's clock and the program's move together.
-        let due_before = ui.manager.schedule.is_due(origin);
-        ui.anchor_to(origin + 1000);
-        assert_eq!(ui.manager.schedule.last_snapshot_timestamp, before + 1000);
-        assert_eq!(
-            ui.manager.schedule.is_due(ui.current_timestamp),
-            due_before,
-            "anchoring moved the schedule relative to the clock"
-        );
-    }
-
-    /// The sample schedule is weekly and last ran 11 days ago, so it is due --
-    /// which means the window demonstrates its own headline feature within a
-    /// minute of opening, rather than showing a countdown that never fires.
-    #[test]
-    fn the_sample_schedule_is_due_so_the_first_tick_shows_what_the_program_does() {
-        let mut ui = SystemRestoreUI::new();
-        let before = ui.manager.tree.count();
-        assert!(ui.manager.schedule.is_due(ui.current_timestamp));
-
-        ui.tick_to(ui.current_timestamp + 60);
-        assert_eq!(ui.manager.tree.count(), before + 1);
-    }
-
-    /// A machine whose clock is behind the sample origin shifts backwards, and
-    /// nothing wraps round to the far future.
-    #[test]
-    fn anchoring_backwards_clamps_at_the_epoch_rather_than_wrapping() {
-        let mut ui = SystemRestoreUI::new();
-        ui.anchor_to(0);
-        for id in ui.manager.tree.all_ids_by_timestamp() {
-            let t = ui
-                .manager
-                .tree
-                .get_snapshot(id)
-                .expect("still there")
-                .timestamp;
-            assert_eq!(t, 0, "clamped, not wrapped to u64::MAX");
-        }
-    }
-
-    /// The whole point of the program, and nothing called it: an automatic
-    /// snapshot manager whose scheduler never ran.
-    #[test]
-    fn a_tick_takes_the_scheduled_snapshot_that_is_due() {
-        let mut ui = SystemRestoreUI::new();
-        let before = ui.manager.tree.count();
-        let due_at = ui.manager.schedule.last_snapshot_timestamp
-            + ui.manager.schedule.frequency.interval_secs();
-
-        assert_eq!(
-            ui.tick_to(due_at - 1),
-            EventResult::Consumed,
-            "the clock moved, so the frame is stale"
-        );
-        assert_eq!(
-            ui.manager.tree.count(),
-            before,
-            "one second early is not yet due"
-        );
-
-        ui.tick_to(due_at);
-        assert_eq!(
-            ui.manager.tree.count(),
-            before + 1,
-            "the scheduled snapshot should have been taken"
-        );
-    }
-
     /// A tick that finds the clock where it left it has nothing to redraw.
     #[test]
     fn a_tick_at_the_same_second_asks_for_nothing() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let now = ui.current_timestamp;
         assert_eq!(ui.tick_to(now), EventResult::Ignored);
     }
@@ -5883,7 +6286,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn the_view_tabs_switch_views() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         for mode in ViewMode::all() {
             let rect = ui
                 .toolbar_controls()
@@ -5903,7 +6306,7 @@ this test to be about anything -- it drew {} text command(s)",
             (ToolbarControl::Create, DialogKind::CreateSnapshot),
             (ToolbarControl::Export, DialogKind::ExportDialog),
         ] {
-            let mut ui = SystemRestoreUI::new();
+            let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
             let rect = ui
                 .toolbar_controls()
                 .into_iter()
@@ -5919,7 +6322,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// Restore and Delete act on the selection, so what they open names it.
     #[test]
     fn restore_and_delete_ask_about_the_selected_snapshot() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let selected = ui.selected_id.expect("the sample opens with a selection");
 
         for (control, expected) in [
@@ -5945,7 +6348,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// The toolbar band is the toolbar's, even between controls.
     #[test]
     fn a_click_on_the_empty_toolbar_does_not_reach_the_list() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let before = ui.selected_id;
         // Between the last tab and the first action button.
         assert_eq!(
@@ -5959,7 +6362,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn clicking_a_row_selects_that_snapshot() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let rows = ui.row_rects();
         assert!(rows.len() > 1, "the sample has several snapshots");
         let (rect, id) = rows[1];
@@ -5974,7 +6377,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// written again, so the view drew an empty frame for ever.
     #[test]
     fn clicking_the_selected_row_again_marks_it_for_comparison() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let (rect, id) = ui.row_rects()[1];
         let (x, y) = centre(rect);
 
@@ -5992,7 +6395,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn the_arrows_walk_the_list_and_stop_at_the_ends() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let rows = ui.visible_rows();
         assert!(rows.len() >= 3);
 
@@ -6023,7 +6426,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// which is why the selection is an id and not a row number.
     #[test]
     fn typing_filters_the_list_and_the_selection_stays_on_something_visible() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         for c in "Network".chars() {
             ui.handle_event(&types(c));
         }
@@ -6043,7 +6446,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn a_key_that_carries_no_text_is_not_typed_into_the_search_box() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         assert_eq!(ui.handle_event(&press(Key::F5)), EventResult::Ignored);
         assert_eq!(ui.search_query, "");
     }
@@ -6052,7 +6455,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn enter_confirms_a_delete_and_the_snapshot_is_gone() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         // A leaf, so the tree has no orphans to worry about.
         let id = *ui
             .visible_rows()
@@ -6076,7 +6479,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn escape_closes_a_dialog_without_doing_it() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let before = ui.manager.tree.count();
         ui.handle_event(&press(Key::Delete));
         ui.handle_event(&press(Key::Escape));
@@ -6089,7 +6492,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// promising.
     #[test]
     fn a_click_outside_a_dialog_closes_it_and_goes_no_further() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let before = ui.selected_id;
         ui.handle_event(&press(Key::Delete));
         assert_ne!(ui.dialog, DialogKind::None);
@@ -6101,7 +6504,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn the_dialog_buttons_can_be_clicked() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let before = ui.manager.tree.count();
         ui.handle_event(&press(Key::Delete));
 
@@ -6120,7 +6523,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// A locked snapshot cannot be deleted, which is what the padlock means.
     #[test]
     fn a_locked_snapshot_survives_a_confirmed_delete() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let id = ui.selected_id.expect("selected");
         ui.handle_event(&press_ctrl(Key::L));
         assert!(
@@ -6131,6 +6534,10 @@ this test to be about anything -- it drew {} text command(s)",
         ui.handle_event(&press(Key::Delete));
         ui.handle_event(&press(Key::Enter));
         assert!(ui.manager.tree.get_snapshot(id).is_some(), "still there");
+        // Refused out loud, saying how to unlock it.
+        let why = ui.progress.as_ref().and_then(|p| p.error.clone()).unwrap();
+        assert!(why.contains("Ctrl+L"), "{why}");
+        ui.handle_event(&press(Key::Enter));
 
         // And it can be unlocked again: `unlock_snapshot` had no caller, so
         // anything locked was locked for the life of the process.
@@ -6138,98 +6545,7 @@ this test to be about anything -- it drew {} text command(s)",
         assert!(!ui.manager.tree.get_snapshot(id).expect("there").locked);
     }
 
-    /// The form branches from what is selected, which is what makes the tree a
-    /// tree. Left at `None` it always added another root.
-    #[test]
-    fn the_create_form_branches_from_the_selection() {
-        let mut ui = SystemRestoreUI::new();
-        let selected = ui.selected_id.expect("selected");
-        ui.handle_event(&press_ctrl(Key::N));
-
-        assert_eq!(ui.dialog, DialogKind::CreateSnapshot);
-        assert_eq!(ui.form_parent_id, Some(selected));
-
-        for c in "Before upgrade".chars() {
-            ui.handle_event(&types(c));
-        }
-        assert_eq!(ui.form_name, "Before upgrade");
-        ui.handle_event(&press(Key::Tab));
-        for c in "notes".chars() {
-            ui.handle_event(&types(c));
-        }
-        assert_eq!(ui.form_description, "notes");
-        assert_eq!(
-            ui.form_name, "Before upgrade",
-            "Tab moved to the other field"
-        );
-
-        let before = ui.manager.tree.count();
-        ui.handle_event(&press(Key::Enter));
-        assert_eq!(ui.manager.tree.count(), before + 1);
-        let made = ui.selected_id.expect("the new one is selected");
-        assert_eq!(
-            ui.manager.tree.get_snapshot(made).expect("there").parent_id,
-            Some(selected),
-            "the new snapshot should hang off the one that was selected"
-        );
-    }
-
     // -- operations --
-
-    /// `simulate_restore` returns the whole filmstrip and had no caller, so the
-    /// progress overlay the renderer draws in full could never appear.
-    #[test]
-    fn a_restore_steps_through_its_progress_and_then_finishes() {
-        let mut ui = SystemRestoreUI::new();
-        ui.handle_event(&press(Key::Enter));
-        assert!(matches!(ui.dialog, DialogKind::ConfirmRestore(_)));
-        ui.handle_event(&press(Key::Enter));
-
-        // Was: the overlay stepped through "Verifying snapshot integrity",
-        // "Restoring System Files", "Applying changes" and finished at
-        // Complete, over several frames. It restored nothing at any point.
-        //
-        // The overlay is still raised, because a confirmed action that shows
-        // nothing reads as a button that did not work. What it carries now is
-        // the refusal.
-        let progress = ui.progress.as_ref().expect("the overlay should be up");
-        assert!(!progress.complete, "a restore reported itself complete");
-        let err = progress.error.as_ref().expect("no reason given");
-        assert!(err.contains("Cannot restore"), "{err}");
-        assert!(
-            ui.pending_steps.is_empty(),
-            "a refused restore queued steps to walk through",
-        );
-        assert_eq!(
-            ui.tick_interval(),
-            Some(CLOCK_STEP),
-            "and the clock goes back to once a minute"
-        );
-    }
-
-    /// Escape abandons a running operation; nothing else reaches through the
-    /// overlay.
-    #[test]
-    fn a_running_operation_swallows_everything_but_escape() {
-        let mut ui = SystemRestoreUI::new();
-        ui.handle_event(&press(Key::Enter));
-        ui.handle_event(&press(Key::Enter));
-        assert!(ui.progress.is_some());
-
-        let before = ui.view_mode;
-        assert_eq!(ui.handle_event(&press(Key::Tab)), EventResult::Ignored);
-        assert_eq!(
-            ui.view_mode, before,
-            "the view must not change under an overlay"
-        );
-
-        ui.handle_event(&press(Key::Escape));
-        assert!(ui.progress.is_none());
-        assert!(
-            ui.pending_steps.is_empty(),
-            "and the rest of the filmstrip is dropped"
-        );
-    }
 
     // -- geometry --
 
@@ -6237,7 +6553,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// renderer drew.
     #[test]
     fn the_rows_are_laid_out_without_overlapping_and_inside_the_content_area() {
-        let ui = SystemRestoreUI::new();
+        let (_scratch, ui) = SystemRestoreUI::with_sample_restore_points();
         let rects = ui.row_rects();
         assert!(!rects.is_empty());
         let top = HEADER_HEIGHT + TOOLBAR_HEIGHT;
@@ -6260,7 +6576,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// the same size whatever window it was given.
     #[test]
     fn the_layout_follows_the_window_it_is_given() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let wide = ui
             .toolbar_controls()
             .into_iter()
@@ -6285,7 +6601,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// negative maximum is the one shape `clamp` panics on.
     #[test]
     fn a_list_shorter_than_the_window_does_not_scroll() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.handle_event(&Event::Mouse(MouseEvent {
             x: 200.0,
             y: 400.0,
@@ -6297,7 +6613,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// The title names the selected snapshot, and follows it.
     #[test]
     fn the_title_names_the_selected_snapshot() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let first = ui.title();
         assert!(first.ends_with("- System Restore"), "got {first:?}");
 
@@ -6409,7 +6725,9 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_snapshot_type_all() {
-        assert_eq!(SnapshotType::all().len(), 5);
+        // Five, and the restore's own undo.
+        assert_eq!(SnapshotType::all().len(), 6);
+        assert!(SnapshotType::all().contains(&SnapshotType::BeforeRestore));
     }
 
     #[test]
@@ -6456,32 +6774,30 @@ this test to be about anything -- it drew {} text command(s)",
     }
 
     #[test]
-    fn test_component_estimated_size() {
-        assert!(SnapshotComponent::SystemFiles.estimated_size_bytes() > 0);
-        assert!(
-            SnapshotComponent::InstalledApps.estimated_size_bytes()
-                > SnapshotComponent::BootConfig.estimated_size_bytes()
-        );
-    }
-
-    #[test]
     fn test_component_all() {
         assert_eq!(SnapshotComponent::all().len(), 10);
     }
 
     #[test]
     fn test_component_default_set() {
-        let defaults = SnapshotComponent::default_set();
-        assert!(!defaults.is_empty());
-        assert!(defaults.contains(&SnapshotComponent::SystemFiles));
-        assert!(defaults.contains(&SnapshotComponent::BootConfig));
+        // What this system can keep: the programs' settings and data. It was
+        // six components, five of which nothing could capture.
+        assert_eq!(
+            SnapshotComponent::default_set(),
+            vec![SnapshotComponent::UserSettings]
+        );
     }
 
     #[test]
     fn test_component_display() {
         assert_eq!(
             format!("{}", SnapshotComponent::UserSettings),
-            "User Settings"
+            "Program Settings and Data"
+        );
+        // The old name still reads, so a list written before the rename loads.
+        assert_eq!(
+            SnapshotComponent::from_label("User Settings"),
+            Some(SnapshotComponent::UserSettings)
         );
     }
 
@@ -6506,37 +6822,24 @@ this test to be about anything -- it drew {} text command(s)",
     }
 
     #[test]
-    fn test_snapshot_size_calculated() {
-        let snap = Snapshot::new(
-            1,
-            "Test",
-            "",
-            0,
-            SnapshotType::Manual,
-            vec![
-                SnapshotComponent::BootConfig,
-                SnapshotComponent::NetworkConfig,
-            ],
-            None,
-        );
-        let expected = SnapshotComponent::BootConfig.estimated_size_bytes()
-            + SnapshotComponent::NetworkConfig.estimated_size_bytes();
-        assert_eq!(snap.size_bytes, expected);
-    }
-
-    #[test]
     fn test_snapshot_size_display() {
-        let snap = Snapshot::new(
+        let mut snap = Snapshot::new(
             1,
             "Test",
             "",
             0,
             SnapshotType::Manual,
-            vec![SnapshotComponent::SystemFiles],
+            vec![SnapshotComponent::UserSettings],
             None,
         );
-        let display = snap.size_display();
-        assert!(display.contains("GiB") || display.contains("MiB"));
+        // Not an estimate: nothing is held until it is taken.
+        assert_eq!(snap.size_bytes, 0);
+        snap.size_bytes = 3 * 1024 * 1024;
+        assert!(
+            snap.size_display().contains("MiB"),
+            "{}",
+            snap.size_display()
+        );
     }
 
     #[test]
@@ -6880,34 +7183,6 @@ this test to be about anything -- it drew {} text command(s)",
     }
 
     #[test]
-    fn test_tree_total_size() {
-        let mut tree = SnapshotTree::new();
-        let _ = tree
-            .add_snapshot(
-                "A",
-                "",
-                100,
-                SnapshotType::Manual,
-                vec![SnapshotComponent::BootConfig],
-                None,
-            )
-            .unwrap();
-        let _ = tree
-            .add_snapshot(
-                "B",
-                "",
-                200,
-                SnapshotType::Manual,
-                vec![SnapshotComponent::NetworkConfig],
-                None,
-            )
-            .unwrap();
-        let expected = SnapshotComponent::BootConfig.estimated_size_bytes()
-            + SnapshotComponent::NetworkConfig.estimated_size_bytes();
-        assert_eq!(tree.total_size_bytes(), expected);
-    }
-
-    #[test]
     fn test_tree_branching() {
         let mut tree = SnapshotTree::new();
         let root = tree
@@ -7190,39 +7465,6 @@ this test to be about anything -- it drew {} text command(s)",
         assert_eq!(stats.smallest_snapshot_bytes, 0);
     }
 
-    #[test]
-    fn test_storage_stats_computed() {
-        let mut tree = SnapshotTree::new();
-        let _ = tree
-            .add_snapshot(
-                "A",
-                "",
-                100,
-                SnapshotType::Manual,
-                vec![SnapshotComponent::BootConfig],
-                None,
-            )
-            .unwrap();
-        let _ = tree
-            .add_snapshot(
-                "B",
-                "",
-                200,
-                SnapshotType::Scheduled,
-                vec![SnapshotComponent::BootConfig],
-                None,
-            )
-            .unwrap();
-        let stats = StorageStats::from_tree(&tree);
-        assert_eq!(stats.snapshot_count, 2);
-        assert_eq!(
-            stats.total_bytes,
-            SnapshotComponent::BootConfig.estimated_size_bytes() * 2
-        );
-        assert!(stats.manual_bytes > 0);
-        assert!(stats.auto_bytes > 0);
-    }
-
     // --- SnapshotExport tests ---
 
     #[test]
@@ -7304,100 +7546,6 @@ this test to be about anything -- it drew {} text command(s)",
     }
 
     #[test]
-    fn test_manager_compare_snapshots() {
-        let mut mgr = SnapshotManager::new();
-        let id1 = mgr
-            .create_snapshot(
-                "Old",
-                "",
-                100,
-                SnapshotType::Manual,
-                vec![
-                    SnapshotComponent::SystemFiles,
-                    SnapshotComponent::BootConfig,
-                ],
-                None,
-            )
-            .unwrap();
-        let id2 = mgr
-            .create_snapshot(
-                "New",
-                "",
-                100 + 86_400 * 3,
-                SnapshotType::Manual,
-                vec![
-                    SnapshotComponent::SystemFiles,
-                    SnapshotComponent::UserSettings,
-                ],
-                None,
-            )
-            .unwrap();
-        let diff = mgr.compare_snapshots(id1, id2).unwrap();
-        // UserSettings was added, BootConfig was removed.
-        assert!(diff.entries.iter().any(|e| matches!(
-            e,
-            DiffEntry::ComponentAdded(SnapshotComponent::UserSettings)
-        )));
-        assert!(diff.entries.iter().any(|e| matches!(
-            e,
-            DiffEntry::ComponentRemoved(SnapshotComponent::BootConfig)
-        )));
-    }
-
-    #[test]
-    fn test_manager_compare_nonexistent() {
-        let mgr = SnapshotManager::new();
-        assert!(mgr.compare_snapshots(1, 2).is_err());
-    }
-
-    #[test]
-    fn test_manager_check_schedule_not_due() {
-        let mut mgr = SnapshotManager::new();
-        mgr.schedule.enabled = true;
-        mgr.schedule.frequency = ScheduleFrequency::Daily;
-        mgr.schedule.last_snapshot_timestamp = 1000;
-        mgr.schedule.components = vec![SnapshotComponent::SystemFiles];
-        let result = mgr.check_schedule(1000 + 100);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-    }
-
-    #[test]
-    fn test_manager_check_schedule_due() {
-        let mut mgr = SnapshotManager::new();
-        mgr.schedule.enabled = true;
-        mgr.schedule.frequency = ScheduleFrequency::Daily;
-        mgr.schedule.last_snapshot_timestamp = 1000;
-        mgr.schedule.components = vec![SnapshotComponent::SystemFiles];
-        let result = mgr.check_schedule(1000 + 86_400);
-        assert!(result.is_ok());
-        let id = result.unwrap();
-        assert!(id.is_some());
-        assert_eq!(mgr.tree.count(), 1);
-    }
-
-    #[test]
-    fn test_manager_apply_retention() {
-        let mut mgr = SnapshotManager::new();
-        for i in 0..5 {
-            let _ = mgr
-                .create_snapshot(
-                    &format!("S{}", i),
-                    "",
-                    100 + i * 100,
-                    SnapshotType::Scheduled,
-                    vec![SnapshotComponent::BootConfig],
-                    None,
-                )
-                .unwrap();
-        }
-        mgr.schedule.retention = RetentionPolicy::new(3, 0, 0);
-        let pruned = mgr.apply_retention(1000);
-        assert_eq!(pruned.len(), 2); // 5 - 3 = 2 pruned.
-        assert_eq!(mgr.tree.count(), 3);
-    }
-
-    #[test]
     fn test_manager_import_snapshots() {
         let mut mgr = SnapshotManager::new();
         let text = "[snapshot]\nid=1\nname=Imported\ndescription=test\ntimestamp=500\ntype=Manual\nsize=1000\nparent=none\nlocked=false\ncomponents=Boot Config\ntags=imported";
@@ -7428,75 +7576,16 @@ this test to be about anything -- it drew {} text command(s)",
                 None,
             )
             .unwrap();
+        // A size is measured when a point is taken; until then it is none.
+        assert_eq!(mgr.storage_stats().total_bytes, 0);
+        let id = mgr.tree.all_ids_by_timestamp()[0];
+        mgr.tree.get_snapshot_mut(id).unwrap().size_bytes = 4096;
         let stats = mgr.storage_stats();
         assert_eq!(stats.snapshot_count, 1);
-        assert!(stats.total_bytes > 0);
+        assert_eq!(stats.total_bytes, 4096);
     }
 
     // --- OperationProgress tests ---
-
-    #[test]
-    fn test_progress_new_create() {
-        let comps = vec![
-            SnapshotComponent::SystemFiles,
-            SnapshotComponent::BootConfig,
-        ];
-        let progress = OperationProgress::new_create(&comps);
-        assert!(!progress.complete);
-        assert_eq!(progress.step_index, 0);
-        assert!(progress.total_bytes > 0);
-    }
-
-    #[test]
-    fn test_progress_fraction_zero() {
-        let progress = OperationProgress::new_create(&[SnapshotComponent::SystemFiles]);
-        assert!(progress.fraction() < 0.01);
-    }
-
-    #[test]
-    fn test_progress_advance_and_finish() {
-        let mut progress = OperationProgress::new_create(&[SnapshotComponent::BootConfig]);
-        progress.advance("Working...", 1_000_000);
-        assert_eq!(progress.step_index, 1);
-        assert_eq!(progress.bytes_processed, 1_000_000);
-        progress.finish();
-        assert!(progress.complete);
-        assert_eq!(progress.percentage(), 100);
-    }
-
-    #[test]
-    fn test_progress_fail() {
-        let mut progress = OperationProgress::new_create(&[]);
-        progress.fail("disk full");
-        assert!(progress.error.is_some());
-        assert_eq!(progress.error.as_deref(), Some("disk full"));
-    }
-
-    #[test]
-    fn test_progress_simulate_create() {
-        let comps = vec![
-            SnapshotComponent::BootConfig,
-            SnapshotComponent::NetworkConfig,
-        ];
-        let states = OperationProgress::simulate_create(&comps);
-        assert!(states.len() >= 4); // initial + prepare + 2 comps + finalize + complete
-        assert!(states.last().unwrap().complete);
-    }
-
-    #[test]
-    fn test_progress_simulate_restore() {
-        let snap = Snapshot::new(
-            1,
-            "S",
-            "",
-            100,
-            SnapshotType::Manual,
-            vec![SnapshotComponent::BootConfig],
-            None,
-        );
-        let states = OperationProgress::simulate_restore(&snap);
-        assert!(states.last().unwrap().complete);
-    }
 
     // --- Utility function tests ---
 
@@ -7556,21 +7645,21 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_new_has_demo_data() {
-        let ui = SystemRestoreUI::new();
+        let (_scratch, ui) = SystemRestoreUI::with_sample_restore_points();
         assert!(ui.manager.tree.count() >= 4);
         assert!(ui.selected_id.is_some());
     }
 
     #[test]
     fn test_ui_visible_ids_no_filter() {
-        let ui = SystemRestoreUI::new();
+        let (_scratch, ui) = SystemRestoreUI::with_sample_restore_points();
         let ids = ui.visible_ids();
         assert!(!ids.is_empty());
     }
 
     #[test]
     fn test_ui_visible_ids_with_type_filter() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.type_filter = Some(SnapshotType::Manual);
         let ids = ui.visible_ids();
         for id in &ids {
@@ -7581,7 +7670,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_visible_ids_with_search() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.search_query = "Update".to_string();
         let ids = ui.visible_ids();
         for id in &ids {
@@ -7593,19 +7682,8 @@ this test to be about anything -- it drew {} text command(s)",
     }
 
     #[test]
-    fn test_ui_form_estimated_size() {
-        let mut ui = SystemRestoreUI::new();
-        // All selected.
-        let full_size = ui.form_estimated_size();
-        assert!(full_size > 0);
-        // Deselect all.
-        ui.form_components = vec![false; SnapshotComponent::all().len()];
-        assert_eq!(ui.form_estimated_size(), 0);
-    }
-
-    #[test]
     fn test_ui_form_selected_components() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.form_components = vec![
             true, false, true, false, false, false, false, false, false, false,
         ];
@@ -7617,7 +7695,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_produces_commands() {
-        let ui = SystemRestoreUI::new();
+        let (_scratch, ui) = SystemRestoreUI::with_sample_restore_points();
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
         // Should have a good number of render commands for the full UI.
@@ -7626,25 +7704,15 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_with_dialog() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.dialog = DialogKind::CreateSnapshot;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
     }
 
     #[test]
-    fn test_ui_render_with_progress() {
-        let mut ui = SystemRestoreUI::new();
-        ui.progress = Some(OperationProgress::new_create(&[
-            SnapshotComponent::BootConfig,
-        ]));
-        let rt = ui.render_tree();
-        assert!(!rt.is_empty());
-    }
-
-    #[test]
     fn test_ui_render_timeline_view() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Timeline;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7652,7 +7720,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_compare_view_no_selection() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Compare;
         ui.compare_id = None;
         let rt = ui.render_tree();
@@ -7661,7 +7729,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_compare_view_with_selection() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Compare;
         let ids = ui.manager.tree.all_ids_by_timestamp();
         if ids.len() >= 2 {
@@ -7674,7 +7742,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_schedule_view() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Schedule;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7682,7 +7750,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_storage_view() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.view_mode = ViewMode::Storage;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7690,7 +7758,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_delete_dialog() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         if let Some(id) = ui.selected_id {
             ui.dialog = DialogKind::ConfirmDelete(id);
         }
@@ -7700,7 +7768,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_restore_dialog() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         if let Some(id) = ui.selected_id {
             ui.dialog = DialogKind::ConfirmRestore(id);
         }
@@ -7710,7 +7778,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_export_dialog() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.dialog = DialogKind::ExportDialog;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7718,7 +7786,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_import_dialog() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.dialog = DialogKind::ImportDialog;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -7733,7 +7801,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// "nothing may be pushed past the panel's anchored bottom row" assertion
     /// for reasons that have nothing to do with the description.
     fn details_panel_with_description(description: &str) -> Vec<RenderCommand> {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let id = *ui
             .manager
             .tree
@@ -7764,7 +7832,7 @@ this test to be about anything -- it drew {} text command(s)",
     /// The details panel for a snapshot `depth` links deep in its own root's
     /// history, every ancestor named too long to fit one link.
     fn details_panel_with_deep_ancestry(depth: usize) -> Vec<RenderCommand> {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         let mut parent = None;
         let mut last = 0;
         for i in 0..depth {
@@ -7977,7 +8045,7 @@ this test to be about anything -- it drew {} text command(s)",
 
     #[test]
     fn test_ui_render_no_selection_details() {
-        let mut ui = SystemRestoreUI::new();
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         ui.selected_id = None;
         let rt = ui.render_tree();
         assert!(!rt.is_empty());
@@ -8289,7 +8357,7 @@ this test to be about anything -- it drew {} text command(s)",
                 .collect()
         }
 
-        let mut app = SystemRestoreUI::new();
+        let (_scratch, mut app) = SystemRestoreUI::with_sample_restore_points();
 
         app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
         let dark = fills(&mut app);
@@ -8315,5 +8383,544 @@ this test to be about anything -- it drew {} text command(s)",
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // -- restore points kept for real (2026-09-27) --
+
+    /// A window over scratch folders: programs' settings with two files in
+    /// them, and an empty store.
+    fn real_ui(tag: &str) -> (scratchdir::ScratchDir, SystemRestoreUI) {
+        let scratch = scratchdir::ScratchDir::new(&format!("systemrestore_{tag}"));
+        let settings = scratch.dir().join("settings");
+        std::fs::create_dir_all(settings.join("notes")).unwrap();
+        std::fs::write(settings.join("appearance.yaml"), "theme: dark\n").unwrap();
+        std::fs::write(settings.join("notes/library.txt"), "a note\n").unwrap();
+        let ui = SystemRestoreUI::with_locations(Locations {
+            settings: Some(settings),
+            store: Some(scratch.dir().join("store")),
+        });
+        (scratch, ui)
+    }
+
+    fn settings_of(scratch: &scratchdir::ScratchDir) -> std::path::PathBuf {
+        scratch.dir().join("settings")
+    }
+
+    /// Tick until the running work has ended, then return what the overlay
+    /// says.
+    fn finish(ui: &mut SystemRestoreUI) {
+        for _ in 0..20_000 {
+            ui.handle_event(&Event::Tick { elapsed_ms: 1 });
+            if ui.work.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("the work never ended");
+    }
+
+    /// Take a restore point through the form, named `name`.
+    fn take(ui: &mut SystemRestoreUI, name: &str) -> u64 {
+        ui.handle_event(&press_ctrl(Key::N));
+        for c in name.chars() {
+            ui.handle_event(&types(c));
+        }
+        ui.handle_event(&press(Key::Enter));
+        finish(ui);
+        let progress = ui.progress.take().expect("the overlay says how it went");
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        ui.manager.current.expect("the new one is current")
+    }
+
+    /// A window opens on what is kept -- on a first run, nothing. It opened
+    /// on five invented restore points with a schedule switched on.
+    #[test]
+    fn a_first_run_opens_on_nothing() {
+        let (_scratch, mut ui) = real_ui("first");
+        assert_eq!(ui.manager.tree.count(), 0);
+        assert!(!ui.manager.schedule.enabled, "a schedule nobody set");
+        assert!(ui.load_error.is_none());
+        // And being off, it takes nothing, however long the window is open.
+        ui.tick_to(2_000_000_000);
+        assert!(
+            ui.work.is_none(),
+            "a schedule that is off took a restore point"
+        );
+    }
+
+    /// The header says what a restore point holds and where it is.
+    #[test]
+    fn the_header_says_what_a_restore_point_holds() {
+        let (scratch, ui) = real_ui("header");
+        let texts: Vec<String> = ui
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        let dir = shown_path(&settings_of(&scratch));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("every program's settings and data") && t.contains(&dir)),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t.contains("Demonstration")));
+    }
+
+    /// Only the programs' own folder can be kept; every other component says
+    /// why, and none pretends.
+    #[test]
+    fn every_component_says_whether_it_can_be_kept() {
+        let loc = Locations {
+            settings: Some(std::path::PathBuf::from("/home/u/.config/slateos")),
+            store: None,
+        };
+        for c in SnapshotComponent::all() {
+            match c.source(&loc) {
+                Ok(dir) => {
+                    assert_eq!(*c, SnapshotComponent::UserSettings);
+                    assert_eq!(dir, std::path::PathBuf::from("/home/u/.config/slateos"));
+                }
+                Err(why) => assert!(!why.is_empty(), "{c:?}"),
+            }
+        }
+        let homeless = Locations {
+            settings: None,
+            store: None,
+        };
+        assert_eq!(
+            SnapshotComponent::UserSettings.source(&homeless),
+            Err(points::NO_HOME)
+        );
+    }
+
+    /// Taking one keeps the folder in the store, adds it on top of the
+    /// current one, and saves the list -- which a new window reads back.
+    #[test]
+    fn a_restore_point_is_taken_kept_and_listed() {
+        let (scratch, mut ui) = real_ui("take");
+        let first = take(&mut ui, "Before the upgrade");
+        let point = ui.manager.tree.get_snapshot(first).unwrap().clone();
+        assert_eq!(point.name, "Before the upgrade");
+        assert_eq!(
+            point.size_bytes, 19,
+            "twelve bytes of theme and seven of note"
+        );
+        assert_eq!(point.stored.len(), 1);
+        assert_eq!(point.parent_id, None);
+        assert!(point.timestamp > 0);
+
+        let second = take(&mut ui, "After");
+        assert_eq!(
+            ui.manager.tree.get_snapshot(second).unwrap().parent_id,
+            Some(first),
+            "a new one hangs from the one the files were last taken as"
+        );
+
+        let reopened = SystemRestoreUI::with_locations(ui.locations.clone());
+        assert!(reopened.load_error.is_none(), "{:?}", reopened.load_error);
+        assert_eq!(reopened.manager.tree.count(), 2);
+        assert_eq!(reopened.manager.current, Some(second));
+        assert_eq!(
+            reopened.manager.tree.get_snapshot(first).unwrap().stored,
+            point.stored
+        );
+        drop(scratch);
+    }
+
+    /// A restore keeps the files as they are first -- its own undo -- then
+    /// puts them back: changed files as they were, an added one removed.
+    #[test]
+    fn a_restore_puts_the_files_back_and_keeps_the_ones_it_replaced() {
+        let (scratch, mut ui) = real_ui("restore");
+        let dir = settings_of(&scratch);
+        let point = take(&mut ui, "Good");
+        std::fs::write(dir.join("appearance.yaml"), "theme: broken\n").unwrap();
+        std::fs::write(dir.join("added.txt"), "new\n").unwrap();
+
+        ui.selected_id = Some(point);
+        ui.handle_event(&press(Key::Enter));
+        assert!(matches!(ui.dialog, DialogKind::ConfirmRestore(_)));
+        ui.handle_event(&press(Key::Enter));
+        finish(&mut ui);
+        let progress = ui.progress.clone().expect("the overlay says how it went");
+        assert!(progress.error.is_none(), "{:?}", progress.error);
+        assert!(progress.complete);
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("appearance.yaml")).unwrap(),
+            "theme: dark\n"
+        );
+        assert!(!dir.join("added.txt").exists());
+        assert_eq!(
+            ui.manager.current,
+            Some(point),
+            "the files are that point now"
+        );
+
+        // The undo: a restore point of what was there, which puts it back.
+        let before = ui
+            .manager
+            .tree
+            .all_ids_by_timestamp()
+            .into_iter()
+            .find(|id| {
+                ui.manager.tree.get_snapshot(*id).unwrap().snapshot_type
+                    == SnapshotType::BeforeRestore
+            })
+            .expect("the files as they were are kept first");
+        ui.progress = None;
+        ui.selected_id = Some(before);
+        ui.handle_event(&press(Key::Enter));
+        ui.handle_event(&press(Key::Enter));
+        finish(&mut ui);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("appearance.yaml")).unwrap(),
+            "theme: broken\n"
+        );
+        assert!(dir.join("added.txt").exists());
+    }
+
+    /// While work runs the overlay lets nothing through and cannot be
+    /// abandoned -- a folder half restored is worse than either -- and once
+    /// it has ended, Enter puts it away.
+    #[test]
+    fn the_overlay_holds_until_the_work_has_ended() {
+        let (_scratch, mut ui) = real_ui("overlay");
+        ui.handle_event(&press_ctrl(Key::N));
+        ui.handle_event(&press(Key::Enter));
+        assert!(ui.work.is_some());
+        let view = ui.view_mode;
+        assert_eq!(ui.handle_event(&press(Key::Tab)), EventResult::Ignored);
+        assert_eq!(ui.view_mode, view);
+        if ui.work.is_some() {
+            assert_eq!(ui.handle_event(&press(Key::Escape)), EventResult::Ignored);
+            assert!(ui.progress.is_some(), "running work was abandoned");
+        }
+        finish(&mut ui);
+        assert!(ui.progress.as_ref().is_some_and(|p| p.complete));
+        ui.handle_event(&press(Key::Enter));
+        assert!(ui.progress.is_none());
+    }
+
+    /// Asked to close while work runs, the window stays -- and closes itself
+    /// when the work is done.
+    #[test]
+    fn closing_waits_for_the_work() {
+        let (_scratch, mut ui) = real_ui("close");
+        ui.handle_event(&press_ctrl(Key::N));
+        ui.handle_event(&press(Key::Enter));
+        if ui.work.is_none() {
+            return; // Finished before the close could be asked: nothing to wait for.
+        }
+        assert_eq!(ui.on_event(&Event::CloseRequested), Response::KeepOpen);
+        let mut response = Response::Idle;
+        for _ in 0..20_000 {
+            response = ui.on_event(&Event::Tick { elapsed_ms: 1 });
+            if response == Response::Exit {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(response, Response::Exit);
+    }
+
+    /// Deleting one removes its files from the store and it from the list,
+    /// and what was taken on top of it hangs from its parent instead.
+    #[test]
+    fn deleting_a_restore_point_keeps_the_branches() {
+        let (_scratch, mut ui) = real_ui("delete");
+        let a = take(&mut ui, "A");
+        let b = take(&mut ui, "B");
+        let c = take(&mut ui, "C");
+        let stored = ui.manager.tree.get_snapshot(b).unwrap().stored.clone();
+        ui.selected_id = Some(b);
+        ui.handle_event(&press(Key::Delete));
+        ui.handle_event(&press(Key::Enter));
+        finish(&mut ui);
+        assert!(ui.manager.tree.get_snapshot(b).is_none());
+        assert_eq!(ui.manager.tree.get_snapshot(c).unwrap().parent_id, Some(a));
+        let store = snapstore::Store::at(ui.locations.store.as_ref().unwrap());
+        for id in stored.values() {
+            assert!(store.meta(id).is_err(), "its files are still in the store");
+        }
+    }
+
+    /// A locked one is refused, and says how to unlock it.
+    #[test]
+    fn a_locked_restore_point_is_not_deleted() {
+        let (_scratch, mut ui) = real_ui("locked");
+        let a = take(&mut ui, "A");
+        ui.selected_id = Some(a);
+        ui.handle_event(&press_ctrl(Key::L));
+        ui.handle_event(&press(Key::Delete));
+        ui.handle_event(&press(Key::Enter));
+        assert!(ui.work.is_none());
+        let why = ui.progress.as_ref().and_then(|p| p.error.clone()).unwrap();
+        assert!(why.contains("Ctrl+L"), "{why}");
+        assert!(ui.manager.tree.get_snapshot(a).is_some());
+    }
+
+    /// A list that does not read is shown, and nothing is written over it:
+    /// taking a restore point is refused rather than saving a list that would
+    /// lose every one the file held.
+    #[test]
+    fn a_damaged_list_is_never_written_over() {
+        let scratch = scratchdir::ScratchDir::new("systemrestore_damaged");
+        let store = scratch.dir().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("points.json"), "{ not a list").unwrap();
+        let mut ui = SystemRestoreUI::with_locations(Locations {
+            settings: Some(scratch.dir().join("settings")),
+            store: Some(store.clone()),
+        });
+        assert!(ui.load_error.is_some());
+        ui.handle_event(&press_ctrl(Key::N));
+        ui.handle_event(&press(Key::Enter));
+        assert!(ui.work.is_none());
+        assert!(ui.progress.as_ref().is_some_and(|p| p.error.is_some()));
+        assert_eq!(
+            std::fs::read_to_string(store.join("points.json")).unwrap(),
+            "{ not a list"
+        );
+    }
+
+    /// The list round-trips: every field of every point, the tree, the
+    /// current one and the schedule.
+    #[test]
+    fn the_list_of_restore_points_round_trips() {
+        let mut m = chained_manager();
+        m.current = m.tree.all_ids_by_timestamp().last().copied();
+        m.schedule.enabled = true;
+        m.schedule.frequency = ScheduleFrequency::Daily;
+        m.schedule.last_snapshot_timestamp = 1_800_000_000;
+        for id in m.tree.all_ids_by_timestamp() {
+            let p = m.tree.get_snapshot_mut(id).unwrap();
+            // A real point holds exactly the components it has kept.
+            p.components = vec![SnapshotComponent::UserSettings];
+            p.size_bytes = id * 1000;
+            p.unread = id;
+            p.stored
+                .insert(SnapshotComponent::UserSettings, format!("{id}-full"));
+            p.tags.push(format!("tag{id}"));
+        }
+        let text = points::to_text(&m);
+        let back = points::parse(&text).unwrap();
+        assert_eq!(points::to_text(&back), text);
+        assert_eq!(back.current, m.current);
+        assert_eq!(back.schedule.frequency, ScheduleFrequency::Daily);
+        for id in m.tree.all_ids_by_timestamp() {
+            assert_eq!(back.tree.get_snapshot(id), m.tree.get_snapshot(id), "{id}");
+        }
+        assert_eq!(back.tree.next_id(), m.tree.next_id());
+    }
+
+    /// A damaged or foreign list is refused whole.
+    #[test]
+    fn a_list_that_is_not_one_is_refused() {
+        assert!(points::parse("{}").is_err());
+        assert!(points::parse(r#"{"version": 99, "points": []}"#).is_err());
+        // One point that does not read spoils the whole list: saving the
+        // others back would lose it.
+        let good = points::to_text(&chained_manager());
+        assert!(points::parse(&good).is_ok());
+        // The newest point's lock (it is locked), spoiled: a leaf, so skipping it would
+        // leave a list that still hangs together -- the case that tempts a
+        // reader to keep what it understood.
+        let at = good.rfind("\"locked\": true").expect("a lock to spoil");
+        let mut spoiled = good.clone();
+        spoiled.replace_range(at..at + "\"locked\": true".len(), "\"locked\": \"yes\"");
+        assert!(points::parse(&spoiled).is_err(), "a list read in part");
+        let mut m = chained_manager();
+        m.current = Some(9_999);
+        assert!(
+            points::parse(&points::to_text(&m)).is_err(),
+            "a current point not in it"
+        );
+    }
+
+    /// The schedule is off until it is turned on, and the Schedule view's
+    /// controls change it and keep the change.
+    #[test]
+    fn the_schedule_is_changed_from_its_view() {
+        let (_scratch, mut ui) = real_ui("schedule");
+        ui.view_mode = ViewMode::Schedule;
+        assert!(!ui.manager.schedule.enabled);
+        ui.handle_event(&press(Key::Space));
+        assert!(ui.manager.schedule.enabled);
+        assert_eq!(ui.manager.schedule.frequency, ScheduleFrequency::Weekly);
+        ui.handle_event(&press(Key::Right));
+        assert_eq!(ui.manager.schedule.frequency, ScheduleFrequency::Daily);
+        ui.handle_event(&press(Key::Left));
+        ui.handle_event(&press(Key::Left));
+        assert_eq!(ui.manager.schedule.frequency, ScheduleFrequency::Monthly);
+        let (rect, _) = ui
+            .schedule_controls()
+            .into_iter()
+            .find(|(_, c)| *c == ScheduleControl::Toggle)
+            .unwrap();
+        let (x, y) = centre(rect);
+        ui.handle_event(&click(x, y));
+        assert!(
+            !ui.manager.schedule.enabled,
+            "a click on the badge turns it off"
+        );
+        let reopened = SystemRestoreUI::with_locations(ui.locations.clone());
+        assert_eq!(
+            reopened.manager.schedule.frequency,
+            ScheduleFrequency::Monthly
+        );
+    }
+
+    /// Turned on, the schedule takes a restore point when one is due -- a
+    /// real one, quietly, on the status bar -- and not again until the next.
+    #[test]
+    fn a_due_schedule_takes_a_real_restore_point() {
+        let (_scratch, mut ui) = real_ui("due");
+        ui.manager.schedule.enabled = true;
+        ui.tick_to(1_900_000_000);
+        assert!(ui.work.is_some(), "due, and nothing started");
+        assert!(ui.progress.is_none(), "the schedule's work is quiet");
+        finish(&mut ui);
+        let id = ui.manager.current.expect("taken");
+        let point = ui.manager.tree.get_snapshot(id).unwrap();
+        assert_eq!(point.snapshot_type, SnapshotType::Scheduled);
+        assert!(!point.stored.is_empty());
+        assert!(ui.status.starts_with("Took"), "{}", ui.status);
+        ui.tick_to(1_900_000_060);
+        assert!(ui.work.is_none(), "taken again a minute later");
+    }
+
+    /// Retention removes only the schedule's own restore points: never one
+    /// somebody took, never a locked one, never the current one.
+    #[test]
+    fn retention_removes_only_scheduled_restore_points() {
+        let mut m = SnapshotManager::new();
+        let day = 86_400u64;
+        let manual = m
+            .create_snapshot("Mine", "", day, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        // An old leaf of somebody's own: the policy's age limit covers it,
+        // and it is not the policy's to remove.
+        m.create_snapshot(
+            "Also mine",
+            "",
+            day,
+            SnapshotType::Manual,
+            vec![],
+            Some(manual),
+        )
+        .unwrap();
+        let old = m
+            .create_snapshot(
+                "Old",
+                "",
+                2 * day,
+                SnapshotType::Scheduled,
+                vec![],
+                Some(manual),
+            )
+            .unwrap();
+        let locked = m
+            .create_snapshot(
+                "Kept",
+                "",
+                3 * day,
+                SnapshotType::Scheduled,
+                vec![],
+                Some(manual),
+            )
+            .unwrap();
+        m.tree.lock_snapshot(locked).unwrap();
+        let current = m
+            .create_snapshot(
+                "Now",
+                "",
+                4 * day,
+                SnapshotType::Scheduled,
+                vec![],
+                Some(manual),
+            )
+            .unwrap();
+        m.current = Some(current);
+        m.schedule.retention = RetentionPolicy::new(0, day, 0);
+        assert_eq!(m.retention_candidates(100 * day), vec![old]);
+    }
+
+    /// The comparison is of the files two restore points hold.
+    #[test]
+    fn the_comparison_is_of_the_files() {
+        let (scratch, mut ui) = real_ui("compare");
+        let dir = settings_of(&scratch);
+        let a = take(&mut ui, "A");
+        std::fs::write(dir.join("appearance.yaml"), "theme: light\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "x").unwrap();
+        std::fs::remove_file(dir.join("notes/library.txt")).unwrap();
+        let b = take(&mut ui, "B");
+        ui.selected_id = Some(a);
+        ui.compare_id = Some(b);
+        ui.handle_event(&press(Key::F2));
+        let Some((_, Ok(diff))) = &ui.compare_cache else {
+            panic!("no comparison: {:?}", ui.compare_cache);
+        };
+        let summaries: Vec<String> = diff.entries.iter().map(DiffEntry::summary).collect();
+        assert!(
+            summaries.contains(&"+ File: new.txt".to_string()),
+            "{summaries:?}"
+        );
+        assert!(summaries.contains(&"~ File: appearance.yaml".to_string()));
+        assert!(summaries.contains(&"- File: notes/library.txt".to_string()));
+        assert_eq!(diff.entries.len(), 3);
+    }
+
+    /// The form keeps what this system can keep, and says so.
+    #[test]
+    fn the_form_says_what_it_keeps() {
+        let (scratch, ui) = real_ui("form");
+        assert_eq!(ui.form_sources(), vec![settings_of(&scratch)]);
+        assert_eq!(
+            ui.form_selected_components(),
+            vec![SnapshotComponent::UserSettings]
+        );
+    }
+
+    /// Progress is files done of files found, and whole once the work ends.
+    #[test]
+    fn progress_is_files_done_of_files_found() {
+        let mut p = OperationProgress::new("Taking a restore point");
+        assert_eq!(p.percentage(), 0);
+        p.step("Keeping Program Settings and Data", 1, 4);
+        assert_eq!(p.percentage(), 25);
+        p.finish("Took it");
+        assert!(p.complete);
+        assert_eq!(p.percentage(), 100);
+        let mut f = OperationProgress::new("x");
+        f.fail("no");
+        assert!(f.complete);
+        assert_eq!(f.error.as_deref(), Some("no"));
+    }
+
+    /// The overlay draws what the work reports.
+    #[test]
+    fn the_overlay_draws_the_work() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        let mut p = OperationProgress::new("Restoring");
+        p.step("Putting back Program Settings and Data", 3, 12);
+        ui.progress = Some(p);
+        let texts: Vec<String> = ui
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "3 of 12 files"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "25%"));
     }
 }

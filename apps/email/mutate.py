@@ -258,10 +258,26 @@ STORE_MUTATIONS = [
 ]
 
 if __name__ == "__main__":
-    only = sys.argv[1:] or None
-    results = [
-        sweep(SRC, MUTATIONS, "email", timeout=900, only=only),
-        sweep(DECODE_SRC, DECODE_MUTATIONS, "email", timeout=900, only=only),
-        sweep(STORE_SRC, STORE_MUTATIONS, "email", timeout=900, only=only),
+    # A filter goes to the tables it names a row of, and only those: the
+    # harness refuses a filter that selects nothing, which is right for one
+    # table and made every filtered run of this three-table file fail.
+    only = sys.argv[1:]
+    tables = [
+        (SRC, MUTATIONS),
+        (DECODE_SRC, DECODE_MUTATIONS),
+        (STORE_SRC, STORE_MUTATIONS),
     ]
+    names = [name for _, rows in tables for name, *_ in rows]
+    unmatched = [o for o in only if not any(o in n for n in names)]
+    if unmatched:
+        print(f"{len(unmatched)} filter(s) name no row in any table:")
+        for o in unmatched:
+            print(f"  {o!r}")
+        raise SystemExit(2)
+    results = [0]
+    for src, rows in tables:
+        mine = [o for o in only if any(o in name for name, *_ in rows)]
+        if only and not mine:
+            continue
+        results.append(sweep(src, rows, "email", timeout=900, only=mine or None))
     raise SystemExit(max(results))

@@ -9,19 +9,13 @@ pathtext = { path = "../pathtext" }
 # renderer for an untrusted name -- never as a lossy decode.
 quoting = { path = "../../userspace/quoting" }
 
-# design-decisions 426's path escape. A crate rather than a copy in each
-# program, because 426 chose one escape so that two formats could not
-# drift, and two copies of it reintroduced exactly that.
-pathcodec = { path = "../../gui/pathcodec" }
-# The content-addressed blob store treats a file's presence at a hash-derived
-# path as proof that the hash's content is there, so a blob must never appear
-# at its final name until it is complete.
+# The store: blobs, manifests, capture and restore. This program's engine
+# until 2026-09-27, moved so that System Restore keeps its copies in the same
+# store with the same guarantees.
+snapstore = { path = "../snapstore" }
+# The schedule file is rewritten whole, so a truncated write would lose every
+# schedule, not only the one being added.
 safeio = { path = "../safeio" }
-
-# The blob store's content addressing. This file used to carry its own copy of
-# SHA-256 -- one of twenty-six in the tree, and the audit that counted them
-# turned up two that were not SHA-256 at all.
-sha2 = { path = "../../sha2" }
 
 # Byte sizes for the listings this tool prints. It is a command-line program and
 # must not link a widget library, so it reaches the shared formatter through the
@@ -37,8 +31,8 @@ textfmt = { path = "../../textfmt" }
 tzrules = { path = "../../tzrules" }
 
 # The same crate again with its `audit` counters on, so the tests can prove the
-# store's writes really went through `safeio` and did not quietly regress to
-# `std::fs::write`/`fs::copy`. Cargo unifies this with the dependency above when
+# schedule file's writes really go through `safeio` and did not quietly regress
+# to `std::fs::write`. Cargo unifies this with the dependency above when
 # building tests, so the counters cost nothing in the shipped binary.
 [dev-dependencies]
 safeio = { path = "../safeio", features = ["audit"] }

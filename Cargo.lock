@@ -147,12 +147,11 @@ dependencies = [
 name = "backup-app"
 version = "0.1.0"
 dependencies = [
- "pathcodec",
  "pathtext",
  "quoting",
  "safeio",
  "scratchdir",
- "sha2",
+ "snapstore",
  "textfmt",
  "tzrules",
 ]
@@ -2887,6 +2886,18 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+]
+
+[[package]]
+name = "snapstore"
+version = "0.1.0"
+dependencies = [
+ "pathcodec",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "sha2",
+ "tzrules",
 ]
 
 [[package]]

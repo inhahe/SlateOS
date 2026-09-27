@@ -6487,11 +6487,12 @@ fn log_out_returns_to_the_login_screen() {
     type_password(&desktop, &mut session, "password");
     assert!(session.login().is_none(), "the desktop should be open");
 
-    // The way a user does it: the start button, the power button, the row.
+    // The way a user does it: the start button, the power button's caret --
+    // the button itself shuts down -- and the row.
     let start = centre(session.shell().start_button_rect());
     press_at(&desktop, session.panel(), start.0, start.1);
     session.pump().expect("pump");
-    let power = centre(session.shell().power_button_rect());
+    let power = centre(session.shell().power_caret_rect());
     press_at(&desktop, session.popups(), power.0, power.1);
     session.pump().expect("pump");
     let row = crate::power::PowerChoice::ALL

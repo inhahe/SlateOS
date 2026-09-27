@@ -325,6 +325,8 @@ const BUILT_IN: &[(&str, &str)] = &[
         "pan-down",
         include_str!("../themes/aero/icons/pan-down.svg"),
     ),
+    // The start menu power button's caret: its choices open upwards.
+    ("pan-up", include_str!("../themes/aero/icons/pan-up.svg")),
     (
         "accessories-calculator",
         include_str!("../themes/aero/icons/accessories-calculator.svg"),

@@ -1859,6 +1859,12 @@ live.
   names. Waiting on others: entries shipped with the programs (lane E), the
   image installing them (lane D), and the terminal taking `-e` (lane E).
 
+- `[C]` **"Shut down" in one click, the rest behind a caret** -- done
+  2026-09-26 (`design-decisions.md` §1405). The start menu's power button was
+  "Power", and opened a menu; it is the reference's now: "Shut down", which
+  asks every window to close and then shuts down, and a caret at its right end
+  that opens restart, sleep, hibernate, lock and log out.
+
 - `[C]` **Shutting down asks the programs first** -- done 2026-09-26
   (`design-decisions.md` §1405). "Shut down" switched the machine off at once,
   and a document with unsaved changes went with it. Shut down, restart and log

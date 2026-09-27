@@ -80796,7 +80796,13 @@ and happen at once, as before.
   manager's (`known-issues.md` `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`).
 - **The one-click "Shut down" button** the reference draws, with the other
   choices behind a caret, was waiting on exactly this (`todo.txt`); it is the
-  next change.
+  next change. *Done the same day:* the start menu's power button reads "Shut
+  down" and does it in one click -- through `choose_power`, so every window is
+  asked first -- and the caret at its right end (`power_caret_rect`, the
+  reference's 30-pixel `aero-sm-power-caret`, its chevron pointing up the way
+  the choices open) opens the other choices, lit with the accent while they
+  show. The two are drawn as the reference's: two parts of glass, a line round
+  each and a pixel between them.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

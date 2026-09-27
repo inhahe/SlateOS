@@ -392,6 +392,32 @@ fn a_wheel_notch_over_the_menu_scrolls_it() {
     );
 }
 
+/// The wheel scrolls the list from the power button too, both its parts --
+/// the caret as much as "Shut down" -- as it does from anywhere else on the
+/// menu, rather than being spent on a part that happens not to scroll.
+#[test]
+fn a_wheel_over_either_part_of_the_power_button_scrolls_the_list() {
+    for part in ["Shut down", "the caret"] {
+        let mut shell = shell_with_a_long_menu();
+        shell.toggle_start_menu();
+        let rect = if part == "Shut down" {
+            shell.power_button_rect()
+        } else {
+            shell.power_caret_rect()
+        };
+        let (x, y) = centre(rect);
+        assert_eq!(
+            shell.handle_mouse(&scroll(x, y, -1.0)),
+            ShellAction::Consumed,
+            "{part}"
+        );
+        assert_eq!(
+            shell.start_menu_scroll, 3,
+            "the wheel over {part} did not scroll the list"
+        );
+    }
+}
+
 /// A fraction left over from one visit to the menu must not move the next one.
 #[test]
 fn reopening_the_menu_forgets_the_leftover_fraction() {
@@ -482,8 +508,8 @@ fn the_power_menu_offers_every_power_action_and_carries_each_out() {
     for (row, choice) in crate::power::PowerChoice::ALL.iter().enumerate() {
         let mut shell = shell();
         shell.toggle_start_menu();
-        let button = shell.power_button_rect();
-        assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
+        let caret = shell.power_caret_rect();
+        assert_eq!(click_at(&mut shell, caret), ShellAction::Consumed);
         assert!(shell.power_menu_open);
 
         let rect = shell.power_menu_row_rect(row);
@@ -573,13 +599,211 @@ fn the_start_menu_offers_every_program_once_and_no_power_action() {
     }
 }
 
+/// **The power button is the reference's: "Shut down" in one click**, with the
+/// other choices behind the caret at its right end. One click is safe because
+/// shutting down asks every window to close first (design-decisions §1405) --
+/// so with a window open, the click asks it rather than switching off.
 #[test]
-fn the_power_button_toggles_its_menu_and_leaves_the_start_menu_open() {
+fn the_power_button_shuts_down_in_one_click_and_its_caret_holds_the_rest() {
     let mut shell = shell();
     shell.toggle_start_menu();
     let button = shell.power_button_rect();
+    let caret = shell.power_caret_rect();
+    // The caret is the button's right end, and only that.
+    assert!(
+        caret.w > 0.0 && caret.w < button.w / 2.0,
+        "the caret is not a small end of the button: {caret:?} of {button:?}"
+    );
+    assert_eq!(caret.x + caret.w, button.x + button.w);
+    assert_eq!((caret.y, caret.h), (button.y, button.h));
+    let (x, y) = centre(button);
+    assert_eq!(shell.hit_test(x, y), Hit::PowerButton);
+    let (x, y) = centre(caret);
+    assert_eq!(shell.hit_test(x, y), Hit::PowerCaret);
 
-    assert_eq!(shell.hit_test(button.x, button.y), Hit::PowerButton);
+    // With nothing open, the machine shuts down at once, and the menus go.
+    assert_eq!(
+        click_at(&mut shell, button),
+        ShellAction::Launch(
+            crate::power::PowerChoice::ShutDown
+                .command()
+                .expect("a program")
+        )
+    );
+    assert!(!shell.start_menu_open, "the menu stayed up over a shut down");
+    assert!(!shell.power_menu_open, "the other choices opened as well");
+
+    // With a window open, the click asks it to close.
+    let mut shell = self::shell();
+    shell.apply_window_list(&here(&[WindowInfo::new(7, 7, "unsaved".to_string())]));
+    shell.toggle_start_menu();
+    let button = shell.power_button_rect();
+    assert_eq!(
+        click_at(&mut shell, button),
+        ShellAction::ControlAll(vec![ShellRequest::window(
+            WindowId(7),
+            ShellControlAction::Close
+        )]),
+        "the button switched off under an open window"
+    );
+    assert!(!shell.start_menu_open);
+}
+
+/// **The caret is drawn where it is clicked**: its chevron inside it, "Shut
+/// down" wholly outside it, and the caret alone lit with the accent while the
+/// choices it opened are showing -- the popup's visible origin.
+#[test]
+fn the_power_caret_is_drawn_where_it_is_clicked_and_lit_while_its_menu_shows() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let button = shell.power_button_rect();
+    let caret = shell.power_caret_rect();
+    let accent = shell.theme.accent_color;
+    let within = |x: f32, y: f32, w: f32, h: f32, r: Rect| {
+        x >= r.x - 0.01 && y >= r.y - 0.01 && x + w <= r.x + r.w + 0.01 && y + h <= r.y + r.h + 0.01
+    };
+    // The accent fills drawn on the button, and the icons drawn in the caret.
+    let lit = |tree: &RenderTree| -> Vec<Rect> {
+        tree.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *color == accent && within(*x, *y, *width, *height, button) => {
+                    Some(Rect::new(*x, *y, *width, *height))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let chevrons = |shell: &DesktopShell, tree: &RenderTree| -> Vec<(String, guitk::color::Color)> {
+        tree.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    image_id,
+                    ..
+                } if within(*x, *y, *width, *height, caret) => {
+                    let request = shell.icon_request(*image_id).expect("an icon");
+                    Some((request.name.into_owned(), request.color))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    let closed = shell.render_start_menu().expect("open");
+    assert_eq!(lit(&closed), Vec::<Rect>::new(), "lit with nothing showing");
+
+    // Two parts of glass, as the reference's `aero-sm-power-main` and
+    // `aero-sm-power-caret`: a wash with a line round each, the caret one of
+    // them, and a gap between the two -- not one slab with a chevron on it.
+    let glass = guitk::theme::with_alpha(shell.theme.start_menu_fg, crate::POWER_BUTTON_GLASS_ALPHA);
+    let edge = guitk::theme::with_alpha(shell.theme.start_menu_fg, crate::POWER_BUTTON_EDGE_ALPHA);
+    let parts: Vec<Rect> = closed
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if *color == glass && within(*x, *y, *width, *height, button) => {
+                Some(Rect::new(*x, *y, *width, *height))
+            }
+            _ => None,
+        })
+        .collect();
+    let lines: Vec<Rect> = closed
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::StrokeRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if *color == edge && within(*x, *y, *width, *height, button) => {
+                Some(Rect::new(*x, *y, *width, *height))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parts.len(), 2, "not two parts of glass: {parts:?}");
+    assert_eq!(parts, lines, "a part without its line, or a line round nothing");
+    let (main, glass_caret) = (parts[0], parts[1]);
+    assert_eq!(glass_caret, caret, "the second part is not the caret");
+    assert_eq!((main.x, main.y, main.h), (button.x, button.y, button.h));
+    assert!(
+        main.x + main.w < caret.x,
+        "no gap between \"Shut down\" and the caret: {main:?} against {caret:?}"
+    );
+    // The chevron points up, the way the choices behind it open -- the
+    // reference's `crumb` turned by `rotate(-90deg)`.
+    let choices = shell.power_menu_rect();
+    assert!(
+        choices.y + choices.h <= caret.y,
+        "the choices do not open above the caret, so an upward chevron misleads: \
+         {choices:?} against {caret:?}"
+    );
+    assert_eq!(
+        chevrons(&shell, &closed),
+        [("pan-up".to_string(), shell.theme.start_menu_fg)]
+    );
+    let (label_x, label_w) = closed
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            RenderCommand::Text {
+                x,
+                text,
+                font_size,
+                font_weight,
+                ..
+            } if text == "Shut down" => {
+                Some((*x, guitk::text::measure(text, *font_size, *font_weight)))
+            }
+            _ => None,
+        })
+        .expect("\"Shut down\" is not drawn");
+    assert!(
+        label_x >= button.x && label_x + label_w <= caret.x,
+        "\"Shut down\" runs into the caret: {label_x} + {label_w} against {caret:?}"
+    );
+
+    shell.toggle_power_menu();
+    let open = shell.render_start_menu().expect("open");
+    assert_eq!(lit(&open), [caret], "the caret is not what is lit");
+    assert_eq!(
+        chevrons(&shell, &open),
+        [("pan-up".to_string(), shell.theme.start_menu_bg)],
+        "the chevron is not readable on the accent"
+    );
+}
+
+#[test]
+fn the_power_caret_toggles_its_menu_and_leaves_the_start_menu_open() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    // The caret, which is what opens the menu now that the button itself
+    // shuts down.
+    let button = shell.power_caret_rect();
+
+    assert_eq!(shell.hit_test(button.x, button.y), Hit::PowerCaret);
     assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
     assert!(shell.power_menu_open);
     assert!(shell.start_menu_open);
@@ -3378,7 +3602,7 @@ fn every_place_and_the_power_button_draws_its_icon() {
         .iter()
         .map(|w| (shell.start_shortcut_rect(*w), w.icon_name(), w.label()))
         .collect();
-    targets.push((shell.power_button_rect(), "system-shutdown", "Power"));
+    targets.push((shell.power_button_rect(), "system-shutdown", "Shut down"));
     for (rect, name, label) in targets {
         let &(x, _, width, id) = images
             .iter()

@@ -373,6 +373,19 @@ const CLOCK_LINE_HEIGHT: f32 = 1.18;
 /// How strongly the clock's date line is drawn under the time: the bar's text
 /// colour at this alpha, the reference's `opacity: 0.85`.
 const CLOCK_DATE_ALPHA: u8 = 217;
+/// Width of the caret at the power button's right end, which opens the other
+/// power choices -- the reference's `aero-sm-power-caret`, 30 wide.
+const POWER_CARET_WIDTH: f32 = 30.0;
+/// The gap between the power button's two parts: the reference's `gap: 1px`.
+const POWER_CARET_GAP: f32 = 1.0;
+/// The power button's glass, in the column's text colour: the reference's
+/// `aero-sm-power-main` gradient, white from 0.14 to 0.04, taken at its middle.
+const POWER_BUTTON_GLASS_ALPHA: u8 = 23;
+/// The line round each part of the power button: the reference's 0.2.
+const POWER_BUTTON_EDGE_ALPHA: u8 = 51;
+/// The caret's chevron points up, the way the choices behind it open -- the
+/// reference's `crumb` glyph turned by `rotate(-90deg)`.
+const POWER_CARET_ICON: &str = "pan-up";
 /// How long a shut down, restart or log out waits for the programs it asked to
 /// close before listing the ones that have not: long enough for a program to
 /// close on its own, short enough that a user who has walked away is not left
@@ -1007,6 +1020,9 @@ pub enum Hit {
     Clock,
     /// The "Show desktop" strip at the taskbar's right end.
     ShowDesktop,
+    /// The caret at the start menu power button's right end, which opens the
+    /// other power choices.
+    PowerCaret,
     /// The "... anyway" button of the list of programs a shut down, restart
     /// or log out is waiting for.
     EndingAnyway,
@@ -3463,6 +3479,26 @@ impl DesktopShell {
         )
     }
 
+    /// The caret at the power button's right end: the other power choices,
+    /// behind it as the reference keeps them. The rest of the button shuts
+    /// down.
+    #[must_use]
+    pub fn power_caret_rect(&self) -> Rect {
+        let button = self.power_button_rect();
+        let w = self.scale(POWER_CARET_WIDTH).min(button.w);
+        Rect::new(button.x + button.w - w, button.y, w, button.h)
+    }
+
+    /// The part of the power button drawn as "Shut down": all of it but the
+    /// caret and the reference's one-pixel gap before it. A press in the gap
+    /// is still the button's, as [`hit_test`](Self::hit_test) finds it.
+    fn power_main_rect(&self) -> Rect {
+        let button = self.power_button_rect();
+        let caret = self.power_caret_rect();
+        let w = (caret.x - self.scale(POWER_CARET_GAP) - button.x).max(0.0);
+        Rect::new(button.x, button.y, w, button.h)
+    }
+
     /// A place in the places column, below the user and above the power
     /// button, in [`StartShortcut::ALL`]'s order.
     ///
@@ -4133,6 +4169,9 @@ impl DesktopShell {
 
         if self.start_menu_open {
             let menu = self.start_menu_rect();
+            if self.power_caret_rect().contains(x, y) {
+                return Hit::PowerCaret;
+            }
             if self.power_button_rect().contains(x, y) {
                 return Hit::PowerButton;
             }
@@ -4964,6 +5003,7 @@ impl DesktopShell {
                 | Hit::StartMenuEntry(_)
                 | Hit::StartMenuPanel
                 | Hit::PowerButton
+                | Hit::PowerCaret
                 | Hit::StartMenuShortcut(_)
                 | Hit::PowerMenuEntry(_)
                 | Hit::PowerMenuPanel
@@ -5147,7 +5187,15 @@ impl DesktopShell {
                 }
                 ShellAction::Consumed
             }
+            // One click, as the reference's button does: every window is asked
+            // to close first (`choose_power`), so a program with unsaved work
+            // is asked rather than switched off -- which is what made this
+            // safe to put under one click.
             Hit::PowerButton => {
+                self.close_start_menu();
+                self.choose_power(power::PowerChoice::ShutDown)
+            }
+            Hit::PowerCaret => {
                 self.toggle_power_menu();
                 ShellAction::Consumed
             }
@@ -5432,7 +5480,7 @@ impl DesktopShell {
         // does not scroll the rows hidden behind it.
         if matches!(
             self.hit_test(x, y),
-            Hit::StartMenuEntry(_) | Hit::StartMenuPanel | Hit::PowerButton
+            Hit::StartMenuEntry(_) | Hit::StartMenuPanel | Hit::PowerButton | Hit::PowerCaret
         ) {
             let rows = scroll_rows(&mut self.start_menu_wheel, dy);
             self.scroll_start_menu(rows);
@@ -7710,20 +7758,33 @@ impl DesktopShell {
             );
         }
 
-        // The power button. Drawn as pressed while its menu is showing, so the
-        // popup that appears over the list has something visible that it came
-        // from.
+        // The power button, as the reference's: "Shut down" in one click, and
+        // a caret at its end for the other choices -- two parts of glass, a
+        // line round each, rounded only at the ends they do not share. The
+        // caret is drawn as pressed while its menu is showing, so the popup
+        // that appears over the list has something visible that it came from.
         let button = self.power_button_rect();
-        let button_radii = CornerRadii::all(radii.top_left.min(button.h / 2.0));
-        if self.power_menu_open {
-            fill_round(&mut tree, button, self.theme.accent_color, button_radii);
-        }
-        let label_size = self.font_size(TextRole::Body);
-        let ink = if self.power_menu_open {
-            self.theme.start_menu_bg
-        } else {
-            self.theme.start_menu_fg
+        let main = self.power_main_rect();
+        let caret = self.power_caret_rect();
+        let round = radii.top_left.min(button.h / 2.0).min(self.scale(4.0));
+        let main_radii = CornerRadii {
+            top_left: round,
+            top_right: 0.0,
+            bottom_right: 0.0,
+            bottom_left: round,
         };
+        let caret_radii = CornerRadii {
+            top_left: 0.0,
+            top_right: round,
+            bottom_right: round,
+            bottom_left: 0.0,
+        };
+        let glass = with_alpha(self.theme.start_menu_fg, POWER_BUTTON_GLASS_ALPHA);
+        let edge = with_alpha(self.theme.start_menu_fg, POWER_BUTTON_EDGE_ALPHA);
+        fill_round(&mut tree, main, glass, main_radii);
+        stroke_round(&mut tree, main, edge, self.scale(1.0), main_radii);
+        let label_size = self.font_size(TextRole::Body);
+        let ink = self.theme.start_menu_fg;
         let px = self.icon_px(START_LINK_ICON);
         #[allow(clippy::cast_precision_loss)]
         let side = px as f32;
@@ -7738,9 +7799,28 @@ impl DesktopShell {
         tree.text(
             button.x + inset + side + self.scale(START_LINK_ICON_GAP),
             button.y + (button.h - label_size).max(0.0) / 2.0,
-            "Power",
+            power::PowerChoice::ShutDown.label(),
             ink,
             label_size,
+        );
+
+        // The caret after the button's own icon and label, so that a reader
+        // of the drawing -- a test, or a screen reader walking it -- meets
+        // "Shut down" first, as the eye does.
+        let caret_ink = if self.power_menu_open {
+            fill_round(&mut tree, caret, self.theme.accent_color, caret_radii);
+            self.theme.start_menu_bg
+        } else {
+            fill_round(&mut tree, caret, glass, caret_radii);
+            self.theme.start_menu_fg
+        };
+        stroke_round(&mut tree, caret, edge, self.scale(1.0), caret_radii);
+        self.icon_in(
+            &mut tree,
+            caret,
+            POWER_CARET_ICON,
+            START_FOLDER_CHEVRON,
+            caret_ink,
         );
 
         if self.power_menu_open {

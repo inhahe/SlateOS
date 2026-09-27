@@ -58817,6 +58817,11 @@ is already waiting, not whether the setter exists.
 
 ## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
 
+- **Done 2026-09-26.** The power button reads "Shut down" and shuts down in
+  one click, asking every window to close first; the caret at its right end
+  (`DesktopShell::power_caret_rect`) opens the other choices. Nothing below is
+  outstanding; kept for the reasoning.
+
 - **The trigger below was met the same day** (design-decisions §1405): shut
   down, restart and log out ask every window to close first, and list the
   ones that do not. The button is next.

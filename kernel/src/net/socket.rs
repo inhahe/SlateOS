@@ -22,7 +22,7 @@
 //! A socket's daemon operations (`connect`/`send`/`recv`, and teardown) block on
 //! the wire while the daemon drains the ring. We must therefore **never** hold
 //! the global [`SOCKET_TABLE`] lock across one. Each slot's mutable state lives
-//! behind its own `Arc<Mutex<SocketInner>>`; an operation clones the `Arc` under
+//! behind its own `Arc<KMutex<SocketInner>>`; an operation clones the `Arc` under
 //! a brief table-lock, releases the table lock, then takes the per-socket lock
 //! for the (possibly blocking) round-trip. The per-socket lock only serializes
 //! operations on the *same* socket, which is the correct semantics (a stream
@@ -30,6 +30,24 @@
 //! slot under the table lock but performs the final `Arc` drop — which may run
 //! [`NetstackConn`] teardown (a blocking daemon round-trip) — *after* releasing
 //! it.
+//!
+//! The per-socket lock, and a listener's shared-session lock, are **sleeping**
+//! locks ([`KMutex`]) because they are held across those round-trips, and a
+//! round-trip blocks: `submit_round` waits in `channel::recv_timeout` for the
+//! daemon's reply. Until 2026-09-27 both were `crate::sync::Mutex`, a spinlock
+//! that disables preemption on its CPU for the whole hold. Blocking under one
+//! left that CPU's preempt count raised while other tasks ran on it, so none of
+//! them could be preempted until the holder came back. If the holder came back
+//! on another CPU, it released the lock there, and the first CPU's count
+//! stayed raised for good. Every boot logged the scheduler's `voluntary context
+//! switch ... while holding 1 tracked spinlock` warning from here. See
+//! known-issues `A-SOCKET-LOCKS-WERE-SPINLOCKS-HELD-ACROSS-DAEMON-ROUND-TRIPS`.
+//! [`SOCKET_TABLE`] stays a spinlock: it is only ever held for a lookup or an
+//! insert.
+//!
+//! Lock order: a socket's own lock, then its shared session's (`accept` and
+//! `SocketInner::with_stream_conn`); never the reverse. The table lock may
+//! be taken under either, never the other way round.
 //!
 //! ## Refcounting
 //!
@@ -40,6 +58,7 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::net::netstack_client::NetstackConn;
+use crate::sched::kmutex::KMutex;
 use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -172,11 +191,13 @@ pub enum ConnectOutcome {
 /// session with the listener and any sibling accepted connections, addressed by
 /// its own `conn_id` (Q23 Option A: one refcounted session, no daemon-ABI change).
 ///
-/// The shared [`NetstackConn`] lives behind its own `Arc<Mutex<…>>` so the listener
+/// The shared [`NetstackConn`] lives behind its own `Arc<KMutex<…>>` so the listener
 /// and every accepted socket — each in a *separate* [`SocketInner`] mutex — can
 /// reach the one ring session. The daemon session is single-producer/
 /// single-consumer, so this inner mutex serialises all ops on that session (the
 /// documented Option-A concurrency limitation; see `known-issues` D-NETSOCK-SYNC).
+/// It is a sleeping lock, held across daemon round-trips; see the module's
+/// "Lock discipline".
 ///
 /// On drop, an accepted connection tells the daemon to close *just* its `conn_id`
 /// (`OP_CLOSE`), leaving the shared session — and the listener — alive. The
@@ -184,7 +205,7 @@ pub enum ConnectOutcome {
 /// when the last `Arc` reference drops, running [`NetstackConn`]'s own `Drop`.
 struct SharedConn {
     /// The shared ring session (listener + all its accepted connections).
-    session: Arc<Mutex<NetstackConn>>,
+    session: Arc<KMutex<NetstackConn>>,
     /// The connection id this socket drives on the shared session — the listener's
     /// [`LISTENER_ID`] for a listener, or a per-accept id for an accepted socket.
     conn_id: u32,
@@ -315,7 +336,7 @@ impl SocketInner {
 /// One entry in the global socket table: the shared per-socket state plus the
 /// fd reference count.
 struct SocketSlot {
-    inner: Arc<Mutex<SocketInner>>,
+    inner: Arc<KMutex<SocketInner>>,
     /// Number of fds referencing this socket (dup/fork bump; close drops).
     refcount: u32,
 }
@@ -377,7 +398,7 @@ fn create_kind(kind: SockKind, domain: u16) -> KernelResult<SocketHandle> {
     };
     let id = alloc_socket_id();
     let slot = SocketSlot {
-        inner: Arc::new(Mutex::new(inner)),
+        inner: Arc::new(KMutex::new(inner)),
         refcount: 1,
     };
     SOCKET_TABLE.lock().insert(id, slot);
@@ -430,7 +451,7 @@ pub fn close(handle: SocketHandle) {
 }
 
 /// Look up a socket's shared state, cloning the `Arc` under a brief table lock.
-fn inner_of(handle: SocketHandle) -> KernelResult<Arc<Mutex<SocketInner>>> {
+fn inner_of(handle: SocketHandle) -> KernelResult<Arc<KMutex<SocketInner>>> {
     let table = SOCKET_TABLE.lock();
     let slot = table.get(&handle.id()).ok_or(KernelError::InvalidHandle)?;
     Ok(slot.inner.clone())
@@ -591,7 +612,7 @@ pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i3
 /// Record that a connection's timeout has been reported by a call: SO_ERROR's
 /// pending `ETIMEDOUT`, if a poll latched one, is consumed, and no later poll
 /// latches another. Linux clears `sk_err` the same way when a call returns it.
-fn timeout_reported(inner: &Mutex<SocketInner>) {
+fn timeout_reported(inner: &KMutex<SocketInner>) {
     let mut guard = inner.lock();
     guard.timeout_reported = true;
     if guard.so_error == ETIMEDOUT {
@@ -1733,7 +1754,7 @@ pub fn listen(handle: SocketHandle, _backlog: i32) -> KernelResult<()> {
         return Err(KernelError::AddrInUse);
     }
     guard.session = SessionRef::Shared(SharedConn {
-        session: Arc::new(Mutex::new(conn)),
+        session: Arc::new(KMutex::new(conn)),
         conn_id: LISTENER_ID,
         is_listener: true,
     });
@@ -1832,7 +1853,7 @@ pub fn accept(handle: SocketHandle) -> KernelResult<(SocketHandle, AcceptedPeer)
     };
     let id = alloc_socket_id();
     let slot = SocketSlot {
-        inner: Arc::new(Mutex::new(accepted)),
+        inner: Arc::new(KMutex::new(accepted)),
         refcount: 1,
     };
     SOCKET_TABLE.lock().insert(id, slot);

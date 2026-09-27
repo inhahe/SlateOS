@@ -729,6 +729,277 @@ pub fn preempt_count(cpu: usize) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// A spinlock carried across a voluntary context switch
+// ---------------------------------------------------------------------------
+
+/// Voluntary context switches taken while the switching CPU's preempt count
+/// was non-zero: a spinlock, or a bare [`preempt_disable`], carried across a
+/// yield or a block.
+///
+/// Every one is a bug with consequences beyond the lock. The count is per
+/// CPU, so the tasks that run next on this CPU inherit it and cannot be
+/// preempted until the holder is back. If the holder resumes on another CPU,
+/// its release lowers *that* CPU's count, and this one stays raised for the
+/// rest of the boot.
+///
+/// This was a one-shot warning until 2026-09-27, printed without a site. It
+/// fired on every boot from inside `net::socket` for weeks, and being one-shot
+/// it could not say whether anything else did too (known-issues
+/// `A-SOCKET-LOCKS-WERE-SPINLOCKS-HELD-ACROSS-DAEMON-ROUND-TRIPS`).
+static SWITCH_UNDER_LOCK: AtomicU64 = AtomicU64::new(0);
+
+/// Occurrences provoked on purpose by [`self_test_switch_under_lock`], kept
+/// out of [`SWITCH_UNDER_LOCK`]: a control counted as a finding is how a
+/// check comes to report a population it never saw (dd-942).
+static SWITCH_UNDER_LOCK_CONTROL: AtomicU64 = AtomicU64::new(0);
+
+/// The CPU on which [`self_test_switch_under_lock`] is provoking the check,
+/// or [`NO_CONTROL_CPU`].
+///
+/// A CPU, not a flag: the control runs with preemption disabled, so nothing
+/// else runs on its CPU meanwhile, but a real occurrence on another CPU at the
+/// same moment must still count as live. A global flag would file it under the
+/// control, and the verdict would never see it.
+static SWITCH_UNDER_LOCK_CONTROL_CPU: AtomicUsize = AtomicUsize::new(NO_CONTROL_CPU);
+
+/// [`SWITCH_UNDER_LOCK_CONTROL_CPU`] when no control is running.
+const NO_CONTROL_CPU: usize = usize::MAX;
+
+/// How many distinct sites [`report_switch_under_lock`] describes in full.
+/// The rest are counted, not printed.
+const SWITCH_UNDER_LOCK_SITES: usize = 16;
+
+/// The sites already described, so each is described once.
+///
+/// A site is the acquisition [`core::panic::Location`] of the innermost lock
+/// lockdep says the CPU holds, else of the `PreemptSpinMutex` it holds, as a
+/// pointer: the identity `sync`'s leaf-claim table uses. With neither -- a
+/// bare `preempt_disable`, or lockdep off -- it is a hash of the call chain,
+/// so two such callers are still told apart. 0 is an empty slot.
+static SWITCH_UNDER_LOCK_SEEN: [AtomicUsize; SWITCH_UNDER_LOCK_SITES] =
+    [const { AtomicUsize::new(0) }; SWITCH_UNDER_LOCK_SITES];
+
+/// Whether a context switch of this kind, taken with this preempt count, is a
+/// lock carried across it.
+///
+/// Only a voluntary switch can be: involuntary preemption is deferred while
+/// the count is non-zero, so it never reaches the switch holding a lock. The
+/// predicate is separate so [`self_test_switch_under_lock`] can test it on
+/// counts it could not safely produce for real.
+#[inline]
+fn switch_is_under_lock(kind: SwitchKind, count: u64) -> bool {
+    matches!(kind, SwitchKind::Voluntary) && count > 0
+}
+
+/// Claim a [`SWITCH_UNDER_LOCK_SEEN`] slot for `key`: `true` the first time a
+/// key is seen, `false` after, or when the table is full.
+fn claim_switch_site(key: usize) -> bool {
+    for slot in &SWITCH_UNDER_LOCK_SEEN {
+        let current = slot.load(Ordering::Relaxed);
+        if current == key {
+            return false;
+        }
+        if current == 0 {
+            match slot.compare_exchange(0, key, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(winner) if winner == key => return false,
+                Err(_) => {}
+            }
+        }
+    }
+    false
+}
+
+/// A key for a site no lock names: a hash of the call chain's return
+/// addresses, never 0.
+fn backtrace_key(bt: &crate::backtrace::BacktraceResult) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+    for f in bt.frames.iter().take(bt.count) {
+        h ^= f.return_addr;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    // Truncation is fine for a dedup key; `| 1` keeps it off the empty 0.
+    #[allow(clippy::cast_possible_truncation)]
+    let key = h as usize;
+    key | 1
+}
+
+/// Count a voluntary context switch taken with a spinlock held, and describe
+/// its site the first time it is seen: the held lock's acquisition site,
+/// lockdep's held stack, and the symbolized call chain.
+///
+/// Runs inside the scheduler with the offending lock still held, so it
+/// neither allocates nor locks: the backtrace is walked into a stack array,
+/// symbols come from `ksyms::resolve_static`, and the held stack and leaf
+/// site are read from per-CPU state.
+#[cold]
+#[inline(never)]
+fn report_switch_under_lock(task: TaskId, cpu: usize) {
+    if SWITCH_UNDER_LOCK_CONTROL_CPU.load(Ordering::Relaxed) == cpu {
+        SWITCH_UNDER_LOCK_CONTROL.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    SWITCH_UNDER_LOCK.fetch_add(1, Ordering::Relaxed);
+    let bt = crate::backtrace::capture();
+    let site = crate::lockdep::innermost_held_site(cpu).or_else(crate::sync::held_leaf_site);
+    let key = site.map_or_else(
+        || backtrace_key(&bt),
+        |l| core::ptr::from_ref::<core::panic::Location<'static>>(l) as usize,
+    );
+    if !claim_switch_site(key) {
+        return;
+    }
+    match site {
+        Some(l) => crate::serial_println!(
+            "[sched] *** BUG: voluntary context switch (task {}, cpu {}) while holding {} \
+             tracked spinlock(s), the innermost taken at {}. A spinlock must never be held \
+             across a yield or a block: the tasks that run next on this CPU inherit its \
+             preempt count. Held locks and the call chain follow; each site is described \
+             once, and the total is reported before BOOT_OK.",
+            task,
+            cpu,
+            preempt_count(cpu),
+            l
+        ),
+        None => crate::serial_println!(
+            "[sched] *** BUG: voluntary context switch (task {}, cpu {}) with preempt count \
+             {} and no lock recorded -- a bare preempt_disable, or a lock lockdep does not \
+             see. Nothing may yield or block with preemption disabled: the tasks that run \
+             next on this CPU inherit the count. The call chain follows; each site is \
+             described once, and the total is reported before BOOT_OK.",
+            task,
+            cpu,
+            preempt_count(cpu)
+        ),
+    }
+    crate::lockdep::dump_held_locks(cpu);
+    crate::backtrace::print_symbolized(&bt);
+}
+
+/// Voluntary context switches taken with a spinlock held since boot, controls
+/// excluded.
+#[must_use]
+pub fn switch_under_lock_count() -> u64 {
+    SWITCH_UNDER_LOCK.load(Ordering::Relaxed)
+}
+
+/// The control for the switch-under-lock check: the predicate on synthetic
+/// counts, and the counting path on a real raised count.
+///
+/// The counting path is provoked by calling the report directly between a
+/// `preempt_disable` and a `preempt_enable`, not by yielding with a lock
+/// held: that would *be* the bug, with its consequences, not a test of the
+/// check. What is exercised is everything after the predicate.
+///
+/// # Errors
+///
+/// `InternalError`, after saying which part failed.
+fn self_test_switch_under_lock() -> KernelResult<()> {
+    let predicate_ok = switch_is_under_lock(SwitchKind::Voluntary, 1)
+        && switch_is_under_lock(SwitchKind::Voluntary, 3)
+        && !switch_is_under_lock(SwitchKind::Voluntary, 0)
+        && !switch_is_under_lock(SwitchKind::Involuntary, 1)
+        && !switch_is_under_lock(SwitchKind::Uncounted, 1);
+    if !predicate_ok {
+        crate::serial_println!(
+            "[sched]   FAIL: switch-under-lock predicate: a voluntary switch must count exactly \
+             when the preempt count is non-zero, and no other kind ever"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let live_before = SWITCH_UNDER_LOCK.load(Ordering::Relaxed);
+    let control_before = SWITCH_UNDER_LOCK_CONTROL.load(Ordering::Relaxed);
+    preempt_disable();
+    // Read after disabling, so it is the CPU the count was raised on, and
+    // the one this task stays on until the enable below.
+    let cpu = current_cpu_id();
+    SWITCH_UNDER_LOCK_CONTROL_CPU.store(cpu, Ordering::Relaxed);
+    let raised = preempt_count(cpu);
+    if switch_is_under_lock(SwitchKind::Voluntary, raised) {
+        report_switch_under_lock(current_task_id(), cpu);
+    }
+    SWITCH_UNDER_LOCK_CONTROL_CPU.store(NO_CONTROL_CPU, Ordering::Relaxed);
+    preempt_enable();
+
+    let control = SWITCH_UNDER_LOCK_CONTROL
+        .load(Ordering::Relaxed)
+        .wrapping_sub(control_before);
+    let live = SWITCH_UNDER_LOCK
+        .load(Ordering::Relaxed)
+        .wrapping_sub(live_before);
+    if raised == 0 || control != 1 {
+        crate::serial_println!(
+            "[sched]   FAIL: switch-under-lock control: with the preempt count raised to {} \
+             the check counted {} control occurrence(s), want 1",
+            raised,
+            control
+        );
+        return Err(KernelError::InternalError);
+    }
+    if live != 0 {
+        // Either the provoked occurrence leaked into the live count, or a
+        // real one landed on another CPU inside the window. The verdict fails
+        // on the second anyway, and a new site is described where it happened.
+        crate::serial_println!(
+            "[sched]   FAIL: switch-under-lock control: the live count moved by {} while the \
+             control ran -- the control leaked into it, or a real occurrence landed on another \
+             CPU at the same moment (a new site is described above)",
+            live
+        );
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
+/// The switch-under-lock check's verdict, before BOOT_OK: how many voluntary
+/// context switches happened with a spinlock held, against how many yields
+/// and blocks the scheduler counted, and a failure if any did.
+///
+/// The control runs first, immediately before the verdict, so a zero here is
+/// a count the check was demonstrably able to make.
+///
+/// # Errors
+///
+/// `InternalError` when the control fails or any switch was taken under a
+/// lock; the offenders are described where they happened.
+pub fn report_switches_under_lock() -> KernelResult<()> {
+    self_test_switch_under_lock()?;
+    let live = switch_under_lock_count();
+    let sites = SWITCH_UNDER_LOCK_SEEN
+        .iter()
+        .filter(|s| s.load(Ordering::Relaxed) != 0)
+        .count();
+    let population: u64 = VOLUNTARY_SWITCHES
+        .iter()
+        .map(|c| c.load(Ordering::Relaxed))
+        .fold(0, u64::saturating_add);
+    if live == 0 {
+        crate::serial_println!(
+            "[sched] switch-under-lock check: none of the {} yield/block call(s) the scheduler \
+             counted switched with a spinlock held (the control's provoked one was counted and \
+             excluded)",
+            population
+        );
+        return Ok(());
+    }
+    crate::serial_println!(
+        "[sched] switch-under-lock check: {} voluntary context switch(es), against {} \
+         yield/block call(s) counted, were taken with a spinlock held, at {} distinct site(s) \
+         described above{}",
+        live,
+        population,
+        sites,
+        if sites >= SWITCH_UNDER_LOCK_SITES {
+            " (SITE TABLE FULL -- more sites were counted than described)"
+        } else {
+            ""
+        }
+    );
+    Err(KernelError::InternalError)
+}
+
+// ---------------------------------------------------------------------------
 // Per-CPU scheduler statistics
 // ---------------------------------------------------------------------------
 
@@ -7084,22 +7355,11 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
     // exactly the hazard PREEMPT_DISABLE_COUNT exists to prevent for the
     // *involuntary* path (which is why involuntary preemption is deferred
     // while the count is non-zero and can never reach here holding a lock).
-    // The voluntary path can't be transparently deferred, so instead we flag
-    // it loudly (one-shot) so the offending call site gets fixed. No such call
-    // site exists today; this catches future regressions instantly instead of
-    // as an intermittent single-CPU deadlock.
-    if matches!(kind, SwitchKind::Voluntary) && preempt_count(cpu) > 0 {
-        static WARNED: AtomicBool = AtomicBool::new(false);
-        if !WARNED.swap(true, Ordering::Relaxed) {
-            crate::serial_println!(
-                "[sched] *** BUG: voluntary context switch (task {}, cpu {}) while \
-                 holding {} tracked spinlock(s). A spinlock must never be held across \
-                 a yield/block — fix the call site. (one-shot warning)",
-                current_id,
-                cpu,
-                preempt_count(cpu),
-            );
-        }
+    // The voluntary path can't be transparently deferred, so every occurrence
+    // is counted and each distinct site described, and the boot fails on the
+    // total (`report_switches_under_lock`).
+    if switch_is_under_lock(kind, preempt_count(cpu)) {
+        report_switch_under_lock(current_id, cpu);
     }
 
     // Data extracted under the single lock acquisition for the switch.

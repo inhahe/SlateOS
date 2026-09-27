@@ -1206,6 +1206,20 @@ fn leaf_site() -> Option<&'static core::panic::Location<'static>> {
     Some(unsafe { &*p })
 }
 
+/// Where this CPU's outermost held `PreemptSpinMutex` was acquired, if it
+/// holds one.
+///
+/// For the scheduler's report of a spinlock carried across a context switch
+/// (`sched::report_switch_under_lock`). A `PreemptSpinMutex` raises the
+/// preempt count exactly as a [`Mutex`] does but never registers with
+/// lockdep, so this is the only record of which one is held. Lock-free and
+/// allocation-free: it runs from inside the scheduler.
+#[must_use]
+pub fn held_leaf_site() -> Option<&'static core::panic::Location<'static>> {
+    leaf_held()?;
+    leaf_site()
+}
+
 /// Is this CPU inside a lock that claims to be a leaf?
 fn leaf_held() -> Option<&'static [u8]> {
     let cpu = crate::smp::current_cpu_index();

@@ -950,6 +950,39 @@ pub fn held_depth(cpu: usize) -> u8 {
     unsafe { HELD[cpu].depth }
 }
 
+/// Where the innermost lock `cpu` holds was acquired, if lockdep recorded it.
+///
+/// For the scheduler's report of a spinlock carried across a context switch
+/// (`sched::report_switch_under_lock`), which names the lock by the code
+/// that took it and uses the site to describe each distinct offender once.
+/// `None` when the validator is off, the CPU holds no tracked lock, or the
+/// class has no recorded site yet.
+///
+/// Lock-free and allocation-free, like [`dump_held_locks`], and for the same
+/// reason: its caller is inside the scheduler.
+#[must_use]
+pub fn innermost_held_site(cpu: usize) -> Option<&'static Location<'static>> {
+    if cpu >= MAX_CPUS || !ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    // Through a raw pointer to the one element, not an index: no reference to
+    // the array is formed while other CPUs write their own entries, and there
+    // is no panicking index for a checked bound.
+    let slot = (&raw const HELD).cast::<HeldStack>().wrapping_add(cpu);
+    // SAFETY: `cpu < MAX_CPUS`, checked above, so `slot` points at element
+    // `cpu` of `HELD`, a static that lives for the whole program. The fields
+    // are read by value through the raw pointer, forming no reference. The
+    // caller is the task running on `cpu`, and only that CPU writes its own
+    // entry, so the copy is not torn.
+    let (depth, stack) = unsafe { ((*slot).depth as usize, (*slot).stack) };
+    let class_idx = *stack.get(depth.checked_sub(1)?)?;
+    let count = (CLASS_COUNT.load(Ordering::Relaxed) as usize).min(MAX_CLASSES);
+    if class_idx as usize >= count || !class_is_ready(class_idx as usize) {
+        return None;
+    }
+    class_site(class_idx)
+}
+
 /// Print the names of all locks currently held by `cpu`, in acquisition
 /// order (bottom → top of the held stack).
 ///

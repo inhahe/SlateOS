@@ -9767,6 +9767,20 @@ extern "C" fn kernel_main() -> ! {
             // accumulate where nothing reads them.
             sync::report_leaf_claims();
 
+            // And the switch-under-lock check's verdict, which, unlike those
+            // two, fails the run. A spinlock carried across a yield or a block
+            // leaves its CPU's preempt count raised under whichever task runs
+            // next, and for good if the holder resumes on another CPU. Each
+            // site is described where it happens; this is the total, after a
+            // control that shows the check can count. Diagnostic, not
+            // Integrity: BOOT_OK and the lines after it still have something
+            // to say, and the failure reds the run either way.
+            selftest::dispatch_debug(
+                "switch under a spinlock",
+                selftest::Severity::Diagnostic,
+                sched::report_switches_under_lock(),
+            );
+
             // And binfmt's, for the reason its own accessor cannot give:
             // `stats()` returns (0, 0, 0, 0) when STATE is None, which is
             // byte-identical to an initialised table on a system that has

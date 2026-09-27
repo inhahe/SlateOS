@@ -82854,6 +82854,32 @@ ignore it.
    a gate that costs much and catches nothing is visible rather than assumed
    useful.
 
+**Measured, 2026-09-27**, with `scripts/gate-cost-report.py`. It reads
+every boot's per-gate timing file in all six worktrees, and it counts only
+the boot test's own gates, so fixture rows are excluded.
+- **Total.** Across 395 boots, the gates `run_checker` times cost 133.9
+  gate-hours.
+- **Never refused.** 98 of the 131 gates never refused once, and they cost
+  73.4 of those hours (55%).
+- **The most expensive.** `check-live-counter-reads` cost 11.2 hours over 335
+  boots, and `check-selftest-reach` 9.3 hours over 267. Neither ever refused.
+
+Two limits on what that says:
+- **A refusal is a catch or a false alarm.** The report lists the dates so a
+  person can tell which.
+- **Zero refusals is not zero value.** A gate can prevent faults its authors
+  fixed before any boot.
+
+So this retires nothing. It says where the gate cache (C-Q11 idea 2) earns
+most: these gates' inputs rarely change between boots. The tooling suites,
+about 5800 s a boot, do not run through `run_checker` and are not in these
+numbers.
+
+**Done 2026-09-27: the first half.**
+- 22 of the 53 boot-only gates, those with a median of 15 s or less that judge
+  source, are push gates 52-73.
+- Each runs only where the working tree is the push.
+
 ## 975. A lock that has another lock taken under it is watched by the deadlock detector; a conversion that costs more than it is worth is reverted, by measurement
 
 **Date:** 2026-09-27 · **Decided by:** Operator (Claude recommended this option) · **Lane:** A

@@ -186,6 +186,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
 | `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
+| `scripts/gate-cost-report.py` | What each boot-test gate has cost, against what it has caught. |
 | `scripts/gen-chmod-fixture.sh` | Measure GNU chmod's answer for a cross product of mode strings, starting |
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
@@ -354,6 +355,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-diff-bound.sh` | Two-probe test for the bound that `diff-wsl.sh` puts around every harness. |
 | `scripts/test-diff-forward.sh` | Does a `DIFF_*` knob set on the command line reach the far side of the WSL |
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
+| `scripts/test-gate-cost-report.py` | Run `gate-cost-report.py`'s self-test under the boot test's tooling gate. |
 | `scripts/test-gittree.py` | Tests for `scripts/gittree.py` — reading many blobs out of one git process. |
 | `scripts/test-grade-positional.py` | Regression tests for `scripts/grade-positional.py`. |
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
@@ -406,4 +408,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_396 scripts._
+_398 scripts._

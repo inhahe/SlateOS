@@ -494,7 +494,23 @@ pub enum HotkeyAction {
     /// Step the Alt+Tab switcher forwards, opening it if it is closed.
     CycleWindows,
     /// Step the Alt+Tab switcher backwards, opening it if it is closed.
+    ///
+    /// Opened this way, it shows itself as the forward chord beside it would --
+    /// the same keys without Shift -- so a user who binds Alt+Tab to
+    /// [`CycleWindowsInOverview`](Self::CycleWindowsInOverview) gets
+    /// Shift+Alt+Tab in the overview as well.
     CycleWindowsBackwards,
+    /// Step through the windows as [`CycleWindows`](Self::CycleWindows)
+    /// does, shown in the overview rather than the switcher's strip: every
+    /// window on the desktop at once, to scale, most recently used first, the
+    /// one letting go would pick lit.
+    ///
+    /// This is how the user chooses what Alt+Tab shows (`design-decisions.md`
+    /// §1416: Super+Tab went, and what it opened became a choice for Alt+Tab)
+    /// -- by binding Alt+Tab to it on the shortcut card, the one place
+    /// shortcuts are set, rather than through a second setting that would say
+    /// the same thing somewhere else.
+    CycleWindowsInOverview,
     /// Open (or close) the Exposé overlay — every window on every desktop.
     ///
     /// Distinct from [`CycleWindows`](Self::CycleWindows), which is the same job
@@ -639,7 +655,7 @@ impl HotkeyAction {
     /// `scripts/check-variant-lists.py` checks it: an action added to the enum
     /// and not here fails that gate rather than quietly being unbindable from
     /// the card.
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::CloseWindow,
         Self::MinimizeWindow,
         Self::MaximizeWindow,
@@ -651,6 +667,7 @@ impl HotkeyAction {
         Self::SwitchInputLayout,
         Self::CycleWindows,
         Self::CycleWindowsBackwards,
+        Self::CycleWindowsInOverview,
         Self::ToggleOverview,
         Self::PreviousDesktop,
         Self::NextDesktop,
@@ -686,6 +703,17 @@ impl HotkeyAction {
     #[must_use]
     pub const fn is_conditional(&self) -> bool {
         matches!(self, Self::DismissPopup)
+    }
+
+    /// Whether this steps a window switch -- starting one if none is under
+    /// way -- which is the one kind of action a *release* ends, and so the one
+    /// kind whose held keys the shell has to remember.
+    #[must_use]
+    pub const fn cycles_windows(&self) -> bool {
+        matches!(
+            self,
+            Self::CycleWindows | Self::CycleWindowsBackwards | Self::CycleWindowsInOverview
+        )
     }
 
     /// The program this action starts, and how to invoke it.
@@ -771,6 +799,7 @@ impl HotkeyAction {
             Self::ShowDesktop => "show_desktop".to_string(),
             Self::CycleWindows => "cycle_windows".to_string(),
             Self::CycleWindowsBackwards => "cycle_windows_backwards".to_string(),
+            Self::CycleWindowsInOverview => "cycle_windows_in_overview".to_string(),
             Self::ToggleOverview => "toggle_overview".to_string(),
             Self::PreviousDesktop => "previous_desktop".to_string(),
             Self::NextDesktop => "next_desktop".to_string(),
@@ -820,6 +849,7 @@ impl HotkeyAction {
             "show_desktop" => Ok(Self::ShowDesktop),
             "cycle_windows" => Ok(Self::CycleWindows),
             "cycle_windows_backwards" => Ok(Self::CycleWindowsBackwards),
+            "cycle_windows_in_overview" => Ok(Self::CycleWindowsInOverview),
             "toggle_overview" => Ok(Self::ToggleOverview),
             "previous_desktop" => Ok(Self::PreviousDesktop),
             "next_desktop" => Ok(Self::NextDesktop),
@@ -860,6 +890,7 @@ impl HotkeyAction {
             Self::ShowDesktop => "Show Desktop",
             Self::CycleWindows => "Cycle Windows",
             Self::CycleWindowsBackwards => "Cycle Windows Backwards",
+            Self::CycleWindowsInOverview => "Cycle Windows in the Overview",
             Self::ToggleOverview => "Window Overview",
             Self::PreviousDesktop => "Previous Desktop",
             Self::NextDesktop => "Next Desktop",

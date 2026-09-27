@@ -1119,7 +1119,9 @@ mod tests {
         let mut reg = registry(&[]);
         let mut ed = ShortcutEditor::new();
         ed.handle_key(&press(Key::Insert), &mut reg, CX);
-        feed(&mut ed, &mut reg, &typed("OVERVIEW"));
+        // "Window Overview" and nothing else: "overview" alone also finds
+        // Cycle Windows in the Overview, listed first.
+        feed(&mut ed, &mut reg, &typed("WINDOW OVERVIEW"));
         assert_eq!(
             ed.handle_key(&press(Key::Enter), &mut reg, CX),
             Outcome::Handled

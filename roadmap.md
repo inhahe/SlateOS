@@ -1868,10 +1868,14 @@ live.
   opens (a Keyboard Shortcuts place). Waiting on others: Alt+Print Screen's
   scancode (lane A), `--save` in the screenshot tool (lane E).
 
-- `[C]` **Alt+Tab can show the overview instead of the switcher** -- open
-  (§1416: Super+Tab is gone, and what it opened becomes a choice of what
-  Alt+Tab shows). A setting, and the overview learning Alt+Tab's manners: hold
-  Alt, Tab and Shift+Tab move through the windows, letting go of Alt picks one.
+- `[C]` **Alt+Tab can show the overview instead of the switcher** -- done
+  2026-09-27 (§1416, §1419). "Cycle Windows in the Overview" is a second
+  window-switching action; binding Alt+Tab to it on the shortcut card makes
+  Alt+Tab show the overview, with Alt+Tab's manners -- hold Alt, Tab and
+  Shift+Tab step, most recent first; the arrows and the pointer choose; letting
+  go picks. Fixed with it: the switcher stepped the wrong way after the first
+  Tab, a switch on any chord but Alt+Tab never ended, and the overview's arrows
+  could light a card on a desktop not shown.
 
 - `[C]` **A shortcut that puts the monitor to sleep** -- blocked by lane F
   (`requests/c-f-a-way-for-the-shell-to-put-the-display-to-sleep.md`: no

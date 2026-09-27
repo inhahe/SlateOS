@@ -1024,6 +1024,83 @@ impl StartShortcut {
     }
 }
 
+/// How a window switch in progress is shown.
+///
+/// Chosen by the action that started it: [`HotkeyAction::CycleWindows`] shows
+/// the switcher's strip, [`HotkeyAction::CycleWindowsInOverview`] the overview.
+/// The stepping, the choosing and the ending are the same either way; only the
+/// picture differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchView {
+    /// The strip: each window's picture in a cell, the chosen one's title
+    /// across the top.
+    Switcher,
+    /// The overview: every window on the desktop at once, to scale, most
+    /// recently used first, the chosen one lit.
+    Overview,
+}
+
+/// What ends a window switch when it is let go of.
+///
+/// Alt+Tab ends when Alt comes up. It used to be *only* Alt, which was right
+/// while Alt+Tab was the only chord that could start a switch; once a user can
+/// put window switching on Super+Tab or Ctrl+` (`design-decisions.md` §1416), a
+/// switch that waits for an Alt release that never comes stays on the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchAnchor {
+    /// Letting go of any of these modifiers.
+    Modifiers(Modifiers),
+    /// A chord with nothing to hold -- a bare key the user bound -- which ends
+    /// when its own key comes up: one press, one switch to the window before.
+    Key(Key),
+}
+
+impl SwitchAnchor {
+    /// Alt: what ends a switch that did not say otherwise, as it always has.
+    pub const ALT: Self = Self::Modifiers(Modifiers {
+        ctrl: false,
+        alt: true,
+        shift: false,
+        super_key: false,
+    });
+
+    /// What ends a switch started by `key` pressed with `modifiers` held.
+    ///
+    /// The chord's own modifiers, less Shift: Shift is the direction, not the
+    /// hold, so Shift+Alt+Tab with Shift then let go carries on switching while
+    /// Alt is down, as it does on every desktop. Shift counts only when it is
+    /// all there is to hold.
+    #[must_use]
+    pub const fn of(key: Key, modifiers: Modifiers) -> Self {
+        let held = Modifiers {
+            shift: false,
+            ..modifiers
+        };
+        if held.ctrl || held.alt || held.super_key {
+            Self::Modifiers(held)
+        } else if modifiers.shift {
+            Self::Modifiers(modifiers)
+        } else {
+            Self::Key(key)
+        }
+    }
+
+    /// Whether letting go of `key` ends the switch.
+    #[must_use]
+    pub fn released_by(self, key: Key) -> bool {
+        match self {
+            Self::Modifiers(held) => match key {
+                Key::LeftAlt | Key::RightAlt => held.alt,
+                Key::LeftCtrl | Key::RightCtrl => held.ctrl,
+                Key::LeftShift | Key::RightShift => held.shift,
+                Key::LeftSuper | Key::RightSuper => held.super_key,
+                _ => false,
+            },
+            Self::Key(own) => key == own,
+        }
+    }
+}
+
 /// Where a program carried from the start menu, the taskbar or the desktop
 /// would go if it were let go at a point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1984,8 +2061,14 @@ pub struct DesktopShell {
     /// the user moves one.
     tray_arrangement: tray_dnd::TrayIconArrangement,
     pub alt_tab_active: bool,
-    /// Alt+Tab selection index.
+    /// The window a switch would pick, as an index into
+    /// [`switcher_windows`](Self::switcher_windows) -- most recently used
+    /// first, so 0 is the window being switched *from*.
     pub alt_tab_index: usize,
+    /// How the switch in progress is shown. Meaningless while none is.
+    pub alt_tab_view: SwitchView,
+    /// What ends the switch in progress. Meaningless while none is.
+    alt_tab_anchor: SwitchAnchor,
     /// The Exposé overlay: every window on every desktop, laid out to scale.
     ///
     /// Its lanes are refreshed from the same `WindowList` that
@@ -2610,6 +2693,8 @@ impl DesktopShell {
             ending_ready: false,
             alt_tab_active: false,
             alt_tab_index: 0,
+            alt_tab_view: SwitchView::Switcher,
+            alt_tab_anchor: SwitchAnchor::ALT,
             overview: overview::OverviewState::new(),
             overview_config: overview::OverviewConfig::default(),
             appearance: AppearanceSettings::default(),
@@ -4556,6 +4641,7 @@ impl DesktopShell {
     /// [`Closed`]: notif_pane::NotifPaneEvent::Closed
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
         let action = self.handle_mouse_inner(event);
+        self.settle_switch();
         match (action, self.apply_pane_events()) {
             // A click on a notification card that names a program. The pane
             // consumed the press and marked the card read; starting the
@@ -4997,6 +5083,7 @@ impl DesktopShell {
                 if self.overview.visible {
                     let layouts = self.overview_layout();
                     overview::on_mouse_move(&mut self.overview, event.x, event.y, &layouts);
+                    self.follow_overview_selection();
                     return ShellAction::Consumed;
                 }
                 // The tiling overlay is the shell's only hover-driven surface,
@@ -6208,7 +6295,9 @@ impl DesktopShell {
         self.listed_windows(|w| !w.skip_taskbar)
     }
 
-    /// The windows Alt+Tab cycles through, in the same order.
+    /// The windows Alt+Tab cycles through, most recently used first: the
+    /// window in front, then the one before it, down to the one used longest
+    /// ago.
     ///
     /// The same set as [`taskbar_windows`](Self::taskbar_windows) until a
     /// window rule says otherwise, and a separate method because
@@ -6221,9 +6310,17 @@ impl DesktopShell {
     /// derived from one filter with one sort rather than written twice — an
     /// index into a differently-ordered list would switch to a window the user
     /// was not looking at.
+    ///
+    /// Most recent first since 2026-09-27. It was the taskbar's bottom-to-top
+    /// order, which put the *first* Alt+Tab on the right window and every Tab
+    /// after it the wrong way: the second went back to the window being left,
+    /// and the third to the one used longest ago -- where every desktop goes
+    /// on to the window used before last.
     #[must_use]
     pub fn switcher_windows(&self) -> Vec<&ManagedWindow> {
-        self.listed_windows(|w| !w.skip_alt_tab)
+        let mut windows = self.listed_windows(|w| !w.skip_alt_tab);
+        windows.reverse();
+        windows
     }
 
     /// The windows on the current desktop that `also` admits, bottom-to-top.
@@ -6313,23 +6410,47 @@ impl DesktopShell {
     // Alt+Tab window switcher
     // ======================================================================
 
-    /// Open the window switcher, on the window below the top one.
+    /// Open the window switcher on the window used before this one, in the
+    /// switcher's strip, ended by letting go of Alt.
     ///
-    /// That is the window the user was in before this one, which is what
-    /// Alt+Tab is for. [`switcher_windows`](Self::switcher_windows) is ordered
-    /// bottom to top, so it is the second entry from the *end* — not index 1,
-    /// which is what this used to say. With exactly two windows index 1 *is*
-    /// the focused window, so press-and-release Alt+Tab — much the commonest
-    /// use there is — re-focused the window you were already in and appeared to
-    /// do nothing at all.
+    /// The window before this one is what Alt+Tab is for: press and release,
+    /// much the commonest use there is, goes back to it. It is index 1 of
+    /// [`switcher_windows`](Self::switcher_windows), which is most recent
+    /// first; index 0 is the window being left.
     pub fn start_alt_tab(&mut self) {
-        let count = self.switcher_windows().len();
-        if count > 1 {
-            self.alt_tab_active = true;
-            self.alt_tab_index = step::wrapping_before(count, count.saturating_sub(1));
-        }
+        self.begin_switch(SwitchView::Switcher, SwitchAnchor::ALT, false);
     }
 
+    /// Start a window switch, shown as `view` and ended by letting go of
+    /// `anchor`: on the window used before this one, or -- `backwards`, for
+    /// Shift+Alt+Tab -- on the one used longest ago, which is where stepping
+    /// back from the window in front wraps round to.
+    ///
+    /// Nothing starts with fewer than two windows: there is nowhere to switch
+    /// to, and a switcher showing only the window already in front would be
+    /// one more thing to dismiss.
+    fn begin_switch(&mut self, view: SwitchView, anchor: SwitchAnchor, backwards: bool) {
+        let count = self.switcher_windows().len();
+        if count < 2 {
+            return;
+        }
+        self.alt_tab_active = true;
+        self.alt_tab_view = view;
+        self.alt_tab_anchor = anchor;
+        self.alt_tab_index = if backwards {
+            step::wrapping_before(count, 0)
+        } else {
+            step::wrapping_after(count, 0)
+        };
+        if view == SwitchView::Overview {
+            self.overview.show(overview::OverviewMode::AllWindows);
+            let order = self.switcher_windows().iter().map(|w| w.id.0).collect();
+            self.overview.set_order(order);
+        }
+        self.light_switch_selection();
+    }
+
+    /// Step the switch on to the window used before the one it is on.
     pub fn next_alt_tab(&mut self) {
         let count = self.switcher_windows().len();
         if count > 0 {
@@ -6339,9 +6460,11 @@ impl DesktopShell {
             // because windows closed while the switcher was open.
             self.alt_tab_index = step::wrapping_after(count, self.alt_tab_index);
         }
+        self.light_switch_selection();
     }
 
-    /// Step the switcher to the previous window, for Shift+Alt+Tab.
+    /// Step the switch back to the window used after the one it is on, for
+    /// Shift+Alt+Tab.
     pub fn prev_alt_tab(&mut self) {
         let count = self.switcher_windows().len();
         if let Some(last) = count.checked_sub(1) {
@@ -6350,25 +6473,143 @@ impl DesktopShell {
             // index to another rather than back into the list.
             self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index.min(last));
         }
+        self.light_switch_selection();
     }
 
-    /// Close the switcher and say which window it landed on.
+    /// End the switch and say which window it landed on.
     ///
-    /// Returns `None` when the switcher was not open, or was open on an index
-    /// that no longer names a window because it closed while the user was
-    /// holding Alt. Closing the switcher is the shell's own business; raising
-    /// the window it chose is the compositor's.
+    /// Returns `None` when no switch was under way, or was on an index that no
+    /// longer names a window because it closed while the user was holding
+    /// Alt. Closing the switcher -- or the overview, for a switch shown there --
+    /// is the shell's own business; raising the window it chose is the
+    /// compositor's.
     pub fn finish_alt_tab(&mut self) -> Option<ShellRequest> {
         if !self.alt_tab_active {
             return None;
         }
         self.alt_tab_active = false;
-        let id = self.switcher_windows().get(self.alt_tab_index)?.id;
-        Some(ShellRequest::window(id, ShellControlAction::Activate))
+        let chosen = self
+            .switcher_windows()
+            .get(self.alt_tab_index)
+            .map(|w| w.id);
+        if self.alt_tab_view == SwitchView::Overview {
+            self.overview.hide();
+        }
+        Some(ShellRequest::window(chosen?, ShellControlAction::Activate))
     }
 
+    /// End the switch without choosing: Escape.
     pub fn cancel_alt_tab(&mut self) {
+        if self.alt_tab_active && self.alt_tab_view == SwitchView::Overview {
+            self.overview.hide();
+        }
         self.alt_tab_active = false;
+    }
+
+    /// Light, in the overview, the window a switch shown there would pick --
+    /// so that what is lit is always what letting go picks.
+    fn light_switch_selection(&mut self) {
+        if !self.alt_tab_active || self.alt_tab_view != SwitchView::Overview {
+            return;
+        }
+        let chosen = self
+            .switcher_windows()
+            .get(self.alt_tab_index)
+            .map(|w| w.id.0);
+        if chosen.is_some() {
+            self.overview.hovered_window = chosen;
+        }
+    }
+
+    /// After the pointer or an arrow key moved the overview's highlight during
+    /// a switch shown there: the switch now picks what is lit -- or, the
+    /// highlight gone (the pointer left every card, or lit a window the switch
+    /// does not offer), lights again what it picks.
+    fn follow_overview_selection(&mut self) {
+        if !self.alt_tab_active || self.alt_tab_view != SwitchView::Overview {
+            return;
+        }
+        let lit = self
+            .overview
+            .hovered_window
+            .and_then(|id| self.switcher_windows().iter().position(|w| w.id.0 == id));
+        match lit {
+            Some(index) => self.alt_tab_index = index,
+            None => self.light_switch_selection(),
+        }
+    }
+
+    /// A switch shown in the overview ends with it, however the overview went:
+    /// a click on a card (which asks for that window itself), a click away, a
+    /// chord that toggles it. Run after every key and every pointer event, so
+    /// no way of closing the overview can leave a switch running behind it --
+    /// one whose Alt release would then pick a window out of nowhere.
+    fn settle_switch(&mut self) {
+        if self.alt_tab_active
+            && self.alt_tab_view == SwitchView::Overview
+            && !self.overview.visible
+        {
+            self.alt_tab_active = false;
+        }
+    }
+
+    /// Start a window switch, or step the one under way.
+    ///
+    /// `anchor` is what ends a switch this starts, and `key` the press that
+    /// asked, when there was one: Shift+Alt+Tab starts its switch shown the way
+    /// the same keys without Shift would show theirs.
+    fn cycle_windows(
+        &mut self,
+        action: &HotkeyAction,
+        anchor: SwitchAnchor,
+        key: Option<&KeyEvent>,
+    ) -> HotkeyOutcome {
+        let backwards = *action == HotkeyAction::CycleWindowsBackwards;
+        if self.alt_tab_active {
+            if backwards {
+                self.prev_alt_tab();
+            } else {
+                self.next_alt_tab();
+            }
+        } else {
+            let view = match action {
+                HotkeyAction::CycleWindowsInOverview => SwitchView::Overview,
+                HotkeyAction::CycleWindowsBackwards => {
+                    key.map_or(SwitchView::Switcher, |key| self.view_beside(key))
+                }
+                _ => SwitchView::Switcher,
+            };
+            self.begin_switch(view, anchor, backwards);
+        }
+        HotkeyOutcome::consumed()
+    }
+
+    /// How the forward chord beside a backward one shows its switch: the same
+    /// key, the same modifiers without Shift. Binding Alt+Tab to the overview
+    /// takes Shift+Alt+Tab with it, rather than leaving the reverse chord
+    /// opening a strip the forward one no longer shows.
+    fn view_beside(&self, key: &KeyEvent) -> SwitchView {
+        let forwards = Modifiers {
+            shift: false,
+            ..key.modifiers
+        };
+        match self.hotkeys.lookup(key.key, &forwards) {
+            Some(HotkeyAction::CycleWindowsInOverview) => SwitchView::Overview,
+            _ => SwitchView::Switcher,
+        }
+    }
+
+    /// Carry out what a pressed chord is bound to.
+    ///
+    /// The one place a press meets its action, and so the one place that knows
+    /// which keys are held: a window switch started here is ended by letting
+    /// go of them ([`SwitchAnchor::of`]), whatever the chord -- Alt+Tab, or a
+    /// Super+Tab the user bound instead.
+    fn run_bound_action(&mut self, action: &HotkeyAction, key: &KeyEvent) -> HotkeyOutcome {
+        if action.cycles_windows() {
+            return self.cycle_windows(action, SwitchAnchor::of(key.key, key.modifiers), Some(key));
+        }
+        self.run_desktop_action(action)
     }
 
     // ======================================================================
@@ -6403,6 +6644,7 @@ impl DesktopShell {
             return HotkeyOutcome::consumed();
         }
         let outcome = self.handle_hotkey_inner(key);
+        self.settle_switch();
         drop(self.apply_pane_events());
         outcome
     }
@@ -6438,8 +6680,9 @@ impl DesktopShell {
 
     fn handle_hotkey_inner(&mut self, key: &KeyEvent) -> HotkeyOutcome {
         if !key.pressed {
-            // Key release — check for Alt+Tab completion
-            if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {
+            // A release ends a window switch when it is one of the keys that
+            // started it -- Alt, for Alt+Tab. See `SwitchAnchor`.
+            if self.alt_tab_active && self.alt_tab_anchor.released_by(key.key) {
                 return HotkeyOutcome::ask(self.finish_alt_tab());
             }
             return HotkeyOutcome::ignored();
@@ -6623,7 +6866,7 @@ impl DesktopShell {
         }
 
         match self.bound_action(key) {
-            Some(action) => self.run_desktop_action(&action),
+            Some(action) => self.run_bound_action(&action, key),
             None => HotkeyOutcome::ignored(),
         }
     }
@@ -6649,7 +6892,7 @@ impl DesktopShell {
                 // manager the chord just asked for.
                 Some(action) => {
                     self.close_start_menu();
-                    self.run_desktop_action(&action)
+                    self.run_bound_action(&action, key)
                 }
                 None => HotkeyOutcome::consumed(),
             };
@@ -6698,7 +6941,7 @@ impl DesktopShell {
                     // shortcut still works with the menu up; anything else
                     // goes no further than the menu.
                     KeyEdit::Unhandled => match self.bound_action(key) {
-                        Some(action) => self.run_desktop_action(&action),
+                        Some(action) => self.run_bound_action(&action, key),
                         None => HotkeyOutcome::consumed(),
                     },
                 }
@@ -6825,6 +7068,9 @@ impl DesktopShell {
 
     /// One press while the overview is up.
     fn key_on_overview(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        if self.alt_tab_active && self.alt_tab_view == SwitchView::Overview {
+            return self.key_on_overview_switch(key);
+        }
         // The one shortcut that still reaches the table: the chord that opened
         // the overview closes it. Without this the binding would be one-way —
         // Super+Tab would open the overlay and then, arriving as a bare Tab,
@@ -6846,6 +7092,37 @@ impl DesktopShell {
             // call can produce them.
             _ => HotkeyOutcome::consumed(),
         }
+    }
+
+    /// One press while a window switch is shown in the overview.
+    ///
+    /// The chords that step a switch step it; the overview's own keys for
+    /// choosing choose within it -- the arrows move what is lit, Enter takes it,
+    /// Escape leaves without taking anything. Typing does nothing: a hand on a
+    /// modifier is not typing a search, and a letter pressed with Alt held is a
+    /// chord, not text.
+    fn key_on_overview_switch(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        if let Some(action) = self.bound_action(key).filter(HotkeyAction::cycles_windows) {
+            return self.run_bound_action(&action, key);
+        }
+        let arrow = match key.key {
+            Key::Escape => {
+                self.cancel_alt_tab();
+                return HotkeyOutcome::consumed();
+            }
+            Key::Enter => return HotkeyOutcome::ask(self.finish_alt_tab()),
+            Key::Up => overview::OverviewKey::ArrowUp,
+            Key::Down => overview::OverviewKey::ArrowDown,
+            Key::Left => overview::OverviewKey::ArrowLeft,
+            Key::Right => overview::OverviewKey::ArrowRight,
+            _ => return HotkeyOutcome::consumed(),
+        };
+        // Only ever `NavigateSelection` for an arrow -- the overview has moved
+        // its highlight, and the switch follows it below -- so there is nothing
+        // in the answer to act on.
+        let _ = overview::on_key(&mut self.overview, arrow);
+        self.follow_overview_selection();
+        HotkeyOutcome::consumed()
     }
 
     /// Translate a key press into the overview's own small vocabulary.
@@ -7013,22 +7290,13 @@ impl DesktopShell {
                 self.persist_input_layout();
                 HotkeyOutcome::consumed()
             }
-            HotkeyAction::CycleWindows => {
-                if self.alt_tab_active {
-                    self.next_alt_tab();
-                } else {
-                    self.start_alt_tab();
-                }
-                HotkeyOutcome::consumed()
-            }
-            HotkeyAction::CycleWindowsBackwards => {
-                if !self.alt_tab_active {
-                    self.start_alt_tab();
-                }
-                if self.alt_tab_active {
-                    self.prev_alt_tab();
-                }
-                HotkeyOutcome::consumed()
+            // Reached with no press in hand -- a test, or a caller naming the
+            // action -- so ended by Alt, as it always was; a press goes
+            // through `run_bound_action`, which knows the keys held.
+            HotkeyAction::CycleWindows
+            | HotkeyAction::CycleWindowsBackwards
+            | HotkeyAction::CycleWindowsInOverview => {
+                self.cycle_windows(action, SwitchAnchor::ALT, None)
             }
             HotkeyAction::CloseWindow => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Close))
@@ -7990,7 +8258,8 @@ impl DesktopShell {
 
     /// Render the Alt+Tab window switcher overlay.
     pub fn render_alt_tab(&self) -> Option<RenderTree> {
-        if !self.alt_tab_active {
+        // A switch shown in the overview is drawn by the overview.
+        if !self.alt_tab_active || self.alt_tab_view == SwitchView::Overview {
             return None;
         }
 
@@ -13151,10 +13420,10 @@ mod window_manager_tests {
     )]
 
     use super::{
-        DesktopShell, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers, Rect,
-        START_MENU_GLOW_ALPHA, START_MENU_SELECTED_ALPHA, ShellControlAction, ShellRequest,
-        TextRole, WindowId, WindowInfo, WindowList, WindowState, hotkeys, snap, text, window_rules,
-        with_alpha,
+        DesktopShell, HotkeyAction, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers,
+        MouseEvent, MouseEventKind, Rect, START_MENU_GLOW_ALPHA, START_MENU_SELECTED_ALPHA,
+        ShellAction, ShellControlAction, ShellRequest, SwitchView, TextRole, WindowId, WindowInfo,
+        WindowList, WindowState, hotkeys, snap, text, window_rules, with_alpha,
     };
 
     /// A shell with the chords that were on by default until §1416 bound --
@@ -13712,7 +13981,8 @@ mod window_manager_tests {
         let taskbar: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
         let switcher: Vec<WindowId> = shell.switcher_windows().iter().map(|w| w.id).collect();
         assert_eq!(taskbar, vec![WindowId(2)]);
-        assert_eq!(switcher, vec![WindowId(1), WindowId(2)]);
+        // Most recent first: the editor arrived last and is in front.
+        assert_eq!(switcher, vec![WindowId(2), WindowId(1)]);
     }
 
     #[test]
@@ -14628,6 +14898,335 @@ mod window_manager_tests {
         );
     }
 
+    fn release(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn shift_alt() -> Modifiers {
+        Modifiers {
+            shift: true,
+            alt: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn activate(id: WindowId) -> Vec<ShellRequest> {
+        vec![ShellRequest::window(id, ShellControlAction::Activate)]
+    }
+
+    /// Each Tab goes one window further back in time, as on every desktop: the
+    /// window before this one, then the one before that, and round to the
+    /// window being left.
+    ///
+    /// After the first press it used to go the other way -- the second Tab
+    /// back to the window being left, the third to the one used longest ago --
+    /// because the switch counted through the taskbar's bottom-to-top order.
+    #[test]
+    fn each_tab_goes_one_window_further_back() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        let alt_tab = press(Key::Tab, Modifiers::alt());
+        let mut landed = Vec::new();
+        // Nothing is raised between rounds, so each counts back from w3.
+        for presses in 1..=4 {
+            for _ in 0..presses {
+                assert!(shell.handle_hotkey(&alt_tab).consumed);
+            }
+            landed.push(shell.handle_hotkey(&release(Key::LeftAlt)).requests);
+        }
+        assert_eq!(
+            landed,
+            vec![
+                activate(ids[2]),
+                activate(ids[1]),
+                activate(ids[0]),
+                activate(ids[3]),
+            ]
+        );
+    }
+
+    /// Shift+Alt+Tab from nothing goes the other way round: to the window used
+    /// longest ago -- and, of two windows, to the other one. It used to open
+    /// the switch forwards and step back from there, which with two windows
+    /// landed on the window already in front: Shift+Alt+Tab did nothing.
+    #[test]
+    fn shift_alt_tab_from_nothing_goes_to_the_window_used_longest_ago() {
+        let mut three = shell();
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut three, &format!("w{i}"))).collect();
+        assert!(three.handle_hotkey(&press(Key::Tab, shift_alt())).consumed);
+        assert_eq!(
+            three.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[0])
+        );
+
+        let mut two = shell();
+        let first = open(&mut two, "first");
+        open(&mut two, "second");
+        assert!(two.handle_hotkey(&press(Key::Tab, shift_alt())).consumed);
+        assert_eq!(
+            two.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(first)
+        );
+    }
+
+    /// Shift is the direction, not the hold: letting go of it in the middle of
+    /// Shift+Alt+Tab carries on switching, and letting go of Alt ends it.
+    #[test]
+    fn letting_go_of_shift_mid_switch_keeps_switching() {
+        let mut shell = shell();
+        for i in 0..3 {
+            open(&mut shell, &format!("w{i}"));
+        }
+        assert!(shell.handle_hotkey(&press(Key::Tab, shift_alt())).consumed);
+        let shift_up = shell.handle_hotkey(&release(Key::LeftShift));
+        assert!(!shift_up.consumed);
+        assert!(shell.alt_tab_active, "letting go of Shift ended the switch");
+        assert!(shell.handle_hotkey(&release(Key::LeftAlt)).consumed);
+        assert!(!shell.alt_tab_active);
+    }
+
+    /// A switch on a chord the user bound ends when *its* modifier comes up.
+    ///
+    /// Only Alt's release ended a switch, which was right while Alt+Tab was the
+    /// only way to start one. With window switching bound to Super+Tab instead,
+    /// the switcher opened and nothing closed it.
+    #[test]
+    fn a_switch_on_a_rebound_chord_ends_when_its_own_modifier_comes_up() {
+        let mut shell = shell();
+        // The fixture puts the overview on Super+Tab; this user puts the
+        // switcher there.
+        let super_tab = hotkeys::Hotkey::new(Key::Tab, super_only());
+        assert!(shell.hotkeys.unregister(&super_tab));
+        shell
+            .hotkeys
+            .register(super_tab, HotkeyAction::CycleWindows)
+            .expect("just freed");
+        let first = open(&mut shell, "first");
+        open(&mut shell, "second");
+
+        assert!(shell.handle_hotkey(&press(Key::Tab, super_only())).consumed);
+        assert!(shell.alt_tab_active);
+        let alt_up = shell.handle_hotkey(&release(Key::LeftAlt));
+        assert!(!alt_up.consumed, "an Alt nobody pressed ended the switch");
+        assert!(shell.alt_tab_active);
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::RightSuper)).requests,
+            activate(first),
+            "letting go of Super did not end it"
+        );
+        assert!(!shell.alt_tab_active);
+    }
+
+    /// A switch on a bare key -- nothing to hold -- ends when the key comes up:
+    /// one press, back to the window before.
+    #[test]
+    fn a_switch_on_a_bare_key_ends_when_the_key_comes_up() {
+        let mut shell = shell();
+        shell
+            .hotkeys
+            .register(hotkeys::Hotkey::bare(Key::F9), HotkeyAction::CycleWindows)
+            .expect("F9 is free");
+        let first = open(&mut shell, "first");
+        open(&mut shell, "second");
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::F9, Modifiers::NONE))
+                .consumed
+        );
+        assert!(shell.alt_tab_active);
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::F9)).requests,
+            activate(first)
+        );
+    }
+
+    // ---- a switch shown in the overview ----
+
+    /// What the user does to make Alt+Tab show the overview: on the card, F2 on
+    /// the Alt+Tab row, and "Cycle Windows in the Overview".
+    fn overview_on_alt_tab(shell: &mut DesktopShell) {
+        let alt_tab = hotkeys::Hotkey::new(Key::Tab, Modifiers::alt());
+        assert!(shell.hotkeys.unregister(&alt_tab));
+        shell
+            .hotkeys
+            .register(alt_tab, HotkeyAction::CycleWindowsInOverview)
+            .expect("just freed");
+    }
+
+    /// The card's centre, as the overview draws it.
+    fn card_centre(shell: &DesktopShell, id: WindowId) -> (f32, f32) {
+        let card = shell
+            .overview_layout()
+            .into_iter()
+            .find(|card| card.window_id == id.0)
+            .unwrap_or_else(|| panic!("{id:?} has no card"));
+        (
+            card.render_x + card.render_width / 2.0,
+            card.render_y + card.render_height / 2.0,
+        )
+    }
+
+    /// Alt+Tab bound to the overview shows the switch there: the overview
+    /// opens on the window before this one, the cards most recent first, with
+    /// no strip drawn over it; each Tab lights one further back, and letting
+    /// go of Alt takes the lit window and closes the overview.
+    #[test]
+    fn alt_tab_bound_to_the_overview_shows_the_switch_there() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        let alt_tab = press(Key::Tab, Modifiers::alt());
+
+        assert!(shell.handle_hotkey(&alt_tab).consumed);
+        assert!(shell.alt_tab_active);
+        assert_eq!(shell.alt_tab_view, SwitchView::Overview);
+        assert!(shell.overview.visible);
+        assert!(
+            shell.render_alt_tab().is_none(),
+            "the strip is drawn over the overview"
+        );
+        assert_eq!(shell.overview.hovered_window, Some(ids[1].0));
+        let drawn: Vec<u64> = shell
+            .overview_layout()
+            .iter()
+            .map(|card| card.window_id)
+            .collect();
+        assert_eq!(
+            drawn,
+            vec![ids[2].0, ids[1].0, ids[0].0],
+            "most recent first"
+        );
+
+        assert!(shell.handle_hotkey(&alt_tab).consumed);
+        assert_eq!(shell.overview.hovered_window, Some(ids[0].0));
+
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[0])
+        );
+        assert!(!shell.alt_tab_active);
+        assert!(!shell.overview.visible, "the overview outlived the switch");
+    }
+
+    /// Shift+Alt+Tab shows its switch where Alt+Tab shows its own, starting
+    /// on the window used longest ago.
+    #[test]
+    fn shift_alt_tab_follows_alt_tab_into_the_overview() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        assert!(shell.handle_hotkey(&press(Key::Tab, shift_alt())).consumed);
+        assert_eq!(shell.alt_tab_view, SwitchView::Overview);
+        assert!(shell.overview.visible);
+        assert_eq!(shell.overview.hovered_window, Some(ids[0].0));
+    }
+
+    /// Escape leaves a switch in the overview without choosing: the overview
+    /// closes, nothing is asked for, and the Alt release after it picks nothing.
+    #[test]
+    fn escape_leaves_a_switch_in_the_overview_without_choosing() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        for i in 0..3 {
+            open(&mut shell, &format!("w{i}"));
+        }
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
+        let escape = shell.handle_hotkey(&press(Key::Escape, Modifiers::alt()));
+        assert!(escape.consumed);
+        assert!(escape.requests.is_empty());
+        assert!(!shell.alt_tab_active);
+        assert!(!shell.overview.visible);
+        assert!(
+            shell
+                .handle_hotkey(&release(Key::LeftAlt))
+                .requests
+                .is_empty()
+        );
+    }
+
+    /// The pointer and the arrows move what a switch in the overview picks, and
+    /// what is lit is always what letting go picks -- including after the
+    /// pointer leaves every card.
+    #[test]
+    fn the_pointer_and_the_arrows_choose_within_a_switch_in_the_overview() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
+
+        let (x, y) = card_centre(&shell, ids[2]);
+        shell.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(shell.overview.hovered_window, Some(ids[2].0));
+        shell.handle_mouse(&MouseEvent {
+            x: 1.0,
+            y: 1.0,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(
+            shell.overview.hovered_window,
+            Some(ids[2].0),
+            "the pointer leaving the cards left nothing lit"
+        );
+
+        // One card on, left to right, is one window further back.
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Right, Modifiers::alt()))
+                .consumed
+        );
+        assert_eq!(shell.overview.hovered_window, Some(ids[1].0));
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[1])
+        );
+    }
+
+    /// A click on a card during a switch in the overview takes that window, and
+    /// the switch is over: the Alt release that follows does not pick a second
+    /// window out of an overview that has gone.
+    #[test]
+    fn a_click_on_a_card_ends_a_switch_in_the_overview() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
+
+        let (x, y) = card_centre(&shell, ids[0]);
+        assert_eq!(
+            shell.handle_mouse(&crate::click(x, y)),
+            ShellAction::Control(ShellRequest::window(ids[0], ShellControlAction::Activate))
+        );
+        assert!(!shell.alt_tab_active, "the switch outlived its overview");
+        assert!(
+            shell
+                .handle_hotkey(&release(Key::LeftAlt))
+                .requests
+                .is_empty(),
+            "a second window was picked"
+        );
+    }
+
     // ---- the switcher's drawing ----
 
     /// The texts a rendered switcher draws.
@@ -15053,6 +15652,8 @@ mod window_manager_tests {
         shell.start_alt_tab();
         shell.next_alt_tab();
         shell.next_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 0, "round to the front again");
 
         for id in &ids[1..] {
             close(&mut shell, *id);
@@ -15066,9 +15667,9 @@ mod window_manager_tests {
     /// the clamp.
     ///
     /// `stepping_backwards_survives_the_windows_closing_underneath_it` above
-    /// steps forward *twice* from a four-window switcher, which wraps the index
-    /// round to 0 — and 0 is in range for every list, so removing the clamp
-    /// leaves that test green. Stepping forward once leaves the index at 3, and
+    /// steps forward three times from a four-window switcher, which wraps the
+    /// index round to 0 — and 0 is in range for every list, so removing the
+    /// clamp leaves that test green. Stepping forward twice leaves it at 3, and
     /// stepping back from 3 in a one-window list is the only arithmetic that
     /// tells the two versions apart: clamped it is 0, unclamped it is 2, which
     /// is another index past the end and so `finish_alt_tab` picks nothing at
@@ -15080,6 +15681,7 @@ mod window_manager_tests {
         let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
 
         shell.start_alt_tab();
+        shell.next_alt_tab();
         shell.next_alt_tab();
         assert_eq!(shell.alt_tab_index, 3, "the last row, not a wrapped one");
 

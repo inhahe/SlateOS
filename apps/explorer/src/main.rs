@@ -674,9 +674,13 @@ const CONFLICT_BUTTONS: [(ConflictAnswer, &str, Key); 4] = [
 /// The prompt's "the same for the rest" line, with its key.
 const FOR_THE_REST: &str = "Do the same for every other taken name (A)";
 
-/// The prompt's size, before a narrow window takes some of its width.
+/// The prompt's width, before a narrow window takes some of it.
 const PROMPT_W: f32 = 520.0;
+/// Its height with every answer on one row; each further row adds
+/// [`PROMPT_ROW`].
 const PROMPT_H: f32 = 190.0;
+/// One row of answers: a button and the gap under it.
+const PROMPT_ROW: f32 = 38.0;
 
 impl ConflictPrompt {
     fn new(plan: u64, question: &ConflictQuestion) -> Self {
@@ -742,18 +746,23 @@ impl ConflictPrompt {
     fn render(&mut self, pal: &Palette, w: f32, h: f32, tree: &mut RenderTree) {
         tree.fill_rect(0.0, 0.0, w, h, with_alpha(pal.crust, 140));
         let card_w = PROMPT_W.min(w - 32.0).max(0.0);
+        let inner = (card_w - 40.0).max(0.0);
+        // The answers laid out first, in as many rows as the card's width
+        // needs -- one in any ordinary window -- so the card can be as tall
+        // as they are rather than have them run off its edge.
+        let (buttons, rows) = conflict_button_rows(inner);
+        let card_h = PROMPT_H + PROMPT_ROW * f32::from(rows.saturating_sub(1));
         let x = ((w - card_w) / 2.0).max(0.0);
-        let y = ((h - PROMPT_H) / 2.0).max(0.0);
+        let y = ((h - card_h) / 2.0).max(0.0);
         pal.push_surface(
             &mut tree.commands,
             x,
             y,
             card_w,
-            PROMPT_H,
+            card_h,
             8.0,
             appearance::Surface::Card,
         );
-        let inner = (card_w - 40.0).max(0.0);
         let left = x + 20.0;
         tree.text_in_weighted(
             left,
@@ -785,16 +794,11 @@ impl ConflictPrompt {
 
         // The answers, left to right. Measured, so a label never runs past
         // its button; the first is drawn as the one Enter chooses.
-        let button_y = y + PROMPT_H - 50.0;
-        let mut bx = left;
-        for (i, (answer, label, _)) in CONFLICT_BUTTONS.iter().enumerate() {
-            let bw = guitk::text::padded_width(
-                label,
-                12.0,
-                12.0,
-                guitk::render::FontWeightHint::Regular,
-            );
-            let rect = Rect::new(bx, button_y, bw, 30.0);
+        let first_row = y + PROMPT_H - 50.0;
+        for (i, ((answer, label, _), (dx, row, bw))) in
+            CONFLICT_BUTTONS.iter().zip(buttons).enumerate()
+        {
+            let rect = Rect::new(left + dx, first_row + PROMPT_ROW * f32::from(row), bw, 30.0);
             let (surface, ink) = if i == 0 {
                 (appearance::Surface::Selected, pal.ink(pal.blue))
             } else {
@@ -818,9 +822,30 @@ impl ConflictPrompt {
                 12.0,
             );
             self.hits.push((PromptControl::Answer(*answer), rect));
-            bx += bw + 8.0;
         }
     }
+}
+
+/// Where each of [`CONFLICT_BUTTONS`] goes in a width of `inner`: its offset
+/// from the left, its row and its width -- and how many rows that takes.
+///
+/// A button that would cross the right edge starts a new row; the first in a
+/// row always stays, so a width too narrow for even one button still gives
+/// every answer a place rather than none.
+fn conflict_button_rows(inner: f32) -> ([(f32, u8, f32); 4], u8) {
+    let mut placed = [(0.0, 0, 0.0); 4];
+    let (mut dx, mut row) = (0.0_f32, 0_u8);
+    for (slot, (_, label, _)) in placed.iter_mut().zip(CONFLICT_BUTTONS.iter()) {
+        let bw =
+            guitk::text::padded_width(label, 12.0, 12.0, guitk::render::FontWeightHint::Regular);
+        if dx > 0.0 && dx + bw > inner {
+            row = row.saturating_add(1);
+            dx = 0.0;
+        }
+        *slot = (dx, row, bw);
+        dx += bw + 8.0;
+    }
+    (placed, row.saturating_add(1))
 }
 
 /// One side of a taken name, for the prompt: its size and when it last
@@ -12758,5 +12783,43 @@ mod tests {
             columnprefs::conflict_policy(&yamldoc::Document::new()),
             ConflictPolicy::Ask
         );
+    }
+
+    /// In a narrow window the answers wrap onto more rows inside the card,
+    /// rather than running off its edge where they could not be clicked.
+    #[test]
+    fn the_prompt_keeps_its_answers_inside_a_narrow_window() {
+        let scratch = temp_dir("ask_narrow");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_onto_a_taken_name(&root);
+        for width in [1200.0_f32, 320.0, 240.0] {
+            let Some(Modal::Conflict { prompt }) = state.modal.as_mut() else {
+                panic!("nobody was asked");
+            };
+            let mut tree = RenderTree::new();
+            prompt.render(&state.palette, width, 600.0, &mut tree);
+            let answers: Vec<Rect> = prompt
+                .hits
+                .iter()
+                .filter(|(c, _)| matches!(c, PromptControl::Answer(_)))
+                .map(|(_, r)| *r)
+                .collect();
+            assert_eq!(answers.len(), CONFLICT_BUTTONS.len());
+            for r in &answers {
+                assert!(
+                    r.x >= 0.0 && r.x + r.w <= width - 16.0 + 0.5,
+                    "an answer runs past the card at {width}: {r:?}"
+                );
+            }
+            for (i, a) in answers.iter().enumerate() {
+                for b in answers.iter().skip(i + 1) {
+                    let apart = a.x + a.w <= b.x
+                        || b.x + b.w <= a.x
+                        || a.y + a.h <= b.y
+                        || b.y + b.h <= a.y;
+                    assert!(apart, "two answers overlap at {width}: {a:?} {b:?}");
+                }
+            }
+        }
     }
 }

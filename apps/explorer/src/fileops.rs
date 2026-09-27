@@ -551,14 +551,20 @@ impl OperationPlan {
         })
     }
 
-    /// Recursively scan a source path and add planned copy actions, `src`
-    /// going to `dest` and everything under it to the same place under
-    /// `dest`.
+    /// Every action under `src`: `src` going to `dest`, and everything under
+    /// it to the same place under `dest` -- a folder before what is in it, in
+    /// the order the folder lists them.
     ///
     /// Given the destination rather than the folder it goes in, because the
     /// top of the tree is not always named as the source is: a duplicate in
     /// the source's own folder is `name (2)`, and everything inside it has to
     /// follow it there.
+    ///
+    /// **A walk with a list of its own, not a recursion.** A recursion is as
+    /// deep as the tree, and a debug build's frames overflowed a test thread's
+    /// stack about 500 folders down -- the main thread on Windows has half
+    /// that, and an overflow takes the window with it. [`MAX_TREE_DEPTH`]
+    /// still bounds the walk, for a tree that is a loop.
     fn scan_source(
         src: &Path,
         dest: &Path,
@@ -566,116 +572,133 @@ impl OperationPlan {
         index: &mut u32,
         total_bytes: &mut u64,
     ) -> io::Result<()> {
-        let dest = dest.to_path_buf();
-        // `symlink_metadata`, which does not follow: a link is one action,
-        // copied as the link. See `PlannedAction::is_link`.
-        let meta = fs::symlink_metadata(src)?;
-        if meta.file_type().is_symlink() {
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: Some(dest),
-                size: 0,
-                is_dir: false,
-                is_link: true,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
-            return Ok(());
-        }
-        if meta.is_dir() {
-            // Directory creation action.
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: Some(dest.clone()),
-                size: 0,
-                is_dir: true,
-                is_link: false,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
-
-            // Recurse into children.
-            for entry in fs::read_dir(src)? {
-                let entry = entry?;
-                Self::scan_source(
-                    &entry.path(),
-                    &dest.join(entry.file_name()),
-                    actions,
-                    index,
-                    total_bytes,
-                )?;
+        // What is still to be looked at: where it is, where it goes, and how
+        // far down. Popped from the end, so a folder's contents -- pushed in
+        // reverse -- come off in the folder's own order, each whole before
+        // the next, as a recursion would take them.
+        let mut pending: Vec<(PathBuf, PathBuf, usize)> =
+            vec![(src.to_path_buf(), dest.to_path_buf(), 0)];
+        while let Some((src, dest, depth)) = pending.pop() {
+            too_deep(&src, depth)?;
+            // `symlink_metadata`, which does not follow: a link is one action,
+            // copied as the link. See `PlannedAction::is_link`.
+            let meta = fs::symlink_metadata(&src)?;
+            if meta.file_type().is_symlink() {
+                actions.push(PlannedAction {
+                    src,
+                    dest: Some(dest),
+                    size: 0,
+                    is_dir: false,
+                    is_link: true,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+                continue;
             }
-        } else {
-            let size = meta.len();
-            *total_bytes = total_bytes.saturating_add(size);
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: Some(dest),
-                size,
-                is_dir: false,
-                is_link: false,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
+            if meta.is_dir() {
+                let mut contents = Vec::new();
+                for entry in fs::read_dir(&src)? {
+                    let entry = entry?;
+                    contents.push((
+                        entry.path(),
+                        dest.join(entry.file_name()),
+                        depth.saturating_add(1),
+                    ));
+                }
+                actions.push(PlannedAction {
+                    src,
+                    dest: Some(dest),
+                    size: 0,
+                    is_dir: true,
+                    is_link: false,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+                pending.extend(contents.into_iter().rev());
+            } else {
+                let size = meta.len();
+                *total_bytes = total_bytes.saturating_add(size);
+                actions.push(PlannedAction {
+                    src,
+                    dest: Some(dest),
+                    size,
+                    is_dir: false,
+                    is_link: false,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+            }
         }
-
         Ok(())
     }
 
-    /// Recursively scan a source path and add planned delete actions.
+    /// Every action a delete of `src` needs: what is in a folder before the
+    /// folder, so that deleting in order empties each folder before it goes.
     ///
-    /// Directories are scanned depth-first so that children appear before their
-    /// parent in the action list; this allows deletion in forward order.
+    /// A walk with a list of its own, for [`scan_source`](Self::scan_source)'s
+    /// reason.
     fn scan_delete(
         src: &Path,
         actions: &mut Vec<PlannedAction>,
         index: &mut u32,
         total_bytes: &mut u64,
     ) -> io::Result<()> {
-        // `symlink_metadata`, which does not follow: a link is deleted as
-        // the link, and what it names is left alone. Following it deleted the
-        // files of whatever folder the link reached.
-        let meta = fs::symlink_metadata(src)?;
-        if meta.file_type().is_symlink() {
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: None,
-                size: 0,
-                is_dir: false,
-                is_link: true,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
-            return Ok(());
-        }
-        if meta.is_dir() {
-            // Children first.
-            for entry in fs::read_dir(src)? {
-                let entry = entry?;
-                Self::scan_delete(&entry.path(), actions, index, total_bytes)?;
+        // What is still to be looked at, how far down, and -- for a folder
+        // whose contents are already on the list -- that only the folder
+        // itself is left to plan.
+        let mut pending: Vec<(PathBuf, usize, bool)> = vec![(src.to_path_buf(), 0, false)];
+        while let Some((src, depth, contents_listed)) = pending.pop() {
+            if contents_listed {
+                actions.push(PlannedAction {
+                    src,
+                    dest: None,
+                    size: 0,
+                    is_dir: true,
+                    is_link: false,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+                continue;
             }
-            // Then the directory itself.
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: None,
-                size: 0,
-                is_dir: true,
-                is_link: false,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
-        } else {
-            let size = meta.len();
-            *total_bytes = total_bytes.saturating_add(size);
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: None,
-                size,
-                is_dir: false,
-                is_link: false,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
+            too_deep(&src, depth)?;
+            // `symlink_metadata`, which does not follow: a link is deleted as
+            // the link, and what it names is left alone. Following it deleted the
+            // files of whatever folder the link reached.
+            let meta = fs::symlink_metadata(&src)?;
+            if meta.file_type().is_symlink() {
+                actions.push(PlannedAction {
+                    src,
+                    dest: None,
+                    size: 0,
+                    is_dir: false,
+                    is_link: true,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+                continue;
+            }
+            if meta.is_dir() {
+                // The folder goes back on the list, to be planned once what is
+                // in it has been; its contents go on top of it.
+                let mut contents = Vec::new();
+                for entry in fs::read_dir(&src)? {
+                    contents.push((entry?.path(), depth.saturating_add(1), false));
+                }
+                pending.push((src, depth, true));
+                pending.extend(contents.into_iter().rev());
+            } else {
+                let size = meta.len();
+                *total_bytes = total_bytes.saturating_add(size);
+                actions.push(PlannedAction {
+                    src,
+                    dest: None,
+                    size,
+                    is_dir: false,
+                    is_link: false,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+            }
         }
         Ok(())
     }
@@ -2238,6 +2261,27 @@ fn inside(path: &Path, dir: &Path) -> bool {
         (Ok(p), Ok(d)) => p.starts_with(&d),
         _ => false,
     }
+}
+
+/// How deep a tree a bulk operation will walk: folders inside folders, 512
+/// levels.
+///
+/// No tree anybody made on purpose comes near it. One that does is a loop --
+/// a folder mounted inside itself -- or a trap, and the walk is a recursion:
+/// it would run out of stack and take the window with it. Refused, and said,
+/// instead. Links are never followed (see `PlannedAction::is_link`), so a
+/// link cannot make a loop; this is for everything else.
+const MAX_TREE_DEPTH: usize = 512;
+
+/// Refuse to walk below [`MAX_TREE_DEPTH`].
+fn too_deep(path: &Path, depth: usize) -> io::Result<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(io::Error::other(format!(
+            "folders nested more than {MAX_TREE_DEPTH} deep, at {}",
+            path.shown()
+        )));
+    }
+    Ok(())
 }
 
 /// Whether `path` is a link (a symbolic link, or a junction on Windows).
@@ -3848,12 +3892,14 @@ mod tests {
             !root.join("dst").join("b.txt").exists(),
             "it went on past the question"
         );
-        assert!(
-            executor
-                .take_events()
-                .iter()
-                .any(|e| matches!(e, FileOpEvent::Conflict { .. })),
-            "the question was not in the event stream"
+        let asked = executor
+            .take_events()
+            .iter()
+            .filter(|e| matches!(e, FileOpEvent::Conflict { .. }))
+            .count();
+        assert_eq!(
+            asked, 1,
+            "asked {asked} times: a waiting operation was stepped anyway"
         );
     }
 
@@ -4457,5 +4503,107 @@ mod tests {
             &root.join("a").join("note.txt"),
             &root.join("a").join("absent.txt")
         ));
+    }
+
+    /// Whatever a plan says, the executor never replaces a file with itself.
+    ///
+    /// The planner leaves no such action; this builds one by hand, since the
+    /// executor's own check is the one that must hold when a plan is wrong.
+    #[test]
+    fn the_executor_never_replaces_a_file_with_itself_whatever_the_plan_says() {
+        let scratch = temp_dir("self_by_hand");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("note.txt"), "hello");
+        for operation in [FileOperation::Move, FileOperation::Copy] {
+            let plan = OperationPlan {
+                operation: operation.clone(),
+                actions: vec![PlannedAction {
+                    src: root.join("note.txt"),
+                    dest: Some(root.join("note.txt")),
+                    size: 5,
+                    is_dir: false,
+                    is_link: false,
+                    index: 0,
+                }],
+                total_bytes: 5,
+                total_files: 1,
+                conflict_policy: ConflictPolicy::Overwrite,
+                error_policy: ErrorPolicy::StopOnFirst,
+            };
+            let mut executor = OperationExecutor::new(plan);
+            let _events = executor.execute();
+            assert_eq!(read_file(&root.join("note.txt")), "hello", "{operation:?}");
+        }
+    }
+
+    #[test]
+    fn a_tree_deeper_than_anyone_makes_is_refused_not_walked() {
+        let scratch = temp_dir("too_deep");
+        let root = scratch.dir().to_path_buf();
+        let mut deepest = root.join("top");
+        for _ in 0..(MAX_TREE_DEPTH + 4) {
+            deepest.push("d");
+        }
+        fs::create_dir_all(&deepest).unwrap();
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let err = OperationPlan::plan_copy(
+            &[root.join("top")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::StopOnFirst,
+        )
+        .expect_err("a tree deeper than the limit was planned");
+        assert!(err.to_string().contains("nested more than"), "{err}");
+        let err = OperationPlan::plan_delete(&[root.join("top")], ErrorPolicy::StopOnFirst)
+            .expect_err("a tree deeper than the limit was planned for deletion");
+        assert!(err.to_string().contains("nested more than"), "{err}");
+    }
+
+    /// The walk plans in the order a recursion did: a folder before its
+    /// contents for a copy, after them for a delete, and each folder's
+    /// contents whole before the next.
+    #[test]
+    fn a_tree_is_planned_in_the_order_it_is_walked() {
+        let scratch = temp_dir("walk_order");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("top").join("a").join("x.txt"), "x");
+        write_file(&root.join("top").join("b.txt"), "b");
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let names = |plan: &OperationPlan| -> Vec<String> {
+            plan.actions
+                .iter()
+                .map(|a| {
+                    a.src
+                        .strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect()
+        };
+        let copy = OperationPlan::plan_copy(
+            &[root.join("top")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let copy_order = names(&copy);
+        let pos = |order: &[String], n: &str| order.iter().position(|s| s == n).unwrap();
+        assert_eq!(copy_order.first().map(String::as_str), Some("top"));
+        assert!(pos(&copy_order, "top/a") < pos(&copy_order, "top/a/x.txt"));
+        let delete =
+            OperationPlan::plan_delete(&[root.join("top")], ErrorPolicy::StopOnFirst).unwrap();
+        let delete_order = names(&delete);
+        assert_eq!(delete_order.last().map(String::as_str), Some("top"));
+        assert!(pos(&delete_order, "top/a/x.txt") < pos(&delete_order, "top/a"));
+        // Each folder's contents whole before the next of its neighbours.
+        let a = pos(&copy_order, "top/a");
+        let x = pos(&copy_order, "top/a/x.txt");
+        let b = pos(&copy_order, "top/b.txt");
+        assert!(
+            b < a || b > x,
+            "a neighbour came between a folder and its contents: {copy_order:?}"
+        );
     }
 }

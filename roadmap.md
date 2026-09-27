@@ -1941,6 +1941,17 @@ word; text inside them that says "lane C" is history.
   then those read "Not reported". `known-issues.md` → `[E] The Device Manager
   cannot say which driver runs a PCI device, nor its interrupt or memory`.
 
+- `[-]` `[E]` **The Network Manager lists the machine's interfaces** —
+  2026-09-26. Read through `hwquery` from `/proc/net` on opening and on
+  Refresh: name, kind, link, MAC, address, netmask, gateway and DNS server,
+  with "None assigned" for the kernel's `0.0.0.0` and "Not reported" for the
+  speed, the counters and DHCP, which nothing publishes. The banner explains
+  an empty list only (not read / unreadable / no card found). **Next:**
+  Apply, Enable and Disable through the kernel's `SYS_NET_IF_CONFIG` (856,
+  net-admin gated -- `userspace/ifconfig` already uses it), and Diagnose as
+  real DNS and TCP reachability checks now that apps have `std::net`; Wi-Fi
+  and VPNs stay refused until something publishes them.
+
 - `[x]` `[E]` **The dictionary knows more than thirty words** — 2026-09-26.
   A word the built-in list lacks is looked up in WordNet at dict.org over
   DICT (RFC 2229), when the reader asks and never as they type

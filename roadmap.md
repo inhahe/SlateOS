@@ -1969,14 +1969,14 @@ word; text inside them that says "lane C" is history.
   the server has shaken hands and its outcome is filed then; the screen is
   uploaded to the compositor and drawn scaled to the view; keys (as X
   keysyms) and the pointer go back while it is shown, the escape hotkey
-  giving the keyboard back. Unencrypted, and the window says so. Hextile is
-  asked for first (tiles of background and coloured rectangles -- a fraction
-  of Raw's bytes for a desktop). **Next:** ZRLE or Tight, which need a zlib
-  stream resumed across rectangles -- a resumable inflater in `deflate/`
-  (no lane's; additive) rather than a second decompressor; partial uploads
-  instead of the whole screen per change; sending the local clipboard;
-  VeNCrypt/TLS once `open-questions.md` E-Q2 settles how certificates are
-  checked; RDP.
+  giving the keyboard back. Unencrypted, and the window says so. ZRLE is
+  asked for first -- 64x64 tiles of palettes and runs through one zlib stream
+  for the whole session, inflated a rectangle at a time by
+  `deflate::PiecewiseInflater` (added for it) -- then Hextile, CopyRect and
+  Raw. **Next:** partial uploads instead of the whole screen per change;
+  the local clipboard to the remote machine (waits on a client for lane C's
+  clipboard service -- apps have none); VeNCrypt/TLS once `open-questions.md`
+  E-Q2 settles how certificates are checked; Tight (JPEG); RDP.
 
 - `[x]` `[E]` **The dictionary knows more than thirty words** — 2026-09-26.
   A word the built-in list lacks is looked up in WordNet at dict.org over

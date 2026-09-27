@@ -1465,6 +1465,8 @@ The remaining 39 rows are other causes: `-i`/`-I` address formatting, `-a` and
 
 ## B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER (lane B, 2026-09-14) — OPEN, fix is lane A's
 
+**Status:** FIXED 2026-09-27 -- the kernel's resolver consults its hosts table (`requests/a-b-dns-resolve-now-consults-the-hosts-table.md`), and the C library reads `/etc/hosts` before it asks the kernel (lane D, `D-POSIX-HOSTS-FILE-WAS-NEVER-READ`).
+
 `getaddrinfo("localhost", …)` and `gethostbyname("localhost")` send a DNS query
 over the network. There is no hosts-file lookup anywhere in the path, so on a
 machine with no DNS server — or one whose upstream declines to answer for
@@ -173626,3 +173628,100 @@ and disagreed with glibc at the edges programs meet:
 `ether_*` functions, ported. The tests replay glibc 2.39's answers for 186
 inputs (`dlm/oracle/addr_oracle.c`, run under WSL) and compare every one.
 `ether_aton`'s and `inet_ntoa`'s buffers are the calling thread's.
+
+### [D] D-POSIX-SERVICES-WERE-A-BUILT-IN-TABLE — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/netdb.rs` (was `posix/src/socket.rs`).
+
+**What it was.** `/etc/services` and `/etc/protocols` were never read:
+`getservbyname` searched a table of 27 services with no aliases, one of
+them under a name no system uses (`dns` for port 53), and `getprotobyname`
+compared names ignoring case, where glibc compares them exactly. There was
+no `getservbyname_r`, `getservbyport_r`, `getservent_r`, `getprotobyname_r`,
+`getprotobynumber_r` or `getprotoent_r`, and no networks or ethers database
+at all (`getnetbyname`, `getnetbyaddr`, `getnetent`, `ether_hostton`,
+`ether_ntohost`). And a lookup in the middle of `getservent`'s enumeration
+rewound it unless `setservent(1)` had been called -- the behaviour of glibc
+before 2.33, not after: glibc 2.39, asked, keeps the enumeration's place.
+
+**Fix.** The four databases as glibc 2.40's `nss_files` reads them: the file
+when there is one, a built-in copy when there is not (design-decisions.md
+§1127), parsed by `files-parse.c`'s rules -- including the service port's
+base-0 number (`0x1f/tcp` is 31) that the macro's argument order gives it.
+The tests replay glibc 2.39's answers to 100 lookups and enumerations over files built to
+exercise the parser (`dlm/oracle/netdb_oracle.c`, run under WSL with those
+files in place of `/etc`). A number past 32 bits clamps to `0xffffffff` as
+upstream glibc clamps it; Debian's glibc refuses the line instead (its
+`local-nss-overflow.diff`), so those lines are tested apart.
+
+### [D] D-POSIX-HOSTS-FILE-WAS-NEVER-READ — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/hosts.rs` (was `posix/src/socket.rs`).
+
+**What it was.** Every host lookup went straight to the kernel's resolver:
+the C library never read `/etc/hosts` or `/etc/host.conf`, so a name a
+program's own container, chroot or administrator had written there was not
+found. Beside that:
+
+- `gethostbyname("1.2.3.4")` asked the resolver instead of answering the
+  number; `gethostbyname2(..., AF_INET6)` answered "no data" for everything,
+  `::1` included;
+- `gethostbyname2_r`, `gethostent`, `gethostent_r`, `sethostent` and
+  `endhostent` were missing;
+- the `_r` functions returned musl's codes (`ENOENT` for "not found"); glibc
+  returns 0 with a NULL result;
+- `herror` wrote to the kernel console, not standard error, and
+  `hstrerror`'s messages were not glibc's ("Host not found" for "Unknown
+  host").
+
+**Fix.** The hosts database as glibc 2.40 answers it with `hosts: files dns`,
+the kernel's resolver standing in for DNS (design-decisions.md §1128):
+numbers answered as themselves, then `/etc/hosts` (`multi`, `reorder` and
+`trim` from `host.conf`), then the kernel -- whose failures are reported as
+glibc's DNS module reports them. The tests replay glibc 2.39's answers to 66
+lookups under two `host.conf` files, with the network down
+(`dlm/oracle/hosts_oracle.c`), and its `host.conf` warnings byte for byte.
+
+**What remains.** The kernel's resolver answers one IPv4 address and no
+canonical name: see `requests/d-a-sys-dns-resolve-answers-one-ipv4-address.md`.
+
+### [D] D-POSIX-GETADDRINFO-WAS-IPV4-ONLY-AND-UNSORTED — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/gai.rs` (was `posix/src/socket.rs`).
+
+**What it was.** `getaddrinfo` knew one family and one address:
+
+- an `AF_INET6` hint was `EAI_FAMILY`, and a numeric IPv6 host (`::1`) was
+  sent to the resolver as a name;
+- `ai_protocol` was ignored, unknown `ai_flags` were accepted, `AI_CANONNAME`
+  without a host was accepted, and `*` meant nothing;
+- `AI_ADDRCONFIG`, `AI_V4MAPPED` and `AI_ALL` did nothing; `SOCK_RAW`
+  entries were never listed, nor DCCP, UDP-Lite or SCTP when asked for;
+- a resolver failure was `EAI_NONAME` whatever it was -- a timeout included;
+- a service was read by this library's own rule, not `strtoul`'s (`+80`,
+  `70000`, `2147483648` all differ);
+- nothing was sorted, and `getnameinfo` refused IPv6 and `AF_UNIX` addresses.
+
+**Fix.** glibc 2.40's `getaddrinfo` and `getnameinfo`, ported, over the hosts
+database (§1128), with RFC 3484 sorting and `/etc/gai.conf` (§1129). The
+tests replay glibc 2.39's answers to 100 calls under two `gai.conf` files, on
+a sandbox with one IPv4 address and no IPv6 (`dlm/oracle/gai_oracle.c`).
+
+### [D] D-POSIX-GETSOCKNAME-SAID-0.0.0.0-AFTER-CONNECT — 2026-09-27 — FIXED 2026-09-27
+
+**Where:** `posix/src/socket.rs` (`connect`, `accept`, `getsockname`).
+
+**What it was.** A socket's local address was only ever what `bind` set, so
+`getsockname` on a connected or accepted socket said `0.0.0.0`. Programs ask
+exactly this to learn their own address -- "connect a UDP socket to
+8.8.8.8, read its name" is the common idiom -- and FTP's active mode, SIP and
+`getaddrinfo`'s own sorting rely on it.
+
+**Fix.** `connect` and `accept` record the address the connection goes out
+from, as this system routes it (`route_source`): the loopback's for
+127/8 and 0.0.0.0, `eth0`'s for anything its subnet or gateway reaches. A
+datagram disconnect forgets it again, as Linux's does, unless `bind` set it.
+
+**What remains.** The route is the C library's reading of `eth0`'s
+configuration; a kernel with several interfaces or real routes would need to
+say which it used.

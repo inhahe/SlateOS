@@ -110,18 +110,10 @@ pub struct PerThread {
     /// Result buffer for `ether_ntoa`: `"xx:xx:xx:xx:xx:xx\0"`.
     pub ether_ntoa: [u8; 18],
 
-    /// Result web for `gethostbyname`.
-    pub hostent: crate::socket::HostentBuf,
-
-    /// Result web for `gethostbyaddr`, kept separate so a reverse lookup
-    /// does not clobber a forward one.
-    pub hostent_rev: crate::socket::HostentBuf,
-
-    /// Result web for `getservbyname`/`getservbyport`.
-    pub servent: crate::socket::ServentBuf,
-
-    /// Result web for `getprotobyname`/`getprotobynumber`.
-    pub protoent: crate::socket::ProtoentBuf,
+    /// This thread's netdb state ([`crate::netdb`]'s `ThreadDb`): the
+    /// blocks `getservbyname` and its kin answer in, and each database's
+    /// enumeration.  NULL until the first call; freed as the thread exits.
+    pub netdb: *mut u8,
 
     /// The thread's cancellation state — `PTHREAD_CANCEL_ENABLE` (0) or
     /// `PTHREAD_CANCEL_DISABLE`.
@@ -197,10 +189,7 @@ impl PerThread {
         inet_ntoa: [0; 16],
         ether_aton: crate::inet::EtherAddr::ZERO,
         ether_ntoa: [0; 18],
-        hostent: crate::socket::HostentBuf::ZERO,
-        hostent_rev: crate::socket::HostentBuf::ZERO,
-        servent: crate::socket::ServentBuf::ZERO,
-        protoent: crate::socket::ProtoentBuf::ZERO,
+        netdb: core::ptr::null_mut(),
         cancel_state: 0,
         cancel_type: 0,
         random: crate::random::RandomState::ZERO,
@@ -326,6 +315,7 @@ mod tests {
         assert_eq!(zeroed.inet_ntoa, PerThread::ZERO.inet_ntoa);
         assert_eq!(zeroed.ether_aton, PerThread::ZERO.ether_aton);
         assert_eq!(zeroed.ether_ntoa, PerThread::ZERO.ether_ntoa);
+        assert_eq!(zeroed.netdb, PerThread::ZERO.netdb);
         assert_eq!(zeroed.tm.tm_sec, PerThread::ZERO.tm.tm_sec);
         assert_eq!(zeroed.tm.tm_year, PerThread::ZERO.tm.tm_year);
         assert_eq!(zeroed.tm.tm_isdst, PerThread::ZERO.tm.tm_isdst);
@@ -427,7 +417,7 @@ mod tests {
             for _ in 0..rounds {
                 // Takes a plain integer; returns a pointer into this
                 // thread's own block.
-                let p = crate::socket::getprotobynumber(number);
+                let p = crate::netdb::getprotobynumber(number);
                 assert!(!p.is_null(), "no entry for protocol {number}");
                 // SAFETY: non-null result, and `p_name` points at this
                 // thread's NUL-terminated name buffer.

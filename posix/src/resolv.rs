@@ -586,6 +586,39 @@ pub extern "C" fn __res_init() -> i32 {
 // Names: glibc's ns_name_* functions
 // ---------------------------------------------------------------------------
 
+/// glibc's `res_hnok`: whether `dn` is a host name -- printable ASCII, a
+/// name `ns_name_pton` accepts, and every label only letters, digits, `-`
+/// and `_`, the first not starting with `-`.  The DNS module asks about
+/// nothing else.
+pub(crate) fn res_hnok(dn: &[u8]) -> bool {
+    if !dn.iter().all(|&c| c > b' ' && c <= b'~') {
+        return false;
+    }
+    let mut wire = [0u8; 255];
+    let Ok((n, _)) = name_pton(dn, &mut wire) else {
+        return false;
+    };
+    let wire = wire.get(..n).unwrap_or(&[]);
+    if wire.first().is_some_and(|&l| l > 0) && wire.get(1) == Some(&b'-') {
+        return false;
+    }
+    let mut i = 0usize;
+    while let Some(&len) = wire.get(i) {
+        if len == 0 {
+            break;
+        }
+        let label = wire.get(i + 1..i + 1 + usize::from(len)).unwrap_or(&[]);
+        if !label
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
+            return false;
+        }
+        i += 1 + usize::from(len);
+    }
+    true
+}
+
 /// `ns_name_pton`: text to an uncompressed wire name in `dst`; the bytes
 /// written, and whether the text was fully qualified.  `Err` is glibc's
 /// `EMSGSIZE`.

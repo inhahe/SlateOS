@@ -1391,6 +1391,7 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     // before the kernel reclaims the thread; also free its name slot.
     let self_tid = pthread_self();
     tsd_thread_cleanup();
+    crate::netdb::thread_cleanup();
     thread_name_release(self_tid);
 
     // The last thread ends the process, and as `exit(0)`: see

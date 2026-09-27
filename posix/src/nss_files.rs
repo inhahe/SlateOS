@@ -30,6 +30,21 @@ pub(crate) enum Which {
     Passwd,
     Group,
     Shadow,
+    Services,
+    Protocols,
+    Networks,
+    Ethers,
+    Hosts,
+    /// `/etc/host.conf` -- not a database, but read the same way.
+    HostConf,
+    /// `/etc/gai.conf` -- likewise.
+    GaiConf,
+}
+
+impl Which {
+    /// How many there are: the host tests keep a slot for each.
+    #[cfg(test)]
+    const COUNT: usize = 10;
 }
 
 impl Which {
@@ -39,6 +54,13 @@ impl Which {
             Which::Passwd => b"/etc/passwd\0",
             Which::Group => b"/etc/group\0",
             Which::Shadow => b"/etc/shadow\0",
+            Which::Services => b"/etc/services\0",
+            Which::Protocols => b"/etc/protocols\0",
+            Which::Networks => b"/etc/networks\0",
+            Which::Ethers => b"/etc/ethers\0",
+            Which::Hosts => b"/etc/hosts\0",
+            Which::HostConf => b"/etc/host.conf\0",
+            Which::GaiConf => b"/etc/gai.conf\0",
         }
     }
 }
@@ -71,6 +93,14 @@ impl Text {
             ptr,
             len: bytes.len(),
         })
+    }
+}
+
+impl Text {
+    /// The block and its length, now the caller's to free.
+    pub(crate) fn into_raw(self) -> (*mut u8, usize) {
+        let t = core::mem::ManuallyDrop::new(self);
+        (t.ptr, t.len)
     }
 }
 
@@ -111,6 +141,13 @@ pub(crate) fn read(which: Which) -> Result<Db, i32> {
     {
         read_file(which.path())
     }
+}
+
+/// Read the file at `path` (NUL-terminated) whole, as [`read`] reads a
+/// database: for a configuration file named at run time.
+#[cfg(not(test))]
+pub(crate) fn read_path(path: &[u8]) -> Result<Db, i32> {
+    read_file(path)
 }
 
 /// Read a whole file into a growing block.
@@ -168,7 +205,7 @@ fn read_file(path: &[u8]) -> Result<Db, i32> {
 /// `__nss_readline`'s entries: each line with its leading white space
 /// skipped, and neither empty nor a `#` comment -- with the offset just past
 /// it, so enumeration can resume there.
-pub(crate) fn lines(text: &[u8], from: usize) -> impl Iterator<Item = (&[u8], usize)> {
+pub(crate) fn lines(text: &[u8], from: usize) -> impl Iterator<Item = (&[u8], usize)> + Clone {
     let mut at = from;
     core::iter::from_fn(move || {
         loop {
@@ -376,6 +413,25 @@ impl Room {
         Ok(at)
     }
 
+    /// Copy `s` in as it is, with no NUL; the copy's address.
+    pub(crate) fn bytes(&mut self, s: &[u8]) -> Result<*mut u8, i32> {
+        let end = self.used.checked_add(s.len()).ok_or(errno::ERANGE)?;
+        if end > self.len {
+            return Err(errno::ERANGE);
+        }
+        // SAFETY: `used..end` lies inside the caller's `len` bytes.
+        let at = unsafe { self.buf.add(self.used) };
+        // SAFETY: as above; `s` is not the buffer being filled.
+        unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), at, s.len()) };
+        self.used = end;
+        Ok(at)
+    }
+
+    /// The whole buffer's length.
+    pub(crate) fn capacity(&self) -> usize {
+        self.len
+    }
+
     /// Room for `n` pointers, aligned for them by address (`parse_list`
     /// aligns the same way), zeroed.
     pub(crate) fn pointers(&mut self, n: usize) -> Result<*mut *const u8, i32> {
@@ -502,6 +558,14 @@ impl<T> Held<T> {
             buf: core::ptr::null_mut(),
             cap: 0,
         }
+    }
+
+    /// Free the block: the entry it held is gone with it.
+    pub(crate) fn release(&mut self) {
+        // SAFETY: `buf` is NULL or this storage's `malloc` block.
+        unsafe { crate::malloc::free(self.buf) };
+        self.buf = core::ptr::null_mut();
+        self.cap = 0;
     }
 }
 
@@ -680,7 +744,7 @@ enum TestDb {
 #[cfg(test)]
 process_global! {
     /// What each database reads as on this host thread.
-    fn test_dbs() -> [TestDb; 3] = [TestDb::Missing; 3];
+    fn test_dbs() -> [TestDb; Which::COUNT] = [TestDb::Missing; Which::COUNT];
 }
 
 #[cfg(test)]

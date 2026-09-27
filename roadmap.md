@@ -4366,6 +4366,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] getpeername kernel fallback: queries SYS_TCP_PEER_ADDR when cached metadata unavailable (dup'd fds)
   - [x] getifaddrs real IP: queries SYS_NET_IF_INFO to populate eth0 address and netmask (was INADDR_ANY)
   - [x] getservbyname/getservbyport: built-in service database (27 entries: http, https, ssh, ftp, smtp, dns, mysql, postgresql, redis, etc.)
+  - [x] netdb databases as glibc's `nss_files` (lane D, 2026-09-27): `/etc/services`, `/etc/protocols`, `/etc/networks`, `/etc/ethers` read by `files-parse.c`'s rules, built-in copies when missing (§1127); every `_r` form; per-thread results and enumerations
+  - [x] hosts database as glibc's `files dns` (lane D, 2026-09-27): numbers, `/etc/hosts` and `/etc/host.conf` (`multi`/`reorder`/`trim`), then the kernel's resolver (§1128); `gethostbyname{,2}{,_r}`, `gethostbyaddr{,_r}`, `gethostent` family, glibc's `herror`/`hstrerror`
+  - [x] getaddrinfo/getnameinfo as glibc's (lane D, 2026-09-27): every flag and family, numeric IPv6 with scopes, `SOCK_RAW`/DCCP/UDP-Lite/SCTP entries, RFC 3484 sorting with `/etc/gai.conf` (§1129); sockets report the address a connection goes out from
   - [x] getprotobyname/getprotobynumber: built-in protocol database (11 entries: ip, icmp, tcp, udp, gre, esp, ah, sctp, etc.)
   - [x] setservent/getservent/endservent + setprotoent/getprotoent/endprotoent: sequential enumeration of the same two tables, per-thread cursor; without `setservent(1)`/`setprotoent(1)` a `getservby*`/`getprotoby*` lookup rewinds the cursor, reproducing glibc's open-scan-close behaviour instead of making `stayopen` a silent no-op
   - [x] poll/select kernel-queried readiness: check_readiness() queries SYS_TCP_POLL_STATUS/SYS_TCP_LISTENER_READY/SYS_UDP_RX_READY for actual socket state (was always-ready)

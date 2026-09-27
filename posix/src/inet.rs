@@ -145,9 +145,6 @@ fn aton_end(s: &[u8]) -> Option<([u8; 4], usize)> {
 
 /// glibc's `__inet_aton_exact`: `inet_aton`, but the whole text must be the
 /// address -- what a numeric host is to `getaddrinfo` and `gethostbyname`.
-// Their ports, in the next commit, are its callers; until then only the
-// tests call it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn aton_exact(s: &[u8]) -> Option<[u8; 4]> {
     match aton_end(s) {
         Some((addr, end)) if end == s.len() => Some(addr),

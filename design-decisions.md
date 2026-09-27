@@ -41343,6 +41343,91 @@ swap itself.
 **How to reverse.** Nothing is built; the entry records a direction. The
 service half can be changed service by service at any time.
 
+
+---
+
+## 1127. The netdb databases read `/etc` when it is there, and a built-in copy when it is not; their answers are the calling thread's
+
+**Date:** 2026-09-27
+**Lane:** D
+**Decided by:** Claude (autonomous)
+
+**In short:** programs look up services ("http" is port 80), protocols
+("tcp" is 6), networks and Ethernet names in four files under `/etc`. The
+booted system has no `/etc` of its own yet, so this library answers from a
+built-in copy when a file is missing -- as `/etc/passwd` answers with its
+`root` entry (§1113) -- and from the file when there is one. And the
+functions that answer in library storage use storage of the calling
+thread's, where glibc shares one buffer between all threads.
+
+| Question | Chosen | Alternatives |
+|---|---|---|
+| a missing file | **the built-in copy**: the IANA registries' well-known entries, written for this project in the files' own format and read by the same parser | glibc: no answer at all -- so `getaddrinfo(host, "http")` would fail on a system with no `/etc/services`; or copy Debian's `netbase` files, which are GPL-2 |
+| `getservbyname`'s buffer, `getservent`'s place | **the calling thread's** (allocated on first use, freed when it exits) | glibc's: one per process, behind a lock -- two threads enumerating take turns consuming each other's entries |
+| a number past 32 bits in a file | **clamped** to `0xffffffff`, upstream glibc's `strtou32` | Debian's glibc refuses the line (a local patch) |
+
+**What would change it.** Staging real `/etc` files on the image makes the
+built-in copies unused, with nothing to change here: a file always wins.
+
+
+---
+
+## 1128. Host lookups are glibc's `files dns`, with the kernel's resolver as the DNS
+
+**Date:** 2026-09-27
+**Lane:** D
+**Decided by:** Claude (autonomous)
+
+**In short:** a program asking for a host's address gets, in order: the
+number itself if the name is one, `/etc/hosts`, then the kernel's resolver
+-- the order every Linux distribution's `nsswitch.conf` gives. The kernel is
+this system's DNS: it holds the cache, its own hosts table, the servers DHCP
+gave and each container's names, so the C library asks it rather than
+speaking DNS itself, the way glibc on a desktop asks `systemd-resolved`.
+
+**Why not this library's own DNS client** (`res_query`, which exists). It
+would bypass everything the kernel's resolver knows -- a container's peers
+by name, the cache -- and has no servers to ask on a booted system with no
+`/etc/resolv.conf`. It would buy `AAAA` records and several addresses a
+name, which the kernel does not answer yet; that belongs in the kernel
+(`requests/d-a-sys-dns-resolve-answers-one-ipv4-address.md`).
+
+**What the kernel cannot say, and what is said instead:**
+
+| Question | Answer |
+|---|---|
+| an IPv6 (`AAAA`) address | the IPv4 address is asked for: found means "no address of that kind" (`NO_DATA`), not found means "no such host" |
+| every address of a name | the one the kernel gives |
+| the canonical name | the name asked |
+| a failure | glibc's DNS module's words for it: unreachable is "try again", refused or timed out is "unavailable, try again", not found is `HOST_NOT_FOUND` -- and a name that is not a host name (`res_hnok`) is never asked |
+
+
+---
+
+## 1129. `getaddrinfo` sorts as glibc does, and here every IPv6 answer is unusable
+
+**Date:** 2026-09-27
+**Lane:** D
+**Decided by:** Claude (autonomous)
+
+**In short:** when a name has several addresses, glibc orders them by RFC
+3484's rules so a program that tries them in order tries the best first. The
+first rule is "avoid addresses you cannot reach", decided by connecting a
+datagram socket. This system has no IPv6 sockets, so every IPv6 address sorts
+after every IPv4 one -- which is what glibc does on a Linux machine with IPv6
+switched off, and what a program here needs.
+
+- **The rules are glibc's**, down to its tables, `/etc/gai.conf`, and its
+  use of prefix lengths only on machines with IPv6 (which this is not).
+- **An IPv4 answer mapped into an IPv6 question** (`AI_V4MAPPED`) is
+  unusable here too, and sorts with the IPv6 ones; Linux's dual-stack
+  sockets would reach it and put it first.
+- **musl's `NI_NUMERICSCOPE`** (0x100) is accepted by `getnameinfo`, where
+  glibc, which has no such flag, answers `EAI_BADFLAGS`: a program built
+  against musl's header passes it meaning "a numeric scope" (§1119).
+- **`AI_IDN` without `libidn2`**: an ASCII name is itself and another is
+  `EAI_IDN_ENCODE`, as glibc answers when the library is absent.
+
 ---
 
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told

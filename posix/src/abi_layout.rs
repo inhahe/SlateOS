@@ -754,6 +754,38 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::netdb::Servent,
+        "struct servent",
+        "netdb.h",
+        s_name,
+        s_aliases,
+        s_port,
+        s_proto
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::netdb::Protoent,
+        "struct protoent",
+        "netdb.h",
+        p_name,
+        p_aliases,
+        p_proto
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::netdb::Netent,
+        "struct netent",
+        "netdb.h",
+        n_name,
+        n_aliases,
+        n_addrtype,
+        n_net
+    );
+    abi!(
+        out,
+        hdrs,
         crate::socket::Hostent,
         "struct hostent",
         "netdb.h",

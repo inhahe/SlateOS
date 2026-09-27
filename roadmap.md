@@ -7869,6 +7869,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Annotation tools (rectangle, arrow, text, highlight) with undo
   - [x] Preview window, hotkeys (PrintScreen variants), auto-filename
 - [x] Backup program (snapshot-based, with all common backup types) — Rust userspace binary
+  - [-] `[E]` **Scheduled backups that happen** (2026-09-27, C-Q21, design-decisions §1426) -- lane E's half done: schedules are kept in `<config>/backup/schedules.json`, where one program can find them all, with a time and a day (`--at`, `--on`); `backup run-due` runs each that is due -- one missed while the machine was off runs once, as soon as it is run -- and records it; `schedules` lists them, `unschedule` removes one. Waiting on lanes D and B for the service that runs `backup run-due` at boot and every few minutes (`requests/e-db-the-backup-service-runs-backup-run-due.md`).
   - [x] Full and incremental backup with SHA-256 content hashing
   - [x] Manifest-based tracking (file, directory, symlink entries)
   - [x] Restore with selective file filtering

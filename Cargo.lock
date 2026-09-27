@@ -170,6 +170,7 @@ dependencies = [
  "quoting",
  "safeio",
  "scratchdir",
+ "settingsfile",
  "snapstore",
  "textfmt",
  "tzrules",

@@ -155699,6 +155699,17 @@ defect this lane spent 2026-09-16 removing from eight other pages.
 
 ## BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS
 
+> **Status 2026-09-27: lane E's half FIXED; waiting on lanes D and B.** The
+> operator answered C-Q21 (design-decisions §1426): a service started at
+> boot runs the backups, and one missed while the machine was off runs as
+> soon as it is on again, without asking. The backup program now keeps
+> every schedule in `<config>/backup/schedules.json` (not in each
+> destination, where nothing could find them) with a time and a day, and
+> `backup run-due` runs whatever is due and records it -- so the service
+> only has to run that command, as each user, at boot and every few
+> minutes (`requests/e-db-the-backup-service-runs-backup-run-due.md`).
+> Until it exists, `backup schedule` says that nothing runs it on its own.
+
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `apps/backup/src/main.rs` — `cmd_schedule` (~2652), `schedules_path`
 (~1805).

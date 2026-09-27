@@ -35,6 +35,8 @@ REFUSED = "a_refused_password_is_a_failed_attempt"
 ASKS = "connect_asks_for_the_password_and_refuses_what_is_not_vnc"
 OVERLAP = "an_overlapping_copy_reads_the_old_pixels"
 DURATION = "a_sessions_duration_runs_from_its_handshake"
+RECONNECT = "test_reconnect_session"
+RECONNECT_ASKS = "reconnect_asks_for_the_password_again"
 HANDSHAKE = "a_session_shakes_hands_and_shows_the_screen"
 PASSWORD = "a_password_is_proven_by_the_challenge"
 OUTSIDE = "a_rectangle_outside_the_desktop_is_refused"
@@ -116,6 +118,21 @@ MAIN = [
         "                    let _id = self.connect_vnc(prompt.profile_index, &prompt.text);",
         "                    let _ = prompt;",
         [ASKS],
+    ),
+    (
+        "reconnect claims an attempt again",
+        "        let _asks = self.connect_profile(profile_index);",
+        "        let _ = profile_index;\n"
+        "        if let Some(s) = self.sessions.get_mut(index) {\n"
+        "            s.state = SessionState::Reconnecting;\n"
+        "        }",
+        [RECONNECT, RECONNECT_ASKS],
+    ),
+    (
+        "a live session is reconnected",
+        "        if session.state != SessionState::Disconnected {",
+        "        if false {",
+        [RECONNECT],
     ),
     (
         "a connected session's duration does not run",

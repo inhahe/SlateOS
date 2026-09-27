@@ -1693,14 +1693,42 @@ impl RemoteDesktopApp {
         }
     }
 
-    /// Reconnect a session by index.
+    /// Connect again to what an ended session was connected to.
+    ///
+    /// An ended session is not revived in place: this asks for its profile's
+    /// password again -- it is kept nowhere -- and starts a new session, as
+    /// Connect does ([`Self::connect_profile`]), or says why it cannot; the
+    /// ended row stays until the list is swept. It used to set the row to
+    /// "Reconnecting", which nothing then advanced, so the row said a
+    /// connection was being attempted while none was, and the window's clock
+    /// ticked for it forever.
+    ///
+    /// Returns whether it went to the profile: `false` for no such session,
+    /// one that has not ended, or one whose profile is gone.
     pub fn reconnect_session(&mut self, index: usize) -> bool {
-        if let Some(session) = self.sessions.get_mut(index) {
-            session.state = SessionState::Reconnecting;
-            true
-        } else {
-            false
+        let Some(session) = self.sessions.get(index) else {
+            return false;
+        };
+        if session.state != SessionState::Disconnected {
+            self.status_message = Some(format!(
+                "{} has not ended -- disconnect it first (D)",
+                session.display_name
+            ));
+            return false;
         }
+        let Some(profile_index) = self
+            .profiles
+            .iter()
+            .position(|p| p.id == session.profile_id)
+        else {
+            self.status_message = Some(format!(
+                "Cannot reconnect {}: its profile has been deleted",
+                session.display_name
+            ));
+            return false;
+        };
+        let _asks = self.connect_profile(profile_index);
+        true
     }
 
     /// Advance session state.
@@ -4712,7 +4740,11 @@ mod tests {
         assert_eq!(app.sessions[0].state, SessionState::Disconnected);
 
         app.handle_event(&press(Key::R));
-        assert_eq!(app.sessions[0].state, SessionState::Reconnecting);
+        assert_eq!(
+            app.sessions[0].state,
+            SessionState::Disconnected,
+            "R claimed a reconnection with nothing behind it"
+        );
 
         app.handle_event(&press(Key::D));
         app.handle_event(&press(Key::Delete));
@@ -5195,9 +5227,45 @@ mod tests {
     #[test]
     fn test_reconnect_session() {
         let mut app = RemoteDesktopApp::with_sample_data();
+        assert!(
+            !app.reconnect_session(0),
+            "a session that has not ended was reconnected"
+        );
         app.disconnect_session(0);
         assert!(app.reconnect_session(0));
-        assert_eq!(app.sessions[0].state, SessionState::Reconnecting);
+        assert_eq!(
+            app.sessions[0].state,
+            SessionState::Disconnected,
+            "a reconnection was claimed with nothing behind it"
+        );
+    }
+
+    /// Reconnecting an ended VNC session asks for its password again -- it
+    /// is kept nowhere -- and Enter starts a new session; the ended row
+    /// stays until the list is swept.
+    #[test]
+    fn reconnect_asks_for_the_password_again() {
+        // A server that is not one: the session ends at its first words.
+        let (port, _heard) = server(vec![Step::Say(b"not VNC, no\n".to_vec())]);
+        let mut app = vnc_app(port);
+        app.connect_vnc(0, "").expect("a session");
+        pump_until(&mut app, |a| {
+            a.sessions[0].state == SessionState::Disconnected
+        });
+        assert!(app.reconnect_session(0));
+        assert_eq!(
+            app.password_prompt.as_ref().map(|p| p.profile_index),
+            Some(0),
+            "no password was asked for"
+        );
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        }));
+        assert_eq!(app.sessions.len(), 2, "no new session was started");
+        assert_eq!(app.sessions[1].state, SessionState::Connecting);
     }
 
     #[test]

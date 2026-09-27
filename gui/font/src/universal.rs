@@ -51,7 +51,7 @@
 //!   recompose a split matra during normalization by declining any composition
 //!   whose first character is a mark, and hangs that refusal off each shaper's
 //!   vtable. The rule *is* implemented, but not here: it lives in
-//!   [`norm`](crate::norm) as `SplitVowels::LeaveApart`, one switch the drawing
+//!   [`norm`] as `SplitVowels::LeaveApart`, one switch the drawing
 //!   path always sets and the text path never does, rather than a copy per
 //!   shaper. It is safe as a global because the 47 characters it can affect all
 //!   belong to Indic or USE scripts — `norm`'s
@@ -82,7 +82,7 @@ use crate::universal_tables::USE_RANGES;
 /// What the Universal Shaping Engine makes of one character.
 ///
 /// The dense order of the variants is the column order of
-/// [`TRANSITIONS`](crate::universal_machine::TRANSITIONS): a row is indexed by
+/// [`TRANSITIONS`]: a row is indexed by
 /// `category as usize`, so reordering this enum silently mis-scans every run
 /// until the machine is regenerated. `tools/gen_universal_machine.py` takes the
 /// order from the same dict `tools/gen_universal_table.py` writes the ranges
@@ -252,7 +252,7 @@ pub(crate) struct Char {
     pub(crate) category: Category,
     /// Whether the character was a combining mark of any kind:
     /// `HB_UNICODE_GENERAL_CATEGORY_IS_MARK`, which is
-    /// [`norm::is_any_mark`](crate::norm::is_any_mark) and *not*
+    /// [`norm::is_any_mark`] and *not*
     /// [`SubGlyph::mark`], whose question is about advance widths and whose
     /// answer is conditional on the face.
     pub(crate) mark: bool,

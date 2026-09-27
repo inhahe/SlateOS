@@ -2002,3 +2002,61 @@ fn keylayout_empty_input_yields_nothing() {
     let k = KeyLayouts::parse(b"");
     assert_eq!(k, KeyLayouts::default());
 }
+
+/// `/proc/net` exactly as `kernel/src/fs/procfs.rs::gen_net` writes it.
+const SLATE_NET: &[u8] = b"Interface: eth0  (UP)
+  MAC:     52:54:00:12:34:56
+  IPv4:    10.0.2.15
+  Netmask: 255.255.255.0
+  Gateway: 10.0.2.2
+  DNS:     10.0.2.3
+";
+
+#[test]
+fn net_interfaces_reads_the_kernels_interface() {
+    let all = NetInterface::parse_all(SLATE_NET);
+    assert_eq!(all.len(), 1);
+    let iface = &all[0];
+    assert_eq!(iface.name, b"eth0".to_vec());
+    assert_eq!(iface.up, Some(true));
+    assert_eq!(iface.mac.as_deref(), Some(&b"52:54:00:12:34:56"[..]));
+    assert_eq!(iface.ipv4.as_deref(), Some(&b"10.0.2.15"[..]));
+    assert_eq!(iface.netmask.as_deref(), Some(&b"255.255.255.0"[..]));
+    assert_eq!(iface.gateway.as_deref(), Some(&b"10.0.2.2"[..]));
+    assert_eq!(iface.dns.as_deref(), Some(&b"10.0.2.3"[..]));
+}
+
+#[test]
+fn net_interfaces_leaves_a_missing_field_missing() {
+    let all = NetInterface::parse_all(b"Interface: eth0  (DOWN)\n  IPv4:    \n");
+    let iface = &all[0];
+    assert_eq!(iface.up, Some(false));
+    assert_eq!(iface.ipv4, None, "an empty value was read as an address");
+    assert_eq!(iface.mac, None);
+    assert!(NetInterface::parse_all(b"").is_empty());
+    assert!(
+        NetInterface::parse_all(b"  IPv4: 1.2.3.4\n").is_empty(),
+        "a field with no interface"
+    );
+    assert!(
+        NetInterface::parse_all(b"Interface:\n  IPv4: 1.2.3.4\n").is_empty(),
+        "an interface with no name"
+    );
+    let odd = NetInterface::parse_all(b"Interface: eth0\n");
+    assert_eq!(odd[0].up, None, "a state that was not written was guessed");
+}
+
+/// Each `Interface:` block is its own interface, its fields its own -- the
+/// second is not dropped, and neither takes the other's addresses.
+#[test]
+fn net_interfaces_keeps_every_block() {
+    let all = NetInterface::parse_all(
+        b"Interface: eth0  (UP)\n  IPv4:    10.0.2.15\nInterface: eth1  (DOWN)\n  MAC:     52:54:00:00:00:02\n",
+    );
+    let names: Vec<&[u8]> = all.iter().map(|i| i.name.as_slice()).collect();
+    assert_eq!(names, [&b"eth0"[..], &b"eth1"[..]]);
+    assert_eq!(all[0].ipv4.as_deref(), Some(&b"10.0.2.15"[..]));
+    assert_eq!(all[0].mac, None, "eth1's MAC went to eth0");
+    assert_eq!(all[1].ipv4, None, "eth0's address went to eth1");
+    assert_eq!(all[1].up, Some(false));
+}

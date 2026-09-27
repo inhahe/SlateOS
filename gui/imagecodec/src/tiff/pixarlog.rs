@@ -23,15 +23,15 @@
 //!   horizontal predictor, which libtiff installs for PixarLog as for
 //!   Deflate, runs over the output all the same.
 //!
-//! The inflating is the shared `deflate` crate's. zlib's rule -- inflate
-//! until the buffer is full, still reading what needs no room: an end of
-//! block, the next block's header and tables, the checksum after the last
-//! block -- is kept at the buffer's end and for the checksum, which is read
-//! where zlib reads it, after the Deflate data. But the crate decodes a
-//! block at a time, so damage further into the block the strip ends in, or
-//! further into the next block, is seen here and not by zlib; undamaged
-//! files are not affected (`known-issues.md`; asked of lane A in
-//! `requests/f-a-zlib-inflate-into-a-fixed-buffer-as-zlib-does.md`).
+//! The inflating is the shared `deflate` crate's port of zlib 1.3's own
+//! (`deflate::zlib_inflate_into`, lane A's answer to
+//! `requests/f-a-zlib-inflate-into-a-fixed-buffer-as-zlib-does.md`): it fills
+//! the buffer as zlib does -- a match or stored block as far as it fits --
+//! and stops where zlib stops, still reading what needs no room once the
+//! buffer is full (an end of block, the next block's header and tables, the
+//! checksum after the last block) and reporting an error found there. So a
+//! damaged strip is shown, or refused, exactly as libtiff shows or refuses
+//! it.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -101,7 +101,6 @@ impl PixarLog {
         out: &mut [u8],
         width: u32,
         big_endian: bool,
-        max_bytes: usize,
     ) -> ImageResult<()> {
         let bad = ImageError::Corrupt("TIFF PixarLog data");
         let nsamples = if self.eight_bit {
@@ -115,7 +114,7 @@ impl PixarLog {
             .filter(|&b| u32::try_from(b).is_ok() && b <= self.tbuf_bytes)
             .ok_or(bad.clone())?;
         let mut codes = vec![0u8; bytes];
-        inflate(raw, &mut codes, max_bytes)?;
+        inflate(raw, &mut codes)?;
         // The codes, in the file's byte order, and one pixel of slack after
         // them, which the last row's stray sum lands in.
         let mut tbuf: Vec<u16> = codes
@@ -216,80 +215,17 @@ fn accumulate(w: &mut [u16], n: usize, stride: usize, mut put: impl FnMut(usize,
 }
 
 /// zlib's `inflate` of strip `raw` into `out` until `out` is full, as
-/// `PixarLogDecode` runs it.
-fn inflate(raw: &[u8], out: &mut [u8], max_bytes: usize) -> ImageResult<()> {
-    let bad = ImageError::Corrupt("TIFF PixarLog data");
-    // The header, as `inflate` checks it: FCHECK, the method, a window of
-    // at most 32 KiB (`inflateInit`'s), and no preset dictionary. Fewer
-    // than two bytes is no progress at all (`Z_BUF_ERROR`).
-    let Some((&[cmf, flg], body)) = raw.split_first_chunk::<2>() else {
-        return Err(bad);
-    };
-    if u16::from_be_bytes([cmf, flg]) % 31 != 0
-        || cmf & 0x0f != 8
-        || cmf >> 4 > 7
-        || flg & 0x20 != 0
-    {
-        return Err(bad);
-    }
-    // A block may run on past what the strip needs; zlib does not care how
-    // far, and the crate's cap is only there to bound its buffer.
-    let mut stream = deflate::inflate_stream(body, out.len().saturating_add(max_bytes));
-    let mut filled = 0usize;
-    while filled < out.len() {
-        let rest = out.get_mut(filled..).ok_or(bad.clone())?;
-        match stream.read(rest) {
-            // The stream ended with room left: "Not enough data" (its
-            // checksum, good or bad, changes nothing).
-            Ok(0) => {
-                return Err(ImageError::Corrupt(
-                    "TIFF PixarLog data ends before the strip",
-                ));
-            }
-            Ok(n) => filled = filled.saturating_add(n),
-            Err(_) => return Err(bad),
-        }
-    }
-    // Full. zlib reads on through what needs no room; where the last block
-    // ends just here, that is the checksum after it.
-    let mut probe = [0u8; 1];
-    match stream.read(&mut probe) {
-        Ok(0) => check_trailer(body, out, max_bytes),
-        Ok(_) | Err(deflate::Error::OutputTooLarge) => Ok(()),
-        Err(_) => Err(bad),
-    }
-}
-
-/// The Adler-32 zlib reads straight after the Deflate data, whose end is
-/// where `body` begins to decode completely: an error only if all four of
-/// its bytes are there and are not `out`'s checksum.
-fn check_trailer(body: &[u8], out: &[u8], max_bytes: usize) -> ImageResult<()> {
-    let want = deflate::adler32(out).to_be_bytes();
-    // Almost always the checksum ends the strip.
-    if body.ends_with(&want) {
-        return Ok(());
-    }
-    // Otherwise find where the Deflate data ends: the shortest prefix that
-    // decodes completely (the crate reads bit by bit, so needs no more).
-    let limit = out.len().saturating_add(max_bytes);
-    let decodes = |len: usize| {
-        body.get(..len)
-            .is_some_and(|prefix| deflate::inflate_limited(prefix, limit).is_ok())
-    };
-    let (mut lo, mut hi) = (0usize, body.len());
-    while lo < hi {
-        let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
-        if decodes(mid) {
-            hi = mid;
-        } else {
-            lo = mid.saturating_add(1);
-        }
-    }
-    match body.get(lo..lo.saturating_add(4)) {
-        Some(stored) if stored.len() == 4 && stored != want => {
-            Err(ImageError::Corrupt("TIFF PixarLog checksum"))
-        }
-        _ => Ok(()),
+/// `PixarLogDecode` runs it: done once the buffer is full or the stream ends
+/// exactly with it, "Not enough data" if it ends sooner, and zlib's error
+/// wherever it finds one.
+fn inflate(raw: &[u8], out: &mut [u8]) -> ImageResult<()> {
+    match deflate::zlib_inflate_into(raw, out) {
+        Ok(deflate::ZlibStop::Full) => Ok(()),
+        Ok(deflate::ZlibStop::Ended(n)) if n == out.len() => Ok(()),
+        Ok(deflate::ZlibStop::Ended(_)) => Err(ImageError::Corrupt(
+            "TIFF PixarLog data ends before the strip",
+        )),
+        Err(_) => Err(ImageError::Corrupt("TIFF PixarLog data")),
     }
 }
 
@@ -592,19 +528,19 @@ mod tests {
         let data: Vec<u8> = (0..300u32).map(|i| (i * 7 % 256) as u8).collect();
         let stream = zlib(&data);
         let mut out = vec![0u8; 300];
-        inflate(&stream, &mut out, 1 << 20).unwrap();
+        inflate(&stream, &mut out).unwrap();
         assert_eq!(out, data);
         // Junk after the checksum: zlib reads the checksum after the
         // Deflate data, not at the strip's end.
         let mut junk = stream.clone();
         junk.extend_from_slice(&[1, 2, 3, 4, 5]);
-        inflate(&junk, &mut out, 1 << 20).unwrap();
+        inflate(&junk, &mut out).unwrap();
         // The checksum cut short: zlib does not miss what is not there.
         let cut = &stream[..stream.len() - 2];
-        inflate(cut, &mut out, 1 << 20).unwrap();
+        inflate(cut, &mut out).unwrap();
         // A buffer smaller than the stream: full, and content.
         let mut half = vec![0u8; 150];
-        inflate(&stream, &mut half, 1 << 20).unwrap();
+        inflate(&stream, &mut half).unwrap();
         assert_eq!(half, data[..150]);
     }
 
@@ -616,17 +552,17 @@ mod tests {
         let mut wrong = stream.clone();
         let last = wrong.len() - 1;
         wrong[last] ^= 1;
-        assert!(inflate(&wrong, &mut out, 1 << 20).is_err());
+        assert!(inflate(&wrong, &mut out).is_err());
         // More wanted than the stream holds.
         let mut more = [0u8; 65];
-        assert!(inflate(&stream, &mut more, 1 << 20).is_err());
+        assert!(inflate(&stream, &mut more).is_err());
         // A window over 32 KiB, and a preset dictionary.
         let mut big = stream.clone();
         big[0] = 0x88;
         big[1] = 0x1c; // (0x88 << 8 | 0x1c) % 31 == 0
         assert_eq!((0x881cu16) % 31, 0);
-        assert!(inflate(&big, &mut out, 1 << 20).is_err());
-        assert!(inflate(&[0x78], &mut out, 1 << 20).is_err());
+        assert!(inflate(&big, &mut out).is_err());
+        assert!(inflate(&[0x78], &mut out).is_err());
     }
 
     #[test]
@@ -642,7 +578,7 @@ mod tests {
             tbuf_bytes: 64,
         };
         let mut out = [0u8; 4];
-        codec.decode(&stream, &mut out, 2, false, 1 << 20).unwrap();
+        codec.decode(&stream, &mut out, 2, false).unwrap();
         assert_eq!(out, [255, 0, 0, 0]);
     }
 }

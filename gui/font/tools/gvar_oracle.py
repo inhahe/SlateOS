@@ -51,13 +51,9 @@ import struct
 import sys
 
 from variable_survey import (
-    apply_segment_map,
-    f2dot14,
+    harfbuzz_instances,
     i16,
-    normalize_user,
-    read_avar_segments,
     read_fvar,
-    read_fvar_instances,
     tables,
     u16,
     u32,
@@ -702,9 +698,8 @@ def report(paths):
         hdr = read_gvar_header(data, tabs, len(axes), num_glyphs)
         if hdr is None:
             continue
-        segments = (read_avar_segments(data, tabs["avar"][0], len(axes))
-                    if "avar" in tabs else None)
-        instances = read_fvar_instances(data, *tabs["fvar"], len(axes))
+        # Normalized by HarfBuzz itself: see `harfbuzz_instances`.
+        instances = harfbuzz_instances(data)
         name = os.path.basename(path)
         gids = pick_glyphs(data, tabs, hdr, long_loca, num_glyphs)
 
@@ -717,13 +712,7 @@ def report(paths):
         # interior point, which is where `avar` and a tapering tuple both bite.
         picks = sorted({0, len(instances) // 2, len(instances) - 1}) if instances else []
         for ii in picks:
-            user = instances[ii][1]
-            coords = []
-            for i, axis in enumerate(axes):
-                c = f2dot14(normalize_user(axis, user[i]))
-                if segments is not None:
-                    c = apply_segment_map(segments[i], c)
-                coords.append(c)
+            user, coords = instances[ii]
             for gid in gids:
                 rec = outline_record(data, tabs, hdr, gid, coords, long_loca, num_glyphs)
                 if rec is not None:

@@ -86,13 +86,10 @@ import struct
 import sys
 
 from variable_survey import (
-    apply_segment_map,
-    f2dot14,
+    harfbuzz_instances,
+    hb_roundf,
     i16,
-    normalize_user,
-    read_avar_segments,
     read_fvar,
-    read_fvar_instances,
     tables,
     u16,
     u32,
@@ -385,12 +382,6 @@ def read_hvar(data, tabs, axis_count):
     return store, (read_index_map(data, off + rel) if rel else None)
 
 
-def hvar_advance_delta(store, index_map, gid, coords):
-    outer, inner = index_map.lookup(gid) if index_map else (0, gid)
-    d = store.delta(outer, inner, coords)
-    return 0.0 if d is None else d
-
-
 def read_mvar(data, tabs, axis_count):
     """(`Store`, {tag: (outer, inner)}) for a face's `MVAR`, or None."""
     if "MVAR" not in tabs:
@@ -448,39 +439,16 @@ def read_num_glyphs(data, tabs):
     return u16(data, off + 4) if off + 6 <= len(data) else None
 
 
-def read_hmtx_advance(data, tabs, gid, num_glyphs):
-    """The default-instance advance width of `gid`, in font units."""
-    if "hhea" not in tabs or "hmtx" not in tabs:
-        return None
-    hhea = tabs["hhea"][0]
-    if hhea + 36 > len(data):
-        return None
-    num_h = u16(data, hhea + 34)
-    if num_h == 0:
-        return None
-    hmtx = tabs["hmtx"][0]
-    # Past `numberOfHMetrics` the advance is the last one; only the side
-    # bearing continues per glyph.
-    at = hmtx + min(gid, num_h - 1) * 4
-    return u16(data, at) if at + 2 <= len(data) else None
-
-
 def instance_coords(data, tabs):
     """[(label, coords)] for the default and each named instance of a face."""
     parsed = read_fvar(data, *tabs["fvar"])
     if parsed is None:
         return None
     axes, _ = parsed
-    segments = read_avar_segments(data, tabs["avar"][0], len(axes)) if "avar" in tabs else None
     out = [("default", [0.0] * len(axes))]
-    for _name_id, user in read_fvar_instances(data, *tabs["fvar"], len(axes)):
-        coords = []
-        for i, axis in enumerate(axes):
-            c = f2dot14(normalize_user(axis, user[i]))
-            if segments is not None:
-                c = apply_segment_map(segments[i], c)
-            coords.append(c / 16384.0)
-        out.append((", ".join(f"{v:g}" for v in user), coords))
+    # Normalized by HarfBuzz itself: see `variable_survey.harfbuzz_instances`.
+    for user, coords in harfbuzz_instances(data):
+        out.append((", ".join(f"{v:g}" for v in user), [c / 16384.0 for c in coords]))
     return len(axes), out
 
 
@@ -549,23 +517,42 @@ def shape_report(paths):
     print(f"index-map entry byte widths: {dict(sorted(entry_sizes.items()))}")
 
 
+def harfbuzz_font(data):
+    """A uharfbuzz font over `data`, one unit per font unit."""
+    import uharfbuzz as hb
+
+    face = hb.Face(hb.Blob(data))
+    font = hb.Font(face)
+    font.scale = (face.upem, face.upem)
+    return font
+
+
 def hvar_report(paths, sample):
-    """Advance-width deltas for a sample of glyphs, per named instance."""
+    """Advance widths for a sample of glyphs, per named instance -- as
+    HarfBuzz itself gives them (`hb_font_get_glyph_h_advance`, one unit per
+    font unit).
+
+    The store reader above is not what answers here: the advance is HarfBuzz's
+    `advance + roundf(delta)`, summed in `float` and rounded half up, and this
+    tool's own reading of it -- in `f64`, rounded by Python's half-to-even --
+    agreed with the Rust's old half-away-from-zero on Bahnschrift's 986.5 only
+    by coincidence, where HarfBuzz says 987. The reader still checks the
+    store's *structure* (`--shape`); the numbers come from the library.
+    """
     for name, data, tabs, axis_count, instances in variable_faces(paths):
-        hvar = read_hvar(data, tabs, axis_count)
-        if hvar is None:
+        if read_hvar(data, tabs, axis_count) is None:
             continue
-        store, index_map = hvar
         num_glyphs = read_num_glyphs(data, tabs) or 0
         gids = [g for g in range(0, num_glyphs, max(1, num_glyphs // sample))][:sample]
+        font = harfbuzz_font(data)
         print(f'    ("{name}", &[')
-        for label, coords in instances:
-            deltas = []
-            for gid in gids:
-                base = read_hmtx_advance(data, tabs, gid, num_glyphs)
-                d = hvar_advance_delta(store, index_map, gid, coords)
-                deltas.append("null" if base is None else str(round(base + d)))
-            print(f'        &[{", ".join(deltas)}],  // {label}')
+        for n, (label, _coords) in enumerate(instances):
+            if n == 0:
+                font.set_variations({})
+            else:
+                font.var_named_instance = n - 1
+            advances = [str(font.get_glyph_h_advance(gid)) for gid in gids]
+            print(f'        &[{", ".join(advances)}],  // {label}')
         print(f'    ]),  // gids {gids}')
 
 
@@ -580,13 +567,21 @@ def mvar_report(paths):
         if not present:
             print(f"{name}: MVAR carries none of the metrics this stack reads")
             continue
+        # HarfBuzz's own correction (`hb_ot_metrics_get_variation`), rounded as
+        # it rounds one: half up.
+        import uharfbuzz as hb
+
+        font = harfbuzz_font(data)
         print(f'    ("{name}", &[  // {", ".join(present)}')
-        for label, coords in instances:
+        for n, (label, _coords) in enumerate(instances):
+            if n == 0:
+                font.set_variations({})
+            else:
+                font.var_named_instance = n - 1
             vals = []
             for t in present:
-                outer, inner = records[t]
-                d = store.delta(outer, inner, coords)
-                vals.append("0" if d is None else str(round(d)))
+                d = font.get_metric_variation(hb.OTMetricsTag(int.from_bytes(t.encode(), "big")))
+                vals.append(str(hb_roundf(d)))
             print(f'        &[{", ".join(vals)}],  // {label}')
         print("    ]),")
 
@@ -620,7 +615,10 @@ def gdef_report(paths, sample):
         chosen = pairs[::step][:sample]
         print(f'    ("{name}", &[  // rows {chosen}')
         for label, coords in instances:
-            vals = [str(round(store.delta(o, i, coords) or 0.0)) for o, i in chosen]
+            # This tool's own sum, in `f64`, rounded as HarfBuzz rounds (half
+            # up); within a hair of a half it can differ from HarfBuzz's
+            # `float` sum, which no host test takes these rows from.
+            vals = [str(hb_roundf(store.delta(o, i, coords) or 0.0)) for o, i in chosen]
             print(f'        &[{", ".join(vals)}],  // {label}')
         print("    ]),")
 

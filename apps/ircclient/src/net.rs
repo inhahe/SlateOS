@@ -242,7 +242,12 @@ pub(crate) mod fake {
     //! An IRC server on a loopback port, for the tests: it records every
     //! line it is sent, and sends whatever a test gives it.
 
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
 
     use std::io::{BufRead, BufReader, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
@@ -262,9 +267,25 @@ pub(crate) mod fake {
 
     impl Server {
         /// Close the connection from the server's side.
+        ///
+        /// Waits for the connection first: the client can see itself
+        /// connected before this server's thread has stored the socket it
+        /// accepted, and a hang-up that found no socket used to do nothing
+        /// -- so under load the client waited for an end that never came.
         pub fn hang_up(&self) {
-            if let Some(s) = self.socket.lock().unwrap().as_ref() {
-                let _ = s.shutdown(Shutdown::Both);
+            let give_up = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(s) = self.socket.lock().unwrap().as_ref() {
+                    // A connection the client already closed has nothing
+                    // left to hang up; that is not this test's failure.
+                    let _ = s.shutdown(Shutdown::Both);
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < give_up,
+                    "the client never connected"
+                );
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
 

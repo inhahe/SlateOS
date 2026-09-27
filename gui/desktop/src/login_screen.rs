@@ -50,6 +50,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::listview::ListKey;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -1015,6 +1016,20 @@ impl LoginScreen {
                 let last = self.users.len().saturating_sub(1);
                 self.selected_user = self.selected_user.saturating_add(1).min(last);
                 LoginAction::Redraw
+            }
+            // The page keys and the ends (`design-decisions.md` §1416). Every
+            // user is on the screen at once, so a page is the whole list.
+            Key::PageUp | Key::PageDown | Key::Home | Key::End => {
+                let len = self.users.len();
+                match ListKey::of(event)
+                    .and_then(|nav| nav.target(Some(self.selected_user), len, len))
+                {
+                    Some(row) => {
+                        self.selected_user = row;
+                        LoginAction::Redraw
+                    }
+                    None => LoginAction::Ignored,
+                }
             }
             Key::Enter | Key::Space => {
                 self.select_user(self.selected_user);
@@ -3269,6 +3284,23 @@ mod tests {
         assert_eq!(screen.selected_user, 1);
         screen.handle_key(&press(Key::Down));
         assert_eq!(screen.selected_user, 1, "down from the last row stays put");
+    }
+
+    /// Home and End, and the page keys, reach the first and last users.
+    #[test]
+    fn home_end_and_the_page_keys_reach_the_ends_of_the_user_list() {
+        let mut users = make_users();
+        users.push(LoginUser::new(Some(1002), "carol", "Carol"));
+        users.push(LoginUser::new(Some(1003), "dave", "Dave"));
+        let mut screen = LoginScreen::new(1920.0, 1080.0, users);
+        assert_eq!(screen.handle_key(&press(Key::End)), LoginAction::Redraw);
+        assert_eq!(screen.selected_user, 3);
+        screen.handle_key(&press(Key::Home));
+        assert_eq!(screen.selected_user, 0);
+        screen.handle_key(&press(Key::PageDown));
+        assert_eq!(screen.selected_user, 3, "the whole list is one page");
+        screen.handle_key(&press(Key::PageUp));
+        assert_eq!(screen.selected_user, 0);
     }
 
     #[test]

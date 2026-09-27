@@ -168962,6 +168962,28 @@ The card check sits above the find panel's branch, which returns before
 everything below it. This is the third app where that placement was the
 difference between a list and a modal with no exit.
 
+## `TD-C-THE-DESKTOP-CRATE-CARRIES-A-SECOND-LAUNCHER-NOTHING-USES` (lane C, 2026-09-27)
+
+**Status:** OPEN.
+
+**In short:** `gui/desktop/src/launcher.rs` holds `LauncherState`, a
+search-as-you-type program launcher with its own key handling, fuzzy ranking
+and drawing -- and nothing constructs it. The shell's start menu has its own
+search, and the standalone launcher program (`apps/launcher`, lane E) keeps a
+separate copy of the same state. Found while giving every list the Page and
+Home/End keys (§1416): this one was left out rather than taught keys it will
+never receive.
+
+**Where:** `gui/desktop/src/launcher.rs`, `LauncherState` and what only it
+uses. The same module's `builtin_app_database`, `FILE_MANAGER` and the other
+program constants *are* used, by the start menu and the hotkeys, and stay.
+
+**Proper fix:** delete `LauncherState` and its private helpers and tests, after
+checking with a grep and `scripts/check-tested-but-uncalled.py` that nothing outside
+the module names them; or, if the shell should have a launcher dialog after
+all, wire this one and delete lane E's copy -- a question for the operator, not
+a cleanup. Deleting is the default, since the start menu's search does the job.
+
 ## `TD-C-THIRTY-EIGHT-CARD-TESTS-ASK-A-WEAKER-QUESTION-THAN-THEY-READ` (lane C, 2026-09-22)
 
 **In short:** Thirty-eight apps have a test asserting that their keyboard-help

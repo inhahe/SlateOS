@@ -179,6 +179,7 @@ use guitk::color::Color;
 use guitk::event::{
     EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use guitk::listview::ListKey;
 use guitk::render::RenderTree;
 use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
@@ -6943,11 +6944,27 @@ impl DesktopShell {
                 HotkeyOutcome::consumed()
             }
             Key::Down => {
-                self.move_start_selection(true);
+                self.move_start_selection(ListKey::Next);
                 HotkeyOutcome::consumed()
             }
             Key::Up => {
-                self.move_start_selection(false);
+                self.move_start_selection(ListKey::Previous);
+                HotkeyOutcome::consumed()
+            }
+            // The page keys are the list's. Home and End are the search
+            // field's while it has text to move through, and the list's when
+            // it is empty or Ctrl is held -- the rule for every field over a
+            // list in the shell (`design-decisions.md` §1416).
+            Key::PageUp | Key::PageDown => {
+                if let Some(nav) = ListKey::of(key) {
+                    self.move_start_selection(nav);
+                }
+                HotkeyOutcome::consumed()
+            }
+            Key::Home | Key::End if key.modifiers.ctrl || self.start_query.text().is_empty() => {
+                if let Some(nav) = ListKey::of(key) {
+                    self.move_start_selection(nav);
+                }
                 HotkeyOutcome::consumed()
             }
             Key::Enter => self.start_menu_enter(),
@@ -7002,7 +7019,7 @@ impl DesktopShell {
 
     /// Move the keyboard's row one step, keeping it on screen. From no row,
     /// Down goes to the first and Up to the last.
-    fn move_start_selection(&mut self, down: bool) {
+    fn move_start_selection(&mut self, nav: ListKey) {
         // Which rows are headings, read out of the rows -- which borrow the
         // shell -- before the selection moves.
         let headings: Vec<bool> = self
@@ -7010,30 +7027,18 @@ impl DesktopShell {
             .iter()
             .map(|row| matches!(row, StartRow::Section(_)))
             .collect();
-        // Headings are passed over: there is nothing on one to start.
-        let selectable: Vec<usize> = headings
-            .iter()
-            .enumerate()
-            .filter(|(_, heading)| !**heading)
-            .map(|(index, _)| index)
-            .collect();
-        let (Some(&first), Some(&last)) = (selectable.first(), selectable.last()) else {
-            return;
+        // Up from nothing picked enters the list from the bottom, as it always
+        // has; every other key from nothing starts at the top.
+        let nav = match (nav, self.start_selected) {
+            (ListKey::Previous, None) => ListKey::Last,
+            (nav, _) => nav,
         };
-        let next = match (self.start_selected, down) {
-            (None, true) => first,
-            (None, false) => last,
-            (Some(row), true) => selectable
-                .iter()
-                .copied()
-                .find(|&at| at > row)
-                .unwrap_or(last),
-            (Some(row), false) => selectable
-                .iter()
-                .rev()
-                .copied()
-                .find(|&at| at < row)
-                .unwrap_or(first),
+        let page = self.start_menu_visible_rows().max(1);
+        // Headings are passed over: there is nothing on one to start.
+        let Some(next) = nav.target_where(self.start_selected, headings.len(), page, |row| {
+            !headings.get(row).copied().unwrap_or(true)
+        }) else {
+            return;
         };
         self.start_selected = Some(next);
         // Keep it on screen -- and, at the top of a section, its heading too,
@@ -7150,6 +7155,8 @@ impl DesktopShell {
             Key::Down => overview::OverviewKey::ArrowDown,
             Key::Left => overview::OverviewKey::ArrowLeft,
             Key::Right => overview::OverviewKey::ArrowRight,
+            Key::Home | Key::PageUp => overview::OverviewKey::First,
+            Key::End | Key::PageDown => overview::OverviewKey::Last,
             _ => return HotkeyOutcome::consumed(),
         };
         // Only ever `NavigateSelection` for an arrow -- the overview has moved
@@ -7182,6 +7189,8 @@ impl DesktopShell {
             Key::Right => Some(K::ArrowRight),
             Key::Backspace => Some(K::Backspace),
             Key::Tab => Some(K::Tab),
+            Key::Home | Key::PageUp => Some(K::First),
+            Key::End | Key::PageDown => Some(K::Last),
             _ => None,
         };
         if named.is_some() {
@@ -11156,6 +11165,7 @@ impl DesktopShell {
             // answer to it where `as u8` would offer a handful.
             desktops: u8::try_from(self.num_desktops).unwrap_or(u8::MAX),
             picker_rows: shortcut_editor::picker_rows(self.shortcut_card_budget()),
+            list_rows: hotkeys::rows_per_column(&self.hotkeys, self.shortcut_card_budget()),
         }
     }
 
@@ -12369,6 +12379,10 @@ impl DesktopShell {
             Key::Down => icons::DesktopKey::Arrow(icons::Direction::Down),
             Key::Left => icons::DesktopKey::Arrow(icons::Direction::Left),
             Key::Right => icons::DesktopKey::Arrow(icons::Direction::Right),
+            Key::Home | Key::End | Key::PageUp | Key::PageDown => match ListKey::of(key) {
+                Some(nav) => icons::DesktopKey::Nav(nav),
+                None => return ShellAction::Pass,
+            },
             _ => return ShellAction::Pass,
         };
         let before = self.icons.selected_ids();
@@ -15230,6 +15244,37 @@ mod window_manager_tests {
         assert_eq!(
             shell.handle_hotkey(&release(Key::LeftAlt)).requests,
             activate(ids[1])
+        );
+    }
+
+    /// Home and End during a switch in the overview light the first and last
+    /// cards -- the window being left and the one used longest ago -- and
+    /// letting go picks what is lit.
+    #[test]
+    fn home_and_end_choose_within_a_switch_in_the_overview() {
+        let mut shell = shell();
+        overview_on_alt_tab(&mut shell);
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Tab, Modifiers::alt()))
+                .consumed
+        );
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::End, Modifiers::alt()))
+                .consumed
+        );
+        assert_eq!(shell.overview.hovered_window, Some(ids[0].0));
+        assert!(
+            shell
+                .handle_hotkey(&press(Key::Home, Modifiers::alt()))
+                .consumed
+        );
+        assert_eq!(shell.overview.hovered_window, Some(ids[2].0));
+        assert_eq!(
+            shell.handle_hotkey(&release(Key::LeftAlt)).requests,
+            activate(ids[2])
         );
     }
 
@@ -23512,6 +23557,29 @@ mod desktop_key_tests {
         assert!(selected(&shell).is_empty());
     }
 
+    /// **Home and End reach the first and last icons** (§1416), and say so,
+    /// so the frame is redrawn; pressed again where they already are, they
+    /// change nothing and pass.
+    #[test]
+    fn home_and_end_reach_the_first_and_last_icons() {
+        let mut shell = shell_with_three();
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::End)),
+            ShellAction::Consumed
+        );
+        assert_eq!(selected(&shell), ["c"]);
+        assert_eq!(
+            shell.handle_desktop_key(&press_with(Key::Home, Modifiers::ctrl())),
+            ShellAction::Consumed
+        );
+        assert_eq!(selected(&shell), ["a"]);
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Home)),
+            ShellAction::Pass,
+            "already on the first icon"
+        );
+    }
+
     /// **The arrow keys walk the icons.**
     #[test]
     fn the_arrow_keys_walk_the_icons() {
@@ -25486,7 +25554,7 @@ mod start_search_tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{DesktopShell, Key, KeyEvent, Modifiers};
+    use super::{DesktopShell, Key, KeyEvent, Modifiers, StartRow};
 
     fn shell() -> DesktopShell {
         let mut shell = DesktopShell::new(1920, 1080);
@@ -26441,6 +26509,75 @@ mod start_search_tests {
         drop(shell.handle_hotkey(&key));
         assert!(!shell.start_menu_open);
         assert!(shell.start_query.text().is_empty());
+    }
+
+    /// The rows that can be chosen, in order: every row but the headings.
+    fn choosable_rows(shell: &DesktopShell) -> Vec<usize> {
+        shell
+            .start_menu_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| !matches!(row, StartRow::Section(_)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// With the search empty, Home and End reach the first and last programs
+    /// -- past the headings -- and the page keys move a windowful, keeping
+    /// the row on screen (`design-decisions.md` §1416).
+    #[test]
+    fn home_end_and_the_page_keys_walk_the_programs() {
+        let mut shell = shell();
+        let rows = choosable_rows(&shell);
+        let (first, last) = (rows[0], *rows.last().unwrap());
+        drop(shell.handle_hotkey(&press(Key::End)));
+        assert_eq!(shell.start_selected, Some(last));
+        drop(shell.handle_hotkey(&press(Key::Home)));
+        assert_eq!(shell.start_selected, Some(first));
+        drop(shell.handle_hotkey(&press(Key::PageDown)));
+        let paged = shell.start_selected.expect("Page Down picked a row");
+        assert!(paged > first, "Page Down did not move");
+        let visible = shell.start_menu_visible_rows();
+        assert!(
+            (shell.start_menu_scroll..shell.start_menu_scroll + visible).contains(&paged),
+            "the row Page Down reached is off the list"
+        );
+        drop(shell.handle_hotkey(&press(Key::PageUp)));
+        assert_eq!(shell.start_selected, Some(first));
+    }
+
+    /// With something typed, Home and End move the caret and leave the list
+    /// alone; with Ctrl they are the list's again.
+    #[test]
+    fn home_and_end_are_the_search_fields_once_it_has_text() {
+        let mut shell = shell();
+        drop(shell.handle_hotkey(&KeyEvent {
+            key: Key::E,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: "e".to_string(),
+        }));
+        assert!(!shell.start_query.text().is_empty(), "precondition: typed");
+        let before = shell.start_selected;
+        drop(shell.handle_hotkey(&press(Key::Home)));
+        assert_eq!(shell.start_selected, before, "Home moved the list");
+        assert_eq!(
+            shell.start_query.cursor().byte(),
+            0,
+            "Home did not move the caret"
+        );
+        let rows = choosable_rows(&shell);
+        let ctrl_end = KeyEvent {
+            key: Key::End,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        };
+        drop(shell.handle_hotkey(&ctrl_end));
+        assert_eq!(shell.start_selected, rows.last().copied());
     }
 
     /// Super+E with the menu up -- which is how it arrives, since the Super key

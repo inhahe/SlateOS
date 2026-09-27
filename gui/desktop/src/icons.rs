@@ -2066,6 +2066,10 @@ impl DesktopIconLayer {
                 self.select_toward(direction);
                 IconEvent::None
             }
+            DesktopKey::Nav(nav) => {
+                self.select_along(nav);
+                IconEvent::None
+            }
             // Select-all without Ctrl is the letter A, which the desktop does
             // nothing with.
             DesktopKey::SelectAll => IconEvent::None,
@@ -2131,6 +2135,51 @@ impl DesktopIconLayer {
             self.select_single(id);
             true
         })
+    }
+
+    /// Home and End, and the page keys, on the desktop
+    /// (`design-decisions.md` §1416): the first or last icon in reading order
+    /// -- down each column, then the next -- or the top or bottom of the
+    /// column the selection is in. The desktop does not scroll, so a column
+    /// is its page. From nothing selected, each starts where an arrow does, at
+    /// the first icon -- except End, which is the last. Answers whether the
+    /// selection moved.
+    pub fn select_along(&mut self, nav: guitk::listview::ListKey) -> bool {
+        use guitk::listview::ListKey;
+        let grid = self.grid;
+        let reading = |icon: &DesktopIcon| grid.desktop_cell(icon.x, icon.y);
+        let from = self
+            .icons
+            .iter()
+            .filter(|icon| icon.selected)
+            .map(&reading)
+            .min();
+        let in_column = |col: i32| move |icon: &&DesktopIcon| reading(icon).0 == col;
+        let target = match (nav, from) {
+            (ListKey::Last, _) => self.icons.iter().max_by_key(|icon| reading(icon)),
+            (ListKey::PageUp, Some((col, _))) => self
+                .icons
+                .iter()
+                .filter(in_column(col))
+                .min_by_key(|icon| reading(icon)),
+            (ListKey::PageDown, Some((col, _))) => self
+                .icons
+                .iter()
+                .filter(in_column(col))
+                .max_by_key(|icon| reading(icon)),
+            // The arrows are `select_toward`'s; they never come here.
+            (ListKey::Previous | ListKey::Next, _) => None,
+            (ListKey::First | ListKey::PageUp | ListKey::PageDown, _) => {
+                self.icons.iter().min_by_key(|icon| reading(icon))
+            }
+        }
+        .map(|icon| icon.id);
+        let Some(id) = target else {
+            return false;
+        };
+        let before = self.selected_ids();
+        self.select_single(id);
+        self.selected_ids() != before
     }
 
     /// The pixel centre of an icon's cell-sized footprint.
@@ -2792,6 +2841,10 @@ pub enum DesktopKey {
     Escape,
     /// An arrow key: move the selection to the nearest icon that way.
     Arrow(Direction),
+    /// Home, End, Page Up or Page Down: see
+    /// [`DesktopIconLayer::select_along`]. The arrows arrive as
+    /// [`Arrow`](Self::Arrow), never as this.
+    Nav(guitk::listview::ListKey),
 }
 
 /// A way to move across the desktop, for the arrow keys.
@@ -5039,6 +5092,27 @@ mod tests {
             selected_names(&layer),
             ["1,1"],
             "the row is empty, so the diagonal"
+        );
+    }
+
+    /// Home and End select the first and last icons in reading order --
+    /// down each column, then the next -- and the page keys the top and
+    /// bottom of the selection's column (§1416).
+    #[test]
+    fn home_end_and_the_page_keys_move_along_the_desktop() {
+        use guitk::listview::ListKey;
+        let mut layer = icons_at(&[(0, 0), (0, 1), (0, 2), (1, 0), (1, 3)]);
+        assert!(layer.select_along(ListKey::Last));
+        assert_eq!(selected_names(&layer), ["1,3"]);
+        assert!(layer.select_along(ListKey::PageUp));
+        assert_eq!(selected_names(&layer), ["1,0"], "the top of column 1");
+        assert!(layer.select_along(ListKey::First));
+        assert_eq!(selected_names(&layer), ["0,0"]);
+        assert!(layer.select_along(ListKey::PageDown));
+        assert_eq!(selected_names(&layer), ["0,2"], "the bottom of column 0");
+        assert!(
+            !layer.select_along(ListKey::PageDown),
+            "already at the bottom: nothing moved"
         );
     }
 

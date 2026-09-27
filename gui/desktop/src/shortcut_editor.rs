@@ -59,7 +59,7 @@
 
 use appearance::Palette;
 use guitk::event::{Key, KeyEvent};
-use guitk::listview::ListViewport;
+use guitk::listview::{ListKey, ListViewport};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::textedit::{self, SingleLine};
@@ -166,6 +166,8 @@ pub struct Context {
     /// How many rows of the action list fit on screen; from [`picker_rows`],
     /// given the same height the card is drawn in.
     pub picker_rows: usize,
+    /// How many rows each column of the card's own list holds: its page.
+    pub list_rows: usize,
 }
 
 /// The card's editor state.
@@ -297,6 +299,20 @@ impl ShortcutEditor {
                 self.message = None;
                 Outcome::Handled
             }
+            // A column at a time, or the ends (`design-decisions.md` §1416).
+            // A chord these do not read -- Ctrl+Page Down -- is not the
+            // card's, so a shortcut on it still works with the card up.
+            Key::PageUp | Key::PageDown | Key::Home | Key::End => match ListKey::of(key) {
+                Some(nav) => {
+                    if let Some(row) = nav.target(Some(self.selected), registry.len(), cx.list_rows)
+                    {
+                        self.selected = row;
+                    }
+                    self.message = None;
+                    Outcome::Handled
+                }
+                None => Outcome::NotMine,
+            },
             Key::Enter => {
                 if let Some(keys) = row_keys {
                     self.mode = Mode::Rechord { keys };
@@ -563,6 +579,14 @@ impl ShortcutEditor {
             Key::Down => view.select_next(len),
             Key::PageUp => view.page_up(len),
             Key::PageDown => view.page_down(len),
+            // Home and End are the search field's while it has text to move
+            // through, and the list's when it is empty or Ctrl is held -- the
+            // rule for every field over a list in the shell (§1416).
+            Key::Home | Key::End if key.modifiers.ctrl || query.text().is_empty() => {
+                if let Some(nav) = ListKey::of(key) {
+                    view.go(nav, len);
+                }
+            }
             Key::Enter => {
                 let picked = view.selected().and_then(|i| shown.get(i)).cloned();
                 return match picked {
@@ -1014,7 +1038,85 @@ mod tests {
     const CX: Context = Context {
         desktops: 4,
         picker_rows: 8,
+        list_rows: 4,
     };
+
+    /// The card's list pages a column at a time and reaches its ends with Home
+    /// and End, Ctrl or not (§1416); Ctrl+Page Down is not the card's.
+    #[test]
+    fn the_cards_list_pages_by_a_column_and_reaches_its_ends() {
+        let bindings: Vec<(Hotkey, HotkeyAction)> = [
+            Key::F1,
+            Key::F2,
+            Key::F3,
+            Key::F4,
+            Key::F5,
+            Key::F6,
+            Key::F7,
+            Key::F8,
+            Key::F9,
+            Key::F10,
+        ]
+        .into_iter()
+        .map(|k| (hk(k, true, true, false, false), HotkeyAction::ShowDesktop))
+        .collect();
+        let mut reg = registry(&[]);
+        for (h, a) in bindings {
+            // Several chords on one action is allowed; the list is by chord.
+            reg.register(h, a).unwrap();
+        }
+        let mut ed = ShortcutEditor::new();
+        assert_eq!(
+            ed.handle_key(&press(Key::PageDown), &mut reg, CX),
+            Outcome::Handled
+        );
+        assert_eq!(ed.selected, 4, "one column of four down");
+        ed.handle_key(&press(Key::End), &mut reg, CX);
+        assert_eq!(ed.selected, 9);
+        ed.handle_key(&press(Key::PageUp), &mut reg, CX);
+        assert_eq!(ed.selected, 5);
+        let ctrl_home = chord(Key::Home, true, false, false, false);
+        ed.handle_key(&ctrl_home, &mut reg, CX);
+        assert_eq!(ed.selected, 0);
+        let ctrl_page_down = chord(Key::PageDown, true, false, false, false);
+        assert_eq!(
+            ed.handle_key(&ctrl_page_down, &mut reg, CX),
+            Outcome::NotMine,
+            "Ctrl+Page Down was taken from the desktop"
+        );
+        assert_eq!(ed.selected, 0);
+    }
+
+    /// In the action picker, Home and End are the list's while the search is
+    /// empty, the search field's once it has text, and the list's again with
+    /// Ctrl held.
+    #[test]
+    fn home_and_end_in_the_picker_follow_the_field_over_a_list_rule() {
+        let mut reg = registry(&[]);
+        let mut ed = ShortcutEditor::new();
+        ed.handle_key(&press(Key::Insert), &mut reg, CX);
+        let selected = |ed: &ShortcutEditor| match ed.mode() {
+            Mode::Pick { view, .. } => view.selected(),
+            other => panic!("not picking: {other:?}"),
+        };
+        let caret = |ed: &ShortcutEditor| match ed.mode() {
+            Mode::Pick { query, .. } => query.cursor().byte(),
+            other => panic!("not picking: {other:?}"),
+        };
+        ed.handle_key(&press(Key::End), &mut reg, CX);
+        let last = selected(&ed).expect("End picked a row");
+        assert!(last > 0, "End stayed on the first row");
+        ed.handle_key(&press(Key::Home), &mut reg, CX);
+        assert_eq!(selected(&ed), Some(0));
+
+        feed(&mut ed, &mut reg, &typed("win"));
+        let before = selected(&ed);
+        ed.handle_key(&press(Key::Home), &mut reg, CX);
+        assert_eq!(caret(&ed), 0, "Home did not move the caret");
+        assert_eq!(selected(&ed), before, "Home moved the list, not the caret");
+        ed.handle_key(&chord(Key::End, true, false, false, false), &mut reg, CX);
+        assert_ne!(selected(&ed), before, "Ctrl+End did not move the list");
+    }
 
     fn press(k: Key) -> KeyEvent {
         KeyEvent {

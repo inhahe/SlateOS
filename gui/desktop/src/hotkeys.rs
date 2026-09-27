@@ -1895,6 +1895,14 @@ pub fn settings_panel_size(registry: &HotkeyRegistry, max_height: f32) -> (f32, 
     (layout.width, layout.height)
 }
 
+/// How many rows each of the card's columns holds at `max_height` -- the page
+/// its list moves by under Page Up and Page Down. Every row is on the screen,
+/// folded into columns, so a page is a column.
+#[must_use]
+pub(crate) fn rows_per_column(registry: &HotkeyRegistry, max_height: f32) -> usize {
+    panel_layout(registry, max_height).rows_per_column
+}
+
 /// The card's shadow, background and edge.
 ///
 /// One function for every card the shortcut card shows -- the list of bindings

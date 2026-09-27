@@ -82335,6 +82335,7 @@ opened becomes a choice of what Alt+Tab shows.
 | Screenshots | Print Screen: the whole screen; Alt+Print Screen: the current window (both to the clipboard, as on Windows); Ctrl+Print Screen and Ctrl+Alt+Print Screen: the same two, asking where to save them as a file | **on** |
 | Dedicated keys | volume up, down, mute; brightness up, down where the hardware sends a key | **on** -- they are keys of their own, usually in the top row or behind Fn, where nobody presses one by accident |
 | Inside programs | Ctrl+C copy, Ctrl+X cut, Ctrl+V paste, Ctrl+Z undo, Ctrl+Shift+Z redo, Ctrl+F4 close the current tab or document | **on** -- each program's own, never a desktop-wide grab, since they mean something different in each program |
+| Inside programs, moving (the operator's addition, later the same day) | Page Up, Page Down, Home, End, Ctrl+Home, Ctrl+End, "for relevant apps" | **on** -- wherever there is a list, a text or a view to move through; each program's own, like the row above |
 | Available, off by default | snap left and right, maximise, minimise, show desktop, the zone overlay, next and previous desktop, notifications, task manager, settings, lock, the shortcut card, the keyboard-layout switch (Super+Space), the file explorer (Super+E), a region screenshot (Super+Shift+S), and a new one: put the monitor to sleep | off, one binding away in the shortcut settings |
 | Gone | Super+Tab | what it opens (the overview) becomes a setting: whether Alt+Tab shows the switcher or the overview |
 
@@ -82355,6 +82356,26 @@ for the current window, like on Windows?" -- but Windows has it the other way
 round (Print Screen the screen, Alt+Print Screen the focused window). The
 defaults follow Windows, as the "like on Windows" asked, which is also what
 frees Ctrl+ for the save-to-file pair.
+
+**The moving keys, as built (2026-09-27, lane C):** the toolkit reads them
+one way (`guitk::listview::ListKey`): in a list, Home and End with or without
+Ctrl are its ends -- a list has no line for plain Home to start -- and Page Up
+and Page Down move a windowful; Ctrl+Page Up/Down are left alone, since they
+change tab in a program with tabs. Menus and the menu bar, the path bar's
+completions, the text views (plain Home/End as well as Ctrl), the start menu,
+the overview, the notification pane, the shortcut card and its action picker,
+the login screen's users, the Run box and the desktop's icons all answer them;
+the text area, grid, tree and file list already did. Judgment calls, easy to
+change:
+- **A text field over a list** (the start menu's search, the card's picker, the
+  Run box, the path bar): Home and End are the text's while it has text to move
+  through, and the list's when it is empty or Ctrl is held; the page keys are
+  the list's.
+- **A list that is not drawn** (the Run box's history): Page Up goes to its
+  oldest entry and Page Down back to what was typed.
+- **A surface that does not scroll** (the desktop's icons, the overview, the
+  login screen): a page is what is on the screen -- the icons' column, all the
+  cards, all the users.
 
 **As built, 2026-09-27 (lane C):**
 - `hotkeys::register_defaults` holds the operator's set and nothing else --

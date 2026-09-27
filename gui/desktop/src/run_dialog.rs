@@ -633,6 +633,19 @@ impl RunDialog {
                     .move_cursor_right(shift, INPUT_FONT_SIZE, FontWeightHint::Regular);
             }
 
+            // The page keys are the list's: the suggestions while they show,
+            // else the history. Ctrl+Home and Ctrl+End are the suggestions'
+            // while they show; plain Home and End, the text's -- the rule for
+            // every field over a list in the shell (`design-decisions.md`
+            // §1416).
+            Key::PageUp | Key::PageDown if !ctrl => {
+                self.page_list(event.key == Key::PageDown);
+            }
+
+            Key::Home | Key::End if ctrl && self.browsing_suggestions() => {
+                self.page_list(event.key == Key::End);
+            }
+
             Key::Home => {
                 self.input.move_home(shift);
             }
@@ -1178,7 +1191,7 @@ impl RunDialog {
         }
         self.history_index = target;
         self.fill_exact(&entry);
-        self.update_suggestions();
+        self.hide_suggestions();
     }
 
     /// Step one entry towards the *newer* end, leaving browse mode and
@@ -1209,7 +1222,63 @@ impl RunDialog {
                 }
             }
         }
-        self.update_suggestions();
+        if self.history_index.is_some() {
+            self.hide_suggestions();
+        } else {
+            self.update_suggestions();
+        }
+    }
+
+    /// Page Up or Page Down: to the end of whichever list the arrows steer.
+    ///
+    /// The suggestions all fit on the screen (there are at most
+    /// `MAX_AUTOCOMPLETE`), so a page of them is all of them. The history is
+    /// not drawn at all, so a page of it is its end: Page Up the oldest entry,
+    /// Page Down back past the newest to what was typed before browsing --
+    /// where the arrows would take it one step at a time.
+    fn page_list(&mut self, down: bool) {
+        if self.browsing_suggestions() {
+            let last = self.suggestions.len().saturating_sub(1);
+            self.suggestion_index = Some(if down { last } else { 0 });
+        } else if down {
+            // Bounded by the history's length: each step moves one entry
+            // newer, and the last leaves browsing.
+            for _ in 0..=self.history.len() {
+                if self.history_index.is_none() {
+                    break;
+                }
+                self.history_next();
+            }
+        } else {
+            self.history_oldest();
+        }
+    }
+
+    /// Go straight to the oldest history entry, entering browse mode as
+    /// [`history_prev`](Self::history_prev) does.
+    fn history_oldest(&mut self) {
+        let Some(entry) = self.history.first().cloned() else {
+            return;
+        };
+        if self.history_index.is_none() {
+            self.pre_history_text = self.input.text().to_string();
+        }
+        self.history_index = Some(0);
+        self.fill_exact(&entry);
+        self.hide_suggestions();
+    }
+
+    /// Put the suggestions away while the history is being browsed.
+    ///
+    /// A recalled entry matches itself, so refreshing the suggestions for it
+    /// opened the popup with its first row picked -- and from then on the
+    /// arrows steered the popup, not the history: Up recalled one entry and
+    /// then stopped. The popup comes back when the user types, or steps past
+    /// the newest entry to their own text again.
+    fn hide_suggestions(&mut self) {
+        self.suggestions.clear();
+        self.show_autocomplete = false;
+        self.suggestion_index = None;
     }
 
     /// Whether the arrow keys are steering the autocomplete popup rather than
@@ -1574,6 +1643,60 @@ mod tests {
         // Past the end returns to original.
         dialog.history_next();
         assert_eq!(dialog.input.text(), "");
+    }
+
+    /// Up recalls one entry after another through the keys, and Down steps
+    /// back. Through the keys is the point: the methods alone always worked,
+    /// but a recalled entry opened the suggestions popup, which then took the
+    /// arrows, so Up recalled the newest entry and nothing further.
+    #[test]
+    fn the_arrows_walk_the_whole_history_through_the_keys() {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.add_to_history(OsStr::new("ls"));
+        dialog.add_to_history(OsStr::new("pwd"));
+        dialog.add_to_history(OsStr::new("cat file.txt"));
+        let key = |k| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        dialog.handle_key_event(&key(Key::Up));
+        assert_eq!(dialog.input.text(), "cat file.txt");
+        dialog.handle_key_event(&key(Key::Up));
+        assert_eq!(
+            dialog.input.text(),
+            "pwd",
+            "the second Up went to the popup"
+        );
+        dialog.handle_key_event(&key(Key::Up));
+        assert_eq!(dialog.input.text(), "ls");
+        dialog.handle_key_event(&key(Key::Down));
+        assert_eq!(dialog.input.text(), "pwd");
+    }
+
+    /// Page Up goes to the oldest entry, and Page Down back past the newest
+    /// to what was typed -- the ends of the history the arrows step through.
+    #[test]
+    fn the_page_keys_go_to_the_ends_of_the_history() {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.add_to_history(OsStr::new("ls"));
+        dialog.add_to_history(OsStr::new("pwd"));
+        dialog.add_to_history(OsStr::new("cat file.txt"));
+        dialog.input.set_text("draft");
+        let key = |k| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        dialog.handle_key_event(&key(Key::PageUp));
+        assert_eq!(dialog.input.text(), "ls", "not the oldest entry");
+        dialog.handle_key_event(&key(Key::PageDown));
+        assert_eq!(dialog.input.text(), "draft", "not back to what was typed");
+        assert!(dialog.history_index.is_none());
     }
 
     #[test]

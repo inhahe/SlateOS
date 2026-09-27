@@ -1868,6 +1868,14 @@ live.
   opens (a Keyboard Shortcuts place). Waiting on others: Alt+Print Screen's
   scancode (lane A), `--save` in the screenshot tool (lane E).
 
+- `[C]` **Page Up, Page Down, Home, End, Ctrl+Home and Ctrl+End wherever
+  there is something to move through** -- done 2026-09-27 (§1416, the
+  operator's addition). One reading of them in the toolkit
+  (`guitk::listview::ListKey`, `ListViewport::go`), used by the menus, the menu
+  bar, the path bar, the text views and every list of the shell's; programs
+  that use the toolkit's widgets have them, and lane E is asked to make its
+  hand-rolled lists read the same keys.
+
 - `[C]` **Alt+Tab can show the overview instead of the switcher** -- done
   2026-09-27 (§1416, §1419). "Cycle Windows in the Overview" is a second
   window-switching action; binding Alt+Tab to it on the shortcut card makes

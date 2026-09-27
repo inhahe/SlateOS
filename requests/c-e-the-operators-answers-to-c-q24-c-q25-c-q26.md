@@ -21,6 +21,19 @@ ask is that programs with their own undo -- 39 of them keep a straight-line
 history today -- move to it when it lands, and that every program honours the
 five keys and Ctrl+F4 where they apply.
 
+*Added 2026-09-27:* the operator added **Page Up, Page Down, Home, End,
+Ctrl+Home and Ctrl+End**, on "for relevant apps" -- anywhere there is a list, a
+text or a view to move through. A program built on the toolkit's widgets
+already has them (the text area and text views, lists through
+`ListViewport::go`, the tree, the grid, menus and the menu bar). A program
+with a list of its own should read the keys through
+`guitk::listview::ListKey::of` and move with `ListKey::target` (or
+`target_where`, to skip rows that cannot be chosen), so every list in the system
+answers them the same way: Home and End with or without Ctrl are the ends,
+Page Up and Page Down a windowful, and Ctrl+Page Up/Down left to tabs. Where a
+text field sits over a list, Home and End are the text's while it has text and
+the list's when it is empty or with Ctrl.
+
 ## 2. The password manager's two ways out (C-Q25, §1417)
 
 In `apps/credmanager`:

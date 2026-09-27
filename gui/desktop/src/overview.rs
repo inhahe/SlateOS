@@ -1152,7 +1152,9 @@ pub fn on_key(state: &mut OverviewState, key: OverviewKey) -> OverviewAction {
         OverviewKey::ArrowUp
         | OverviewKey::ArrowDown
         | OverviewKey::ArrowLeft
-        | OverviewKey::ArrowRight => {
+        | OverviewKey::ArrowRight
+        | OverviewKey::First
+        | OverviewKey::Last => {
             navigate_selection(state, key);
             OverviewAction::NavigateSelection
         }
@@ -1317,6 +1319,11 @@ pub enum OverviewKey {
     Text(String),
     Backspace,
     Tab,
+    /// Home, and Page Up: the first card. The cards all fit on the screen, so
+    /// a page of them is all of them (`design-decisions.md` §1416).
+    First,
+    /// End, and Page Down: the last card.
+    Last,
 }
 
 /// Arrow-key navigation over the cards as they are drawn.
@@ -1338,6 +1345,8 @@ fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
     // Clamped, matching the scroll gesture above: arrowing off the edge of
     // the grid holds still rather than teleporting to the opposite edge.
     let new_idx = match (current_idx, key) {
+        (_, OverviewKey::First) => Some(0),
+        (_, OverviewKey::Last) => all.len().checked_sub(1),
         (None, _) => Some(0),
         (Some(i), OverviewKey::ArrowRight | OverviewKey::ArrowDown) => {
             Some(step::clamped_after(all.len(), i))
@@ -1473,6 +1482,22 @@ mod tests {
 
     fn default_config() -> OverviewConfig {
         OverviewConfig::default()
+    }
+
+    /// Home and End light the first and last cards drawn, from anywhere and
+    /// from nothing lit.
+    #[test]
+    fn first_and_last_light_the_ends_of_what_is_drawn() {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllWindows);
+        on_key(&mut s, OverviewKey::Last);
+        assert_eq!(s.hovered_window, Some(2), "the last card on this desktop");
+        on_key(&mut s, OverviewKey::First);
+        assert_eq!(s.hovered_window, Some(1));
+        s.show(OverviewMode::AllDesktops);
+        on_key(&mut s, OverviewKey::Last);
+        assert_eq!(s.hovered_window, Some(3), "the last card of the last lane");
     }
 
     // -- The order a window switch asks for ----------------------------------

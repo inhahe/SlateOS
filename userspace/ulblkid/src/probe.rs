@@ -1094,7 +1094,11 @@ impl Probe {
             }
             if let Some(buf) = buf {
                 let at = usize::try_from(mag.sboff & 0x3ff).unwrap_or(0);
-                if buf.get(at..at.saturating_add(mag.magic.len())) == Some(mag.magic) {
+                // A magic that straddles the KiB's end is compared with what
+                // follows it in the cached buffer, as upstream's `memcmp`
+                // reads on through its pointer.
+                let window = buf.through_end();
+                if window.get(at..at.saturating_add(mag.magic.len())) == Some(mag.magic) {
                     return (
                         PROBE_OK,
                         off.wrapping_add(u64::from(mag.sboff & 0x3ff)),

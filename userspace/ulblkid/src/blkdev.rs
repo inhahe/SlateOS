@@ -8,7 +8,8 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
-/// `ENOTTY`.
+/// `ENOTTY`: what a host without the calls answers.
+#[cfg(not(unix))]
 pub const ENOTTY: i32 = 25;
 
 /// `BLKGETSIZE64`: `_IOR(0x12, 114, size_t)`.

@@ -83,10 +83,28 @@ impl Table {
         }
     }
 
+    /// `scols_wrapnl_chunksize`: the width of the widest newline-separated
+    /// piece.
+    fn wrapnl_chunksize(&self, data: &[u8]) -> usize {
+        mbs::c_str(data)
+            .split(|&b| b == b'\n')
+            .map(|piece| self.text_width(piece))
+            .max()
+            .unwrap_or(0)
+    }
+
     /// `count_cell_width`.
     fn count_cell_width(&mut self, ln: LineId, cl: usize, buf: &mut Buf) {
         self.cell_to_buffer(ln, cl, buf);
-        let len = self.text_width(&buf.data);
+        let customwrap = self
+            .columns
+            .get(cl)
+            .is_some_and(crate::Column::is_customwrap);
+        let len = if customwrap {
+            self.wrapnl_chunksize(&buf.data)
+        } else {
+            self.text_width(&buf.data)
+        };
         let treewidth = buf.safe_pointer_width(self.utf8);
         if let Some(cell) = self.cell_mut(ln, cl) {
             cell.width = len;
@@ -237,7 +255,7 @@ impl Table {
         let org_width = col.width;
         let wanted = width.saturating_sub(termwidth);
         let st = col.wstat;
-        let is_trunc = col.is_trunc() || col.is_wrap();
+        let is_trunc = col.is_trunc() || (col.is_wrap() && !col.is_customwrap());
         let noextremes = col.is_noextremes();
         let hint = col.width_hint;
         let wide_spread = |divisor: f64| st.width_deviation >= st.width_avg / divisor;

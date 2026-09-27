@@ -53,10 +53,13 @@
 //!
 //! Each is refused or absent rather than approximated, and each is what a
 //! program that needs it will have to add: groups (`scols_line_link_group`,
-//! the group chart), custom wrapping functions (`scols_column_set_wrapfunc`),
-//! sorting (`scols_sort_table`), colours (every colour is ignored, as upstream
-//! ignores them when colours are not wanted), printing a range, and the
-//! debug output.
+//! the group chart), custom wrapping functions other than upstream's own
+//! newline one (`scols_column_set_wrapfunc` with anything but
+//! `scols_wrapnl_chunksize`/`scols_wrapnl_nextchunk`, which is
+//! [`Table::column_set_wrapnl`]), sorting (`scols_sort_table`), colours
+//! (every colour is ignored, as upstream ignores them when colours are not
+//! wanted), printing a range that starts or ends mid-table, removing single
+//! lines, and the debug output.
 
 mod calc;
 pub mod careful;
@@ -192,6 +195,10 @@ pub(crate) struct Column {
     pub(crate) safechars: Option<Vec<u8>>,
     /// The rest of a wrapped cell, for the extra lines.
     pub(crate) pending: Option<Vec<u8>>,
+    /// `scols_column_set_wrapfunc(cl, scols_wrapnl_chunksize,
+    /// scols_wrapnl_nextchunk, NULL)`: a wrapped cell breaks at its
+    /// newlines rather than at the column's width.
+    pub(crate) wrapnl: bool,
     /// The name, as a cell.
     pub(crate) header: Cell,
     pub(crate) is_groups: bool,
@@ -218,6 +225,10 @@ impl Column {
     }
     pub(crate) fn is_wrap(&self) -> bool {
         self.flags & FL_WRAP != 0
+    }
+    /// `scols_column_is_customwrap`: wrapped, by the newline functions.
+    pub(crate) fn is_customwrap(&self) -> bool {
+        self.is_wrap() && self.wrapnl
     }
 
     /// `scols_column_get_name_as_shellvar`: `1FOO%` is `_1FOO_PCT`.
@@ -659,6 +670,27 @@ impl Table {
         Ok(())
     }
 
+    /// `scols_column_set_wrapfunc(cl, scols_wrapnl_chunksize,
+    /// scols_wrapnl_nextchunk, NULL)`: when the column also has
+    /// [`FL_WRAP`], a cell breaks at each newline, one piece per line; the
+    /// column is as wide as the widest piece; and in JSON an array column
+    /// is written one element per piece. (The last piece, if still too
+    /// wide, is wrapped at the column's width, as upstream wraps it.)
+    ///
+    /// # Errors
+    ///
+    /// The column is not this table's.
+    pub fn column_set_wrapnl(&mut self, cl: ColumnId) -> Result<(), Error> {
+        self.column_mut(cl).ok_or(Error::Invalid)?.wrapnl = true;
+        Ok(())
+    }
+
+    /// `scols_table_remove_lines`: every line gone, the columns kept, so
+    /// the table can be filled and printed again.
+    pub fn remove_lines(&mut self) {
+        self.lines.clear();
+    }
+
     /// The columns in their order (`scols_table_next_column`); detached
     /// ones are not in it.
     #[must_use]
@@ -916,6 +948,22 @@ impl Table {
         let mut out = Vec::new();
         self.print_into(&mut out)?;
         Ok(out)
+    }
+
+    /// `scols_table_print_range(tb, NULL, NULL)`: every line, as a list,
+    /// without the JSON brackets around the table (each line is an object
+    /// of its own) and without a final newline -- the header only the first
+    /// time, since a range continues what an earlier one printed.
+    ///
+    /// # Errors
+    ///
+    /// The table is a tree (upstream's `-EINVAL`), or a wrapped cell's
+    /// column was left no width; what was printed stays in `out`.
+    pub fn print_range_into(&mut self, out: &mut Vec<u8>) -> Result<(), Error> {
+        if self.is_tree() {
+            return Err(Error::Invalid);
+        }
+        self.do_print_range(out)
     }
 
     /// `scols_print_table_to_string`: as [`Table::print`], without the final

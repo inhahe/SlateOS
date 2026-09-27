@@ -273,7 +273,24 @@ impl Table {
             return Err(crate::Error::Invalid);
         }
         let mut len = width;
-        let bytes = mbs::mbs_truncate(&mut data, &mut len, self.utf8);
+        let customwrap = self
+            .columns
+            .get(cl)
+            .is_some_and(crate::Column::is_customwrap);
+        let nl = if customwrap {
+            data.iter().position(|&b| b == b'\n')
+        } else {
+            None
+        };
+        let bytes = if let Some(nl) = nl {
+            // `scols_wrapnl_nextchunk`: this piece, whatever its width; the
+            // newline goes with it.
+            data.truncate(nl);
+            len = self.chunk_width(&data);
+            nl.saturating_add(1)
+        } else {
+            mbs::mbs_truncate(&mut data, &mut len, self.utf8)
+        };
         if bytes > 0 {
             self.step_pending(cl, bytes);
         } else if let Some(col) = self.columns.get_mut(cl) {
@@ -288,6 +305,17 @@ impl Table {
             out.extend_from_slice(&self.colsep());
         }
         Ok(())
+    }
+
+    /// The width of one piece of an (already encoded) custom-wrapped cell:
+    /// `mbs_safe_nwidth` over the encoded bytes, as upstream measures it --
+    /// so an encoded `\x..` counts its backslash as four cells.
+    fn chunk_width(&self, data: &[u8]) -> usize {
+        if self.no_encode {
+            mbs::mbs_width(data, self.utf8)
+        } else {
+            mbs::mbs_safe_width(data, self.utf8)
+        }
     }
 
     /// `print_json_data`.
@@ -309,7 +337,32 @@ impl Table {
             }
             JsonType::ArrayString | JsonType::ArrayNumber => {
                 self.json.open(out, name, Kind::Array);
-                self.json.value_s(out, None, data);
+                if self
+                    .columns
+                    .get(cl)
+                    .is_some_and(crate::Column::is_customwrap)
+                {
+                    // One element per newline-separated piece; a trailing
+                    // newline ends the last piece rather than starting an
+                    // empty one.
+                    let mut rest = Some(mbs::c_str(data));
+                    while let Some(d) = rest {
+                        let (piece, next) = match d.iter().position(|&b| b == b'\n') {
+                            Some(i) => {
+                                (d.get(..i).unwrap_or_default(), d.get(i.saturating_add(1)..))
+                            }
+                            None => (d, None),
+                        };
+                        if ty == JsonType::ArrayString {
+                            self.json.value_s(out, None, piece);
+                        } else {
+                            self.json.value_raw(out, None, piece);
+                        }
+                        rest = next.filter(|n| !n.is_empty());
+                    }
+                } else {
+                    self.json.value_s(out, None, data);
+                }
                 self.json.close(out, Kind::Array);
             }
         }
@@ -378,7 +431,23 @@ impl Table {
             return;
         };
         let mut width = col.width;
-        let (is_right, is_trunc, is_wrap) = (col.is_right(), col.is_trunc(), col.is_wrap());
+        let (is_right, is_trunc, is_customwrap) =
+            (col.is_right(), col.is_trunc(), col.is_customwrap());
+        let is_wrap = col.is_wrap() && !is_customwrap;
+
+        // A custom multi-line cell: this piece now, the rest on the extra
+        // lines (nothing left over when the data ends with the newline).
+        if is_customwrap && let Some(nl) = data.iter().position(|&b| b == b'\n') {
+            let rest = data
+                .get(nl.saturating_add(1)..)
+                .unwrap_or_default()
+                .to_vec();
+            if let Some(col) = self.columns.get_mut(cl) {
+                col.pending = (!rest.is_empty()).then_some(rest);
+            }
+            data.truncate(nl);
+            len = self.chunk_width(&data);
+        }
 
         if is_last && len < width && !self.maxout && !is_right {
             width = len;
@@ -756,6 +825,33 @@ impl Table {
             self.symbols = None;
             self.priv_symbols = false;
         }
+    }
+
+    /// `scols_table_print_range(tb, NULL, NULL)` for a table that is not a
+    /// tree: the header (once, ever), then every line; no JSON brackets
+    /// around them and no newline after the last.
+    ///
+    /// # Errors
+    ///
+    /// No columns, or a line that could not be printed.
+    pub(crate) fn do_print_range(&mut self, out: &mut Vec<u8>) -> Result<(), crate::Error> {
+        if self.columns.is_empty() {
+            return Err(crate::Error::Invalid);
+        }
+        let mut buf = Buf::default();
+        self.initialize_printing(&mut buf);
+        if self
+            .columns
+            .iter()
+            .any(|c| !c.is_hidden() && c.width > MAX_PRINTED_WIDTH)
+        {
+            self.cleanup_printing();
+            return Err(crate::Error::Invalid);
+        }
+        self.print_header(out, &mut buf);
+        let printed = self.print_lines(out, &mut buf);
+        self.cleanup_printing();
+        printed
     }
 
     /// `do_print_table`: whether there was nothing to print.

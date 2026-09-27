@@ -304,3 +304,74 @@ fn an_unnamed_column_has_an_empty_header() {
     assert_eq!(tb.column_name(a), None);
     assert_eq!(text(tb.print().unwrap()), "   B\nxx y\n");
 }
+
+/// findmnt's SOURCES column: wrapped at its newlines.
+fn sources(data: &[u8]) -> (Table, ColumnId) {
+    let mut tb = Table::new();
+    tb.set_utf8(true);
+    tb.set_termforce(TermForce::Never);
+    let t = tb.new_column(b"TARGET", 0.0, 0);
+    let s = tb.new_column(b"SOURCES", 0.0, FL_WRAP);
+    tb.column_set_wrapnl(s).unwrap();
+    tb.column_set_safechars(s, b"\n").unwrap();
+    let ln = tb.new_line(None).unwrap();
+    tb.line_set_data(ln, t, b"/x").unwrap();
+    tb.line_set_data(ln, s, data).unwrap();
+    (tb, s)
+}
+
+#[test]
+fn a_newline_wrapped_cell_prints_a_piece_per_line() {
+    let (mut tb, _) = sources(b"a\nbbb");
+    assert_eq!(
+        text(tb.print().unwrap()),
+        "TARGET SOURCES\n/x     a\n       bbb\n"
+    );
+    // A trailing newline ends the last piece; it does not start another.
+    let (mut tb, _) = sources(b"a\n");
+    assert_eq!(text(tb.print().unwrap()), "TARGET SOURCES\n/x     a\n");
+    // The column is as wide as its widest piece, not its whole text.
+    let (mut tb, _) = sources(b"/dev/sda1\n/dev/sdb1");
+    assert_eq!(
+        text(tb.print().unwrap()),
+        "TARGET SOURCES\n/x     /dev/sda1\n       /dev/sdb1\n"
+    );
+}
+
+#[test]
+fn a_newline_wrapped_json_array_has_an_element_per_piece() {
+    let (mut tb, s) = sources(b"a\nbbb");
+    tb.column_set_json_type(s, JsonType::ArrayString).unwrap();
+    tb.enable_json(true);
+    tb.set_name(b"t");
+    assert_eq!(
+        text(tb.print().unwrap()),
+        "{\n   \"t\": [\n      {\n         \"target\": \"/x\",\n         \"sources\": [\n             \"a\", \"bbb\"\n         ]\n      }\n   ]\n}\n"
+    );
+}
+
+#[test]
+fn a_range_prints_its_header_once_and_lines_can_be_replaced() {
+    let mut tb = disks();
+    let mut out = Vec::new();
+    tb.print_range_into(&mut out).unwrap();
+    assert_eq!(text(out), "NAME SIZE\nsda   10G\nsdb1   5G");
+    tb.remove_lines();
+    assert_eq!(tb.nlines(), 0);
+    let ln = tb.new_line(None).unwrap();
+    let (name, size) = (tb.column(0).unwrap(), tb.column(1).unwrap());
+    tb.line_set_data(ln, name, b"sdc").unwrap();
+    tb.line_set_data(ln, size, b"1G").unwrap();
+    let mut out = Vec::new();
+    tb.print_range_into(&mut out).unwrap();
+    assert_eq!(text(out), "sdc    1G");
+}
+
+#[test]
+fn a_tree_cannot_be_printed_as_a_range() {
+    let mut tb = Table::new();
+    tb.set_termforce(TermForce::Never);
+    tb.new_column(b"N", 0.0, FL_TREE);
+    tb.new_line(None).unwrap();
+    assert!(tb.print_range_into(&mut Vec::new()).is_err());
+}

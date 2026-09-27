@@ -637,9 +637,9 @@ struct Options {
     /// `--near NUM`: every pattern must occur within NUM lines of another,
     /// and only matching lines inside a satisfying window are selected. The
     /// sliding-window form of [`Options::every_pattern`]; see
-    /// [`near_eligible_lines`] for the rule, which is the operator's
-    /// implementation and deliberately not their README's description of it
-    /// (`design-decisions.md` §1008).
+    /// [`near_eligible_lines`] for the rule, which is their README's: a
+    /// match may belong to any number of windows (`design-decisions.md`
+    /// §1044, which replaced §1008's reading of their program).
     near: Option<usize>,
     /// `--every-pattern`: a file produces no output unless **every** pattern
     /// occurs in it. Opt-in, because GNU's repeated `-e` means alternation and
@@ -1541,7 +1541,7 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             }
             Flag::Short(b'f') => pattern_files.push(required(value)),
             Flag::Short(b'm') => {
-                opts.max_count = max_count_arg(&quote::os_bytes(&required(value)))?
+                opts.max_count = max_count_arg(&quote::os_bytes(&required(value)))?;
             }
             Flag::Include => opts
                 .file_selectors
@@ -2129,34 +2129,39 @@ fn matches_in(
 
 /// Which lines `--near NUM` allows to be selected.
 ///
-/// The sliding-window form of [`every_pattern_present`]. A window is satisfied
-/// when every pattern has a match no more than `near` lines back; the matching
-/// lines from the earliest live match up to the current line become eligible,
-/// and **the record is then cleared** so the next window starts fresh.
+/// The sliding-window form of [`every_pattern_present`]. A *window* is any run
+/// of `near` consecutive lines, and it is *satisfied* when every pattern
+/// matches somewhere in it; a matching line is eligible when it lies in at
+/// least one satisfied window.
 ///
-/// # The clearing is the whole rule, and it is not in the README
+/// # A match can belong to any number of windows
 ///
-/// The operator's `README.md` gives one worked example -- `ALPHA` on 3, `BETA`
-/// on 5, `ALPHA` on 7, `--near 3` -- and says lines 3 and 5 print while 7 does
-/// not, because "its `ALPHA` has no `BETA` within 3 lines". But `|7-5| = 2`,
-/// which *is* within 3. The rule is not derivable from the example: `BETA` on
-/// line 5 was **consumed** by the window that ended there, so nothing is left
-/// for line 7 to pair with. Windows are non-overlapping, greedy and
-/// earliest-first.
+/// Windows overlap and nothing is used up: in `ALPHA`, `BETA`, `ALPHA` on three
+/// lines the `BETA` pairs with the `ALPHA` on each side of it, so `--near 2`
+/// selects all three. That is what makes a `near` at least as large as the file
+/// exactly the whole-file gate, as the operator's README says. Their program
+/// once cleared its record whenever a window was satisfied, so a match could
+/// complete one window only, and this port followed the program; the operator
+/// ruled the README right (design-decisions §1044, answering B-Q10), and their
+/// `grep.py` and `grep.cpp` were fixed with it.
 ///
-/// The README also claims a `near` at least as large as the file is exactly
-/// equivalent to the whole-file gate. It is not, and the counterexample was
-/// measured against the operator's own program rather than argued:
-/// `ALPHA`/`BETA`/`ALPHA` on three lines prints 1,2,3 under the gate and 1,2
-/// under `-P 100`. This follows the program. See `design-decisions.md` §1008
-/// and `open-questions.md` B-Q10.
+/// # One pass
+///
+/// `last` holds each pattern's most recent match while it is fewer than `near`
+/// lines back. When every pattern is live on a line that itself matched, the
+/// window ending on that line is satisfied and every matching line in it is
+/// eligible. A line that matched nothing cannot add one: every match live on
+/// it was live on the line before, whose window already took in every matching
+/// line this one would. And the lines an earlier window made eligible are
+/// always the front of `matching`, so each line is marked once.
 ///
 /// # Context is not folded in here
 ///
 /// The operator's implementation expands each window by `-A`/`-B` while
 /// emitting it. This returns *eligibility* only and lets the ordinary context
 /// machinery run around the selected lines, which produces the same output --
-/// the README's own example notes that `-C` still reaches line 7 as context --
+/// the README's own example notes that `-C` still reaches the unpaired match
+/// as context --
 /// and keeps one implementation of context rather than two.
 ///
 /// # `--near 0` selects nothing
@@ -2215,17 +2220,15 @@ fn near_eligible_lines(data: &[u8], pats: &[Pat], opts: &Options, near: usize) -
         while matching.front().is_some_and(|f| *f <= unreachable) {
             matching.pop_front();
         }
-        if live == pats.len() {
-            let start = last.iter().flatten().copied().min().unwrap_or(lineno);
-            for m in &matching {
-                if *m >= start && *m <= lineno {
-                    eligible.insert(*m);
+        // `matching` is now exactly the matching lines of the window
+        // (lineno - near, lineno]; those an earlier window took in are at its
+        // front, so marking stops at the first one already marked.
+        if any && live == pats.len() {
+            for m in matching.iter().rev() {
+                if !eligible.insert(*m) {
+                    break;
                 }
             }
-            for slot in last.iter_mut() {
-                *slot = None;
-            }
-            live = 0;
         }
     }
     eligible
@@ -4979,32 +4982,56 @@ mod tests {
             .collect()
     }
 
-    /// The operator's README's own worked example, reproduced exactly.
-    ///
-    /// This is the test that pins the rule, and it is here because the example
-    /// alone does not imply it: line 7's `ALPHA` is two lines from the `BETA`
-    /// on line 5, which *is* within 3, and every obvious reading of the
-    /// sentence prints it. It is absent because the window ending at line 5
-    /// consumed that `BETA`.
+    /// The operator's README's worked example, as it reads since B-Q10: the
+    /// trailing `ALPHA` is 4 lines from the `BETA`, so no 3-line window holds
+    /// both.
     #[test]
     fn near_reproduces_the_readme_example() {
         let o = Options::default();
-        let text = "l1\nl2\nl3 ALPHA\nl4\nl5 BETA\nl6\nl7 ALPHA\n";
+        let text = "l1\nl2\nl3 ALPHA\nl4\nl5 BETA\nl6\nl7\nl8\nl9 ALPHA\nl10\n";
         assert_eq!(near_set(text, &["ALPHA", "BETA"], 3, &o), vec![3, 5]);
     }
 
-    /// `--near` at least as large as the file is **not** the whole-file gate,
-    /// whatever the README says. Measured against the operator's own program
-    /// before being written down here: their `grep.py` prints 1,2,3 without
-    /// `-P` and 1,2 with `-P 100`. See design-decisions §1008 and B-Q10.
+    /// The README's example as it read before B-Q10: the trailing `ALPHA` is 2
+    /// lines from the `BETA`, which is within 3, so the `BETA` completes a
+    /// second window. The old rule used it up in the first (§1044).
     #[test]
-    fn near_larger_than_the_file_is_still_window_scoped() {
+    fn near_lets_one_match_complete_two_windows() {
         let o = Options::default();
-        let text = "l1 ALPHA\nl2 BETA\nl3 ALPHA\n";
-        assert_eq!(near_set(text, &["ALPHA", "BETA"], 100, &o), vec![1, 2]);
-        // ...whereas the whole-file gate accepts the file outright, which is
-        // the difference the README denies exists.
-        assert!(gate(text, &["ALPHA", "BETA"], &o));
+        let text = "l1\nl2\nl3 ALPHA\nl4\nl5 BETA\nl6\nl7 ALPHA\n";
+        assert_eq!(near_set(text, &["ALPHA", "BETA"], 3, &o), vec![3, 5, 7]);
+        // Two lines apart is outside a two-line window.
+        assert!(near_set(text, &["ALPHA", "BETA"], 2, &o).is_empty());
+    }
+
+    /// `--near` at least as large as the file IS the whole-file gate: every
+    /// matching line, once every pattern occurs. The two shapes that once broke
+    /// it -- a match shared by two windows, and a pattern matched twice before
+    /// the window completed.
+    #[test]
+    fn near_at_least_the_file_is_the_whole_file_gate() {
+        let o = Options::default();
+        for text in [
+            "l1 ALPHA\nl2 BETA\nl3 ALPHA\n",
+            "l1 ALPHA\nl2 ALPHA\nl3 BETA\n",
+        ] {
+            assert!(gate(text, &["ALPHA", "BETA"], &o));
+            assert_eq!(
+                near_set(text, &["ALPHA", "BETA"], 100, &o),
+                vec![1, 2, 3],
+                "{text:?}"
+            );
+        }
+    }
+
+    /// An earlier match of a pattern counts while it is still in the window,
+    /// and not after it has left.
+    #[test]
+    fn near_takes_every_match_still_in_the_window() {
+        let o = Options::default();
+        let text = "l1 ALPHA\nl2 ALPHA\nl3 BETA\n";
+        assert_eq!(near_set(text, &["ALPHA", "BETA"], 3, &o), vec![1, 2, 3]);
+        assert_eq!(near_set(text, &["ALPHA", "BETA"], 2, &o), vec![2, 3]);
     }
 
     /// Windows are found repeatedly, not once.

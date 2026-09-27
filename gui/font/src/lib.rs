@@ -48,8 +48,12 @@ extern crate alloc;
 pub mod bidi;
 mod bidi_tables;
 pub mod bitmap;
+#[cfg(test)]
+mod bitmap_fixture;
 pub mod cff;
 pub mod colr;
+#[cfg(test)]
+mod colr_fixture;
 mod context;
 pub mod deadkey;
 mod device;

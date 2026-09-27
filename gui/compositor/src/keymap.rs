@@ -6,7 +6,7 @@
 //! compositor, rather than in each client — so that one system keymap governs
 //! every application and a layout change takes effect everywhere at once
 //! instead of app by app as each notices. Clients receive a
-//! [`Key`](guitk::event::Key); the raw scancode is forwarded alongside for the
+//! [`Key`]; the raw scancode is forwarded alongside for the
 //! few that want physical positions (games binding "the key left of S",
 //! remapping utilities) rather than letters.
 //!

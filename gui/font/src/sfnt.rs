@@ -2129,11 +2129,14 @@ impl Face {
     /// Horizontal advance for a glyph at a variable-font instance, in font
     /// units.
     ///
-    /// The `hmtx` advance corrected by `HVAR`. Identical to
-    /// [`advance`](Self::advance) when the face does not vary, carries no
-    /// `HVAR`, or is asked for the default instance — the last because the
-    /// default instance's advance *is* what `hmtx` stores, so every delta is
-    /// zero there by construction.
+    /// The `hmtx` advance corrected by `HVAR` -- or, in a `glyf` face with
+    /// `gvar` and no `HVAR`, the distance between the glyph's left and right
+    /// phantom points where `gvar` moved them, as HarfBuzz measures it
+    /// (`glyf_accelerator_t::get_advance_with_var_unscaled`). Identical to
+    /// [`advance`](Self::advance) when the face does not vary, carries
+    /// neither table, or is asked for the default instance -- the last
+    /// because the default instance's advance *is* what `hmtx` stores, so
+    /// every delta is zero there by construction.
     ///
     /// The result is clamped at zero rather than allowed to wrap: a negative
     /// advance would drag the rest of the line backwards over the glyph, which
@@ -2146,12 +2149,18 @@ impl Face {
     /// for a font's unmapped tail.
     pub fn advance_at(&self, gid: u16, coords: &var::Coords) -> Result<u16, SfntError> {
         let base = self.advance(gid)?;
-        let Some(hvar) = self.hvar.as_ref() else {
-            return Ok(base);
-        };
         if coords.is_default() {
             return Ok(base);
         }
+        let Some(hvar) = self.hvar.as_ref() else {
+            // Without `HVAR`, HarfBuzz takes a `glyf` face's advance from the
+            // phantom points `gvar` moved; a face without either does not
+            // vary its advances.
+            if self.gvar.is_some() && matches!(self.outlines, Outlines::Glyf { .. }) {
+                return Ok(crate::glyf::advance(self, gid, coords.as_slice()));
+            }
+            return Ok(base);
+        };
         let delta = hvar.advance_delta(&self.data, gid, coords.as_slice());
         Ok(
             u16::try_from(i32::from(base).saturating_add(i32::from(delta)).max(0))
@@ -2724,6 +2733,14 @@ impl Face {
     /// [`glyph_bbox_at`](Self::glyph_bbox_at) is the box; this is the box as
     /// HarfBuzz rounds it, which depends on where the box came from:
     ///
+    /// * a colour glyph reports the box its tables give, which HarfBuzz asks
+    ///   for first: a bitmap glyph the box of its picture in the biggest
+    ///   `sbix` or `CBDT` strike ([`crate::bitmap::glyph_extents`]), then a
+    ///   `COLR` glyph its clip box, or else its paint measured
+    ///   ([`crate::colr::extents::glyph_extents`]);
+    /// * in a face of pictures alone, a glyph neither table answers for has
+    ///   no box at all -- there is no outline to measure -- which is `None`,
+    ///   as HarfBuzz's is no answer;
     /// * a `glyf` glyph read without deltas reports the box its header
     ///   states, in whole units already;
     /// * a `glyf` glyph at a varied instance reports the box around its
@@ -2742,6 +2759,17 @@ impl Face {
     #[must_use]
     pub(crate) fn glyph_extents_at(&self, gid: u16, coords: &var::Coords) -> Option<[i32; 4]> {
         use crate::hbcalc::roundf_i32;
+        // HarfBuzz asks the colour tables first -- `sbix`, `CBDT`, then
+        // `COLR` -- and a colour glyph's box is the one they give.
+        if let Some(extents) = crate::bitmap::glyph_extents(self, gid) {
+            return Some(extents);
+        }
+        if let Some(extents) = crate::colr::extents::glyph_extents(self, gid, coords) {
+            return Some(extents);
+        }
+        if matches!(self.outlines, Outlines::Pictures) {
+            return None;
+        }
         if let Outlines::Cff(cff) = &self.outlines {
             return self.cff_extents(cff, gid, coords);
         }
@@ -3902,6 +3930,21 @@ fn decode_mac_roman(bytes: &[u8]) -> String {
 )]
 pub(crate) mod tests {
     use super::*;
+
+    /// Where table `tag` lies in the font file `font`, by its table
+    /// directory record: for tests that mutate one table in place.
+    pub(crate) fn table_range(font: &[u8], tag: [u8; 4]) -> Option<core::ops::Range<usize>> {
+        let count = usize::from(u16::from_be_bytes(font.get(4..6)?.try_into().ok()?));
+        (0..count).find_map(|i| {
+            let record = font.get(12 + 16 * i..28 + 16 * i)?;
+            if record[..4] != tag {
+                return None;
+            }
+            let word = |at: usize| u32::from_be_bytes(record[at..at + 4].try_into().unwrap());
+            let (offset, len) = (word(8) as usize, word(12) as usize);
+            Some(offset..offset + len)
+        })
+    }
 
     /// Build a minimal but *real* TrueType file in memory.
     ///

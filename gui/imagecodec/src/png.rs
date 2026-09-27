@@ -177,6 +177,51 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     Ok(orientation(bytes).shown((h.width, h.height)))
 }
 
+/// How the picture stores its pixels: `IHDR`'s bit depth and colour type,
+/// and whether a `tRNS` chunk before the image data makes a colour or
+/// palette entry transparent.
+///
+/// # Errors
+///
+/// As [`dimensions`].
+pub fn pixel_format(bytes: &[u8]) -> ImageResult<crate::PixelFormat> {
+    use crate::ColourModel;
+    let h = read_header(bytes)?;
+    let (model, palette) = match h.color {
+        ColorType::Gray | ColorType::GrayAlpha => (ColourModel::Grey, false),
+        ColorType::Palette => (ColourModel::Colour, true),
+        ColorType::Rgb | ColorType::Rgba => (ColourModel::Colour, false),
+    };
+    let alpha_channel = matches!(h.color, ColorType::GrayAlpha | ColorType::Rgba);
+    let channels = u16::try_from(h.color.channels()).unwrap_or(u16::MAX);
+    Ok(crate::PixelFormat::uniform(
+        h.depth,
+        channels,
+        model,
+        palette,
+        alpha_channel || has_trns(bytes),
+    ))
+}
+
+/// Whether a `tRNS` chunk comes before the image data -- walked as [`exif`]
+/// walks, so a damaged chunk is passed over as the decoder passes it.
+fn has_trns(bytes: &[u8]) -> bool {
+    let mut chunks = Chunks::new(bytes);
+    chunks.next();
+    loop {
+        match chunks.peek_kind() {
+            None => return false,
+            Some(kind) if matches!(&kind, b"IDAT" | b"IEND") => return false,
+            Some(_) => {}
+        }
+        match chunks.next() {
+            Some(Ok(chunk)) if chunk.kind == *b"tRNS" => return true,
+            Some(Ok(_)) => {}
+            Some(Err(_)) | None => return false,
+        }
+    }
+}
+
 /// Which way up the picture is shown: its EXIF orientation, from the first
 /// `eXIf` chunk before the image data, as Chrome reads it (see
 /// [`crate::orientation`]). As stored if there is none, or none that counts.

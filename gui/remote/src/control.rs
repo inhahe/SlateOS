@@ -115,7 +115,10 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// for the desktop's artifact recovery, and the `RPNT` frame
 /// ([`repaint`](crate::repaint)) the compositor then sends every client.
 /// Incompatible on 2's terms: an unknown tag stops the decoder.
-pub const CONTROL_VERSION: u8 = 17;
+/// **18** — [`RequestBody::PatchImage`] (tag `0x29`), by which a window
+/// replaces a rectangle of an image it uploaded instead of the whole of it.
+/// Incompatible on 2's terms: an unknown tag stops the decoder.
+pub const CONTROL_VERSION: u8 = 18;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1261,6 +1264,42 @@ pub enum RequestBody {
         format: BufferFormat,
         bytes: Vec<u8>,
     },
+    /// Replace a rectangle of an image already uploaded under `image_id`,
+    /// leaving the rest of it as it was.
+    ///
+    /// [`UploadImage`](Self::UploadImage) replacing the whole picture is the
+    /// right way to change most of one -- a video frame, the next photograph --
+    /// but a picture that changes a little at a time pays for all of it on
+    /// every change that way. A remote desktop is the case this exists for:
+    /// the far end reports what changed as rectangles, often a few dozen
+    /// pixels (a blinking caret), and re-sending a 1920x1080 screen for each is
+    /// 8 MB a change. A patch carries only the rectangle.
+    ///
+    /// `x`, `y`, `width` and `height` place the rectangle in the image, in the
+    /// image's pixels. `stride` is the bytes from the start of one row of
+    /// `bytes` to the next, as for an upload, and may likewise exceed the
+    /// rectangle's width. The pixels are in the format the image was uploaded
+    /// in, which is why the request does not name one: an image has one
+    /// format, and a patch in another would be a second image.
+    ///
+    /// All or nothing, as an upload is. Answered with [`ResponseBody::Ok`], or
+    /// an error -- the window is not yours, it holds no image under
+    /// `image_id`, the rectangle is empty or not wholly inside the image, or
+    /// the bytes do not cover it -- and a refused patch changes no pixel. It
+    /// costs the link's image budget nothing: the image holds as many pixels
+    /// after as before.
+    PatchImage {
+        window: u64,
+        image_id: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        /// Bytes from the start of one row to the start of the next, as for
+        /// [`UploadImage`](Self::UploadImage).
+        stride: u32,
+        bytes: Vec<u8>,
+    },
     /// Forget one of this window's uploaded images and release its memory.
     ///
     /// Commands still naming the id afterwards draw nothing, which is the same
@@ -1429,6 +1468,7 @@ enum RequestTag {
     WatchIdle = 0x26,
     ReloadSession = 0x27,
     RecoverDisplay = 0x28,
+    PatchImage = 0x29,
 }
 
 impl RequestTag {
@@ -1473,6 +1513,7 @@ impl RequestTag {
             0x26 => Self::WatchIdle,
             0x27 => Self::ReloadSession,
             0x28 => Self::RecoverDisplay,
+            0x29 => Self::PatchImage,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1830,6 +1871,27 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             // Bytes last, so that everything the receiver needs to decide
             // whether it wants them has already been read by the time the
             // length prefix arrives.
+            write_bytes(out, bytes);
+        }
+        RequestBody::PatchImage {
+            window,
+            image_id,
+            x,
+            y,
+            width,
+            height,
+            stride,
+            bytes,
+        } => {
+            out.push(RequestTag::PatchImage as u8);
+            write_u64(out, *window);
+            write_u64(out, *image_id);
+            write_u32(out, *x);
+            write_u32(out, *y);
+            write_u32(out, *width);
+            write_u32(out, *height);
+            write_u32(out, *stride);
+            // Bytes last, as for an upload, and for the same reason.
             write_bytes(out, bytes);
         }
         RequestBody::DropImage { window, image_id } => {
@@ -2238,6 +2300,30 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 bytes,
             }
         }
+        RequestTag::PatchImage => {
+            let window = r.read_u64()?;
+            let image_id = r.read_u64()?;
+            let x = r.read_u32()?;
+            let y = r.read_u32()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            let stride = r.read_u32()?;
+            // Nothing is checked against anything else here, as for an
+            // upload: whether the rectangle lies inside the image and whether
+            // the bytes cover it are questions only the compositor, which
+            // holds the image, can answer.
+            let bytes = r.read_bytes()?;
+            RequestBody::PatchImage {
+                window,
+                image_id,
+                x,
+                y,
+                width,
+                height,
+                stride,
+                bytes,
+            }
+        }
         RequestTag::DropImage => {
             let window = r.read_u64()?;
             RequestBody::DropImage {
@@ -2502,6 +2588,35 @@ mod tests {
                     bytes: Vec::new(),
                 },
             ),
+            // A patch with every field distinct, so a codec that swapped two
+            // of them would not round-trip; and one at the far corner of the
+            // number space.
+            Request::new(
+                41,
+                RequestBody::PatchImage {
+                    window: 7,
+                    image_id: 9,
+                    x: 1,
+                    y: 2,
+                    width: 3,
+                    height: 1,
+                    stride: 16,
+                    bytes: (0..12).collect(),
+                },
+            ),
+            Request::new(
+                42,
+                RequestBody::PatchImage {
+                    window: u64::MAX,
+                    image_id: u64::MAX,
+                    x: u32::MAX,
+                    y: u32::MAX,
+                    width: 0,
+                    height: 0,
+                    stride: 0,
+                    bytes: Vec::new(),
+                },
+            ),
             Request::new(
                 21,
                 RequestBody::DropImage {
@@ -2722,9 +2837,60 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x29),
-            None,
-            "0x29 is the next free tag"
+            Some(RequestTag::PatchImage),
+            "0x29 was taken by PatchImage in control version 18"
         );
+        assert_eq!(
+            RequestTag::from_byte(0x2A),
+            None,
+            "0x2A is the next free tag"
+        );
+    }
+
+    #[test]
+    fn a_patch_payload_over_the_cap_is_refused_before_it_is_read() {
+        // As for an upload: the length prefix is another process's number.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&REQUEST_MAGIC);
+        bytes.push(CONTROL_VERSION);
+        bytes.push(0);
+        write_u32(&mut bytes, 1); // one message
+        write_u32(&mut bytes, 1); // seq
+        bytes.push(RequestTag::PatchImage as u8);
+        write_u64(&mut bytes, 7); // window
+        write_u64(&mut bytes, 1); // image_id
+        for field in [0, 0, 1, 1, 4] {
+            write_u32(&mut bytes, field); // x, y, width, height, stride
+        }
+        write_u32(&mut bytes, crate::MAX_IMAGE_BYTES.saturating_add(1));
+        assert!(matches!(
+            decode_requests(&bytes),
+            Err(DecodeError::ImageTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn every_byte_of_a_patch_frame_can_be_corrupted_without_a_panic() {
+        let frame = encode_requests(&[Request::new(
+            1,
+            RequestBody::PatchImage {
+                window: 3,
+                image_id: 4,
+                x: 5,
+                y: 6,
+                width: 2,
+                height: 2,
+                stride: 8,
+                bytes: vec![0xAB; 16],
+            },
+        )]);
+        for i in 0..frame.len() {
+            for bit in 0..8u32 {
+                let mut corrupt = frame.clone();
+                corrupt[i] ^= 1u8 << bit;
+                let _ = decode_requests(&corrupt);
+            }
+        }
     }
 
     #[test]

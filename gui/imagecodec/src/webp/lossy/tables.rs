@@ -134,7 +134,7 @@ pub(super) const KF_BMODE_PROBS: [[[u8; 9]; 10]; 10] = [
 ];
 
 /// The probability that each coefficient probability is replaced in the frame
-/// header (RFC 6386 §13.4), indexed [block type][band][context][tree node].
+/// header (RFC 6386 §13.4), indexed `[block type][band][context][tree node]`.
 pub(super) const COEFF_UPDATE_PROBS: [[[[u8; 11]; 3]; 8]; 4] = [
     [
         [
@@ -307,7 +307,7 @@ pub(super) const COEFF_UPDATE_PROBS: [[[[u8; 11]; 3]; 8]; 4] = [
 ];
 
 /// The coefficient probabilities every key frame starts from (RFC 6386 §13.5),
-/// indexed [block type][band][context][tree node].
+/// indexed `[block type][band][context][tree node]`.
 pub(super) const DEFAULT_COEFF_PROBS: [[[[u8; 11]; 3]; 8]; 4] = [
     [
         [

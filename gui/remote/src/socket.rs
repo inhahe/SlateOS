@@ -498,7 +498,7 @@ impl Socket {
 
 impl AsWaitHandle for Socket {
     /// The stream underneath, so a server can wait on many of these at once
-    /// ([`WaitSet`](crate::WaitSet)) rather than parking on one with
+    /// ([`WaitSet`]) rather than parking on one with
     /// [`Transport::wait`].
     fn wait_handle(&self) -> WaitHandle {
         self.stream.wait_handle()

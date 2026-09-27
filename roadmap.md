@@ -2503,12 +2503,24 @@ lane C's `guitk`.
   `known-issues.md` TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET and
   `compositor::tests::bench_fill_floor`.
 
-- `[F]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)
+- `[F]` Video-encoded capture fallback (lines ~4623, ~5060): **VP9**,
+  decided 2026-09-27 (design-decisions.md §1332). A port of libvpx for
+  encoding and decoding on the CPU, threaded across every core. Hardware VP9
+  (Intel's media driver, AMD's through Mesa, both over VA-API) comes once the
+  GPU stack exists. The encoder films buffer-backed windows for the
+  compositor's capture stream; the decoder serves SlateOS's remote viewer.
+
+- `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
+  and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
+  and gets thumbnails wherever a picture does. HEIC waits on
+  `open-questions.md` F-Q1 (a patent question), and would reuse the container.
 
 - `[F]` Port FreeRDP (line ~5058)
 
-Also lane F's to act on when answered: `open-questions.md` → **C-Q18**
-(nothing draws the mouse pointer), filed by lane C before the split.
+`open-questions.md` **C-Q18** (the pointer over fullscreen), filed by lane C
+before the split, was answered 2026-09-27 (§1334): the pointer is always
+shown. It is drawn on the presenter's copy today, and moves to the display's
+hardware cursor plane when a screen is shown without copying.
 
 
 ---
@@ -7562,7 +7574,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] `[F]` **JPEG is libjpeg-turbo, ported** — JPEG decoded to within 3 levels of what every other program shows, and some kinds (CMYK, RGB-coded, arithmetic-coded, separate-scan sequential) wrongly or not at all. `gui/imagecodec/src/jpeg/` is now a port of libjpeg-turbo 3.1.1's decompressor -- markers, Huffman, progressive and arithmetic decoding, block smoothing, the accurate integer and reduced inverse DCTs, fancy upsampling, colour conversion, and its handling of damaged data -- with Chrome's choices on top (colour space, CMYK formula, 100 scans). Every JPEG test is exact now; 146 seeds at four sizes and 32,000 mutants agree with libjpeg-turbo to the bit. Faster too: 0.76 s for a 21-megapixel photograph, from 1.42 s. Lossless JPEG as well (`jdlhuff.c`, `jddiffct.c`, `jdlossls.c`), held by 56 fixtures of its own and 20,000 lossless mutants. design-decisions.md §1318.
   - [x] `[F]` **An application can decline a close to ask about unsaved work** — a window's close button closed it whatever the application answered, so every editor threw away unsaved changes without a word. `Response::KeepOpen` (and `EventResponse::KeepOpen`) keeps the window open and redraws, so the application can show its "Save changes?" question and exit itself when the user answers; any other answer still closes, so no window can have an X that does nothing. Lane E's request. design-decisions.md §1309.
   - [x] `[F]` **Double clicks reach applications** — double-clicking did nothing inside any application (the file picker could not open a file by double-clicking it; a double click selected no word), because the compositor sends single presses by design and nothing paired them. Every application's event loop (`oswindow::EventLoop::poll`) now delivers `DoubleClick` after the press that completes one, at the user's double-click speed from `input.yaml`, by design-decisions §502's rules plus a four-pixel slop. Timed by a stamp the compositor now puts on every input event (input protocol v7), so a busy application still pairs clicks by when they were made. Lane E's request. design-decisions.md §1310.
-  - [ ] `[F]` Video-encoded capture fallback (H.264/VP9 for games/video)
+  - [ ] `[F]` Video-encoded capture fallback (VP9 for games/video, §1332: libvpx, threaded; hardware where found)
 
 ### 3.4 Window manager / desktop shell
 - [x] Window *control* (ask the compositor to focus/minimize/maximize/restore/tile/close) — placement and geometry are the compositor's, and the shell keeps no copy; see §506
@@ -8081,7 +8093,7 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
 ### 4.5 Remote desktop
 - [ ] `[F]` Port FreeRDP (working remote desktop early)
 - [x] Native compositor-level streaming (efficient draw-command forwarding) — the multi-window **scene protocol** lives in the shared `guiremote` crate (`gui/remote/src/scene.rs`), layered on that crate's existing single-window `RenderCommand` wire codec (`encode_frame`/`decode_frame`, `ORDR` magic) rather than a compositor-local duplicate. `SCEN`-magic frames forward each window's vector `RenderCommand`s instead of pixels, so a remote viewer replays the scene through its own rasterizer (orders of magnitude smaller than a raster for typical flat-shaded desktops). `SceneFrame`/`SceneWindow` carry per-window geometry+opacity in bottom→top z-order plus removed-window ids; `encode_scene_frame`/`decode_scene_frame` embed an `ORDR` sub-frame per present window and round-trip every `RenderCommand` variant (bounds-checked decoder rejects truncation, bad magic, unsupported version, oversized/`TooManyWindows` counts). `SceneSession` does delta suppression via an FNV-1a fingerprint of each window's command blob — unchanged windows send geometry-only (`commands: None`), and `apply_scene_frame` reconstructs the full scene viewer-side by carrying forward prior commands for delta windows. The compositor depends on `guiremote`; `Compositor::capture_stream_frame` walks the z-stack and emits a `SceneFrame` from the live visible window set, exposed over IPC via `StreamStart`/`StreamCapture`/`StreamStop`. 7 scene unit tests (frame round-trip, malformed-input rejection, version/magic checks, delta suppression, content-change resend, removed-window reporting, apply carry-forward, reset) on top of guiremote's 19 codec tests, plus 2 compositor IPC/forwarding tests. NOTE: DMA-BUF/buffer-backed windows have no vector commands, so they stream as empty command lists — pixel forwarding for those is the video-encoded capture fallback's job (next item).
-- [ ] `[F]` Video-encoded capture fallback for fullscreen games/video
+- [ ] `[F]` Video-encoded capture fallback for fullscreen games/video (VP9, §1332)
 - [x] DynDNS setup helper in settings (remote.rs: 5 DynDNS providers, remote desktop config, firewall integration)
 
 ### 4.6 System snapshots

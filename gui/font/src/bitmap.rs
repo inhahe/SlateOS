@@ -19,6 +19,14 @@
 //! reads it. Both scale by the ratio of the size asked for to the strike's,
 //! and the picture is placed to the nearest whole pixel, as a mask is.
 //!
+//! # Extents
+//!
+//! A glyph's box, as the shaper's fallback mark placement reads it
+//! (`Face::glyph_extents_at`), is not the picture [`render`] draws but the
+//! one HarfBuzz reports: from the biggest strike of `sbix`, else of `CBDT`,
+//! whatever the size drawn at, and with HarfBuzz's own reading and rounding
+//! of it -- `glyph_extents`, below.
+//!
 //! # Hostile fonts
 //!
 //! Every offset is bounds-checked. A picture is decoded under limits that
@@ -191,7 +199,8 @@ fn locate(cblc: &[u8], size: usize, gid: u16) -> Option<Located> {
         if !(first..=last).contains(&gid) {
             return None;
         }
-        let sub = at(array, u32_at(cblc, at(record, 4)?)?)?;
+        // A null offset is no subtable -- not the record array.
+        let sub = at(array, u32_at(cblc, at(record, 4)?).filter(|&o| o != 0)?)?;
         locate_in(cblc, sub, first, gid)
     })
 }
@@ -314,7 +323,8 @@ fn sbix_glyph(sbix: &[u8], gid: u16, num_glyphs: u16, px_per_em: f32) -> Option<
     let count = u32_at(sbix, 4)?;
     let mut strikes: Vec<(f32, usize)> = (0..count.min(MAX_STRIKES))
         .filter_map(|i| {
-            let strike = u32_at(sbix, nth(8, i, 4)?)?;
+            // A null offset is no strike -- not the table's own header.
+            let strike = u32_at(sbix, nth(8, i, 4)?).filter(|&o| o != 0)?;
             let ppem = f32::from(u16_at(sbix, strike)?);
             (ppem > 0.0).then_some((ppem, strike))
         })
@@ -363,6 +373,259 @@ fn sbix_in_strike(
         // `mask`, `pdf `, and a `dupe` of a `dupe`.
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Extents, as HarfBuzz reports them
+// ---------------------------------------------------------------------------
+
+/// The box HarfBuzz reports for glyph `gid` from the face's colour bitmaps,
+/// which it asks -- `sbix`, then `CBDT` -- before `COLR` and the outlines
+/// (`hb_ot_get_glyph_extents`): left edge, top edge, width rightwards and
+/// height downwards, in font units.
+///
+/// Each table answers from one strike: the biggest, the first of those tied,
+/// whatever its bit depth -- the strike HarfBuzz chooses for a font given no
+/// size (`choose_strike`). What the strike says of the glyph, in its own
+/// pixels, is scaled by `upem / ppem` and each value rounded by HarfBuzz's
+/// `roundf`, which takes a half up:
+///
+/// * `sbix` (`get_png_extents`): a PNG glyph, reached through up to eight
+///   `dupe`s -- its origin offset, and the width and height in its header,
+///   read without checking that it is a PNG at all, and as 0 by 0 when the
+///   data is too short to hold a header. A picture 65,536 or more pixels on
+///   a side, or of another kind, is no answer.
+/// * `CBDT` (`CBDT::accelerator_t::get_extents`): the glyph metrics of image
+///   formats 17 and 18, found through index formats 1 and 3. The other
+///   formats are no answer.
+///
+/// `None` where neither table answers, and HarfBuzz asks `COLR`, then the
+/// outlines. This is not where [`render`] draws a glyph: that picks the
+/// strike nearest the size drawn at, among colour strikes, and follows one
+/// `dupe`.
+#[must_use]
+pub(crate) fn glyph_extents(face: &Face, gid: u16) -> Option<[i32; 4]> {
+    let tables = face.bitmap_tables();
+    if tables.sbix.is_none() && tables.cbdt.is_none() {
+        return None;
+    }
+    // `hb_face_get_upem`: a `head` outside the range the specification
+    // allows is taken for 1000.
+    let upem = match face.units_per_em() {
+        u @ 16..=16384 => f32::from(u),
+        _ => 1000.0,
+    };
+    tables
+        .sbix
+        .and_then(|sbix| sbix_extents(sbix, gid, face.num_glyphs(), upem))
+        .or_else(|| {
+            tables
+                .cbdt
+                .and_then(|(cblc, cbdt)| cbdt_extents(cblc, cbdt, gid, upem))
+        })
+}
+
+/// `roundf (v * scale)` -- HarfBuzz's own `roundf`, which takes a half up
+/// ([`crate::hbcalc`]) -- into an `hb_position_t`.
+fn scaled(v: i32, scale: f32) -> i32 {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "`int` to `float`, as HarfBuzz multiplies; every value here is under 2^18"
+    )]
+    let product = v as f32 * scale;
+    crate::hbcalc::roundf_i32(product)
+}
+
+/// How many `dupe`s HarfBuzz follows (`get_glyph_blob`'s `retry_count`).
+const SBIX_DUPES: u32 = 8;
+
+/// `sbix::accelerator_t::get_png_extents`.
+fn sbix_extents(sbix: &[u8], gid: u16, num_glyphs: u16, upem: f32) -> Option<[i32; 4]> {
+    // HarfBuzz's sanitizer refuses a table of version 0, or one whose strike
+    // offsets run past its end.
+    if u16_at(sbix, 0)? == 0 {
+        return None;
+    }
+    let count = u32_at(sbix, 4)?;
+    if nth(8, count, 4)? > sbix.len() {
+        return None;
+    }
+    // A null strike offset is HarfBuzz's null strike, of no size, and so is
+    // one whose header and glyph offsets do not fit, which the sanitizer
+    // nulls.
+    let offsets = usize::from(num_glyphs).checked_add(1)?;
+    let strike = |i: usize| -> Option<(u16, usize)> {
+        let at_ = u32_at(sbix, nth(8, i, 4)?).filter(|&o| o != 0)?;
+        (nth(at(at_, 4)?, offsets, 4)? <= sbix.len()).then_some(())?;
+        Some((u16_at(sbix, at_)?, at_))
+    };
+    let mut best: Option<(u16, usize)> = None;
+    for i in 0..count {
+        if let Some((ppem, at_)) = strike(i)
+            && best.is_none_or(|(p, _)| ppem > p)
+        {
+            best = Some((ppem, at_));
+        }
+    }
+    let (ppem, strike) = best.filter(|&(ppem, _)| ppem > 0)?;
+    let room = sbix.len().checked_sub(strike)?;
+    let mut glyph = gid;
+    let mut dupes = SBIX_DUPES;
+    loop {
+        if glyph >= num_glyphs {
+            return None;
+        }
+        let slot = nth(at(strike, 4)?, usize::from(glyph), 4)?;
+        let (start, end) = (u32_at(sbix, slot)?, u32_at(sbix, at(slot, 4)?)?);
+        // Eight bytes of header, and at least one of data.
+        if end <= start.checked_add(8)? || end > room {
+            return None;
+        }
+        let record = at(strike, start)?;
+        let data = sbix.get(at(record, 8)?..at(strike, end)?)?;
+        match sbix.get(at(record, 4)?..at(record, 8)?)? {
+            b"dupe" => {
+                glyph = u16_at(data, 0)?;
+                dupes = dupes.checked_sub(1)?;
+            }
+            b"png " => {
+                let x = i32::from(i16_at(sbix, record)?);
+                let y = i32::from(i16_at(sbix, at(record, 2)?)?);
+                // The header's width and height, at 16 and 20: HarfBuzz reads
+                // data too short for the 29-byte header as its null one.
+                let (width, height) = if data.len() >= 29 {
+                    (u32_at(data, 16)?, u32_at(data, 20)?)
+                } else {
+                    (0, 0)
+                };
+                let (width, height) = (
+                    i32::try_from(width).ok().filter(|&w| w < 65_536)?,
+                    i32::try_from(height).ok().filter(|&h| h < 65_536)?,
+                );
+                let scale = upem / f32::from(ppem);
+                return Some(crate::hbcalc::scale_glyph_extents_at_upem([
+                    scaled(x, scale),
+                    scaled(height.saturating_add(y), scale),
+                    scaled(width, scale),
+                    scaled(height.saturating_neg(), scale),
+                ]));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// `CBDT::accelerator_t::get_extents`.
+fn cbdt_extents(cblc: &[u8], cbdt: &[u8], gid: u16, upem: f32) -> Option<[i32; 4]> {
+    let version = |table: &[u8]| matches!(u16_at(table, 0), Some(2 | 3));
+    if !version(cbdt) || !cblc_whole(cblc) {
+        return None;
+    }
+    let count = u32_at(cblc, 4)?;
+    let ppems = |size: usize| Some((u8_at(cblc, at(size, 44)?)?, u8_at(cblc, at(size, 45)?)?));
+    let mut best: Option<(u8, usize)> = None;
+    for i in 0..count {
+        let size = nth(8, i, 48)?;
+        let (x, y) = ppems(size)?;
+        if best.is_none_or(|(p, _)| x.max(y) > p) {
+            best = Some((x.max(y), size));
+        }
+    }
+    let (_, size) = best?;
+    let (ppem_x, ppem_y) = ppems(size)?;
+    if ppem_x == 0 || ppem_y == 0 {
+        return None;
+    }
+    // `find_table`: the first index subtable record that covers the glyph.
+    let array = u32_at(cblc, size)?;
+    let records = u32_at(cblc, at(size, 8)?)?;
+    let (record, first, last) = (0..records).find_map(|k| {
+        let record = nth(array, k, 8)?;
+        let (first, last) = (u16_at(cblc, record)?, u16_at(cblc, at(record, 2)?)?);
+        (first <= gid && gid <= last).then_some((record, first, last))
+    })?;
+    // A null subtable offset is HarfBuzz's null subtable, which answers
+    // nothing.
+    let sub = at(array, u32_at(cblc, at(record, 4)?).filter(|&o| o != 0)?)?;
+    let (index_format, image_format) = (u16_at(cblc, sub)?, u16_at(cblc, at(sub, 2)?)?);
+    let image_data = u32::try_from(u32_at(cblc, at(sub, 4)?)?).ok()?;
+    // Index formats 1 and 3: an offset for each glyph and one past the last,
+    // all of which the sanitizer sees to fit, or it nulls the subtable.
+    let stride = match index_format {
+        1 => 4,
+        3 => 2,
+        _ => return None,
+    };
+    let offsets = at(sub, 8)?;
+    let glyphs = usize::from(last.checked_sub(first)?).checked_add(1)?;
+    if nth(offsets, glyphs.checked_add(1)?, stride)? > cblc.len() {
+        return None;
+    }
+    let offset = |j: usize| -> Option<u32> {
+        let p = nth(offsets, j, stride)?;
+        if stride == 4 {
+            u32::try_from(u32_at(cblc, p)?).ok()
+        } else {
+            u16_at(cblc, p).map(u32::from)
+        }
+    };
+    let i = usize::from(gid.checked_sub(first)?);
+    let (start, end) = (offset(i)?, offset(i.checked_add(1)?)?);
+    if end <= start {
+        return None;
+    }
+    // `imageDataOffset + offset`, added in 32 bits as HarfBuzz adds them.
+    let image = usize::try_from(image_data.wrapping_add(start)).ok()?;
+    let length = usize::try_from(end.checked_sub(start)?).ok()?;
+    if image > cbdt.len() || cbdt.len().checked_sub(image)? < length {
+        return None;
+    }
+    // Small metrics and the data's length, or big metrics and it.
+    let least = match image_format {
+        17 => 9,
+        18 => 12,
+        _ => return None,
+    };
+    if length < least {
+        return None;
+    }
+    let height = i32::from(u8_at(cbdt, image)?);
+    let width = i32::from(u8_at(cbdt, at(image, 1)?)?);
+    let bearing_x = i32::from(i8_at(cbdt, at(image, 2)?)?);
+    let bearing_y = i32::from(i8_at(cbdt, at(image, 3)?)?);
+    let (x_scale, y_scale) = (upem / f32::from(ppem_x), upem / f32::from(ppem_y));
+    Some([
+        scaled(bearing_x, x_scale),
+        scaled(bearing_y, y_scale),
+        scaled(width, x_scale),
+        scaled(height.saturating_neg(), y_scale),
+    ])
+}
+
+/// Whether HarfBuzz's sanitizer takes `CBLC` whole: a major version of 2 or
+/// 3, and every strike's size record, index subtable array and records
+/// within the table, each record's first glyph no later than its last. A
+/// fault in any of those fails the table; a fault in an index subtable
+/// itself only nulls that subtable, which [`cbdt_extents`] finds on its own.
+/// Linear in the number of records, as the sanitizer is.
+fn cblc_whole(cblc: &[u8]) -> bool {
+    let check = || -> Option<()> {
+        matches!(u16_at(cblc, 0)?, 2 | 3).then_some(())?;
+        let count = u32_at(cblc, 4)?;
+        (nth(8, count, 48)? <= cblc.len()).then_some(())?;
+        for i in 0..count {
+            let size = nth(8, i, 48)?;
+            let array = u32_at(cblc, size)?;
+            let records = u32_at(cblc, at(size, 8)?)?;
+            (nth(array, records, 8)? <= cblc.len()).then_some(())?;
+            for k in 0..records {
+                let record = nth(array, k, 8)?;
+                (u16_at(cblc, record)? <= u16_at(cblc, at(record, 2)?)?).then_some(())?;
+            }
+        }
+        Some(())
+    };
+    check().is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -541,8 +804,31 @@ fn resample(source: &[Rgba], (sw, sh): (usize, usize), (dw, dh): (usize, usize))
 )]
 mod tests {
     use super::*;
+    use crate::bitmap_fixture::{BITMAP_ALONE_FACE, BITMAP_EXTENTS, BITMAP_FACE};
     use crate::sfnt::tests::{build_test_font_with, build_test_font_without};
+    use crate::var::Coords;
     use alloc::vec;
+
+    #[test]
+    fn every_glyph_measures_as_harfbuzz_measures_it() {
+        let full = Face::parse(BITMAP_FACE.to_vec()).unwrap();
+        let alone = Face::parse(BITMAP_ALONE_FACE.to_vec()).unwrap();
+        assert!(alone.has_bitmap_glyphs());
+        let default = Coords::default();
+        let mut wrong = Vec::new();
+        for &(gid, name, in_full, in_alone) in &BITMAP_EXTENTS {
+            for (face, which, expected) in [(&full, "full", in_full), (&alone, "alone", in_alone)] {
+                let got = face.glyph_extents_at(gid, &default);
+                if got != expected {
+                    wrong.push((which, name, got, expected));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "boxes unlike HarfBuzz's (face, glyph, ours, HarfBuzz's): {wrong:#?}"
+        );
+    }
 
     const RED: [u8; 4] = [255, 0, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
@@ -969,6 +1255,42 @@ mod tests {
             for gid in 0..=4 {
                 for px in [7.0, 20.0, 33.0] {
                     let _ = render(&face, gid, px);
+                }
+                let _ = face.glyph_extents_at(gid, &Coords::default());
+            }
+        }
+    }
+
+    #[test]
+    fn a_mutated_fixture_measures_something_or_nothing_but_never_panics() {
+        let mut seed = 0x5851_F42D_4C95_7F2Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let faces: [(&[u8], &[[u8; 4]]); 2] = [
+            (&BITMAP_FACE, &[*b"sbix", *b"CBLC", *b"CBDT"]),
+            (&BITMAP_ALONE_FACE, &[*b"CBLC", *b"CBDT"]),
+        ];
+        for (font, tags) in faces {
+            let ranges: Vec<_> = tags
+                .iter()
+                .map(|&tag| crate::sfnt::tests::table_range(font, tag).unwrap())
+                .collect();
+            for round in 0..900 {
+                let mut bytes = font.to_vec();
+                let range = &ranges[round % ranges.len()];
+                for _ in 0..=(next() % 4) {
+                    let i = range.start + (next() % range.len() as u64) as usize;
+                    bytes[i] = next() as u8;
+                }
+                let Ok(face) = Face::parse(bytes) else {
+                    continue;
+                };
+                for gid in 0..face.num_glyphs() {
+                    let _ = face.glyph_extents_at(gid, &Coords::default());
                 }
             }
         }

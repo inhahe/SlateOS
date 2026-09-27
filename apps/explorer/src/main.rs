@@ -884,6 +884,10 @@ pub struct ExplorerState {
     pub thumb_config: ThumbConfig,
     /// Which labels the icon view draws under each thumbnail.
     pub icon_labels: columnprefs::IconLabels,
+    /// What a paste or a drop does with a name the folder already has -- the
+    /// user's choice from the folder menu, kept in `explorer.yaml` (C-Q26).
+    /// Until 2026-09-27 it was always "keep both", for everyone.
+    pub conflict_policy: ConflictPolicy,
     /// Thumbnails generated but not yet handed to the compositor.
     ///
     /// Drained by [`Self::take_pending_uploads`]. The explorer cannot register
@@ -965,6 +969,9 @@ impl ExplorerState {
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
             icon_labels: columnprefs::icon_labels(&settingsfile::load(columnprefs::CONFIG_NAME)),
+            conflict_policy: columnprefs::conflict_policy(&settingsfile::load(
+                columnprefs::CONFIG_NAME,
+            )),
             thumb_config: {
                 // The size the user last chose, if they chose one. Applied
                 // here rather than after construction so the first listing is
@@ -2363,6 +2370,50 @@ impl ExplorerState {
         }
     }
 
+    /// What a paste does with a taken name, ticked at the one in force.
+    fn conflict_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_CONFLICT_BASE,
+            label: String::from("When the name is taken"),
+            icon: None,
+            enabled: true,
+            children: columnprefs::CONFLICT_CHOICES
+                .iter()
+                .zip(0u64..)
+                .map(|((policy, _, said), n)| {
+                    Self::label_row(
+                        MENU_CONFLICT_BASE.saturating_add(n),
+                        said,
+                        *policy == self.conflict_policy,
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Choose what a paste does with a taken name, and remember it. Answers
+    /// whether the id was one of these.
+    fn conflict_action(&mut self, id: u64) -> bool {
+        let Some(chosen) = id
+            .checked_sub(MENU_CONFLICT_BASE)
+            .and_then(|n| usize::try_from(n).ok())
+            .and_then(|n| columnprefs::CONFLICT_CHOICES.get(n))
+        else {
+            return false;
+        };
+        let (policy, _, said) = *chosen;
+        self.conflict_policy = policy;
+        columnprefs::set_conflict_policy(&mut self.column_prefs, policy);
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => format!("A taken name now: {}", said.to_lowercase()),
+                Err(e) => {
+                    format!("The choice holds until the window closes -- it was not saved: {e}")
+                }
+            };
+        true
+    }
+
     /// One tickable label row.
     fn label_row(id: u64, label: &str, on: bool) -> MenuItem {
         MenuItem::Action {
@@ -2678,6 +2729,7 @@ impl ExplorerState {
             // next.
             Self::menu_action(MENU_PASTE, "Paste", self.clipboard.is_some()),
             Self::menu_action(MENU_REFRESH, "Refresh", true),
+            self.conflict_menu(),
         ];
         // Only where thumbnails are drawn. In Details and List the sizes
         // change nothing visible, and a submenu that silently does nothing is
@@ -2753,7 +2805,11 @@ impl ExplorerState {
         // The column picker first: its per-column ids are allocated above
         // every action below, so asking it first costs one comparison and
         // keeps the two id spaces from having to be interleaved here.
-        if self.column_menu_action(id) || self.thumb_size_action(id) || self.icon_label_action(id) {
+        if self.column_menu_action(id)
+            || self.thumb_size_action(id)
+            || self.icon_label_action(id)
+            || self.conflict_action(id)
+        {
             return;
         }
         match id {
@@ -2929,20 +2985,21 @@ impl ExplorerState {
             ClipboardOp::Cut(paths) => (paths.clone(), FileOperation::Move),
         };
 
-        // Rename on conflict: a paste must never silently destroy a file that
-        // is already in the destination. The user can still overwrite by
-        // deleting the old file first, which is an explicit act.
+        // What a taken name gets is the user's choice (the folder menu's
+        // "When the name is taken"): keep both unless they chose otherwise, so
+        // a paste never destroys a file in the destination that nobody said
+        // it could.
         let plan = match operation {
             FileOperation::Move => OperationPlan::plan_move(
                 &paths,
                 &self.current_path,
-                ConflictPolicy::Rename,
+                self.conflict_policy,
                 ErrorPolicy::SkipAndContinue,
             ),
             _ => OperationPlan::plan_copy(
                 &paths,
                 &self.current_path,
-                ConflictPolicy::Rename,
+                self.conflict_policy,
                 ErrorPolicy::SkipAndContinue,
             ),
         };
@@ -3370,7 +3427,7 @@ impl ExplorerState {
                 OperationPlan::plan_move(
                     &result.sources,
                     &result.target_dir,
-                    ConflictPolicy::Rename,
+                    self.conflict_policy,
                     ErrorPolicy::SkipAndContinue,
                 ),
                 "Moved",
@@ -3379,7 +3436,7 @@ impl ExplorerState {
                 OperationPlan::plan_copy(
                     &result.sources,
                     &result.target_dir,
-                    ConflictPolicy::Rename,
+                    self.conflict_policy,
                     ErrorPolicy::SkipAndContinue,
                 ),
                 "Copied",
@@ -4903,6 +4960,8 @@ const MENU_COLUMN_BASE: u64 = 1000;
 const MENU_THUMB_SIZE_BASE: u64 = 2000;
 /// One id per icon-view label toggle, clear of the sizes above.
 const MENU_ICON_LABEL_BASE: u64 = 3000;
+/// One id per choice of what a paste does with a taken name.
+const MENU_CONFLICT_BASE: u64 = 4000;
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -7223,19 +7282,21 @@ mod tests {
         fs::write(root.join("a.txt"), "x").unwrap();
         let mut state = state_at(&root);
 
+        // The size submenu by its id: the folder menu has other submenus
+        // (what a paste does with a taken name) in every view.
+        let is_sizes =
+            |i: &MenuItem| matches!(i, MenuItem::Submenu { id, .. } if *id == MENU_THUMB_SIZE_BASE);
         state.view_mode = ViewMode::Details;
         let details = state.folder_menu_items();
         assert!(
-            !details
-                .iter()
-                .any(|i| matches!(i, MenuItem::Submenu { .. })),
+            !details.iter().any(is_sizes),
             "the size submenu was offered in a view that draws no thumbnails"
         );
 
         state.view_mode = ViewMode::Icons;
         let icons = state.folder_menu_items();
         assert!(
-            icons.iter().any(|i| matches!(i, MenuItem::Submenu { .. })),
+            icons.iter().any(is_sizes),
             "the size submenu was missing from the icon view"
         );
     }
@@ -12107,5 +12168,72 @@ mod tests {
         state.leave_search();
         assert_eq!(state.current_path, before);
         assert!(state.search_showing.is_none());
+    }
+
+    // ---- what a paste does with a taken name (2026-09-27, C-Q26) ----
+
+    #[test]
+    fn a_taken_name_is_kept_both_until_the_user_chooses_otherwise_and_the_choice_is_remembered() {
+        settingsfile::testing::with_scratch_config("explorer-conflict", |_root| {
+            let scratch = temp_dir("conflict_choice");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+            let mut state = state_at(&root);
+            assert_eq!(state.conflict_policy, ConflictPolicy::Rename);
+            // "Skip it" is the second row.
+            state.activate_menu_item(MENU_CONFLICT_BASE + 1);
+            assert_eq!(state.conflict_policy, ConflictPolicy::Skip);
+            let again = state_at(&root);
+            assert_eq!(
+                again.conflict_policy,
+                ConflictPolicy::Skip,
+                "the choice did not survive"
+            );
+        });
+    }
+
+    #[test]
+    fn a_paste_does_what_was_chosen_with_a_taken_name() {
+        let scratch = temp_dir("conflict_paste");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 1);
+        write(&root.join("dst").join("f0.txt"), "already here");
+        state.conflict_policy = ConflictPolicy::Skip;
+        state.paste();
+        settle(&mut state);
+        assert_eq!(
+            fs::read_to_string(root.join("dst").join("f0.txt")).unwrap(),
+            "already here",
+            "Skip replaced the file"
+        );
+        assert!(
+            !root.join("dst").join("f0 (2).txt").exists(),
+            "Skip kept both"
+        );
+
+        let mut state = paste_of(&root.join("again"), 1);
+        write(
+            &root.join("again").join("dst").join("f0.txt"),
+            "already here",
+        );
+        state.conflict_policy = ConflictPolicy::Rename;
+        state.paste();
+        settle(&mut state);
+        assert!(
+            root.join("again").join("dst").join("f0 (2).txt").exists(),
+            "Keep both did not keep both"
+        );
+    }
+
+    #[test]
+    fn the_choice_is_offered_on_the_folder_menu() {
+        let scratch = temp_dir("conflict_menu");
+        let root = scratch.dir().to_path_buf();
+        let state = state_at(&root);
+        let offered = state
+            .folder_menu_items()
+            .iter()
+            .any(|item| matches!(item, MenuItem::Submenu { id, .. } if *id == MENU_CONFLICT_BASE));
+        assert!(offered, "the folder menu does not offer the choice");
     }
 }

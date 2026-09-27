@@ -687,6 +687,11 @@ pub struct SettingsState {
     /// Held rather than re-read while drawing, like the two lists above:
     /// `build_page` runs on every repaint and again for every hit test.
     lock_after_minutes: u32,
+    /// Whether the lock screen's clock shows seconds, and the date: the lock
+    /// screen program's own settings (`lockscreen.yaml`), which until
+    /// 2026-09-27 were compiled in and the same for everyone (C-Q26).
+    lock_clock_seconds: bool,
+    lock_clock_date: bool,
     /// `session.yaml` was rewritten and the shell has not been told.
     ///
     /// Without the telling, a delay the user just chose takes effect at the
@@ -901,6 +906,7 @@ impl SettingsState {
     /// I/O, and so out of [`new`](Self::new) with the rest of it.
     pub fn load_lock_delay(&mut self) {
         self.lock_after_minutes = lockscreen::stored_minutes();
+        (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
     }
 
     /// Enumerate the font families installed on this machine.
@@ -1395,6 +1401,8 @@ impl SettingsState {
             font_families: Vec::new(),
             mono_families: Vec::new(),
             lock_after_minutes: 0,
+            lock_clock_seconds: false,
+            lock_clock_date: true,
             session_dirty: false,
         }
     }
@@ -2095,6 +2103,10 @@ enum ToggleId {
     MouseKeys,
     ReduceAnimations,
     ReduceTransparency,
+    /// Whether the lock screen's clock shows seconds (`lockscreen.yaml`).
+    LockClockSeconds,
+    /// Whether it shows the date under the clock.
+    LockClockDate,
     /// Slide the taskbar out of the way when it is not in use.
     ///
     /// Unlike its neighbours here, the field behind this one lives in the
@@ -4676,6 +4688,18 @@ impl SettingsState {
             );
         }
 
+        s.section("Lock Screen Clock");
+        s.toggle_row(
+            "Show seconds",
+            ToggleId::LockClockSeconds,
+            self.lock_clock_seconds,
+        );
+        s.toggle_row(
+            "Show the date",
+            ToggleId::LockClockDate,
+            self.lock_clock_date,
+        );
+
         s.gap();
         // Said here because the alternative is a user setting a delay, walking
         // away, and finding the screen open. `design-decisions.md` 818 is the
@@ -5823,6 +5847,14 @@ impl SettingsState {
                 if let Some(flag) = self.toggle_mut(id) {
                     *flag = !*flag;
                 }
+                // The lock screen's clock is its own file, written as it is
+                // changed: nothing else on this page would carry it there.
+                if matches!(id, ToggleId::LockClockSeconds | ToggleId::LockClockDate)
+                    && let Err(err) =
+                        lockscreen::store_clock(self.lock_clock_seconds, self.lock_clock_date)
+                {
+                    eprintln!("settings: could not save lockscreen.yaml: {err}");
+                }
             }
             RowHit::Pill(PillId::QuietDays, idx) => {
                 // Toggled, not selected: the days are a set, and a user who
@@ -6043,6 +6075,8 @@ impl SettingsState {
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
             ToggleId::TaskbarAutohide => &mut self.appearance.settings.taskbar_autohide,
+            ToggleId::LockClockSeconds => &mut self.lock_clock_seconds,
+            ToggleId::LockClockDate => &mut self.lock_clock_date,
         })
     }
 

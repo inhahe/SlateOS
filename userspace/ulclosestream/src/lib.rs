@@ -168,6 +168,18 @@ impl Stdout {
         }
     }
 
+    /// `ferror(stdout)`, with the failure that set it: a program that checks
+    /// its own stream after a `fflush` (GNU AutoGen's libopts, after printing
+    /// usage) reports that write's `errno`. A reader that went away is not a
+    /// failure here either -- the tree never reports `EPIPE` (see the module
+    /// docs) -- so it reads as `None`.
+    #[must_use]
+    pub fn error(&self) -> Option<&io::Error> {
+        self.failed
+            .as_ref()
+            .filter(|e| e.kind() != io::ErrorKind::BrokenPipe)
+    }
+
     /// `exit` in a program that never registers `close_stdout` (`lsirq`):
     /// glibc's own flush of what is held, whose failure nobody hears of --
     /// no message, and the status is the program's.
@@ -256,11 +268,18 @@ fn is_ebadf(e: &io::Error) -> bool {
 
 /// `_IO_file_doallocate`: a terminal is line buffered; anything else gets a
 /// buffer [`buffer_size`] bytes long.
+///
+/// In glibc's order: `fstat` first, and only a character device is then
+/// asked whether it is a terminal. The order is visible to a program that
+/// later prints `errno` without a failure of its own -- sharutils' uudecode
+/// does, for a base64 file cut short -- because `isatty` on a file or a pipe
+/// fails with `ENOTTY` and leaves it behind, and glibc never asks those.
 fn allocate() -> Buffering {
-    if io::stdout().is_terminal() {
+    let stat = sys::char_device_and_block_size(sys::STDOUT);
+    if matches!(stat, Some((true, _))) && io::stdout().is_terminal() {
         Buffering::Line
     } else {
-        Buffering::Full(buffer_size(sys::block_size(sys::STDOUT)))
+        Buffering::Full(buffer_size(stat.map(|(_, block)| block)))
     }
 }
 
@@ -371,18 +390,21 @@ mod sys {
         Ok(())
     }
 
-    /// `fstat(fd).st_blksize`, or `None` when `fstat` fails.
-    pub fn block_size(fd: c_int) -> Option<u64> {
+    /// `fstat(fd)`: whether it is a character device, and `st_blksize`;
+    /// `None` when `fstat` fails.
+    pub fn char_device_and_block_size(fd: c_int) -> Option<(bool, u64)> {
         use std::mem::ManuallyDrop;
         use std::os::fd::FromRawFd;
-        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
         // SAFETY: `fd` is 1 or 2, never -1 (which `from_raw_fd` refuses), and
         // `File::metadata` on it is `fstat(2)`, defined for any descriptor
         // number: a closed one reports EBADF. `ManuallyDrop` keeps the
         // borrowed descriptor from being closed here.
         let file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
-        file.metadata().ok().map(|m| m.blksize())
+        file.metadata()
+            .ok()
+            .map(|m| (m.file_type().is_char_device(), m.blksize()))
     }
 }
 
@@ -414,13 +436,16 @@ mod sys {
         Ok(())
     }
 
-    /// The host's descriptors have no `st_blksize`; a pipe's is assumed.
+    /// The host's descriptors have no `st_blksize` and no device type: a
+    /// pipe's size is assumed, and a console counts as the character device
+    /// a terminal would be.
     #[allow(
         clippy::unnecessary_wraps,
         reason = "the signature of the unix function this stands in for"
     )]
-    pub fn block_size(_fd: i32) -> Option<u64> {
-        Some(4096)
+    pub fn char_device_and_block_size(_fd: i32) -> Option<(bool, u64)> {
+        use std::io::IsTerminal;
+        Some((io::stdout().is_terminal(), 4096))
     }
 }
 

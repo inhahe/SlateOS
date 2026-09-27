@@ -110,7 +110,6 @@ userspace/losetup  # bare deny(clippy::all)
 userspace/lp
 userspace/lsblk
 userspace/lsmod
-userspace/lsns  # bare deny(clippy::all)
 userspace/lsof  # bare deny(clippy::all)
 userspace/lspci
 userspace/lsusb

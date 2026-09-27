@@ -1834,8 +1834,14 @@ dependencies = [
 name = "lsns"
 version = "0.1.0"
 dependencies = [
- "procinfo",
+ "charwidth",
+ "getoptlong",
  "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulmount",
+ "ulstrutils",
 ]
 
 [[package]]

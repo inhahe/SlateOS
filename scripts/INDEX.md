@@ -234,6 +234,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lscpu-diff.sh` | Differential test: our `lscpu` against util-linux 2.39.3's. |
 | `scripts/lsirq-diff.sh` | Differential test: our `lsirq` against util-linux 2.39.3's. |
 | `scripts/lsmem-diff.sh` | Differential test: our `lsmem` against util-linux 2.39.3's. |
+| `scripts/lsns-diff.sh` | Differential test: our `lsns` against util-linux 2.39.3's. |
 | `scripts/make-spike/run.sh` | Cross-compile upstream GNU make and link it against SlateOS's own libc.a. |
 | `scripts/merge-readiness.py` | Say whether incoming `origin/main` commits land in the part of the tree your |
 | `scripts/mknod-diff.sh` | mknod-diff.sh — compare our `mknod` against GNU's, inside WSL. |
@@ -441,4 +442,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_431 scripts._
+_432 scripts._

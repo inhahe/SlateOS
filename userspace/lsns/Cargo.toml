@@ -2,15 +2,27 @@
 name = "lsns"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS lsns utility"
-[dependencies]
-# `/proc/<pid>/comm` is read as BYTES here (`trim_comm` + `display_bytes`).
-# `read_to_string` fails on a name that is not UTF-8, and that failure was
-# landing on the same placeholder as a process that had exited. Zero
-# dependencies of its own, so it is safe under 768.
-procinfo = { path = "../../procinfo" }
+description = "lsns, util-linux 2.39.3's, ported: namespaces found through /proc and nsfs mounts, printed through smartcols"
 
-# An option value that is not valid Unicode still has to appear in the
-# diagnostic that refuses it, as the bytes the user typed. Pure formatting,
-# no I/O of its own, so 768-exempt for the same reason `procinfo` is.
+[lints]
+workspace = true
+
+[dependencies]
+# glibc's getopt_long, with util-linux's mutually exclusive options.
+getoptlong = { path = "../getoptlong" }
+# argv and paths are bytes; a name in a diagnostic is escaped; `iswprint`
+# for a user's name.
 quoting = { path = "../quoting" }
+# `wcwidth`, for whether a user's name is shown or its number.
+charwidth = { path = "../charwidth" }
+# libsmartcols: the table, the process and namespace trees, and the
+# newline-wrapped NSFS cells.
+smartcols = { path = "../smartcols" }
+# libmount's reading of /proc/self/mountinfo, for the nsfs mounts.
+ulmount = { path = "../ulmount" }
+# string_add_to_idarray for -o, strtos32 for -p, strtou64 for the operand.
+ulstrutils = { path = "../ulstrutils" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor lsns was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }

@@ -171155,11 +171155,16 @@ util-linux's own test tables, tables of its own and WSL's, including
 never finishes -- a port that needed libmount's table code and libblkid's
 device cache, as `userspace/ulmount`, and newline-wrapped cells, JSON arrays
 and range printing added to the crate; `mountpoint`, which the old program
-doubled as, is its own port now, `scripts/mountpoint-diff.sh`); the others
-still do not use it.
+doubled as, is its own port now, `scripts/mountpoint-diff.sh`), and so does
+`lsns` (`scripts/lsns-diff.sh`: 483 cases, run inside a user, PID, network
+and mount namespace the harness makes for itself -- every type of namespace,
+user and PID namespaces nested three deep, persistent ones, assigned network
+IDs -- plus 4 where only upstream crashes, dereferencing the missing process
+of a persistent namespace whose owner `-t` filtered out); the others still do
+not use it.
 
 **Where:** `userspace/lsblk`,
-`lsns`, `losetup` (`--list`), `swapon` (`--show`), `rfkill`,
+`losetup` (`--list`), `swapon` (`--show`), `rfkill`,
 `fdisk` (`-l`'s partition table). `rfkill`'s reference, like `lsirq`'s,
 is not installed in WSL; `scripts/util-linux-extra.sh` unpacks both without
 root.
@@ -171170,7 +171175,7 @@ the table handed to the crate -- with a differential harness against WSL's
 util-linux that includes a pty at several widths. Parts of libsmartcols not
 yet ported (the crate's module docs list them: groups, sorting, custom wrap
 functions other than the newline one, colours) are added when a program
-needs them; `lsblk` and `lsns` need only trees, which are ported. Each of these is
+needs them; `lsblk` needs only trees, which are ported. Each of these is
 also on TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE's list, and the two
 are one job per program.
 

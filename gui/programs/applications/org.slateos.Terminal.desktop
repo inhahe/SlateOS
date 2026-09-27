@@ -1,0 +1,15 @@
+# SlateOS's own Terminal, as a desktop entry (gui/programs, design-decisions.md 1425).
+# Built into the programs library; the same file installs as
+# /usr/share/applications/org.slateos.Terminal.desktop. What each field carries,
+# and where it came from, is gui/programs/INVENTORY.md.
+
+[Desktop Entry]
+Type=Application
+Name=Terminal
+GenericName=Terminal Emulator
+Comment=Command-line terminal emulator
+Exec=/usr/bin/terminal
+TryExec=/usr/bin/terminal
+Icon=utilities-terminal
+Categories=System;TerminalEmulator;
+Keywords=shell;console;command;bash;cli;

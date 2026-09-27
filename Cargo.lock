@@ -2509,6 +2509,14 @@ name = "procinfo"
 version = "0.1.0"
 
 [[package]]
+name = "programs"
+version = "0.1.0"
+dependencies = [
+ "desktopentry",
+ "guitk",
+]
+
+[[package]]
 name = "pstree"
 version = "0.1.0"
 dependencies = [

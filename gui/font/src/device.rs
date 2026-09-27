@@ -539,15 +539,16 @@ mod tests {
 
     #[test]
     fn a_variation_index_rounds_the_way_the_other_stores_round() {
-        // 41 at half the axis is 20.5, which goes to 21 — away from zero, not
-        // to the even neighbour. Shared with HVAR and MVAR so that three
-        // tables reading one store cannot disagree about a half unit.
+        // 41 at half the axis is 20.5, which goes to 21, and -41 is -20.5,
+        // which goes to -20: HarfBuzz's `roundf` sends a half up on both
+        // sides of zero (`crate::hbcalc`). Shared with HVAR and MVAR so that
+        // three tables reading one store cannot disagree about a half unit.
         let (data, store) = with_store(&variation_index(0, 0), &[41]);
         let c = Corrections::varying(Ppem::NONE, Some(&store), &[HALF]);
         assert_eq!(c.delta(&data, 0, 4), 21);
         let (data, store) = with_store(&variation_index(0, 0), &[-41]);
         let c = Corrections::varying(Ppem::NONE, Some(&store), &[HALF]);
-        assert_eq!(c.delta(&data, 0, 4), -21);
+        assert_eq!(c.delta(&data, 0, 4), -20);
     }
 
     #[test]

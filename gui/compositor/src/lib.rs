@@ -4037,8 +4037,17 @@ impl TranslateStack {
 // ---------------------------------------------------------------------------
 
 /// How glyphs are rasterized, from the appearance settings: `smoothing`, the
-/// subpixel order and `hinting`.
-fn font_rendering(settings: &AppearanceSettings) -> osfont::raster::Rendering {
+/// subpixel order and `hinting` -- and, from the theme `palette` resolved from
+/// them, which of a colour font's palettes its emoji are painted with: the
+/// one the font marks for a light background on a light theme, for a dark one
+/// on a dark theme (design-decisions §1327). Taken resolved rather than
+/// resolved here, because a palette is resolved once per change of settings
+/// (`the_palette_is_resolved_when_it_changes_not_per_frame`).
+fn font_rendering(
+    settings: &AppearanceSettings,
+    palette: &appearance::Palette,
+) -> osfont::raster::Rendering {
+    use osfont::colr::ColourPalette;
     use osfont::raster::Subpixel;
     osfont::raster::Rendering {
         smoothing: settings.fonts.smoothing,
@@ -4050,6 +4059,11 @@ fn font_rendering(settings: &AppearanceSettings) -> osfont::raster::Rendering {
             appearance::SubpixelMode::VBgr => Subpixel::VBgr,
         },
         hinting: settings.fonts.hinting,
+        palette: if palette.light {
+            ColourPalette::Light
+        } else {
+            ColourPalette::Dark
+        },
     }
 }
 
@@ -5768,6 +5782,8 @@ fn truncate_glyph(glyph: &str) -> String {
 impl Compositor {
     /// Create a new compositor with the given display dimensions.
     pub fn new(width: u32, height: u32, refresh_rate: u32) -> CompositorResult<Self> {
+        // The defaults' palette, resolved once for the fonts and the field.
+        let palette = appearance::Palette::from_settings(&AppearanceSettings::default());
         let backend = RenderBackend::software(width, height)?;
         let display_manager = DisplayManager::new(width, height, refresh_rate);
         let frame_interval = frame_interval_for(refresh_rate);
@@ -5800,11 +5816,11 @@ impl Compositor {
                 let mut engine = RenderEngine::new();
                 engine
                     .fonts
-                    .set_rendering(font_rendering(&AppearanceSettings::default()));
+                    .set_rendering(font_rendering(&AppearanceSettings::default(), &palette));
                 engine
             },
             theme: DecorationTheme::default(),
-            palette: appearance::Palette::from_settings(&AppearanceSettings::default()),
+            palette,
             // The defaults, not the user's file: a constructor that read
             // `$HOME` would make every test of this crate depend on the machine
             // running it. `main` loads the file and calls `set_appearance`.
@@ -5899,10 +5915,10 @@ impl Compositor {
         // One resolve, then everything derived from it. Two lines that each
         // resolved their own palette is what the resolution counter caught the
         // first time it was asserted on.
+        self.palette = appearance::Palette::from_settings(&self.appearance);
         self.render_engine
             .fonts
-            .set_rendering(font_rendering(&self.appearance));
-        self.palette = appearance::Palette::from_settings(&self.appearance);
+            .set_rendering(font_rendering(&self.appearance, &self.palette));
         self.theme = DecorationTheme::from_settings_with(&self.appearance, &self.palette);
         self.full_recomposite = true;
     }
@@ -11979,12 +11995,15 @@ mod tests {
         // and `set_appearance` with those same defaults changes nothing -- so
         // the constructor is what must have applied them.
         let mut comp = Compositor::new(640, 480, 60).expect("compositor");
+        // The default theme is dark, so colour fonts paint from a palette
+        // they mark for dark backgrounds.
         assert_eq!(
             comp.render_engine.fonts.rendering(),
             Rendering {
                 smoothing: true,
                 subpixel: Subpixel::Rgb,
                 hinting: true,
+                palette: osfont::colr::ColourPalette::Dark,
             }
         );
         let mut settings = AppearanceSettings::default();
@@ -12003,7 +12022,28 @@ mod tests {
                 smoothing: false,
                 subpixel: Subpixel::None,
                 hinting: true,
+                palette: osfont::colr::ColourPalette::Dark,
             }
+        );
+    }
+
+    #[test]
+    fn a_light_theme_paints_colour_fonts_from_their_light_palette() {
+        use osfont::colr::ColourPalette;
+        let mut comp = Compositor::new(640, 480, 60).expect("compositor");
+        let themed = |theme_mode| AppearanceSettings {
+            theme_mode,
+            ..AppearanceSettings::default()
+        };
+        comp.set_appearance(themed(appearance::ThemeMode::Light));
+        assert_eq!(
+            comp.render_engine.fonts.rendering().palette,
+            ColourPalette::Light
+        );
+        comp.set_appearance(themed(appearance::ThemeMode::Dark));
+        assert_eq!(
+            comp.render_engine.fonts.rendering().palette,
+            ColourPalette::Dark
         );
     }
 

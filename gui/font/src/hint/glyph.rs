@@ -1,5 +1,5 @@
 //! One glyph, analysed for hinting and moved to follow its hinted edges:
-//! FreeType's `afhints.c`, for the vertical dimension only.
+//! FreeType's `afhints.c`.
 //!
 //! [`Hints::load`] is `af_glyph_hints_reload`: it scales the glyph's points,
 //! links each contour into a ring and classifies every point by the
@@ -8,13 +8,15 @@
 //! controls, points partway along a run, the middle of a flat corner) and
 //! so will only ever be interpolated. [`Hints::align_edge_points`],
 //! [`Hints::align_strong_points`] and [`Hints::align_weak_points`] are the
-//! three passes that then move every point once the Latin module has placed
+//! three passes that then move every point once a writing system has placed
 //! the edges: points on an edge go with it, other strong points are
 //! interpolated between the edges either side, and weak points between their
 //! touched neighbours along the contour, as TrueType's `IUP` does.
 //!
-//! Horizontal positions are never touched -- light hinting is vertical only
-//! -- so nothing horizontal is kept but the font-unit `x` the analysis reads.
+//! Each [`Dim`] has its own segments and edges ([`Axis`]) and its own passes,
+//! as FreeType's two `AF_AxisHintsRec`s do. The Latin writing system in light
+//! mode hints only [`Dim::Vert`], leaving every `x` where the size scales it;
+//! the CJK one hints both.
 //!
 //! Indices, not pointers, link everything: a point's ring neighbours, a
 //! segment's first and last point, an edge's segments. Every access goes
@@ -54,6 +56,8 @@ const FLAG_CONIC: u16 = 1 << 0;
 const FLAG_CUBIC: u16 = 1 << 1;
 /// Either kind of control point (`AF_FLAG_CONTROL`).
 pub(super) const FLAG_CONTROL: u16 = FLAG_CONIC | FLAG_CUBIC;
+/// Moved horizontally already (`AF_FLAG_TOUCH_X`).
+const FLAG_TOUCH_X: u16 = 1 << 2;
 /// Moved vertically already (`AF_FLAG_TOUCH_Y`).
 const FLAG_TOUCH_Y: u16 = 1 << 3;
 /// Only ever interpolated (`AF_FLAG_WEAK_INTERPOLATION`).
@@ -72,6 +76,27 @@ pub(super) const EDGE_NEUTRAL: u8 = 1 << 3;
 /// segments; a glyph of this many points is detail no pixel grid resolves.
 const MAX_POINTS: usize = 1 << 14;
 
+/// Which of a glyph's two dimensions (`AF_Dimension`): [`Dim::Horz`] is
+/// the `x` coordinate -- vertical stems, whose edges stand upright -- and
+/// [`Dim::Vert`] the `y`, horizontal stems and the blue zones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Dim {
+    /// `x` (`AF_DIMENSION_HORZ`).
+    Horz,
+    /// `y` (`AF_DIMENSION_VERT`).
+    Vert,
+}
+
+impl Dim {
+    /// The flag a point is given once moved in this dimension.
+    const fn touch(self) -> u16 {
+        match self {
+            Self::Horz => FLAG_TOUCH_X,
+            Self::Vert => FLAG_TOUCH_Y,
+        }
+    }
+}
+
 /// One point of the glyph (`AF_PointRec`).
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Point {
@@ -81,9 +106,11 @@ pub(super) struct Point {
     /// Font units.
     pub(super) fx: i64,
     pub(super) fy: i64,
-    /// `fy` scaled, 26.6.
+    /// `fx` and `fy` scaled, 26.6.
+    pub(super) ox: i64,
     pub(super) oy: i64,
-    /// The hinted vertical position, 26.6.
+    /// The hinted position, 26.6.
+    pub(super) x: i64,
     pub(super) y: i64,
     /// Scratch, as FreeType uses it: a segment's position and coordinate
     /// while segments are found, the current and original position during
@@ -100,9 +127,45 @@ impl Point {
     pub(super) const fn is_control(&self) -> bool {
         self.flags & FLAG_CONTROL != 0
     }
+
+    /// The coordinate `dim` measures, in font units.
+    pub(super) const fn f(&self, dim: Dim) -> i64 {
+        match dim {
+            Dim::Horz => self.fx,
+            Dim::Vert => self.fy,
+        }
+    }
+
+    /// That coordinate scaled, 26.6.
+    pub(super) const fn o(&self, dim: Dim) -> i64 {
+        match dim {
+            Dim::Horz => self.ox,
+            Dim::Vert => self.oy,
+        }
+    }
+
+    /// That coordinate hinted, 26.6.
+    pub(super) const fn at(&self, dim: Dim) -> i64 {
+        match dim {
+            Dim::Horz => self.x,
+            Dim::Vert => self.y,
+        }
+    }
+
+    /// Move the point to `pos` in `dim`, and mark it moved there.
+    pub(super) const fn place(&mut self, dim: Dim, pos: i64) {
+        match dim {
+            Dim::Horz => self.x = pos,
+            Dim::Vert => self.y = pos,
+        }
+        self.flags |= dim.touch();
+    }
 }
 
-/// A run of points heading the same horizontal way (`AF_SegmentRec`).
+/// A run of points heading one way along a dimension (`AF_SegmentRec`):
+/// for [`Dim::Vert`], left or right, and the rest of these notes are written
+/// for that dimension; for [`Dim::Horz`], up or down, with `x` and `y`
+/// exchanged.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Segment {
     pub(super) flags: u8,
@@ -122,6 +185,10 @@ pub(super) struct Segment {
     pub(super) link: Option<usize>,
     pub(super) serif: Option<usize>,
     pub(super) score: i64,
+    /// How far this segment and its `link` overlap along the run, font
+    /// units: the CJK system's second test of a pairing, which the Latin
+    /// one leaves at zero.
+    pub(super) len: i64,
     /// The run's first and last point.
     pub(super) first: usize,
     pub(super) last: usize,
@@ -149,21 +216,38 @@ pub(super) struct Edge {
     pub(super) last: usize,
 }
 
-/// A glyph being hinted (`AF_GlyphHintsRec`), vertical axis only.
+/// One dimension's analysis (`AF_AxisHintsRec`).
+#[derive(Clone, Debug, Default)]
+pub(super) struct Axis {
+    /// The dimension's scale, 16.16 -- for [`Dim::Vert`] the size's after
+    /// the x-height nudge.
+    pub(super) scale: i64,
+    /// Which way a bottom (or, horizontally, a left) edge runs: for
+    /// [`Dim::Vert`] left in a TrueType outline (outer contours clockwise)
+    /// and right in a PostScript one, for [`Dim::Horz`] up and down.
+    pub(super) major_dir: i8,
+    pub(super) segments: Vec<Segment>,
+    pub(super) edges: Vec<Edge>,
+}
+
+/// A glyph's points and one dimension's analysis, borrowed apart: see
+/// [`Hints::view`].
+pub(super) struct View<'a> {
+    pub(super) points: &'a mut Vec<Point>,
+    pub(super) contours: &'a [usize],
+    pub(super) units_per_em: i64,
+    pub(super) axis: &'a mut Axis,
+}
+
+/// A glyph being hinted (`AF_GlyphHintsRec`).
 #[derive(Clone, Debug)]
 pub(super) struct Hints {
     pub(super) points: Vec<Point>,
     /// Each contour's first point; a contour is contiguous in `points`.
     pub(super) contours: Vec<usize>,
-    /// The vertical scale, 16.16: the size's, after the x-height nudge.
-    pub(super) y_scale: i64,
-    /// Which horizontal direction a bottom edge runs in -- left for a
-    /// TrueType outline (outer contours clockwise), right for a PostScript
-    /// one: the vertical axis's `major_dir`.
-    pub(super) major_dir: i8,
     pub(super) units_per_em: i64,
-    pub(super) segments: Vec<Segment>,
-    pub(super) edges: Vec<Edge>,
+    /// [`Dim::Horz`]'s analysis, then [`Dim::Vert`]'s.
+    axes: [Axis; 2],
 }
 
 /// How a coordinate becomes whole font units: however FreeType's loader for
@@ -203,6 +287,35 @@ pub(super) fn font_unit(v: f64, units: Units) -> Option<i64> {
         }
     };
     (r.is_finite() && (-32768.0..=32767.0).contains(&r)).then_some(r as i64)
+}
+
+/// Where a new edge at `fpos` goes in a dimension's sorted list: after every
+/// edge below it (above, hinting top down), and, at an equal position, after
+/// the edges of the minor direction but before the major's:
+/// `af_axis_hints_new_edge`.
+pub(super) fn insertion_point(
+    edges: &[Edge],
+    fpos: i64,
+    dir: i8,
+    major_dir: i8,
+    top_to_bottom: bool,
+) -> usize {
+    let mut at = edges.len();
+    while at > 0 {
+        let Some(prev) = edges.get(at - 1) else {
+            break;
+        };
+        let before = if top_to_bottom {
+            prev.fpos > fpos
+        } else {
+            prev.fpos < fpos
+        };
+        if before || (prev.fpos == fpos && dir == major_dir) {
+            break;
+        }
+        at -= 1;
+    }
+    at
 }
 
 /// The direction of a vector, if it is within about four degrees of one of
@@ -262,7 +375,7 @@ fn is_postscript(points: &[Point], contours: &[usize]) -> bool {
 }
 
 impl Hints {
-    /// Load `outline` for vertical hinting at `y_scale` (16.16):
+    /// Load `outline` for hinting at `x_scale` and `y_scale` (16.16):
     /// `af_glyph_hints_reload`.
     ///
     /// `None` for a glyph the hinter leaves alone: no points, more than
@@ -272,6 +385,7 @@ impl Hints {
     pub(super) fn load(
         outline: &TaggedOutline,
         units: Units,
+        x_scale: i64,
         y_scale: i64,
         units_per_em: i64,
     ) -> Option<Self> {
@@ -279,13 +393,16 @@ impl Hints {
         if n == 0 || n > MAX_POINTS || outline.tags.len() != n {
             return None;
         }
-        if !(1..=MAX_SCALE).contains(&y_scale) || !(16..=16384).contains(&units_per_em) {
+        if !(1..=MAX_SCALE).contains(&x_scale)
+            || !(1..=MAX_SCALE).contains(&y_scale)
+            || !(16..=16384).contains(&units_per_em)
+        {
             return None;
         }
         let mut points = Vec::with_capacity(n);
         for (p, tag) in outline.points.iter().zip(&outline.tags) {
             let (fx, fy) = (font_unit(p.x, units)?, font_unit(p.y, units)?);
-            let oy = mul_fix(fy, y_scale);
+            let (ox, oy) = (mul_fix(fx, x_scale), mul_fix(fy, y_scale));
             points.push(Point {
                 flags: match tag {
                     Tag::On => 0,
@@ -296,7 +413,9 @@ impl Hints {
                 out_dir: DIR_NONE,
                 fx,
                 fy,
+                ox,
                 oy,
+                x: ox,
                 y: oy,
                 ..Point::default()
             });
@@ -320,22 +439,48 @@ impl Hints {
             return None;
         }
 
-        let major_dir = if is_postscript(&points, &contours) {
-            DIR_RIGHT
+        let (horz, vert) = if is_postscript(&points, &contours) {
+            (DIR_DOWN, DIR_RIGHT)
         } else {
-            DIR_LEFT
+            (DIR_UP, DIR_LEFT)
+        };
+        let axis = |scale, major_dir| Axis {
+            scale,
+            major_dir,
+            ..Axis::default()
         };
         let mut hints = Self {
             points,
             contours,
-            y_scale,
-            major_dir,
             units_per_em,
-            segments: Vec::new(),
-            edges: Vec::new(),
+            axes: [axis(x_scale, horz), axis(y_scale, vert)],
         };
         hints.classify()?;
         Some(hints)
+    }
+
+    /// The points and `dim`'s analysis, borrowed apart so that both can
+    /// change at once -- which every pass that finds segments and edges
+    /// needs, reading points while it writes the axis.
+    pub(super) fn view(&mut self, dim: Dim) -> View<'_> {
+        let [horz, vert] = &mut self.axes;
+        View {
+            points: &mut self.points,
+            contours: &self.contours,
+            units_per_em: self.units_per_em,
+            axis: match dim {
+                Dim::Horz => horz,
+                Dim::Vert => vert,
+            },
+        }
+    }
+
+    /// `dim`'s analysis.
+    pub(super) const fn axis(&self, dim: Dim) -> &Axis {
+        match dim {
+            Dim::Horz => &self.axes[0],
+            Dim::Vert => &self.axes[1],
+        }
     }
 
     fn pt(&self, i: usize) -> Option<&Point> {
@@ -476,21 +621,20 @@ impl Hints {
         Some(())
     }
 
-    /// Put every point of an edge's segments at the edge's hinted height:
+    /// Put every point of an edge's segments at the edge's hinted position:
     /// `af_glyph_hints_align_edge_points`.
-    pub(super) fn align_edge_points(&mut self) -> Option<()> {
-        for s in 0..self.segments.len() {
-            let seg = *self.segments.get(s)?;
+    pub(super) fn align_edge_points(&mut self, dim: Dim) -> Option<()> {
+        for s in 0..self.axis(dim).segments.len() {
+            let seg = *self.axis(dim).segments.get(s)?;
             let Some(e) = seg.edge else {
                 continue;
             };
-            let pos = self.edges.get(e)?.pos;
+            let pos = self.axis(dim).edges.get(e)?.pos;
             let mut point = seg.first;
             let mut guard = self.points.len();
             loop {
                 let p = self.pt_mut(point)?;
-                p.y = pos;
-                p.flags |= FLAG_TOUCH_Y;
+                p.place(dim, pos);
                 if point == seg.last {
                     break;
                 }
@@ -501,20 +645,22 @@ impl Hints {
         Some(())
     }
 
-    /// Interpolate every untouched strong point between the edges above and
-    /// below it, or shift it with the nearer one outside them all:
+    /// Interpolate every untouched strong point between the edges either
+    /// side of it, or shift it with the nearer one outside them all:
     /// `af_glyph_hints_align_strong_points` (TrueType's `IP`).
-    pub(super) fn align_strong_points(&mut self) -> Option<()> {
-        let (Some(&first), Some(&last)) = (self.edges.first(), self.edges.last()) else {
+    pub(super) fn align_strong_points(&mut self, dim: Dim) -> Option<()> {
+        let edges = &self.axis(dim).edges;
+        let (Some(&first), Some(&last)) = (edges.first(), edges.last()) else {
             return Some(());
         };
-        let count = self.edges.len();
+        let count = edges.len();
         for i in 0..self.points.len() {
             let p = *self.pt(i)?;
-            if p.flags & (FLAG_TOUCH_Y | FLAG_WEAK) != 0 {
+            if p.flags & (dim.touch() | FLAG_WEAK) != 0 {
                 continue;
             }
-            let (u, ou) = (p.fy, p.oy);
+            let edges = &self.axis(dim).edges;
+            let (u, ou) = (p.f(dim), p.o(dim));
             let y = if first.fpos - u >= 0 {
                 first.pos - (first.opos - ou)
             } else if u - last.fpos >= 0 {
@@ -527,8 +673,8 @@ impl Hints {
                 let mut on_edge = None;
                 let mut min = 0usize;
                 if count <= 8 {
-                    let nn = self.edges.iter().position(|e| e.fpos >= u).unwrap_or(count);
-                    if let Some(e) = self.edges.get(nn)
+                    let nn = edges.iter().position(|e| e.fpos >= u).unwrap_or(count);
+                    if let Some(e) = edges.get(nn)
                         && e.fpos == u
                     {
                         on_edge = Some(e.pos);
@@ -538,7 +684,7 @@ impl Hints {
                     let mut max = count;
                     while min < max {
                         let mid = (max + min) >> 1;
-                        let e = self.edges.get(mid)?;
+                        let e = edges.get(mid)?;
                         match u.cmp(&e.fpos) {
                             core::cmp::Ordering::Less => max = mid,
                             core::cmp::Ordering::Greater => min = mid + 1,
@@ -552,16 +698,14 @@ impl Hints {
                 match on_edge {
                     Some(pos) => pos,
                     None => {
-                        let before = *self.edges.get(min.checked_sub(1)?)?;
-                        let after = *self.edges.get(min)?;
+                        let before = *edges.get(min.checked_sub(1)?)?;
+                        let after = *edges.get(min)?;
                         let scale = div_fix(after.pos - before.pos, after.fpos - before.fpos);
                         before.pos + mul_fix(u - before.fpos, scale)
                     }
                 }
             };
-            let p = self.pt_mut(i)?;
-            p.y = y;
-            p.flags |= FLAG_TOUCH_Y;
+            self.pt_mut(i)?.place(dim, y);
         }
         Some(())
     }
@@ -569,12 +713,13 @@ impl Hints {
     /// Interpolate every point still untouched between its nearest touched
     /// neighbours along the contour: `af_glyph_hints_align_weak_points`
     /// (TrueType's `IUP`).
-    pub(super) fn align_weak_points(&mut self) -> Option<()> {
+    pub(super) fn align_weak_points(&mut self, dim: Dim) -> Option<()> {
         for p in &mut self.points {
-            p.u = p.y;
-            p.v = p.oy;
+            p.u = p.at(dim);
+            p.v = p.o(dim);
         }
-        let touched = |h: &Self, i: usize| h.pt(i).is_some_and(|p| p.flags & FLAG_TOUCH_Y != 0);
+        let touch = dim.touch();
+        let touched = |h: &Self, i: usize| h.pt(i).is_some_and(|p| p.flags & touch != 0);
         for c in 0..self.contours.len() {
             let first_point = *self.contours.get(c)?;
             let end_point = self.pt(first_point)?.prev;
@@ -622,7 +767,10 @@ impl Hints {
             }
         }
         for p in &mut self.points {
-            p.y = p.u;
+            match dim {
+                Dim::Horz => p.x = p.u,
+                Dim::Vert => p.y = p.u,
+            }
         }
         Some(())
     }
@@ -709,13 +857,21 @@ mod tests {
 
     #[test]
     fn a_clockwise_outline_is_truetype_and_a_counter_clockwise_one_is_not() {
-        let cw = Hints::load(&rect(0.0, 0.0, 100.0, 50.0), Units::Rounded, 0x10000, 1000).unwrap();
-        assert_eq!(cw.major_dir, DIR_LEFT);
+        let cw = Hints::load(
+            &rect(0.0, 0.0, 100.0, 50.0),
+            Units::Rounded,
+            0x10000,
+            0x10000,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(cw.axis(Dim::Vert).major_dir, DIR_LEFT);
         let mut ccw = rect(0.0, 0.0, 100.0, 50.0);
         ccw.points.reverse();
         assert_eq!(
-            Hints::load(&ccw, Units::Rounded, 0x10000, 1000)
+            Hints::load(&ccw, Units::Rounded, 0x10000, 0x10000, 1000)
                 .unwrap()
+                .axis(Dim::Vert)
                 .major_dir,
             DIR_RIGHT
         );
@@ -723,7 +879,14 @@ mod tests {
 
     #[test]
     fn a_rectangles_corners_are_strong_and_its_sides_have_directions() {
-        let h = Hints::load(&rect(0.0, 0.0, 100.0, 50.0), Units::Rounded, 0x10000, 1000).unwrap();
+        let h = Hints::load(
+            &rect(0.0, 0.0, 100.0, 50.0),
+            Units::Rounded,
+            0x10000,
+            0x10000,
+            1000,
+        )
+        .unwrap();
         // Up the left side, right along the top, down, left along the bottom.
         let dirs: Vec<(i8, i8)> = h.points.iter().map(|p| (p.in_dir, p.out_dir)).collect();
         assert_eq!(
@@ -752,7 +915,7 @@ mod tests {
             tags: alloc::vec![Tag::On, Tag::On, Tag::On, Tag::Conic, Tag::On, Tag::On],
             ends: alloc::vec![6],
         };
-        let h = Hints::load(&o, Units::Rounded, 0x10000, 1000).unwrap();
+        let h = Hints::load(&o, Units::Rounded, 0x10000, 0x10000, 1000).unwrap();
         let weak: Vec<bool> = h.points.iter().map(|p| p.flags & FLAG_WEAK != 0).collect();
         assert_eq!(weak, [false, true, false, true, false, false]);
     }
@@ -764,14 +927,24 @@ mod tests {
                 &rect(0.0, 0.0, 40000.0, 10.0),
                 Units::Rounded,
                 0x10000,
+                0x10000,
                 1000
             )
             .is_none()
         );
         let mut bad = rect(0.0, 0.0, 10.0, 10.0);
         bad.ends = alloc::vec![0, 4];
-        assert!(Hints::load(&bad, Units::Rounded, 0x10000, 1000).is_none());
-        assert!(Hints::load(&TaggedOutline::default(), Units::Rounded, 0x10000, 1000).is_none());
+        assert!(Hints::load(&bad, Units::Rounded, 0x10000, 0x10000, 1000).is_none());
+        assert!(
+            Hints::load(
+                &TaggedOutline::default(),
+                Units::Rounded,
+                0x10000,
+                0x10000,
+                1000
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -788,7 +961,7 @@ mod tests {
             tags: alloc::vec![Tag::On; 4],
             ends: alloc::vec![4],
         };
-        let mut h = Hints::load(&o, Units::Rounded, 0x10000, 1000).unwrap();
+        let mut h = Hints::load(&o, Units::Rounded, 0x10000, 0x10000, 1000).unwrap();
         for p in &mut h.points {
             p.flags = 0;
         }
@@ -796,7 +969,7 @@ mod tests {
         h.points[0].y = 10;
         h.points[3].flags |= FLAG_TOUCH_Y;
         h.points[3].y = 310;
-        h.align_weak_points().unwrap();
+        h.align_weak_points(Dim::Vert).unwrap();
         let ys: Vec<i64> = h.points.iter().map(|p| p.y).collect();
         assert_eq!(ys, [10, 110, 210, 310]);
     }

@@ -10,11 +10,13 @@
 //! # Input
 //!
 //! ```text
-//! hint_dump <font file> <sizes> [<glyph id>...]
+//! hint_dump [--var <tag>=<value>,...] <font file> <sizes> [<glyph id>...]
 //! ```
 //!
 //! `<sizes>` is a comma-separated list of pixel sizes. Without glyph ids,
-//! every glyph of the face is printed.
+//! every glyph of the face is printed. `--var` picks a variable font's
+//! instance by user-space axis values (`wght=700,wdth=87.5`), leaving the
+//! axes it does not name at their defaults.
 //!
 //! # Output
 //!
@@ -48,9 +50,33 @@ use osfont::scaled::ScaledFont;
 use osfont::sfnt::Face;
 
 fn main() {
-    let mut args = env::args().skip(1);
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    // `--var tag=value,...`: a variable font's instance, in user-space axis
+    // values, the axes not named at their defaults.
+    let mut variations: Vec<([u8; 4], f32)> = Vec::new();
+    if let Some(i) = args.iter().position(|a| a == "--var") {
+        let spec = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| panic!("--var needs tag=value[,tag=value...]"));
+        args.drain(i..=i + 1);
+        for pair in spec.split(',') {
+            let (tag, value) = pair
+                .split_once('=')
+                .unwrap_or_else(|| panic!("not tag=value: {pair:?}"));
+            let tag: [u8; 4] = tag
+                .as_bytes()
+                .try_into()
+                .unwrap_or_else(|_| panic!("not a four-letter axis tag: {tag:?}"));
+            let value = value
+                .parse()
+                .unwrap_or_else(|_| panic!("not an axis value: {value:?}"));
+            variations.push((tag, value));
+        }
+    }
+    let mut args = args.into_iter();
     let (Some(path), Some(sizes)) = (args.next(), args.next()) else {
-        eprintln!("usage: hint_dump <font> <px>[,<px>...] [<gid>...]");
+        eprintln!("usage: hint_dump [--var tag=value,...] <font> <px>[,<px>...] [<gid>...]");
         process::exit(2);
     };
     let sizes: Vec<f32> = sizes
@@ -73,11 +99,19 @@ fn main() {
     } else {
         gids
     };
+    let coords = (!variations.is_empty()).then(|| {
+        face.variation_axes()
+            .unwrap_or_else(|| panic!("{path}: --var for a face with no variation axes"))
+            .normalize_tags(&variations)
+    });
     let face = std::sync::Arc::new(face);
     let out = io::stdout();
     let mut out = BufWriter::new(out.lock());
     for px in sizes {
         let mut font = ScaledFont::shared(face.clone(), px).expect("a valid size");
+        if let Some(coords) = &coords {
+            font.set_variations(coords.clone());
+        }
         font.set_rendering(Rendering {
             hinting: true,
             ..Rendering::default()

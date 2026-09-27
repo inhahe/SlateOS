@@ -169,7 +169,6 @@ userspace/watch/src/main.rs:argv-as-string
 userspace/wget/src/main.rs:argv-as-string
 userspace/who/src/main.rs:argv-as-string
 userspace/whois/src/main.rs:argv-as-string
-userspace/wipefs/src/main.rs:argv-as-string
 userspace/wpa/src/main.rs:argv-as-string
 userspace/xattr/src/main.rs:argv-as-string
 userspace/xdg/src/main.rs:argv-as-string

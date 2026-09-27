@@ -3900,7 +3900,15 @@ dependencies = [
 name = "wipefs"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "getoptlong",
  "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]

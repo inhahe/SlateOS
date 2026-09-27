@@ -4570,7 +4570,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] fio/fio-verify: flexible I/O benchmarking (7 IO patterns, 5 engines, built-in MD5/SHA256/CRC32, INI job files, JSON output, 184 tests)
   - [ ] socat/filan/procan: bidirectional data relay (16 address types, TCP/UDP/UNIX/EXEC, CRLF conversion, 161 tests)
   - [x] fail2ban-server/client/regex: intrusion prevention (custom regex engine, IPv4/IPv6 CIDR matching, INI jail config, 6 built-in filters, 144 tests)
-  - [x] wipefs/blkdiscard: filesystem signature detection and wiping (15 signature types, JSON/parsable output)
+  - [x] wipefs/blkdiscard: filesystem signature detection and wiping (15 signature types, JSON/parsable output) -- since 2026-09-27 wipefs is a port of util-linux 2.39.3's on `userspace/ulblkid` (every signature libblkid knows); `scripts/wipefs-diff.sh`: 239 cases agree, erased bytes and backups included. blkdiscard, a never-reachable personality of the old program, is not part of it (known-issues TD-B-LSBLK-IS-NOT-A-PORT)
   - [x] blockdev/blkzone: block device ioctls and zone management (get/set read-ahead, sector size, RO flag)
   - [x] cal/ncal: calendar display (Zeller's congruence, leap years, Julian days, week numbers, year view)
   - [x] chage: password aging management (shadow file parsing, date conversion, expiry policies)

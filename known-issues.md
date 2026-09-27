@@ -171307,30 +171307,30 @@ test images, 9 made with mkfs/mkswap/sfdisk, 484 truncated copies.
 `scripts/blkid-cli-diff.sh` compares the two programs: 144 cases agree.
 
 What remains for other programs is theirs: `lsblk` and `wipefs` are still
-hand-written and do not use the crate yet -- TD-B-LSBLK-AND-WIPEFS-ARE-NOT-PORTS.
+hand-written and did not use the crate -- `wipefs` is now a port; `lsblk` is TD-B-LSBLK-IS-NOT-A-PORT.
 
-## TD-B-LSBLK-AND-WIPEFS-ARE-NOT-PORTS (lane B, 2026-09-27) — **open**
+## TD-B-LSBLK-IS-NOT-A-PORT (lane B, 2026-09-27) — **open**
 
-**In short:** `lsblk` (list block devices) and `wipefs` (find and erase
-filesystem signatures) are hand-written programs, not ports of util-linux's.
-They each recognise a handful of formats by their own code -- `wipefs`
-fifteen signature types -- where util-linux's use libblkid, which knows
-every format and is now ported (`userspace/ulblkid`, measured against the
-real libblkid on 621 images).
+**In short:** `lsblk` (list block devices) is a hand-written program, not a
+port of util-linux's. It recognises filesystems by its own code where
+util-linux's asks libblkid, which is now ported (`userspace/ulblkid`,
+measured against the real libblkid on 621 images). `wipefs` was in the same
+state and is now a port (2026-09-27, `scripts/wipefs-diff.sh`: 239 cases
+agree, the erased images' bytes and the backups included).
 
-**What a user sees:** `wipefs` misses signatures libblkid finds (and would
-leave them on a disk it was asked to clean); `lsblk -f` shows no FSTYPE,
-LABEL or UUID for the formats its own code does not know; both parse
-options by hand (whole long names only), and their output formats are
-approximations of upstream's.
+**What a user sees:** `lsblk -f` shows no FSTYPE, LABEL or UUID for the
+formats its own code does not know; options are parsed by hand (whole long
+names only), and its output formats approximate upstream's.
 
-**Where:** `userspace/wipefs/src/main.rs`, `userspace/lsblk/src/main.rs`.
+**Where:** `userspace/lsblk/src/main.rs`.
 
-**The proper fix:** port `misc-utils/wipefs.c` onto `ulblkid` -- its core
-is exactly `blkid_do_probe` and `blkid_do_wipe`, which the port has and
-which `blkid-diff.sh`'s wipefs walk already compares -- and
-`misc-utils/lsblk*.c` onto `ulblkid`, `ulmount` and `smartcols`, each with
-a differential harness against WSL's, as `blkid` and `findfs` were.
+**The proper fix:** port `misc-utils/lsblk*.c` onto `ulblkid`, `ulmount`
+and `smartcols`, with a differential harness against WSL's.
+
+**Also:** the hand-written `wipefs` answered to `blkdiscard` too -- a
+personality no executable was ever produced for (the multicall baseline
+listed it as unreachable). The port does not; util-linux's `blkdiscard`
+(`sys-utils/blkdiscard.c`) wants a crate of its own.
 
 ## TD-B-UTIL-LINUX-PORTS-WRITE-THROUGH-RUST-STDIO (lane B, 2026-09-26) — ✅ FIXED 2026-09-26 (lane B)
 

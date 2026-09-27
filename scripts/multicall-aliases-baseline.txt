@@ -151,7 +151,6 @@ useradd:groupmod
 useradd:userdel
 useradd:usermod
 who:w
-wipefs:blkdiscard
 xattr:attr
 xattr:setfattr
 xdg:mimeopen

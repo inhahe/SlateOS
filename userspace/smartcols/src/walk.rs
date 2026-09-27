@@ -158,6 +158,6 @@ impl Table {
                 return false;
             }
         }
-        !(self.is_group_child(ln) && !self.is_last_group_child(ln))
+        !self.is_group_child(ln) || self.is_last_group_child(ln)
     }
 }

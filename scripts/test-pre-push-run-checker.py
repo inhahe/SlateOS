@@ -1318,6 +1318,30 @@ def main() -> int:
               "MARKER-RETURNED rc=0" in out and "CHANGED THE REPOSITORY" not in out,
               out.strip()[-300:])
 
+        # The shape every lane pushes from: a LINKED worktree, whose own git
+        # directory (`.git/worktrees/<name>`) has no `config` at all -- the one
+        # all worktrees share is in the common directory. The 2026-09-26
+        # accident set core.bare=true there, from a lane's worktree, and every
+        # linked worktree kept working: only the main checkout noticed, six
+        # hours later, when the operator's `git status` in it failed. So the
+        # guard must fingerprint `--git-common-dir`'s config; `--git-dir`'s
+        # would find no file and see nothing change.
+        linked = tmp_root / "judged-linked"
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "linked", str(linked)],
+                       cwd=str(judged), env=genv, check=True, capture_output=True)
+        bare = fake_checker(tmp_root, "guard-linked", git_step("git config core.bare true"))
+        r = run_guarded(linked, func, bare, guard=True)
+        out = r.stdout + r.stderr
+        shared = subprocess.run(["git", "config", "--get", "core.bare"], cwd=str(judged),
+                                env=genv, capture_output=True, text=True).stdout.strip()
+        check("the gate in a linked worktree really wrote the shared config",
+              shared == "true", f"core.bare in the common config: {shared!r}")
+        check("and the guard, run from that worktree, stops it",
+              "CHANGED THE REPOSITORY" in out and "MARKER-RETURNED" not in out,
+              out.strip()[-400:])
+        subprocess.run(["git", "config", "core.bare", "false"], cwd=str(judged), env=genv,
+                       capture_output=True)
+
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 

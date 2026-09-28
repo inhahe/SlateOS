@@ -1610,33 +1610,23 @@ impl NotificationPane {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Toggle pill.
+        // The switch, through the toolkit's. This pane drew its own and
+        // filled the knob with `text` -- the eighteenth copy of the defect
+        // `guitk::switch` exists to end: on the accent track that is a light
+        // grey on a light blue, 1.35:1 on the stock theme, so the one part of
+        // the switch that says it is on was the part you could not see. The
+        // toolkit's knob is derived from the track. The geometry is the same:
+        // this pane's knob was already inset two pixels all round.
         let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
         let pill_bg = if enabled { p.accent } else { p.surface2 };
-        cmds.push(RenderCommand::FillRect {
-            x: pill_x,
-            y: y + 6.0,
-            width: TOGGLE_WIDTH,
-            height: TOGGLE_HEIGHT,
-            color: pill_bg,
-            corner_radii: CornerRadii::all(TOGGLE_HEIGHT / 2.0),
-        });
-
-        // Toggle knob.
-        let knob_radius = (TOGGLE_HEIGHT - 4.0) / 2.0;
-        let knob_x = if enabled {
-            pill_x + TOGGLE_WIDTH - knob_radius * 2.0 - 2.0
-        } else {
-            pill_x + 2.0
-        };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: y + 8.0,
-            width: knob_radius * 2.0,
-            height: knob_radius * 2.0,
-            color: p.text,
-            corner_radii: CornerRadii::all(knob_radius),
-        });
+        cmds.extend(guitk::switch::switch(
+            pill_x,
+            y + 6.0,
+            TOGGLE_WIDTH,
+            TOGGLE_HEIGHT,
+            enabled,
+            pill_bg,
+        ));
     }
 
     /// Draw the `slot`-th slider's row -- its label and level, and the
@@ -2445,6 +2435,65 @@ mod tests {
     // the arrangement that once put every notification card 76 px from where
     // it was drawn. These tests read the rows out of the commands the
     // renderer actually pushed and probe those.
+
+    /// The quick settings' switches: a knob on the accent track is legible on
+    /// it, in both modes and for every accent the palette offers.
+    ///
+    /// The pane drew its own switch with the knob in `text` -- a light grey on
+    /// a light accent, 1.35:1 on the stock theme -- after the rest of the
+    /// shell had been moved off exactly that defect. Its knob is the
+    /// toolkit's now, derived from the track.
+    #[test]
+    fn a_quick_setting_switch_that_is_on_shows_its_knob() {
+        for light in [false, true] {
+            let mut p = Palette::for_mode(light);
+            for accent in [
+                p.blue,
+                p.green,
+                p.yellow,
+                p.peach,
+                p.lavender,
+                p.rosewater,
+                p.sky,
+            ] {
+                p.accent = accent;
+                let mut pane = NotificationPane::new();
+                pane.state = PaneState::Visible;
+                for qs in QuickSetting::all() {
+                    if !pane.quick_setting_value(*qs) {
+                        pane.quick_settings.toggle(*qs);
+                    }
+                }
+                let mut cmds = Vec::new();
+                pane.render_quick_settings(&p, &mut cmds, 0.0);
+                let knob = TOGGLE_HEIGHT - 2.0 * guitk::switch::INSET;
+                let knobs: Vec<Color> = cmds
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        RenderCommand::FillRect {
+                            width,
+                            height,
+                            color,
+                            ..
+                        } if (*width - knob).abs() < f32::EPSILON
+                            && (*height - knob).abs() < f32::EPSILON =>
+                        {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(knobs.len(), QuickSetting::COUNT, "a knob per switch");
+                for ink in knobs {
+                    let c = appearance::contrast_ratio(accent, ink);
+                    assert!(
+                        c >= 4.5,
+                        "a knob on {accent:?} (light={light}) is {ink:?}, {c:.2}:1"
+                    );
+                }
+            }
+        }
+    }
 
     /// Top of every toggle row the renderer drew, recovered from the pill it
     /// paints six pixels down.
@@ -3786,9 +3835,11 @@ mod tests {
         ];
         for light in [false, true] {
             let p = Palette::for_mode(light);
-            // The two computed inks: the lettering on the accent-filled
-            // action button, and the lettering inside a priority badge. The
-            // four badge fills are written out rather than read back from
+            // The computed inks: the lettering on the accent-filled action
+            // button (and the knob of a quick-setting switch that is on), the
+            // lettering inside a priority badge, and the knob of a switch that
+            // is off, on its `surface2` track. The four badge fills are
+            // written out rather than read back from
             // `NotifPriority::accent_color`, so this is a claim about the
             // design instead of an echo of the code under test.
             let ink = [
@@ -3797,6 +3848,7 @@ mod tests {
                 readable_on(p.blue),
                 readable_on(p.peach),
                 readable_on(p.red),
+                readable_on(p.surface2),
             ];
             for priority in priorities {
                 for show_settings in [false, true] {
@@ -3838,7 +3890,11 @@ mod tests {
                     palette_check::assert_drawn_from(
                         &p,
                         &cmds,
-                        &[readable_on(p.accent), readable_on(p.red)],
+                        &[
+                            readable_on(p.accent),
+                            readable_on(p.red),
+                            readable_on(p.surface2),
+                        ],
                         "notif_pane mid-slide",
                     );
                 }

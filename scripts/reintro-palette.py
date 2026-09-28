@@ -18673,6 +18673,7 @@ DEFECTS = [
             # one line from it leaves a power menu floating over an empty
             # desktop, anchored to a button that is no longer drawn.
             'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
+            'the_power_menu_offers_every_power_action_and_carries_each_out',
         ],
     ),
     # RETIRED 2026-09-27: LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL (80): the start menu lists the system actions as ordinary programs
@@ -18701,7 +18702,9 @@ DEFECTS = [
             # menu and leave the list where it was. Closing both makes one click
             # undo two things, the second of which the user did not ask for.
             'a_click_on_the_list_behind_the_power_menu_only_dismisses_it',
+            'a_press_on_a_place_first_closes_the_power_menu',
             'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
+            'the_power_caret_toggles_its_menu_and_leaves_the_start_menu_open',
         ],
     ),
     (
@@ -18737,7 +18740,9 @@ DEFECTS = [
             # release with no press for it reads a click on the taskbar as a
             # click on itself -- so the visible symptom is a button in an
             # application firing when you let go over the shell.
+            'a_folders_row_closes_and_opens_it',
             'a_release_over_chrome_is_swallowed_with_the_press',
+            'every_visible_row_launches_the_program_named_on_it',
         ],
     ),
     (
@@ -20195,6 +20200,8 @@ DEFECTS = [
             # at all, and the key it released was LeftAlt -- for which the guard
             # and its removal agree. Releasing the Tab of an Alt+Tab is the
             # ordinary case this breaks, and no fixture ever released Tab.
+            'a_switch_on_a_rebound_chord_ends_when_its_own_modifier_comes_up',
+            'letting_go_of_shift_mid_switch_keeps_switching',
             'releasing_tab_does_not_end_the_window_switcher',
         ],
     ),
@@ -20208,8 +20215,10 @@ DEFECTS = [
         ["desktop"],
         [
             # Re-derived 2026-09-27 against the code as it now reads.
-            'releasing_tab_does_not_end_the_window_switcher',
             'a_key_release_only_ends_the_window_switcher',
+            'a_switch_on_a_rebound_chord_ends_when_its_own_modifier_comes_up',
+            'letting_go_of_shift_mid_switch_keeps_switching',
+            'releasing_tab_does_not_end_the_window_switcher',
         ],
     ),
     (
@@ -20353,8 +20362,12 @@ DEFECTS = [
         [
             # Re-derived 2026-09-27 against the code as it now reads. The binding lives in the
             # shortcut table's defaults now (`hotkeys.rs`).
-            'closing_the_last_menu_takes_the_surface_away_again',
+            'a_deleted_shortcut_is_still_deleted_in_a_fresh_shell',
             'escape_closes_a_popup_and_is_otherwise_left_alone',
+            'escape_is_claimed_while_a_menu_is_open_and_given_back_after',
+            'escape_is_not_held_permanently',
+            'the_chooser_closes_the_ways_a_popup_closes',
+            'the_defaults_are_the_operators_set_and_nothing_else',
         ],
     ),
     (

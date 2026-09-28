@@ -396,11 +396,9 @@ MUTATIONS = [
         ],
     ),
     (
-        # The win notice is a notice, not a sheet.  Giving it a hit box puts a
-        # control the player never asked for over the middle of the maze.
         "the win notice swallows the clicks under it",
-        "        fill(f, plate, CRUST, (h * 0.12).min(12.0));",
-        "        fill(f, plate, CRUST, (h * 0.12).min(12.0));\n        f.hit(Target::NewMaze, plate);",
+        "            (h * 0.12).min(12.0),\n            Surface::Panel,\n        );",
+        "            (h * 0.12).min(12.0),\n            Surface::Panel,\n        );\n        f.hit(Target::NewMaze, plate);",
         ["the_win_notice_covers_nothing_a_click_needs"],
     ),
     (
@@ -421,6 +419,42 @@ MUTATIONS = [
         '        "Maze".to_string()',
         '        String::new()',
         ["the_window_names_itself"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the player's square is Mocha's blend whatever the theme",
+        "            player_square: with_alpha(p.blue, 56).over(p.surface0),",
+        "            player_square: Color::from_hex(0x2A3A5A),",
+        ["the_player_and_goal_squares_follow_the_theme"],
+    ),
+    (
+        "the goal's square is a plain one",
+        "            goal_square: with_alpha(p.green, 56).over(p.surface0),",
+        "            goal_square: p.surface0,",
+        ["the_maze_is_seen_in_either_theme"],
+    ),
+    (
+        "the help sheet has no ground of its own",
+        "            radius,\n            Surface::Panel,",
+        "            radius,\n            Surface::Card,",
+        ["the_help_sheet_has_a_ground_of_its_own"],
+    ),
+    (
+        "the level in play looks like the others",
+        "            self.button(f, l, r, level.name(), active);",
+        "            self.button(f, l, r, level.name(), false);",
+        ["the_level_in_play_looks_chosen"],
     ),
 ]
 

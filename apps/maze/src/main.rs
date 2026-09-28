@@ -79,38 +79,81 @@
 //!    `unused_imports` among them, which is what kept 2 and 4 quiet. A
 //!    hand-written `impl Clone for Maze` reproduced the derive field for field.
 
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
 
-/// The cell the player stands on.
-const PLAYER_BG: Color = Color::from_hex(0x2A3A5A);
-/// The cell to reach.
-const GOAL_BG: Color = Color::from_hex(0x2A4A3A);
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A well.
+    crust: Color,
+    /// Raised.
+    surface0: Color,
+    /// Raised further.
+    surface1: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// The palette's mauve, inked for the page.
+    mauve: Color,
+
+    /// The square the player stands on, and the one to reach: a tint of the
+    /// palette's blue and green over a square.
+    player_square: Color,
+    goal_square: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            crust: p.crust,
+            surface0: p.surface0,
+            surface1: p.surface1,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            yellow: p.ink(p.yellow),
+            lavender: p.ink(p.lavender),
+            mauve: p.ink(p.mauve),
+            player_square: with_alpha(p.blue, 56).over(p.surface0),
+            goal_square: with_alpha(p.green, 56).over(p.surface0),
+        }
+    }
+}
 
 const WINDOW_WIDTH: f32 = 780.0;
 const WINDOW_HEIGHT: f32 = 740.0;
@@ -780,6 +823,12 @@ pub struct MazeApp {
     status: String,
     rng: SeededRng,
     size_drawn: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl MazeApp {
@@ -810,6 +859,8 @@ impl MazeApp {
             status: String::new(),
             rng: SeededRng::new(seed),
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         game.new_maze();
         game
@@ -1217,7 +1268,7 @@ impl MazeApp {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, BASE, 0.0);
+        fill(&mut f, l.window, self.colours.base, 0.0);
         self.draw_header(&mut f, &l);
         self.draw_info(&mut f, &l);
         self.draw_board(&mut f, &l);
@@ -1240,7 +1291,7 @@ impl MazeApp {
             y,
             "Maze",
             size,
-            LAVENDER,
+            self.colours.lavender,
             FontWeightHint::Bold,
             Some((l.header.w - l.pad * 2.0).max(0.0)),
         );
@@ -1254,9 +1305,9 @@ impl MazeApp {
             &name,
             small,
             if self.state == GameState::Won {
-                GREEN
+                self.colours.green
             } else {
-                SUBTEXT0
+                self.colours.subtext0
             },
             FontWeightHint::Bold,
             Some((l.header.w * 0.45).max(0.0)),
@@ -1285,9 +1336,9 @@ impl MazeApp {
             return;
         }
         let colour = if self.state == GameState::Won {
-            GREEN
+            self.colours.green
         } else {
-            SUBTEXT0
+            self.colours.subtext0
         };
         let size = l.font.min(l.info.h * 0.8);
         label(
@@ -1306,7 +1357,7 @@ impl MazeApp {
         if l.board.w <= 0.0 || l.board.h <= 0.0 {
             return;
         }
-        fill(f, l.board, CRUST, (l.board.w * 0.02).min(10.0));
+        fill(f, l.board, self.colours.crust, (l.board.w * 0.02).min(10.0));
         let rows = self.maze.rows();
         let cols = self.maze.cols();
         let cell = l.cell(rows, cols);
@@ -1326,13 +1377,13 @@ impl MazeApp {
                 let rect = l.square(rows, cols, r, c);
                 let here = (r, c);
                 let back = if here == self.player {
-                    PLAYER_BG
+                    self.colours.player_square
                 } else if here == self.goal {
-                    GOAL_BG
+                    self.colours.goal_square
                 } else if self.on_trail(r, c) {
-                    SURFACE1
+                    self.colours.surface1
                 } else {
-                    SURFACE0
+                    self.colours.surface0
                 };
                 fill(f, rect, back, 0.0);
                 if let Some(i) = self.maze.index(r, c) {
@@ -1346,10 +1397,26 @@ impl MazeApp {
             for c in 0..cols {
                 let rect = l.square(rows, cols, r, c);
                 if self.maze.has_wall(r, c, Dir::North) {
-                    line(f, rect.x, rect.y, rect.right(), rect.y, LAVENDER, wall);
+                    line(
+                        f,
+                        rect.x,
+                        rect.y,
+                        rect.right(),
+                        rect.y,
+                        self.colours.lavender,
+                        wall,
+                    );
                 }
                 if self.maze.has_wall(r, c, Dir::West) {
-                    line(f, rect.x, rect.y, rect.x, rect.bottom(), LAVENDER, wall);
+                    line(
+                        f,
+                        rect.x,
+                        rect.y,
+                        rect.x,
+                        rect.bottom(),
+                        self.colours.lavender,
+                        wall,
+                    );
                 }
                 // Only the far edges of the grid need the other two sides
                 // drawn: every wall inside it is the north or west side of the
@@ -1361,7 +1428,7 @@ impl MazeApp {
                         rect.y,
                         rect.right(),
                         rect.bottom(),
-                        LAVENDER,
+                        self.colours.lavender,
                         wall,
                     );
                 }
@@ -1372,7 +1439,7 @@ impl MazeApp {
                         rect.bottom(),
                         rect.right(),
                         rect.bottom(),
-                        LAVENDER,
+                        self.colours.lavender,
                         wall,
                     );
                 }
@@ -1395,7 +1462,7 @@ impl MazeApp {
                     d,
                     d,
                 ),
-                YELLOW,
+                self.colours.yellow,
                 d / 2.0,
             );
         }
@@ -1410,7 +1477,7 @@ impl MazeApp {
                 (goal.w - m * 2.0).max(0.0),
                 (goal.h - m * 2.0).max(0.0),
             ),
-            GREEN,
+            self.colours.green,
             (cell * 0.08).clamp(1.0, 3.0),
             (cell * 0.15).max(0.0),
         );
@@ -1426,9 +1493,9 @@ impl MazeApp {
                 (player.h - pm * 2.0).max(0.0),
             ),
             if self.state == GameState::Won {
-                GREEN
+                self.colours.green
             } else {
-                MAUVE
+                self.colours.mauve
             },
             (cell * 0.3).max(0.0),
         );
@@ -1456,15 +1523,23 @@ impl MazeApp {
             w,
             h,
         );
-        fill(f, plate, CRUST, (h * 0.12).min(12.0));
-        stroke(f, plate, GREEN, 1.5, (h * 0.12).min(12.0));
+        self.palette.push_surface(
+            f,
+            plate.x,
+            plate.y,
+            plate.w,
+            plate.h,
+            (h * 0.12).min(12.0),
+            Surface::Panel,
+        );
+        stroke(f, plate, self.colours.green, 1.5, (h * 0.12).min(12.0));
         let title = (h * 0.3).clamp(8.0, l.big);
         centred_in(
             f,
             Rect::new(plate.x, plate.y + h * 0.12, plate.w, h * 0.34),
             "Out!",
             title,
-            GREEN,
+            self.colours.green,
             FontWeightHint::Bold,
         );
         centred_in(
@@ -1477,8 +1552,27 @@ impl MazeApp {
                 self.opening_steps
             ),
             (h * 0.2).clamp(7.0, l.font),
-            TEXT_COLOR,
+            self.colours.text,
             FontWeightHint::Regular,
+        );
+    }
+
+    /// A control: the toolkit's push button, its label at this window's size;
+    /// `on` draws a choice that is made -- the level in play, the way out
+    /// shown -- as the toolkit's primary button.
+    fn button(&self, f: &mut Frame, l: &Layout, r: Rect, text_str: &str, on: bool) {
+        if r.w <= 0.0 || r.h <= 0.0 {
+            return;
+        }
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            text_str,
+            (r.h * 0.5).clamp(6.0, l.font),
+            if on { Kind::Primary } else { Kind::Plain },
+            State::default(),
+            self.colours.base,
         );
     }
 
@@ -1491,22 +1585,15 @@ impl MazeApp {
         for (slot, level) in LEVELS.iter().enumerate() {
             let r = l.button(l.controls, slot, count);
             let active = slot == self.level;
-            button(
-                f,
-                l,
-                r,
-                level.name(),
-                if active { SURFACE1 } else { SURFACE0 },
-                if active { LAVENDER } else { SUBTEXT0 },
-            );
+            self.button(f, l, r, level.name(), active);
             f.hit(Target::Level(slot), r);
         }
         let new_r = l.button(l.controls, LEVELS.len(), count);
-        button(f, l, new_r, "New", SURFACE0, TEAL);
+        self.button(f, l, new_r, "New", false);
         f.hit(Target::NewMaze, new_r);
 
         let sol_r = l.button(l.controls, LEVELS.len().saturating_add(1), count);
-        button(
+        self.button(
             f,
             l,
             sol_r,
@@ -1515,17 +1602,12 @@ impl MazeApp {
             } else {
                 "Way out"
             },
-            if self.show_solution {
-                SURFACE1
-            } else {
-                SURFACE0
-            },
-            if self.show_solution { PEACH } else { OVERLAY0 },
+            self.show_solution,
         );
         f.hit(Target::ToggleSolution, sol_r);
 
         let help_r = l.button(l.controls, LEVELS.len().saturating_add(2), count);
-        button(f, l, help_r, "?", SURFACE0, YELLOW);
+        self.button(f, l, help_r, "?", self.show_help);
         f.hit(Target::ToggleHelp, help_r);
     }
 
@@ -1542,8 +1624,15 @@ impl MazeApp {
         // the help text would be describing a screen nobody can see.
         f.hit(Target::ToggleHelp, l.window);
         let radius = (sheet.w * 0.03).min(12.0);
-        fill(f, sheet, SURFACE0, radius);
-        stroke(f, sheet, LAVENDER, 1.5, radius);
+        self.palette.push_surface(
+            f,
+            sheet.x,
+            sheet.y,
+            sheet.w,
+            sheet.h,
+            radius,
+            Surface::Panel,
+        );
 
         let pad = l.pad;
         let line_h = (sheet.h - pad * 3.0) / (HELP_ROWS.len().saturating_add(1)) as f32;
@@ -1557,7 +1646,7 @@ impl MazeApp {
             sheet.y + pad,
             HELP_TITLE,
             (line_h * 0.7).clamp(7.0, l.big),
-            YELLOW,
+            self.colours.yellow,
             FontWeightHint::Bold,
             Some((sheet.w - pad * 2.0).max(0.0)),
         );
@@ -1573,7 +1662,7 @@ impl MazeApp {
                 y,
                 key,
                 size,
-                BLUE,
+                self.colours.blue,
                 FontWeightHint::Bold,
                 Some(key_w),
             );
@@ -1583,7 +1672,7 @@ impl MazeApp {
                 y,
                 what,
                 size,
-                TEXT_COLOR,
+                self.colours.text,
                 FontWeightHint::Regular,
                 Some((sheet.w - pad * 2.0 - key_w).max(0.0)),
             );
@@ -1681,16 +1770,6 @@ fn centred_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: 
     );
 }
 
-/// A filled, labelled control.
-fn button(f: &mut Frame, l: &Layout, r: Rect, text_str: &str, back: Color, fore: Color) {
-    if r.w <= 0.0 || r.h <= 0.0 {
-        return;
-    }
-    fill(f, r, back, (r.h * 0.25).min(8.0));
-    let size = (r.h * 0.5).clamp(6.0, l.font);
-    centred_in(f, r, text_str, size, fore, FontWeightHint::Bold);
-}
-
 // ── Window ─────────────────────────────────────────────────────────────────
 
 /// The one body both the window and the test probe drive, so what a key does
@@ -1709,6 +1788,11 @@ pub fn handle_event(game: &mut MazeApp, event: &Event) -> EventResult {
 }
 
 impl App for MazeApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Maze".to_string()
     }
@@ -1789,6 +1873,233 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: a maze in play with the way out shown, the
+    /// help sheet, a maze solved, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, MazeApp)> {
+        let mut shown = game(7);
+        shown.show_solution = true;
+        let mut help = game(7);
+        help.show_help = true;
+        let mut won = game(7);
+        won.state = GameState::Won;
+        let mut cramped = sized(7, (360.0, 360.0));
+        cramped.show_solution = true;
+        let mut looks = vec![
+            ("playing", shown),
+            ("help", help),
+            ("won", won),
+            ("cramped", cramped),
+        ];
+        for (_, g) in &mut looks {
+            g.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's, the toolkit's
+    /// buttons', or the player's and the goal's tinted squares (the
+    /// operator's C-Q16). It drew in its own copy of Catppuccin Mocha, dark
+    /// on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.base);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.base));
+            let c = Colours::of(&p);
+            derived.extend([c.player_square, c.goal_square]);
+            for (what, g) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    g.frame(g.size_drawn.0, g.size_drawn.1).commands(),
+                    &derived,
+                    &format!("maze, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            for (what, g) in every_look(&p) {
+                let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "maze: {bad:#?}");
+    }
+
+    /// **The player's and the goal's squares follow the theme**: a tint of
+    /// the palette's own hue over a square, which is a different colour in a
+    /// light theme and a dark one -- a fixed blend is the same in both.
+    #[test]
+    fn the_player_and_goal_squares_follow_the_theme() {
+        let (dark, light) = (
+            Colours::of(&Palette::for_mode(false)),
+            Colours::of(&Palette::for_mode(true)),
+        );
+        assert_ne!(
+            dark.player_square, light.player_square,
+            "the player's square is one colour in every theme"
+        );
+        assert_ne!(
+            dark.goal_square, light.goal_square,
+            "the goal's square is one colour in every theme"
+        );
+        for c in [dark, light] {
+            // A tint of blue and of green: each nearer its hue than the square is.
+            let d = |a: Color, b: Color| {
+                (i32::from(a.r) - i32::from(b.r)).abs()
+                    + (i32::from(a.g) - i32::from(b.g)).abs()
+                    + (i32::from(a.b) - i32::from(b.b)).abs()
+            };
+            assert!(
+                d(c.player_square, c.blue) < d(c.surface0, c.blue),
+                "the player's square is not a blue tint"
+            );
+            assert!(
+                d(c.goal_square, c.green) < d(c.surface0, c.green),
+                "the goal's square is not a green tint"
+            );
+        }
+    }
+
+    /// **The help sheet has a ground of its own** -- the toolkit's panel,
+    /// filled in either surface look -- so its words do not land on the maze.
+    #[test]
+    fn the_help_sheet_has_a_ground_of_its_own() {
+        for cards in [false, true] {
+            let mut g = game(7);
+            g.show_help = true;
+            g.theme_changed(&palette(false, cards));
+            let sheet = g.layout().help;
+            let grounded = g
+                .frame(g.size_drawn.0, g.size_drawn.1)
+                .commands()
+                .iter()
+                .any(|c| {
+                    matches!(c, RenderCommand::FillRect { x, y, width, height, color, .. }
+                    if (*x - sheet.x).abs() < 0.01
+                        && (*y - sheet.y).abs() < 0.01
+                        && (*width - sheet.w).abs() < 0.01
+                        && (*height - sheet.h).abs() < 0.01
+                        && color.a == u8::MAX)
+                });
+            assert!(grounded, "the help sheet has no ground (cards: {cards})");
+        }
+    }
+
+    /// **The level in play looks chosen**: its button is the toolkit's
+    /// primary button and the others its plain one.
+    #[test]
+    fn the_level_in_play_looks_chosen() {
+        let g = game(7);
+        let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+        let face_of = |label: &str| {
+            let (tx, ty) = f
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == label => Some((*x, *y)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} is not drawn"));
+            f.commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                        && *width < g.size_drawn.0 / 3.0 =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} has no face"))
+        };
+        let paint =
+            |kind| guitk::button::paint(&g.palette, kind, State::default(), g.colours.base).lower;
+        let chosen = g.level().name();
+        for level in LEVELS {
+            let want = if level.name() == chosen {
+                Kind::Primary
+            } else {
+                Kind::Plain
+            };
+            assert_eq!(
+                face_of(level.name()),
+                paint(want),
+                "{} looks wrong",
+                level.name()
+            );
+        }
+    }
+
+    /// **The walls, the player, the goal and the way out are seen on the
+    /// squares in either theme** (WCAG 1.4.11's 3:1 for what a player must
+    /// see), and the player's and the goal's squares are told from a plain
+    /// one.
+    #[test]
+    fn the_maze_is_seen_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for ground in [c.surface0, c.surface1] {
+                for (what, colour) in [
+                    ("a wall", c.lavender),
+                    ("the player", c.mauve),
+                    ("the goal's ring", c.green),
+                    ("the way out", c.yellow),
+                ] {
+                    let ratio = guitk::theme::contrast_ratio(colour, ground);
+                    assert!(
+                        ratio >= 3.0,
+                        "{what} is {ratio:.2}:1 on {ground:?} (light: {light})"
+                    );
+                }
+            }
+            for (what, square) in [
+                ("the player's", c.player_square),
+                ("the goal's", c.goal_square),
+            ] {
+                assert_ne!(
+                    square, c.surface0,
+                    "{what} square looks like any other (light: {light})"
+                );
+            }
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
 

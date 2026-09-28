@@ -1615,7 +1615,7 @@ pub unsafe extern "C" fn wcstod(nptr: *const WcharT, endptr: *mut *const WcharT)
     let (token, negative) = unsafe { scan_wide_float(nptr, endptr, &mut acc) };
     let value = match token {
         crate::decfloat::FloatToken::None => return 0.0,
-        crate::decfloat::FloatToken::Nan => return f64::NAN,
+        crate::decfloat::FloatToken::Nan(p) => return crate::decfloat::nan_f64(p, negative),
         crate::decfloat::FloatToken::Infinity => f64::INFINITY,
         crate::decfloat::FloatToken::Number => {
             let (v, out_of_range) = acc.to_f64();
@@ -1645,7 +1645,7 @@ pub unsafe extern "C" fn wcstof(nptr: *const WcharT, endptr: *mut *const WcharT)
     let (token, negative) = unsafe { scan_wide_float(nptr, endptr, &mut acc) };
     let value = match token {
         crate::decfloat::FloatToken::None => return 0.0,
-        crate::decfloat::FloatToken::Nan => return f32::NAN,
+        crate::decfloat::FloatToken::Nan(p) => return crate::decfloat::nan_f32(p, negative),
         crate::decfloat::FloatToken::Infinity => f32::INFINITY,
         crate::decfloat::FloatToken::Number => {
             let (v, out_of_range) = acc.to_f32();

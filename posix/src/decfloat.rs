@@ -697,10 +697,100 @@ pub(crate) trait ByteSource {
 pub(crate) enum FloatToken {
     /// No valid subject sequence.
     None,
-    Nan,
+    /// `nan`, with the payload glibc reads out of a `nan(n-char-sequence)`
+    /// ([`nan_payload`]); `None` for the default NaN.
+    Nan(Option<u64>),
     Infinity,
     /// Digits, accumulated into the caller's collector.
     Number,
+}
+
+/// A byte of an n-char-sequence, as glibc's `__strtod_nan` takes one:
+/// `[0-9A-Za-z_]`.
+pub(crate) const fn is_nchar(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// The payload glibc's `__strtod_nan` (`stdlib/strtod_nan_main.c`) reads
+/// from the n-chars at `start..end`: the run read as `strtoull(run, &e, 0)`
+/// reads it -- `0x` hex, leading-`0` octal, else decimal -- and used only if
+/// that read ends exactly at `end`. `None` otherwise, which is the default
+/// NaN. A number past `ULLONG_MAX` is `ULLONG_MAX`, with `ERANGE`, as the
+/// `strtoull` inside glibc's reads sets it.
+pub(crate) fn nan_payload<S: ByteSource + ?Sized>(
+    src: &S,
+    start: usize,
+    end: usize,
+) -> Option<u64> {
+    if start >= end {
+        return None;
+    }
+    let at = |k: usize| src.byte_at(k);
+    let hex = at(start) == b'0'
+        && (at(start.wrapping_add(1)) | 0x20) == b'x'
+        && start.wrapping_add(2) < end
+        && at(start.wrapping_add(2)).is_ascii_hexdigit();
+    let (mut k, radix) = if hex {
+        (start.wrapping_add(2), 16)
+    } else if at(start) == b'0' {
+        (start.wrapping_add(1), 8)
+    } else {
+        (start, 10)
+    };
+    let mut v: u64 = 0;
+    let mut overflow = false;
+    while k < end {
+        let d = char::from(at(k)).to_digit(radix)?;
+        match v
+            .checked_mul(u64::from(radix))
+            .and_then(|m| m.checked_add(u64::from(d)))
+        {
+            Some(n) => v = n,
+            None => overflow = true,
+        }
+        k = k.wrapping_add(1);
+    }
+    if overflow {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        return Some(u64::MAX);
+    }
+    Some(v)
+}
+
+/// The quiet NaN with `payload` below its quiet bit, as glibc's
+/// `SET_NAN_PAYLOAD` puts it there (and only if nonzero there), negated for
+/// a `-nan`: glibc keeps the sign, `-nan` printing as `-nan`.
+pub(crate) fn nan_f64(payload: Option<u64>, negative: bool) -> f64 {
+    const LOW: u64 = (1 << 51) - 1;
+    let mut bits = f64::NAN.to_bits();
+    if let Some(p) = payload.filter(|p| p & LOW != 0) {
+        bits |= p & LOW;
+    }
+    let v = f64::from_bits(bits);
+    if negative { -v } else { v }
+}
+
+/// [`nan_f64`] for a float: 22 payload bits.
+pub(crate) fn nan_f32(payload: Option<u64>, negative: bool) -> f32 {
+    const LOW: u64 = (1 << 22) - 1;
+    let mut bits = f32::NAN.to_bits();
+    if let Some(p) = payload.filter(|p| p & LOW != 0) {
+        // The mask keeps it under 2^22.
+        #[allow(clippy::cast_possible_truncation)]
+        let low = (p & LOW) as u32;
+        bits |= low;
+    }
+    let v = f32::from_bits(bits);
+    if negative { -v } else { v }
+}
+
+/// A byte slice read as a C string: its bytes, then 0 forever.
+pub(crate) struct SliceSource<'a>(pub(crate) &'a [u8]);
+
+impl ByteSource for SliceSource<'_> {
+    fn byte_at(&self, i: usize) -> u8 {
+        self.0.get(i).copied().unwrap_or(0)
+    }
 }
 
 /// ASCII whitespace, the set `strtod` skips before the subject sequence.
@@ -711,8 +801,11 @@ const fn is_space(c: u8) -> bool {
 /// Scan a `strtod` subject sequence and report what it was.
 ///
 /// Accepts `[whitespace][sign]` followed by `digits[.digits][e[sign]digits]`,
-/// `inf`/`infinity`, or `nan[(n-char-sequence)]`, the last two
-/// case-insensitively.  Hex floats (`0x1p3`) are not supported.
+/// a hex float (`0x1.8p3`, the binary exponent optional), `inf`/`infinity`,
+/// or `nan[(n-char-sequence)]`, the last two case-insensitively.  The
+/// n-char-sequence is glibc's: letters, digits and `_`, closed by `)`; any
+/// other byte before the `)` means only `nan` was the subject sequence, the
+/// `(` left in place (glibc's `strtod_l.c`).
 ///
 /// Returns `(token, negative, consumed)`.  `consumed` counts the elements that
 /// belong to the subject sequence, and is 0 when there was none, which is
@@ -775,17 +868,22 @@ pub(crate) fn scan_float_token<S: ByteSource + ?Sized>(
             let c2 = src.byte_at(i.wrapping_add(2));
             if c2 != 0 && (c1 | 0x20) == b'a' && (c2 | 0x20) == b'n' {
                 i = i.wrapping_add(3);
-                // Skip the optional (chars) payload per C99.
+                // The optional (n-char-sequence), and its payload. Until
+                // 2026-09-27 any bytes up to a `)` were skipped and the
+                // payload dropped.
+                let mut payload = None;
                 if src.byte_at(i) == b'(' {
-                    let mut j = i.wrapping_add(1);
-                    while src.byte_at(j) != 0 && src.byte_at(j) != b')' {
+                    let start = i.wrapping_add(1);
+                    let mut j = start;
+                    while is_nchar(src.byte_at(j)) {
                         j = j.wrapping_add(1);
                     }
                     if src.byte_at(j) == b')' {
+                        payload = nan_payload(src, start, j);
                         i = j.wrapping_add(1);
                     }
                 }
-                return (FloatToken::Nan, negative, i);
+                return (FloatToken::Nan(payload), negative, i);
             }
         }
     }

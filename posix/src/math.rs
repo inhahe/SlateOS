@@ -1625,45 +1625,6 @@ pub extern "C" fn isfinite(x: f64) -> i32 {
 // nan(tag)
 // ---------------------------------------------------------------------------
 
-/// The payload glibc's `__strtod_nan` (`stdlib/strtod_nan_main.c`) reads out
-/// of a tag: the whole tag made of `[0-9A-Za-z_]`, read as `strtoull(tag,
-/// &end, 0)` reads it -- `0x` hex, leading-`0` octal, else decimal -- and used
-/// only if that read ends exactly where the tag does. `None` for any other
-/// tag, which gets the default NaN. An overflowing number is `ULLONG_MAX`, and
-/// sets `ERANGE`, as `strtoull` does inside glibc's `nan`.
-fn nan_payload(tag: &[u8]) -> Option<u64> {
-    if !tag.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_') {
-        return None;
-    }
-    let (digits, radix) = match tag {
-        [b'0', b'x' | b'X', rest @ ..] if rest.first().is_some_and(u8::is_ascii_hexdigit) => {
-            (rest, 16)
-        }
-        [b'0', rest @ ..] => (rest, 8),
-        _ => (tag, 10),
-    };
-    if tag.is_empty() {
-        return None;
-    }
-    let mut v: u64 = 0;
-    let mut overflow = false;
-    for &c in digits {
-        let d = char::from(c).to_digit(radix)?;
-        match v
-            .checked_mul(u64::from(radix))
-            .and_then(|m| m.checked_add(u64::from(d)))
-        {
-            Some(n) => v = n,
-            None => overflow = true,
-        }
-    }
-    if overflow {
-        set(errno::ERANGE);
-        return Some(u64::MAX);
-    }
-    Some(v)
-}
-
 /// The NUL-terminated `tag`, as bytes; empty for NULL.
 ///
 /// # Safety
@@ -1685,32 +1646,30 @@ unsafe fn tag_bytes<'a>(tag: *const u8) -> &'a [u8] {
     }
 }
 
-/// A quiet NaN, `tag` in its payload as glibc puts it there
-/// (`SET_NAN_PAYLOAD`: below the quiet bit, and only if nonzero there).
-/// Until 2026-09-27 the tag was ignored.
+/// A quiet NaN, `tag` in its payload as glibc puts it there: glibc's
+/// `nan` is `__strtod_nan (tag, NULL, 0)`, so the whole tag must be
+/// n-chars (`[0-9A-Za-z_]`), read as `strtoull` reads a number, and
+/// anything else is the default NaN (`crate::decfloat::nan_payload`, shared
+/// with `strtod`'s `nan(...)`). Until 2026-09-27 the tag was ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nan(tag: *const u8) -> f64 {
-    let quiet = f64::NAN.to_bits();
     // SAFETY: `nan`'s contract: `tag` is NULL or the caller's C string.
-    match nan_payload(unsafe { tag_bytes(tag) }) {
-        Some(p) if p & ((1u64 << 51) - 1) != 0 => f64::from_bits(quiet | (p & ((1u64 << 51) - 1))),
-        _ => f64::from_bits(quiet),
-    }
+    crate::decfloat::nan_f64(tag_payload(unsafe { tag_bytes(tag) }), false)
 }
 
 /// [`nan`] (float: 22 payload bits).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nanf(tag: *const u8) -> f32 {
-    let quiet = f32::NAN.to_bits();
     // SAFETY: as in `nan`.
-    match nan_payload(unsafe { tag_bytes(tag) }) {
-        Some(p) if p & ((1u64 << 22) - 1) != 0 => {
-            #[allow(clippy::cast_possible_truncation)]
-            let low = (p & ((1u64 << 22) - 1)) as u32;
-            f32::from_bits(quiet | low)
-        }
-        _ => f32::from_bits(quiet),
+    crate::decfloat::nan_f32(tag_payload(unsafe { tag_bytes(tag) }), false)
+}
+
+/// The payload of a whole tag: every byte an n-char, the run a number.
+fn tag_payload(tag: &[u8]) -> Option<u64> {
+    if !tag.iter().all(|&c| crate::decfloat::is_nchar(c)) {
+        return None;
     }
+    crate::decfloat::nan_payload(&crate::decfloat::SliceSource(tag), 0, tag.len())
 }
 
 #[cfg(test)]

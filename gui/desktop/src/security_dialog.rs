@@ -1479,7 +1479,15 @@ mod tests {
                                 dialog.hovered_button = hovered;
                                 let cmds = dialog.render(&p);
                                 assert!(!cmds.is_empty());
-                                palette_check::assert_drawn_from(&p, &cmds, &[], "security_dialog");
+                                // The risk badge and the two answer buttons
+                                // are lettered for their own hues.
+                                let inks = [p.green, p.yellow, p.peach, p.red].map(readable_on);
+                                palette_check::assert_drawn_from(
+                                    &p,
+                                    &cmds,
+                                    &inks,
+                                    "security_dialog",
+                                );
                             }
                         }
                     }

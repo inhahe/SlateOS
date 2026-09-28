@@ -1514,12 +1514,14 @@ mod tests {
                     ),
                 ] {
                     drawn += cmds.len();
-                    // `derived` is empty on purpose: this module computes no
-                    // colour that is not either a role or a `readable_on`
-                    // endpoint, and the endpoints are already allowed by the
-                    // sweep. A module that needed an exception here would be
-                    // claiming one, which is the point of the parameter.
-                    assert_drawn_from(&p, &cmds, &[], &format!("{which} in {name}"));
+                    // The transport buttons' labels, lettered for their own
+                    // fills -- declared, as the sweep asks of every
+                    // `readable_on` ink, and nothing else: this module
+                    // computes no other colour, and a module that needed more
+                    // here would be claiming it, which is the point of the
+                    // parameter.
+                    let inks = [p.red, p.yellow, p.green].map(readable_on);
+                    assert_drawn_from(&p, &cmds, &inks, &format!("{which} in {name}"));
                 }
             }
         }
@@ -1700,13 +1702,14 @@ mod tests {
     #[test]
     fn a_transport_button_is_lettered_for_its_own_fill() {
         // Judgement 2, and the only conversion in this module that fixes a
-        // bug a user could already see. The endpoints are written out rather
-        // than obtained from `readable_on`, because a test that called the
-        // same function the renderer calls would agree with it however wrong
-        // both were.
-        const NEAR_BLACK: u32 = 0x0011_111B;
-        const NEAR_WHITE: u32 = 0x00EF_F1F5;
+        // bug a user could already see. The endpoints are named rather than
+        // obtained from `readable_on`, because a test that called the same
+        // function the renderer calls would agree with it however wrong both
+        // were -- and named rather than written out, so they stay the two
+        // endpoints whatever values those are given.
         let rgb = |c: Color| (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b);
+        let near_black = rgb(appearance::DARK_EXTREME);
+        let near_white = rgb(appearance::LIGHT_EXTREME);
 
         for (state, label) in [
             (RecordingState::Idle, "Record"),
@@ -1730,7 +1733,7 @@ mod tests {
             // want dark ink.
             assert_eq!(
                 rgb(ink_dark),
-                NEAR_BLACK,
+                near_black,
                 "{label} in dark mode should be lettered near-black"
             );
             // The light theme's are all deep enough to want the opposite. This is exactly what the deleted
@@ -1738,7 +1741,7 @@ mod tests {
             // rather than merely an unconverted constant.
             assert_eq!(
                 rgb(ink_light),
-                NEAR_WHITE,
+                near_white,
                 "{label} in light mode should be lettered near-white"
             );
             assert_ne!(

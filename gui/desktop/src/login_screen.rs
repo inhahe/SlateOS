@@ -3214,10 +3214,10 @@ mod tests {
                     "light={light} accent={v:#04X}: the label must be readable \
                      on the fill it is drawn on"
                 );
-                if ink == Color::from_hex(0x0011_111B) {
+                if ink == appearance::DARK_EXTREME {
                     seen_dark_ink = true;
                 }
-                if ink == Color::from_hex(0x00EF_F1F5) {
+                if ink == appearance::LIGHT_EXTREME {
                     seen_light_ink = true;
                 }
             }

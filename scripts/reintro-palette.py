@@ -626,7 +626,7 @@ DEFECTS = [
         # badge unrendered and the reintroduced constant unseen.
         "PP: the one-shot badge goes back to Mocha peach",
         RULES,
-        [("                    color: p.peach,", "                    color: Color::from_hex(0xFAB387),")],
+        [("                    color: p.ink(p.peach),", "                    color: Color::from_hex(0xFAB387),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
@@ -683,7 +683,7 @@ DEFECTS = [
         # matrix too: a fixture that never sets one would leave it unrendered.
         "VV: the status message goes back to Mocha yellow",
         ACCT,
-        [("                color: p.yellow,", "                color: Color::from_hex(0xF9E2AF),")],
+        [("                color: p.ink(p.yellow),", "                color: Color::from_hex(0xF9E2AF),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
@@ -797,7 +797,7 @@ DEFECTS = [
     (
         "III: the restart warning goes back to Mocha peach",
         UPD,
-        [("                color: p.peach,", "                color: Color::from_hex(0xFAB387),")],
+        [("                color: p.ink(p.peach),", "                color: Color::from_hex(0xFAB387),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
@@ -829,8 +829,8 @@ DEFECTS = [
     (
         "MMM: the active tab's label stops following the accent",
         UPD,
-        [("                color: if active { p.accent } else { p.subtext0 },",
-          "                color: if active { p.blue } else { p.subtext0 },")],
+        [("                color: if active { p.ink(p.accent) } else { p.subtext0 },",
+          "                color: if active { p.ink(p.blue) } else { p.subtext0 },")],
         ["desktop"],
         ["an_updates_status_colours_do_not_follow_the_accent"],
     ),
@@ -841,8 +841,8 @@ DEFECTS = [
     (
         "NNN: the chosen schedule's label stops following the accent",
         UPD,
-        [("                color: if active { p.accent } else { p.text },",
-          "                color: if active { p.blue } else { p.text },")],
+        [("                color: if active { p.ink(p.accent) } else { p.text },",
+          "                color: if active { p.ink(p.blue) } else { p.text },")],
         ["desktop"],
         ["an_updates_status_colours_do_not_follow_the_accent"],
     ),
@@ -864,21 +864,21 @@ DEFECTS = [
     (
         "QQQ: the breakdown heading goes back to Mocha lavender",
         STOR,
-        [("                color: p.lavender,", "                color: Color::from_hex(0xB4BEFE),")],
+        [("                color: p.ink(p.lavender),", "                color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
         "RRR: the low-space warning caption goes back to Mocha red",
         STOR,
-        [("                color: p.red,", "                color: Color::from_hex(0xF38BA8),")],
+        [("                color: p.ink(p.red),", "                color: Color::from_hex(0xF38BA8),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
         "SSS: the reclaimable estimate goes back to Mocha green",
         STOR,
-        [("                    color: p.green,", "                    color: Color::from_hex(0xA6E3A1),")],
+        [("                    color: p.ink(p.green),", "                    color: Color::from_hex(0xA6E3A1),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
@@ -900,8 +900,8 @@ DEFECTS = [
     (
         "VVV: the active tab's label stops following the accent",
         STOR,
-        [("                color: if active { p.accent } else { p.subtext0 },",
-          "                color: if active { p.blue } else { p.subtext0 },")],
+        [("                color: if active { p.ink(p.accent) } else { p.subtext0 },",
+          "                color: if active { p.ink(p.blue) } else { p.subtext0 },")],
         ["desktop"],
         ["the_storage_panels_own_colours_do_not_follow_the_accent"],
     ),
@@ -911,7 +911,7 @@ DEFECTS = [
     (
         "WWW: the Change buttons stop following the accent",
         STOR,
-        [("                color: p.accent,", "                color: p.blue,")],
+        [("                color: p.ink(p.accent),", "                color: p.ink(p.blue),")],
         ["desktop"],
         ["the_storage_panels_own_colours_do_not_follow_the_accent"],
     ),
@@ -987,8 +987,8 @@ DEFECTS = [
         "DDDD: the active tab's label stops following the accent",
         POW,
         [(
-            "                color: if active { p.accent } else { p.subtext0 },",
-            "                color: if active { p.blue } else { p.subtext0 },",
+            "                color: if active { p.ink(p.accent) } else { p.subtext0 },",
+            "                color: if active { p.ink(p.blue) } else { p.subtext0 },",
         )],
         ["desktop"],
         ["the_power_panels_own_colours_do_not_follow_the_accent"],
@@ -1001,8 +1001,8 @@ DEFECTS = [
         "EEEE: the selected plan's label stops following the accent",
         POW,
         [(
-            "                color: if active { p.accent } else { p.text },",
-            "                color: if active { p.blue } else { p.text },",
+            "                color: if active { p.ink(p.accent) } else { p.text },",
+            "                color: if active { p.ink(p.blue) } else { p.text },",
         )],
         ["desktop"],
         ["the_power_panels_own_colours_do_not_follow_the_accent"],
@@ -1190,7 +1190,7 @@ DEFECTS = [
         "VVVV: the pin marker keeps its old yellow (only drawn for a pinned entry)",
         CLIP,
         [(
-            '                        text: "P".to_string(),\n                        color: p.yellow,',
+            '                        text: "P".to_string(),\n                        color: p.ink(p.yellow),',
             '                        text: "P".to_string(),\n                        color: Color::from_hex(0xF9E2AF),',
         )],
         ["desktop"],
@@ -1233,8 +1233,8 @@ DEFECTS = [
         "ZZZZ: the sensitive marker is repainted the user's accent",
         CLIP,
         [(
-            '                        text: "S".to_string(),\n                        color: p.red,',
-            '                        text: "S".to_string(),\n                        color: p.accent,',
+            '                        text: "S".to_string(),\n                        color: p.ink(p.red),',
+            '                        text: "S".to_string(),\n                        color: p.ink(p.accent),',
         )],
         ["desktop"],
         ["only_the_active_filter_tab_follows_the_accent"],
@@ -1544,7 +1544,7 @@ DEFECTS = [
     (
         "FFFFFFF: two rungs of the Wi-Fi security ladder collapse onto peach",
         NET_SET,
-        [("            2 => p.yellow,", "            2 => p.peach,")],
+        [("            2 => p.ink(p.yellow),", "            2 => p.ink(p.peach),")],
         ["desktop"],
         ["every_category_stays_distinct_under_every_accent"],
     ),
@@ -1848,7 +1848,7 @@ DEFECTS = [
         "LLLLLLLL: the boot-time ladder's first band moves from ten seconds "
         "to one",
         STARTUP,
-        [("    if ms < 10_000 {\n        p.green", "    if ms < 1_000 {\n        p.green")],
+        [("    if ms < 10_000 {\n        p.ink(p.green)", "    if ms < 1_000 {\n        p.ink(p.green)")],
         ["desktop"],
         ["the_boot_time_bands_are_where_they_say_they_are"],
     ),
@@ -1856,7 +1856,7 @@ DEFECTS = [
         "MMMMMMMM: a bad boot reading is painted in the accent, so a forty-"
         "second boot is green on a green desktop",
         STARTUP,
-        [("    } else {\n        p.red\n    }\n}", "    } else {\n        p.accent\n    }\n}")],
+        [("    } else {\n        p.ink(p.red)\n    }\n}", "    } else {\n        p.ink(p.accent)\n    }\n}")],
         ["desktop"],
         ["no_category_follows_the_accent",
          "every_control_that_offers_something_follows_the_accent"],
@@ -1864,8 +1864,8 @@ DEFECTS = [
     (
         "NNNNNNNN: a slow boot collapses onto a fast one",
         STARTUP,
-        [("    } else if ms < 30_000 {\n        p.yellow",
-          "    } else if ms < 30_000 {\n        p.green")],
+        [("    } else if ms < 30_000 {\n        p.ink(p.yellow)",
+          "    } else if ms < 30_000 {\n        p.ink(p.green)")],
         ["desktop"],
         ["every_category_stays_distinct_under_every_accent"],
     ),
@@ -2068,8 +2068,8 @@ DEFECTS = [
     (
         "TTTTTTTTT: the name of the zone in force is pinned to blue again",
         DTS,
-        [("color: if is_current { p.accent } else { p.text },",
-          "color: if is_current { p.blue } else { p.text },")],
+        [("color: if is_current { p.ink(p.accent) } else { p.text },",
+          "color: if is_current { p.ink(p.blue) } else { p.text },")],
         ["desktop"],
         ["every_control_that_offers_something_follows_the_accent",
          "the_zone_you_are_looking_at_is_not_the_zone_in_force"],
@@ -2078,7 +2078,7 @@ DEFECTS = [
         "UUUUUUUUU: the zone in force stops being named differently at all, "
         "so the panel cannot say which zone the machine is on",
         DTS,
-        [("color: if is_current { p.accent } else { p.text },", "color: p.text,")],
+        [("color: if is_current { p.ink(p.accent) } else { p.text },", "color: p.text,")],
         ["desktop"],
         ["every_control_that_offers_something_follows_the_accent",
          "the_zone_you_are_looking_at_is_not_the_zone_in_force"],
@@ -2096,7 +2096,7 @@ DEFECTS = [
     (
         "WWWWWWWWW: the DST badge keeps Mocha's yellow",
         DTS,
-        [("                    font_size: 10.0,\n                    color: p.yellow,",
+        [("                    font_size: 10.0,\n                    color: p.ink(p.yellow),",
           "                    font_size: 10.0,\n"
           "                    color: Color::from_hex(0xF9E2AF),")],
         ["desktop"],
@@ -2107,8 +2107,8 @@ DEFECTS = [
         "XXXXXXXXX: the DST badge follows the accent, so whether a zone's "
         "clock is shifted depends on the desktop's colour",
         DTS,
-        [("                    font_size: 10.0,\n                    color: p.yellow,",
-          "                    font_size: 10.0,\n                    color: p.accent,")],
+        [("                    font_size: 10.0,\n                    color: p.ink(p.yellow),",
+          "                    font_size: 10.0,\n                    color: p.ink(p.accent),")],
         ["desktop"],
         ["the_dst_badge_does_not_follow_the_accent",
          "every_control_that_offers_something_follows_the_accent"],
@@ -3379,8 +3379,8 @@ DEFECTS = [
         "HHHHHHHHHHHHHHH: an idle extension icon keeps Mocha's subtext0",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
-             '                    color: if hovered { p.accent } else { guitk::color::Color::from_hex(0xA6ADC8) },'),
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
+             '                    color: if hovered { p.ink(p.accent) } else { guitk::color::Color::from_hex(0xA6ADC8) },'),
         ],
         ["desktop"],
         [
@@ -3492,7 +3492,7 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQ: the Slow badge keeps Mocha's yellow",
         CTX,
         [
-            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.yellow,',
+            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.ink(p.yellow),',
              '                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: guitk::color::Color::from_hex(0xF9E2AF),'),
         ],
         ["desktop"],
@@ -3507,7 +3507,7 @@ DEFECTS = [
         "RRRRRRRRRRRRRRR: a hovered extension's icon keeps its hardcoded blue",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
              '                    color: if hovered { guitk::color::Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -3520,7 +3520,7 @@ DEFECTS = [
         "SSSSSSSSSSSSSSS: a hovered extension's icon is drawn like an idle one",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
              '                    color: if hovered { p.subtext0 } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -3532,8 +3532,8 @@ DEFECTS = [
         "TTTTTTTTTTTTTTT: an extension's icon takes the accent whether it is pointed at or not",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
-             '                    color: if hovered { p.accent } else { p.accent },'),
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
+             '                    color: if hovered { p.ink(p.accent) } else { p.ink(p.accent) },'),
         ],
         ["desktop"],
         [
@@ -3544,7 +3544,7 @@ DEFECTS = [
         "UUUUUUUUUUUUUUU: a hovered extension's icon is drawn in the body text colour",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
              '                    color: if hovered { p.text } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -3582,8 +3582,8 @@ DEFECTS = [
         "XXXXXXXXXXXXXXX: the Slow badge follows the desktop's accent",
         CTX,
         [
-            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.yellow,',
-             '                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.accent,'),
+            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.ink(p.yellow),',
+             '                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -4337,7 +4337,7 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEE: a muted master volume stops going red",
         SND,
         [
-            ('master_muted {\n                p.red\n',
+            ('master_muted {\n                p.ink(p.red)\n',
              'master_muted {\n                p.text\n'),
         ],
         ["desktop"],
@@ -4349,8 +4349,8 @@ DEFECTS = [
         "FFFFFFFFFFFFFFFFFFF: an unmuted master volume drops to secondary text",
         SND,
         [
-            ('p.red\n            } else {\n                p.text\n            },',
-             'p.red\n            } else {\n                p.subtext0\n            },'),
+            ('p.ink(p.red)\n            } else {\n                p.text\n            },',
+             'p.ink(p.red)\n            } else {\n                p.subtext0\n            },'),
         ],
         ["desktop"],
         [
@@ -4387,7 +4387,7 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIII: the active tab's label is frozen back to Mocha blue",
         SND,
         [
-            ('color: if active { p.accent } else { p.subtext0 },',
+            ('color: if active { p.ink(p.accent) } else { p.subtext0 },',
              'color: if active { guitk::color::Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -4401,7 +4401,7 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJ: the active tab's label reads like an inactive one",
         SND,
         [
-            ('color: if active { p.accent } else { p.subtext0 },',
+            ('color: if active { p.ink(p.accent) } else { p.subtext0 },',
              'color: if active { p.subtext0 } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -4415,8 +4415,8 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKK: every tab's label takes the accent",
         SND,
         [
-            ('color: if active { p.accent } else { p.subtext0 },',
-             'color: if active { p.accent } else { p.accent },'),
+            ('color: if active { p.ink(p.accent) } else { p.subtext0 },',
+             'color: if active { p.ink(p.accent) } else { p.ink(p.accent) },'),
         ],
         ["desktop"],
         [
@@ -4552,8 +4552,8 @@ DEFECTS = [
         "VVVVVVVVVVVVVVVVVVV: the microphone heading follows the accent",
         SND,
         [
-            ('text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.lavender,',
-             'text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+            ('text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.ink(p.lavender),',
+             'text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -4687,8 +4687,8 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGG: the spatial heading follows the accent",
         SND,
         [
-            ('text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.lavender,',
-             'text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+            ('text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.ink(p.lavender),',
+             'text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -4726,7 +4726,7 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJ: the selected spatial mode's label is frozen back to Mocha blue",
         SND,
         [
-            ('color: if active { p.accent } else { p.text },',
+            ('color: if active { p.ink(p.accent) } else { p.text },',
              'color: if active { guitk::color::Color::from_hex(0x89B4FA) } else { p.text },'),
         ],
         ["desktop"],
@@ -4740,7 +4740,7 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKKK: the selected spatial mode's label reads like an unselected one",
         SND,
         [
-            ('color: if active { p.accent } else { p.text },',
+            ('color: if active { p.ink(p.accent) } else { p.text },',
              'color: if active { p.text } else { p.text },'),
         ],
         ["desktop"],
@@ -4753,8 +4753,8 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLL: every spatial mode's label takes the accent",
         SND,
         [
-            ('color: if active { p.accent } else { p.text },',
-             'color: if active { p.accent } else { p.accent },'),
+            ('color: if active { p.ink(p.accent) } else { p.text },',
+             'color: if active { p.ink(p.accent) } else { p.ink(p.accent) },'),
         ],
         ["desktop"],
         [
@@ -6258,8 +6258,8 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHH: the selected printer's name stops following the accent",
         PRINTMGR,
         [
-            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.accent,',
-             '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.blue,'),
+            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.ink(p.accent),',
+             '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.ink(p.blue),'),
         ],
         ["desktop"],
         [
@@ -6271,7 +6271,7 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIII: the selected printer's name is drawn as ordinary body text",
         PRINTMGR,
         [
-            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.accent,',
+            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.ink(p.accent),',
              '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.text,'),
         ],
         ["desktop"],
@@ -6334,8 +6334,8 @@ DEFECTS = [
         'NNNNNNNNNNNNNNNNNNNNNNNNNNNN: a validation error is reported in the accent instead of red',
         PRINTMGR,
         [
-            ('                font_size: 11.0,\n                color: p.red,',
-             '                font_size: 11.0,\n                color: p.accent,'),
+            ('                font_size: 11.0,\n                color: p.ink(p.red),',
+             '                font_size: 11.0,\n                color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -6347,7 +6347,7 @@ DEFECTS = [
         'OOOOOOOOOOOOOOOOOOOOOOOOOOOO: a validation error is frozen back to Mocha red',
         PRINTMGR,
         [
-            ('                font_size: 11.0,\n                color: p.red,',
+            ('                font_size: 11.0,\n                color: p.ink(p.red),',
              '                font_size: 11.0,\n                color: Color::from_hex(0xF38BA8),'),
         ],
         ["desktop"],
@@ -6360,7 +6360,7 @@ DEFECTS = [
         'PPPPPPPPPPPPPPPPPPPPPPPPPPPP: a validation error is drawn as ordinary body text',
         PRINTMGR,
         [
-            ('                font_size: 11.0,\n                color: p.red,',
+            ('                font_size: 11.0,\n                color: p.ink(p.red),',
              '                font_size: 11.0,\n                color: p.text,'),
         ],
         ["desktop"],
@@ -6954,7 +6954,7 @@ DEFECTS = [
         'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the charging bolt is frozen back to Mocha yellow',
         POWER,
         [
-            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.yellow),',
              '            text: "\\u{26A1}".to_string(), // ⚡\n            color: Color::from_hex(0xF9E2AF),'),
         ],
         ["desktop"],
@@ -6967,8 +6967,8 @@ DEFECTS = [
         'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the charging bolt turns into an alarm',
         POWER,
         [
-            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
-             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.red,'),
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.yellow),',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.red),'),
         ],
         ["desktop"],
         [
@@ -6979,8 +6979,8 @@ DEFECTS = [
         'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the charging bolt takes the accent',
         POWER,
         [
-            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
-             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.accent,'),
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.yellow),',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -7030,7 +7030,7 @@ DEFECTS = [
         'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the Balanced badge is frozen back to its Mocha value',
         POWER,
         [
-            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
+            ('        PowerProfile::Balanced => ("Balanced", p.ink(p.blue)),',
              '        PowerProfile::Balanced => ("Balanced", Color::from_hex(0x89B4FA)),'),
         ],
         ["desktop"],
@@ -7044,8 +7044,8 @@ DEFECTS = [
         "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Balanced badge is swapped with another profile's hue",
         POWER,
         [
-            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
-             '        PowerProfile::Balanced => ("Balanced", p.peach),'),
+            ('        PowerProfile::Balanced => ("Balanced", p.ink(p.blue)),',
+             '        PowerProfile::Balanced => ("Balanced", p.ink(p.peach)),'),
         ],
         ["desktop"],
         [
@@ -7057,8 +7057,8 @@ DEFECTS = [
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the Balanced badge takes the accent',
         POWER,
         [
-            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
-             '        PowerProfile::Balanced => ("Balanced", p.accent),'),
+            ('        PowerProfile::Balanced => ("Balanced", p.ink(p.blue)),',
+             '        PowerProfile::Balanced => ("Balanced", p.ink(p.accent)),'),
         ],
         ["desktop"],
         [
@@ -7071,7 +7071,7 @@ DEFECTS = [
         'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the Performance badge is frozen back to its Mocha value',
         POWER,
         [
-            ('        PowerProfile::Performance => ("Performance", p.peach),',
+            ('        PowerProfile::Performance => ("Performance", p.ink(p.peach)),',
              '        PowerProfile::Performance => ("Performance", Color::from_hex(0xFAB387)),'),
         ],
         ["desktop"],
@@ -7084,8 +7084,8 @@ DEFECTS = [
         "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the Performance badge is swapped with another profile's hue",
         POWER,
         [
-            ('        PowerProfile::Performance => ("Performance", p.peach),',
-             '        PowerProfile::Performance => ("Performance", p.blue),'),
+            ('        PowerProfile::Performance => ("Performance", p.ink(p.peach)),',
+             '        PowerProfile::Performance => ("Performance", p.ink(p.blue)),'),
         ],
         ["desktop"],
         [
@@ -7096,8 +7096,8 @@ DEFECTS = [
         'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the Performance badge takes the accent',
         POWER,
         [
-            ('        PowerProfile::Performance => ("Performance", p.peach),',
-             '        PowerProfile::Performance => ("Performance", p.accent),'),
+            ('        PowerProfile::Performance => ("Performance", p.ink(p.peach)),',
+             '        PowerProfile::Performance => ("Performance", p.ink(p.accent)),'),
         ],
         ["desktop"],
         [
@@ -7109,7 +7109,7 @@ DEFECTS = [
         'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the Power Saver badge is frozen back to its Mocha value',
         POWER,
         [
-            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.green)),',
              '        PowerProfile::PowerSaver => ("Power Saver", Color::from_hex(0xA6E3A1)),'),
         ],
         ["desktop"],
@@ -7122,8 +7122,8 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Power Saver badge is swapped with another profile's hue",
         POWER,
         [
-            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
-             '        PowerProfile::PowerSaver => ("Power Saver", p.lavender),'),
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.green)),',
+             '        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.lavender)),'),
         ],
         ["desktop"],
         [
@@ -7134,8 +7134,8 @@ DEFECTS = [
         'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Power Saver badge takes the accent',
         POWER,
         [
-            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
-             '        PowerProfile::PowerSaver => ("Power Saver", p.accent),'),
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.green)),',
+             '        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.accent)),'),
         ],
         ["desktop"],
         [
@@ -7147,7 +7147,7 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Custom badge is frozen back to its Mocha value',
         POWER,
         [
-            ('        PowerProfile::Custom => ("Custom", p.lavender),',
+            ('        PowerProfile::Custom => ("Custom", p.ink(p.lavender)),',
              '        PowerProfile::Custom => ("Custom", Color::from_hex(0xB4BEFE)),'),
         ],
         ["desktop"],
@@ -7160,8 +7160,8 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Custom badge is swapped with another profile's hue",
         POWER,
         [
-            ('        PowerProfile::Custom => ("Custom", p.lavender),',
-             '        PowerProfile::Custom => ("Custom", p.green),'),
+            ('        PowerProfile::Custom => ("Custom", p.ink(p.lavender)),',
+             '        PowerProfile::Custom => ("Custom", p.ink(p.green)),'),
         ],
         ["desktop"],
         [
@@ -7172,8 +7172,8 @@ DEFECTS = [
         'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Custom badge takes the accent',
         POWER,
         [
-            ('        PowerProfile::Custom => ("Custom", p.lavender),',
-             '        PowerProfile::Custom => ("Custom", p.accent),'),
+            ('        PowerProfile::Custom => ("Custom", p.ink(p.lavender)),',
+             '        PowerProfile::Custom => ("Custom", p.ink(p.accent)),'),
         ],
         ["desktop"],
         [
@@ -7948,7 +7948,7 @@ DEFECTS = [
         'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the error message is frozen back to Mocha red',
         LOGIN,
         [
-            ('                        font_size: 12.0,\n                        color: p.red,',
+            ('                        font_size: 12.0,\n                        color: p.ink(p.red),',
              '                        font_size: 12.0,\n                        color: Color::from_hex(0xF38BA8),'),
         ],
         ["desktop"],
@@ -7962,8 +7962,8 @@ DEFECTS = [
         'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the error message takes the accent',
         LOGIN,
         [
-            ('                        font_size: 12.0,\n                        color: p.red,',
-             '                        font_size: 12.0,\n                        color: p.accent,'),
+            ('                        font_size: 12.0,\n                        color: p.ink(p.red),',
+             '                        font_size: 12.0,\n                        color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -7975,7 +7975,7 @@ DEFECTS = [
         'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the lockout notice is frozen back to Mocha yellow',
         LOGIN,
         [
-            ('                        font_size: 12.0,\n                        color: p.yellow,',
+            ('                        font_size: 12.0,\n                        color: p.ink(p.yellow),',
              '                        font_size: 12.0,\n                        color: Color::from_hex(0xF9E2AF),'),
         ],
         ["desktop"],
@@ -7989,8 +7989,8 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the lockout notice takes the accent',
         LOGIN,
         [
-            ('                        font_size: 12.0,\n                        color: p.yellow,',
-             '                        font_size: 12.0,\n                        color: p.accent,'),
+            ('                        font_size: 12.0,\n                        color: p.ink(p.yellow),',
+             '                        font_size: 12.0,\n                        color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -9470,7 +9470,7 @@ DEFECTS = [
         "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the current language's name stops being accented",
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: if is_current {',
              '                color: p.text,\n                font_weight: if is_current {'),
         ],
         ["desktop"],
@@ -9482,8 +9482,8 @@ DEFECTS = [
         'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: every list row is accented, not just the current one',
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
-             '                color: p.accent,\n                font_weight: if is_current {'),
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: if is_current {',
+             '                color: p.ink(p.accent),\n                font_weight: if is_current {'),
         ],
         ["desktop"],
         [
@@ -9495,8 +9495,8 @@ DEFECTS = [
         "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: an ordinary row's name is frozen to Mocha text",
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
-             '                color: if is_current {\n                    p.accent\n                } else {\n                    guitk::color::Color::from_hex(0xCDD6F4)\n                },\n                font_weight: if is_current {'),
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: if is_current {',
+             '                color: if is_current {\n                    p.ink(p.accent)\n                } else {\n                    guitk::color::Color::from_hex(0xCDD6F4)\n                },\n                font_weight: if is_current {'),
         ],
         ["desktop"],
         [
@@ -9633,7 +9633,7 @@ DEFECTS = [
         'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Date Format heading is frozen to Mocha lavender',
         LANG,
         [
-            ('            text: "Date Format".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+            ('            text: "Date Format".into(),\n            font_size: 15.0,\n            color: p.ink(p.lavender),',
              '            text: "Date Format".into(),\n            font_size: 15.0,\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
         ],
         ["desktop"],
@@ -9647,8 +9647,8 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Time Format heading follows the accent',
         LANG,
         [
-            ('            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.lavender,',
-             '            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.accent,'),
+            ('            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.ink(p.lavender),',
+             '            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -9660,7 +9660,7 @@ DEFECTS = [
         'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Measurement heading drops to the sub-heading rung',
         LANG,
         [
-            ('            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+            ('            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.ink(p.lavender),',
              '            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.subtext1,'),
         ],
         ["desktop"],
@@ -9686,7 +9686,7 @@ DEFECTS = [
         'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Currency heading is frozen to Mocha lavender',
         LANG,
         [
-            ('            text: "Currency".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+            ('            text: "Currency".into(),\n            font_size: 15.0,\n            color: p.ink(p.lavender),',
              '            text: "Currency".into(),\n            font_size: 15.0,\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
         ],
         ["desktop"],
@@ -9754,7 +9754,7 @@ DEFECTS = [
         "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the default currency's row stops being accented",
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: FontWeightHint::Regular,',
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: FontWeightHint::Regular,',
              '                color: p.text,\n                font_weight: FontWeightHint::Regular,'),
         ],
         ["desktop"],
@@ -9770,8 +9770,8 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: every currency row is accented, not just the default one',
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: FontWeightHint::Regular,',
-             '                color: p.accent,\n                font_weight: FontWeightHint::Regular,'),
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: FontWeightHint::Regular,',
+             '                color: p.ink(p.accent),\n                font_weight: FontWeightHint::Regular,'),
         ],
         ["desktop"],
         [
@@ -11193,7 +11193,7 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: MOCHA_PEACH survives the conversion at the fallback site",
         SCRCAP,
         [
-            ('                color: p.peach,',
+            ('                color: p.ink(p.peach),',
              '                color: guitk::color::Color::from_hex(0xFAB387),'),
         ],
         ["desktop"],
@@ -11323,7 +11323,7 @@ DEFECTS = [
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the transient-state word and the panel title trade ink",
         SCRCAP,
         [
-            ('                color: p.peach,',
+            ('                color: p.ink(p.peach),',
              '                color: p.text,'),
             ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
              '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.peach,'),
@@ -11429,8 +11429,8 @@ DEFECTS = [
         "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the transient-state word is painted with the accent",
         SCRCAP,
         [
-            ('                color: p.peach,',
-             '                color: p.accent,'),
+            ('                color: p.ink(p.peach),',
+             '                color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -11680,8 +11680,8 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the transient-state word borrows the pause colour",
         SCRCAP,
         [
-            ('                color: p.peach,',
-             '                color: p.yellow,'),
+            ('                color: p.ink(p.peach),',
+             '                color: p.ink(p.yellow),'),
         ],
         ["desktop"],
         [
@@ -11803,7 +11803,7 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: MOCHA_LAVENDER survives at the picker's title",
         SNAP,
         [
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
              '            // the accented thumbnail below it that actually means something.\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
         ],
         ["desktop"],
@@ -11952,7 +11952,7 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the picker's title and a zone's label trade inks",
         SNAP,
         [
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
              '            // the accented thumbnail below it that actually means something.\n            color: readable_on(p.scrim()),'),
             ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
              '                // be dark-on-dark under the light theme.\n                color: p.lavender,'),
@@ -12013,7 +12013,7 @@ DEFECTS = [
         [
             ('            height: picker_h,\n            color: p.surface0,',
              '            height: picker_h,\n            color: p.lavender,'),
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
              '            // the accented thumbnail below it that actually means something.\n            color: p.surface0,'),
         ],
         ["desktop"],
@@ -12111,8 +12111,8 @@ DEFECTS = [
         "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the picker's title is accented and competes with the thumbnail that matters",
         SNAP,
         [
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
-             '            // the accented thumbnail below it that actually means something.\n            color: p.accent,'),
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -12393,7 +12393,7 @@ DEFECTS = [
         "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the picker's title is as quiet as body text",
         SNAP,
         [
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
              '            // the accented thumbnail below it that actually means something.\n            color: p.subtext0,'),
         ],
         ["desktop"],
@@ -12452,7 +12452,7 @@ DEFECTS = [
         'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the engaged Current line keeps its own Mocha blue',
         FOCUS,
         [
-            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.blue)\n            },',
              '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                Color::from_hex(0x89B4FA)\n            },'),
         ],
         ["desktop"],
@@ -12468,8 +12468,8 @@ DEFECTS = [
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the quiet Current line keeps its own Mocha subtext0',
         FOCUS,
         [
-            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
-             '            color: if mode == FocusMode::Off {\n                Color::from_hex(0xA6ADC8)\n            } else {\n                p.blue\n            },'),
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.blue)\n            },',
+             '            color: if mode == FocusMode::Off {\n                Color::from_hex(0xA6ADC8)\n            } else {\n                p.ink(p.blue)\n            },'),
         ],
         ["desktop"],
         [
@@ -12764,8 +12764,8 @@ DEFECTS = [
         'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the engaged Current line follows the accent',
         FOCUS,
         [
-            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
-             '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.accent\n            },'),
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.blue)\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.accent)\n            },'),
         ],
         ["desktop"],
         [
@@ -13034,8 +13034,8 @@ DEFECTS = [
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the Current line's engaged and quiet branches are swapped",
         FOCUS,
         [
-            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
-             '            color: if mode == FocusMode::Off {\n                p.blue\n            } else {\n                p.subtext0\n            },'),
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.blue)\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.ink(p.blue)\n            } else {\n                p.subtext0\n            },'),
         ],
         ["desktop"],
         [

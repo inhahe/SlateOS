@@ -1975,15 +1975,15 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 - [x] Rope or gap buffer backing (efficient for large files) — *2026-09-28: `guitk::textbuffer::TextBuffer`, the text in chunks of at most 4 KiB with the byte offset and newline count before each: an edit rewrites the chunks it touches, a line lookup is a binary search and a scan of one chunk. On a 10 MB file, loading takes 20 ms, a keystroke with its line lookups about 12 µs. Batches of edits (several carets) in the offsets before the batch; offsets inside a character are refused, not rounded. The editors in `apps/` still keep `Vec<String>`; the widget below is what moves them.*
 - [ ] Syntax highlighting via tree-sitter integration
 - [ ] Line numbers (toggleable)
-- [ ] Undo/redo stack — *[-] 2026-09-27: the history exists and is a tree, not a stack (`guitk::undo`, `design-decisions.md` §1420), and the multi-line text area uses it; this widget, which would use it too, does not exist yet.*
-- [ ] Multi-cursor support
-- [ ] Selection modes: line, word, block/column
+- [x] Undo/redo stack — *[-] 2026-09-27: the history exists and is a tree, not a stack (`guitk::undo`, `design-decisions.md` §1420), and the multi-line text area uses it; this widget, which would use it too, does not exist yet.* *2026-09-28: `guitk::codeedit::CodeEditor` records every batch -- one edit at every caret -- as one step of that tree, typing gathered a word at a time; undo puts back exactly what a batch changed however its carets shifted each other.*
+- [-] Multi-cursor support — *2026-09-28, the model (`guitk::codeedit`): any number of selections, sorted and merged where they meet; typing, deleting, newline, tab, paste and cut at every caret as one batch; a caret added above or below, the next occurrence (Ctrl+D), a block; copying from several carets and pasting at as many puts each piece back at its own. Drawing them and the keys are the view's, not yet built.*
+- [x] Selection modes: line, word, block/column — *2026-09-28: `CodeEditor::select_word`, `select_line` (again takes in the next line), `select_block` (a column range on every line between two points, held to short lines).*
 - [ ] Find/replace (regex-capable)
 - [ ] Soft wrap or horizontal scroll (user choice)
-- [ ] Indent/dedent selection
-- [ ] Auto-indent
-- [ ] Bracket matching
-- [ ] Configurable tab width, tabs vs spaces
+- [x] Indent/dedent selection — *2026-09-28: Tab on a selection spanning lines indents every line it touches and keeps it selected; Shift+Tab takes off a tab or up to a tab width of spaces; empty lines are left empty.*
+- [x] Auto-indent — *2026-09-28: a new line keeps its line's indentation, one level more after an opening bracket, and a closer right after the caret goes to a line of its own at the outer level.*
+- [-] Bracket matching — *2026-09-28: `CodeEditor::matching_bracket` finds the partner of the bracket at or before the caret through nesting (brackets in strings count; a language-aware matcher can take over). Highlighting the pair is the view's.*
+- [x] Configurable tab width, tabs vs spaces — *2026-09-28: `codeedit::Options` -- tab width 1-16, spaces or tabs; Tab runs to the next stop, Backspace in leading spaces back to the previous one.*
 
 #### Ribbon Widget
 _A tabbed command surface (Office-style) for command-dense applications: file explorer, text editor, image editor, etc. The ribbon is a widget, not a mandatory chrome — apps that don't want one use traditional menus and toolbars instead._

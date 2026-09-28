@@ -1054,6 +1054,10 @@ fn launch(
 /// Returns 0 on success, or a POSIX error number on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32 {
+    // A thread waiting for itself would wait for ever: glibc's EDEADLK.
+    if is_calling_thread(thread_id) {
+        return errno::EDEADLK;
+    }
     // A detached thread must not be joined (POSIX: EINVAL).  Reject early
     // so we never race the detached thread's self-unmap.
     if let Some(slot) = find_slot(thread_id) {
@@ -1109,6 +1113,102 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
     }
 
     0
+}
+
+/// Whether `thread_id` is the calling thread's own id.
+fn is_calling_thread(thread_id: PthreadT) -> bool {
+    u64::try_from(current_tid()).is_ok_and(|me| me == thread_id)
+}
+
+/// How far a thread is on its way to being joined: whether it has exited,
+/// or why it cannot be joined at all -- itself (`EDEADLK`), detached
+/// (`EINVAL`), or not a thread this process tracks (`ESRCH`).
+///
+/// "Exited" is the thread's own word on its way out, its slot's
+/// `STATE_EXITED`. A thread killed before it could say so -- by a fault it
+/// did not handle -- is never seen to have exited here, though
+/// `pthread_join` would return `PTHREAD_CANCELED` for it: the kernel's join
+/// only waits (known-issues.md, D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD).
+fn join_readiness(thread_id: PthreadT) -> Result<bool, i32> {
+    if is_calling_thread(thread_id) {
+        return Err(errno::EDEADLK);
+    }
+    let slot = find_slot(thread_id).ok_or(errno::ESRCH)?;
+    match slot.state.load(Ordering::Acquire) {
+        STATE_DETACHED => Err(errno::EINVAL),
+        STATE_EXITED => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+/// Join a thread only if it has already exited (`pthread_tryjoin_np`, GNU):
+/// as [`pthread_join`] then, and `EBUSY` at once while it runs. `EDEADLK`
+/// for the calling thread, `EINVAL` for a detached one, `ESRCH` for one
+/// this process does not know.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_tryjoin_np(thread_id: PthreadT, retval: *mut *mut u8) -> i32 {
+    match join_readiness(thread_id) {
+        Ok(true) => pthread_join(thread_id, retval),
+        Ok(false) => errno::EBUSY,
+        Err(e) => e,
+    }
+}
+
+/// How long [`pthread_timedjoin_np`] sleeps between looks: the kernel has
+/// no timed join, so it polls.
+const TIMEDJOIN_POLL_NS: i64 = 1_000_000;
+
+/// Join a thread, waiting for it until `abstime` on `CLOCK_REALTIME`
+/// (`pthread_timedjoin_np`, GNU): as [`pthread_join`] once it exits, and
+/// `ETIMEDOUT` if the time comes first. A NULL `abstime` waits without end,
+/// as glibc's does; one whose nanoseconds are outside 0..1e9 is `EINVAL`,
+/// as it is to every other timed wait -- when there is a wait, that is: a
+/// thread already gone is joined whatever `abstime` says. Otherwise as
+/// [`pthread_tryjoin_np`].
+///
+/// # Safety
+///
+/// `abstime` is NULL or a readable `struct timespec`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_timedjoin_np(
+    thread_id: PthreadT,
+    retval: *mut *mut u8,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if abstime.is_null() {
+        return pthread_join(thread_id, retval);
+    }
+    // SAFETY: non-null, the caller's.
+    let deadline = unsafe { *abstime };
+    loop {
+        match join_readiness(thread_id) {
+            Ok(true) => return pthread_join(thread_id, retval),
+            Ok(false) => {}
+            Err(e) => return e,
+        }
+        if !(0..1_000_000_000).contains(&deadline.tv_nsec) {
+            return errno::EINVAL;
+        }
+        let mut now = crate::stat::Timespec::default();
+        if crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now) != 0 {
+            return errno::get_errno();
+        }
+        let left_ns = i128::from(deadline.tv_sec)
+            .saturating_sub(i128::from(now.tv_sec))
+            .saturating_mul(1_000_000_000)
+            .saturating_add(i128::from(deadline.tv_nsec))
+            .saturating_sub(i128::from(now.tv_nsec));
+        if left_ns <= 0 {
+            return errno::ETIMEDOUT;
+        }
+        let pause = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: i64::try_from(left_ns.min(i128::from(TIMEDJOIN_POLL_NS)))
+                .unwrap_or(TIMEDJOIN_POLL_NS),
+        };
+        // A short or failed sleep only means an earlier look.
+        let _ = crate::time::nanosleep(&raw const pause, core::ptr::null_mut());
+    }
 }
 
 /// Detach a thread.
@@ -7646,6 +7746,115 @@ mod tests {
         let mut rv: *mut u8 = core::ptr::null_mut();
         assert_eq!(pthread_join(tid, &raw mut rv), crate::errno::EINVAL);
         release_slot(slot);
+    }
+
+    #[test]
+    fn tryjoin_answers_by_the_threads_state() {
+        let tid: u64 = 0x5100_0020;
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        assert_eq!(
+            pthread_tryjoin_np(tid, &raw mut rv),
+            crate::errno::EBUSY,
+            "still running"
+        );
+        // Exited: the join goes ahead, and its answer is pthread_join's --
+        // on the host, whose kernel call fails, ESRCH.
+        slot.state.store(STATE_EXITED, Ordering::Release);
+        assert_eq!(
+            pthread_tryjoin_np(tid, &raw mut rv),
+            pthread_join(tid, &raw mut rv)
+        );
+        if let Some(s) = find_slot(tid) {
+            release_slot(s);
+        }
+        let detached: u64 = 0x5100_0021;
+        let slot = track(detached, 0, DEFAULT_THREAD_STACK_SIZE, true);
+        assert_eq!(
+            pthread_tryjoin_np(detached, &raw mut rv),
+            crate::errno::EINVAL
+        );
+        release_slot(slot);
+        assert_eq!(
+            pthread_tryjoin_np(0x5100_00ff, &raw mut rv),
+            crate::errno::ESRCH
+        );
+    }
+
+    #[test]
+    fn timedjoin_waits_until_its_time_and_no_longer() {
+        use crate::stat::Timespec;
+        let tid: u64 = 0x5100_0022;
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        let at = |tv_sec, tv_nsec| Timespec { tv_sec, tv_nsec };
+        // SAFETY: each `abstime` is this frame's.
+        unsafe {
+            assert_eq!(
+                pthread_timedjoin_np(tid, &raw mut rv, &at(0, 0)),
+                crate::errno::ETIMEDOUT,
+                "1970 has passed"
+            );
+            assert_eq!(
+                pthread_timedjoin_np(tid, &raw mut rv, &at(0, 1_000_000_000)),
+                crate::errno::EINVAL
+            );
+        }
+        let mut now = Timespec::default();
+        assert_eq!(
+            crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now),
+            0
+        );
+        let soon = if now.tv_nsec < 970_000_000 {
+            at(now.tv_sec, now.tv_nsec + 30_000_000)
+        } else {
+            at(now.tv_sec + 1, now.tv_nsec - 970_000_000)
+        };
+        let started = std::time::Instant::now();
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { pthread_timedjoin_np(tid, &raw mut rv, &soon) },
+            crate::errno::ETIMEDOUT
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(25));
+        // Gone already: joined whatever `abstime` says.
+        slot.state.store(STATE_EXITED, Ordering::Release);
+        // SAFETY: as above.
+        let r = unsafe { pthread_timedjoin_np(tid, &raw mut rv, &at(0, -1)) };
+        assert_eq!(r, pthread_join(tid, &raw mut rv));
+        if let Some(s) = find_slot(tid) {
+            release_slot(s);
+        }
+    }
+
+    #[test]
+    fn a_thread_joining_itself_is_edeadlk() {
+        // Give this host thread a task id, as the target's first lookup would.
+        let pt = crate::perthread::current();
+        // SAFETY: this thread's own block.
+        let saved = unsafe { (*pt).tid };
+        // SAFETY: as above.
+        unsafe { (*pt).tid = 0x5100_0030 };
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        assert_eq!(
+            pthread_join(0x5100_0030, &raw mut rv),
+            crate::errno::EDEADLK
+        );
+        assert_eq!(
+            pthread_tryjoin_np(0x5100_0030, &raw mut rv),
+            crate::errno::EDEADLK
+        );
+        let later = crate::stat::Timespec {
+            tv_sec: i64::MAX,
+            tv_nsec: 0,
+        };
+        // SAFETY: `later` is this frame's.
+        assert_eq!(
+            unsafe { pthread_timedjoin_np(0x5100_0030, &raw mut rv, &later) },
+            crate::errno::EDEADLK
+        );
+        // SAFETY: as above.
+        unsafe { (*pt).tid = saved };
     }
 
     #[test]

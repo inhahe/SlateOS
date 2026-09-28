@@ -187,6 +187,16 @@ pub(crate) fn abi_asserts() -> String {
         data
     );
 
+    // --- DNS messages: ns_initparse's handle, ns_parserr's record ----------
+    abi!(out, hdrs, crate::resolv::NsMsg, "ns_msg", "arpa/nameser.h",
+         msg as "_msg", eom as "_eom", id as "_id", flags as "_flags", counts as "_counts",
+         sections as "_sections", sect as "_sect", rrnum as "_rrnum", msg_ptr as "_msg_ptr");
+    abi!(out, hdrs, crate::resolv::NsRr, "ns_rr", "arpa/nameser.h",
+         name as "name", type_ as "type", rr_class as "rr_class", ttl as "ttl",
+         rdlength as "rdlength", rdata as "rdata");
+    abi!(out, hdrs, crate::resolv::NsFlagData, "struct _ns_flagdata", "arpa/nameser.h",
+         mask as "mask", shift as "shift");
+
     // --- time: ftime's result -------------------------------------------------
     abi!(
         out,

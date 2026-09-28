@@ -799,7 +799,13 @@ fn name_unpack(msg: &[u8], at: usize, dst: &mut [u8]) -> Result<usize, ()> {
         }
     }
     *dst.get_mut(dstp).ok_or(())? = 0;
-    Ok(len.unwrap_or(srcp - at))
+    // Not `unwrap_or(srcp - at)`: that subtracts even when a pointer set
+    // `len`, and a pointer back into the message leaves `srcp` behind `at`
+    // -- an overflow, a panic in a debug build, in every compressed answer.
+    Ok(match len {
+        Some(l) => l,
+        None => srcp - at,
+    })
 }
 
 /// glibc's `dn_find`: the offset from `msg` of a name among the `dnptrs`
@@ -1108,46 +1114,422 @@ pub extern "C" fn dn_comp(
 // ns_get16 / ns_get32 / ns_put16 / ns_put32
 // ---------------------------------------------------------------------------
 
-/// `ns_get16` — get a 16-bit value from network byte order.
+/// `ns_get16` -- a 16-bit value in network byte order, as the `unsigned`
+/// the header declares.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ns_get16(src: *const u8) -> u16 {
+pub extern "C" fn ns_get16(src: *const u8) -> u32 {
     if src.is_null() {
         return 0;
     }
     // SAFETY: caller guarantees at least 2 bytes.
     let b = unsafe { core::ptr::read_unaligned(src.cast::<[u8; 2]>()) };
-    u16::from_be_bytes(b)
+    u32::from(u16::from_be_bytes(b))
 }
 
-/// `ns_get32` — get a 32-bit value from network byte order.
+/// `ns_get32` -- a 32-bit value in network byte order, as the `unsigned
+/// long` the header declares.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ns_get32(src: *const u8) -> u32 {
+pub extern "C" fn ns_get32(src: *const u8) -> u64 {
     if src.is_null() {
         return 0;
     }
     // SAFETY: caller guarantees at least 4 bytes.
     let b = unsafe { core::ptr::read_unaligned(src.cast::<[u8; 4]>()) };
-    u32::from_be_bytes(b)
+    u64::from(u32::from_be_bytes(b))
 }
 
-/// `ns_put16` — put a 16-bit value in network byte order.
+/// `ns_put16` -- the low 16 bits of `val` in network byte order.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ns_put16(val: u16, dst: *mut u8) {
+pub extern "C" fn ns_put16(val: u32, dst: *mut u8) {
     if dst.is_null() {
         return;
     }
+    // The header's `unsigned`; the field is 16 bits, as in C's `*cp++ = s`.
+    #[allow(clippy::cast_possible_truncation)]
+    let v = val as u16;
     // SAFETY: caller guarantees at least 2 bytes.
-    unsafe { core::ptr::write_unaligned(dst.cast::<[u8; 2]>(), val.to_be_bytes()) };
+    unsafe { core::ptr::write_unaligned(dst.cast::<[u8; 2]>(), v.to_be_bytes()) };
 }
 
-/// `ns_put32` — put a 32-bit value in network byte order.
+/// `ns_put32` -- the low 32 bits of `val` in network byte order.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ns_put32(val: u32, dst: *mut u8) {
+pub extern "C" fn ns_put32(val: u64, dst: *mut u8) {
     if dst.is_null() {
         return;
     }
+    // The header's `unsigned long`; the field is 32 bits.
+    #[allow(clippy::cast_possible_truncation)]
+    let v = val as u32;
     // SAFETY: caller guarantees at least 4 bytes.
-    unsafe { core::ptr::write_unaligned(dst.cast::<[u8; 4]>(), val.to_be_bytes()) };
+    unsafe { core::ptr::write_unaligned(dst.cast::<[u8; 4]>(), v.to_be_bytes()) };
+}
+
+// ---------------------------------------------------------------------------
+// ns_initparse / ns_parserr / ns_skiprr / ns_name_uncompress
+// ---------------------------------------------------------------------------
+
+/// The longest name `ns_parserr` writes, as text: `NS_MAXDNAME`.
+pub const NS_MAXDNAME: usize = 1025;
+
+/// `ns_sect`: the question section (`ns_s_qd`, also `ns_s_zn`).
+pub const NS_S_QD: i32 = 0;
+/// The answer section (`ns_s_an`, also `ns_s_pr`).
+pub const NS_S_AN: i32 = 1;
+/// The authority section (`ns_s_ns`, also `ns_s_ud`).
+pub const NS_S_NS: i32 = 2;
+/// The additional section (`ns_s_ar`).
+pub const NS_S_AR: i32 = 3;
+/// One past the last section (`ns_s_max`): the handle between parses.
+pub const NS_S_MAX: i32 = 4;
+
+/// A message taken apart for [`ns_parserr`] (`ns_msg`). The C header's
+/// field names begin with `_`; the layout is what matters, and
+/// `abi_layout.rs` holds it to musl's.
+#[repr(C)]
+pub struct NsMsg {
+    /// The message, and its end.
+    pub msg: *const u8,
+    /// One past the message's last byte.
+    pub eom: *const u8,
+    /// The header's id.
+    pub id: u16,
+    /// The header's flags word.
+    pub flags: u16,
+    /// Each section's record count.
+    pub counts: [u16; 4],
+    /// Each section's first record, NULL for an empty section.
+    pub sections: [*const u8; 4],
+    /// The section the next record is read from; `NS_S_MAX` for none.
+    pub sect: i32,
+    /// The number of that record in its section; -1 for none.
+    pub rrnum: i32,
+    /// Where that record begins.
+    pub msg_ptr: *const u8,
+}
+
+/// One record, as [`ns_parserr`] fills it (`ns_rr`).
+#[repr(C)]
+pub struct NsRr {
+    /// The owner name, as text, NUL-terminated ("" for the root).
+    pub name: [u8; NS_MAXDNAME],
+    /// The record type.
+    pub type_: u16,
+    /// The record class.
+    pub rr_class: u16,
+    /// The time to live; 0 for a question.
+    pub ttl: u32,
+    /// The length of `rdata`; 0 for a question.
+    pub rdlength: u16,
+    /// The record's data, in the message; NULL for a question.
+    pub rdata: *const u8,
+}
+
+/// Where one of the header's flags lives in its flags word (`struct
+/// _ns_flagdata`), for the `ns_msg_getflag` macro.
+#[repr(C)]
+pub struct NsFlagData {
+    /// The flag's bits.
+    pub mask: i32,
+    /// How far to shift them down.
+    pub shift: i32,
+}
+
+/// The header's flags, in `ns_flag`'s order -- `qr`, `opcode`, `aa`, `tc`,
+/// `rd`, `ra`, `z`, `ad`, `cd`, `rcode` -- and six unused: the table
+/// `ns_msg_getflag` reads.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static _ns_flagdata: [NsFlagData; 16] = {
+    const fn f(mask: i32, shift: i32) -> NsFlagData {
+        NsFlagData { mask, shift }
+    }
+    [
+        f(0x8000, 15),
+        f(0x7800, 11),
+        f(0x0400, 10),
+        f(0x0200, 9),
+        f(0x0100, 8),
+        f(0x0080, 7),
+        f(0x0040, 6),
+        f(0x0020, 5),
+        f(0x0010, 4),
+        f(0x000f, 0),
+        f(0, 0),
+        f(0, 0),
+        f(0, 0),
+        f(0, 0),
+        f(0, 0),
+        f(0, 0),
+    ]
+};
+
+/// Fail with `err`: -1, and `errno` set.
+fn ns_fail(err: i32) -> i32 {
+    errno::set_errno(err);
+    -1
+}
+
+/// The big-endian 16-bit value `off` bytes past `p`.
+///
+/// # Safety
+///
+/// `p + off` and the byte after it are readable.
+unsafe fn get16_at(p: *const u8, off: usize) -> u16 {
+    // SAFETY: the caller's contract.
+    u16::from_be_bytes(unsafe { core::ptr::read_unaligned(p.add(off).cast::<[u8; 2]>()) })
+}
+
+/// Whether `n` bytes from `off` bytes past `from` reach past `eom`: glibc's
+/// `ptr + n > eom`, without forming the pointer.
+fn past(from: *const u8, off: usize, n: usize, eom: *const u8) -> bool {
+    let room = (eom as usize).saturating_sub(from as usize);
+    off.checked_add(n).is_none_or(|end| end > room)
+}
+
+/// `ns_skiprr` -- the bytes `count` records of `section` take from `ptr`
+/// (a question is a name and four bytes; any other record a name, ten bytes
+/// and its data), or -1 with `EMSGSIZE` when they run past `eom` or a name
+/// is malformed. A `count` of 0 or less is 0 bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ns_skiprr(ptr: *const u8, eom: *const u8, section: i32, count: i32) -> i32 {
+    let mut off = 0usize;
+    for _ in 0..count.max(0) {
+        let Ok(b) = usize::try_from(dn_skipname(ptr.wrapping_add(off), eom)) else {
+            return ns_fail(errno::EMSGSIZE);
+        };
+        // The name, then the type and class.
+        off = off.saturating_add(b).saturating_add(4);
+        if section != NS_S_QD {
+            // The TTL and the data's length must be there to read.
+            if past(ptr, off, 6, eom) {
+                return ns_fail(errno::EMSGSIZE);
+            }
+            // SAFETY: the six bytes at `off` are before `eom` (checked).
+            let rdlength = unsafe { get16_at(ptr, off + 4) };
+            off = off.saturating_add(6).saturating_add(usize::from(rdlength));
+        }
+    }
+    if past(ptr, off, 0, eom) {
+        return ns_fail(errno::EMSGSIZE);
+    }
+    i32::try_from(off).unwrap_or_else(|_| ns_fail(errno::EMSGSIZE))
+}
+
+/// Put `h` at the start of `sect`, or between parses for `NS_S_MAX`
+/// (glibc's `setsection`).
+fn set_section(h: &mut NsMsg, sect: i32) {
+    h.sect = sect;
+    match usize::try_from(sect).ok().and_then(|s| h.sections.get(s)) {
+        Some(&start) if sect != NS_S_MAX => {
+            h.rrnum = 0;
+            h.msg_ptr = start;
+        }
+        _ => {
+            h.rrnum = -1;
+            h.msg_ptr = core::ptr::null();
+        }
+    }
+}
+
+/// `ns_initparse` -- take the `msglen`-byte message at `msg` apart into
+/// `handle`: its header, and where each section's records begin. 0, or -1
+/// with `EMSGSIZE` when the header is short, a section's records run past
+/// the end or are malformed, or bytes are left over after the last. A NULL
+/// `handle`, or a NULL `msg` with a header to read, is `EFAULT` (§303).
+///
+/// # Safety
+///
+/// `msg` is readable for `msglen` bytes; `handle` is NULL or writable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_initparse(msg: *const u8, msglen: i32, handle: *mut NsMsg) -> i32 {
+    if handle.is_null() {
+        return ns_fail(errno::EFAULT);
+    }
+    // A negative length puts the end before the start: nothing can be read.
+    let len = usize::try_from(msglen).unwrap_or(0);
+    let eom = msg.wrapping_add(len);
+    // SAFETY: non-null, the caller's to fill.
+    let h = unsafe { &mut *handle };
+    h.msg = msg;
+    // glibc's `msg + msglen`, before the start for a negative length.
+    h.eom = msg.wrapping_offset(isize::try_from(msglen).unwrap_or(0));
+    if len < 12 {
+        return ns_fail(errno::EMSGSIZE);
+    }
+    if msg.is_null() {
+        return ns_fail(errno::EFAULT);
+    }
+    // SAFETY: the twelve header bytes are inside the message.
+    unsafe {
+        h.id = get16_at(msg, 0);
+        h.flags = get16_at(msg, 2);
+        for (i, count) in h.counts.iter_mut().enumerate() {
+            *count = get16_at(msg, 4 + 2 * i);
+        }
+    }
+    let mut off = 12usize;
+    for i in 0..4usize {
+        let count = h.counts.get(i).copied().unwrap_or(0);
+        let slot = h.sections.get_mut(i);
+        if count == 0 {
+            if let Some(s) = slot {
+                *s = core::ptr::null();
+            }
+            continue;
+        }
+        let at = msg.wrapping_add(off);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let b = ns_skiprr(at, eom, i as i32, i32::from(count));
+        let Ok(b) = usize::try_from(b) else {
+            return -1; // ns_skiprr's errno
+        };
+        if let Some(s) = slot {
+            *s = at;
+        }
+        off = off.saturating_add(b);
+    }
+    if off != len {
+        return ns_fail(errno::EMSGSIZE);
+    }
+    set_section(h, NS_S_MAX);
+    0
+}
+
+/// `ns_parserr` -- record `rrnum` of `section` into `rr`, as glibc 2.39's
+/// reads it: 0, or -1 with `errno`. `rrnum` -1 is the handle's next record;
+/// a section that is none, or a record number outside the section, is
+/// `ENODEV`; a record that runs past the end, or a name that cannot be
+/// expanded, `EMSGSIZE`. The handle keeps its place, so reading a section
+/// in order walks it once; after the last record it stays at the section's
+/// end (glibc's `++rrnum > count` never moves it on). A NULL `handle` or
+/// `rr` is `EFAULT` (§303).
+///
+/// # Safety
+///
+/// `handle` is NULL or one `ns_initparse` filled, whose message is still
+/// there; `rr` is NULL or writable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_parserr(
+    handle: *mut NsMsg,
+    section: i32,
+    rrnum: i32,
+    rr: *mut NsRr,
+) -> i32 {
+    if handle.is_null() || rr.is_null() {
+        return ns_fail(errno::EFAULT);
+    }
+    // SAFETY: non-null; the caller's.
+    let (h, rr) = unsafe { (&mut *handle, &mut *rr) };
+    let Some(count) = usize::try_from(section)
+        .ok()
+        .filter(|&s| s < 4)
+        .and_then(|s| h.counts.get(s).copied())
+    else {
+        return ns_fail(errno::ENODEV);
+    };
+    if section != h.sect {
+        set_section(h, section);
+    }
+    let rrnum = if rrnum == -1 { h.rrnum } else { rrnum };
+    if rrnum < 0 || rrnum >= i32::from(count) {
+        return ns_fail(errno::ENODEV);
+    }
+    if rrnum < h.rrnum {
+        set_section(h, section);
+    }
+    if rrnum > h.rrnum {
+        let Ok(b) = usize::try_from(ns_skiprr(h.msg_ptr, h.eom, section, rrnum - h.rrnum)) else {
+            return -1; // ns_skiprr's errno
+        };
+        h.msg_ptr = h.msg_ptr.wrapping_add(b);
+        h.rrnum = rrnum;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let b = dn_expand(
+        h.msg,
+        h.eom,
+        h.msg_ptr,
+        rr.name.as_mut_ptr(),
+        NS_MAXDNAME as i32,
+    );
+    let Ok(b) = usize::try_from(b) else {
+        return -1; // dn_expand's EMSGSIZE
+    };
+    // The handle moves on as each field is read, and a field is stored as
+    // soon as it is read, before the next bounds check -- glibc's order, so
+    // a record that fails half-way leaves what glibc's would.
+    h.msg_ptr = h.msg_ptr.wrapping_add(b);
+    if past(h.msg_ptr, 0, 4, h.eom) {
+        return ns_fail(errno::EMSGSIZE);
+    }
+    // SAFETY: the four bytes at `msg_ptr` are before the end (checked).
+    unsafe {
+        rr.type_ = get16_at(h.msg_ptr, 0);
+        rr.rr_class = get16_at(h.msg_ptr, 2);
+    }
+    h.msg_ptr = h.msg_ptr.wrapping_add(4);
+    if section == NS_S_QD {
+        rr.ttl = 0;
+        rr.rdlength = 0;
+        rr.rdata = core::ptr::null();
+    } else {
+        if past(h.msg_ptr, 0, 6, h.eom) {
+            return ns_fail(errno::EMSGSIZE);
+        }
+        // SAFETY: the six bytes at `msg_ptr` are before the end (checked).
+        unsafe {
+            rr.ttl = u32::from_be_bytes(core::ptr::read_unaligned(h.msg_ptr.cast::<[u8; 4]>()));
+            rr.rdlength = get16_at(h.msg_ptr, 4);
+        }
+        h.msg_ptr = h.msg_ptr.wrapping_add(6);
+        if past(h.msg_ptr, 0, usize::from(rr.rdlength), h.eom) {
+            return ns_fail(errno::EMSGSIZE);
+        }
+        rr.rdata = h.msg_ptr;
+        h.msg_ptr = h.msg_ptr.wrapping_add(usize::from(rr.rdlength));
+    }
+    h.rrnum = h.rrnum.saturating_add(1);
+    if h.rrnum > i32::from(count) {
+        set_section(h, section.saturating_add(1));
+    }
+    0
+}
+
+/// `ns_name_uncompress` -- the compressed name at `src`, in the message
+/// `[msg, eom)`, as text in `dst` (`dstsiz` bytes): the bytes the name
+/// occupies at `src`, or -1 with `EMSGSIZE`. The root is ".", unlike
+/// [`dn_expand`]'s "".
+///
+/// # Safety
+///
+/// `[msg, eom)` is readable and `src` inside it; `dst` is writable for
+/// `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_uncompress(
+    msg: *const u8,
+    eom: *const u8,
+    src: *const u8,
+    dst: *mut u8,
+    dstsiz: usize,
+) -> i32 {
+    let result = (|| {
+        if msg.is_null() || dst.is_null() {
+            return Err(());
+        }
+        let msg_len = (eom as usize).checked_sub(msg as usize).ok_or(())?;
+        let at = (src as usize).checked_sub(msg as usize).ok_or(())?;
+        // SAFETY: the caller's contract: `[msg, eom)` is the message.
+        let whole = unsafe { core::slice::from_raw_parts(msg, msg_len) };
+        let mut wire = [0u8; MAXCDNAME];
+        let n = name_unpack(whole, at, &mut wire)?;
+        // No name's text is longer than four bytes for each of its 255,
+        // so a bigger buffer is only ever used this far.
+        let cap = dstsiz.min(4 * MAXCDNAME + 2);
+        // SAFETY: the caller's contract: `dst` holds `dstsiz` bytes.
+        let out = unsafe { core::slice::from_raw_parts_mut(dst, cap) };
+        name_ntop(&wire, out)?;
+        i32::try_from(n).map_err(|_| ())
+    })();
+    result.unwrap_or_else(|()| ns_fail(errno::EMSGSIZE))
 }
 
 // ---------------------------------------------------------------------------
@@ -2653,5 +3035,246 @@ search a.example b.example\noptions ndots:3 timeout:99 attempts:0 rotate use-vc 
         assert_eq!(b, [0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(ns_get32(b.as_ptr()), 0xdead_beef);
         assert_eq!(ns_get16(core::ptr::null()), 0);
+        // The header's wider types: only the field's own bits are written.
+        ns_put16(0x1_2345, b.as_mut_ptr());
+        assert_eq!(&b[..2], &[0x23, 0x45]);
+        ns_put32(0x1_0000_0001, b.as_mut_ptr());
+        assert_eq!(b, [0, 0, 0, 1]);
+    }
+
+    /// A pointer back to a name that ends before the pointer: the length is
+    /// the pointer's two bytes. `name_unpack` used to subtract its position
+    /// from the start regardless, which overflowed -- a panic in a debug
+    /// build -- on every such name, the common shape of a DNS answer.
+    #[test]
+    fn a_pointer_back_to_an_earlier_name_is_two_bytes() {
+        let mut m = std::vec![0u8; 12];
+        m.extend_from_slice(b"\x01a\x00"); // 12..15: "a"
+        m.extend_from_slice(b"\xff\xff"); // filler
+        m.extend_from_slice(&[0xc0, 12]); // 17: a pointer to 12
+        let mut out = [0u8; 64];
+        let base = m.as_ptr();
+        // SAFETY: `m` is the message; `out` holds 64 bytes.
+        let n = dn_expand(
+            base,
+            base.wrapping_add(m.len()),
+            base.wrapping_add(17),
+            out.as_mut_ptr(),
+            64,
+        );
+        assert_eq!(n, 2);
+        assert_eq!(&out[..2], b"a\0");
+    }
+
+    // -- ns_initparse / ns_parserr / ns_skiprr / ns_name_uncompress --
+
+    /// glibc's answers (`posix/tools/oracle/ns_harness.py`): the messages,
+    /// then one call a line; the harness's docstring has the format.
+    const NS_ORACLE: &str = include_str!("ns_oracle.txt");
+
+    /// A name as the harness prints one: `\xHH` outside `!`..`~` and for
+    /// `\`, and `\x` alone for the empty name.
+    fn ns_text(b: &[u8]) -> String {
+        if b.is_empty() {
+            return "\\x".into();
+        }
+        let mut s = String::new();
+        for &c in b {
+            if !(0x21..=0x7e).contains(&c) || c == b'\\' {
+                s.push_str(&format!("\\x{c:02x}"));
+            } else {
+                s.push(char::from(c));
+            }
+        }
+        s
+    }
+
+    /// A pointer as an offset into `m`, `-` for NULL, `?` outside it.
+    fn ns_off(p: *const u8, m: &[u8]) -> String {
+        let base = m.as_ptr() as usize;
+        if p.is_null() {
+            "-".into()
+        } else if (p as usize) >= base && (p as usize) <= base + m.len() {
+            (p as usize - base).to_string()
+        } else {
+            "?".into()
+        }
+    }
+
+    fn ns_handle(h: &NsMsg, m: &[u8]) -> String {
+        let mut s = format!("{} {}", h.id, h.flags);
+        for c in h.counts {
+            s.push_str(&format!(" {c}"));
+        }
+        for p in h.sections {
+            s.push_str(&format!(" {}", ns_off(p, m)));
+        }
+        s.push_str(&format!(" {} {} {}", h.sect, h.rrnum, ns_off(h.msg_ptr, m)));
+        s
+    }
+
+    fn empty_ns_msg() -> NsMsg {
+        NsMsg {
+            msg: core::ptr::null(),
+            eom: core::ptr::null(),
+            id: 0,
+            flags: 0,
+            counts: [0; 4],
+            sections: [core::ptr::null(); 4],
+            sect: 0,
+            rrnum: 0,
+            msg_ptr: core::ptr::null(),
+        }
+    }
+
+    #[test]
+    fn ns_parsing_answers_as_glibc_does() {
+        let mut msgs: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+        let mut handles: std::collections::BTreeMap<String, NsMsg> = Default::default();
+        let mut bad = Vec::new();
+        let mut calls = 0;
+        for line in NS_ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            if let Some(rest) = line.strip_prefix("M ") {
+                let (name, hex) = rest.split_once(' ').unwrap();
+                let bytes = if hex == "-" {
+                    Vec::new()
+                } else {
+                    (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                        .collect()
+                };
+                msgs.insert(name.into(), bytes);
+                continue;
+            }
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            let m = &msgs[w[1]];
+            errno::set_errno(1234);
+            let got = match w[0] {
+                "I" => {
+                    let mut h = empty_ns_msg();
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    // SAFETY: the message and a handle of this frame's.
+                    let rc = unsafe { ns_initparse(m.as_ptr(), m.len() as i32, &raw mut h) };
+                    let err = errno::get_errno();
+                    let mut s = format!("{rc} {err}");
+                    if rc == 0 {
+                        s.push(' ');
+                        s.push_str(&ns_handle(&h, m));
+                        handles.insert(w[1].into(), h);
+                    }
+                    s
+                }
+                "P" => {
+                    let (sect, rrnum) = (w[2].parse().unwrap(), w[3].parse().unwrap());
+                    let h = handles.get_mut(w[1]).unwrap();
+                    // SAFETY: an all-zero record is a valid one: bytes, and
+                    // a NULL pointer.
+                    let mut rr: NsRr = unsafe { core::mem::zeroed() };
+                    // SAFETY: a handle `ns_initparse` filled over a message
+                    // still in `msgs`; a record of this frame's.
+                    let rc = unsafe { ns_parserr(h, sect, rrnum, &raw mut rr) };
+                    let err = errno::get_errno();
+                    let mut s = format!("{rc} {err}");
+                    if rc == 0 {
+                        let n = rr.name.iter().position(|&b| b == 0).unwrap();
+                        s.push_str(&format!(
+                            " {} {} {} {} {} {}",
+                            ns_text(&rr.name[..n]),
+                            rr.type_,
+                            rr.rr_class,
+                            rr.ttl,
+                            rr.rdlength,
+                            ns_off(rr.rdata, m)
+                        ));
+                    }
+                    s.push_str(" ; ");
+                    s.push_str(&ns_handle(h, m));
+                    s
+                }
+                "K" => {
+                    let (off, sect, count, eom): (usize, i32, i32, usize) = (
+                        w[2].parse().unwrap(),
+                        w[3].parse().unwrap(),
+                        w[4].parse().unwrap(),
+                        w[5].parse().unwrap(),
+                    );
+                    let rc = ns_skiprr(
+                        m.as_ptr().wrapping_add(off),
+                        m.as_ptr().wrapping_add(eom),
+                        sect,
+                        count,
+                    );
+                    format!("{rc} {}", errno::get_errno())
+                }
+                "U" => {
+                    let (off, size): (usize, usize) =
+                        (w[2].parse().unwrap(), w[3].parse().unwrap());
+                    let mut out = [0u8; 1100];
+                    // SAFETY: the message; `out` holds more than `size`.
+                    let rc = unsafe {
+                        ns_name_uncompress(
+                            m.as_ptr(),
+                            m.as_ptr().wrapping_add(m.len()),
+                            m.as_ptr().wrapping_add(off),
+                            out.as_mut_ptr(),
+                            size,
+                        )
+                    };
+                    let mut s = format!("{rc} {}", errno::get_errno());
+                    if rc >= 0 {
+                        let n = out.iter().position(|&b| b == 0).unwrap();
+                        s.push(' ');
+                        s.push_str(&ns_text(&out[..n]));
+                    }
+                    s
+                }
+                other => panic!("no such line: {other}"),
+            };
+            calls += 1;
+            if got != want {
+                bad.push(format!("{line}\n    ours {got}"));
+            }
+        }
+        assert!(calls > 120, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ:\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
+
+    #[test]
+    fn ns_calls_refuse_what_glibc_would_fault_on() {
+        let m = [0u8; 12];
+        // SAFETY: NULLs are what is tested.
+        unsafe {
+            assert_eq!(ns_initparse(m.as_ptr(), 12, core::ptr::null_mut()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+            let mut h = empty_ns_msg();
+            assert_eq!(ns_initparse(core::ptr::null(), 12, &raw mut h), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+            // Too short to hold a header: EMSGSIZE, before `msg` is read.
+            assert_eq!(ns_initparse(core::ptr::null(), 0, &raw mut h), -1);
+            assert_eq!(errno::get_errno(), errno::EMSGSIZE);
+            assert_eq!(ns_initparse(m.as_ptr(), -5, &raw mut h), -1);
+            assert_eq!(errno::get_errno(), errno::EMSGSIZE);
+            assert_eq!(ns_initparse(m.as_ptr(), 12, &raw mut h), 0);
+            assert_eq!(ns_parserr(&raw mut h, 0, 0, core::ptr::null_mut()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+    }
+
+    #[test]
+    fn ns_flagdata_is_the_headers_flag_table() {
+        // qr, opcode, aa, tc, rd, ra, z, ad, cd, rcode of a response's 0x8583.
+        let flags = 0x8583;
+        let get = |f: usize| (flags & _ns_flagdata[f].mask) >> _ns_flagdata[f].shift;
+        assert_eq!(
+            (0..10).map(get).collect::<Vec<_>>(),
+            [1, 0, 1, 0, 1, 1, 0, 0, 0, 3]
+        );
     }
 }

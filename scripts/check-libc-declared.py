@@ -80,12 +80,8 @@ BASELINE_MISSING = frozenset({
     "cabsl", "cacosl", "cacoshl", "cargl", "casinl", "casinhl", "catanl", "catanhl", "ccosl",
     "ccoshl", "cexpl", "cimagl", "clogl", "conjl", "cpowl", "cprojl", "creall", "csinl",
     "csinhl", "csqrtl", "ctanl", "ctanhl",
-    # threads
-    "pthread_timedjoin_np", "pthread_tryjoin_np",
     # time
     "getdate",
-    # DNS messages
-    "ns_initparse", "ns_parserr", "ns_skiprr", "ns_name_uncompress",
     # contexts (musl declares and does not define these either)
     "getcontext", "setcontext", "makecontext", "swapcontext",
 })

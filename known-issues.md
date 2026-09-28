@@ -175522,7 +175522,7 @@ nonzero is dropped, toward -inf a negative one's, toward zero never. Due with
 the 80-bit conversions (TD-POSIX-LONG-DOUBLE-PRECISION), which go through the
 same code.
 
-## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: OPEN (93 of the 104 done 2026-09-28: C11 `<threads.h>` (posix/src/threads.rs), the pthread cleanup helpers, scheduling attributes, `pthread_setschedprio`, the concurrency hint and default attributes, the nine `_l` functions, `wcsnlen`, `wcswcs`, the seven signal functions; then `ecvt`/`fcvt`/`gcvt` (exact digits, design-decisions §1135), `hcreate_r`/`hsearch_r`/`hdestroy_r`, `tcgetwinsize`/`tcsetwinsize`, `posix_close`, `_Fork`, `ftime`, `stime`, `clock_getcpuclockid`, `ftok`, `lcong48`, `scalb`/`scalbf`, `dlinfo`, and `vhangup`/`acct`/`remap_file_pages` as `ENOSYS` -- the kernel has no such facility; then the account-file functions -- `fgetpwent`, `putpwent`, `fgetgrent`, `putgrent`, `fgetspent`, `sgetspent`, `putspent`, `lckpwdf`, `ulckpwdf`, the `getusershell` three, `cuserid`, `getpass` (design-decisions §1137). The other 11 -- `getdate`, the `ns_*` DNS parsers, the `ucontext` four, the two `_np` joins -- are `scripts/check-libc-declared.py`'s baseline, which refuses a new one)**
+## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: OPEN (99 of the 104 done 2026-09-28: C11 `<threads.h>` (posix/src/threads.rs), the pthread cleanup helpers, scheduling attributes, `pthread_setschedprio`, the concurrency hint and default attributes, the nine `_l` functions, `wcsnlen`, `wcswcs`, the seven signal functions; then `ecvt`/`fcvt`/`gcvt` (exact digits, design-decisions §1135), `hcreate_r`/`hsearch_r`/`hdestroy_r`, `tcgetwinsize`/`tcsetwinsize`, `posix_close`, `_Fork`, `ftime`, `stime`, `clock_getcpuclockid`, `ftok`, `lcong48`, `scalb`/`scalbf`, `dlinfo`, and `vhangup`/`acct`/`remap_file_pages` as `ENOSYS` -- the kernel has no such facility; then the account-file functions -- `fgetpwent`, `putpwent`, `fgetgrent`, `putgrent`, `fgetspent`, `sgetspent`, `putspent`, `lckpwdf`, `ulckpwdf`, the `getusershell` three, `cuserid`, `getpass` (design-decisions §1137); then `ns_initparse`, `ns_parserr`, `ns_skiprr`, `ns_name_uncompress` and `pthread_tryjoin_np`/`pthread_timedjoin_np` (D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD). The other 5 -- `getdate` and the `ucontext` four -- are `scripts/check-libc-declared.py`'s baseline, which refuses a new one)**
 
 **In short:** C programs here are compiled against musl's headers (`zig cc`)
 and linked against our `libc.a`. The headers declare 126 functions the library
@@ -175664,3 +175664,27 @@ cells, and a selection's copy carries the marks. Whether the font places the
 mark over its base is the text layer's (`GPOS` mark attachment, which
 `gui/toolkit`'s shaper has); the terminal's part is to keep the mark and hand
 it over.
+
+## D-POSIX-TRYJOIN-CANNOT-SEE-A-KILLED-THREAD — `pthread_tryjoin_np` and `pthread_timedjoin_np` never see a thread killed before it could exit (lane D, 2026-09-28) — **Status: OPEN (blocked on lane A: `requests/d-a-a-thread-join-that-does-not-wait.md`)**
+
+**In short:** a program can ask "has that thread finished?" without waiting
+(`pthread_tryjoin_np`), or wait only so long (`pthread_timedjoin_np`). Both
+work for a thread that ends normally. A thread that is killed instead -- by
+a fault it did not handle -- never gets to say it has ended, so both keep
+answering "still running" (`EBUSY`, then `ETIMEDOUT`), while a plain
+`pthread_join` would have returned at once with `PTHREAD_CANCELED`.
+
+**Where:** `posix/src/pthread.rs`, `join_readiness`: "exited" is the
+thread's slot's `STATE_EXITED`, which the thread sets itself in
+`pthread_exit`. The kernel knows better -- `SYS_THREAD_JOIN` reports a
+killed thread as `Cancelled` -- but it only answers once the thread is gone,
+and waits until then.
+
+**Why it is still open:** the one call that can tell "gone" from "running"
+without the thread's help is the kernel's, and it has no form that returns
+at once or gives up at a deadline.
+
+**Proper fix:** lane A's join with a deadline (the request proposes a
+timeout argument to `SYS_THREAD_JOIN`, 0 meaning "don't wait"); then
+`pthread_tryjoin_np` asks it with 0, and `pthread_timedjoin_np` with the
+time left, instead of polling the slot every millisecond as it does now.

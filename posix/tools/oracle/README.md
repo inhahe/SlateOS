@@ -22,6 +22,7 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `complex_harness.py` | `posix/src/complex_oracle.txt` | `complex.rs`, `include_str!` |
 | `accounts_harness.py` | `posix/src/accounts_oracle.txt` | `accounts_oracle.rs`, `include_str!` (`fgetpwent` & co., `put*ent`, `sgetspent`, `getusershell`, `getpass`) |
 | `cvt_harness.py` | `posix/src/cvt_oracle.txt` | `stdlib.rs`, `include_str!` (`ecvt`, `fcvt`, `gcvt`) |
+| `ns_harness.py` | `posix/src/ns_oracle.txt` | `resolv.rs`, `include_str!` (`ns_initparse` & co.) |
 | `strtod_nan_harness.py` | a table, pasted as `GLIBC_NAN` | `stdlib.rs` |
 | `cp125x_harness.py` | a table, pasted as `GLIBC_CP125X` | `iconv.rs` |
 | `tcvn_harness.py` (cases: `tcvn_cases.py`) | a table, pasted as `GLIBC_TCVN` | `iconv.rs` |

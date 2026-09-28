@@ -1,15 +1,3 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-
 //! Slate OS Match-3 — Bejeweled-style puzzle game.
 //!
 //! Features an 8x8 grid of colored gems with match-3 mechanics,
@@ -18,17 +6,29 @@
 //! a hint system, and automatic shuffle when no moves exist.
 //! Randomness comes from the shared `randrange` crate, seeded from the
 //! system so that two players do not get the same game.
+//!
+//! Every rectangle comes from the window's own size (`Layout::new`), and a
+//! click is read against the frame the window is showing: the pass that
+//! draws the board records a box for every cell and control, and
+//! `Frame::hit_test` answers from those. It drew at one size -- 48-pixel
+//! cells, a window computed from them, text at eyeballed offsets from the
+//! middle of a cell -- so a larger window left the board in a corner and a
+//! smaller one cut it off.
 
 use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
-use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
 #[cfg(test)]
-use guitk::event::{KeyEvent, Modifiers};
+use guitk::event::Modifiers;
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::palette::Palette;
+use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 use guitk::surface::Surface;
+use guitk::text;
 use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -81,9 +81,6 @@ impl Colours {
 
 // ── Layout constants ────────────────────────────────────────────────
 const GRID_SIZE: usize = 8;
-const CELL_SIZE: f32 = 48.0;
-const CELL_GAP: f32 = 2.0;
-const PADDING: f32 = 16.0;
 /// How often the board is asked to advance itself.
 ///
 /// 16 ms is one frame at 60 Hz, which is what the cascade animation and the
@@ -92,13 +89,29 @@ const PADDING: f32 = 16.0;
 /// steppy, and a faster one is work nobody can see.
 const TICK: Duration = Duration::from_millis(16);
 
-const HEADER_HEIGHT: f32 = 60.0;
-const FOOTER_HEIGHT: f32 = 40.0;
-const HEADER_FONT_SIZE: f32 = 18.0;
-const CELL_FONT_SIZE: f32 = 22.0;
-const TITLE_FONT_SIZE: f32 = 28.0;
-const OVERLAY_FONT_SIZE: f32 = 16.0;
-const CELL_CORNER_RADIUS: f32 = 6.0;
+/// The window the game asks for. Any other size is laid out the same way:
+/// every rectangle is [`Layout::new`]'s, from the window's own size.
+const WINDOW_WIDTH: f32 = 480.0;
+const WINDOW_HEIGHT: f32 = 640.0;
+
+/// The share of the window's height the board keeps before the bands give
+/// way: in a short window the key line goes first, then the controls, then
+/// the header -- the keys do what the controls do, and the score is the one
+/// thing a player cannot play without.
+const BOARD_SHARE: f32 = 0.55;
+
+/// What the controls' row offers, in order.
+const CONTROLS: [(Target, &str); 5] = [
+    (Target::Mode(GameMode::Classic), "Classic"),
+    (Target::Mode(GameMode::Timed), "Timed"),
+    (Target::Mode(GameMode::Moves), "Moves"),
+    (Target::Hint, "Hint"),
+    (Target::NewGame, "New game"),
+];
+
+/// The key line at the foot of the window.
+const KEYS: &str =
+    "Arrows move \u{b7} Enter swaps \u{b7} H hint \u{b7} N new game \u{b7} 1 2 3 mode";
 
 /// Number of gem types.
 const GEM_TYPE_COUNT: u8 = 7;
@@ -127,14 +140,6 @@ const CASCADE_MULTIPLIER_FP: u32 = 150;
 
 /// Fixed-point base (100 = 1.0x).
 const FP_BASE: u32 = 100;
-
-// ── Gem symbols for rendering ───────────────────────────────────────
-const GEM_SYMBOLS: [&str; 7] = [
-    "\u{25C6}", "\u{25CF}", "\u{25A0}", "\u{2605}", "\u{25B2}", "\u{2666}", "\u{2764}",
-];
-
-// ── Gem colors ──────────────────────────────────────────────────────
-const GEM_COLORS: [Color; 7] = [RUBY, SAPPHIRE, EMERALD, TOPAZ, AMBER, AMETHYST, AQUA];
 
 // ── Randomness ──────────────────────────────────────────────────────
 
@@ -190,13 +195,9 @@ impl GemType {
         }
     }
 
-    fn index(self) -> usize {
-        self as usize
-    }
-
     fn color(self) -> Color {
-        // `match`, not `GEM_COLORS[self.index()]`. Same lookup, except that
-        // adding a variant to `GemType` now fails to compile instead of
+        // `match`, not an index into a table of colours. Same lookup, except
+        // that adding a variant to `GemType` fails to compile instead of
         // panicking the first time that colour is drawn.
         match self {
             Self::Ruby => RUBY,
@@ -369,6 +370,308 @@ impl HighScores {
     }
 }
 
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// What a click can land on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// A cell of the board.
+    Cell(Pos),
+    /// A mode's button: a new game in it.
+    Mode(GameMode),
+    /// Show a move that makes a match.
+    Hint,
+    /// A new board in the same mode.
+    NewGame,
+    /// The game-over panel: a click on it starts the next game.
+    GameOver,
+}
+
+type Frame = guitk::frame::Frame<Target>;
+
+/// Every rectangle in the window, from the window's own size.
+///
+/// Built for each frame and each click and never stored, so the picture and
+/// what a click is read against cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Layout {
+    window: Rect,
+    /// The band with the mode, the score, the best and what is left.
+    header: Rect,
+    /// The row of controls: the three modes, Hint, New game.
+    controls: Rect,
+    /// The board's frame, which the grid sits in.
+    board: Rect,
+    /// A cell's side, the gap between cells, and the frame's width.
+    cell: f32,
+    gap: f32,
+    frame: f32,
+    /// The key line; empty when the window has no room for it.
+    footer: Rect,
+    font: f32,
+    small: f32,
+    pad: f32,
+}
+
+impl Layout {
+    fn new(width: f32, height: f32) -> Self {
+        let w = width.max(1.0);
+        let h = height.max(1.0);
+        let pad = (w.min(h) * 0.025).clamp(3.0, 14.0);
+        let font = (h / 34.0).clamp(8.0, 18.0);
+        let small = (font - 3.0).max(7.0);
+
+        // What each band would like, in [header, controls, footer] order,
+        // and the order they give way in when the board would fall under
+        // its share: the key line, the controls, then the header.
+        let mut wants = [
+            text::line_height(font, FontWeightHint::Bold) * 2.0 + pad * 2.0,
+            (small * 2.2).max(12.0),
+            text::line_height(small, FontWeightHint::Regular) + pad,
+        ];
+        let budget = (h - h * BOARD_SHARE - pad * 4.0).max(0.0);
+        for i in [2, 1, 0] {
+            if wants.iter().sum::<f32>() <= budget {
+                break;
+            }
+            if let Some(band) = wants.get_mut(i) {
+                *band = 0.0;
+            }
+        }
+        let [header_h, controls_h, footer_h] = wants;
+        let inner_w = (w - pad * 2.0).max(0.0);
+        let header = if header_h > 0.0 {
+            Rect::new(pad, pad, inner_w, header_h)
+        } else {
+            Rect::EMPTY
+        };
+        let top = if header_h > 0.0 { header.bottom() } else { 0.0 };
+        let controls = if controls_h > 0.0 {
+            Rect::new(pad, top + pad, inner_w, controls_h)
+        } else {
+            Rect::EMPTY
+        };
+        let top = if controls_h > 0.0 {
+            controls.bottom()
+        } else {
+            top
+        };
+        let footer = if footer_h > 0.0 {
+            Rect::new(pad, h - footer_h, inner_w, footer_h)
+        } else {
+            Rect::EMPTY
+        };
+        let bottom = if footer_h > 0.0 { footer.y } else { h };
+
+        // The board: the largest square the rest holds, its cells a whole
+        // number of pixels so every cell is the same size.
+        let free = Rect::new(pad, top + pad, inner_w, (bottom - top - pad * 2.0).max(0.0));
+        let side = free.w.min(free.h);
+        let n = GRID_SIZE as f32;
+        let gap = (side * 0.006).clamp(1.0, 3.0);
+        let frame = gap * 2.0;
+        let cell = ((side - frame * 2.0 - gap * (n - 1.0)) / n)
+            .floor()
+            .max(0.0);
+        let board_side = if cell > 0.0 {
+            cell * n + gap * (n - 1.0) + frame * 2.0
+        } else {
+            0.0
+        };
+        let board = Rect::new(
+            free.x + (free.w - board_side) / 2.0,
+            free.y + (free.h - board_side) / 2.0,
+            board_side,
+            board_side,
+        );
+        Self {
+            window: Rect::new(0.0, 0.0, w, h),
+            header,
+            controls,
+            board,
+            cell,
+            gap,
+            frame,
+            footer,
+            font,
+            small,
+            pad,
+        }
+    }
+
+    /// The cell at `pos`.
+    fn cell_rect(&self, pos: Pos) -> Rect {
+        let step = self.cell + self.gap;
+        Rect::new(
+            self.board.x + self.frame + pos.col as f32 * step,
+            self.board.y + self.frame + pos.row as f32 * step,
+            self.cell,
+            self.cell,
+        )
+    }
+
+    /// A cell's corner radius, scaled with the cell.
+    fn radius(&self) -> f32 {
+        (self.cell * 0.125).min(6.0)
+    }
+
+    /// The `index`th of `count` evenly spaced buttons filling `row`.
+    fn nth_of(row: Rect, count: usize, index: usize) -> Rect {
+        let n = count.max(1) as f32;
+        let gap = (row.w * 0.012).min(6.0);
+        let bw = ((row.w - gap * (n - 1.0)) / n).max(0.0);
+        Rect::new(row.x + index as f32 * (bw + gap), row.y, bw, row.h.max(0.0))
+    }
+}
+
+// ── Drawing helpers ─────────────────────────────────────────────────
+
+/// A filled rectangle; nothing when it is empty.
+fn fill(f: &mut Frame, r: Rect, color: Color, radius: f32) {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii: CornerRadii::all(radius),
+    });
+}
+
+/// `r` shrunk by `by` on every side.
+fn inset(r: Rect, by: f32) -> Rect {
+    Rect::new(
+        r.x + by,
+        r.y + by,
+        (r.w - by * 2.0).max(0.0),
+        (r.h - by * 2.0).max(0.0),
+    )
+}
+
+/// `r` grown by `by` on every side.
+fn grow(r: Rect, by: f32) -> Rect {
+    Rect::new(r.x - by, r.y - by, r.w + by * 2.0, r.h + by * 2.0)
+}
+
+/// `s` from (`x`, `y`), its top left, cut with an ellipsis at `max` wide.
+fn text_left(
+    f: &mut Frame,
+    (x, y): (f32, f32),
+    s: &str,
+    (size, weight): (f32, FontWeightHint),
+    color: Color,
+    max: f32,
+) {
+    if max <= 0.0 {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: s.to_string(),
+        color,
+        font_size: size,
+        font_weight: weight,
+        max_width: Some(max),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// `s` ending at `right`, cut with an ellipsis at `max` wide.
+fn text_right(
+    f: &mut Frame,
+    (right, y): (f32, f32),
+    s: &str,
+    (size, weight): (f32, FontWeightHint),
+    color: Color,
+    max: f32,
+) {
+    let w = text::measure(s, size, weight).min(max);
+    text_left(f, (right - w, y), s, (size, weight), color, max);
+}
+
+/// `s` centred in `r`, measured rather than placed at a guessed offset, and
+/// cut with an ellipsis if `r` is narrower than it.
+fn centred(f: &mut Frame, r: Rect, s: &str, (size, weight): (f32, FontWeightHint), color: Color) {
+    let w = text::measure(s, size, weight).min(r.w);
+    let h = text::line_height(size, weight);
+    let x = r.x + (r.w - w).max(0.0) / 2.0;
+    let y = r.y + (r.h - h).max(0.0) / 2.0;
+    text_left(f, (x, y), s, (size, weight), color, r.w);
+}
+
+/// A gem in the cell `r`: its body in its own colour, its symbol centred on
+/// it, and a special's marks -- each scaled with the cell. The symbol stood
+/// at eyeballed offsets from the middle, right for one font at one size.
+fn draw_gem(f: &mut Frame, l: &Layout, r: Rect, gem: Gem) {
+    let inset_by = (l.cell * 0.08).max(1.0);
+    let body = inset(r, inset_by);
+    fill(f, body, gem.gem_type.color(), l.radius());
+    let size = (l.cell * 0.46).max(6.0);
+    centred(
+        f,
+        r,
+        gem.gem_type.symbol(),
+        (size, FontWeightHint::Bold),
+        GEM_INK,
+    );
+    let line = (l.cell * 0.04).max(1.0);
+    let (cx, cy) = r.centre();
+    match gem.special {
+        SpecialKind::LineClearH => f.push(RenderCommand::Line {
+            x1: body.x + inset_by * 0.5,
+            y1: cy,
+            x2: body.right() - inset_by * 0.5,
+            y2: cy,
+            color: GEM_INK,
+            width: line,
+        }),
+        SpecialKind::LineClearV => f.push(RenderCommand::Line {
+            x1: cx,
+            y1: body.y + inset_by * 0.5,
+            x2: cx,
+            y2: body.bottom() - inset_by * 0.5,
+            color: GEM_INK,
+            width: line,
+        }),
+        SpecialKind::ColorBomb => {
+            // Four dots in the body's corners.
+            let dot = (l.cell * 0.06).max(1.0);
+            for (x, y) in [
+                (body.x + dot, body.y + dot),
+                (body.right() - dot, body.y + dot),
+                (body.x + dot, body.bottom() - dot),
+                (body.right() - dot, body.bottom() - dot),
+            ] {
+                fill(
+                    f,
+                    Rect::new(x - dot, y - dot, dot * 2.0, dot * 2.0),
+                    GEM_INK,
+                    dot,
+                );
+            }
+        }
+        SpecialKind::None => {}
+    }
+}
+
+/// The key line at the foot, when the window has room for one.
+fn draw_footer(f: &mut Frame, l: &Layout, c: &Colours) {
+    if l.footer.is_empty() {
+        return;
+    }
+    centred(
+        f,
+        l.footer,
+        KEYS,
+        (l.small, FontWeightHint::Regular),
+        c.chrome.dim,
+    );
+}
+
 // ── Main app struct ─────────────────────────────────────────────────
 struct Match3 {
     /// The 8x8 board of gems. `board[row][col]`.
@@ -407,6 +710,10 @@ struct Match3 {
     /// the defaults; the framework calls `App::theme_changed` before the
     /// first frame.
     palette: Palette,
+    /// The window's size, as the window last set it: the size the next
+    /// click is read against.
+    width: f32,
+    height: f32,
 }
 
 impl Match3 {
@@ -439,6 +746,8 @@ impl Match3 {
             pulse_counter: 0,
             total_elapsed_ms: 0,
             palette: Palette::for_mode(false),
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
         };
         app.fill_board_no_matches();
         app
@@ -1004,490 +1313,278 @@ impl Match3 {
         self.new_game();
     }
 
-    // ── Grid pixel math ─────────────────────────────────────────────
+    // ── Window ──────────────────────────────────────────────────────
 
-    fn grid_origin_x() -> f32 {
-        PADDING
+    /// Record the size the window is now, which is the size the next click
+    /// is read against.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.width = width.max(1.0);
+        self.height = height.max(1.0);
     }
 
-    fn grid_origin_y() -> f32 {
-        PADDING + HEADER_HEIGHT
+    /// What a click at (`x`, `y`) lands on, read from the frame the window
+    /// is showing. The boxes were recorded by the pass that drew them, so
+    /// there is no second copy of the geometry to get wrong.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.width, self.height).hit_test(x, y)
     }
 
-    fn grid_width() -> f32 {
-        GRID_SIZE as f32 * (CELL_SIZE + CELL_GAP) - CELL_GAP
-    }
+    // ── Drawing ─────────────────────────────────────────────────────
 
-    fn grid_height() -> f32 {
-        GRID_SIZE as f32 * (CELL_SIZE + CELL_GAP) - CELL_GAP
-    }
-
-    fn window_width() -> f32 {
-        PADDING * 2.0 + Self::grid_width()
-    }
-
-    fn window_height() -> f32 {
-        PADDING * 2.0 + HEADER_HEIGHT + Self::grid_height() + FOOTER_HEIGHT
-    }
-
-    /// Convert pixel coordinates to grid position.
-    fn pixel_to_grid(px: f32, py: f32) -> Option<Pos> {
-        let ox = Self::grid_origin_x();
-        let oy = Self::grid_origin_y();
-        let gx = px - ox;
-        let gy = py - oy;
-        if gx < 0.0 || gy < 0.0 {
-            return None;
-        }
-        let col = (gx / (CELL_SIZE + CELL_GAP)) as usize;
-        let row = (gy / (CELL_SIZE + CELL_GAP)) as usize;
-        if row < GRID_SIZE && col < GRID_SIZE {
-            // Check we are actually within the cell, not in the gap.
-            let cell_x = gx - col as f32 * (CELL_SIZE + CELL_GAP);
-            let cell_y = gy - row as f32 * (CELL_SIZE + CELL_GAP);
-            if cell_x <= CELL_SIZE && cell_y <= CELL_SIZE {
-                Some(Pos::new(row, col))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Get the pixel center of a grid cell.
-    fn cell_center(pos: Pos) -> (f32, f32) {
-        let ox = Self::grid_origin_x();
-        let oy = Self::grid_origin_y();
-        let x = ox + pos.col as f32 * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2.0;
-        let y = oy + pos.row as f32 * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2.0;
-        (x, y)
-    }
-
-    /// Get the top-left pixel of a grid cell.
-    fn cell_origin(pos: Pos) -> (f32, f32) {
-        let ox = Self::grid_origin_x();
-        let oy = Self::grid_origin_y();
-        let x = ox + pos.col as f32 * (CELL_SIZE + CELL_GAP);
-        let y = oy + pos.row as f32 * (CELL_SIZE + CELL_GAP);
-        (x, y)
-    }
-
-    // ── Rendering ───────────────────────────────────────────────────
-
-    /// Produce the full render command list for the current frame.
-    /// Named `render_commands` and not `render`: `App::render` is also on
-    /// this type and takes two arguments, and at *different* arity the
-    /// compiler still resolved a bare `self.render_commands()` inside the trait impl
-    /// to the trait method and reported a missing-argument error rather than
-    /// calling this one. A distinct name says which is meant everywhere.
-    fn render_commands(&self) -> Vec<RenderCommand> {
+    /// The whole window at `width` x `height`, with a box recorded for
+    /// everything a click can do.
+    fn frame(&self, width: f32, height: f32) -> Frame {
+        let l = Layout::new(width, height);
         let c = Colours::of(&self.palette);
-        let mut cmds = Vec::new();
-        let win_w = Self::window_width();
-        let win_h = Self::window_height();
-
-        // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: win_w,
-            height: win_h,
-            color: c.chrome.page,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        self.render_header(&mut cmds, &c);
-        self.render_grid(&mut cmds, &c);
-        self.render_gems(&mut cmds);
-        self.render_cursor(&mut cmds, &c);
-        self.render_selection(&mut cmds, &c);
-        self.render_hint_highlight(&mut cmds, &c);
-        self.render_footer(&mut cmds, &c);
-
+        let mut f = Frame::new(l.window.w, l.window.h);
+        fill(&mut f, l.window, c.chrome.page, 0.0);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_controls(&mut f, &l, &c);
+        self.draw_board(&mut f, &l, &c);
+        draw_footer(&mut f, &l, &c);
         if self.state == GameState::GameOver {
-            self.render_game_over_overlay(&mut cmds, &c);
+            self.draw_game_over(&mut f, &l, &c);
         }
-
-        cmds
+        f
     }
 
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
-        let header_w = Self::window_width() - PADDING * 2.0;
-
-        // Header background.
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: PADDING / 2.0,
-            width: header_w,
-            height: HEADER_HEIGHT - PADDING / 2.0,
-            color: c.chrome.raised,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
+    /// The mode and the score on the left, the best and what is left of
+    /// the game on the right, each cut with an ellipsis before it reaches
+    /// the other half.
+    fn draw_header(&self, f: &mut Frame, l: &Layout, c: &Colours) {
+        let r = l.header;
+        if r.is_empty() {
+            return;
+        }
+        fill(f, r, c.chrome.raised, (r.h * 0.18).min(8.0));
         // Every word here is written for the raised band, not the page: the
         // page's inks were 3.6:1 (the mode, the best score) and 4.1:1 (the
         // grey) on it in a light theme.
         let on = c.chrome.on(c.chrome.raised);
-
-        // Mode label.
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 12.0,
-            y: PADDING / 2.0 + 8.0,
-            text: format!("Mode: {}", self.mode.label()),
-            color: on.title,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Score.
-        cmds.push(RenderCommand::Text {
-            x: PADDING + 12.0,
-            y: PADDING / 2.0 + 30.0,
-            text: format!("Score: {}", self.score),
-            color: on.text,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // High score.
-        let high = self.high_scores.get(self.mode);
-        cmds.push(RenderCommand::Text {
-            x: PADDING + header_w / 2.0 - 20.0,
-            y: PADDING / 2.0 + 8.0,
-            text: format!("Best: {high}"),
-            color: on.even,
-            font_size: HEADER_FONT_SIZE - 2.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Mode-specific info.
-        match self.mode {
+        let inner = inset(r, l.pad);
+        let half = (inner.w / 2.0 - l.pad / 2.0).max(0.0);
+        let line = text::line_height(l.font, FontWeightHint::Bold);
+        let top = inner.y + (inner.h - line * 2.0).max(0.0) / 2.0;
+        let bold = FontWeightHint::Bold;
+        let regular = FontWeightHint::Regular;
+        let mode = format!("Mode: {}", self.mode.label());
+        text_left(f, (inner.x, top), &mode, (l.font, bold), on.title, half);
+        let score = format!("Score: {}", self.score);
+        text_left(
+            f,
+            (inner.x, top + line),
+            &score,
+            (l.font, bold),
+            on.text,
+            half,
+        );
+        let best = format!("Best: {}", self.high_scores.get(self.mode));
+        text_right(
+            f,
+            (inner.right(), top),
+            &best,
+            (l.font, regular),
+            on.even,
+            half,
+        );
+        let (limit, colour, weight) = match self.mode {
             GameMode::Timed => {
                 let secs = self.time_remaining_ms / 1000;
-                let color = if secs <= 10 { on.bad } else { on.good };
-                cmds.push(RenderCommand::Text {
-                    x: PADDING + header_w - 120.0,
-                    y: PADDING / 2.0 + 8.0,
-                    text: format!("Time: {secs}s"),
-                    color,
-                    font_size: HEADER_FONT_SIZE,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
+                let colour = if secs <= 10 { on.bad } else { on.good };
+                (format!("Time: {secs}s"), colour, bold)
             }
             GameMode::Moves => {
-                let color = if self.moves_remaining <= 5 {
+                let colour = if self.moves_remaining <= 5 {
                     on.bad
                 } else {
                     on.key
                 };
-                cmds.push(RenderCommand::Text {
-                    x: PADDING + header_w - 120.0,
-                    y: PADDING / 2.0 + 8.0,
-                    text: format!("Moves: {}", self.moves_remaining),
-                    color,
-                    font_size: HEADER_FONT_SIZE,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
+                (format!("Moves: {}", self.moves_remaining), colour, bold)
             }
-            GameMode::Classic => {
-                cmds.push(RenderCommand::Text {
-                    x: PADDING + header_w - 120.0,
-                    y: PADDING / 2.0 + 8.0,
-                    text: String::from("No limit"),
-                    color: on.dim,
-                    font_size: HEADER_FONT_SIZE - 2.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
+            GameMode::Classic => ("No limit".to_string(), on.dim, regular),
+        };
+        text_right(
+            f,
+            (inner.right(), top + line),
+            &limit,
+            (l.font, weight),
+            colour,
+            half,
+        );
+    }
+
+    /// The modes, Hint and New game: the toolkit's buttons, the mode being
+    /// played the primary one. Hint is switched off once the game is over.
+    fn draw_controls(&self, f: &mut Frame, l: &Layout, c: &Colours) {
+        let r = l.controls;
+        if r.is_empty() {
+            return;
+        }
+        let over = self.state == GameState::GameOver;
+        for (i, (target, label)) in CONTROLS.iter().enumerate() {
+            let b = Layout::nth_of(r, CONTROLS.len(), i);
+            let (kind, disabled) = match *target {
+                Target::Mode(mode) if mode == self.mode => (Kind::Primary, false),
+                Target::Hint => (Kind::Plain, over),
+                _ => (Kind::Plain, false),
+            };
+            let state = State {
+                disabled,
+                ..State::default()
+            };
+            gamechrome::button(
+                f,
+                &self.palette,
+                (b.x, b.y, b.w, b.h),
+                label,
+                l.small,
+                kind,
+                state,
+                c.chrome.page,
+            );
+            if !disabled {
+                f.hit(*target, b);
             }
         }
     }
 
-    fn render_grid(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
-        let ox = Self::grid_origin_x();
-        let oy = Self::grid_origin_y();
-
-        // Grid background.
-        cmds.push(RenderCommand::FillRect {
-            x: ox - 4.0,
-            y: oy - 4.0,
-            width: Self::grid_width() + 8.0,
-            height: Self::grid_height() + 8.0,
-            color: c.chrome.raised,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        // Cell backgrounds.
-        for row in 0..GRID_SIZE {
-            for col in 0..GRID_SIZE {
-                let (cx, cy) = Self::cell_origin(Pos::new(row, col));
-                let bg = if row.saturating_add(col) % 2 == 0 {
+    /// The board: its frame, the cells, the gems, and the glows for the
+    /// keyboard's cell, the gem picked up and a hint.
+    fn draw_board(&self, f: &mut Frame, l: &Layout, c: &Colours) {
+        if l.board.is_empty() || l.cell <= 0.0 {
+            return;
+        }
+        let radius = l.radius();
+        fill(f, l.board, c.chrome.raised, (radius + l.frame).min(10.0));
+        let over = self.state == GameState::GameOver;
+        for (row, cells) in self.board.iter().enumerate() {
+            for (col, gem) in cells.iter().enumerate() {
+                let pos = Pos::new(row, col);
+                let r = l.cell_rect(pos);
+                let shade = if row.saturating_add(col) % 2 == 0 {
                     c.chrome.lit
                 } else {
                     c.chrome.raised
                 };
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: CELL_SIZE,
-                    height: CELL_SIZE,
-                    color: bg,
-                    corner_radii: CornerRadii::all(CELL_CORNER_RADIUS),
-                });
-            }
-        }
-    }
-
-    fn render_gems(&self, cmds: &mut Vec<RenderCommand>) {
-        for row in 0..GRID_SIZE {
-            for col in 0..GRID_SIZE {
-                if let Some(gem) = self.get_gem(row, col) {
-                    let pos = Pos::new(row, col);
-                    self.render_gem(cmds, pos, gem);
+                fill(f, r, shade, radius);
+                if let Some(gem) = gem {
+                    draw_gem(f, l, r, *gem);
+                }
+                // A cell takes a click while the game is on; over, the
+                // panel above it answers.
+                if !over {
+                    f.hit(Target::Cell(pos), r);
                 }
             }
         }
-    }
-
-    fn render_gem(&self, cmds: &mut Vec<RenderCommand>, pos: Pos, gem: Gem) {
-        let (cx, cy) = Self::cell_origin(pos);
-        let inset = 4.0;
-        let gem_color = gem.gem_type.color();
-
-        // Gem body.
-        cmds.push(RenderCommand::FillRect {
-            x: cx + inset,
-            y: cy + inset,
-            width: CELL_SIZE - inset * 2.0,
-            height: CELL_SIZE - inset * 2.0,
-            color: gem_color,
-            corner_radii: CornerRadii::all(CELL_CORNER_RADIUS),
-        });
-
-        // Gem symbol.
-        cmds.push(RenderCommand::Text {
-            x: cx + CELL_SIZE / 2.0 - 6.0,
-            y: cy + CELL_SIZE / 2.0 - 8.0,
-            text: String::from(gem.gem_type.symbol()),
-            color: GEM_INK,
-            font_size: CELL_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Special gem indicator.
-        match gem.special {
-            SpecialKind::LineClearH => {
-                // Horizontal line indicator.
-                cmds.push(RenderCommand::Line {
-                    x1: cx + inset + 2.0,
-                    y1: cy + CELL_SIZE / 2.0,
-                    x2: cx + CELL_SIZE - inset - 2.0,
-                    y2: cy + CELL_SIZE / 2.0,
-                    color: GEM_INK,
-                    width: 2.0,
-                });
-            }
-            SpecialKind::LineClearV => {
-                // Vertical line indicator.
-                cmds.push(RenderCommand::Line {
-                    x1: cx + CELL_SIZE / 2.0,
-                    y1: cy + inset + 2.0,
-                    x2: cx + CELL_SIZE / 2.0,
-                    y2: cy + CELL_SIZE - inset - 2.0,
-                    color: GEM_INK,
-                    width: 2.0,
-                });
-            }
-            SpecialKind::ColorBomb => {
-                // Star burst indicator: small circles at corners.
-                let r = 3.0;
-                for &(dx, dy) in &[
-                    (inset + r, inset + r),
-                    (CELL_SIZE - inset - r, inset + r),
-                    (inset + r, CELL_SIZE - inset - r),
-                    (CELL_SIZE - inset - r, CELL_SIZE - inset - r),
-                ] {
-                    cmds.push(RenderCommand::FillRect {
-                        x: cx + dx - r,
-                        y: cy + dy - r,
-                        width: r * 2.0,
-                        height: r * 2.0,
-                        color: GEM_INK,
-                        corner_radii: CornerRadii::all(r),
-                    });
-                }
-            }
-            SpecialKind::None => {}
+        if !over {
+            fill(
+                f,
+                grow(l.cell_rect(self.cursor), l.gap),
+                c.cursor,
+                radius + l.gap,
+            );
         }
-    }
-
-    fn render_cursor(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
-        if self.state == GameState::GameOver {
-            return;
-        }
-        let (cx, cy) = Self::cell_origin(self.cursor);
-
-        // Cursor highlight (subtle border).
-        cmds.push(RenderCommand::FillRect {
-            x: cx - 2.0,
-            y: cy - 2.0,
-            width: CELL_SIZE + 4.0,
-            height: CELL_SIZE + 4.0,
-            color: c.cursor,
-            corner_radii: CornerRadii::all(CELL_CORNER_RADIUS + 2.0),
-        });
-    }
-
-    fn render_selection(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
         if let Some(sel) = self.selected {
-            let (cx, cy) = Self::cell_origin(sel);
-
-            // Selection highlight (bright border).
-            cmds.push(RenderCommand::FillRect {
-                x: cx - 3.0,
-                y: cy - 3.0,
-                width: CELL_SIZE + 6.0,
-                height: CELL_SIZE + 6.0,
-                color: c.selected,
-                corner_radii: CornerRadii::all(CELL_CORNER_RADIUS + 3.0),
-            });
+            let glow = l.gap * 1.5;
+            fill(f, grow(l.cell_rect(sel), glow), c.selected, radius + glow);
         }
-    }
-
-    fn render_hint_highlight(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
-        if !self.hint_visible {
-            return;
-        }
-        if let Some((a, b)) = self.hint {
-            // Pulsing glow effect on hint gems.
-            let pulse =
-                ((self.pulse_counter % 60) as f32 / 60.0 * std::f32::consts::PI * 2.0).sin();
-            let alpha = (40.0 + pulse * 40.0) as u8;
-
-            for pos in &[a, b] {
-                let (cx, cy) = Self::cell_origin(*pos);
-                cmds.push(RenderCommand::FillRect {
-                    x: cx - 3.0,
-                    y: cy - 3.0,
-                    width: CELL_SIZE + 6.0,
-                    height: CELL_SIZE + 6.0,
-                    color: with_alpha(c.hint, alpha),
-                    corner_radii: CornerRadii::all(CELL_CORNER_RADIUS + 3.0),
-                });
+        if self.hint_visible
+            && let Some((a, b)) = self.hint
+        {
+            // A glow that pulses once a second.
+            let phase = (self.pulse_counter % 60) as f32 / 60.0 * std::f32::consts::TAU;
+            let alpha = (40.0 + phase.sin() * 40.0) as u8;
+            let glow = l.gap * 1.5;
+            for pos in [a, b] {
+                fill(
+                    f,
+                    grow(l.cell_rect(pos), glow),
+                    with_alpha(c.hint, alpha),
+                    radius + glow,
+                );
             }
         }
     }
 
-    fn render_footer(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
-        let y = Self::window_height() - FOOTER_HEIGHT + 8.0;
-
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y,
-            text: String::from("Arrows/Click:Move  Enter/Click:Swap  H:Hint  N:New  1/2/3:Mode"),
-            color: c.chrome.dim,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_game_over_overlay(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
-        let ox = Self::grid_origin_x();
-        let oy = Self::grid_origin_y();
-        let gw = Self::grid_width();
-        let gh = Self::grid_height();
-
-        // Dim overlay.
-        cmds.push(RenderCommand::FillRect {
-            x: ox - 4.0,
-            y: oy - 4.0,
-            width: gw + 8.0,
-            height: gh + 8.0,
-            color: c.chrome.veil,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        // Game Over text.
-        let center_x = ox + gw / 2.0;
-        let center_y = oy + gh / 2.0;
-
-        // A ground of its own under the words: over the veil alone they sat
-        // on whichever gem was beneath -- the best score at 4.1:1 over a
-        // teal one in a light theme. Sized to the words, which stand at
-        // fixed offsets from the centre, as this game's whole layout still
-        // does (known-issues.md: it draws at one size whatever the window).
-        self.palette.push_surface(
-            cmds,
-            center_x - 100.0,
-            center_y - 62.0,
-            200.0,
-            140.0,
-            8.0,
-            Surface::Panel,
-        );
+    /// The game over, on the toolkit's panel over the veiled board: the
+    /// panel is sized to its words and takes the click that starts the
+    /// next game.
+    fn draw_game_over(&self, f: &mut Frame, l: &Layout, c: &Colours) {
+        fill(f, l.board, c.chrome.veil, (l.radius() + l.frame).min(10.0));
         // On the panel the chrome's roles read as they are: the palette inks
-        // its text colours for its own panel (`Palette::ink`).
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 80.0,
-            y: center_y - 50.0,
-            text: String::from("GAME OVER"),
-            color: c.chrome.bad,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 60.0,
-            y: center_y - 10.0,
-            text: format!("Final Score: {}", self.score),
-            color: c.chrome.text,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        let high = self.high_scores.get(self.mode);
-        cmds.push(RenderCommand::Text {
-            x: center_x - 50.0,
-            y: center_y + 15.0,
-            text: format!("Best: {high}"),
-            color: c.chrome.even,
-            font_size: OVERLAY_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: center_x - 80.0,
-            y: center_y + 50.0,
-            text: String::from("Press N for new game"),
-            color: c.chrome.dim,
-            font_size: OVERLAY_FONT_SIZE - 2.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // its text colours for its own panel (`Palette::ink`). Over the veil
+        // alone the words sat on whichever gem was beneath -- the best score
+        // at 4.1:1 over a teal one in a light theme.
+        let bold = FontWeightHint::Bold;
+        let regular = FontWeightHint::Regular;
+        let lines = [
+            ("GAME OVER".to_string(), l.font * 1.6, bold, c.chrome.bad),
+            (
+                format!("Final score: {}", self.score),
+                l.font,
+                regular,
+                c.chrome.text,
+            ),
+            (
+                format!("Best: {}", self.high_scores.get(self.mode)),
+                l.font,
+                regular,
+                c.chrome.even,
+            ),
+            (
+                "Click here, or N, for a new game".to_string(),
+                l.small,
+                regular,
+                c.chrome.dim,
+            ),
+        ];
+        let gap = l.pad * 0.5;
+        let widest = lines
+            .iter()
+            .map(|(s, size, weight, _)| text::measure(s, *size, *weight))
+            .fold(0.0_f32, f32::max);
+        let total: f32 = lines
+            .iter()
+            .map(|(_, size, weight, _)| text::line_height(*size, *weight))
+            .sum::<f32>()
+            + gap * (lines.len() as f32 - 1.0);
+        let (cx, cy) = l.board.centre();
+        let block = Rect::new(
+            cx - widest / 2.0 - l.pad,
+            cy - total / 2.0 - l.pad,
+            widest + l.pad * 2.0,
+            total + l.pad * 2.0,
+        );
+        // Cut to the window, and not drawn under a point, where the
+        // toolkit's border would reach outside it.
+        let Some(panel) = block.intersect(l.window) else {
+            return;
+        };
+        if panel.w >= 1.0 && panel.h >= 1.0 {
+            self.palette.push_surface(
+                f,
+                panel.x,
+                panel.y,
+                panel.w,
+                panel.h,
+                l.pad * 0.6,
+                Surface::Panel,
+            );
+        }
+        let mut y = cy - total / 2.0;
+        for (s, size, weight, colour) in &lines {
+            let h = text::line_height(*size, *weight);
+            centred(
+                f,
+                Rect::new(panel.x, y, panel.w, h),
+                s,
+                (*size, *weight),
+                *colour,
+            );
+            y += h + gap;
+        }
+        f.hit(Target::GameOver, panel);
     }
 
     // ── Event handling ──────────────────────────────────────────────
@@ -1524,10 +1621,7 @@ impl Match3 {
                 return;
             }
             Key::H => {
-                if self.state != GameState::GameOver {
-                    self.hint = self.find_hint();
-                    self.hint_visible = true;
-                }
+                self.show_hint();
                 return;
             }
             _ => {}
@@ -1561,15 +1655,29 @@ impl Match3 {
         }
     }
 
+    /// A left press, answered by what it lands on in the frame the window
+    /// is showing.
     fn handle_mouse(&mut self, me: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = me.kind {
-            self.reset_idle();
-            if self.state == GameState::GameOver {
-                return;
-            }
-            if let Some(pos) = Self::pixel_to_grid(me.x, me.y) {
+        if !matches!(me.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return;
+        }
+        self.reset_idle();
+        match self.target_at(me.x, me.y) {
+            Some(Target::Cell(pos)) if self.state != GameState::GameOver => {
                 self.select_or_swap(pos);
             }
+            Some(Target::Mode(mode)) => self.switch_mode(mode),
+            Some(Target::Hint) => self.show_hint(),
+            Some(Target::NewGame | Target::GameOver) => self.new_game(),
+            _ => {}
+        }
+    }
+
+    /// Show a move that makes a match, while the game is on.
+    fn show_hint(&mut self) {
+        if self.state != GameState::GameOver {
+            self.hint = self.find_hint();
+            self.hint_visible = true;
         }
     }
 
@@ -1653,36 +1761,29 @@ impl Match3 {
             *cell = gem;
         }
     }
+}
 
-    /// Clear the board (for testing setups).
+/// Test support: a board set up by hand, and a count of what is on it. The
+/// game itself only ever fills a board by dealing, so these live behind
+/// `cfg(test)` rather than widening what the program can do.
+#[cfg(test)]
+impl Match3 {
+    /// Clear the board.
     fn clear_board(&mut self) {
-        for row in 0..GRID_SIZE {
-            for col in 0..GRID_SIZE {
-                self.set_gem(row, col, None);
-            }
-        }
-    }
-
-    /// Fill entire board with a single gem type (for testing).
-    fn fill_board_with(&mut self, gem: Gem) {
-        for row in 0..GRID_SIZE {
-            for col in 0..GRID_SIZE {
-                self.set_gem(row, col, Some(gem));
-            }
-        }
+        self.board = [[None; GRID_SIZE]; GRID_SIZE];
     }
 
     /// Count non-empty cells.
     fn gem_count(&self) -> usize {
-        let mut count: usize = 0;
-        for row in 0..GRID_SIZE {
-            for col in 0..GRID_SIZE {
-                if self.get_gem(row, col).is_some() {
-                    count = count.saturating_add(1);
-                }
-            }
-        }
-        count
+        self.board.iter().flatten().filter(|g| g.is_some()).count()
+    }
+}
+
+#[cfg(test)]
+impl GemType {
+    /// Where the kind stands in the order `from_index` reads.
+    fn index(self) -> usize {
+        self as usize
     }
 }
 
@@ -1770,22 +1871,9 @@ impl App for Match3 {
     }
 
     fn initial_size(&self) -> (u32, u32) {
-        // The board decides the window, not the other way round: every
-        // coordinate in `render` is derived from `CELL_SIZE` and `GRID_SIZE`,
-        // so asking for anything else would draw a board the window does not
-        // fit. Rounded up, because a fractional pixel of window is a row of
-        // background the grid does not reach.
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "both are a positive constant sum well under u32::MAX"
-        )]
-        {
-            (
-                Self::window_width().ceil() as u32,
-                Self::window_height().ceil() as u32,
-            )
-        }
+        // A size to open at, not the only one it can draw: every rectangle
+        // is laid out from the size the window has.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
     fn tick_interval(&self) -> Option<Duration> {
@@ -1809,15 +1897,35 @@ impl App for Match3 {
         Response::Redraw
     }
 
-    fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
-        // The size is ignored because the window is fixed: `initial_size`
-        // asks for exactly the board, and the board has no layout that could
-        // use a different one. A resize therefore leaves the extra space as
-        // background rather than stretching the grid, which is the right
-        // answer for a game whose cells are hit-tested by pixel arithmetic.
-        RenderTree {
-            commands: self.render_commands(),
-        }
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against -- that is why it is stored here.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for Match3 {
+    type Target = Target;
+    type Outcome = ();
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }));
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Key(key.clone()));
     }
 }
 
@@ -1885,6 +1993,22 @@ mod tests {
     }
 
     use super::*;
+    use guitk::probe;
+
+    /// The seven gems' own colours, in `GemType` order.
+    const GEM_COLORS: [Color; 7] = [RUBY, SAPPHIRE, EMERALD, TOPAZ, AMBER, AMETHYST, AQUA];
+
+    /// The window sizes the layout tests draw at: the one it asks for,
+    /// wider, taller, cramped, a sliver, and a big one.
+    const WINDOWS: [(f32, f32); 7] = [
+        (WINDOW_WIDTH, WINDOW_HEIGHT),
+        (900.0, 600.0),
+        (480.0, 1000.0),
+        (320.0, 360.0),
+        (200.0, 120.0),
+        (1600.0, 1200.0),
+        (60.0, 60.0),
+    ];
 
     /// **The window is drawn in the user's colours**, light or dark -- a
     /// board with a gem picked up and a hint showing, and a game over --
@@ -1896,14 +2020,18 @@ mod tests {
         derived.push(GEM_INK);
         for (light, cards) in LOOKS {
             let p = palette(light, cards);
-            // The header's words, written for it.
+            // The header's words, written for it, and the controls' faces
+            // and labels: the toolkit's blends of the palette.
             let chrome = gamechrome::Chrome::of(&p);
             let mut derived = derived.clone();
             derived.extend(chrome.on(chrome.raised).inks());
-            for (what, cmds) in every_look(&p) {
+            for kind in [Kind::Plain, Kind::Primary] {
+                derived.extend(gamechrome::button_colours(&p, kind, chrome.page));
+            }
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
-                    &cmds,
+                    f.commands(),
                     &derived,
                     &format!("match3, {what}, light: {light}, cards: {cards}"),
                 );
@@ -1927,18 +2055,36 @@ mod tests {
     const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
 
     /// Every state the window shows, drawn in `p`'s colours: a gem picked up
-    /// and a hint shown, and the game over. (One size: match-3 draws at one
-    /// size whatever the window is -- known-issues.md.)
-    fn every_look(p: &Palette) -> Vec<(&'static str, Vec<RenderCommand>)> {
+    /// and a hint shown in each mode, the game over, and the same in a
+    /// cramped window and a wide one.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
         let mut game = Match3::with_seed(7);
         game.theme_changed(p);
         game.selected = Some(Pos::new(2, 2));
         game.hint = Some((Pos::new(3, 3), Pos::new(3, 4)));
         game.hint_visible = true;
-        let playing = game.render_commands();
+        let (w, h) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let playing = game.frame(w, h);
+        let cramped = game.frame(320.0, 360.0);
+        let wide = game.frame(900.0, 600.0);
+        game.mode = GameMode::Timed;
+        game.time_remaining_ms = 5_000;
+        let timed = game.frame(w, h);
+        game.mode = GameMode::Moves;
+        game.moves_remaining = 3;
+        let moves = game.frame(w, h);
         game.state = GameState::GameOver;
-        let over = game.render_commands();
-        vec![("playing", playing), ("over", over)]
+        let over = game.frame(w, h);
+        let over_cramped = game.frame(320.0, 360.0);
+        vec![
+            ("playing", playing),
+            ("timed", timed),
+            ("moves", moves),
+            ("over", over),
+            ("cramped", cramped),
+            ("wide", wide),
+            ("over, cramped", over_cramped),
+        ]
     }
 
     /// **Every text reads on what is drawn under it**, in either theme and
@@ -1948,8 +2094,22 @@ mod tests {
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
         for (look, p) in gamechrome::legibility::looks() {
-            for (what, cmds) in every_look(&p) {
-                for r in gamechrome::legibility::illegible(&cmds, p.base, |_| false) {
+            // A switched-off button's label is exempt, as WCAG exempts an
+            // inactive control: Hint, once the game is over.
+            let off = guitk::button::paint(
+                &p,
+                Kind::Plain,
+                State {
+                    disabled: true,
+                    ..State::default()
+                },
+                Colours::of(&p).chrome.page,
+            );
+            let exempt = |r: &gamechrome::legibility::Read| {
+                r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
                         "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
@@ -2782,12 +2942,7 @@ mod tests {
     #[test]
     fn test_mouse_click_selects() {
         let mut game = Match3::new();
-        let (cx, cy) = Match3::cell_center(Pos::new(2, 3));
-        game.handle_event(&Event::Mouse(MouseEvent {
-            x: cx,
-            y: cy,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        }));
+        probe::click(&mut game, Target::Cell(Pos::new(2, 3)));
         assert_eq!(game.state, GameState::Selected);
         assert_eq!(game.selected, Some(Pos::new(2, 3)));
     }
@@ -2807,13 +2962,87 @@ mod tests {
     #[test]
     fn test_mouse_right_click_ignored() {
         let mut game = Match3::new();
-        let (cx, cy) = Match3::cell_center(Pos::new(2, 3));
-        game.handle_event(&Event::Mouse(MouseEvent {
-            x: cx,
-            y: cy,
-            kind: MouseEventKind::Press(MouseButton::Right),
-        }));
+        probe::click_with(&mut game, Target::Cell(Pos::new(2, 3)), MouseButton::Right);
         assert_eq!(game.state, GameState::Idle);
+    }
+
+    /// **The controls do what they say**: a mode's button starts a game in
+    /// it, Hint shows a move, New game deals a new board in the same mode.
+    #[test]
+    fn the_controls_do_what_they_say() {
+        let mut game = Match3::with_seed(5);
+        for mode in [GameMode::Timed, GameMode::Moves, GameMode::Classic] {
+            game.score = 40;
+            probe::click(&mut game, Target::Mode(mode));
+            assert_eq!(game.mode, mode);
+            assert_eq!(game.score, 0, "{mode:?} did not start a new game");
+        }
+        assert!(!game.hint_visible);
+        probe::click(&mut game, Target::Hint);
+        assert!(
+            game.hint_visible && game.hint.is_some(),
+            "Hint showed nothing"
+        );
+        let before = game.board;
+        game.mode = GameMode::Moves;
+        probe::click(&mut game, Target::NewGame);
+        assert_ne!(game.board, before, "New game kept the board");
+        assert_eq!(game.mode, GameMode::Moves, "New game changed the mode");
+    }
+
+    /// **The mode being played is the primary button**, and the others
+    /// plain -- the one way the row says which mode this is.
+    #[test]
+    fn the_mode_being_played_is_the_primary_button() {
+        let mut game = Match3::with_seed(5);
+        game.mode = GameMode::Timed;
+        let p = game.palette;
+        let primary = guitk::button::paint(&p, Kind::Primary, State::default(), p.base);
+        let f = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let face = |target: Target| {
+            let r = f.rect_of(|t| *t == target).expect("the button is drawn");
+            f.commands().iter().find_map(|cmd| match cmd {
+                RenderCommand::FillRect { x, y, color, .. }
+                    if (x - r.x).abs() < 0.5 && (y - r.y).abs() < 0.5 =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+        };
+        let primary_face = [primary.lower, primary.upper];
+        let timed = face(Target::Mode(GameMode::Timed)).expect("Timed has a face");
+        assert!(
+            primary_face.contains(&timed),
+            "the mode played is not the primary button"
+        );
+        let classic = face(Target::Mode(GameMode::Classic)).expect("Classic has a face");
+        assert!(
+            !primary_face.contains(&classic),
+            "a mode not played looks chosen"
+        );
+    }
+
+    /// **A game over takes a click on its panel as the next game**, and
+    /// Hint is switched off: there is no move to show.
+    #[test]
+    fn a_click_on_the_game_over_panel_starts_the_next_game() {
+        let mut game = Match3::with_seed(5);
+        game.end_game();
+        assert!(
+            !probe::is_visible(&game, Target::Hint),
+            "Hint is live on a finished game"
+        );
+        assert!(
+            !probe::is_visible(&game, Target::Cell(Pos::new(0, 0))),
+            "the board takes clicks under the panel"
+        );
+        probe::click(&mut game, Target::GameOver);
+        assert_ne!(
+            game.state,
+            GameState::GameOver,
+            "the panel's click did nothing"
+        );
     }
 
     // ── Hint system tests ───────────────────────────────────────────
@@ -3029,34 +3258,68 @@ mod tests {
         assert!(!had_match);
     }
 
-    // ── Pixel to grid tests ─────────────────────────────────────────
+    // ── Where a click lands ─────────────────────────────────────────
 
+    /// **Every cell is taken where it is drawn**, in every window: the box a
+    /// click is read against is the cell's rectangle, and a click in its
+    /// middle picks that gem up.
     #[test]
-    fn test_pixel_to_grid_origin() {
-        let ox = Match3::grid_origin_x();
-        let oy = Match3::grid_origin_y();
-        let pos = Match3::pixel_to_grid(ox + 1.0, oy + 1.0);
-        assert_eq!(pos, Some(Pos::new(0, 0)));
+    fn every_cell_is_clicked_where_it_is_drawn() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            if l.cell < 1.0 {
+                continue;
+            }
+            for row in 0..GRID_SIZE {
+                for col in 0..GRID_SIZE {
+                    let pos = Pos::new(row, col);
+                    let mut game = Match3::with_seed(3);
+                    let r = probe::rect_of_sized(&game, Target::Cell(pos), (w, h))
+                        .expect("every cell is drawn");
+                    assert_eq!(r, l.cell_rect(pos), "{w}x{h}: {pos:?}");
+                    let (x, y) = r.centre();
+                    game.click_at(x, y, MouseButton::Left, (w, h));
+                    assert_eq!(game.selected, Some(pos), "{w}x{h}: {pos:?}");
+                }
+            }
+        }
     }
 
+    /// **A click is read against the size the window was last drawn at**:
+    /// the frame the window shows, not the size it opened at.
     #[test]
-    fn test_pixel_to_grid_last_cell() {
-        let ox = Match3::grid_origin_x();
-        let oy = Match3::grid_origin_y();
-        let x = ox + (GRID_SIZE - 1) as f32 * (CELL_SIZE + CELL_GAP) + 1.0;
-        let y = oy + (GRID_SIZE - 1) as f32 * (CELL_SIZE + CELL_GAP) + 1.0;
-        let pos = Match3::pixel_to_grid(x, y);
-        assert_eq!(pos, Some(Pos::new(GRID_SIZE - 1, GRID_SIZE - 1)));
+    fn a_click_is_read_against_the_size_the_window_was_drawn_at() {
+        let mut game = Match3::with_seed(3);
+        let (w, h) = (1600.0, 1200.0);
+        let _ = App::render(&mut game, w, h);
+        let (x, y) = Layout::new(w, h).cell_rect(Pos::new(7, 7)).centre();
+        game.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(game.selected, Some(Pos::new(7, 7)));
     }
 
+    /// **A click between cells or off the board picks nothing up.**
     #[test]
-    fn test_pixel_to_grid_outside() {
-        assert_eq!(Match3::pixel_to_grid(0.0, 0.0), None);
-    }
-
-    #[test]
-    fn test_pixel_to_grid_negative() {
-        assert_eq!(Match3::pixel_to_grid(-10.0, -10.0), None);
+    fn a_click_off_the_cells_picks_nothing_up() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let a = l.cell_rect(Pos::new(0, 0));
+        for (x, y) in [
+            (a.right() + l.gap / 2.0, a.y + a.h / 2.0),
+            (a.x + a.w / 2.0, a.bottom() + l.gap / 2.0),
+            (l.board.x + 0.5, l.board.y + 0.5),
+            (1.0, WINDOW_HEIGHT - 1.0),
+        ] {
+            let mut game = Match3::with_seed(3);
+            game.click_at(x, y, MouseButton::Left, (WINDOW_WIDTH, WINDOW_HEIGHT));
+            assert_eq!(
+                game.state,
+                GameState::Idle,
+                "a click at ({x}, {y}) picked a gem up"
+            );
+        }
     }
 
     // ── Render tests ────────────────────────────────────────────────
@@ -3064,19 +3327,25 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let game = Match3::new();
-        let cmds = game.render_commands();
-        assert!(!cmds.is_empty());
+        assert!(
+            !game
+                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands()
+                .is_empty()
+        );
     }
 
     #[test]
     fn test_render_game_over_overlay() {
         let mut game = Match3::new();
         game.end_game();
-        let cmds = game.render_commands();
-        // Should have more commands than an idle game (overlay).
-        let idle_game = Match3::new();
-        let idle_cmds = idle_game.render_commands();
-        assert!(cmds.len() > idle_cmds.len());
+        let f = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            f.rect_of(|t| *t == Target::GameOver).is_some(),
+            "no game-over panel"
+        );
+        let idle = Match3::new().frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(f.commands().len() > idle.commands().len());
     }
 
     // ── HighScores tests ────────────────────────────────────────────
@@ -3104,49 +3373,173 @@ mod tests {
         assert_eq!(hs.get(GameMode::Classic), 100);
     }
 
-    // ── Layout math tests ───────────────────────────────────────────
+    // ── Layout ──────────────────────────────────────────────────────
 
+    /// **The board fits every window**: square, whole cells of one size,
+    /// inside the window and clear of the bands, in every size -- it drew at
+    /// one size, in a corner of a large window and cut off in a small one.
     #[test]
-    fn test_grid_dimensions() {
-        let w = Match3::grid_width();
-        let h = Match3::grid_height();
-        assert!(w > 0.0);
-        assert_eq!(w, h); // Square grid.
+    fn the_board_fits_every_window() {
+        for (w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            assert!(
+                l.cell >= 0.0 && l.cell == l.cell.floor(),
+                "{w}x{h}: cell {}",
+                l.cell
+            );
+            if l.cell == 0.0 {
+                continue;
+            }
+            let b = l.board;
+            assert!((b.w - b.h).abs() < 0.01, "{w}x{h}: the board is not square");
+            assert!(
+                b.x >= 0.0 && b.y >= 0.0 && b.right() <= w + 0.01 && b.bottom() <= h + 0.01,
+                "{w}x{h}: the board {b:?} leaves the window"
+            );
+            for band in [l.header, l.controls, l.footer] {
+                if !band.is_empty() {
+                    assert!(
+                        band.bottom() <= b.y + 0.01 || band.y >= b.bottom() - 0.01,
+                        "{w}x{h}: {band:?} overlaps the board {b:?}"
+                    );
+                }
+            }
+            let last = l.cell_rect(Pos::new(GRID_SIZE - 1, GRID_SIZE - 1));
+            assert!(
+                last.right() <= b.right() + 0.01 && last.bottom() <= b.bottom() + 0.01,
+                "{w}x{h}: the last cell leaves the board"
+            );
+        }
     }
 
+    /// **A larger window gets a larger board**, not the same one in a
+    /// corner of it.
     #[test]
-    fn test_window_dimensions() {
-        let w = Match3::window_width();
-        let h = Match3::window_height();
-        assert!(w > 0.0);
-        assert!(h > w); // Window is taller than wide (header + footer).
+    fn a_larger_window_gets_a_larger_board() {
+        let small = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let large = Layout::new(1600.0, 1200.0);
+        assert!(
+            large.cell > small.cell * 1.5,
+            "{} then {}",
+            small.cell,
+            large.cell
+        );
+        // Centred across the window.
+        let b = large.board;
+        assert!(
+            (b.x - (1600.0 - b.right())).abs() < 1.0,
+            "{b:?} is not centred"
+        );
     }
 
+    /// **In a short window the bands give way in order**: the key line
+    /// first, then the controls, then the header -- the board keeps its
+    /// share of the height.
     #[test]
-    fn test_cell_center_in_bounds() {
-        for row in 0..GRID_SIZE {
-            for col in 0..GRID_SIZE {
-                let (cx, cy) = Match3::cell_center(Pos::new(row, col));
-                assert!(cx >= 0.0);
-                assert!(cy >= 0.0);
-                assert!(cx < Match3::window_width());
-                assert!(cy < Match3::window_height());
+    fn in_a_short_window_the_bands_give_way_in_order() {
+        let full = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(!full.header.is_empty() && !full.controls.is_empty() && !full.footer.is_empty());
+        let mut seen = Vec::new();
+        for h in (60..=640).rev().step_by(4) {
+            let l = Layout::new(WINDOW_WIDTH, h as f32);
+            let shown = [
+                !l.header.is_empty(),
+                !l.controls.is_empty(),
+                !l.footer.is_empty(),
+            ];
+            if seen.last() != Some(&shown) {
+                seen.push(shown);
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                [true, true, true],
+                [true, true, false],
+                [true, false, false],
+                [false, false, false]
+            ],
+            "the bands gave way in another order"
+        );
+    }
+
+    /// **Nothing is drawn outside the window**, in every size and state.
+    #[test]
+    fn nothing_is_drawn_outside_the_window() {
+        let mut game = Match3::with_seed(5);
+        game.selected = Some(Pos::new(0, 0));
+        game.hint = Some((Pos::new(7, 6), Pos::new(7, 7)));
+        game.hint_visible = true;
+        for over in [false, true] {
+            if over {
+                game.state = GameState::GameOver;
+            }
+            for (w, h) in WINDOWS {
+                for cmd in game.frame(w, h).commands() {
+                    if let RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } = cmd
+                    {
+                        // The glows reach a few points past their cell by
+                        // design; the board's frame leaves room for them.
+                        let slack = Layout::new(w, h).gap * 2.0;
+                        assert!(
+                            *x >= -slack
+                                && *y >= -slack
+                                && x + width <= w + slack
+                                && y + height <= h + slack,
+                            "{w}x{h}: {x},{y} {width}x{height} leaves the window"
+                        );
+                    }
+                }
             }
         }
     }
 
+    /// **A gem's symbol is centred on it**, at every cell size: measured,
+    /// rather than placed at an offset from the middle that was right for
+    /// one font at one size.
     #[test]
-    fn test_cell_origin_sequential() {
-        // Each cell origin should be to the right/below the previous.
-        for col in 0..GRID_SIZE - 1 {
-            let (x1, _) = Match3::cell_origin(Pos::new(0, col));
-            let (x2, _) = Match3::cell_origin(Pos::new(0, col + 1));
-            assert!(x2 > x1);
-        }
-        for row in 0..GRID_SIZE - 1 {
-            let (_, y1) = Match3::cell_origin(Pos::new(row, 0));
-            let (_, y2) = Match3::cell_origin(Pos::new(row + 1, 0));
-            assert!(y2 > y1);
+    fn a_gems_symbol_is_centred_on_it() {
+        let game = Match3::with_seed(5);
+        for (w, h) in [
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+            (1600.0, 1200.0),
+            (320.0, 360.0),
+        ] {
+            let l = Layout::new(w, h);
+            let f = game.frame(w, h);
+            let cell = l.cell_rect(Pos::new(4, 4));
+            let gem = game.get_gem(4, 4).expect("a full board");
+            let symbol = gem.gem_type.symbol();
+            let (x, y, size) = f
+                .commands()
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Text {
+                        x,
+                        y,
+                        text,
+                        font_size,
+                        ..
+                    } if text == symbol && cell.contains(*x + 0.5, *y + 0.5) => {
+                        Some((*x, *y, *font_size))
+                    }
+                    _ => None,
+                })
+                .expect("the symbol is drawn in its cell");
+            let tw = text::measure(symbol, size, FontWeightHint::Bold);
+            let th = text::line_height(size, FontWeightHint::Bold);
+            let (cx, cy) = cell.centre();
+            assert!(
+                (x + tw / 2.0 - cx).abs() < 0.5,
+                "{w}x{h}: off-centre across"
+            );
+            assert!((y + th / 2.0 - cy).abs() < 0.5, "{w}x{h}: off-centre down");
         }
     }
 
@@ -3331,8 +3724,12 @@ mod tests {
         // Tick forward.
         game.handle_event(&Event::Tick { elapsed_ms: 100 });
         // Render should not panic.
-        let cmds = game.render_commands();
-        assert!(!cmds.is_empty());
+        assert!(
+            !game
+                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands()
+                .is_empty()
+        );
     }
 }
 
@@ -3411,27 +3808,23 @@ mod reaches_a_window {
         );
     }
 
-    /// The window the game asks for is the board it draws, not a number.
+    /// The window the game asks for shows everything: the header, the
+    /// controls, the key line and a board of real cells.
     ///
     /// `initial_size` is the one part of the `App` impl a compositor obeys
     /// without question, and a wrong answer there is not a crash -- it is a
-    /// window with the playfield clipped or floating in a margin. Deriving the
-    /// expectation from the same constants the renderer uses is what stops
-    /// this from being a copy of the answer.
+    /// window with the playfield clipped or its chrome given away.
     #[test]
-    fn the_window_it_asks_for_is_the_size_of_the_board() {
+    fn the_window_it_asks_for_shows_everything() {
         let game = Match3::new();
         let (w, h) = game.initial_size();
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "the same positive constants the impl casts"
-        )]
-        let expected = (
-            Match3::window_width().ceil() as u32,
-            Match3::window_height().ceil() as u32,
+        assert_eq!((w, h), (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32));
+        let l = Layout::new(w as f32, h as f32);
+        assert!(!l.header.is_empty() && !l.controls.is_empty() && !l.footer.is_empty());
+        assert!(
+            l.cell >= 40.0,
+            "cells of {} at the size it asks for",
+            l.cell
         );
-        assert_eq!((w, h), expected, "the window does not match the board");
-        assert!(w > 0 && h > 0, "a zero dimension is an invisible window");
     }
 }

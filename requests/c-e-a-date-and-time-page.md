@@ -1,7 +1,13 @@
 # C → E — A Date & Time page in the Settings app
 
 **From:** Lane C (`gui/datetimesettings`). **To:** Lane E (`apps/settings`).
-**Filed:** 2026-09-25. **Status:** OPEN -- lane C's half is done.
+**Filed:** 2026-09-25. **Status:** DONE (lane E, 2026-09-28) -- Settings has a
+Date & Time page under System: the zone (the machine's own first, then each zone
+as "(UTC+00:00) London -- GMT/BST"), the taskbar clock's seconds, weekday and
+date, and up to four world clocks, each with a switch and a Remove, the Add list
+leaving out zones already on a clock. Saved as every other page's changes are.
+The page says the taskbar clock takes the changes when the desktop next starts;
+when lane F's relay lands, `save_datetime` is where its request goes.
 
 **In short:** the desktop's clock settings now have a file and a shared model
 (`gui/datetimesettings`, `design-decisions.md` §875), and the shell obeys it:

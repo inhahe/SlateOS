@@ -50,9 +50,11 @@
 //! value of every reachable position, computed independently of the code being
 //! tested — rather than against a handful of hand-set boards.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -61,23 +63,29 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha, only the entries this program paints with ──
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-const COL_OVERLAY: Color = Color::from_hex(0x6C7086);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+/// The colours this window draws in, from the user's palette: the page, the
+/// board and both marks follow the theme -- a tic-tac-toe board's colours only
+/// fill space (the operator's answer to C-Q16, `design-decisions.md` §1422).
+/// It drew in its own copy of Catppuccin Mocha, dark on a light desktop.
+///
+/// X is the accent and O a palette hue the accent cannot be mistaken for, so
+/// the two marks stay apart whatever accent the user picks.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    x: Color,
+    o: Color,
+}
 
-/// Drawn over the window behind the help sheet, and over a finished board.
-const COL_SCRIM: Color = Color::rgba(0x1E, 0x1E, 0x2E, 158);
-const COL_VEIL: Color = Color::rgba(0x11, 0x11, 0x1B, 214);
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            x: p.ink(p.accent),
+            o: gamechrome::apart_from_accent(p),
+        }
+    }
+}
 
 /// The board is 3x3. Named because `3` appears in a dozen expressions below
 /// and half of them would still compile if one of them were a `4`.
@@ -315,11 +323,12 @@ impl Mark {
         }
     }
 
+    /// The mark's colour in `c`: X the accent, O a hue kept apart from it.
     #[must_use]
-    pub fn color(self) -> Color {
+    fn color(self, c: &Colours) -> Color {
         match self {
-            Self::X => COL_BLUE,
-            Self::O => COL_RED,
+            Self::X => c.x,
+            Self::O => c.o,
         }
     }
 }
@@ -474,6 +483,10 @@ pub struct TicTacToe {
     show_help: bool,
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults so it is never absent; the framework calls
+    /// `App::theme_changed` before the first frame.
+    palette: Palette,
 }
 
 impl Default for TicTacToe {
@@ -498,6 +511,7 @@ impl TicTacToe {
             show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         }
     }
 
@@ -894,20 +908,34 @@ fn ring(f: &mut Frame, r: Rect, thickness: f32, color: Color) {
 }
 
 /// One button: a filled pill with a centred caption, and its hit box.
-fn button(f: &mut Frame, r: Rect, body: &str, size: f32, bg: Color, fg: Color, target: Target) {
+/// A header button: the toolkit's push button, in the palette, with its
+/// label at the window's size -- it was a flat slab of its own.
+#[allow(clippy::too_many_arguments)]
+fn button(
+    f: &mut Frame,
+    palette: &Palette,
+    r: Rect,
+    body: &str,
+    size: f32,
+    live: bool,
+    ground: Color,
+    target: Target,
+) {
     if r.w <= 0.0 || r.h <= 0.0 {
         return;
     }
-    fill(f, r, bg, (r.h * 0.28).min(8.0));
-    centred_in(
+    gamechrome::button(
         f,
-        r.x,
-        r.w,
-        r.y + r.h / 2.0,
+        palette,
+        (r.x, r.y, r.w, r.h),
         body,
         size,
-        fg,
-        FontWeightHint::Bold,
+        guitk::button::Kind::Plain,
+        guitk::button::State {
+            disabled: !live,
+            ..guitk::button::State::default()
+        },
+        ground,
     );
     f.hit(target, r);
 }
@@ -930,28 +958,29 @@ impl TicTacToe {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = self.layout(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
+        let c = Colours::of(&self.palette);
+        fill(&mut f, l.window, c.chrome.page, 0.0);
 
         if l.shows_header() {
-            self.draw_header(&mut f, &l);
+            self.draw_header(&mut f, &l, &c);
         }
         if l.shows_info() {
-            self.draw_info(&mut f, &l);
+            self.draw_info(&mut f, &l, &c);
         }
-        self.draw_board(&mut f, &l);
+        self.draw_board(&mut f, &l, &c);
         if !self.playing() {
-            self.draw_banner(&mut f, &l);
+            self.draw_banner(&mut f, &l, &c);
         }
         if l.shows_footer() {
-            self.draw_footer(&mut f, &l);
+            self.draw_footer(&mut f, &l, &c);
         }
         if self.show_help {
-            draw_help(&mut f, &l);
+            draw_help(&mut f, &l, &c);
         }
         f
     }
 
-    fn draw_header(&self, f: &mut Frame, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let cy = l.header.y + l.header.h / 2.0;
         let first = l.header_button(0);
         let title_span = (first.x - l.pad * 2.0 - l.header.x).max(0.0);
@@ -961,7 +990,7 @@ impl TicTacToe {
             cy - text::line_height(l.font, FontWeightHint::Bold) / 2.0,
             "Tic-tac-toe",
             l.font,
-            COL_LAVENDER,
+            c.chrome.title,
             FontWeightHint::Bold,
             Some(title_span),
         );
@@ -980,28 +1009,29 @@ impl TicTacToe {
             };
             button(
                 f,
+                &self.palette,
                 r,
                 caption,
                 l.small,
-                if live { COL_SURFACE0 } else { COL_CRUST },
-                if live { COL_TEXT } else { COL_OVERLAY },
+                live,
+                c.chrome.page,
                 target,
             );
         }
     }
 
-    fn draw_info(&self, f: &mut Frame, l: &Layout) {
+    fn draw_info(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let colour = match self.state {
             GameState::Playing => {
                 if self.human_turn() {
-                    COL_TEXT
+                    c.chrome.text
                 } else {
-                    COL_SUBTEXT
+                    c.chrome.dim
                 }
             }
-            GameState::Won(mark, _) if mark == self.human => COL_GREEN,
-            GameState::Won(_, _) => COL_RED,
-            GameState::Draw => COL_YELLOW,
+            GameState::Won(mark, _) if mark == self.human => c.chrome.good,
+            GameState::Won(_, _) => c.chrome.bad,
+            GameState::Draw => c.chrome.even,
         };
         centred_in(
             f,
@@ -1015,11 +1045,11 @@ impl TicTacToe {
         );
     }
 
-    fn draw_board(&self, f: &mut Frame, l: &Layout) {
+    fn draw_board(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         if l.board.w <= 0.0 || l.board.h <= 0.0 {
             return;
         }
-        fill(f, l.board, COL_CRUST, (l.board.w * 0.03).min(14.0));
+        fill(f, l.board, c.chrome.well, (l.board.w * 0.03).min(14.0));
 
         let line = self.win_line();
         let gap = (l.board.w * 0.012).min(7.0);
@@ -1038,16 +1068,16 @@ impl TicTacToe {
                 f,
                 r,
                 if winning {
-                    COL_SURFACE1
+                    c.chrome.lit
                 } else if aimed {
-                    COL_SURFACE0
+                    c.chrome.raised
                 } else {
-                    COL_BASE
+                    c.chrome.page
                 },
                 radius,
             );
             if aimed {
-                ring(f, r, (r.w * 0.035).max(1.5), COL_LAVENDER);
+                ring(f, r, (r.w * 0.035).max(1.5), c.chrome.ring);
             }
             if let Some(mark) = self.cell(i) {
                 // Sized from the cell, not from a constant: the mark has to
@@ -1061,7 +1091,11 @@ impl TicTacToe {
                     r.y + r.h / 2.0,
                     mark.symbol(),
                     size,
-                    if winning { COL_YELLOW } else { mark.color() },
+                    if winning {
+                        c.chrome.even
+                    } else {
+                        mark.color(c)
+                    },
                     FontWeightHint::Bold,
                 );
             }
@@ -1072,7 +1106,7 @@ impl TicTacToe {
     }
 
     /// The result, over the finished board.
-    fn draw_banner(&self, f: &mut Frame, l: &Layout) {
+    fn draw_banner(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let h = (l.board.h * 0.2).clamp(0.0, 48.0);
         let w = (l.board.w * 0.86).min(340.0);
         if h <= 0.0 || w <= 0.0 {
@@ -1084,7 +1118,7 @@ impl TicTacToe {
             w,
             h,
         );
-        fill(f, r, COL_VEIL, (h * 0.3).min(12.0));
+        fill(f, r, c.chrome.veil, (h * 0.3).min(12.0));
         centred_in(
             f,
             r.x,
@@ -1093,9 +1127,9 @@ impl TicTacToe {
             &self.status(),
             l.font,
             match self.state {
-                GameState::Won(mark, _) if mark == self.human => COL_GREEN,
-                GameState::Won(_, _) => COL_RED,
-                _ => COL_YELLOW,
+                GameState::Won(mark, _) if mark == self.human => c.chrome.good,
+                GameState::Won(_, _) => c.chrome.bad,
+                _ => c.chrome.even,
             },
             FontWeightHint::Bold,
         );
@@ -1106,27 +1140,27 @@ impl TicTacToe {
             r.y + r.h * 0.74,
             "Enter or N for a new game",
             l.small,
-            COL_SUBTEXT,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
     }
 
-    fn draw_footer(&self, f: &mut Frame, l: &Layout) {
+    fn draw_footer(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let captions = [
             format!("You ({})", self.human.symbol()),
             format!("Computer ({})", self.computer().symbol()),
             "Draws".to_string(),
         ];
-        let colours = [self.human.color(), self.computer().color(), COL_YELLOW];
+        let colours = [self.human.color(c), self.computer().color(c), c.chrome.even];
         for i in 0..3 {
             let r = l.score_panel(i);
             if r.w <= 0.0 || r.h <= 0.0 {
                 continue;
             }
-            fill(f, r, COL_CRUST, (r.h * 0.22).min(7.0));
+            fill(f, r, c.chrome.well, (r.h * 0.22).min(7.0));
             let count = self.scores.get(i).copied().unwrap_or(0);
             let caption = captions.get(i).map_or("", String::as_str);
-            let colour = colours.get(i).copied().unwrap_or(COL_TEXT);
+            let colour = colours.get(i).copied().unwrap_or(c.chrome.text);
             centred_in(
                 f,
                 r.x,
@@ -1134,7 +1168,7 @@ impl TicTacToe {
                 r.y + r.h * 0.32,
                 caption,
                 (l.small - 1.0).max(6.0),
-                COL_SUBTEXT,
+                c.chrome.dim,
                 FontWeightHint::Regular,
             );
             centred_in(
@@ -1151,12 +1185,12 @@ impl TicTacToe {
     }
 }
 
-fn draw_help(f: &mut Frame, l: &Layout) {
+fn draw_help(f: &mut Frame, l: &Layout, c: &Colours) {
     // Dim the whole window first, then the panel on top of it, so the sheet
     // reads as in front of the game rather than part of it.
-    fill(f, l.window, COL_SCRIM, 0.0);
+    fill(f, l.window, c.chrome.scrim, 0.0);
     let p = l.help;
-    fill(f, p, COL_VEIL, 10.0);
+    fill(f, p, c.chrome.veil, 10.0);
 
     let pad = (p.w * 0.06).clamp(6.0, 18.0);
     let inner = (p.w - pad * 2.0).max(0.0);
@@ -1167,7 +1201,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
         p.y + pad,
         HELP_TITLE,
         l.font,
-        COL_YELLOW,
+        c.chrome.even,
         FontWeightHint::Bold,
         Some(inner),
     );
@@ -1189,7 +1223,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
             y,
             k,
             l.small,
-            COL_BLUE,
+            c.chrome.key,
             FontWeightHint::Bold,
             Some(key_span),
         );
@@ -1199,7 +1233,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
             y,
             v,
             l.small,
-            COL_TEXT,
+            c.chrome.text,
             FontWeightHint::Regular,
             Some((inner - key_span).max(0.0)),
         );
@@ -1329,6 +1363,10 @@ pub fn handle_event(app: &mut TicTacToe, event: &Event) -> EventResult {
 }
 
 impl App for TicTacToe {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Tic-tac-toe".to_string()
     }
@@ -1415,6 +1453,72 @@ mod tests {
     use super::*;
     use guitk::event::Modifiers;
     use guitk::probe;
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// every state it shows: playing with the keyboard on a square, won,
+    /// drawn, and with the help sheet up. It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut game = TicTacToe::new();
+            game.theme_changed(&p);
+            game.cells[0] = Some(Mark::X);
+            game.cells[4] = Some(Mark::O);
+            let playing = game.frame(640.0, 520.0);
+            game.cells = [Some(Mark::X); CELLS];
+            game.state = GameState::Won(Mark::X, [0, 1, 2]);
+            let won = game.frame(640.0, 520.0);
+            game.state = GameState::Draw;
+            let drawn = game.frame(640.0, 520.0);
+            game.show_help = true;
+            let help = game.frame(640.0, 520.0);
+            // The header's buttons are the toolkit's blends of the palette.
+            let buttons = gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Plain,
+                Colours::of(&p).chrome.page,
+            );
+            for (what, f) in [
+                ("playing", playing),
+                ("won", won),
+                ("drawn", drawn),
+                ("help", help),
+            ] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &buttons,
+                    &format!("tictactoe, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// X and O are never alike, whatever accent the user picks: X is the
+    /// accent, and O a hue kept apart from it.
+    #[test]
+    fn the_two_marks_are_never_alike() {
+        for &accent in appearance::AccentColor::presets() {
+            for light in [false, true] {
+                let p = Palette::from_settings(&appearance::AppearanceSettings {
+                    accent_color: accent,
+                    theme_mode: if light {
+                        appearance::ThemeMode::Light
+                    } else {
+                        appearance::ThemeMode::Dark
+                    },
+                    ..appearance::AppearanceSettings::default()
+                });
+                let c = Colours::of(&p);
+                assert!(
+                    !guitk::palette::hard_to_tell_apart(Mark::X.color(&c), Mark::O.color(&c)),
+                    "{accent:?}, light: {light}: X and O look alike"
+                );
+            }
+        }
+    }
 
     // ── Helpers ────────────────────────────────────────────────────────────
 

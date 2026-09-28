@@ -466,30 +466,22 @@ MUTATIONS = [
         ["each_length_button_deals_a_word_of_the_length_it_names"],
     ),
     (
-        # The board is a picture, not a control.
         "the tiles of the guess grid are clickable",
-        "                fill(f, r, state.color(), CornerRadii::all(4.0));\n"
-        "                // An answered tile is a block of colour;",
-        "                fill(f, r, state.color(), CornerRadii::all(4.0));\n"
-        "                f.hit(Target::Enter, r);\n"
-        "                // An answered tile is a block of colour;",
+        "                fill(f, r, face, CornerRadii::all(4.0));\n                // An answered tile is a block of colour;",
+        "                fill(f, r, face, CornerRadii::all(4.0));\n                f.hit(Target::Enter, r);\n                // An answered tile is a block of colour;",
         ["the_guess_grid_takes_no_clicks"],
     ),
     # -- What the picture says ------------------------------------------
     (
         "the tiles are all drawn in one colour",
-        "                fill(f, r, state.color(), CornerRadii::all(4.0));\n"
-        "                // An answered tile is a block of colour;",
-        "                fill(f, r, SURFACE0, CornerRadii::all(4.0));\n"
-        "                // An answered tile is a block of colour;",
+        "                fill(f, r, face, CornerRadii::all(4.0));\n                // An answered tile is a block of colour;",
+        "                fill(f, r, c.chrome.raised, CornerRadii::all(4.0));\n                // An answered tile is a block of colour;",
         ["an_answered_guess_stays_on_the_board_in_the_colours_it_was_given"],
     ),
     (
         "the keys are all drawn in one colour",
-        "                fill(f, r, state.color(), CornerRadii::all(4.0));\n"
-        "                let mut buf = [0u8; 4];",
-        "                fill(f, r, SURFACE1, CornerRadii::all(4.0));\n"
-        "                let mut buf = [0u8; 4];",
+        "                fill(f, r, face, CornerRadii::all(4.0));\n                let mut buf = [0u8; 4];",
+        "                fill(f, r, c.chrome.lit, CornerRadii::all(4.0));\n                let mut buf = [0u8; 4];",
         ["the_keyboard_is_drawn_in_what_it_has_learnt"],
     ),
     (
@@ -629,6 +621,30 @@ MUTATIONS = [
         '        "wordle".to_string()\n    }\n\n    fn initial_size',
         '        "sokoban".to_string()\n    }\n\n    fn initial_size',
         ["the_window_names_itself"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "an answered letter is always written in near-black",
+        "        gamechrome::legible_on(ANSWER_INKS, face)",
+        "        ANSWER_INKS.1",
+        ["every_answered_letter_reads_on_its_tile"],
+    ),
+    (
+        "the shortcut card is drawn in the default palette",
+        "            guitk::shortcut::render_card(\n                &mut f,\n                &self.palette,",
+        "            guitk::shortcut::render_card(\n                &mut f,\n                &Palette::for_mode(false),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "an unanswered tile is drawn in the answer's grey",
+        "            Self::Filled => c.chrome.lit,",
+        "            Self::Filled => ABSENT,",
+        ["the_grid_shows_the_row_as_it_is_typed"],
     ),
 ]
 

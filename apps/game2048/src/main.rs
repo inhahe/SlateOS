@@ -71,9 +71,11 @@
 //!    `#![allow(dead_code)]` and nine more crate-wide allows. All ten are
 //!    gone, and with them `spawn_tile_at` and `is_full`, which nothing called.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
@@ -82,24 +84,66 @@ use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha, only the entries this program actually paints with ──
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_MANTLE: Color = Color::from_hex(0x181825);
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_SURFACE2: Color = Color::from_hex(0x585B70);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const COL_TEAL: Color = Color::from_hex(0x94E2D5);
-const COL_MAUVE: Color = Color::from_hex(0xCBA6F7);
+/// The tiles' own colours, by value: a player reads a tile's size by its
+/// colour, so these keep their values in every theme (the operator's answer
+/// to C-Q16, §1422). The empty square and a tile past 8192 are the board's,
+/// and follow the theme.
+const TILES: [(u32, Color); 13] = [
+    (2, Color::from_hex(0xEEE4DA)),
+    (4, Color::from_hex(0xEDE0C8)),
+    (8, Color::from_hex(0xFAB387)),
+    (16, Color::from_hex(0xF59563)),
+    (32, Color::from_hex(0xF38BA8)),
+    (64, Color::from_hex(0xF65E3B)),
+    (128, Color::from_hex(0xF9E2AF)),
+    (256, Color::from_hex(0xEDCC61)),
+    (512, Color::from_hex(0xA6E3A1)),
+    (1024, Color::from_hex(0x94E2D5)),
+    (2048, Color::from_hex(0x89B4FA)),
+    (4096, Color::from_hex(0xCBA6F7)),
+    (8192, Color::from_hex(0xB4BEFE)),
+];
+
+/// The two inks a tile's number may take, `(light, dark)`: whichever reads
+/// on the tile. Every face above is pale, so on those the dark one; the light
+/// ink used to be written on all but the 2 and the 4, which put near-white
+/// numbers on the pale yellow of a 128 and the pale blue of a 2048. Past the
+/// table the face is the board's, and the ink whichever the theme needs.
+const TILE_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x1E1E2E));
+
+/// The colours this window draws in: the chrome from the user's palette, the
+/// tiles by value from [`TILES`]. It drew everything from its own copy of
+/// Catppuccin Mocha, dark on a light desktop.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+        }
+    }
+
+    /// The face of a tile of `value`: its own colour, or the board's for an
+    /// empty square and for anything past the table.
+    fn tile_face(&self, value: u32) -> Color {
+        if value == 0 {
+            return self.chrome.raised;
+        }
+        TILES
+            .iter()
+            .find(|(v, _)| *v == value)
+            .map_or(self.chrome.high, |&(_, face)| face)
+    }
+
+    /// The ink of a tile's number: whichever of [`TILE_INKS`] reads on the
+    /// tile's face -- its own colour, or the board's past the table.
+    fn tile_ink(&self, value: u32) -> Color {
+        gamechrome::legible_on(TILE_INKS, self.tile_face(value))
+    }
+}
 
 /// The side of the board, in cells. 2048 is a 4x4 game; the constant is here
 /// so the arithmetic reads as arithmetic rather than as a sprinkling of 4s.
@@ -802,46 +846,38 @@ fn centred(f: &mut Frame, r: Rect, body: &str, size: f32, color: Color, weight: 
     );
 }
 
-/// A button: a filled box with a hit box on it and a centred label.
-fn button(f: &mut Frame, r: Rect, target: Target, body: &str, size: f32, face: Color, ink: Color) {
+/// A button: the toolkit's push button, in the palette, with its label at
+/// the window's size, and a hit box on it.
+#[allow(clippy::too_many_arguments)]
+fn button(
+    f: &mut Frame,
+    palette: &Palette,
+    r: Rect,
+    target: Target,
+    body: &str,
+    size: f32,
+    live: bool,
+    ground: Color,
+) {
     if r.w <= 0.0 || r.h <= 0.0 {
         return;
     }
-    fill(f, r, face, (r.h * 0.22).min(8.0));
+    gamechrome::button(
+        f,
+        palette,
+        (r.x, r.y, r.w, r.h),
+        body,
+        size,
+        guitk::button::Kind::Plain,
+        guitk::button::State {
+            disabled: !live,
+            ..guitk::button::State::default()
+        },
+        ground,
+    );
     // Recorded by the pass that paints it, so a button that moved took its
     // hit box with it and there is no second copy of the geometry to disagree.
     f.hit(target, r);
-    centred(f, r, body, size, ink, FontWeightHint::Bold);
-}
-
-/// The face a tile of this value is painted with.
-fn tile_face(value: u32) -> Color {
-    match value {
-        0 => COL_SURFACE0,
-        2 => Color::from_hex(0xEEE4DA),
-        4 => Color::from_hex(0xEDE0C8),
-        8 => COL_PEACH,
-        16 => Color::from_hex(0xF59563),
-        32 => COL_RED,
-        64 => Color::from_hex(0xF65E3B),
-        128 => COL_YELLOW,
-        256 => Color::from_hex(0xEDCC61),
-        512 => COL_GREEN,
-        1024 => COL_TEAL,
-        2048 => COL_BLUE,
-        4096 => COL_MAUVE,
-        8192 => COL_LAVENDER,
-        _ => COL_SURFACE2,
-    }
-}
-
-/// The ink a tile's number is written in. The two palest faces need dark ink;
-/// every other face is dark enough to take light ink.
-fn tile_ink(value: u32) -> Color {
-    match value {
-        2 | 4 => COL_CRUST,
-        _ => COL_TEXT,
-    }
 }
 
 // ── The program ────────────────────────────────────────────────────────────
@@ -855,6 +891,10 @@ pub struct Game2048 {
     /// is read against.
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl Game2048 {
@@ -873,6 +913,7 @@ impl Game2048 {
             show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         };
         app.deal();
         app
@@ -1090,33 +1131,34 @@ impl Game2048 {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
+        let c = Colours::of(&self.palette);
+        fill(&mut f, l.window, c.chrome.page, 0.0);
 
         if l.shows(l.header) {
-            self.draw_header(&mut f, &l);
+            self.draw_header(&mut f, &l, &c);
         }
         if l.shows(l.info) {
-            self.draw_info(&mut f, &l);
+            self.draw_info(&mut f, &l, &c);
         }
-        self.draw_board(&mut f, &l);
+        self.draw_board(&mut f, &l, &c);
         match self.board.status {
-            GameStatus::Won => self.draw_banner(&mut f, &l, "You win!", COL_GREEN, true),
-            GameStatus::Lost => self.draw_banner(&mut f, &l, "Game over", COL_RED, false),
+            GameStatus::Won => self.draw_banner(&mut f, &l, &c, "You win!", c.chrome.good, true),
+            GameStatus::Lost => self.draw_banner(&mut f, &l, &c, "Game over", c.chrome.bad, false),
             GameStatus::Playing | GameStatus::WonContinuing => {}
         }
         if l.shows(l.dpad) {
-            self.draw_dpad(&mut f, &l);
+            self.draw_dpad(&mut f, &l, &c);
         }
         if l.shows(l.footer) {
-            self.draw_footer(&mut f, &l);
+            self.draw_footer(&mut f, &l, &c);
         }
         if self.show_help {
-            self.draw_help(&mut f, &l);
+            self.draw_help(&mut f, &l, &c);
         }
         f
     }
 
-    fn draw_header(&self, f: &mut Frame, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let score = l.score_box(0);
         let best = l.score_box(1);
         // The title gets whatever is left to the left of the boxes, and says
@@ -1146,27 +1188,35 @@ impl Game2048 {
             title.y + (title.h - text::line_height(size, FontWeightHint::Bold)).max(0.0) / 2.0,
             "2048",
             size,
-            COL_YELLOW,
+            c.chrome.title,
             FontWeightHint::Bold,
             Some(title.w),
         );
 
-        self.draw_score_box(f, l, best, "BEST", self.board.best_score);
-        self.draw_score_box(f, l, score, "SCORE", self.board.score);
+        self.draw_score_box(f, l, c, best, "BEST", self.board.best_score);
+        self.draw_score_box(f, l, c, score, "SCORE", self.board.score);
     }
 
-    fn draw_score_box(&self, f: &mut Frame, l: &Layout, r: Rect, caption: &str, value: u32) {
+    fn draw_score_box(
+        &self,
+        f: &mut Frame,
+        l: &Layout,
+        c: &Colours,
+        r: Rect,
+        caption: &str,
+        value: u32,
+    ) {
         if r.is_empty() {
             return;
         }
-        fill(f, r, COL_SURFACE0, (r.h * 0.2).min(8.0));
+        fill(f, r, c.chrome.raised, (r.h * 0.2).min(8.0));
         let cap_h = (r.h * 0.4).max(0.0);
         centred(
             f,
             Rect::new(r.x, r.y, r.w, cap_h),
             caption,
             l.small.min(cap_h * 0.8),
-            COL_SUBTEXT0,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
         centred(
@@ -1174,12 +1224,12 @@ impl Game2048 {
             Rect::new(r.x, r.y + cap_h, r.w, r.h - cap_h),
             &value.to_string(),
             (l.font * 1.1).min((r.h - cap_h) * 0.8),
-            COL_TEXT,
+            c.chrome.text,
             FontWeightHint::Bold,
         );
     }
 
-    fn draw_info(&self, f: &mut Frame, l: &Layout) {
+    fn draw_info(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let size = l.small.min(l.info.h * 0.8);
         label(
             f,
@@ -1191,22 +1241,22 @@ impl Game2048 {
                 self.board.highest_tile()
             ),
             size,
-            COL_SUBTEXT0,
+            c.chrome.dim,
             FontWeightHint::Regular,
             Some((l.info.w - l.pad * 2.0).max(0.0)),
         );
     }
 
-    fn draw_board(&self, f: &mut Frame, l: &Layout) {
+    fn draw_board(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         if l.board.is_empty() {
             return;
         }
-        fill(f, l.board, COL_MANTLE, (l.board.w * 0.02).min(10.0));
+        fill(f, l.board, c.chrome.band, (l.board.w * 0.02).min(10.0));
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
                 let r = l.cell(row, col);
                 let val = self.board.at(row, col);
-                fill(f, r, tile_face(val), (r.h * 0.12).min(8.0));
+                fill(f, r, c.tile_face(val), (r.h * 0.12).min(8.0));
                 if val == 0 {
                     continue;
                 }
@@ -1218,28 +1268,29 @@ impl Game2048 {
                 if width > r.w * 0.84 && width > 0.0 {
                     size *= r.w * 0.84 / width;
                 }
-                centred(f, r, &body, size, tile_ink(val), FontWeightHint::Bold);
+                centred(f, r, &body, size, c.tile_ink(val), FontWeightHint::Bold);
             }
         }
     }
 
-    fn draw_dpad(&self, f: &mut Frame, l: &Layout) {
+    fn draw_dpad(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let playable = self.can_play();
         for (i, &dir) in Direction::ALL.iter().enumerate() {
             let r = l.dpad_button(i);
             button(
                 f,
+                &self.palette,
                 r,
                 Target::Move(dir),
                 dir.glyph(),
                 (r.h * 0.55).min(l.font * 1.6),
-                if playable { COL_SURFACE1 } else { COL_SURFACE0 },
-                if playable { COL_TEXT } else { COL_OVERLAY0 },
+                playable,
+                c.chrome.page,
             );
         }
     }
 
-    fn draw_footer(&self, f: &mut Frame, l: &Layout) {
+    fn draw_footer(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let entries = [
             (Target::NewGame, "New game", true),
             (Target::Undo, "Undo", !self.undo_stack.is_empty()),
@@ -1249,22 +1300,31 @@ impl Game2048 {
             let r = l.footer_button(i);
             button(
                 f,
+                &self.palette,
                 r,
                 target,
                 body,
                 (r.h * 0.42).min(l.font),
-                if live { COL_SURFACE1 } else { COL_SURFACE0 },
-                if live { COL_TEXT } else { COL_OVERLAY0 },
+                live,
+                c.chrome.page,
             );
         }
     }
 
-    fn draw_banner(&self, f: &mut Frame, l: &Layout, title: &str, accent: Color, offer: bool) {
+    fn draw_banner(
+        &self,
+        f: &mut Frame,
+        l: &Layout,
+        c: &Colours,
+        title: &str,
+        accent: Color,
+        offer: bool,
+    ) {
         let b = l.banner();
         if b.is_empty() {
             return;
         }
-        fill(f, b, Color::rgba(30, 30, 46, 224), (b.h * 0.08).min(10.0));
+        fill(f, b, c.chrome.veil, (b.h * 0.08).min(10.0));
         let head = Rect::new(b.x, b.y, b.w, b.h * 0.45);
         centred(
             f,
@@ -1280,29 +1340,30 @@ impl Game2048 {
             sub,
             &format!("Score {}", self.board.score),
             (sub.h * 0.72).min(l.font),
-            COL_SUBTEXT0,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
         if offer {
             let btn = l.banner_button();
             button(
                 f,
+                &self.palette,
                 btn,
                 Target::Continue,
                 "Keep going",
                 (btn.h * 0.5).min(l.font),
-                COL_SURFACE1,
-                COL_TEXT,
+                true,
+                c.chrome.well,
             );
         }
     }
 
-    fn draw_help(&self, f: &mut Frame, l: &Layout) {
+    fn draw_help(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let h = l.help;
         if h.is_empty() {
             return;
         }
-        fill(f, h, COL_SURFACE0, (h.h * 0.04).min(10.0));
+        fill(f, h, c.chrome.raised, (h.h * 0.04).min(10.0));
         // The hit box is the whole *window*, not the sheet's own rectangle,
         // and the sheet's last line is the reason: it says "Click anywhere to
         // close", and anywhere means anywhere. Claiming only its own rectangle
@@ -1321,7 +1382,7 @@ impl Game2048 {
             Rect::new(h.x, h.y, h.w, head_h),
             HELP_TITLE,
             (head_h * 0.6).min(l.font * 1.2),
-            COL_LAVENDER,
+            c.chrome.title,
             FontWeightHint::Bold,
         );
 
@@ -1345,7 +1406,7 @@ impl Game2048 {
                 y,
                 key,
                 size,
-                COL_TEXT,
+                c.chrome.text,
                 FontWeightHint::Bold,
                 Some(key_w),
             );
@@ -1355,7 +1416,7 @@ impl Game2048 {
                 y,
                 meaning,
                 size,
-                COL_SUBTEXT0,
+                c.chrome.dim,
                 FontWeightHint::Regular,
                 Some((h.w - key_w - l.pad * 2.0).max(0.0)),
             );
@@ -1366,7 +1427,7 @@ impl Game2048 {
             Rect::new(h.x, h.y + head_h + l.pad + rows * step, h.w, step),
             "Click anywhere to close",
             size * 0.9,
-            COL_OVERLAY0,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
     }
@@ -1430,6 +1491,10 @@ pub fn handle_event(app: &mut Game2048, event: &Event) -> EventResult {
 }
 
 impl App for Game2048 {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "2048".to_string()
     }
@@ -1510,6 +1575,105 @@ mod tests {
 
     use super::*;
     use guitk::probe;
+
+    /// **The window is drawn in the user's colours**, light or dark -- a
+    /// board in play, a win, a loss and the help sheet -- with only the
+    /// tiles' own colours and their inks not the palette's. It drew in its
+    /// own copy of Catppuccin Mocha, dark on a light desktop (the operator's
+    /// C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.theme_changed(&p);
+            app.board = bare([
+                [2, 4, 8, 16],
+                [32, 64, 128, 256],
+                [512, 1024, 2048, 4096],
+                [8192, 16384, 0, 0],
+            ]);
+            let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.board.status = GameStatus::Won;
+            let won = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.board.status = GameStatus::Lost;
+            let lost = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.board.status = GameStatus::Playing;
+            app.show_help = true;
+            let help = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let c = Colours::of(&p);
+            let mut derived: Vec<Color> = TILES.iter().map(|&(_, face)| face).collect();
+            derived.extend([TILE_INKS.0, TILE_INKS.1]);
+            for ground in [c.chrome.page, c.chrome.well] {
+                derived.extend(gamechrome::button_colours(
+                    &p,
+                    guitk::button::Kind::Plain,
+                    ground,
+                ));
+            }
+            for (what, f) in [
+                ("playing", playing),
+                ("won", won),
+                ("lost", lost),
+                ("help", help),
+            ] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("2048, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// A tile past the table's last value is still drawn as a tile, and not
+    /// as an empty square, in either theme.
+    #[test]
+    fn a_tile_past_the_table_is_not_drawn_as_an_empty_square() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            assert_ne!(c.tile_face(16384), c.tile_face(0), "light: {light}");
+        }
+    }
+
+    /// **Every tile's number is drawn in an ink that reads on its tile**, in
+    /// either theme, past the table too.
+    ///
+    /// Found by where it is drawn, not by what it says: the title says "2048"
+    /// as well, and is drawn first. The test this replaces looked its inks up
+    /// by text, so it compared the 2 tile's ink with the *title's* -- and
+    /// passed while the 2048 tile's number was pale grey on pale blue, 1.4:1,
+    /// and the 128's near-white on pale yellow.
+    #[test]
+    fn every_tiles_number_is_drawn_in_an_ink_that_reads_on_it() {
+        let cell = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT).cell(0, 0);
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            for value in TILES.iter().map(|&(v, _)| v).chain([16384]) {
+                let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+                app.theme_changed(&p);
+                app.board = bare([[value, 0, 0, 0], [0; 4], [0; 4], [0; 4]]);
+                let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+                let ink = f
+                    .commands()
+                    .iter()
+                    .find_map(|cmd| match cmd {
+                        RenderCommand::Text { x, y, color, .. } if cell.contains(*x, *y) => {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("{value}'s number is not drawn on its tile"));
+                let ratio = guitk::theme::contrast_ratio(ink, c.tile_face(value));
+                assert!(
+                    ratio >= 4.5,
+                    "{value}'s number is {ratio:.2}:1 on its tile (light: {light})"
+                );
+            }
+        }
+    }
 
     /// Windows to check the layout against, from a desktop down to something
     /// no sane person would resize to.
@@ -2963,8 +3127,9 @@ mod tests {
             filled, empty,
             "a tile and a hole were painted the same colour"
         );
-        assert_eq!(filled, tile_face(2));
-        assert_eq!(empty, tile_face(0));
+        let c = Colours::of(&Palette::for_mode(false));
+        assert_eq!(filled, c.tile_face(2));
+        assert_eq!(empty, c.tile_face(0));
     }
 
     #[test]
@@ -3770,7 +3935,14 @@ mod tests {
             "the fixture box is tall enough for the line, so it tests nothing"
         );
         let mut f = Frame::new(400.0, 200.0);
-        centred(&mut f, short, "Keep going", size, COL_TEXT, weight);
+        centred(
+            &mut f,
+            short,
+            "Keep going",
+            size,
+            Color::from_hex(0xCDD6F4),
+            weight,
+        );
         let (_, drawn, _) = text_boxes(&f)
             .into_iter()
             .next()
@@ -3788,7 +3960,14 @@ mod tests {
             "the fixture box is wide enough for the line, so it tests nothing"
         );
         let mut f = Frame::new(400.0, 200.0);
-        centred(&mut f, narrow, body, size, COL_TEXT, weight);
+        centred(
+            &mut f,
+            narrow,
+            body,
+            size,
+            Color::from_hex(0xCDD6F4),
+            weight,
+        );
         let (_, drawn, _) = text_boxes(&f)
             .into_iter()
             .next()
@@ -3903,35 +4082,6 @@ mod tests {
             "the 8 was written at y={}, not in row 0 of a board at {:?}",
             eight.1.y,
             l.board
-        );
-    }
-
-    #[test]
-    fn a_pale_tile_takes_dark_ink_and_a_dark_tile_light_ink() {
-        // The low tiles are painted on cream and the high ones on colour, so
-        // one ink cannot serve both: black on the 2048 or white on the 2 is a
-        // number that is there and cannot be read. The two are compared to
-        // each other rather than to a literal, so this says the inks differ
-        // *and* which way round they go.
-        let mut app = playing([[2, 0, 0, 0], [0, 0, 0, 0], [0; 4], [0; 4]]);
-        app.board.grid[3][3] = 2048;
-        app.resize(WINDOW_WIDTH, WINDOW_HEIGHT);
-        let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-        let ink = |want: &str| {
-            f.commands()
-                .iter()
-                .find_map(|c| match c {
-                    RenderCommand::Text { text, color, .. } if text == want => Some(*color),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("{want:?} is not on the board"))
-        };
-        let pale = ink("2");
-        let dark = ink("2048");
-        let brightness = |c: Color| u32::from(c.r) + u32::from(c.g) + u32::from(c.b);
-        assert!(
-            brightness(pale) < brightness(dark),
-            "the ink on the pale tile ({pale:?}) is no darker than on the dark one ({dark:?})"
         );
     }
 

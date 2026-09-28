@@ -48,7 +48,7 @@ impl JsonValue {
                 clippy::float_cmp,
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
-                reason = "whether the value is exactly whole is the question asked;                           the cast is of a whole number in 0..=2^53, which a u64 holds"
+                reason = "whether the value is exactly whole is the question asked; the cast is of a whole number in 0..=2^53, which a u64 holds"
             )]
             JsonValue::Number(n)
                 if n.is_finite() && *n >= 0.0 && n.trunc() == *n && *n <= EXACT =>

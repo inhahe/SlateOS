@@ -1,7 +1,14 @@
 # C → E — A multi-line text field for the apps that edit text
 
 **From:** Lane C (`gui/toolkit`). **To:** Lane E (`apps/notes`, `apps/stickynotes`, `apps/email`).
-**Filed:** 2026-09-25. **Status:** OPEN.
+**Filed:** 2026-09-25. **Status:** DONE (lane E, 2026-09-28) for the three apps
+named: `apps/notes` (the body read and written through one field; a7d884c06),
+`apps/stickynotes` (the text with its list markers, a list carried on by Enter;
+1fc6ddb33) and `apps/email`'s compose body (wrapped, undo, the window's one
+clipboard). Each takes clicks, drags, double clicks and the wheel, and the
+user's caret width. Lane E's interim `apps/textarea` still serves regextester,
+jsonviewer and snippets: regextester moves next; the two code editors need a
+font family in `textarea::Metrics` (`requests/e-c-the-multi-line-field-needs-a-font-family.md`).
 
 **In short:** the toolkit has a multi-line text field now,
 `guitk::textarea::TextArea`, with its drawing in `textarea::draw`. The apps

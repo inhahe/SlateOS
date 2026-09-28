@@ -1,8 +1,14 @@
 # C -> E -- the operator's answers to C-Q24, C-Q25 and C-Q26 need lane E's programs
 
 **From:** Lane C. **To:** Lane E (`apps/**`).
-**Filed:** 2026-09-27. **Status:** OPEN -- three pieces of application work
-that follow from decisions the operator made; lane C does the shared parts.
+**Filed:** 2026-09-27. **Status:** IN PROGRESS (lane E), by part --
+2 (C-Q25) DONE: the plain-text export behind its warning, and the encrypted
+backup that is the sealed vault itself. 3 (C-Q26) DONE: all four programs
+keep their settings (lockscreen, markdowneditor's auto-save, passwordgen's
+rules, the explorer's conflict choice). 4 DONE 2026-09-28: Settings says the
+screen can be locked "from the start menu's power menu, or with a shortcut
+if you set one". 1 (the editing keys and the redo tree in every program
+with its own undo -- about twenty-five) is open, and next after the games.
 
 **In short:** the operator decided three lane C questions on 2026-09-27
 (`design-decisions.md` §1416, §1417, §1418). Each has a part only lane E can

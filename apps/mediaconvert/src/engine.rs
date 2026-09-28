@@ -360,6 +360,44 @@ pub fn encode_bmp(width: u32, height: u32, pixels: &[u32]) -> Result<Vec<u8>, St
     Ok(out)
 }
 
+/// A gate a test holds a job's thread at, before the job reads anything.
+///
+/// So that what a test does to a *running* job -- cancels it -- is done while
+/// the job is certainly still running. Unheld, the job races the test: a
+/// short file can be converted and written before the test's next line runs,
+/// and on a machine busy with a boot test that is what happened -- the cancel
+/// arrived after the job had completed, and the test failed.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct Gate(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+#[cfg(test)]
+impl Gate {
+    /// Let the job through.
+    pub fn open(&self) {
+        let (lock, ready) = &*self.0;
+        // A poisoned lock is a test that has already panicked; the flag it
+        // guards is a plain bool, still good to set.
+        *lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        ready.notify_all();
+    }
+
+    /// Wait until the test opens the gate.
+    fn wait(&self) {
+        let (lock, ready) = &*self.0;
+        let mut open = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !*open {
+            open = ready
+                .wait(open)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
 /// A job running on a thread of its own.
 pub struct Worker {
     /// The queue's id for the job.
@@ -373,12 +411,38 @@ impl Worker {
     /// Start `recipe` from `input` into `output`.
     #[must_use]
     pub fn start(job_id: u64, recipe: Recipe, input: PathBuf, output: PathBuf) -> Self {
+        Self::spawn(job_id, move |p, c| run(&recipe, &input, &output, p, c))
+    }
+
+    /// Start `recipe` as [`start`](Self::start) does, held at `gate` -- before
+    /// it reads anything -- until the test opens it.
+    #[cfg(test)]
+    #[must_use]
+    pub fn start_held(
+        job_id: u64,
+        recipe: Recipe,
+        input: PathBuf,
+        output: PathBuf,
+        gate: Gate,
+    ) -> Self {
+        Self::spawn(job_id, move |p, c| {
+            gate.wait();
+            run(&recipe, &input, &output, p, c)
+        })
+    }
+
+    /// Run `body` on a thread of its own, with the job's progress and cancel
+    /// flag.
+    fn spawn(
+        job_id: u64,
+        body: impl FnOnce(&AtomicU32, &AtomicBool) -> Result<u64, String> + Send + 'static,
+    ) -> Self {
         let progress = Arc::new(AtomicU32::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let (p, c) = (Arc::clone(&progress), Arc::clone(&cancel));
         let handle = std::thread::Builder::new()
             .name(format!("convert-{job_id}"))
-            .spawn(move || run(&recipe, &input, &output, &p, &c));
+            .spawn(move || body(&p, &c));
         match handle {
             Ok(handle) => Self {
                 job_id,

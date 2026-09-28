@@ -25,38 +25,43 @@
 
 use std::process::ExitCode;
 
+use gamechrome::{Chrome, cards};
 use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
+// ── Colours ─────────────────────────────────────────────────────────
 //
-// The nine the drawing actually uses. The file carried sixteen, and the seven
-// that nothing referred to were kept alive only by a crate-wide
-// `#![allow(dead_code)]` at the top -- the same allowance that let a `main`
-// which drew nothing pass a build.
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// The cards are white with red and black suits in every theme -- that is what
+// a card is (`gamechrome::cards`) -- and the table, the backs, the rings and
+// the text round them follow the user's palette (the operator's answer to
+// C-Q16, §1422, and lane C's call for the card games). It was all a copy of
+// Catppuccin Mocha: dark on a light desktop, with the red suits a pale pink on
+// a lavender face, 1.6:1.
 
-// ── Card colors ─────────────────────────────────────────────────────
-const CARD_BG: Color = Color::from_hex(0xCDD6F4);
-const CARD_BACK_BG: Color = Color::from_hex(0x45475A);
-const CARD_BACK_PATTERN: Color = Color::from_hex(0x585B70);
-const CARD_RED: Color = Color::from_hex(0xF38BA8);
-const CARD_BLACK: Color = Color::from_hex(0x1E1E2E);
-const SELECTED_HIGHLIGHT: Color = Color::from_hex(0x89B4FA);
-const CURSOR_HIGHLIGHT: Color = Color::from_hex(0xF9E2AF);
-const EMPTY_PILE: Color = Color::from_hex(0x313244);
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    table: cards::Table,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            table: cards::Table::of(p),
+        }
+    }
+}
 
 // ── The size the window opens at ────────────────────────────────────
 //
@@ -353,9 +358,9 @@ impl Suit {
         matches!(self, Self::Hearts | Self::Diamonds)
     }
 
-    /// Display color for this suit.
+    /// Display color for this suit: a card's red or black.
     fn color(self) -> Color {
-        if self.is_red() { CARD_RED } else { CARD_BLACK }
+        cards::suit_ink(self.is_red())
     }
 
     /// Index 0..3 for foundation ordering.
@@ -601,6 +606,10 @@ struct GameState {
     won: bool,
     /// RNG for new games.
     rng: SeededRng,
+    /// The user's colours, which the game is drawn in: replaced whenever the
+    /// theme changes. A new game deals into this same state, so they carry
+    /// over.
+    palette: Palette,
 }
 
 impl GameState {
@@ -625,6 +634,7 @@ impl GameState {
             move_count: 0,
             won: false,
             rng: SeededRng::new(seed),
+            palette: Palette::for_mode(false),
         };
         state.deal();
         state
@@ -1323,24 +1333,26 @@ impl GameState {
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
         let t = Table::fit(&l);
+        let c = Colours::of(&self.palette);
         let mut f = Frame::new(w, h);
 
-        // The background is the window, not a remembered size.
+        // The background is the window, not a remembered size -- and the
+        // table the cards are laid on.
         f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: w,
             height: h,
-            color: BASE,
+            color: c.table.felt,
             corner_radii: CornerRadii::ZERO,
         });
         f.clip(l.window);
 
-        self.draw_header(&mut f, &l);
-        self.draw_top_row(&mut f, &l, t);
-        self.draw_tableau(&mut f, &l, t);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_top_row(&mut f, &l, t, &c);
+        self.draw_tableau(&mut f, &l, t, &c);
         if self.won {
-            self.draw_win_banner(&mut f, &l);
+            self.draw_win_banner(&mut f, &l, &c);
         }
 
         f.unclip();
@@ -1348,7 +1360,7 @@ impl GameState {
     }
 
     /// The title, the move count and the key help, laid left to right.
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let band = inset(l.header, l.pad);
         if band.is_empty() {
             return;
@@ -1358,7 +1370,7 @@ impl GameState {
             f,
             band,
             "Solitaire",
-            Ink::new(l.title, FontWeightHint::Bold, LAVENDER),
+            Ink::new(l.title, FontWeightHint::Bold, c.chrome.title),
         );
         f.hit(Target::Title, title);
 
@@ -1367,7 +1379,7 @@ impl GameState {
         // at x = 500, which put them on top of the title in any window narrow
         // enough and adrift in any window wide enough.
         let gap = l.pad * 1.5;
-        let ink = Ink::new(l.small, FontWeightHint::Regular, SUBTEXT0);
+        let ink = Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim);
         let moves = format!("Moves: {}", self.move_count);
         let x = title.right() + gap;
         if x < band.right() {
@@ -1382,7 +1394,7 @@ impl GameState {
                     f,
                     help,
                     "N:New  Z:Undo  A:Auto",
-                    Ink::new(l.small, FontWeightHint::Regular, OVERLAY0),
+                    Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim),
                 );
                 f.hit(Target::Help, drawn);
             }
@@ -1390,13 +1402,13 @@ impl GameState {
     }
 
     /// The stock, the waste, and the four foundations.
-    fn draw_top_row(&self, f: &mut Frame<Target>, l: &Layout, t: Table) {
+    fn draw_top_row(&self, f: &mut Frame<Target>, l: &Layout, t: Table, c: &Colours) {
         // Stock in slot 0, waste in slot 1, slot 2 left blank so the
         // foundations sit under the right-hand columns.
         let stock = t.slot(0);
         let focused = self.focus == FocusArea::Stock;
         if self.stock.is_empty() {
-            self.draw_empty_pile(f, stock, t, focused);
+            self.draw_empty_pile(f, stock, t, focused, c);
             if !self.waste.is_empty() {
                 // The recycle arrow: the stock is empty but the waste can be
                 // turned back over.
@@ -1404,12 +1416,12 @@ impl GameState {
                     f,
                     stock,
                     "\u{21BB}",
-                    Ink::new(t.card_w * 0.3, FontWeightHint::Bold, OVERLAY0),
+                    Ink::new(t.card_w * 0.3, FontWeightHint::Bold, c.chrome.dim),
                 );
             }
         } else {
-            self.draw_card_back(f, stock, t, focused);
-            self.draw_pile_count(f, l, stock, &format!("{}", self.stock.len()));
+            self.draw_card_back(f, stock, t, focused, c);
+            self.draw_pile_count(f, l, stock, &format!("{}", self.stock.len()), c);
         }
         f.hit(Target::Stock, stock);
 
@@ -1422,8 +1434,9 @@ impl GameState {
                 card,
                 self.focus == FocusArea::Waste,
                 self.selection == Some(Selection::Waste),
+                c,
             ),
-            None => self.draw_empty_pile(f, waste, t, self.focus == FocusArea::Waste),
+            None => self.draw_empty_pile(f, waste, t, self.focus == FocusArea::Waste, c),
         }
         f.hit(Target::Waste, waste);
 
@@ -1442,16 +1455,17 @@ impl GameState {
                         card,
                         focused,
                         self.selection == Some(Selection::Foundation(i)),
+                        c,
                     );
-                    self.draw_pile_count(f, l, slot, &format!("{}/13", self.found(i).len()));
+                    self.draw_pile_count(f, l, slot, &format!("{}/13", self.found(i).len()), c);
                 }
                 None => {
-                    self.draw_empty_pile(f, slot, t, focused);
+                    self.draw_empty_pile(f, slot, t, focused, c);
                     centre_glyph(
                         f,
                         slot,
                         suit.symbol(),
-                        Ink::new(t.card_w * 0.3, FontWeightHint::Regular, OVERLAY0),
+                        Ink::new(t.card_w * 0.3, FontWeightHint::Regular, c.chrome.dim),
                     );
                 }
             }
@@ -1460,7 +1474,7 @@ impl GameState {
     }
 
     /// The seven columns.
-    fn draw_tableau(&self, f: &mut Frame<Target>, l: &Layout, t: Table) {
+    fn draw_tableau(&self, f: &mut Frame<Target>, l: &Layout, t: Table, c: &Colours) {
         for (col, pile) in self.tableau.iter().enumerate() {
             // The column's whole strip goes down first, because a hit test
             // reads the boxes in reverse paint order: everything recorded
@@ -1472,7 +1486,7 @@ impl GameState {
             if pile.is_empty() {
                 let slot = t.back_rect(col, 0);
                 let focused = matches!(self.focus, FocusArea::Tableau(c, _) if c == col);
-                self.draw_empty_pile(f, slot, t, focused);
+                self.draw_empty_pile(f, slot, t, focused, c);
                 f.hit(Target::TableauEmpty(col), slot);
                 continue;
             }
@@ -1495,12 +1509,13 @@ impl GameState {
                         pc.card,
                         self.focus == FocusArea::Tableau(col, nth),
                         selected,
+                        c,
                     );
                     f.hit(Target::TableauCard(col, nth), rect);
                     nth = nth.saturating_add(1);
                 } else {
                     let rect = t.back_rect(col, i);
-                    self.draw_card_back(f, rect, t, false);
+                    self.draw_card_back(f, rect, t, false, c);
                     f.hit(Target::TableauBack(col, i), rect);
                 }
             }
@@ -1518,8 +1533,8 @@ impl GameState {
     }
 
     /// The little count under a pile.
-    fn draw_pile_count(&self, f: &mut Frame<Target>, l: &Layout, slot: Rect, s: &str) {
-        let ink = Ink::new(l.small * 0.9, FontWeightHint::Regular, SUBTEXT0);
+    fn draw_pile_count(&self, f: &mut Frame<Target>, l: &Layout, slot: Rect, s: &str, c: &Colours) {
+        let ink = Ink::new(l.small * 0.9, FontWeightHint::Regular, c.chrome.dim);
         let y = slot.bottom() + 2.0;
         if y + ink.height() <= l.window.bottom() {
             let _ = label(f, slot.x + 2.0, y, s, ink);
@@ -1527,7 +1542,14 @@ impl GameState {
     }
 
     /// An empty pile: an outline with a darker inside.
-    fn draw_empty_pile(&self, f: &mut Frame<Target>, r: Rect, t: Table, focused: bool) {
+    fn draw_empty_pile(
+        &self,
+        f: &mut Frame<Target>,
+        r: Rect,
+        t: Table,
+        focused: bool,
+        c: &Colours,
+    ) {
         // Filled first, then outlined. The other order -- which is what this
         // replaced -- painted the fill over the inner half of the border, so a
         // two-pixel focus ring showed up one pixel wide.
@@ -1536,7 +1558,7 @@ impl GameState {
             y: r.y + 1.0,
             width: (r.w - 2.0).max(0.0),
             height: (r.h - 2.0).max(0.0),
-            color: EMPTY_PILE,
+            color: c.table.empty,
             corner_radii: CornerRadii::all(t.corner),
         });
         f.push(RenderCommand::StrokeRect {
@@ -1544,21 +1566,25 @@ impl GameState {
             y: r.y,
             width: r.w,
             height: r.h,
-            color: if focused { CURSOR_HIGHLIGHT } else { OVERLAY0 },
+            color: if focused {
+                c.table.focus
+            } else {
+                c.table.empty_edge
+            },
             line_width: if focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(t.corner),
         });
     }
 
     /// A face-down card.
-    fn draw_card_back(&self, f: &mut Frame<Target>, r: Rect, t: Table, focused: bool) {
+    fn draw_card_back(&self, f: &mut Frame<Target>, r: Rect, t: Table, focused: bool, c: &Colours) {
         if focused {
             f.push(RenderCommand::StrokeRect {
                 x: r.x - 1.0,
                 y: r.y - 1.0,
                 width: r.w + 2.0,
                 height: r.h + 2.0,
-                color: CURSOR_HIGHLIGHT,
+                color: c.table.focus,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(t.corner + 1.0),
             });
@@ -1568,7 +1594,18 @@ impl GameState {
             y: r.y,
             width: r.w,
             height: r.h,
-            color: CARD_BACK_BG,
+            color: c.table.back,
+            corner_radii: CornerRadii::all(t.corner),
+        });
+        // Its edge: the back's own colour where it stands off the table, a
+        // rim where the accent is close to the table's shade.
+        f.push(RenderCommand::StrokeRect {
+            x: r.x,
+            y: r.y,
+            width: r.w,
+            height: r.h,
+            color: c.table.back_edge(),
+            line_width: 1.0,
             corner_radii: CornerRadii::all(t.corner),
         });
 
@@ -1587,7 +1624,7 @@ impl GameState {
                 y1: inner.y,
                 x2: inner.x + (inner.right() - x).min(inner.h),
                 y2: inner.y + (inner.right() - x).min(inner.h),
-                color: CARD_BACK_PATTERN,
+                color: c.table.pattern,
                 width: 1.0,
             });
             x += spacing;
@@ -1604,6 +1641,7 @@ impl GameState {
         card: Card,
         focused: bool,
         selected: bool,
+        c: &Colours,
     ) {
         if focused || selected {
             f.push(RenderCommand::StrokeRect {
@@ -1612,9 +1650,9 @@ impl GameState {
                 width: r.w + 4.0,
                 height: r.h + 4.0,
                 color: if focused {
-                    CURSOR_HIGHLIGHT
+                    c.table.focus
                 } else {
-                    SELECTED_HIGHLIGHT
+                    c.table.picked
                 },
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(t.corner + 2.0),
@@ -1625,7 +1663,18 @@ impl GameState {
             y: r.y,
             width: r.w,
             height: r.h,
-            color: CARD_BG,
+            color: cards::FACE,
+            corner_radii: CornerRadii::all(t.corner),
+        });
+        // Its edge: white on a light theme's table is a card seen by nothing
+        // but its shadow, so there it is ringed.
+        f.push(RenderCommand::StrokeRect {
+            x: r.x,
+            y: r.y,
+            width: r.w,
+            height: r.h,
+            color: c.table.face_edge(),
+            line_width: 1.0,
             corner_radii: CornerRadii::all(t.corner),
         });
 
@@ -1663,22 +1712,22 @@ impl GameState {
     }
 
     /// The banner shown when all four foundations are full.
-    fn draw_win_banner(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_win_banner(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: l.window.w,
             height: l.window.h,
-            color: Color::rgba(17, 17, 27, 180),
+            color: c.chrome.scrim,
             corner_radii: CornerRadii::ZERO,
         });
 
         let ink = Ink::new(
             (l.title * 1.6).min(l.window.w * 0.12),
             FontWeightHint::Bold,
-            GREEN,
+            c.chrome.good,
         );
-        let sub = Ink::new(l.small, FontWeightHint::Regular, OVERLAY0);
+        let sub = Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim);
         let msg = "You Win!";
         let note = "Press N for a new game";
         let moves = format!("Moves: {}", self.move_count);
@@ -1911,6 +1960,10 @@ fn handle_event(app: &mut SolitaireApp, event: &Event) -> EventResult {
 }
 
 impl App for SolitaireApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.state.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Solitaire".to_string()
     }
@@ -1998,6 +2051,84 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- a
+    /// deal with a card picked up and the keyboard on a back, and a won game
+    /// -- with only the cards' own white, red and black, and the rim a card
+    /// is ringed in, not the palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        let derived = [
+            cards::FACE,
+            cards::RED,
+            cards::BLACK,
+            gamechrome::RIMS.0,
+            gamechrome::RIMS.1,
+        ];
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut app = SolitaireApp::new();
+            app.theme_changed(&p);
+            app.state.focus = FocusArea::Stock;
+            let dealt = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.state.won = true;
+            let won = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            for (what, f) in [("dealt", dealt), ("won", won)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("solitaire, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **The cards are white with red and black suits in either theme**, and
+    /// a light theme's table rings them: a card face is drawn in the card's
+    /// white and outlined in a colour that stands off the table.
+    #[test]
+    fn the_cards_are_white_and_seen_on_either_themes_table() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let t = cards::Table::of(&p);
+            let mut app = SolitaireApp::new();
+            app.theme_changed(&p);
+            let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let faces = f
+                .commands()
+                .iter()
+                .filter(|cmd| matches!(cmd, RenderCommand::FillRect { color, .. } if *color == cards::FACE))
+                .count();
+            assert_eq!(
+                faces, 7,
+                "a deal shows seven cards face up (light: {light})"
+            );
+            let edge = t.face_edge();
+            assert!(
+                f.commands().iter().any(
+                    |cmd| matches!(cmd, RenderCommand::StrokeRect { color, .. } if *color == edge)
+                ),
+                "no card is outlined (light: {light})"
+            );
+            let seen = guitk::theme::contrast_ratio(cards::FACE, t.felt)
+                .max(guitk::theme::contrast_ratio(edge, t.felt));
+            assert!(
+                seen >= 3.0,
+                "a card is seen at {seen:.2}:1 (light: {light})"
+            );
+        }
+    }
+
+    /// **A new game keeps the user's colours.**
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut app = SolitaireApp::new();
+        app.theme_changed(&light);
+        app.state.new_game();
+        assert_eq!(app.state.palette, light);
+    }
     use guitk::probe;
 
     // ── The window ──────────────────────────────────────────────────

@@ -26,7 +26,7 @@
 //! and `unused_imports` among them, which is what let a program whose `main`
 //! discarded its own app compile without a word of complaint.
 
-use appearance::AppearanceSettings;
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -41,21 +41,45 @@ use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ──
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── The game's language ──
+//
+// Green, yellow and grey are how the game answers a guess, and a player reads
+// them before the letters: they keep their values in every theme (the
+// operator's answer to C-Q16, §1422). Everything else -- the page, the empty
+// and typed tiles, the keys not yet answered, the header and the panels --
+// follows the user's palette. It all used to be a copy of Catppuccin Mocha,
+// dark on a light desktop.
+
+/// Right letter, right place.
+const CORRECT: Color = Color::from_hex(0xA6E3A1);
+/// Right letter, wrong place.
+const PRESENT: Color = Color::from_hex(0xF9E2AF);
+/// Not in the word. One grey for the tile and the key: they were two.
+const ABSENT: Color = Color::from_hex(0x6C7086);
+/// The two inks a letter on an answered tile may take, `(light, dark)`:
+/// whichever reads on the tile. Dark on green and yellow; light on grey,
+/// where the dark ink every answered tile was given could barely be seen.
+const ANSWER_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x11111B));
+
+/// The colours this window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// A header button that is on (a length, hard mode): the accent.
+    lit: Color,
+    /// A letter on a lit button.
+    on_lit: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            lit: p.accent,
+            on_lit: p.on_accent(),
+        }
+    }
+}
 
 // ── Tile states ──
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -68,13 +92,13 @@ enum TileState {
 }
 
 impl TileState {
-    fn color(self) -> Color {
+    fn color(self, c: &Colours) -> Color {
         match self {
-            Self::Empty => SURFACE0,
-            Self::Filled => SURFACE1,
-            Self::Correct => GREEN,
-            Self::Present => YELLOW,
-            Self::Absent => SURFACE2,
+            Self::Empty => c.chrome.raised,
+            Self::Filled => c.chrome.lit,
+            Self::Correct => CORRECT,
+            Self::Present => PRESENT,
+            Self::Absent => ABSENT,
         }
     }
 }
@@ -89,13 +113,23 @@ enum LetterState {
 }
 
 impl LetterState {
-    fn color(self) -> Color {
+    fn color(self, c: &Colours) -> Color {
         match self {
-            Self::Unknown => SURFACE1,
-            Self::Correct => GREEN,
-            Self::Present => YELLOW,
-            Self::Absent => OVERLAY0,
+            Self::Unknown => c.chrome.lit,
+            Self::Correct => CORRECT,
+            Self::Present => PRESENT,
+            Self::Absent => ABSENT,
         }
+    }
+}
+
+/// A letter's ink on `face`: an answer colour's legible ink, and the text
+/// colour on a tile or key the theme paints.
+fn letter_ink(face: Color, c: &Colours) -> Color {
+    if [CORRECT, PRESENT, ABSENT].contains(&face) {
+        gamechrome::legible_on(ANSWER_INKS, face)
+    } else {
+        c.chrome.text
     }
 }
 
@@ -725,6 +759,10 @@ pub struct Wordle {
     size_drawn: (f32, f32),
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl Wordle {
@@ -749,6 +787,7 @@ impl Wordle {
             hard_mode: false,
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
             show_help: false,
+            palette: Palette::for_mode(false),
         }
     }
 
@@ -1224,21 +1263,23 @@ impl Wordle {
     pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let l = Layout::new(width, height, self.target_len);
         let mut f = Frame::new(width, height);
+        let c = Colours::of(&self.palette);
 
-        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
-        self.draw_header(&mut f, &l);
-        self.draw_board(&mut f, &l);
-        self.draw_message(&mut f, &l);
-        self.draw_keyboard(&mut f, &l);
-        self.draw_footer(&mut f, &l);
-        self.draw_over(&mut f, &l);
+        fill(&mut f, l.window, c.chrome.page, CornerRadii::ZERO);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_board(&mut f, &l, &c);
+        self.draw_message(&mut f, &l, &c);
+        self.draw_keyboard(&mut f, &l, &c);
+        self.draw_footer(&mut f, &l, &c);
+        self.draw_over(&mut f, &l, &c);
 
         // Over the end-of-game panel as well as the board: the list is the one
-        // thing on screen a reader asked for explicitly.
+        // thing on screen a reader asked for explicitly. In the user's
+        // palette -- it was drawn in the default one whatever the theme.
         if self.show_help {
             guitk::shortcut::render_card(
                 &mut f,
-                &Palette::from_settings(&AppearanceSettings::default()),
+                &self.palette,
                 (width, height),
                 0.0,
                 SHORTCUTS,
@@ -1248,15 +1289,15 @@ impl Wordle {
         f
     }
 
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, CornerRadii::ZERO);
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.header, c.chrome.band, CornerRadii::ZERO);
         label_centred(
             f,
             &Label {
                 text: "WORDLE",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: TEXT,
+                color: c.chrome.text,
             },
             l.title_rect(),
         );
@@ -1282,13 +1323,13 @@ impl Wordle {
             // cannot be turned on halfway through. Saying so in the drawing is
             // the only warning a player gets before clicking it.
             let live = *target != Target::HardMode || self.guesses.is_empty();
-            let bg = if lit { BLUE } else { SURFACE0 };
+            let bg = if lit { c.lit } else { c.chrome.raised };
             let fg = if !live {
-                OVERLAY0
+                c.chrome.off
             } else if lit {
-                CRUST
+                c.on_lit
             } else {
-                TEXT
+                c.chrome.text
             };
             fill(f, r, bg, CornerRadii::all(4.0));
             label_centred(
@@ -1321,28 +1362,26 @@ impl Wordle {
         (' ', TileState::Empty)
     }
 
-    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         for row in 0..MAX_GUESSES {
             for col in 0..l.cols {
                 let r = l.tile_rect(row, col);
                 let (ch, state) = self.tile_at(row, col);
-                fill(f, r, state.color(), CornerRadii::all(4.0));
+                let face = state.color(c);
+                fill(f, r, face, CornerRadii::all(4.0));
                 // An answered tile is a block of colour; an unanswered one is
                 // an outline, so an empty board reads as six empty rows rather
                 // than as thirty grey squares.
                 if matches!(state, TileState::Empty | TileState::Filled) {
                     let edge = if state == TileState::Filled {
-                        SURFACE2
+                        c.chrome.high
                     } else {
-                        SURFACE1
+                        c.chrome.lit
                     };
                     stroke(f, r, edge, 2.0, CornerRadii::all(4.0));
                 }
                 if ch != ' ' {
-                    let fg = match state {
-                        TileState::Correct | TileState::Present | TileState::Absent => CRUST,
-                        TileState::Empty | TileState::Filled => TEXT,
-                    };
+                    let fg = letter_ink(face, c);
                     let mut buf = [0u8; 4];
                     label_centred(
                         f,
@@ -1359,7 +1398,7 @@ impl Wordle {
         }
     }
 
-    fn draw_message(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_message(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let Some(msg) = self.message else {
             return;
         };
@@ -1369,22 +1408,19 @@ impl Wordle {
                 text: msg,
                 size: l.font,
                 weight: FontWeightHint::Bold,
-                color: PEACH,
+                color: c.chrome.even,
             },
             l.message,
         );
     }
 
-    fn draw_keyboard(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_keyboard(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         for (row, letters) in KEY_ROWS.iter().enumerate() {
             for (col, ch) in letters.chars().enumerate() {
                 let r = l.key_rect(row, col);
-                let state = self.letter_state(ch);
-                let fg = match state {
-                    LetterState::Correct | LetterState::Present => CRUST,
-                    LetterState::Unknown | LetterState::Absent => TEXT,
-                };
-                fill(f, r, state.color(), CornerRadii::all(4.0));
+                let face = self.letter_state(ch).color(c);
+                let fg = letter_ink(face, c);
+                fill(f, r, face, CornerRadii::all(4.0));
                 let mut buf = [0u8; 4];
                 label_centred(
                     f,
@@ -1409,14 +1445,14 @@ impl Wordle {
             } else {
                 "DEL"
             };
-            fill(f, r, SURFACE1, CornerRadii::all(4.0));
+            fill(f, r, c.chrome.lit, CornerRadii::all(4.0));
             label_centred(
                 f,
                 &Label {
                     text: name,
                     size: l.key_h * 0.28,
                     weight: FontWeightHint::Bold,
-                    color: TEXT,
+                    color: c.chrome.text,
                 },
                 r,
             );
@@ -1433,11 +1469,11 @@ impl Wordle {
             .unwrap_or(LetterState::Unknown)
     }
 
-    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.footer.is_empty() {
             return;
         }
-        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        fill(f, l.footer, c.chrome.band, CornerRadii::ZERO);
         let weight = FontWeightHint::Regular;
         let y = l.footer.y + (l.footer.h - text::line_height(l.small, weight)) / 2.0;
         let left = l.footer.x + l.pad;
@@ -1467,7 +1503,7 @@ impl Wordle {
                 text: hint,
                 size: l.small,
                 weight,
-                color: OVERLAY0,
+                color: c.chrome.dim,
             },
             left,
             y,
@@ -1479,7 +1515,7 @@ impl Wordle {
                 text: &stats,
                 size: l.small,
                 weight,
-                color: SUBTEXT0,
+                color: c.chrome.dim,
             },
             stats_x,
             y,
@@ -1493,10 +1529,10 @@ impl Wordle {
     /// `if` that says the same thing: the rule that this is only drawn when the
     /// game is over is one rule, and it is written once, here, where the phase
     /// is already being read to decide what the panel says.
-    fn draw_over(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_over(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let (head, head_color) = match self.phase {
-            GamePhase::Won => ("You won!", GREEN),
-            GamePhase::Lost => ("Out of guesses", RED),
+            GamePhase::Won => ("You won!", c.chrome.good),
+            GamePhase::Lost => ("Out of guesses", c.chrome.bad),
             GamePhase::Playing => return,
         };
         let w = l.window.w * 0.7;
@@ -1507,8 +1543,8 @@ impl Wordle {
             w,
             h,
         );
-        fill(f, panel, MANTLE, CornerRadii::all(12.0));
-        stroke(f, panel, SURFACE2, 2.0, CornerRadii::all(12.0));
+        fill(f, panel, c.chrome.band, CornerRadii::all(12.0));
+        stroke(f, panel, c.chrome.high, 2.0, CornerRadii::all(12.0));
 
         let line = panel.h / 3.0;
         let row = |i: usize| Rect::new(panel.x, panel.y + i as f32 * line, panel.w, line);
@@ -1540,9 +1576,9 @@ impl Wordle {
                 size: l.font,
                 weight: FontWeightHint::Regular,
                 color: if self.phase == GamePhase::Won {
-                    TEXT
+                    c.chrome.text
                 } else {
-                    YELLOW
+                    c.chrome.even
                 },
             },
             row(1),
@@ -1553,7 +1589,7 @@ impl Wordle {
                 text: "Press N or Esc for a new word",
                 size: l.small,
                 weight: FontWeightHint::Regular,
-                color: SUBTEXT0,
+                color: c.chrome.dim,
             },
             row(2),
         );
@@ -1671,6 +1707,10 @@ pub fn handle_event(game: &mut Wordle, event: &Event) -> EventResult {
 }
 
 impl App for Wordle {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Wordle".to_string()
     }
@@ -1749,6 +1789,60 @@ mod tests {
 
     use super::*;
     use guitk::probe;
+
+    /// **The window is drawn in the user's colours**, light or dark -- a game
+    /// with every kind of tile and key on it and a message up, a win, a loss
+    /// and the shortcut card -- with only the game's three answer colours and
+    /// their inks not the palette's. It drew in its own copy of Catppuccin
+    /// Mocha, dark on a light desktop (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let derived = [CORRECT, PRESENT, ABSENT, ANSWER_INKS.0, ANSWER_INKS.1];
+            let mut playing = game();
+            playing.theme_changed(&p);
+            guess(&mut playing, "stone");
+            guess(&mut playing, "trace");
+            // Not a word: refused, so the message line is up and the five
+            // letters stay in the row, typed but unanswered.
+            guess(&mut playing, "zzzzz");
+            let mut help = game();
+            help.theme_changed(&p);
+            help.show_help = true;
+            let mut over = [won(), lost()];
+            for g in &mut over {
+                g.theme_changed(&p);
+            }
+            for (what, g) in [
+                ("playing", &playing),
+                ("help", &help),
+                ("won", &over[0]),
+                ("lost", &over[1]),
+            ] {
+                let f = g.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("wordle, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **Every answered letter reads on its tile** -- a grey tile's letter
+    /// was written in the same near-black as a green one's, 3.9:1 at best.
+    #[test]
+    fn every_answered_letter_reads_on_its_tile() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for face in [CORRECT, PRESENT, ABSENT] {
+                let ratio = guitk::theme::contrast_ratio(letter_ink(face, &c), face);
+                assert!(ratio >= 4.5, "{face:?}: {ratio:.2}:1");
+            }
+        }
+    }
 
     // ── Randomness, as the game uses it ──
     //
@@ -3648,10 +3742,17 @@ mod tests {
                 Some(ch.to_ascii_uppercase().to_string().as_str()),
                 "the letter typed into slot {i} is not drawn there"
             );
+            let typed = fill_of(&g, r);
             assert_eq!(
-                fill_of(&g, r),
-                Some(TileState::Filled.color()),
-                "a typed but unanswered slot is drawn as an answered one"
+                typed,
+                Some(TileState::Filled.color(&Colours::of(&g.palette))),
+                "a typed slot is not drawn as one"
+            );
+            // Said without `color`, which the line above takes on trust: an
+            // answer's colour on a letter not yet answered is a false answer.
+            assert!(
+                typed.is_some_and(|face| ![CORRECT, PRESENT, ABSENT].contains(&face)),
+                "a typed but unanswered slot is drawn as an answered one: {typed:?}"
             );
         }
         // The slots past what has been typed stay empty, and the row after this
@@ -3675,7 +3776,7 @@ mod tests {
             );
             assert_eq!(
                 fill_of(&g, r),
-                Some(eval[col].color()),
+                Some(eval[col].color(&Colours::of(&g.palette))),
                 "slot {col} is not drawn in the colour it was answered"
             );
         }
@@ -3696,7 +3797,7 @@ mod tests {
                 seen[state as usize] = true;
                 assert_eq!(
                     fill_of(&g, l.key_rect(row, col)),
-                    Some(state.color()),
+                    Some(state.color(&Colours::of(&g.palette))),
                     "{ch} is not drawn in the state the keyboard holds for it"
                 );
             }
@@ -3925,7 +4026,12 @@ mod tests {
             let l = g.layout();
             for (target, r) in HEADER_BUTTONS.iter().zip(l.button_rects()) {
                 if let Target::Level(d) = target {
-                    let want = if *d == difficulty { BLUE } else { SURFACE0 };
+                    let c = Colours::of(&g.palette);
+                    let want = if *d == difficulty {
+                        c.lit
+                    } else {
+                        c.chrome.raised
+                    };
                     assert_eq!(
                         fill_of(&g, r),
                         Some(want),
@@ -3942,11 +4048,16 @@ mod tests {
     fn the_hard_mode_switch_is_greyed_once_it_can_no_longer_turn() {
         let mut g = game();
         let r = probe::rect_of(&g, Target::HardMode).unwrap();
-        assert_eq!(text_colour(&g, r), Some(TEXT), "a live switch is greyed");
+        let c = Colours::of(&g.palette);
+        assert_eq!(
+            text_colour(&g, r),
+            Some(c.chrome.text),
+            "a live switch is greyed"
+        );
         guess(&mut g, "stone");
         assert_eq!(
             text_colour(&g, r),
-            Some(OVERLAY0),
+            Some(c.chrome.off),
             "the switch still looks live after it has stopped turning"
         );
     }

@@ -34,9 +34,11 @@
 
 use std::process::ExitCode;
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
@@ -44,32 +46,58 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── The tiles ───────────────────────────────────────────────────────
+//
+// A mahjong tile is ivory, and its suit is told by its ink: the tiles keep
+// those in every theme (the operator's answer to C-Q16, §1422, and lane C's
+// call for this game), and the table, the header, the legend and the help
+// strip follow the user's palette. The tiles were the dark theme's own greys
+// with its pastels on them -- no convention, and dark on a light desktop.
 
-// ── Tile colors (one per suit category) ─────────────────────────────
-const BAMBOO_COLOR: Color = Color::from_hex(0xA6E3A1);
-const CIRCLE_COLOR: Color = Color::from_hex(0x89B4FA);
-const CHARACTER_COLOR: Color = Color::from_hex(0xF38BA8);
-const WIND_COLOR: Color = Color::from_hex(0xF9E2AF);
-const DRAGON_COLOR: Color = Color::from_hex(0xCBA6F7);
-const SEASON_COLOR: Color = Color::from_hex(0xFAB387);
-const FLOWER_COLOR: Color = Color::from_hex(0x94E2D5);
-const TILE_BG: Color = Color::from_hex(0x45475A);
-const TILE_BG_FREE: Color = Color::from_hex(0x585B70);
-const TILE_SELECTED: Color = Color::from_hex(0x89B4FA);
-const TILE_HINT: Color = Color::from_hex(0xA6E3A1);
-const TILE_SHADOW: Color = Color::from_hex(0x11111B);
+/// A tile that can be taken: ivory.
+const TILE_BG_FREE: Color = Color::from_hex(0xFBF6E9);
+/// A tile that cannot be taken yet: the same ivory, a shade deeper.
+const TILE_BG: Color = Color::from_hex(0xDDD5C1);
+/// A tile the hint points at: the ivory tinted green.
+const TILE_HINT: Color = Color::from_hex(0xD8EFCB);
+/// The shadow a raised tile casts.
+const TILE_SHADOW: Color = Color::rgba(0, 0, 0, 90);
+
+// The suits' inks, one per group, deep enough to read at 4.5:1 or better on
+// every face above.
+const BAMBOO_COLOR: Color = Color::from_hex(0x166534);
+const CIRCLE_COLOR: Color = Color::from_hex(0x1F5AA6);
+const CHARACTER_COLOR: Color = Color::from_hex(0xA30D25);
+const WIND_COLOR: Color = Color::from_hex(0x1E1E2E);
+const DRAGON_COLOR: Color = Color::from_hex(0x7B2FBE);
+const SEASON_COLOR: Color = Color::from_hex(0x9A3412);
+const FLOWER_COLOR: Color = Color::from_hex(0x0B5E57);
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The tile picked up: the accent, its label in the accent's own ink.
+    selected: Color,
+    on_selected: Color,
+    /// The keyboard's outline round a tile: the accent, in the shade that
+    /// reads on the ivory.
+    cursor: Color,
+    /// The header's word when a click was refused.
+    message: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            selected: p.accent,
+            on_selected: p.on_accent(),
+            cursor: p.ink_on(p.accent, TILE_BG_FREE),
+            message: p.ink(p.peach),
+        }
+    }
+}
 
 /// The legend's rows: the codes that appear on the tiles, and one tile of that
 /// group to ask for the rest.
@@ -952,6 +980,10 @@ struct Mahjong {
     width: f32,
     /// The height the window last reported.
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame. A new game deals into this same state, so they carry over.
+    palette: Palette,
 }
 
 impl Mahjong {
@@ -988,6 +1020,7 @@ impl Mahjong {
             message: None,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         };
         app.update_status();
         app
@@ -1331,6 +1364,7 @@ impl Mahjong {
     /// so the hit test cannot disagree with the picture.
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
+        let c = Colours::of(&self.palette);
         let mut f = Frame::new(w, h);
 
         // The background is the window, not a remembered size.
@@ -1339,15 +1373,15 @@ impl Mahjong {
             y: 0.0,
             width: w,
             height: h,
-            color: BASE,
+            color: c.chrome.page,
             corner_radii: CornerRadii::ZERO,
         });
         f.clip(l.window);
 
-        self.draw_header(&mut f, &l);
-        self.draw_board(&mut f, &l);
-        self.draw_legend(&mut f, &l);
-        self.draw_help(&mut f, &l);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_board(&mut f, &l, &c);
+        self.draw_legend(&mut f, &l, &c);
+        self.draw_help(&mut f, &l, &c);
 
         f.unclip();
         f
@@ -1359,7 +1393,7 @@ impl Mahjong {
     /// `BOARD_OFFSET_X + 400.0`, so in any window narrower than about 640 the
     /// message ran off the right edge and the player never learned why their
     /// click did nothing.
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let inner = inset(l.header, l.pad);
         if inner.w <= 0.0 || inner.h <= 0.0 {
             return;
@@ -1369,7 +1403,7 @@ impl Mahjong {
             x: title_box.x,
             y: title_box.y,
             text: "Mahjong Solitaire".into(),
-            color: LAVENDER,
+            color: c.chrome.title,
             font_size: l.title,
             font_weight: FontWeightHint::Bold,
             max_width: Some(title_box.w),
@@ -1397,9 +1431,9 @@ impl Mahjong {
             GameStatus::Lost => "No valid moves remain!".into(),
         };
         let status_color = match self.status {
-            GameStatus::Playing => SUBTEXT0,
-            GameStatus::Won => GREEN,
-            GameStatus::Lost => RED,
+            GameStatus::Playing => c.chrome.dim,
+            GameStatus::Won => c.chrome.good,
+            GameStatus::Lost => c.chrome.bad,
         };
         f.push(RenderCommand::Text {
             x: status_box.x,
@@ -1418,7 +1452,7 @@ impl Mahjong {
                 x: message_box.x,
                 y: message_box.y,
                 text: msg.into(),
-                color: PEACH,
+                color: c.message,
                 font_size: l.status,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(message_box.w),
@@ -1429,7 +1463,7 @@ impl Mahjong {
     }
 
     /// The turtle: every live tile, bottom layer first.
-    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         // A box behind the tiles, so a click in the board's margin is answered
         // as "the board" and not as whichever tile happens to be nearest.
         f.hit(Target::Board, l.board);
@@ -1465,7 +1499,7 @@ impl Mahjong {
 
             // Tile background
             let bg_color = if is_selected {
-                TILE_SELECTED
+                c.selected
             } else if is_hint {
                 TILE_HINT
             } else if is_free {
@@ -1494,7 +1528,7 @@ impl Mahjong {
                     y1: r.y,
                     x2: r.right(),
                     y2: r.y,
-                    color: YELLOW,
+                    color: c.cursor,
                     width: bw,
                 });
                 // Bottom edge
@@ -1503,7 +1537,7 @@ impl Mahjong {
                     y1: r.bottom(),
                     x2: r.right(),
                     y2: r.bottom(),
-                    color: YELLOW,
+                    color: c.cursor,
                     width: bw,
                 });
                 // Left edge
@@ -1512,7 +1546,7 @@ impl Mahjong {
                     y1: r.y,
                     x2: r.x,
                     y2: r.bottom(),
-                    color: YELLOW,
+                    color: c.cursor,
                     width: bw,
                 });
                 // Right edge
@@ -1521,7 +1555,7 @@ impl Mahjong {
                     y1: r.y,
                     x2: r.right(),
                     y2: r.bottom(),
-                    color: YELLOW,
+                    color: c.cursor,
                     width: bw,
                 });
             }
@@ -1529,7 +1563,7 @@ impl Mahjong {
             // Tile label text
             let label = tile.kind.label();
             let text_color = if is_selected {
-                CRUST
+                c.on_selected
             } else {
                 tile.kind.text_color()
             };
@@ -1556,7 +1590,7 @@ impl Mahjong {
     ///
     /// The strip used to be `height - 24.0` tall by a constant 30, which in a
     /// window shorter than 54 pixels was drawn above its own top edge.
-    fn draw_help(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_help(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.help.h <= 0.0 {
             return;
         }
@@ -1565,7 +1599,7 @@ impl Mahjong {
             y: l.help.y,
             width: l.help.w,
             height: l.help.h,
-            color: MANTLE,
+            color: c.chrome.band,
             corner_radii: CornerRadii::ZERO,
         });
         let inner = inset(l.help, l.pad);
@@ -1573,7 +1607,7 @@ impl Mahjong {
             x: inner.x,
             y: inner.y,
             text: HELP_TEXT.into(),
-            color: OVERLAY0,
+            color: c.chrome.dim,
             font_size: l.small,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner.w),
@@ -1588,7 +1622,7 @@ impl Mahjong {
     /// window is too narrow to carry it, which is the case the old fixed
     /// `legend_x = 730` could not express: it drew the legend off the edge and
     /// left no sign that anything was missing.
-    fn draw_legend(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_legend(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.legend.w <= 0.0 {
             return;
         }
@@ -1606,7 +1640,7 @@ impl Mahjong {
             x: head.x,
             y: head.y,
             text: "Legend".into(),
-            color: TEXT_COLOR,
+            color: c.chrome.text,
             font_size: l.small,
             font_weight: FontWeightHint::Bold,
             max_width: Some(head.w),
@@ -1616,20 +1650,32 @@ impl Mahjong {
         for (i, &(codes, kind)) in LEGEND_ITEMS.iter().enumerate() {
             let r = row(i.saturating_add(1));
             let swatch = l.small * 0.7;
+            // A little tile: the ivory, with the group's ink inside it. A bare
+            // square of the ink vanished on a dark page for the winds, whose
+            // ink is near-black.
             f.push(RenderCommand::FillRect {
                 x: r.x,
                 y: r.y + (l.small - swatch) / 2.0,
                 width: swatch,
                 height: swatch,
-                color: kind.text_color(),
+                color: TILE_BG_FREE,
                 corner_radii: CornerRadii::all(swatch / 4.0),
+            });
+            let pip = swatch * 0.5;
+            f.push(RenderCommand::FillRect {
+                x: r.x + (swatch - pip) / 2.0,
+                y: r.y + (l.small - pip) / 2.0,
+                width: pip,
+                height: pip,
+                color: kind.text_color(),
+                corner_radii: CornerRadii::all(pip / 4.0),
             });
             let text_x = r.x + swatch + l.pad / 2.0;
             f.push(RenderCommand::Text {
                 x: text_x,
                 y: r.y,
                 text: legend_label(codes, kind),
-                color: SUBTEXT0,
+                color: c.chrome.dim,
                 font_size: l.small,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((r.right() - text_x).max(0.0)),
@@ -1644,7 +1690,7 @@ impl Mahjong {
             x: note.x,
             y: note.y,
             text: LEGEND_NOTE.into(),
-            color: OVERLAY0,
+            color: c.chrome.dim,
             font_size: l.small,
             font_weight: FontWeightHint::Regular,
             max_width: Some(note.w),
@@ -1697,6 +1743,10 @@ fn f32_from_u32(v: u32) -> f32 {
 }
 
 impl App for Mahjong {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Mahjong Solitaire".to_string()
     }
@@ -1785,6 +1835,84 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- a deal
+    /// with a tile picked up, the hint on show and the keyboard on a tile --
+    /// with only the tiles' own ivory and inks, and the shadow they cast, not
+    /// the palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        let mut derived = vec![TILE_BG_FREE, TILE_BG, TILE_HINT, TILE_SHADOW];
+        derived.extend(LEGEND_ITEMS.iter().map(|&(_, k)| k.text_color()));
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut g = Mahjong::with_seed(7);
+            g.theme_changed(&p);
+            let free = g.board.free_tiles();
+            assert!(g.try_select(free[0]), "a free tile could not be picked up");
+            g.hint = Some((free[1], free[2]));
+            g.show_hint = true;
+            g.cursor.tile_idx = free.get(3).copied();
+            let f = g.draw(Mahjong::SIZE);
+            appearance::palette_check::assert_drawn_from(
+                &p,
+                f.commands(),
+                &[derived.as_slice(), &[c.cursor, c.on_selected]].concat(),
+                &format!("mahjong, light: {light}"),
+            );
+        }
+    }
+
+    /// **The keyboard's outline reads on a tile** in either theme: the accent
+    /// in the shade that stands off the ivory -- a dark theme's pale accent
+    /// is under 2:1 on it.
+    #[test]
+    fn the_keyboard_outline_reads_on_a_tile() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            let ratio = guitk::theme::contrast_ratio(c.cursor, TILE_BG_FREE);
+            assert!(
+                ratio >= 3.0,
+                "the outline is {ratio:.2}:1 on a tile (light: {light})"
+            );
+        }
+    }
+
+    /// **The legend's swatches are little tiles**: the ivory, with the group's
+    /// ink inside it. A bare square of the ink vanished on a dark page for the
+    /// winds, whose ink is near-black.
+    #[test]
+    fn the_legend_swatches_are_little_tiles() {
+        let g = Mahjong::with_seed(7);
+        let f = g.draw(Mahjong::SIZE);
+        let all = fills(&f);
+        for (i, &(_, kind)) in LEGEND_ITEMS.iter().enumerate() {
+            let row = probe::rect_of_sized(&g, Target::Legend(i), Mahjong::SIZE)
+                .expect("the legend row is drawn");
+            let inside = |want: Color| {
+                all.iter()
+                    .any(|&(r, c)| c == want && row.contains(r.x + r.w / 2.0, r.y + r.h / 2.0))
+            };
+            assert!(
+                inside(TILE_BG_FREE),
+                "{kind:?}'s swatch has no tile under it"
+            );
+            assert!(inside(kind.text_color()), "{kind:?}'s swatch has no ink");
+        }
+    }
+
+    /// **Every tile's label reads on its face** -- ivory, a blocked tile's
+    /// deeper ivory, a hinted tile's green tint -- at 4.5:1 or better.
+    #[test]
+    fn every_tiles_label_reads_on_its_face() {
+        for (_, kind) in LEGEND_ITEMS {
+            for face in [TILE_BG_FREE, TILE_BG, TILE_HINT] {
+                let ratio = guitk::theme::contrast_ratio(kind.text_color(), face);
+                assert!(ratio >= 4.5, "{kind:?} is {ratio:.2}:1 on {face:?}");
+            }
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
     use std::collections::{HashMap, HashSet};
@@ -3752,7 +3880,7 @@ mod tests {
             let f = g.draw((w, h));
             let strip = fills(&f)
                 .into_iter()
-                .find(|&(r, c)| c == MANTLE && r.w == w)
+                .find(|&(r, c)| c == Colours::of(&g.palette).chrome.band && r.w == w)
                 .unwrap_or_else(|| panic!("at {w}x{h} the help bar has no background"));
             assert!(
                 strip.0.y >= l.header.bottom() - 0.01,
@@ -3807,7 +3935,7 @@ mod tests {
         assert!(
             !fills(&f).iter().any(|&(_, c)| c == TILE_BG
                 || c == TILE_BG_FREE
-                || c == TILE_SELECTED
+                || c == Colours::of(&Palette::for_mode(false)).selected
                 || c == TILE_HINT
                 || c == TILE_SHADOW),
             "a window with no room for a tile still painted tiles"

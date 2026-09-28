@@ -55,6 +55,146 @@ MUTATIONS = [
         "        if false {",
         [FAILS],
     ),
+    # A note's text is written in the toolkit's multi-line field
+    # (requests/c-e-a-multi-line-text-field-for-the-apps-that-edit-text.md).
+    (
+        "what is written reaches the note only at the end",
+        "            KeyEdit::Changed => {\n                self.write_back(id);",
+        "            KeyEdit::Changed => {\n                let _ = id;",
+        ["typing_into_a_body_line_marks_the_store_dirty", "a_multibyte_note_survives_editing"],
+    ),
+    (
+        "a key the field passes is swallowed",
+        "            KeyEdit::Unhandled => None,",
+        "            KeyEdit::Unhandled => Some(Action::None),",
+        ["ctrl_z_and_ctrl_y_walk_the_undo_stack"],
+    ),
+    (
+        "Enter does not carry a list on",
+        '                    self.body.insert_str(&format!("\\n{}", marker_text(&next)));',
+        '                    self.body.insert_str(&format!("\\n{}", marker_text(&LineKind::Plain)));',
+        ["enter_carries_a_list_on_and_ends_it_on_an_empty_item"],
+    ),
+    (
+        "an empty item does not end the list",
+        "                if text.get(words..end).is_some_and(|w| w.trim().is_empty()) {",
+        "                if false {",
+        ["enter_carries_a_list_on_and_ends_it_on_an_empty_item"],
+    ),
+    (
+        "a ticked box carries on ticked",
+        "                        LineKind::Checkbox { .. } => LineKind::Checkbox { checked: false },",
+        "                        LineKind::Checkbox { checked } => LineKind::Checkbox { checked },",
+        ["enter_carries_a_list_on_and_ends_it_on_an_empty_item"],
+    ),
+    (
+        "a line grows past the cap",
+        "            .all(|line| line.len() <= MAX_LINE_LEN)",
+        "            .all(|line| line.len() <= usize::MAX)",
+        ["a_line_stops_at_the_cap"],
+    ),
+    (
+        "a paste is not capped",
+        "            return (event.key == Key::V).then(|| self.body.clipboard().to_owned());",
+        "            return None;",
+        ["a_line_stops_at_the_cap"],
+    ),
+    (
+        "Up from the first line stays in the text",
+        "            Key::Up if bare && self.body.caret_position(&m).0 == 0 => {",
+        "            Key::Up if false => {",
+        ["up_from_the_first_line_goes_to_the_title_and_tab_leaves"],
+    ),
+    (
+        "Up from any line goes to the title",
+        "            Key::Up if bare && self.body.caret_position(&m).0 == 0 => {",
+        "            Key::Up if bare => {",
+        ["up_from_the_first_line_goes_to_the_title_and_tab_leaves"],
+    ),
+    (
+        "Tab stays in the note",
+        "            Key::Tab if bare => {\n                self.commit_focus();\n                self.focus = None;",
+        "            Key::Tab if false => {\n                self.commit_focus();\n                self.focus = None;",
+        ["up_from_the_first_line_goes_to_the_title_and_tab_leaves"],
+    ),
+    (
+        "the writing is not one undo step",
+        "                note.commit_body(before);",
+        "                drop(before);",
+        ["ctrl_z_and_ctrl_y_walk_the_undo_stack"],
+    ),
+    (
+        "an untouched note gains an undo step",
+        "        if old == self.body {\n            return;\n        }\n        let new = self.body.clone();",
+        "        let new = self.body.clone();",
+        ["opening_a_note_and_leaving_it_changes_nothing"],
+    ),
+    (
+        "the field is filled again at every key",
+        "            .is_some_and(|held| held.id == note.id && held.source == note.body_text())",
+        "            .is_some_and(|held| held.id == note.id && held.source == note.body_text() && false)",
+        ["ctrl_z_and_ctrl_y_walk_the_undo_stack"],
+    ),
+    (
+        "a click on a line puts the caret at the start",
+        "            TextPlace::Line(line, col) => offset_of_line(self.body.text(), line, col),",
+        "            TextPlace::Line(..) => 0,",
+        ["clicking_a_body_line_puts_the_caret_where_the_click_landed"],
+    ),
+    (
+        "a drag does not select",
+        "        self.body.drag_to(cx - r.x, cy - r.y, &m);",
+        "        let _ = (r, m, cx, cy);",
+        ["a_drag_across_the_text_selects_it"],
+    ),
+    (
+        "a release goes on dragging",
+        "        self.body_drag = false;\n        if matches!(self.store.drag_state(), DragState::None) {",
+        "        if matches!(self.store.drag_state(), DragState::None) {",
+        ["a_drag_across_the_text_selects_it"],
+    ),
+    (
+        "a double click is one click",
+        "                            self.press_text(id, mouse.x - canvas.x, mouse.y - canvas.y, 2);",
+        "                            self.press_text(id, mouse.x - canvas.x, mouse.y - canvas.y, 1);",
+        ["a_double_click_selects_a_word"],
+    ),
+    (
+        "the wheel does not scroll the text",
+        "            self.body.scroll_by(wheel::pixels(dy, m.line_height()), &m);",
+        "            let _ = (dy, &m);",
+        ["the_wheel_scrolls_the_text_being_written"],
+    ),
+    (
+        "the text is not a target",
+        "        frame.hit(Target::NoteText(note.id), r);",
+        "        let _ = r;",
+        ["a_drag_across_the_text_selects_it", "a_double_click_selects_a_word"],
+    ),
+    (
+        "Ctrl+L while writing changes a line the caret is not on",
+        "            return self.cycle_line_kind_in_text(id);",
+        "            let _ = id;",
+        ["the_line_kind_key_cycles_the_line_being_written"],
+    ),
+    (
+        "Ctrl+L moves the caret off its letter",
+        "            caret.saturating_sub(len).saturating_add(new.len())",
+        "            caret",
+        ["the_line_kind_key_cycles_the_line_being_written"],
+    ),
+    (
+        "an undo leaves the writing's start where it was",
+        "        if undone {\n            self.refill_body();",
+        "        if undone {",
+        ["the_toolbar_undo_while_writing_takes_the_writing_back"],
+    ),
+    (
+        "the caret's width setting is ignored",
+        "        self.caret_width = settings.caret_width();",
+        "        let _ = settings;",
+        ["the_caret_is_as_wide_as_the_setting_says"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -443,6 +443,8 @@ dependencies = [
 name = "checkers"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -451,6 +453,8 @@ dependencies = [
 name = "chess"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -548,6 +552,8 @@ dependencies = [
 name = "connect4"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1003,7 +1009,6 @@ dependencies = [
  "pathtext",
  "safeio",
  "settingsfile",
- "textarea",
  "textline",
 ]
 
@@ -1211,6 +1216,8 @@ dependencies = [
 name = "freecell"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -1269,8 +1276,18 @@ dependencies = [
 name = "game2048"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
+]
+
+[[package]]
+name = "gamechrome"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "guitk",
 ]
 
 [[package]]
@@ -1309,6 +1326,8 @@ version = "0.1.0"
 name = "gomoku"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1378,6 +1397,8 @@ version = "0.1.0"
 name = "hearts"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -2025,6 +2046,8 @@ dependencies = [
 name = "mahjong"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2117,6 +2140,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "memory"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2155,6 +2180,8 @@ dependencies = [
 name = "minesweeper"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -2972,6 +2999,8 @@ dependencies = [
 name = "reversi"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3159,6 +3188,7 @@ dependencies = [
  "appearance",
  "associations",
  "compositor",
+ "datetimesettings",
  "guitk",
  "inputsettings",
  "loginusers",
@@ -3215,6 +3245,8 @@ dependencies = [
 name = "simon"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3300,6 +3332,8 @@ dependencies = [
 name = "solitaire"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -3322,6 +3356,8 @@ dependencies = [
 name = "spades"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3688,6 +3724,8 @@ dependencies = [
 name = "tetris"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3735,6 +3773,8 @@ dependencies = [
 name = "tictactoe"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -4095,6 +4135,7 @@ name = "wordle"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]

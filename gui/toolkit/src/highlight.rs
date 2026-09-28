@@ -285,6 +285,17 @@ pub trait Highlighter: fmt::Debug {
     /// `budget`, and answer whether work remains.
     fn work(&mut self, text: &TextBuffer, budget: Duration) -> bool;
 
+    /// Whether [`work`](Self::work) has something to do that it has not
+    /// said -- work that drawing found. A highlighter whose
+    /// [`highlights`](Self::highlights) starts parses it cannot finish at
+    /// once (a language inside another, a code fence in its language) says
+    /// so here, and the view keeps calling [`work`](Self::work), and drawing
+    /// again, until it says no. The default: drawing leaves nothing for
+    /// later.
+    fn has_work(&self) -> bool {
+        false
+    }
+
     /// The highlights over `range` of `text`: sorted, none overlapping
     /// another, each within `range`. As the last finished work left them --
     /// text changed since may be uncoloured or coloured as it was before, but

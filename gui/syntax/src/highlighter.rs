@@ -31,9 +31,13 @@
 //! names, a Rust macro's body in Rust. Those stretches are parsed with that
 //! language's grammar (only them: the parser is given their ranges) and
 //! coloured by its query, over the enclosing language's colours, to three
-//! levels deep. The parses are kept until the text changes, so drawing the
-//! same screen again costs nothing; one that does not finish in its budget
-//! ([`INJECTION_BUDGET`]) is left uncoloured rather than stalling a frame.
+//! levels deep. Drawing starts each stretch it finds, all of them within
+//! [`DRAW_BUDGET`] together; one that does not finish in it is carried on
+//! by [`work`](Highlighter::work) a slice at a time -- the view keeps asking
+//! while [`has_work`](Highlighter::has_work) says so -- and is coloured when
+//! it is done. The parses are kept until the text changes, so drawing the
+//! same screen again costs nothing; a stretch past its work limit
+//! ([`parse_limit`]) stays in its host's colours.
 //!
 //! # From captures to colours
 //!
@@ -69,8 +73,9 @@ use crate::{Compiled, Error, Injections, Language, Paint, ffi};
 /// is two, a macro's body in that fence's Rust three.
 const MAX_INJECTION_DEPTH: usize = 3;
 
-/// How long an injected stretch may take to parse while a screen is drawn.
-pub const INJECTION_BUDGET: Duration = Duration::from_millis(20);
+/// How long drawing may spend parsing the injected stretches it finds, all
+/// of them together; what does not fit is carried on by `work`.
+pub const DRAW_BUDGET: Duration = Duration::from_millis(4);
 
 /// The most injected text parsed at once: past this a stretch is left in
 /// its host's colours, whatever the budget would allow.
@@ -80,15 +85,104 @@ const MAX_INJECTED_BYTES: usize = 1 << 20;
 /// bytes.
 type StretchKey = (usize, Vec<(usize, usize)>);
 
+/// An injected stretch's parse, for one revision of the text.
+enum Stretch {
+    /// Parsed.
+    Done(Tree),
+    /// Being parsed a slice at a time by `work`: the parser, holding the
+    /// parse where it stopped, the work done so far and the most allowed.
+    Pending {
+        parser: Parser,
+        used: u64,
+        limit: u64,
+    },
+    /// Too big, past its work limit, or refused: in its host's colours until
+    /// the text changes.
+    Failed,
+}
+
 /// Parses of injected stretches for one revision of the text.
 #[derive(Default)]
 struct InjectionCache {
     revision: u64,
-    /// A parser for each language injected so far, by language index.
-    parsers: HashMap<usize, Parser>,
-    /// Each stretch's tree, by language and ranges; `None` for one that did
-    /// not parse in its budget.
-    trees: HashMap<StretchKey, Option<Tree>>,
+    /// Parsers not in use, by language index, for the next stretches.
+    parsers: HashMap<usize, Vec<Parser>>,
+    /// Each stretch's parse, by language and ranges.
+    stretches: HashMap<StretchKey, Stretch>,
+}
+
+impl InjectionCache {
+    /// Forget every stretch -- the text changed -- keeping the parsers of
+    /// those being parsed, reset, for the next.
+    fn forget(&mut self) {
+        for (key, stretch) in self.stretches.drain() {
+            if let Stretch::Pending { mut parser, .. } = stretch {
+                parser.reset();
+                self.parsers.entry(key.0).or_default().push(parser);
+            }
+        }
+    }
+
+    /// Whether any stretch is waiting for `work`.
+    fn pending(&self) -> bool {
+        self.stretches
+            .values()
+            .any(|s| matches!(s, Stretch::Pending { .. }))
+    }
+}
+
+/// How one slice of a parse ended.
+enum Slice {
+    /// Done: the tree.
+    Done(Tree),
+    /// Stopped at the deadline, with more to do.
+    Late,
+    /// Past its work limit: to be given up.
+    Over,
+    /// Refused, for a reason that is not the deadline -- which a parser with
+    /// a language set has none of.
+    Refused,
+}
+
+/// Parse `text` with `parser` -- carrying on where it stopped, if it did --
+/// until it is done or `deadline` (none: no deadline) passes, adding its
+/// work to `used` and stopping it past `limit` ([`parse_limit`]).
+fn slice(
+    parser: &mut Parser,
+    text: &TextBuffer,
+    old: Option<&Tree>,
+    deadline: Option<Instant>,
+    used: &mut u64,
+    limit: u64,
+) -> Slice {
+    let (before, lexed) = (*used, ffi::advances());
+    // The work so far, this slice's included: the steps the callback has
+    // been called for, and the characters lexed since the slice began.
+    let done = |checks: u64| {
+        before
+            .saturating_add(checks.saturating_mul(STEPS_PER_CHECK))
+            .saturating_add(ffi::advances().wrapping_sub(lexed))
+    };
+    let mut checks: u64 = 0;
+    let (mut late, mut over) = (false, false);
+    let mut progress = |_: &ParseState| {
+        checks = checks.saturating_add(1);
+        over = done(checks) > limit;
+        late = deadline.is_some_and(|d| Instant::now() >= d);
+        over || late
+    };
+    let parsed = parser.parse_with_options(
+        &mut |byte: usize, _: Point| text.bytes_from(byte),
+        old,
+        Some(ParseOptions::new().progress_callback(&mut progress)),
+    );
+    *used = done(checks);
+    match parsed {
+        Some(tree) => Slice::Done(tree),
+        None if over => Slice::Over,
+        None if late => Slice::Late,
+        None => Slice::Refused,
+    }
 }
 
 /// A language's parser and highlight query, for one text.
@@ -98,9 +192,11 @@ pub struct SyntaxHighlighter {
     /// The language's queries.
     compiled: &'static Compiled,
     /// Parses of the text's injected stretches. In a cell because they are
-    /// made while drawing, which asks through `&self` -- a cache of what the
+    /// begun while drawing, which asks through `&self` -- a cache of what the
     /// text says, remade when the text changes.
     injected: RefCell<InjectionCache>,
+    /// How long drawing may parse the stretches it finds: [`DRAW_BUDGET`].
+    draw_budget: Duration,
     /// The last complete parse, moved to match every edit since.
     tree: Option<Tree>,
     /// Whether the text changed since `tree` was parsed from it.
@@ -167,6 +263,7 @@ impl SyntaxHighlighter {
             parser,
             compiled,
             injected: RefCell::default(),
+            draw_budget: DRAW_BUDGET,
             tree: None,
             stale: true,
             halted: false,
@@ -234,6 +331,7 @@ impl Highlighter for SyntaxHighlighter {
     fn reset(&mut self, _text: &TextBuffer) {
         self.tree = None;
         self.parser.reset();
+        self.injected.get_mut().forget();
         self.halted = false;
         self.stale = true;
         self.used = 0;
@@ -247,74 +345,62 @@ impl Highlighter for SyntaxHighlighter {
             }
         }
         // A parse stopped part-way was of the text before these edits: start
-        // it again, from the moved tree.
+        // it again, from the moved tree. So were the injected stretches.
         if self.halted {
             self.parser.reset();
             self.halted = false;
         }
+        self.injected.get_mut().forget();
         self.stale = true;
         self.used = 0;
         self.abandoned = false;
     }
 
     fn work(&mut self, text: &TextBuffer, budget: Duration) -> bool {
-        if !self.stale {
-            return false;
-        }
+        // A budget too long to add to the clock has no deadline.
         let deadline = Instant::now().checked_add(budget);
-        let limit = parse_limit(text.len());
-        let (before, lexed) = (self.used, ffi::advances());
-        // The work so far, this slice's included: the steps the callback has
-        // been called for, and the characters lexed since the slice began.
-        let done = |checks: u64| {
-            before
-                .saturating_add(checks.saturating_mul(STEPS_PER_CHECK))
-                .saturating_add(ffi::advances().wrapping_sub(lexed))
-        };
-        let mut checks: u64 = 0;
-        let (mut late, mut over) = (false, false);
-        let mut progress = |_: &ParseState| {
-            checks = checks.saturating_add(1);
-            over = done(checks) > limit;
-            late = deadline.is_none_or(|d| Instant::now() >= d);
-            over || late
-        };
-        let parsed = self.parser.parse_with_options(
-            &mut |byte: usize, _: Point| text.bytes_from(byte),
-            self.tree.as_ref(),
-            Some(ParseOptions::new().progress_callback(&mut progress)),
-        );
-        self.used = done(checks);
-        match parsed {
-            Some(tree) => {
-                self.tree = Some(tree);
-                self.stale = false;
-                self.halted = false;
-                false
-            }
-            None if over => {
-                // Round in circles, or as good as: give this text up (see
-                // the module docs); the next edit starts again.
-                self.parser.reset();
-                self.halted = false;
-                self.stale = false;
-                self.abandoned = true;
-                false
-            }
-            None if late => {
-                self.halted = true;
-                true
-            }
-            // Refused for a reason that is not the budget -- which a parser
-            // with a language set has none of. Stop asking rather than spin;
-            // the moved tree keeps what colours it has.
-            None => {
-                self.parser.reset();
-                self.halted = false;
-                self.stale = false;
-                false
+        if self.stale {
+            let limit = parse_limit(text.len());
+            match slice(
+                &mut self.parser,
+                text,
+                self.tree.as_ref(),
+                deadline,
+                &mut self.used,
+                limit,
+            ) {
+                Slice::Done(tree) => {
+                    self.tree = Some(tree);
+                    self.stale = false;
+                    self.halted = false;
+                }
+                Slice::Over => {
+                    // Round in circles, or as good as: give this text up
+                    // (see the module docs); the next edit starts again.
+                    self.parser.reset();
+                    self.halted = false;
+                    self.stale = false;
+                    self.abandoned = true;
+                }
+                Slice::Late => {
+                    self.halted = true;
+                    return true;
+                }
+                // Stop asking rather than spin; the moved tree keeps what
+                // colours it has.
+                Slice::Refused => {
+                    self.parser.reset();
+                    self.halted = false;
+                    self.stale = false;
+                }
             }
         }
+        self.carry_on_injections(text, deadline)
+    }
+
+    fn has_work(&self) -> bool {
+        // Borrowed only while drawing, which does not ask this.
+        self.stale || self.injected.try_borrow().is_ok_and(|c| c.pending())
     }
 
     fn highlights(&self, text: &TextBuffer, range: Range<usize>) -> Vec<HighlightSpan> {
@@ -324,8 +410,16 @@ impl Highlighter for SyntaxHighlighter {
         if range.is_empty() {
             return Vec::new();
         }
+        let deadline = Instant::now().checked_add(self.draw_budget);
         let mut found = Vec::new();
-        self.collect(self.compiled, tree, text, range.clone(), 0, &mut found);
+        self.collect(
+            self.compiled,
+            tree,
+            text,
+            range.clone(),
+            (0, deadline),
+            &mut found,
+        );
         flatten(found, &range)
     }
 }
@@ -334,13 +428,15 @@ impl SyntaxHighlighter {
     /// The captures of `tree` over `range`, in `compiled`'s language, then
     /// those of each stretch it injects -- after them, so an injected
     /// language's colours win over its host's where both colour a stretch.
+    /// `depth` is how deep in injections this is, and `deadline` when
+    /// drawing stops parsing the stretches it finds (see [`DRAW_BUDGET`]).
     fn collect(
         &self,
         compiled: &Compiled,
         tree: &Tree,
         text: &TextBuffer,
         range: Range<usize>,
-        depth: usize,
+        (depth, deadline): (usize, Option<Instant>),
         found: &mut Vec<(Range<usize>, Option<Highlight>)>,
     ) {
         let mut cursor = QueryCursor::new();
@@ -393,24 +489,33 @@ impl SyntaxHighlighter {
             let Ok(inner) = language.compiled() else {
                 continue;
             };
-            let Some(sub) = self.injected_tree(language, &ranges, text) else {
+            let Some(sub) = self.injected_tree(language, &ranges, text, deadline) else {
                 continue;
             };
-            self.collect(inner, &sub, text, within, depth.saturating_add(1), found);
+            self.collect(
+                inner,
+                &sub,
+                text,
+                within,
+                (depth.saturating_add(1), deadline),
+                found,
+            );
         }
     }
 
-    /// The tree of `ranges` of `text` in `language`: parsed once for each
-    /// revision of the text, within [`INJECTION_BUDGET`].
+    /// The tree of `ranges` of `text` in `language`, if it has one yet:
+    /// parsed once for each revision of the text -- begun here, until
+    /// `deadline`, and carried on by `work` if it does not finish.
     fn injected_tree(
         &self,
         language: &'static Language,
         ranges: &[tree_sitter::Range],
         text: &TextBuffer,
+        deadline: Option<Instant>,
     ) -> Option<Tree> {
         let mut cache = self.injected.try_borrow_mut().ok()?;
         if cache.revision != text.revision() {
-            cache.trees.clear();
+            cache.forget();
             cache.revision = text.revision();
         }
         let key = (
@@ -420,41 +525,104 @@ impl SyntaxHighlighter {
                 .map(|r| (r.start_byte, r.end_byte))
                 .collect::<Vec<_>>(),
         );
-        if let Some(tree) = cache.trees.get(&key) {
-            return tree.clone();
+        match cache.stretches.get(&key) {
+            Some(Stretch::Done(tree)) => return Some(tree.clone()),
+            Some(Stretch::Pending { .. } | Stretch::Failed) => return None,
+            None => {}
         }
         let bytes: usize = ranges
             .iter()
             .map(|r| r.end_byte.saturating_sub(r.start_byte))
             .fold(0, usize::saturating_add);
-        let tree = if bytes > MAX_INJECTED_BYTES {
-            None
-        } else {
-            let parser = cache.parsers.entry(language.index).or_insert_with(|| {
-                let mut parser = Parser::new();
-                // A grammar the runtime refuses leaves the parser without a
-                // language, and it then parses nothing: nothing is coloured.
-                let _ = parser.set_language(&language.ts_language());
-                parser
-            });
-            if parser.set_included_ranges(ranges).is_err() {
-                None
-            } else {
-                let deadline = Instant::now().checked_add(INJECTION_BUDGET);
-                let mut late = |_: &ParseState| deadline.is_none_or(|d| Instant::now() >= d);
-                let parsed = parser.parse_with_options(
-                    &mut |byte: usize, _: Point| text.bytes_from(byte),
-                    None,
-                    Some(ParseOptions::new().progress_callback(&mut late)),
-                );
-                if parsed.is_none() {
-                    parser.reset();
-                }
-                parsed
+        if bytes > MAX_INJECTED_BYTES {
+            cache.stretches.insert(key, Stretch::Failed);
+            return None;
+        }
+        let InjectionCache {
+            parsers, stretches, ..
+        } = &mut *cache;
+        let pool = parsers.entry(language.index).or_default();
+        let mut parser = pool.pop().unwrap_or_else(|| {
+            let mut parser = Parser::new();
+            // A grammar the runtime refuses leaves the parser without a
+            // language, and it then refuses to parse: the stretch fails.
+            let _ = parser.set_language(&language.ts_language());
+            parser
+        });
+        if parser.set_included_ranges(ranges).is_err() {
+            pool.push(parser);
+            stretches.insert(key, Stretch::Failed);
+            return None;
+        }
+        let limit = parse_limit(bytes);
+        let mut used = 0;
+        match slice(&mut parser, text, None, deadline, &mut used, limit) {
+            Slice::Done(tree) => {
+                pool.push(parser);
+                stretches.insert(key, Stretch::Done(tree.clone()));
+                Some(tree)
             }
-        };
-        cache.trees.insert(key, tree.clone());
-        tree
+            Slice::Late => {
+                stretches.insert(
+                    key,
+                    Stretch::Pending {
+                        parser,
+                        used,
+                        limit,
+                    },
+                );
+                None
+            }
+            Slice::Over | Slice::Refused => {
+                parser.reset();
+                pool.push(parser);
+                stretches.insert(key, Stretch::Failed);
+                None
+            }
+        }
+    }
+
+    /// Carry on the injected stretches drawing began and did not finish,
+    /// each until it is done or `deadline` passes: whether any is left.
+    fn carry_on_injections(&mut self, text: &TextBuffer, deadline: Option<Instant>) -> bool {
+        let cache = self.injected.get_mut();
+        if cache.revision != text.revision() {
+            // Begun on another text: nothing to carry on.
+            cache.forget();
+            return false;
+        }
+        let InjectionCache {
+            parsers, stretches, ..
+        } = cache;
+        let mut left = false;
+        for (key, stretch) in stretches.iter_mut() {
+            let Stretch::Pending {
+                parser,
+                used,
+                limit,
+            } = stretch
+            else {
+                continue;
+            };
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                left = true;
+                continue;
+            }
+            let outcome = slice(parser, text, None, deadline, used, *limit);
+            let next = match outcome {
+                Slice::Done(tree) => Stretch::Done(tree),
+                Slice::Late => {
+                    left = true;
+                    continue;
+                }
+                Slice::Over | Slice::Refused => Stretch::Failed,
+            };
+            if let Stretch::Pending { mut parser, .. } = core::mem::replace(stretch, next) {
+                parser.reset();
+                parsers.entry(key.0).or_default().push(parser);
+            }
+        }
+        left
     }
 }
 
@@ -615,16 +783,37 @@ fn flatten(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use super::*;
+
+    /// The highlights of all of `buffer` once there is no work left, as a
+    /// view gets them: it draws, and while the highlighter has work -- the
+    /// document's parse, then the stretches each draw found and did not
+    /// finish -- it works and draws again. Each round finishes what the last
+    /// draw found, and injections go three deep, so a highlighter that still
+    /// has work after a few rounds is broken: that fails, rather than hangs.
+    fn settled(h: &mut SyntaxHighlighter, buffer: &TextBuffer) -> Vec<HighlightSpan> {
+        for _ in 0..=MAX_INJECTION_DEPTH + 1 {
+            while h.work(buffer, Duration::from_secs(5)) {}
+            let drawn = h.highlights(buffer, 0..buffer.len());
+            if !h.has_work() {
+                return drawn;
+            }
+        }
+        panic!("the highlighter still has work after every round of it");
+    }
 
     fn spans(text: &str, language: &str) -> Vec<(String, Highlight)> {
         let buffer = TextBuffer::from_text(text);
         let mut h = Language::named(language).unwrap().highlighter().unwrap();
         h.reset(&buffer);
-        while h.work(&buffer, Duration::from_secs(5)) {}
-        h.highlights(&buffer, 0..buffer.len())
+        settled(&mut h, &buffer)
             .into_iter()
             .map(|s| (text[s.range].to_owned(), s.highlight))
             .collect()
@@ -922,10 +1111,10 @@ mod tests {
         h.reset(&buffer);
         while h.work(&buffer, Duration::from_secs(5)) {}
         let first = h.highlights(&buffer, 0..buffer.len());
-        let parses = h.injected.borrow().trees.len();
+        let parses = h.injected.borrow().stretches.len();
         assert!(parses > 0, "nothing was injected");
         assert_eq!(h.highlights(&buffer, 0..buffer.len()), first);
-        assert_eq!(h.injected.borrow().trees.len(), parses);
+        assert_eq!(h.injected.borrow().stretches.len(), parses);
     }
 
     /// **Markdown is coloured block by block, inline, and in the languages
@@ -968,6 +1157,106 @@ mod tests {
                 .any(|(t, h)| t.contains('=') && *h == Highlight::String),
             "{got:?}"
         );
+    }
+
+    /// **A stretch too long to parse while drawing is carried on by
+    /// `work`**, which the highlighter says it has, and coloured when it is
+    /// done: a Rust fence of five hundred lines in Markdown, drawn with no
+    /// time to parse, is uncoloured at first -- and a short paragraph beside
+    /// it, which parses before the first check of the clock, is not.
+    #[test]
+    fn a_stretch_too_long_to_draw_is_parsed_by_work_then_coloured() {
+        let mut text = String::from("Some `code` here.\n\n```rust\n");
+        for i in 0..500 {
+            text.push_str(&format!("let x{i} = {i};\n"));
+        }
+        text.push_str("```\n");
+        let buffer = TextBuffer::from_text(&text);
+        let mut h = Language::named("markdown").unwrap().highlighter().unwrap();
+        h.draw_budget = Duration::ZERO;
+        h.reset(&buffer);
+        while h.work(&buffer, Duration::from_secs(5)) {}
+        assert!(!h.has_work(), "the document itself is parsed");
+        let kinds = |h: &SyntaxHighlighter| -> Vec<Highlight> {
+            h.highlights(&buffer, 0..buffer.len())
+                .into_iter()
+                .map(|s| s.highlight)
+                .collect()
+        };
+        let first = kinds(&h);
+        assert!(
+            first.contains(&Highlight::String),
+            "the paragraph's code span"
+        );
+        assert!(
+            !first.contains(&Highlight::Keyword),
+            "the fence parsed at once"
+        );
+        assert!(h.has_work(), "the fence left for `work` was not reported");
+        let mut slices = 0;
+        while h.work(&buffer, Duration::from_micros(200)) {
+            slices += 1;
+            assert!(slices < 100_000, "never finished");
+        }
+        assert!(!h.has_work());
+        assert!(
+            kinds(&h).contains(&Highlight::Keyword),
+            "the fence was not coloured"
+        );
+    }
+
+    /// **An edit forgets the stretches being parsed**: they are of the text
+    /// before it. The next draw begins them again on the text as it is.
+    #[test]
+    fn an_edit_forgets_the_stretches_being_parsed() {
+        let mut text = String::from("```rust\n");
+        for i in 0..500 {
+            text.push_str(&format!("let x{i} = {i};\n"));
+        }
+        text.push_str("```\n");
+        let mut buffer = TextBuffer::from_text(&text);
+        let mut h = Language::named("markdown").unwrap().highlighter().unwrap();
+        h.draw_budget = Duration::ZERO;
+        h.reset(&buffer);
+        while h.work(&buffer, Duration::from_secs(5)) {}
+        let _ = h.highlights(&buffer, 0..buffer.len());
+        assert!(h.injected.borrow().pending());
+        let _ = buffer.take_changes();
+        buffer.insert(0, "x\n\n").unwrap();
+        h.edited(&buffer, &buffer.clone().take_changes().splices.unwrap());
+        assert!(!h.injected.borrow().pending(), "a stretch of the old text");
+        assert!(h.injected.borrow().stretches.is_empty());
+        // Its parser is kept for the next stretch in its language.
+        let rust = Language::named("rust").unwrap().index;
+        assert_eq!(
+            h.injected.borrow().parsers.get(&rust).map(Vec::len),
+            Some(1)
+        );
+        while h.work(&buffer, Duration::from_secs(5)) {}
+        let _ = h.highlights(&buffer, 0..buffer.len());
+        while h.work(&buffer, Duration::from_secs(5)) {}
+        let kinds: Vec<Highlight> = h
+            .highlights(&buffer, 0..buffer.len())
+            .into_iter()
+            .map(|s| s.highlight)
+            .collect();
+        assert!(kinds.contains(&Highlight::Keyword));
+    }
+
+    /// **A budget too long to add to the clock is no deadline** -- not one
+    /// already passed: a whole parse happens in one call, however many
+    /// times the runtime checks the clock on the way.
+    #[test]
+    fn a_budget_past_the_clock_is_no_deadline() {
+        let mut text = String::new();
+        for i in 0..200 {
+            text.push_str(&format!("fn f{i}() {{}}\n"));
+        }
+        let buffer = TextBuffer::from_text(&text);
+        let mut h = Language::named("rust").unwrap().highlighter().unwrap();
+        h.reset(&buffer);
+        assert!(!h.work(&buffer, Duration::MAX));
+        assert!(h.tree().is_some() && !h.is_stale());
     }
 
     /// **A language another's text names is found by name or alias**, in

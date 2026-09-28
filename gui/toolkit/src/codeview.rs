@@ -37,13 +37,28 @@
 //! ([`CodeViewEvent::Copy`], [`CodeViewEvent::Cut`]) and Ctrl+V asks the host
 //! for it ([`CodeViewEvent::Paste`]), which answers with
 //! [`CodeView::paste`] -- the system clipboard is the host's to reach.
+//!
+//! # Colouring the code
+//!
+//! A [`Highlighter`] set with [`CodeView::set_highlighter`] colours the code
+//! (`gui/syntax` has the tree-sitter one). The view tells it about every
+//! change as the buffer journalled it, gives it a few milliseconds after each
+//! edit -- an incremental re-parse's worth -- and asks for what is on screen
+//! each time it draws, in the theme's colours for code
+//! ([`Palette::syntax_ink`]); selected text keeps the selection's ink. Work a
+//! slice cannot finish -- the first parse of a large file -- waits for the
+//! host: while [`CodeView::has_work`], it calls [`CodeView::work`] and draws
+//! again, and the colours arrive a frame at a time rather than the window
+//! stopping until they do.
 
 use core::ops::Range;
+use core::time::Duration;
 
 use crate::codeedit::{CodeEditor, Selection};
 use crate::color::Color;
 use crate::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::Rect;
+use crate::highlight::{HighlightSpan, Highlighter};
 use crate::palette::Palette;
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow, TextSpan};
 use crate::scrollbar;
@@ -68,6 +83,13 @@ const SIDE_MARGIN_CELLS: f32 = 4.0;
 const DEFAULT_CARET_WIDTH: f32 = 2.0;
 /// How strongly the current line is marked.
 const CURRENT_LINE_ALPHA: u8 = 70;
+/// How long a highlighter may work right after an edit before the view
+/// returns to its host: an incremental re-parse of any ordinary edit, and
+/// short enough that typing never waits on it.
+const EDIT_BUDGET: Duration = Duration::from_millis(4);
+/// How long it may work each time the host calls [`CodeView::work`]: half a
+/// frame at 60 Hz.
+const WORK_BUDGET: Duration = Duration::from_millis(8);
 
 /// How the view draws.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -157,6 +179,14 @@ pub struct CodeView {
     /// Where the caret was when the find bar opened: an incremental search
     /// looks for the first match from here, however far typing has taken it.
     find_origin: usize,
+    /// What colours the code, if anything does.
+    highlighter: Option<Box<dyn Highlighter>>,
+    /// The revision of the text the highlighter was last told about: until
+    /// it is the editor's, what it answers is for another text and is not
+    /// drawn.
+    highlighted: Option<u64>,
+    /// Whether the highlighter has work it has not finished.
+    highlight_pending: bool,
 }
 
 impl CodeView {
@@ -177,6 +207,9 @@ impl CodeView {
             goal_x: None,
             find: FindBar::default(),
             find_origin: 0,
+            highlighter: None,
+            highlighted: None,
+            highlight_pending: false,
         }
     }
 
@@ -224,6 +257,78 @@ impl CodeView {
     #[must_use]
     pub fn top_line(&self) -> usize {
         self.top_line
+    }
+
+    /// Colour the code with `highlighter` from now on -- or stop colouring
+    /// it, with `None`. The highlighter starts on the text at once, for a
+    /// few milliseconds; see [`work`](Self::work) for the rest.
+    pub fn set_highlighter(&mut self, highlighter: Option<Box<dyn Highlighter>>) {
+        self.highlighter = highlighter;
+        self.highlighted = None;
+        self.highlight_pending = false;
+        self.sync_highlighter(EDIT_BUDGET);
+    }
+
+    /// Whether a highlighter colours the code.
+    #[must_use]
+    pub fn has_highlighter(&self) -> bool {
+        self.highlighter.is_some()
+    }
+
+    /// Give the highlighter half a frame, and answer whether it still has
+    /// work: while [`has_work`](Self::has_work), a host calls this and draws
+    /// again. Changes made through [`editor_mut`](Self::editor_mut) reach the
+    /// highlighter here too.
+    pub fn work(&mut self) -> bool {
+        self.sync_highlighter(WORK_BUDGET);
+        self.highlight_pending
+    }
+
+    /// Whether [`work`](Self::work) has anything to do: the highlighter has
+    /// not finished, or has not yet been told of a change.
+    #[must_use]
+    pub fn has_work(&self) -> bool {
+        self.highlighter.is_some()
+            && (self.highlight_pending || self.highlighted != Some(self.editor.revision()))
+    }
+
+    /// Tell the highlighter about every change since it was last told -- or,
+    /// when that cannot be said, start it over on the text -- and let it work
+    /// for `budget`.
+    fn sync_highlighter(&mut self, budget: Duration) {
+        let Some(highlighter) = self.highlighter.as_mut() else {
+            return;
+        };
+        let changes = self.editor.take_changes();
+        let buffer = self.editor.buffer();
+        match (self.highlighted, changes.splices) {
+            (Some(seen), Some(splices)) if seen == changes.since => {
+                if !splices.is_empty() {
+                    highlighter.edited(buffer, &splices);
+                }
+            }
+            // Never told of any text, changes it cannot be told (the journal
+            // gave up), or a journal that does not start where it left off --
+            // the editor was replaced, or someone else took the journal.
+            _ => highlighter.reset(buffer),
+        }
+        self.highlighted = Some(buffer.revision());
+        self.highlight_pending = highlighter.work(buffer, budget);
+    }
+
+    /// The highlights over the rows on screen -- none while the highlighter
+    /// has not been told of the text as it is, since what it would answer is
+    /// for another text.
+    fn visible_highlights(&self, rows: &[Row]) -> Vec<HighlightSpan> {
+        let (Some(highlighter), Some(first), Some(last)) =
+            (self.highlighter.as_ref(), rows.first(), rows.last())
+        else {
+            return Vec::new();
+        };
+        if self.highlighted != Some(self.editor.revision()) {
+            return Vec::new();
+        }
+        highlighter.highlights(self.editor.buffer(), first.range.start..last.range.end)
     }
 
     /// Paste `text` at every caret: the host's answer to
@@ -671,6 +776,8 @@ impl CodeView {
             sink.emit(fill(Rect::new(b.x, b.y, gutter, b.h), p.mantle));
         }
         let rows = self.screen_rows();
+        let highlights = self.visible_highlights(&rows);
+        let inks = p.syntax_inks();
         let line_h = self.line_height();
         let text = self.text_rect();
         let primary = self.editor.primary();
@@ -710,7 +817,7 @@ impl CodeView {
                     overflow: TextOverflow::Clip,
                 });
             }
-            self.draw_row(sink, p, row, y, text);
+            self.draw_row(sink, p, row, y, text, (&highlights, &inks));
         }
         self.draw_matches(sink, p, &rows, text);
         self.draw_bracket_pair(sink, p, &rows, text);
@@ -736,8 +843,20 @@ impl CodeView {
     }
 
     /// One row: the selections behind it, then its text -- tabs as spaces,
-    /// the selected part in the ink that reads on the selection.
-    fn draw_row(&self, sink: &mut impl CommandSink, p: &Palette, row: &Row, y: f32, text: Rect) {
+    /// coloured as the highlighter says, the selected part in the ink that
+    /// reads on the selection.
+    fn draw_row(
+        &self,
+        sink: &mut impl CommandSink,
+        p: &Palette,
+        row: &Row,
+        y: f32,
+        text: Rect,
+        (highlights, inks): (
+            &[HighlightSpan],
+            &[Color; crate::highlight::Highlight::COUNT],
+        ),
+    ) {
         let line_h = self.line_height();
         let buffer = self.editor.buffer();
         // The row as drawn, with where each of its bytes went.
@@ -763,13 +882,29 @@ impl CodeView {
             }
             x += w;
         }
+        // `map` ascends in both halves, so a binary search finds where an
+        // offset went: a row can be a whole minified file.
         let shown_at = |offset: usize| {
-            map.iter()
-                .find(|(at, _)| *at >= offset)
-                .map_or(shown.len(), |(_, s)| *s)
+            let i = map.partition_point(|(at, _)| *at < offset);
+            map.get(i).map_or(shown.len(), |(_, s)| *s)
         };
         let left = text.x - self.scroll_x;
-        let mut spans: Vec<TextSpan> = Vec::new();
+        // What the highlighter says each stretch of the row is, in the row
+        // as drawn. The spans are sorted and apart, and so are these.
+        let first = highlights.partition_point(|h| h.range.end <= row.range.start);
+        let colored: Vec<(Range<usize>, Color)> = highlights
+            .get(first..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|h| h.range.start < row.range.end)
+            .filter_map(|h| {
+                let from = shown_at(h.range.start.max(row.range.start));
+                let to = shown_at(h.range.end.min(row.range.end));
+                let ink = inks.get(h.highlight.index()).copied()?;
+                (to > from).then_some((from..to, ink))
+            })
+            .collect();
+        let mut selected: Vec<Range<usize>> = Vec::new();
         for s in self.editor.selections() {
             let range = s.range();
             if range.is_empty() || range.end < row.range.start || range.start > row.range.end {
@@ -789,20 +924,13 @@ impl CodeView {
             }
             let (a, b) = (shown_at(from), shown_at(to));
             if b > a {
-                spans.push(TextSpan {
-                    end: u32::try_from(a).unwrap_or(u32::MAX),
-                    color: p.text,
-                });
-                spans.push(TextSpan {
-                    end: u32::try_from(b).unwrap_or(u32::MAX),
-                    color: p.on_accent(),
-                });
+                selected.push(a..b);
             }
         }
         if shown.is_empty() {
             return;
         }
-        spans.sort_by_key(|s| s.end);
+        let spans = color_runs(&colored, &selected, p.on_accent(), p.text);
         sink.emit(RenderCommand::RichText {
             x: left,
             y,
@@ -1044,6 +1172,7 @@ impl CodeView {
         if self.find.open && self.find.revision != Some(self.editor.revision()) {
             self.refresh_matches();
         }
+        self.sync_highlighter(EDIT_BUDGET);
         self.reveal();
     }
 
@@ -1336,6 +1465,55 @@ fn row_index_of(rows: &[Row], offset: usize) -> usize {
 }
 
 /// A filled rectangle.
+/// The colour runs of a row: `selected` stretches in `selected_ink`, the rest
+/// of the `colored` stretches in theirs, and everything else in `ink`. Both
+/// lists are sorted and none of their stretches overlap another in the same
+/// list. Linear in the two lists, whatever the row's length.
+fn color_runs(
+    colored: &[(Range<usize>, Color)],
+    selected: &[Range<usize>],
+    selected_ink: Color,
+    ink: Color,
+) -> Vec<TextSpan> {
+    let mut edges: Vec<usize> = colored
+        .iter()
+        .flat_map(|(r, _)| [r.start, r.end])
+        .chain(selected.iter().flat_map(|r| [r.start, r.end]))
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let mut spans: Vec<TextSpan> = Vec::new();
+    let (mut c, mut s) = (0, 0);
+    let mut from = 0;
+    for &to in &edges {
+        if to > from {
+            // What covers `from..to`: the first stretch of each list that
+            // does not end before it.
+            while colored.get(c).is_some_and(|(r, _)| r.end <= from) {
+                c = c.saturating_add(1);
+            }
+            while selected.get(s).is_some_and(|r| r.end <= from) {
+                s = s.saturating_add(1);
+            }
+            let color = if selected.get(s).is_some_and(|r| r.start <= from) {
+                selected_ink
+            } else {
+                colored
+                    .get(c)
+                    .filter(|(r, _)| r.start <= from)
+                    .map_or(ink, |(_, color)| *color)
+            };
+            let end = u32::try_from(to).unwrap_or(u32::MAX);
+            match spans.last_mut() {
+                Some(last) if last.color == color => last.end = end,
+                _ => spans.push(TextSpan { end, color }),
+            }
+        }
+        from = to;
+    }
+    spans
+}
+
 fn fill(r: Rect, color: Color) -> RenderCommand {
     RenderCommand::FillRect {
         x: r.x,
@@ -1518,6 +1696,269 @@ mod tests {
         );
         assert!(cmds.iter().any(|c| matches!(c,
             RenderCommand::FillRect { color, .. } if *color == p.accent)));
+    }
+
+    /// A highlighter for tests: `fn` is a keyword and a run of digits a
+    /// number, found by reading the text afresh. It writes down what it is
+    /// told, where the test can read it, and takes `slices` calls to `work`
+    /// to finish after each change -- answering nothing until it has.
+    #[derive(Debug)]
+    struct Words {
+        log: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        slices: usize,
+        left: usize,
+    }
+
+    impl Words {
+        fn boxed(
+            slices: usize,
+        ) -> (
+            Box<dyn Highlighter>,
+            std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        ) {
+            let log = std::rc::Rc::default();
+            let words = Self {
+                log: std::rc::Rc::clone(&log),
+                slices,
+                left: 0,
+            };
+            (Box::new(words), log)
+        }
+    }
+
+    impl Highlighter for Words {
+        fn reset(&mut self, _text: &crate::textbuffer::TextBuffer) {
+            self.log.borrow_mut().push("reset".to_owned());
+            self.left = self.slices;
+        }
+
+        fn edited(
+            &mut self,
+            _text: &crate::textbuffer::TextBuffer,
+            splices: &[crate::textbuffer::Splice],
+        ) {
+            for s in splices {
+                self.log
+                    .borrow_mut()
+                    .push(format!("edited {}..{}->{}", s.start, s.old_end, s.new_end));
+            }
+            self.left = self.slices;
+        }
+
+        fn work(&mut self, _text: &crate::textbuffer::TextBuffer, _budget: Duration) -> bool {
+            self.left = self.left.saturating_sub(1);
+            self.left > 0
+        }
+
+        fn highlights(
+            &self,
+            text: &crate::textbuffer::TextBuffer,
+            range: Range<usize>,
+        ) -> Vec<HighlightSpan> {
+            use crate::highlight::Highlight;
+            if self.left > 0 {
+                return Vec::new();
+            }
+            let all = text.text();
+            let mut out = Vec::new();
+            let bytes = all.as_bytes();
+            let mut i = range.start;
+            while i < range.end {
+                if all[i..].starts_with("fn") && i + 2 <= range.end {
+                    out.push(HighlightSpan {
+                        range: i..i + 2,
+                        highlight: Highlight::Keyword,
+                    });
+                    i += 2;
+                } else if bytes[i].is_ascii_digit() {
+                    let start = i;
+                    while i < range.end && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    out.push(HighlightSpan {
+                        range: start..i,
+                        highlight: Highlight::Number,
+                    });
+                } else {
+                    i += 1;
+                }
+            }
+            out
+        }
+    }
+
+    /// The colour runs of the row drawn as `text`.
+    fn row_spans(cmds: &[RenderCommand], text: &str) -> Vec<TextSpan> {
+        cmds.iter()
+            .find_map(|c| match c {
+                RenderCommand::RichText { text: t, spans, .. } if t == text => Some(spans.clone()),
+                _ => None,
+            })
+            .expect("the row")
+    }
+
+    /// **A highlighter colours the code in the theme's inks for code, and
+    /// the selected part keeps the selection's ink.**
+    #[test]
+    fn a_highlighter_colours_the_code_and_selected_text_keeps_its_ink() {
+        use crate::highlight::Highlight;
+        let p = Palette::for_mode(false);
+        let (keyword, number) = (
+            p.syntax_ink(Highlight::Keyword),
+            p.syntax_ink(Highlight::Number),
+        );
+        assert_ne!(keyword, number);
+        let mut v = view("fn a12() {}\nx");
+        let (words, _) = Words::boxed(1);
+        v.set_highlighter(Some(words));
+        assert!(v.has_highlighter());
+        let spans = row_spans(&drawn(&v), "fn a12() {}");
+        assert_eq!(
+            spans,
+            vec![
+                TextSpan {
+                    end: 2,
+                    color: keyword
+                },
+                TextSpan {
+                    end: 4,
+                    color: p.text
+                },
+                TextSpan {
+                    end: 6,
+                    color: number
+                },
+            ]
+        );
+        // Selected: the selection's ink over the keyword's first letter.
+        v.editor_mut()
+            .set_selections(vec![Selection { anchor: 0, head: 1 }]);
+        let spans = row_spans(&drawn(&v), "fn a12() {}");
+        assert_eq!(spans[0].end, 1);
+        assert_eq!(spans[0].color, p.on_accent());
+        assert_eq!((spans[1].end, spans[1].color), (2, keyword));
+        // Without one, the text's own ink throughout.
+        v.set_highlighter(None);
+        assert!(!v.has_highlighter() && !v.has_work());
+        v.editor_mut().set_selections(vec![Selection::caret(0)]);
+        assert!(row_spans(&drawn(&v), "fn a12() {}").is_empty());
+    }
+
+    /// **Every change reaches the highlighter, in the order it was made** --
+    /// typing, a batch at two carets (last first, as the buffer made it),
+    /// undo -- and nothing reaches it twice.
+    #[test]
+    fn every_change_reaches_the_highlighter_in_order() {
+        let mut v = view("ab\ncd");
+        let (words, log) = Words::boxed(1);
+        v.set_highlighter(Some(words));
+        v.handle_key(&typed("x"));
+        // Told at once: a keystroke's re-parse happens before the view
+        // returns, not on the host's next call.
+        assert!(!v.has_work(), "the edit waited for the host");
+        assert_eq!(log.borrow().len(), 2);
+        v.editor_mut()
+            .set_selections(vec![Selection::caret(1), Selection::caret(4)]);
+        v.handle_key(&typed("y"));
+        v.handle_key(&key(Key::Z, true, false));
+        v.work();
+        assert_eq!(
+            *log.borrow(),
+            [
+                "reset",
+                "edited 0..0->1",
+                "edited 4..4->5",
+                "edited 1..1->2",
+                "edited 5..6->5",
+                "edited 1..2->1",
+            ]
+        );
+    }
+
+    /// **A change the highlighter has not heard of is drawn plain**, not in
+    /// colours worked out for the text before it -- and reaches it, as a
+    /// change and not a start over, the next time the view works.
+    #[test]
+    fn a_change_the_highlighter_has_not_heard_of_is_drawn_plain() {
+        let p = Palette::for_mode(false);
+        let mut v = view("fn 1");
+        let (words, log) = Words::boxed(1);
+        v.set_highlighter(Some(words));
+        assert!(!row_spans(&drawn(&v), "fn 1").is_empty());
+        v.editor_mut().set_selections(vec![Selection::caret(0)]);
+        v.editor_mut().type_text("2 ");
+        assert!(v.has_work());
+        assert!(
+            row_spans(&drawn(&v), "2 fn 1").is_empty(),
+            "coloured by a highlighter that has not seen the text"
+        );
+        assert!(!v.work());
+        assert_eq!(
+            log.borrow().last().map(String::as_str),
+            Some("edited 0..0->2")
+        );
+        let spans = row_spans(&drawn(&v), "2 fn 1");
+        assert_eq!(
+            spans[0].color,
+            p.syntax_ink(crate::highlight::Highlight::Number)
+        );
+    }
+
+    /// **A replaced editor starts the highlighter over**: its journal does
+    /// not continue the one the highlighter was following.
+    #[test]
+    fn a_replaced_editor_starts_the_highlighter_over() {
+        let mut v = view("fn");
+        let (words, log) = Words::boxed(1);
+        v.set_highlighter(Some(words));
+        *v.editor_mut() = CodeEditor::from_text("fn fn");
+        v.work();
+        assert_eq!(*log.borrow(), ["reset", "reset"]);
+        // A journal someone else took is the same case.
+        v.editor_mut().type_text("1");
+        let _ = v.editor_mut().take_changes();
+        v.work();
+        assert_eq!(log.borrow().last().map(String::as_str), Some("reset"));
+    }
+
+    /// **Work the highlighter cannot finish at once is given a slice at a
+    /// time**, while the view says it has work, and the colours arrive when
+    /// it is done.
+    #[test]
+    fn work_is_given_a_slice_at_a_time_until_it_is_done() {
+        let mut v = view("fn");
+        let (words, _) = Words::boxed(3);
+        v.set_highlighter(Some(words));
+        assert!(v.has_work(), "one slice of three was given");
+        assert!(row_spans(&drawn(&v), "fn").is_empty());
+        assert!(v.work());
+        assert!(!v.work());
+        assert!(!v.has_work());
+        assert!(!row_spans(&drawn(&v), "fn").is_empty());
+        // A view without one has nothing to do.
+        let mut plain = view("fn");
+        assert!(!plain.has_work() && !plain.work());
+    }
+
+    /// **Colour runs**: the selection's ink wins, then the highlighter's,
+    /// then the text's; neighbours of one colour are one run.
+    #[test]
+    fn colour_runs_prefer_the_selection_and_merge_neighbours() {
+        let (k, n, sel, ink) = (
+            Color::rgb(1, 0, 0),
+            Color::rgb(2, 0, 0),
+            Color::rgb(3, 0, 0),
+            Color::rgb(4, 0, 0),
+        );
+        let runs = color_runs(
+            &[(0..2, k), (2..4, n), (4..5, n), (6..8, k), (9..10, k)],
+            core::slice::from_ref(&(3..7)),
+            sel,
+            ink,
+        );
+        let got: Vec<(u32, Color)> = runs.iter().map(|s| (s.end, s.color)).collect();
+        assert_eq!(got, [(2, k), (3, n), (7, sel), (8, k), (9, ink), (10, k)]);
+        assert!(color_runs(&[], &[], sel, ink).is_empty());
     }
 
     /// **Carets are drawn only while the view has the keyboard**, one per

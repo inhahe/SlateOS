@@ -83624,8 +83624,8 @@ out as the template:
 | `field.focus` | `ring`, `glow` or `underline` | glow | `.aero-srch-in:focus` |
 | `check.radius` | 0-7 px (7 is a circle) | 2 | the toolkit's box |
 | `toggle` | `pill` or `checkbox` | pill | every switch drawn so far |
-| `scrollbar.width` | `thin` (6), `normal` (10), `wide` (14) | normal | the toolkit's 10 |
-| `scrollbar.visibility` | `always` or `overlay` | always | the browser's |
+| `scrollbar.width` | `thin` (6) or `normal` (10) | normal | the toolkit's 10 |
+| `scrollbar.visibility` | `always`, or `overlay` (a thin line until the pointer comes to it) | always | the browser's |
 
 As with colours, what a section leaves out is the built-in theme's, and a value
 that cannot be read costs that value and is listed for the theme's author. A
@@ -83649,6 +83649,7 @@ theme's file as it covers the colour theme's.
 | **Focus colour** | a focus mark is drawn over grounds nobody can list in advance, so a theme's colour could be one that vanishes; `guitk::style::FOCUS_RING_WIDTH`'s note already refuses the hue as a user setting for this reason. The mark is always the accent, at least the user's focus width | nothing: this is the rule |
 | **Scrollbar colour** (the roadmap's item names it) | it is the colours axis's already: the thumb is `surface2`, whose documented job is "a scrollbar thumb" | nothing: a theme sets `surface2` |
 | **A field with no edge** | a well on a page of nearly its own shade is a field nobody can find; `underline` keeps a line where the typing goes | nothing |
+| **A scrollbar wider than its column, or one that takes no column** | the toolkit answers a click by laying a widget out again with any palette to hand -- "where things land does not depend on colour" -- so a style that moved a hit region would put the click somewhere other than the drawing. The column is the same in every theme; the style draws the bar inside it, and an overlaid bar is a thin line rather than nothing, still saying where the view is | a widget that keeps the style it last drew with for its clicks, as the dialogs will have to for padding |
 
 **High contrast.** A high-contrast scheme is chosen for need and replaces the
 colours whole. It keeps the theme's shapes -- round or square, pill or box, a
@@ -83663,12 +83664,17 @@ a scrollbar that stays (`WidgetStyle::for_high_contrast`).
 |---|---|---|
 | **A fixed set of named settings per control** (chosen) | each is checked, bounded and documented; a theme cannot ask for what the toolkit cannot draw | a new look needs a new setting |
 | A CSS-like property sheet (`design.txt` 772 floats "a subset of CSS") | open-ended | `design.txt` itself records the recommendation against CSS; every property is a promise every control must keep, and themes are "pure data" that must not reach layout |
-| Free numbers for the scrollbar width | finer choice | a 2-pixel scrollbar is one nobody can take hold of; three widths cover the looks the roadmap names (thin, wide) |
+| Free numbers for the scrollbar width | finer choice | the bar lives in a fixed column, so there is room for two looks -- thin, and the column itself -- and a theme gains nothing from a third |
 
-**What honours it, as of this entry:** nothing yet draws differently -- the
-axis is read, carried and checked, and the controls follow in their own
-commits (button, text field, check box, switch, scrollbar), each noted in
-`roadmap-detailed.md` → *Tier 2 — Widget Styling*.
+**What honours it:** the toolkit's button; every toolkit text field, drawn
+by one function now (`guitk::field` -- the drop-down, the address bar, the
+input dialog, the Save box and the colour picker's hex field had each drawn
+their own, and had drifted); the check box; the switch, drawn as a box in
+the pill's room under `toggle: checkbox`, the shell's settings pages
+included; and the file dialog's and the tree view's scrollbars
+(`guitk::scrollbar::draw`). Still to follow: the shell's own text fields,
+button padding, and lane E's applications and Settings picker -- each noted
+in `roadmap-detailed.md` → *Tier 2 — Widget Styling*.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

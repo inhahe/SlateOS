@@ -2004,10 +2004,14 @@ live.
   radius, gloss and shadow; a field's radius, edge and focus mark; a check
   box's radius; pill or checkbox for on/off; scrollbar width and whether it
   hides), chosen as `theme.widget_style` apart from the colours, read with the
-  settings and carried on the palette to every control. **Next:** each control
-  draws from it -- the button, the text fields, the check box, the switch, the
-  scrollbars -- then button padding through the dialog layout, and lane E's
-  Settings picker for the axis.
+  settings and carried on the palette to every control. The toolkit's
+  controls draw from it: the button, every toolkit text field (one drawer,
+  `guitk::field`), the check box, the switch (a box in the pill's room under
+  `toggle: checkbox`, in the shell's settings too) and the scrollbars
+  (`guitk::scrollbar::draw`, in a column every theme shares). **Next:** the
+  shell's own text fields, then button padding through the dialog layout; lane
+  E's Settings picker for the axis and its applications' own fields and
+  scrollbars.
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

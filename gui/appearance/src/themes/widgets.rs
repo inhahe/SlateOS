@@ -21,7 +21,7 @@
 //!     radius: 2          # 0 to 7; 7 is a circle
 //!   toggle: pill         # pill | checkbox
 //!   scrollbar:
-//!     width: normal      # thin | normal | wide
+//!     width: normal      # thin | normal
 //!     visibility: always # always | overlay
 //! ```
 //!
@@ -214,7 +214,6 @@ fn read_scrollbar(
                     &[
                         ("thin", ScrollbarWidth::Thin),
                         ("normal", ScrollbarWidth::Normal),
-                        ("wide", ScrollbarWidth::Wide),
                     ],
                     w,
                 )
@@ -538,7 +537,7 @@ widget-style:
     radius: 7
   toggle: checkbox
   scrollbar:
-    width: wide
+    width: thin
     visibility: overlay
 ";
 
@@ -557,7 +556,7 @@ widget-style:
             check: CheckStyle { radius: 7 },
             toggle: ToggleStyle::Checkbox,
             scrollbar: ScrollbarStyle {
-                width: ScrollbarWidth::Wide,
+                width: ScrollbarWidth::Thin,
                 visibility: ScrollbarVisibility::Overlay,
             },
         }
@@ -796,6 +795,9 @@ widget-style:
     fn a_choice_is_offered_in_words() {
         assert_eq!(one_of(&["pill"]), "pill");
         assert_eq!(one_of(&["pill", "checkbox"]), "pill or checkbox");
-        assert_eq!(one_of(&["thin", "normal", "wide"]), "thin, normal or wide");
+        assert_eq!(
+            one_of(&["ring", "glow", "underline"]),
+            "ring, glow or underline"
+        );
     }
 }

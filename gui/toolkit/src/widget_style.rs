@@ -27,10 +27,14 @@
 //!   ([`WidgetStyle::for_high_contrast`]).
 //! - **Where anything is.** A style does not move controls or resize the room
 //!   they are given, the rule `roadmap-detailed.md` → *What Themes Do NOT
-//!   Control* sets out. That is why a button's padding is not here yet: the
-//!   width a button's label needs decides where the next button in a row
-//!   begins, and the dialogs lay their rows out before they are drawn.
-//!   `todo.txt` → *Judgment Calls* has the rest.
+//!   Control* sets out -- and the toolkit depends on it: a widget answers a
+//!   click by laying itself out again with any palette to hand ("where things
+//!   land does not depend on colour"), so a style that moved a hit region
+//!   would put the click somewhere other than the drawing. That is why a
+//!   button's padding is not here yet (it decides where the next button in a
+//!   row begins; `todo.txt` → *Judgment Calls*), and why a scrollbar's style
+//!   draws it *inside* the column every theme gives it rather than widening
+//!   the column.
 //!
 //! # Whole pixels
 //!
@@ -53,7 +57,7 @@ pub struct WidgetStyle {
     pub check: CheckStyle,
     /// On/off switches: `crate::switch`.
     pub toggle: ToggleStyle,
-    /// Scrollbars.
+    /// Scrollbars: `crate::scrollbar`.
     pub scrollbar: ScrollbarStyle,
 }
 
@@ -222,7 +226,9 @@ pub enum ToggleStyle {
     Checkbox,
 }
 
-/// How a scrollbar is drawn.
+/// How a scrollbar is drawn in its column -- the strip at the side of a view
+/// that takes a press on the bar, which is the same in every theme
+/// (`crate::scrollbar::WIDTH`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScrollbarStyle {
     /// How wide it is.
@@ -231,16 +237,19 @@ pub struct ScrollbarStyle {
     pub visibility: ScrollbarVisibility,
 }
 
-/// How wide a scrollbar is.
+/// How wide a scrollbar is drawn.
+///
+/// There is no width wider than the column: a bar drawn past the strip that
+/// takes a press on it would be partly a bar that cannot be pressed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ScrollbarWidth {
-    /// Six pixels: out of the way, and harder to take hold of.
+    /// Six pixels, at the column's outer edge: out of the way. The whole
+    /// column still takes a press, so the bar is no harder to take hold of
+    /// than it looks.
     Thin,
-    /// Ten pixels: what the toolkit has always drawn.
+    /// The whole column, ten pixels: what the toolkit has always drawn.
     #[default]
     Normal,
-    /// Fourteen pixels: the easiest to take hold of.
-    Wide,
 }
 
 impl ScrollbarWidth {
@@ -250,20 +259,21 @@ impl ScrollbarWidth {
         match self {
             Self::Thin => 6,
             Self::Normal => 10,
-            Self::Wide => 14,
         }
     }
 }
 
-/// Whether a scrollbar stays on screen.
+/// Whether a scrollbar is always drawn in full.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ScrollbarVisibility {
-    /// Always drawn, in a column of its own beside what it scrolls.
+    /// The track and the thumb, always.
     #[default]
     Always,
-    /// Drawn over what it scrolls, and only while the pointer is over the
-    /// scrolled view or the bar is held: the view has the whole width, and the
-    /// bar is there when a hand goes to look for it.
+    /// No track, and the thumb a thin line along the column's edge until the
+    /// pointer comes to the bar or holds it, when it widens to its full
+    /// width: out of the way while reading, there when a hand goes to it --
+    /// and still saying where in the list the view is, which a bar that
+    /// vanished would not.
     Overlay,
 }
 
@@ -318,12 +328,11 @@ mod tests {
         assert_eq!(hc.scrollbar.width, ScrollbarWidth::Thin);
     }
 
-    /// **The widths are ordered and the normal one is the old constant**, so
-    /// the built-in theme's scrollbars did not change width.
+    /// **No bar is drawn wider than its column, and the normal one fills
+    /// it**, so the built-in theme's scrollbars did not change width.
     #[test]
-    fn the_scrollbar_widths_are_ordered() {
+    fn the_scrollbar_widths_fit_the_column() {
         assert!(ScrollbarWidth::Thin.pixels() < ScrollbarWidth::Normal.pixels());
-        assert!(ScrollbarWidth::Normal.pixels() < ScrollbarWidth::Wide.pixels());
         #[allow(clippy::float_cmp, reason = "a small whole number, exactly")]
         {
             assert_eq!(

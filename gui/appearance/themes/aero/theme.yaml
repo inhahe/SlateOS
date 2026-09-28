@@ -168,5 +168,5 @@ widget-style:
     radius: 2          # 0 (square) to 7 (a circle)
   toggle: pill         # an on/off setting: pill, or checkbox
   scrollbar:
-    width: normal      # thin, normal or wide
-    visibility: always # always, or overlay: over the view, while the pointer is on it
+    width: normal      # thin, or normal
+    visibility: always # always, or overlay: a thin line until the pointer comes to it

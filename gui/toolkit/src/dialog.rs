@@ -310,6 +310,9 @@ pub struct FileDialog {
     /// Kept so the thumb does not jump under the pointer on the first drag
     /// event: the thumb follows the grab point, not the pointer.
     thumb_grab: Option<f32>,
+    /// Whether the pointer is over the file list's scrollbar: an overlaid bar
+    /// widens into its full self while it is (`crate::scrollbar::draw`).
+    bar_hovered: bool,
     /// The zone the Modified column is rendered in.
     ///
     /// Defaults to UTC because a toolkit has no business reading `TZ` behind
@@ -855,6 +858,17 @@ impl FileDialog {
         }
 
         match event.kind {
+            MouseEventKind::Move | MouseEventKind::Enter => {
+                self.bar_hovered = matches!(
+                    target,
+                    Some(DialogTarget::ScrollTrack | DialogTarget::ScrollThumb)
+                );
+            }
+            MouseEventKind::Leave => self.bar_hovered = false,
+            _ => {}
+        }
+
+        match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 self.press(&frame, target, event.x, event.y, height)
             }
@@ -1192,6 +1206,7 @@ impl FileDialog {
             scroll_top: 0,
             wheel: wheel::Accumulator::default(),
             thumb_grab: None,
+            bar_hovered: false,
             timezone: Tz::UTC,
             address: PathBar::new("/"),
             address_proposed: false,
@@ -1833,31 +1848,25 @@ impl FileDialog {
             SCROLLBAR_WIDTH,
             (height - ROW_HEIGHT).max(0.0),
         );
-        frame.push(RenderCommand::FillRect {
-            x: track.x,
-            y: track.y,
-            width: track.w,
-            height: track.h,
-            color: palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
-        frame.hit(DialogTarget::ScrollTrack, track);
-
         let thumb = scrollbar::thumb(
             track,
             total,
             capacity,
             self.visible_rows(dialog_height).start,
         );
-        palette.push_surface(
+        // Drawn in the theme's form, inside the column; the whole column and
+        // the whole thumb take a press, however much of them is drawn.
+        scrollbar::draw(
             frame,
-            thumb.x,
-            thumb.y,
-            thumb.w,
-            thumb.h,
-            CORNER_RADIUS,
-            Surface::ControlTrack,
+            palette,
+            track,
+            thumb,
+            scrollbar::BarState {
+                hovered: self.bar_hovered,
+                dragging: self.thumb_grab.is_some(),
+            },
         );
+        frame.hit(DialogTarget::ScrollTrack, track);
         // Recorded after the track, so a press on the overlap reaches the thumb
         // — `hit_test` answers with the last box drawn, which is the one on top.
         frame.hit(DialogTarget::ScrollThumb, thumb);
@@ -3943,6 +3952,50 @@ mod tests {
             dialog.thumb_grab.is_none(),
             "releasing has to drop the grab"
         );
+    }
+
+    /// **The file list's scrollbar is the toolkit's, in the theme's form**:
+    /// under an overlaid style it is a line until the pointer comes to its
+    /// column, then the full bar, and a line again when the pointer leaves --
+    /// while the column that takes a press is the same throughout.
+    #[test]
+    fn an_overlaid_scrollbar_widens_when_the_pointer_reaches_it() {
+        use crate::widget_style::ScrollbarVisibility;
+        let mut palette = Palette::for_mode(false);
+        palette.widget_style.scrollbar.visibility = ScrollbarVisibility::Overlay;
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let thumb_width = |dialog: &FileDialog| {
+            let frame = dialog.frame(&palette, W, H);
+            let thumb = frame
+                .rect_of(|t| *t == DialogTarget::ScrollThumb)
+                .expect("a long listing has a scrollbar");
+            let drawn = frame
+                .into_tree()
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect { y, width, color, .. }
+                        if *y == thumb.y
+                            && (color.r, color.g, color.b) != (palette.crust.r, palette.crust.g, palette.crust.b)
+                            && *width <= scrollbar::WIDTH =>
+                    {
+                        Some(*width)
+                    }
+                    _ => None,
+                })
+                .expect("no thumb was drawn");
+            (thumb.w, drawn)
+        };
+        assert_eq!(thumb_width(&dialog), (scrollbar::WIDTH, scrollbar::IDLE_WIDTH));
+
+        let (x, y) = centre_of(&dialog, DialogTarget::ScrollTrack);
+        let at = |kind| MouseEvent { x, y, kind };
+        dialog.handle_mouse(&at(MouseEventKind::Move), W, H);
+        assert_eq!(thumb_width(&dialog), (scrollbar::WIDTH, scrollbar::WIDTH));
+
+        dialog.handle_mouse(&at(MouseEventKind::Leave), W, H);
+        assert_eq!(thumb_width(&dialog), (scrollbar::WIDTH, scrollbar::IDLE_WIDTH));
     }
 
     #[test]

@@ -670,6 +670,9 @@ pub struct TreeView<K> {
     wheel: wheel::Accumulator,
     /// While the thumb is dragged, how far below its top the pointer took it.
     thumb_grab: Option<f32>,
+    /// Whether the pointer is over the scrollbar's column: an overlaid bar
+    /// widens into its full self while it is (`crate::scrollbar::draw`).
+    bar_hover: bool,
 }
 
 impl<K: Clone + Ord> Default for TreeView<K> {
@@ -695,6 +698,7 @@ impl<K: Clone + Ord> TreeView<K> {
             state: DisabledState::Enabled,
             wheel: wheel::Accumulator::default(),
             thumb_grab: None,
+            bar_hover: false,
         }
     }
 
@@ -1161,10 +1165,12 @@ impl<K: Clone + Ord> TreeView<K> {
             MouseEventKind::Leave => {
                 self.hover = None;
                 self.pointer_in = false;
+                self.bar_hover = false;
                 return Vec::new();
             }
             MouseEventKind::Move | MouseEventKind::Enter => {
                 self.pointer_in = hit.is_some();
+                self.bar_hover = matches!(hit, Some(TreeHit::ScrollTrack | TreeHit::ScrollThumb));
                 self.hover = match &hit {
                     Some(TreeHit::Row(path) | TreeHit::Disclosure(path) | TreeHit::Check(path)) => {
                         Some(path.clone())
@@ -1413,24 +1419,18 @@ impl<K: Clone + Ord> TreeView<K> {
         if let Some((track, thumb)) = scroll {
             frame.hit(wrap(TreeHit::ScrollTrack), track);
             frame.hit(wrap(TreeHit::ScrollThumb), thumb);
-            // The same two paints as the file dialog's scrollbar, so the two
-            // lists in one window do not disagree about what a scrollbar is.
-            ink.push(RenderCommand::FillRect {
-                x: track.x,
-                y: track.y,
-                width: track.w,
-                height: track.h,
-                color: palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
-            palette.push_surface(
+            // The toolkit's scrollbar, as the file dialog's is, so the two
+            // lists in one window do not disagree about what a scrollbar is --
+            // in the theme's form, inside the column the hits above cover.
+            scrollbar::draw(
                 &mut ink,
-                thumb.x,
-                thumb.y,
-                thumb.w,
-                thumb.h,
-                3.0,
-                Surface::ControlTrack,
+                palette,
+                track,
+                thumb,
+                scrollbar::BarState {
+                    hovered: self.bar_hover,
+                    dragging: self.thumb_grab.is_some(),
+                },
             );
         }
 
@@ -2561,6 +2561,59 @@ mod tests {
             &source,
         );
         assert_eq!(view.first_visible(), 80);
+    }
+
+    /// **The tree's scrollbar is the toolkit's, in the theme's form**: under
+    /// an overlaid style a line until the pointer reaches the column, the
+    /// full bar while it is there or the thumb is held, a line again after.
+    #[test]
+    fn an_overlaid_scrollbar_widens_under_the_pointer_and_while_held() {
+        use crate::widget_style::ScrollbarVisibility;
+        let names: Vec<&'static str> = (0..100)
+            .map(|i| &*Box::leak(format!("n{i}").into_boxed_str()))
+            .collect();
+        let source = Literal(names.iter().map(|n| leaf(n)).collect());
+        let mut view = view_over(&source, 10);
+        let mut palette = Palette::for_mode(false);
+        palette.widget_style.scrollbar.visibility = ScrollbarVisibility::Overlay;
+        let drawn = |view: &TreeView<&'static str>| {
+            let mut frame = Frame::new(view.bounds().right(), view.bounds().bottom());
+            view.draw(&palette, &mut frame, |h| h);
+            let thumb = frame
+                .rect_of(|h| *h == TreeHit::ScrollThumb)
+                .expect("a long tree has a scrollbar");
+            frame
+                .into_tree()
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect { x, y, width, .. }
+                        if *y == thumb.y && *x >= thumb.x =>
+                    {
+                        Some(*width)
+                    }
+                    _ => None,
+                })
+                .expect("no thumb was drawn")
+        };
+        assert_eq!(drawn(&view), scrollbar::IDLE_WIDTH);
+        let (tx, ty) = centre_of(&view, |h| *h == TreeHit::ScrollThumb);
+        view.handle_mouse(&mouse(tx, ty, MouseEventKind::Move), &source);
+        assert_eq!(drawn(&view), scrollbar::WIDTH, "the pointer is on it");
+        view.handle_mouse(
+            &mouse(tx, ty, MouseEventKind::Press(MouseButton::Left)),
+            &source,
+        );
+        view.handle_mouse(&mouse(5.0, 5.0, MouseEventKind::Move), &source);
+        assert_eq!(drawn(&view), scrollbar::WIDTH, "held, off the column");
+        view.handle_mouse(
+            &mouse(5.0, 5.0, MouseEventKind::Release(MouseButton::Left)),
+            &source,
+        );
+        assert_eq!(drawn(&view), scrollbar::IDLE_WIDTH, "let go, elsewhere");
+        view.handle_mouse(&mouse(tx, ty, MouseEventKind::Move), &source);
+        view.handle_mouse(&mouse(tx, ty, MouseEventKind::Leave), &source);
+        assert_eq!(drawn(&view), scrollbar::IDLE_WIDTH, "the pointer left");
     }
 
     /// A press in the groove just past the thumb's end takes hold of the

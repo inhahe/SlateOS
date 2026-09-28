@@ -211,6 +211,12 @@ MUTATIONS = [
         "        self.draw_button(f, folder, FOLDER_BUTTON_LABEL, Target::SearchBox);",
         ["the_folder_button_asks_for_a_folder"],
     ),
+    (
+        "an AVIF is not a picture to the search",
+        "        \"jpg\" | \"jpeg\" | \"png\" | \"gif\" | \"bmp\" | \"svg\" | \"ico\" | \"webp\" | \"avif\" | \"tif\"",
+        "        \"jpg\" | \"jpeg\" | \"png\" | \"gif\" | \"bmp\" | \"svg\" | \"ico\" | \"webp\" | \"tif\"",
+        ["test_categorize_image"],
+    ),
 ]
 
 if __name__ == "__main__":

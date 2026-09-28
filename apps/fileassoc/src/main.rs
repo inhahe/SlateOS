@@ -915,7 +915,9 @@ impl AssociationRegistry {
                 "imageviewer",
                 "Image Viewer",
                 "/usr/bin/imageviewer",
-                &["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "ico"],
+                &[
+                    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tif", "tiff",
+                ],
                 3,
             ),
             (
@@ -3714,6 +3716,25 @@ mod tests {
     fn test_registry_with_defaults_has_associations() {
         let reg = AssociationRegistry::with_defaults();
         assert!(reg.association_count() > 0);
+    }
+
+    /// **The image viewer opens every picture it can show** -- TIFF among
+    /// them, which it opens and which nothing was associated with.
+    ///
+    /// AVIF is in the viewer's list too, and joins this one when the
+    /// toolkit's table of file types knows it: this registry takes its types
+    /// from that table, which has no `.avif` yet -- lane C's part of
+    /// `requests/f-bce-avif-pictures-open-and-animate.md`.
+    #[test]
+    fn the_image_viewer_opens_every_picture_it_shows() {
+        let reg = AssociationRegistry::with_defaults();
+        for ext in ["png", "jpg", "gif", "webp", "tif", "tiff"] {
+            assert_eq!(
+                reg.get_default_app(ext).map(|app| app.id.as_str()),
+                Some("imageviewer"),
+                "{ext}"
+            );
+        }
     }
 
     #[test]

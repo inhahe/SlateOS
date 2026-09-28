@@ -22,6 +22,9 @@ super::generated!("rust", super::Scanner);
 /// The highlight query, as published.
 pub(crate) const HIGHLIGHTS: &str = include_str!("../../grammars/rust/highlights.scm");
 
+/// The injection query, as published: a macro's token tree is Rust too.
+pub(crate) const INJECTIONS: &str = include_str!("../../grammars/rust/injections.scm");
+
 /// The external tokens, in the grammar's order (`TokenType` in scanner.c).
 #[derive(Clone, Copy)]
 enum Token {

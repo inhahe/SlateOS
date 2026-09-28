@@ -22,6 +22,17 @@
 //! file needs ([`parse_limit`]: five seconds, and a second more per megabyte);
 //! the colours stay as the moved tree has them, and the next edit tries again.
 //!
+//! # Languages inside languages
+//!
+//! A grammar's injection query names the stretches of its text written in
+//! another language -- a Markdown code fence in the language its info string
+//! names, a Rust macro's body in Rust. Those stretches are parsed with that
+//! language's grammar (only them: the parser is given their ranges) and
+//! coloured by its query, over the enclosing language's colours, to three
+//! levels deep. The parses are kept until the text changes, so drawing the
+//! same screen again costs nothing; one that does not finish in its budget
+//! ([`INJECTION_BUDGET`]) is left uncoloured rather than stalling a frame.
+//!
 //! # From captures to colours
 //!
 //! The query's captures nest the way the tree does -- an escape inside a
@@ -32,8 +43,10 @@
 //! node, a node within it wins. What comes out is sorted, flat and within the
 //! range asked for, which is what the view draws.
 
+use core::cell::RefCell;
 use core::ops::Range;
 use core::time::Duration;
+use std::collections::HashMap;
 use std::time::Instant;
 
 use guitk::highlight::{Highlight, HighlightSpan, Highlighter};
@@ -43,15 +56,44 @@ use tree_sitter::{
     TextProvider, Tree,
 };
 
-use crate::{Error, Language};
+use crate::{Compiled, Error, Injections, Language, Paint};
+
+/// How many languages deep injections go: Markdown's code fence in Markdown
+/// is two, a macro's body in that fence's Rust three.
+const MAX_INJECTION_DEPTH: usize = 3;
+
+/// How long an injected stretch may take to parse while a screen is drawn.
+pub const INJECTION_BUDGET: Duration = Duration::from_millis(20);
+
+/// The most injected text parsed at once: past this a stretch is left in
+/// its host's colours, whatever the budget would allow.
+const MAX_INJECTED_BYTES: usize = 1 << 20;
+
+/// An injected stretch's key: its language's index, and its ranges'
+/// bytes.
+type StretchKey = (usize, Vec<(usize, usize)>);
+
+/// Parses of injected stretches for one revision of the text.
+#[derive(Default)]
+struct InjectionCache {
+    revision: u64,
+    /// A parser for each language injected so far, by language index.
+    parsers: HashMap<usize, Parser>,
+    /// Each stretch's tree, by language and ranges; `None` for one that did
+    /// not parse in its budget.
+    trees: HashMap<StretchKey, Option<Tree>>,
+}
 
 /// A language's parser and highlight query, for one text.
 pub struct SyntaxHighlighter {
     language: &'static Language,
     parser: Parser,
-    query: &'static tree_sitter::Query,
-    /// What each of the query's captures colours, by capture index.
-    kinds: Vec<Option<Highlight>>,
+    /// The language's queries.
+    compiled: &'static Compiled,
+    /// Parses of the text's injected stretches. In a cell because they are
+    /// made while drawing, which asks through `&self` -- a cache of what the
+    /// text says, remade when the text changes.
+    injected: RefCell<InjectionCache>,
     /// The last complete parse, moved to match every edit since.
     tree: Option<Tree>,
     /// Whether the text changed since `tree` was parsed from it.
@@ -87,7 +129,7 @@ impl core::fmt::Debug for SyntaxHighlighter {
 
 impl SyntaxHighlighter {
     pub(crate) fn new(language: &'static Language) -> Result<Self, Error> {
-        let query = language.query()?;
+        let compiled = language.compiled()?;
         let mut parser = Parser::new();
         parser
             .set_language(&language.ts_language())
@@ -95,16 +137,11 @@ impl SyntaxHighlighter {
                 language: language.name(),
                 message: e.to_string(),
             })?;
-        let kinds = query
-            .capture_names()
-            .iter()
-            .map(|name| Highlight::for_capture(name))
-            .collect();
         Ok(Self {
             language,
             parser,
-            query,
-            kinds,
+            compiled,
+            injected: RefCell::default(),
             tree: None,
             stale: true,
             halted: false,
@@ -252,47 +289,243 @@ impl Highlighter for SyntaxHighlighter {
         if range.is_empty() {
             return Vec::new();
         }
+        let mut found = Vec::new();
+        self.collect(self.compiled, tree, text, range.clone(), 0, &mut found);
+        flatten(found, &range)
+    }
+}
+
+impl SyntaxHighlighter {
+    /// The captures of `tree` over `range`, in `compiled`'s language, then
+    /// those of each stretch it injects -- after them, so an injected
+    /// language's colours win over its host's where both colour a stretch.
+    fn collect(
+        &self,
+        compiled: &Compiled,
+        tree: &Tree,
+        text: &TextBuffer,
+        range: Range<usize>,
+        depth: usize,
+        found: &mut Vec<(Range<usize>, Option<Highlight>)>,
+    ) {
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(range.clone());
-        let mut captures = cursor.captures(self.query, tree.root_node(), BufferText(text));
-        // Each node's first capture that colours anything, in the order the
+        let mut captures =
+            cursor.captures(&compiled.highlights, tree.root_node(), BufferText(text));
+        // Each node's first capture that paints anything, in the order the
         // cursor gives them: by position, and for one node by pattern.
-        let mut found: Vec<(Range<usize>, Highlight)> = Vec::new();
         let mut last_node: Option<usize> = None;
         while let Some((m, index)) = captures.next() {
             let Some(capture) = m.captures.get(*index) else {
                 continue;
             };
-            let Some(Some(kind)) = usize::try_from(capture.index)
+            let paint = usize::try_from(capture.index)
                 .ok()
-                .and_then(|i| self.kinds.get(i))
-            else {
-                continue;
+                .and_then(|i| compiled.paints.get(i))
+                .copied()
+                .unwrap_or(Paint::Skip);
+            let kind = match paint {
+                Paint::Kind(kind) => Some(kind),
+                Paint::Plain => None,
+                Paint::Skip => continue,
             };
             let node = capture.node;
             if last_node == Some(node.id()) {
                 continue;
             }
             last_node = Some(node.id());
-            found.push((node.byte_range(), *kind));
+            found.push((node.byte_range(), kind));
         }
-        flatten(found, &range)
+        if depth >= MAX_INJECTION_DEPTH {
+            return;
+        }
+        let Some(injections) = compiled.injections.as_ref() else {
+            return;
+        };
+        for (language, ranges) in injections_in(injections, tree, text, range.clone()) {
+            let (Some(first), Some(last)) = (ranges.first(), ranges.last()) else {
+                continue;
+            };
+            let within = range.start.max(first.start_byte)..range.end.min(last.end_byte);
+            if within.is_empty() {
+                continue;
+            }
+            let Ok(inner) = language.compiled() else {
+                continue;
+            };
+            let Some(sub) = self.injected_tree(language, &ranges, text) else {
+                continue;
+            };
+            self.collect(inner, &sub, text, within, depth.saturating_add(1), found);
+        }
+    }
+
+    /// The tree of `ranges` of `text` in `language`: parsed once for each
+    /// revision of the text, within [`INJECTION_BUDGET`].
+    fn injected_tree(
+        &self,
+        language: &'static Language,
+        ranges: &[tree_sitter::Range],
+        text: &TextBuffer,
+    ) -> Option<Tree> {
+        let mut cache = self.injected.try_borrow_mut().ok()?;
+        if cache.revision != text.revision() {
+            cache.trees.clear();
+            cache.revision = text.revision();
+        }
+        let key = (
+            language.index,
+            ranges
+                .iter()
+                .map(|r| (r.start_byte, r.end_byte))
+                .collect::<Vec<_>>(),
+        );
+        if let Some(tree) = cache.trees.get(&key) {
+            return tree.clone();
+        }
+        let bytes: usize = ranges
+            .iter()
+            .map(|r| r.end_byte.saturating_sub(r.start_byte))
+            .fold(0, usize::saturating_add);
+        let tree = if bytes > MAX_INJECTED_BYTES {
+            None
+        } else {
+            let parser = cache.parsers.entry(language.index).or_insert_with(|| {
+                let mut parser = Parser::new();
+                // A grammar the runtime refuses leaves the parser without a
+                // language, and it then parses nothing: nothing is coloured.
+                let _ = parser.set_language(&language.ts_language());
+                parser
+            });
+            if parser.set_included_ranges(ranges).is_err() {
+                None
+            } else {
+                let deadline = Instant::now().checked_add(INJECTION_BUDGET);
+                let mut late = |_: &ParseState| deadline.is_none_or(|d| Instant::now() >= d);
+                let parsed = parser.parse_with_options(
+                    &mut |byte: usize, _: Point| text.bytes_from(byte),
+                    None,
+                    Some(ParseOptions::new().progress_callback(&mut late)),
+                );
+                if parsed.is_none() {
+                    parser.reset();
+                }
+                parsed
+            }
+        };
+        cache.trees.insert(key, tree.clone());
+        tree
+    }
+}
+
+/// The stretches `injections` finds in `tree` over `range`: each with its
+/// language and the ranges its text is in. A match with
+/// `injection.combined` is one document with every other match of its
+/// pattern and language (among those in `range`).
+fn injections_in(
+    injections: &Injections,
+    tree: &Tree,
+    text: &TextBuffer,
+    range: Range<usize>,
+) -> Vec<(&'static Language, Vec<tree_sitter::Range>)> {
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(range);
+    let mut matches = cursor.matches(&injections.query, tree.root_node(), BufferText(text));
+    let mut out: Vec<(&'static Language, Vec<tree_sitter::Range>)> = Vec::new();
+    let mut combined: Vec<(usize, &'static Language, Vec<tree_sitter::Range>)> = Vec::new();
+    while let Some(m) = matches.next() {
+        let settings = injections.query.property_settings(m.pattern_index);
+        let setting = |key: &str| settings.iter().find(|p| &*p.key == key);
+        let mut name: Option<String> = setting("injection.language")
+            .and_then(|p| p.value.as_deref())
+            .map(str::to_owned);
+        let include_children = setting("injection.include-children").is_some();
+        let is_combined = setting("injection.combined").is_some();
+        let mut ranges = Vec::new();
+        for capture in m.captures {
+            if Some(capture.index) == injections.language {
+                name = text.slice(capture.node.byte_range()).ok();
+            } else if Some(capture.index) == injections.content {
+                content_ranges(capture.node, include_children, &mut ranges);
+            }
+        }
+        let Some(language) = name.as_deref().and_then(Language::for_injection) else {
+            continue;
+        };
+        if ranges.is_empty() {
+            continue;
+        }
+        if is_combined {
+            match combined
+                .iter_mut()
+                .find(|(pattern, l, _)| *pattern == m.pattern_index && *l == language)
+            {
+                Some((_, _, all)) => all.extend(ranges),
+                None => combined.push((m.pattern_index, language, ranges)),
+            }
+        } else {
+            out.push((language, ranges));
+        }
+    }
+    for (_, language, mut ranges) in combined {
+        ranges.sort_by_key(|r| r.start_byte);
+        out.push((language, ranges));
+    }
+    out
+}
+
+/// The ranges of `node`'s text an injection covers: all of it with
+/// `injection.include-children`, otherwise the text between its children.
+fn content_ranges(node: Node<'_>, include_children: bool, out: &mut Vec<tree_sitter::Range>) {
+    let range = |start_byte: usize, end_byte: usize, start_point: Point, end_point: Point| {
+        tree_sitter::Range {
+            start_byte,
+            end_byte,
+            start_point,
+            end_point,
+        }
+    };
+    if include_children || node.child_count() == 0 {
+        out.push(node.range());
+        return;
+    }
+    let (mut at, mut at_point) = (node.start_byte(), node.start_position());
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.start_byte() > at {
+            out.push(range(
+                at,
+                child.start_byte(),
+                at_point,
+                child.start_position(),
+            ));
+        }
+        at = child.end_byte();
+        at_point = child.end_position();
+    }
+    if node.end_byte() > at {
+        out.push(range(at, node.end_byte(), at_point, node.end_position()));
     }
 }
 
 /// Nested spans made flat: sorted by start, the outer before the inner, the
-/// inner winning where it is -- and cut to `within`.
-fn flatten(mut spans: Vec<(Range<usize>, Highlight)>, within: &Range<usize>) -> Vec<HighlightSpan> {
+/// inner winning where it is -- and cut to `within`. A span of no kind
+/// paints plainly: nothing is emitted for it, and what it covers shows the
+/// text's own ink.
+fn flatten(
+    mut spans: Vec<(Range<usize>, Option<Highlight>)>,
+    within: &Range<usize>,
+) -> Vec<HighlightSpan> {
     // Stable: spans the same (a node and its only child) keep the cursor's
     // order, which puts the parent first -- so the child wins, as it would
     // nested.
     spans.sort_by_key(|(r, _)| (r.start, core::cmp::Reverse(r.end)));
     let mut out: Vec<HighlightSpan> = Vec::new();
-    let mut emit = |from: usize, to: usize, kind: Highlight| {
+    let mut emit = |from: usize, to: usize, kind: Option<Highlight>| {
         let (from, to) = (from.max(within.start), to.min(within.end));
-        if to <= from {
+        let Some(kind) = kind.filter(|_| to > from) else {
             return;
-        }
+        };
         match out.last_mut() {
             Some(last) if last.range.end == from && last.highlight == kind => last.range.end = to,
             _ => out.push(HighlightSpan {
@@ -302,7 +535,7 @@ fn flatten(mut spans: Vec<(Range<usize>, Highlight)>, within: &Range<usize>) -> 
         }
     };
     // The spans open at `pos`, innermost last: (end, kind).
-    let mut open: Vec<(usize, Highlight)> = Vec::new();
+    let mut open: Vec<(usize, Option<Highlight>)> = Vec::new();
     let mut pos = 0usize;
     for (range, kind) in spans {
         // Close what ends before this starts, colouring up to each end.
@@ -511,16 +744,17 @@ mod tests {
     }
 
     /// **Flattening**: nested spans become flat ones, the inner winning, cut
-    /// to the range asked for; neighbours of one kind merge.
+    /// to the range asked for; neighbours of one kind merge; a plain span
+    /// (`@none`) leaves a gap its enclosing colour does not show through.
     #[test]
     fn nested_spans_are_flattened() {
         use Highlight::{Escape, Keyword, String as Str};
         let flat = flatten(
             vec![
-                (0..10, Str),
-                (3..5, Escape),
-                (5..7, Escape),
-                (12..14, Keyword),
+                (0..10, Some(Str)),
+                (3..5, Some(Escape)),
+                (5..7, Some(Escape)),
+                (12..14, Some(Keyword)),
             ],
             &(2..13),
         );
@@ -531,9 +765,54 @@ mod tests {
             [(2..3, Str), (3..7, Escape), (7..10, Str), (12..13, Keyword)]
         );
         // A child as wide as its parent wins.
-        let same = flatten(vec![(0..4, Str), (0..4, Keyword)], &(0..4));
+        let same = flatten(vec![(0..4, Some(Str)), (0..4, Some(Keyword))], &(0..4));
         assert_eq!(same.len(), 1);
         assert_eq!(same[0].highlight, Keyword);
         assert!(flatten(Vec::new(), &(0..9)).is_empty());
+        // Plain inside a string: the string on either side, nothing within;
+        // and a keyword inside the plain part is still a keyword.
+        let plain = flatten(
+            vec![(0..10, Some(Str)), (2..8, None), (4..6, Some(Keyword))],
+            &(0..10),
+        );
+        let got: Vec<(Range<usize>, Highlight)> =
+            plain.into_iter().map(|s| (s.range, s.highlight)).collect();
+        assert_eq!(got, [(0..2, Str), (4..6, Keyword), (8..10, Str)]);
+    }
+
+    /// **A stretch in another language is coloured as that language**: a
+    /// `macro_rules!` body is a token tree to the Rust grammar, where `let`
+    /// is only a word, and Rust's injection query says it is Rust -- parsed
+    /// as Rust, `let` is a keyword and `1` a number.
+    #[test]
+    fn an_injected_stretch_is_coloured_as_its_language() {
+        let text = "macro_rules! m { () => { let x = 1; } }\n";
+        let got = spans(text, "rust");
+        let at = |s: &str| got.iter().find(|(t, _)| t == s).map(|(_, h)| *h);
+        assert_eq!(at("let"), Some(Highlight::Keyword), "{got:?}");
+        assert_eq!(at("1"), Some(Highlight::Constant), "{got:?}");
+        // The parse is kept for the text as it is: asking again parses
+        // nothing more.
+        let buffer = TextBuffer::from_text(text);
+        let mut h = Language::named("rust").unwrap().highlighter().unwrap();
+        h.reset(&buffer);
+        while h.work(&buffer, Duration::from_secs(5)) {}
+        let first = h.highlights(&buffer, 0..buffer.len());
+        let parses = h.injected.borrow().trees.len();
+        assert!(parses > 0, "nothing was injected");
+        assert_eq!(h.highlights(&buffer, 0..buffer.len()), first);
+        assert_eq!(h.injected.borrow().trees.len(), parses);
+    }
+
+    /// **A language another's text names is found by name or alias**, in
+    /// any case, with a fence's decorations off.
+    #[test]
+    fn an_injected_language_is_found_by_name_or_alias() {
+        let found = |n: &str| Language::for_injection(n).map(Language::name);
+        assert_eq!(found("rust"), Some("Rust"));
+        assert_eq!(found("RS"), Some("Rust"));
+        assert_eq!(found(" py "), Some("Python"));
+        assert_eq!(found("{.yml}"), Some("YAML"));
+        assert_eq!(found("cobol"), None);
     }
 }

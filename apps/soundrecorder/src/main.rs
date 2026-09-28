@@ -24,8 +24,6 @@
 //! recording whose markers are being saved -- and not if another program has
 //! changed it since it was opened.
 
-#![allow(dead_code, clippy::too_many_arguments, clippy::vec_init_then_push)]
-
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -1065,19 +1063,30 @@ impl TrimRegion {
 // ============================================================================
 
 /// Simple noise gate that suppresses audio below a threshold.
+///
+/// It opens and shuts over [`attack_samples`](Self::attack_samples) rather
+/// than between one sample and the next. A signal cut in from silence at
+/// full level, or cut off from full level to silence, is a step, and a step
+/// is heard as a click -- at every edge of every word. The attack was always
+/// here and always documented, and nothing read it: the gate opened in one
+/// sample and shut in one.
 pub struct NoiseGate {
     /// Threshold level (0.0..1.0). Samples below this are zeroed.
     pub threshold: f32,
     /// Whether the gate is currently enabled.
     pub enabled: bool,
-    /// Whether the gate is currently open (signal is above threshold).
+    /// Whether the gate is open at all -- letting anything through.
     pub is_open: bool,
-    /// Attack time in samples (how quickly the gate opens).
+    /// How many samples the gate takes to open fully, and to shut.
     attack_samples: u32,
-    /// Release time in samples (how long to keep open after signal drops).
+    /// How long it stays open after the signal drops below the threshold,
+    /// in samples, before it starts to shut.
     release_samples: u32,
-    /// Counter for release timing.
+    /// Samples left of that hold.
     release_counter: u32,
+    /// How far open the gate is, in samples of its attack: none shut, all of
+    /// them fully open.
+    level: u32,
 }
 
 impl NoiseGate {
@@ -1086,10 +1095,34 @@ impl NoiseGate {
             threshold: threshold.clamp(0.0, 1.0),
             enabled: true,
             is_open: false,
-            attack_samples: 64,
+            attack_samples: 64,    // ~1.3ms at 48kHz
             release_samples: 4800, // ~100ms at 48kHz
             release_counter: 0,
+            level: 0,
         }
+    }
+
+    /// The level at which the gate is fully open. An attack of none opens
+    /// and shuts at once, rather than never opening.
+    fn fully_open(&self) -> u32 {
+        self.attack_samples.max(1)
+    }
+
+    /// `sample` through the gate as open as it is: itself when fully open,
+    /// silence when shut, in proportion between.
+    fn through(&self, sample: i16) -> i16 {
+        let full = self.fully_open();
+        if self.level >= full {
+            return sample;
+        }
+        i64::from(sample)
+            .checked_mul(i64::from(self.level))
+            .and_then(|scaled| scaled.checked_div(i64::from(full)))
+            .and_then(|scaled| i16::try_from(scaled).ok())
+            // Unreachable: the level is below full, so the product divided
+            // by full is smaller than the sample itself. Silence is the
+            // answer that cannot be heard as a fault.
+            .unwrap_or(0)
     }
 
     /// Set the threshold (0.0..1.0).
@@ -1110,29 +1143,36 @@ impl NoiseGate {
         for sample in samples.iter_mut() {
             let abs_sample = sample.saturating_abs();
 
-            if abs_sample > threshold_i16 {
-                // Signal above threshold: open the gate
-                self.is_open = true;
+            let wanted_open = if abs_sample > threshold_i16 {
+                // Signal above threshold: open, and hold open from here.
                 self.release_counter = self.release_samples;
-                any_passed = true;
+                true
             } else if self.release_counter > 0 {
-                // In release period: keep gate open
+                // In the hold: stay open.
                 self.release_counter = self.release_counter.saturating_sub(1);
-                any_passed = true;
+                true
             } else {
-                // Gate closed: zero the sample
-                self.is_open = false;
-                *sample = 0;
-            }
+                false
+            };
+            // One sample's step toward open or shut.
+            self.level = if wanted_open {
+                self.level.saturating_add(1).min(self.fully_open())
+            } else {
+                self.level.saturating_sub(1)
+            };
+            *sample = self.through(*sample);
+            any_passed |= self.level > 0;
         }
+        self.is_open = self.level > 0;
 
         any_passed
     }
 
-    /// Reset gate state.
+    /// Reset gate state: shut at once, with nothing held.
     pub fn reset(&mut self) {
         self.is_open = false;
         self.release_counter = 0;
+        self.level = 0;
     }
 
     /// Render the noise gate threshold indicator.
@@ -4496,10 +4536,62 @@ mod tests {
     #[test]
     fn test_noise_gate_reset() {
         let mut ng = NoiseGate::new(0.01);
-        let mut samples = [20000i16];
+        let mut samples = [20000i16; 64];
         ng.process(&mut samples);
         assert!(ng.is_open);
         ng.reset();
+        assert!(!ng.is_open);
+        // Shut, not merely said to be: the next signal opens it from nothing.
+        let mut samples = [20000i16];
+        ng.process(&mut samples);
+        assert!(samples[0] < 1_000, "it was still open: {}", samples[0]);
+    }
+
+    /// **The gate opens over its attack, not in one sample**: a signal cut
+    /// in from silence at full level is a step, heard as a click.
+    #[test]
+    fn test_noise_gate_opens_over_its_attack() {
+        let mut ng = NoiseGate::new(0.01);
+        let mut samples = [20_000_i16; 128];
+        ng.process(&mut samples);
+        assert!(
+            samples[0] > 0 && samples[0] < 1_000,
+            "it opened at once: {}",
+            samples[0]
+        );
+        assert!(
+            samples.windows(2).all(|w| w[0] <= w[1]),
+            "it did not open steadily"
+        );
+        assert_eq!(samples[63], 20_000, "not fully open after its attack");
+        assert!(samples[64..].iter().all(|&s| s == 20_000));
+    }
+
+    /// **And shuts over the same time once its hold is over**, the tail of
+    /// a word passed whole through the hold and faded rather than cut.
+    #[test]
+    fn test_noise_gate_shuts_over_its_attack_after_its_hold() {
+        let mut ng = NoiseGate::new(0.01);
+        let mut loud = [20_000_i16; 64];
+        ng.process(&mut loud);
+        // Below the threshold (327), but not silence: the tail of a word.
+        let mut quiet = [200_i16; 4_800 + 128];
+        ng.process(&mut quiet);
+        assert!(
+            quiet[..4_800].iter().all(|&s| s == 200),
+            "the hold cut the tail"
+        );
+        let fade = &quiet[4_800..4_864];
+        assert!(
+            fade[0] > 150 && fade[0] < 200,
+            "it shut at once: {}",
+            fade[0]
+        );
+        assert!(
+            fade.windows(2).all(|w| w[0] >= w[1]),
+            "it did not shut steadily"
+        );
+        assert!(quiet[4_864..].iter().all(|&s| s == 0), "it did not shut");
         assert!(!ng.is_open);
     }
 
@@ -5050,7 +5142,8 @@ mod tests {
             std::fs::write(path, b"somebody's").unwrap();
         }
         app.handle_event(&key(Key::Space));
-        // Loud enough to open the noise gate, which zeroes what is quieter.
+        // Loud enough to open the noise gate, which zeroes what is quieter
+        // and fades a take in over its attack.
         let samples: Vec<i16> = (0..4_410).map(|i| 1_000 + (i % 300) as i16).collect();
         app.process_samples(&samples);
         app.handle_event(&key(Key::M));
@@ -5075,9 +5168,21 @@ mod tests {
             .chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect();
-        let mut both = samples.clone();
-        both.extend_from_slice(&samples);
-        assert_eq!(stored, both, "the take was not stored as captured");
+        let mut captured = samples.clone();
+        captured.extend_from_slice(&samples);
+        // What the gate let through, as a fresh gate lets it: the take
+        // fades in over the attack, and is stored as captured after it.
+        let mut through = captured.clone();
+        NoiseGate::new(app.noise_gate.threshold).process(&mut through);
+        assert_eq!(
+            stored, through,
+            "the take was not stored as the gate passed it"
+        );
+        assert_eq!(
+            stored[64..],
+            captured[64..],
+            "past the gate's attack the take is not as captured"
+        );
         let cues = wavpcm::cues(&bytes).unwrap();
         assert_eq!(
             cues,

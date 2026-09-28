@@ -18,17 +18,12 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![allow(dead_code, clippy::too_many_arguments)]
-
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
-#[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-#[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-#[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -76,7 +71,6 @@ const BUTTON_HEIGHT: f32 = 34.0;
 const BUTTON_SPACING: f32 = 8.0;
 const PADDING: f32 = 12.0;
 const SECTION_SPACING: f32 = 16.0;
-const ICON_SIZE: f32 = 16.0;
 const CORNER_RADIUS: f32 = 6.0;
 const SMALL_RADIUS: f32 = 4.0;
 

@@ -207,6 +207,43 @@ MUTATIONS = [
         "                    false,",
         ["the_list_scrolls_and_follows_the_keys"],
     ),
+    # -- the noise gate opens and shuts over its attack (2026-09-28) ----------------------------------
+    (
+        "the gate opens in one sample",
+        "                self.level.saturating_add(1).min(self.fully_open())",
+        "                self.fully_open()",
+        ["test_noise_gate_opens_over_its_attack"],
+    ),
+    (
+        "the gate shuts in one sample",
+        "            } else {\n                self.level.saturating_sub(1)\n            };",
+        "            } else {\n                0\n            };",
+        ["test_noise_gate_shuts_over_its_attack_after_its_hold"],
+    ),
+    (
+        "the gate opens in proportion to nothing",
+        "            .checked_mul(i64::from(self.level))",
+        "            .checked_mul(i64::from(full))",
+        ["test_noise_gate_opens_over_its_attack"],
+    ),
+    (
+        "the hold is not held",
+        "                self.release_counter = self.release_samples;\n                true",
+        "                self.release_counter = 0;\n                true",
+        ["test_noise_gate_shuts_over_its_attack_after_its_hold"],
+    ),
+    (
+        "a reset gate is still open",
+        "        self.release_counter = 0;\n        self.level = 0;",
+        "        self.release_counter = 0;",
+        ["test_noise_gate_reset"],
+    ),
+    (
+        "an open gate says it is shut",
+        "        self.is_open = self.level > 0;",
+        "        self.is_open = self.level == 0;",
+        ["test_noise_gate_loud_passes"],
+    ),
 ]
 
 if __name__ == "__main__":

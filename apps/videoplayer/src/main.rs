@@ -2214,8 +2214,11 @@ pub struct PlayerPreferences {
     pub default_volume: u32,
     pub hardware_decode: bool,
     pub subtitle_auto_load: bool,
-    pub subtitle_preferred_lang: Option<String>,
-    pub audio_preferred_lang: Option<String>,
+    /// The subtitle track a file opens with, when it has one in this
+    /// language; `None` for the file's own choice.
+    pub subtitle_preferred_lang: Option<Language>,
+    /// The sound track a file opens with, likewise.
+    pub audio_preferred_lang: Option<Language>,
     pub on_finish: OnFinishAction,
     pub osd_duration_ms: u64,
     pub seek_small_step: u64,
@@ -2265,7 +2268,12 @@ impl Default for PlayerPreferences {
             default_volume: 100,
             hardware_decode: true,
             subtitle_auto_load: true,
-            subtitle_preferred_lang: Some("eng".to_string()),
+            // The file's own choice for both. Subtitles were "eng" here when
+            // nothing read it; now that something does, English would turn on
+            // the subtitles of every film that carries an English track --
+            // which is what a user who has not asked for subtitles least
+            // expects, and why players ship with no preference set.
+            subtitle_preferred_lang: None,
             audio_preferred_lang: None,
             on_finish: OnFinishAction::PlayNext,
             osd_duration_ms: 2000,
@@ -2296,17 +2304,142 @@ pub enum SettingRow {
     RememberVolume,
     HardwareDecode,
     SubtitleAutoLoad,
+    AudioLanguage,
+    SubtitleLanguage,
     OnFinish,
     Deinterlace,
 }
 
+/// A language the Settings tab's language rows offer.
+///
+/// A file names a track's language one of three ways, and a choice has to
+/// match all three: MP4 headers carry ISO 639-2's terminology code (`deu`),
+/// Matroska's older element its bibliographic code where the two differ
+/// (`ger`), and Matroska's newer element a BCP 47 tag, whose language is the
+/// two-letter ISO 639-1 code wherever there is one (`de-AT`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Language {
+    /// ISO 639-2/T.
+    pub code: &'static str,
+    /// ISO 639-2/B -- the same as `code` for most languages.
+    pub bibliographic: &'static str,
+    /// ISO 639-1: a BCP 47 tag's language.
+    pub two_letter: &'static str,
+    /// What the row shows.
+    pub name: &'static str,
+}
+
+impl Language {
+    const fn new(
+        code: &'static str,
+        bibliographic: &'static str,
+        two_letter: &'static str,
+        name: &'static str,
+    ) -> Self {
+        Self {
+            code,
+            bibliographic,
+            two_letter,
+            name,
+        }
+    }
+
+    /// Whether a track the file tags `tag` is in this language.
+    #[must_use]
+    pub fn tags(self, tag: &str) -> bool {
+        let primary = tag.split(['-', '_']).next().unwrap_or(tag);
+        [self.code, self.bibliographic, self.two_letter]
+            .iter()
+            .any(|c| primary.eq_ignore_ascii_case(c))
+    }
+
+    /// The language after `current` in [`LANGUAGES`]: the first after the
+    /// file's own choice (`None`), and `None` again after the last.
+    #[must_use]
+    pub fn after(current: Option<Self>) -> Option<Self> {
+        let Some(current) = current else {
+            return LANGUAGES.first().copied();
+        };
+        let at = LANGUAGES.iter().position(|l| *l == current)?;
+        LANGUAGES.get(at.saturating_add(1)).copied()
+    }
+}
+
+/// The languages the rows step through, after "File default": the most
+/// spoken, and the most often found on a film's tracks.
+pub const LANGUAGES: [Language; 16] = [
+    Language::new("eng", "eng", "en", "English"),
+    Language::new("spa", "spa", "es", "Spanish"),
+    Language::new("fra", "fre", "fr", "French"),
+    Language::new("deu", "ger", "de", "German"),
+    Language::new("ita", "ita", "it", "Italian"),
+    Language::new("por", "por", "pt", "Portuguese"),
+    Language::new("rus", "rus", "ru", "Russian"),
+    Language::new("jpn", "jpn", "ja", "Japanese"),
+    Language::new("zho", "chi", "zh", "Chinese"),
+    Language::new("kor", "kor", "ko", "Korean"),
+    Language::new("nld", "dut", "nl", "Dutch"),
+    Language::new("pol", "pol", "pl", "Polish"),
+    Language::new("swe", "swe", "sv", "Swedish"),
+    Language::new("tur", "tur", "tr", "Turkish"),
+    Language::new("ara", "ara", "ar", "Arabic"),
+    Language::new("hin", "hin", "hi", "Hindi"),
+];
+
+/// How a language row reads.
+fn language_label(language: Option<Language>) -> &'static str {
+    language.map_or("File default", |l| l.name)
+}
+
+/// Whether `tag` -- a track's language, if the file gives one -- is `want`.
+fn tagged(tag: Option<&str>, want: Option<Language>) -> bool {
+    match (tag, want) {
+        (Some(tag), Some(want)) => want.tags(tag),
+        _ => false,
+    }
+}
+
+/// The sound track `file` opens with: one in the preferred language -- its
+/// default one first, for a file that also carries a commentary in it -- or
+/// else the file's own default.
+fn opening_audio(file: &MediaFile, want: Option<Language>) -> Option<u32> {
+    let wanted = |a: &&AudioStream| tagged(a.language.as_deref(), want);
+    file.audio_streams
+        .iter()
+        .filter(wanted)
+        .find(|a| a.is_default)
+        .or_else(|| file.audio_streams.iter().find(wanted))
+        .or_else(|| file.primary_audio())
+        .map(|a| a.index)
+}
+
+/// The subtitle track `file` opens with: one in the preferred language -- a
+/// full one before a forced one, which carries only the lines spoken in some
+/// other language -- or else the file's own forced or default track.
+fn opening_subtitle(file: &MediaFile, want: Option<Language>) -> Option<u32> {
+    let wanted = |s: &&SubtitleStream| tagged(s.language.as_deref(), want);
+    file.subtitle_streams
+        .iter()
+        .filter(wanted)
+        .find(|s| !s.is_forced)
+        .or_else(|| file.subtitle_streams.iter().find(wanted))
+        .or_else(|| {
+            file.subtitle_streams
+                .iter()
+                .find(|s| s.is_forced || s.is_default)
+        })
+        .map(|s| s.index)
+}
+
 impl SettingRow {
     /// Every row, in the order the panel draws them.
-    pub const ALL: [SettingRow; 6] = [
+    pub const ALL: [SettingRow; 8] = [
         Self::ResumePlayback,
         Self::RememberVolume,
         Self::HardwareDecode,
         Self::SubtitleAutoLoad,
+        Self::AudioLanguage,
+        Self::SubtitleLanguage,
         Self::OnFinish,
         Self::Deinterlace,
     ];
@@ -2318,6 +2451,8 @@ impl SettingRow {
             Self::RememberVolume => "Remember Volume",
             Self::HardwareDecode => "Hardware Decode",
             Self::SubtitleAutoLoad => "Auto-load Subtitles",
+            Self::AudioLanguage => "Audio Language",
+            Self::SubtitleLanguage => "Subtitle Language",
             Self::OnFinish => "On Finish",
             Self::Deinterlace => "Deinterlace",
         }
@@ -2333,6 +2468,8 @@ impl SettingRow {
             Self::RememberVolume => on_off(prefs.remember_volume),
             Self::HardwareDecode => on_off(prefs.hardware_decode),
             Self::SubtitleAutoLoad => on_off(prefs.subtitle_auto_load),
+            Self::AudioLanguage => language_label(prefs.audio_preferred_lang),
+            Self::SubtitleLanguage => language_label(prefs.subtitle_preferred_lang),
             Self::OnFinish => prefs.on_finish.label(),
             Self::Deinterlace => prefs.deinterlace.label(),
         }
@@ -2345,6 +2482,12 @@ impl SettingRow {
             Self::RememberVolume => prefs.remember_volume = !prefs.remember_volume,
             Self::HardwareDecode => prefs.hardware_decode = !prefs.hardware_decode,
             Self::SubtitleAutoLoad => prefs.subtitle_auto_load = !prefs.subtitle_auto_load,
+            Self::AudioLanguage => {
+                prefs.audio_preferred_lang = Language::after(prefs.audio_preferred_lang);
+            }
+            Self::SubtitleLanguage => {
+                prefs.subtitle_preferred_lang = Language::after(prefs.subtitle_preferred_lang);
+            }
             Self::OnFinish => prefs.on_finish = prefs.on_finish.next(),
             Self::Deinterlace => prefs.deinterlace = prefs.deinterlace.next(),
         }
@@ -2862,16 +3005,14 @@ impl VideoPlayerApp {
         }
     }
 
-    /// Make `file` the one on screen: at its start, stopped, its own default
-    /// sound and subtitles chosen, and nothing of the last file's -- its
-    /// chapters or loaded subtitles -- carried over.
+    /// Make `file` the one on screen: at its start, stopped, the sound and
+    /// subtitles in the preferred languages chosen (the file's own where it
+    /// has none in them), and nothing of the last file's -- its chapters or
+    /// loaded subtitles -- carried over.
     fn show_file(&mut self, file: MediaFile) {
-        self.selected_audio_track = file.primary_audio().map(|a| a.index);
-        self.selected_subtitle_track = file
-            .subtitle_streams
-            .iter()
-            .find(|s| s.is_forced || s.is_default)
-            .map(|s| s.index);
+        self.selected_audio_track = opening_audio(&file, self.preferences.audio_preferred_lang);
+        self.selected_subtitle_track =
+            opening_subtitle(&file, self.preferences.subtitle_preferred_lang);
         self.current_file = Some(file);
         self.position = Duration::ZERO;
         self.state = PlaybackState::Stopped;
@@ -4908,9 +5049,9 @@ impl VideoPlayerApp {
             });
 
             let value_color = if value == "On" {
-                self.palette.green
+                self.palette.ink(self.palette.green)
             } else if value == "Off" {
-                self.palette.red
+                self.palette.ink(self.palette.red)
             } else {
                 self.palette.subtext1
             };
@@ -4958,32 +5099,6 @@ impl VideoPlayerApp {
         cmds.push(RenderCommand::Text {
             x: label_x,
             y: extra_y + 52.0,
-            text: "Preferred Languages".to_string(),
-            font_size: 14.0,
-            color: self.palette.ink(self.palette.blue),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: label_x + 8.0,
-            y: extra_y + 76.0,
-            text: format!(
-                "Subtitle: {} | Audio: {}",
-                prefs.subtitle_preferred_lang.as_deref().unwrap_or("Any"),
-                prefs.audio_preferred_lang.as_deref().unwrap_or("Any")
-            ),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(400.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: label_x,
-            y: extra_y + 104.0,
             text: "Screenshots".to_string(),
             font_size: 14.0,
             color: self.palette.ink(self.palette.blue),
@@ -4994,7 +5109,7 @@ impl VideoPlayerApp {
 
         cmds.push(RenderCommand::Text {
             x: label_x + 8.0,
-            y: extra_y + 128.0,
+            y: extra_y + 76.0,
             text: format!(
                 "Format: {} | Quality: {}% | Include subs: {}",
                 prefs.screenshot_config.format.extension(),
@@ -5014,7 +5129,7 @@ impl VideoPlayerApp {
 
         cmds.push(RenderCommand::Text {
             x: label_x + 8.0,
-            y: extra_y + 144.0,
+            y: extra_y + 92.0,
             text: NO_SCREENSHOTS.to_owned(),
             font_size: 11.0,
             color: self.palette.subtext0,
@@ -7099,8 +7214,9 @@ as many times as before",
         for row in SettingRow::ALL {
             let mut prefs = PlayerPreferences::default();
             let start = row.value(&prefs).to_string();
-            // Eight presses passes the longest list here (five) and lands
-            // back only if the cycle wraps.
+            // Forty presses passes the longest list here (the languages,
+            // seventeen with the file's own) and lands back only if the
+            // cycle wraps.
             let mut seen_other = false;
             for _ in 0..40 {
                 row.cycle(&mut prefs);
@@ -8165,5 +8281,145 @@ as many times as before",
             });
             assert!(!crowded, "{line:?} shares its row with other text");
         }
+    }
+
+    // == The language preferences (2026-09-27) ===================================
+
+    fn coded_audio(index: u32, language: &str, is_default: bool) -> AudioStream {
+        AudioStream {
+            index,
+            codec: Codec::Aac,
+            sample_rate: None,
+            channels: None,
+            bit_rate: None,
+            language: Some(language.to_string()),
+            title: None,
+            is_default,
+        }
+    }
+
+    fn coded_subtitle(
+        index: u32,
+        language: &str,
+        is_default: bool,
+        is_forced: bool,
+    ) -> SubtitleStream {
+        SubtitleStream {
+            index,
+            codec: Codec::Text,
+            language: Some(language.to_string()),
+            title: None,
+            is_default,
+            is_forced,
+        }
+    }
+
+    /// A file tagged the way a real one is: codes, not names; a commentary
+    /// in the second language before its main track; that language's forced
+    /// subtitles before its full ones, the full ones tagged BCP 47.
+    fn coded_file() -> MediaFile {
+        let mut file = sample_media_file();
+        file.audio_streams = vec![
+            coded_audio(1, "eng", true),
+            coded_audio(2, "spa", false),
+            coded_audio(3, "spa", true),
+        ];
+        file.subtitle_streams = vec![
+            coded_subtitle(7, "spa", false, true),
+            coded_subtitle(5, "es-MX", false, false),
+            coded_subtitle(4, "eng", true, false),
+        ];
+        file
+    }
+
+    fn language(code: &str) -> Language {
+        *LANGUAGES
+            .iter()
+            .find(|l| l.code == code)
+            .expect("a language the rows offer")
+    }
+
+    /// The tracks `coded_file` opens with under these preferences.
+    fn opened_with(audio: Option<&str>, subtitle: Option<&str>) -> (Option<u32>, Option<u32>) {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.preferences.audio_preferred_lang = audio.map(language);
+        app.preferences.subtitle_preferred_lang = subtitle.map(language);
+        app.show_file(coded_file());
+        (app.selected_audio_track, app.selected_subtitle_track)
+    }
+
+    #[test]
+    fn the_language_rows_step_through_the_languages_and_back_to_the_files_own() {
+        let mut prefs = PlayerPreferences::default();
+        assert_eq!(SettingRow::AudioLanguage.value(&prefs), "File default");
+        SettingRow::AudioLanguage.cycle(&mut prefs);
+        assert_eq!(SettingRow::AudioLanguage.value(&prefs), "English");
+        for _ in 1..LANGUAGES.len() {
+            SettingRow::AudioLanguage.cycle(&mut prefs);
+        }
+        assert_eq!(SettingRow::AudioLanguage.value(&prefs), "Hindi");
+        SettingRow::AudioLanguage.cycle(&mut prefs);
+        assert_eq!(
+            prefs.audio_preferred_lang, None,
+            "the last language did not come back round"
+        );
+        // The subtitle row is its own.
+        SettingRow::SubtitleLanguage.cycle(&mut prefs);
+        assert_eq!(SettingRow::SubtitleLanguage.value(&prefs), "English");
+        assert_eq!(prefs.audio_preferred_lang, None);
+    }
+
+    #[test]
+    fn a_track_is_in_a_language_by_any_of_its_three_spellings() {
+        let german = language("deu");
+        for tag in ["deu", "ger", "de", "DE", "de-AT", "de_CH"] {
+            assert!(german.tags(tag), "{tag} is German");
+        }
+        for tag in ["deutsch", "en", "d", "", "-de"] {
+            assert!(!german.tags(tag), "{tag} is not German");
+        }
+        assert!(
+            language("zho").tags("chi"),
+            "Matroska's bibliographic Chinese"
+        );
+        assert!(
+            language("fra").tags("fre"),
+            "Matroska's bibliographic French"
+        );
+    }
+
+    #[test]
+    fn a_file_opens_with_the_preferred_languages_tracks() {
+        assert_eq!(
+            opened_with(Some("spa"), Some("spa")),
+            (Some(3), Some(5)),
+            "the Spanish default before its commentary, the full subtitles before the forced"
+        );
+        assert_eq!(opened_with(Some("eng"), Some("eng")), (Some(1), Some(4)));
+        // With none in the language, or no preference, the file's own.
+        let own = opened_with(None, None);
+        assert_eq!(own.0, Some(1), "the file's default sound");
+        assert_eq!(opened_with(Some("jpn"), Some("jpn")), own);
+    }
+
+    #[test]
+    fn a_language_chosen_on_the_settings_tab_chooses_the_track_of_the_next_file() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.active_tab = PlayerTab::Settings;
+        let row = SettingRow::ALL
+            .iter()
+            .position(|r| *r == SettingRow::AudioLanguage)
+            .expect("the row is listed");
+        for _ in 0..row {
+            app.handle_event(&press(Key::Down));
+        }
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Enter));
+        assert!(
+            drawn_texts(&app).iter().any(|t| t == "Spanish"),
+            "the panel does not show the language chosen"
+        );
+        app.show_file(coded_file());
+        assert_eq!(app.selected_audio_track, Some(3));
     }
 }

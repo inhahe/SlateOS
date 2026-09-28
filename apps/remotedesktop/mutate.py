@@ -47,6 +47,12 @@ RFB_KEYS = "keys_and_the_pointer_are_sent_as_rfb_says"
 HEXTILE_TEST = "hextile_tiles_are_drawn"
 ZRLE_TEST = "zrle_rectangles_are_drawn_through_one_stream"
 ZRLE_REFUSED = "a_zrle_run_past_its_tile_is_refused"
+FEWER_BITS = "fewer_bits_a_pixel_are_asked_for_and_read_as_full_colour"
+COMPACT = "a_zrle_compact_pixel_is_a_whole_pixel_below_32_bits"
+WIDENS = "every_channel_widens_to_its_full_range"
+PACED = "a_frame_rate_spaces_the_requests"
+PROFILE_DEPTH = "a_vnc_session_asks_for_the_profiles_colour_depth"
+PRESET_SAYS = "a_quality_preset_changed_under_a_live_session_says_when_it_applies"
 
 MAIN = [
     (
@@ -148,6 +154,19 @@ MAIN = [
         "            (true, Some(_)) => 0,",
         [DURATION],
     ),
+    # The profile's picture (2026-09-27).
+    (
+        "a session asks for full colour whatever the profile says",
+        "            bits: profile.display.color_depth.pixel_bits(),",
+        "            bits: rfb::PixelBits::ThirtyTwo,",
+        [PROFILE_DEPTH],
+    ),
+    (
+        "a preset changed under a live session does not say when it applies",
+        "                if self.selected_profile_is_live() {",
+        "                if false {",
+        [PRESET_SAYS],
+    ),
 ]
 
 RFB = [
@@ -221,9 +240,52 @@ RFB = [
     ),
     (
         "the pixels' red and blue are swapped",
-        "                            [b, g, r, _] => u32::from_le_bytes([*b, *g, *r, 0]),",
-        "                            [b, g, r, _] => u32::from_le_bytes([*r, *g, *b, 0]),",
-        [HANDSHAKE, SHOWS],
+        "            Self::ThirtyTwo => return raw & 0x00FF_FFFF,",
+        "            Self::ThirtyTwo => return ((raw & 0xFF) << 16) | (raw & 0xFF00) | ((raw >> 16) & 0xFF),",
+        [HANDSHAKE, SHOWS, WIDENS],
+    ),
+    # The profile's picture (2026-09-27): colour depth and frame rate.
+    (
+        "the pixel format asked for is always 32 bits",
+        "        self.write(&self.bits.set_pixel_format())?;",
+        "        self.write(&PixelBits::ThirtyTwo.set_pixel_format())?;",
+        [FEWER_BITS],
+    ),
+    (
+        "a 16-bit pixel's red is read from the wrong bits",
+        "                widen((raw >> 11) & 31, 31),",
+        "                widen((raw >> 10) & 31, 31),",
+        [FEWER_BITS, WIDENS],
+    ),
+    (
+        "a channel is not widened to its full range",
+        "                .saturating_mul(255)",
+        "                .saturating_mul(248)",
+        [WIDENS],
+    ),
+    (
+        "a Raw rectangle is read at four bytes a pixel",
+        "                    let size = bits.bytes() as u64;",
+        "                    let size = 4_u64;",
+        [FEWER_BITS],
+    ),
+    (
+        "a ZRLE compact pixel is always three bytes",
+        "        for b in p.iter_mut().take(bits.compact_bytes()) {",
+        "        for b in p.iter_mut().take(3) {",
+        [COMPACT],
+    ),
+    (
+        "no frame rate is kept",
+        "        if let (Some(gap), Some(asked)) = (self.gap, self.asked)",
+        "        if let (Some(gap), Some(asked)) = (None::<Duration>, self.asked)",
+        [PACED],
+    ),
+    (
+        "the frame gap is not a second divided by the rate",
+        "        Duration::from_secs(1).checked_div(u32::from(self.frames_per_second))",
+        "        Duration::from_millis(1).checked_div(u32::from(self.frames_per_second))",
+        [PACED],
     ),
 ]
 

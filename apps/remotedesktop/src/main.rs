@@ -210,6 +210,21 @@ impl ColorDepth {
             Self::Bit32 => 32,
         }
     }
+
+    /// What a VNC session asks the server for at this depth. RFB carries 8,
+    /// 16 or 32 bits a pixel; 24 bits of colour travel in 32, so 24 and 32
+    /// ask for the same pixels.
+    ///
+    /// The session asked for 32 bits whatever the profile said: "8-bit
+    /// (256)" on a Low Bandwidth profile cost as much bandwidth as full
+    /// colour, and looked like it.
+    pub fn pixel_bits(self) -> rfb::PixelBits {
+        match self {
+            Self::Bit8 => rfb::PixelBits::Eight,
+            Self::Bit16 => rfb::PixelBits::Sixteen,
+            Self::Bit24 | Self::Bit32 => rfb::PixelBits::ThirtyTwo,
+        }
+    }
 }
 
 /// Quality preset for connection performance tuning.
@@ -1307,10 +1322,17 @@ impl RemoteDesktopApp {
     pub fn connect_vnc(&mut self, profile_index: usize, password: &str) -> Option<u32> {
         let profile = self.profiles.get(profile_index)?;
         let name = profile.display_name.clone();
+        // The profile's colour depth and refresh rate, as the server is
+        // asked for them: fewer bits a pixel, and no more frames a second.
+        let picture = rfb::Picture {
+            bits: profile.display.color_depth.pixel_bits(),
+            frames_per_second: profile.display.refresh_rate,
+        };
         let rfb = match rfb::Session::open(
             &profile.hostname,
             profile.port,
             password,
+            picture,
             self.waker.clone(),
         ) {
             Ok(rfb) => rfb,
@@ -1849,6 +1871,17 @@ impl RemoteDesktopApp {
     // Display Settings
     // ========================================================================
 
+    /// Whether the selected profile has a session open or opening.
+    fn selected_profile_is_live(&self) -> bool {
+        let Some(profile) = self.selected_profile.and_then(|i| self.profiles.get(i)) else {
+            return false;
+        };
+        self.sessions.iter().any(|s| {
+            s.profile_id == profile.id
+                && matches!(s.state, SessionState::Connecting | SessionState::Connected)
+        })
+    }
+
     /// Apply a quality preset to the current display settings.
     pub fn apply_quality_preset(&mut self, preset: QualityPreset) {
         let (depth, rate, scaling) = preset.settings();
@@ -2227,7 +2260,18 @@ impl RemoteDesktopApp {
                     QualityPreset::HighQuality => QualityPreset::Auto,
                 };
                 self.apply_quality_preset(next);
-                self.status_message = Some(format!("quality: {}", next.label()));
+                let (depth, rate, _) = next.settings();
+                let mut said = format!(
+                    "quality: {} -- {} colour, at most {rate} frames a second",
+                    next.label(),
+                    depth.label()
+                );
+                // A session asks for its picture when it connects, so one
+                // already open keeps what it asked for.
+                if self.selected_profile_is_live() {
+                    said.push_str(", from the next connection");
+                }
+                self.status_message = Some(said);
                 EventResult::Consumed
             }
             // Span every remote monitor, or go back to the first one. The
@@ -6406,6 +6450,62 @@ mod tests {
             drawn.iter().any(|c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == screen_image(id))),
             "the screen is not drawn"
         );
+    }
+
+    /// **A session asks for its profile's colour depth and frame rate.** It
+    /// asked for 32 bits a pixel, as fast as the server would send, whatever
+    /// the profile said.
+    #[test]
+    fn a_vnc_session_asks_for_the_profiles_colour_depth() {
+        let (port, heard) = server(handshake_none());
+        let mut app = vnc_app(port);
+        app.profiles[0].display.color_depth = ColorDepth::Bit16;
+        app.connect_vnc(0, "").expect("a session");
+        let mut messages = Vec::new();
+        for _ in 0..4 {
+            messages.push(heard.recv_timeout(Duration::from_secs(5)).expect("heard"));
+        }
+        assert_eq!(
+            messages[3][4..6],
+            [16, 16],
+            "a 16-bit profile did not ask for 16 bits a pixel"
+        );
+        for (depth, bits) in [
+            (ColorDepth::Bit8, rfb::PixelBits::Eight),
+            (ColorDepth::Bit16, rfb::PixelBits::Sixteen),
+            (ColorDepth::Bit24, rfb::PixelBits::ThirtyTwo),
+            (ColorDepth::Bit32, rfb::PixelBits::ThirtyTwo),
+        ] {
+            assert_eq!(depth.pixel_bits(), bits);
+        }
+    }
+
+    #[test]
+    fn a_quality_preset_changed_under_a_live_session_says_when_it_applies() {
+        let press_q = |app: &mut RemoteDesktopApp| {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::Q,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: String::new(),
+            }));
+        };
+        let (port, _heard) = server(handshake_none());
+        let mut app = vnc_app(port);
+        app.selected_profile = Some(0);
+        app.current_view = MainView::Connections;
+        press_q(&mut app);
+        let said = app.status_message.clone().unwrap_or_default();
+        assert!(said.contains("frames a second"), "{said:?}");
+        assert!(
+            !said.contains("next connection"),
+            "no session is open: {said:?}"
+        );
+        app.connect_vnc(0, "").expect("a session");
+        app.current_view = MainView::Connections;
+        press_q(&mut app);
+        let said = app.status_message.clone().unwrap_or_default();
+        assert!(said.contains("from the next connection"), "{said:?}");
     }
 
     /// Keys and the pointer reach the remote machine while its screen is

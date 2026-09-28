@@ -4913,6 +4913,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] posix_madvise: POSIX_MADV_* constants + stub (returns 0); memfd_create stub (ENOSYS)
   - [x] ffs/ffsl/ffsll: find first set bit (trailing_zeros + 1)
   - [x] timegm: inverse of gmtime (**no longer** identical to mktime — `mktime` reads local time, `timegm` UTC; they differ by the zone offset)
+  - [x] time conversions in closed form, as glibc answers (lane D, 2026-09-28): gmtime/localtime/mktime/timegm through tzrules' calendar instead of a loop a year at a time (a large time_t took hours), EOVERFLOW for a year past tm_year, mktime's tm_isdst rules, strftime's %s as mktime, asctime's widths and asctime_r's 26 bytes; replayed against glibc 2.39 for 1,399 calls (posix/tools/oracle/timeconv_harness.py; D-POSIX-TIME-CONVERSIONS-COUNTED-YEAR-BY-YEAR)
   - [x] INET_ADDRSTRLEN/INET6_ADDRSTRLEN/INADDR_BROADCAST/INADDR_NONE constants
   - [x] sched_getaffinity/sched_setaffinity: CPU affinity stubs (single-CPU mask), CpuSetT struct
   - [x] mkostemp: mkstemp with additional open flags (flags accepted, not enforced)

@@ -96,10 +96,10 @@ pub struct PerThread {
 
     /// Result buffer for `asctime`/`ctime`.
     ///
-    /// 26 bytes is the maximum a conforming `asctime` can produce
-    /// (`"Www Mmm dd hh:mm:ss yyyy\n\0"`); 32 rounds it up and leaves room
-    /// for the out-of-range years `asctime` is allowed to refuse to format.
-    pub asctime: [u8; 32],
+    /// Big enough for every `struct tm`, as glibc's is: `asctime` formats
+    /// any year and any field width, and only `asctime_r`'s 26 bytes are a
+    /// limit (see [`crate::time::ASCTIME_MAX`]).
+    pub asctime: [u8; crate::time::ASCTIME_MAX],
 
     /// Result buffer for `inet_ntoa`.  Exactly fits `"255.255.255.255\0"`.
     pub inet_ntoa: [u8; 16],
@@ -191,7 +191,7 @@ impl PerThread {
         errno: 0,
         h_errno: 0,
         tm: crate::time::Tm::ZERO,
-        asctime: [0; 32],
+        asctime: [0; crate::time::ASCTIME_MAX],
         inet_ntoa: [0; 16],
         ether_aton: crate::inet::EtherAddr::ZERO,
         ether_ntoa: [0; 18],

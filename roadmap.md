@@ -2539,6 +2539,16 @@ lane C's `guitk`.
   - `[ ]` Speed: a committed benchmark, then SIMD in rav1d (known-issues.md,
     "[F] AVIF decoding has no committed benchmark").
 
+- `[F]` **A display transport over channel IPC** for local clients, beside
+  the TCP one (`gui/remote/src/socket.rs` planned it "when SlateOS's own
+  channel IPC becomes reachable from a userspace application", which it now
+  is). The point is the peer's identity: the kernel attests a channel's peer
+  (`SYS_CHANNEL_PEER_CRED`), a TCP peer cannot say what process it is, and
+  today's `client_pid` is a per-connection number. Unblocks the process
+  explorer's window picker (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`,
+  part 3), `open-questions.md` F-Q3's option B, and per-program (rather than
+  per-connection) grouping on the taskbar.
+
 - `[F]` Port FreeRDP (line ~5058)
 
 `open-questions.md` **C-Q18** (the pointer over fullscreen), filed by lane C

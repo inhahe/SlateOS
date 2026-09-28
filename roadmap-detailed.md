@@ -1918,7 +1918,7 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 - [x] Tabs view — *`gui/toolkit/src/tabs.rs`.*
 - [x] Grid view — *`gui/toolkit/src/grid.rs`.*
 - [x] Color picker (like qtpyrc's) — *`gui/toolkit/src/colorpicker.rs`: HSV square and hue bar, RGB/HSV sliders, hex entry, alpha, presets, eyedropper and a recent-colours history, as `ColorPicker` (inline) and `ColorPickerDialog`. Consumers: `apps/paint`, `apps/colorpicker`, and `apps/settings` since 2026-09-17.*
-- [ ] **Font picker dialog** (family, style/weight, size, and other font attributes).
+- [ ] **Font picker dialog** (family, style/weight, size, and other font attributes). — *~ blocked 2026-09-28 by lane F: a render tree can name only the UI and the fixed-pitch faces (`FontFamily::{Ui, Mono}`), so the preview cannot draw a family by name, nor can a host preview its document in one. Asked in `requests/c-f-text-in-a-family-the-drawing-names.md`; the dialog follows its answer.*
   - [ ] **Live "tentative selection" events.** The picker fires an event *whenever
     the user tentatively/temporarily changes any font attribute* (hovers or
     highlights a family, changes the size, toggles bold/italic, etc.) — before the

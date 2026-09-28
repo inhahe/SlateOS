@@ -26,10 +26,18 @@
 //!
 //! where the macros (`tree_sitter/parser.h`) make each `ADVANCE` and `SKIP` a
 //! jump back to the top: advance the lexer, read the next character, and
-//! switch on the new state. In Rust that is a `loop` around a `match`, and a
-//! jump is `continue`. The conditions are C boolean expressions over
+//! switch on the new state. In Rust each state is a function of its own,
+//! answering where to go next (`LexStep`), and one loop in the syntax crate
+//! (`ffi::run_lexer`) takes the character and calls the next state's
+//! function out of a table. The conditions are C boolean expressions over
 //! `lookahead` and `eof`, which read the same in Rust once each character
 //! literal is written as its number.
+//!
+//! A state a function, rather than the whole machine one `loop` around one
+//! `match`, is for the optimiser: a lexer has thousands of states, and one
+//! function of thousands of arms took a release build of the syntax crate
+//! more than a quarter of an hour of CPU, the optimiser's passes being far
+//! from linear in the size of a function.
 
 use core::fmt::Write as _;
 
@@ -300,42 +308,80 @@ pub(crate) fn set_name(c_name: &str) -> String {
 }
 
 impl LexFn {
-    /// The function as Rust: `fn name(lexer: &mut Lexer<'_>, start: u16) -> bool`.
+    /// The lexer as Rust: `fn name(lexer: &mut Lexer<'_>, start: u16) ->
+    /// bool`, which runs the states through `crate::ffi::run_lexer`; each
+    /// state a function `name_N` in the table `NAME_STATES` by number (a
+    /// number no case has is `None`, and runs the default), and the default
+    /// `name_default`.
     pub(crate) fn write_rust(&self, name: &str, out: &mut String) {
+        let table = format!("{}_STATES", name.to_ascii_uppercase());
         let _ = writeln!(
             out,
-            "fn {name}(lexer: &mut Lexer<'_>, start: u16) -> bool {{"
+            "fn {name}(lexer: &mut Lexer<'_>, start: u16) -> bool {{\n    \
+             crate::ffi::run_lexer(lexer, start, &{table}, {name}_default, {})\n}}",
+            self.reads_eof
         );
-        out.push_str("    let mut state = start;\n");
-        out.push_str("    let mut result = false;\n");
-        out.push_str("    let mut skip = false;\n");
-        out.push_str("    let mut started = false;\n");
-        out.push_str("    loop {\n");
-        out.push_str("        if started {\n            lexer.advance_with(skip);\n        }\n");
-        out.push_str("        started = true;\n");
-        out.push_str("        skip = false;\n");
-        out.push_str("        let lookahead = lexer.lookahead();\n");
-        if self.reads_eof {
-            out.push_str("        let eof = lexer.eof();\n");
-        } else {
-            out.push_str("        let eof = false;\n");
-        }
-        out.push_str("        match state {\n");
-        for (value, stmts) in &self.states {
-            let _ = writeln!(out, "            {value} => {{");
-            for stmt in stmts {
-                write_stmt(stmt, 4, out);
+        let numbers: std::collections::BTreeSet<i64> =
+            self.states.iter().map(|(value, _)| *value).collect();
+        let len = numbers.last().map_or(0, |last| last.saturating_add(1));
+        let _ = writeln!(
+            out,
+            "static {table}: [Option<crate::ffi::LexState>; {len}] = ["
+        );
+        for n in 0..len {
+            if numbers.contains(&n) {
+                let _ = writeln!(out, "    Some({name}_{n}),");
+            } else {
+                out.push_str("    None,\n");
             }
-            out.push_str("            }\n");
         }
-        out.push_str("            _ => {\n");
-        for stmt in &self.default {
-            write_stmt(stmt, 4, out);
+        out.push_str("];\n");
+        for (value, stmts) in &self.states {
+            // A state that falls off its end: the old loop took the
+            // character and ran the same state again. Every generator ends a
+            // state with END_STATE(), so this is only ever the shape's.
+            write_state(
+                &format!("{name}_{value}"),
+                stmts,
+                &format!("Take({value})"),
+                out,
+            );
         }
         // A default that falls off the end: what C's function would do is
         // undefined, and every generator writes `return false`, so do that.
-        out.push_str("                return false;\n            }\n");
-        out.push_str("        }\n    }\n}\n");
+        write_state(
+            &format!("{name}_default"),
+            &self.default,
+            "Stop(false)",
+            out,
+        );
+    }
+}
+
+/// One state as a function: its statements, then -- if they can end without
+/// saying where to go -- `fallthrough`, a `LexStep` variant.
+fn write_state(fname: &str, stmts: &[Stmt], fallthrough: &str, out: &mut String) {
+    let _ = writeln!(
+        out,
+        "fn {fname}(lexer: &mut Lexer<'_>, lookahead: i32, eof: bool, result: &mut bool) \
+         -> crate::ffi::LexStep {{"
+    );
+    for stmt in stmts {
+        write_stmt(stmt, 1, out);
+    }
+    if !stmts.last().is_some_and(always_returns) {
+        let _ = writeln!(out, "    crate::ffi::LexStep::{fallthrough}");
+    }
+    out.push_str("}\n");
+}
+
+/// Whether `stmt` always returns: the last statement of a state that does
+/// needs nothing after it.
+fn always_returns(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Advance(_) | Stmt::Skip(_) | Stmt::End | Stmt::ReturnFalse => true,
+        Stmt::Block(stmts) => stmts.last().is_some_and(always_returns),
+        Stmt::AdvanceMap(_) | Stmt::Accept(_) | Stmt::If(..) => false,
     }
 }
 
@@ -343,29 +389,29 @@ fn write_stmt(stmt: &Stmt, depth: usize, out: &mut String) {
     let pad = "    ".repeat(depth);
     match stmt {
         Stmt::Advance(n) => {
-            let _ = writeln!(out, "{pad}state = {n};\n{pad}continue;");
+            let _ = writeln!(out, "{pad}return crate::ffi::LexStep::Take({n});");
         }
         Stmt::Skip(n) => {
-            let _ = writeln!(out, "{pad}skip = true;\n{pad}state = {n};\n{pad}continue;");
+            let _ = writeln!(out, "{pad}return crate::ffi::LexStep::Skip({n});");
         }
         Stmt::AdvanceMap(map) => {
             let _ = writeln!(out, "{pad}match lookahead {{");
             for (c, n) in map {
                 let _ = writeln!(
                     out,
-                    "{pad}    {c} => {{\n{pad}        state = {n};\n{pad}        continue;\n{pad}    }}"
+                    "{pad}    {c} => return crate::ffi::LexStep::Take({n}),"
                 );
             }
             let _ = writeln!(out, "{pad}    _ => {{}}\n{pad}}}");
         }
         Stmt::Accept(sym) => {
-            let _ = writeln!(out, "{pad}result = true;\n{pad}lexer.accept({sym});");
+            let _ = writeln!(out, "{pad}*result = true;\n{pad}lexer.accept({sym});");
         }
         Stmt::End => {
-            let _ = writeln!(out, "{pad}return result;");
+            let _ = writeln!(out, "{pad}return crate::ffi::LexStep::Stop(*result);");
         }
         Stmt::ReturnFalse => {
-            let _ = writeln!(out, "{pad}return false;");
+            let _ = writeln!(out, "{pad}return crate::ffi::LexStep::Stop(false);");
         }
         Stmt::If(cond, then) => {
             let _ = writeln!(out, "{pad}if {cond} {{");
@@ -442,21 +488,67 @@ mod tests {
         assert_eq!(l.default, [Stmt::ReturnFalse]);
     }
 
-    /// **The Rust is a loop around a match**, a jump a `continue`.
+    /// **Each state is a function, run by one loop out of a table**: a jump
+    /// returns where to go, a state no case has is `None` in the table, and
+    /// the lexer is `run_lexer` over the table and the default.
     #[test]
-    fn the_rust_is_a_loop_around_a_match() {
+    fn each_state_is_a_function_run_out_of_a_table() {
         let l = lexer(
             "START_LEXER(); eof = lexer->eof(lexer); switch (state) {
-               case 0: if (lookahead == 'a') ADVANCE(1); END_STATE();
-               case 1: ACCEPT_TOKEN(sym_identifier); END_STATE();
+               case 0: if (lookahead == 'a') ADVANCE(2); SKIP(0); END_STATE();
+               case 2: ACCEPT_TOKEN(sym_identifier); END_STATE();
                default: return false; }",
         );
         let mut rust = String::new();
         l.write_rust("lex_main", &mut rust);
-        assert!(rust.contains("fn lex_main(lexer: &mut Lexer<'_>, start: u16) -> bool {"));
-        assert!(rust.contains("if lookahead == 97 {\n                    state = 1;\n                    continue;"), "{rust}");
-        assert!(rust.contains("lexer.accept(5);"));
-        assert!(rust.contains("let eof = lexer.eof();"));
+        for want in [
+            "fn lex_main(lexer: &mut Lexer<'_>, start: u16) -> bool {\n    \
+             crate::ffi::run_lexer(lexer, start, &LEX_MAIN_STATES, lex_main_default, true)\n}",
+            "static LEX_MAIN_STATES: [Option<crate::ffi::LexState>; 3] = [\n    \
+             Some(lex_main_0),\n    None,\n    Some(lex_main_2),\n];",
+            "fn lex_main_0(lexer: &mut Lexer<'_>, lookahead: i32, eof: bool, result: &mut bool) \
+             -> crate::ffi::LexStep {",
+            "    if lookahead == 97 {\n        return crate::ffi::LexStep::Take(2);\n    }",
+            "    return crate::ffi::LexStep::Skip(0);",
+            "    *result = true;\n    lexer.accept(5);",
+            "    return crate::ffi::LexStep::Stop(*result);\n}",
+            "fn lex_main_default(",
+            "    return crate::ffi::LexStep::Stop(false);\n}",
+        ] {
+            assert!(rust.contains(want), "{want}\n--- in ---\n{rust}");
+        }
+        // Every state ends by returning, so none falls through.
+        assert!(
+            !rust.contains("    crate::ffi::LexStep::Take(0)\n}"),
+            "{rust}"
+        );
+    }
+
+    /// **A state that can fall off its end goes round again** -- as the old
+    /// loop took the character and ran the same state -- and a default that
+    /// can stops, answering no token; a lexer that never reads `eof` says so.
+    #[test]
+    fn a_state_that_falls_off_its_end_goes_round_again() {
+        let l = lexer(
+            "START_LEXER(); switch (state) {
+               case 1: if (lookahead == 'a') ADVANCE(1);
+               default: if (eof) ADVANCE(1); }",
+        );
+        let mut rust = String::new();
+        l.write_rust("lex_keywords", &mut rust);
+        assert!(rust.contains("lex_keywords_default, false)"), "{rust}");
+        assert!(
+            rust.contains("[\n    None,\n    Some(lex_keywords_1),\n];"),
+            "{rust}"
+        );
+        assert!(
+            rust.contains("    }\n    crate::ffi::LexStep::Take(1)\n}"),
+            "{rust}"
+        );
+        assert!(
+            rust.contains("    }\n    crate::ffi::LexStep::Stop(false)\n}"),
+            "{rust}"
+        );
     }
 
     /// **What the generator does not write is refused**, not guessed at: a

@@ -64,6 +64,60 @@ pub(crate) fn advances() -> u64 {
     ADVANCES.with(Cell::get)
 }
 
+/// What one state of a generated lexer does with the character ahead: take
+/// it into the token and go to a state, step over it and go to one, or stop
+/// -- answering whether a token was accepted. (`ADVANCE`, `SKIP` and
+/// `END_STATE` in the C.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LexStep {
+    /// Take the character; go to this state.
+    Take(u16),
+    /// Step over the character, leaving it out of the token; go to this state.
+    Skip(u16),
+    /// Stop: whether a token was accepted.
+    Stop(bool),
+}
+
+/// One state of a generated lexer, as `tsgrammar` writes it: the lexer, the
+/// character ahead, whether the text has ended, and whether a token has been
+/// accepted so far (which the state may set).
+pub(crate) type LexState = fn(&mut Lexer<'_>, i32, bool, &mut bool) -> LexStep;
+
+/// Run a generated lexer from state `start`: each state's function says
+/// where to go, and this takes the character and goes -- the C's jumps, as
+/// calls. A state `states` has no function for runs `default`; `reads_eof`
+/// is whether the lexer asks, at each character, if the text has ended.
+pub(crate) fn run_lexer(
+    lexer: &mut Lexer<'_>,
+    start: u16,
+    states: &[Option<LexState>],
+    default: LexState,
+    reads_eof: bool,
+) -> bool {
+    let mut state = start;
+    let mut accepted = false;
+    loop {
+        let lookahead = lexer.lookahead();
+        let eof = reads_eof && lexer.eof();
+        let run = states
+            .get(usize::from(state))
+            .copied()
+            .flatten()
+            .unwrap_or(default);
+        match run(lexer, lookahead, eof, &mut accepted) {
+            LexStep::Take(next) => {
+                lexer.advance_with(false);
+                state = next;
+            }
+            LexStep::Skip(next) => {
+                lexer.advance_with(true);
+                state = next;
+            }
+            LexStep::Stop(answer) => return answer,
+        }
+    }
+}
+
 /// The runtime's lexer, as a grammar's lexer or scanner uses it: the
 /// character ahead, and what can be done with it.
 pub struct Lexer<'a> {

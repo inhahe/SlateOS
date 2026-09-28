@@ -122,6 +122,12 @@ W_FAIL_NARROW = "the_failure_prompt_keeps_its_answers_inside_a_narrow_window"
 W_WHY_WRAP = "a_long_reason_is_wrapped_above_the_answers"
 W_WHY_CUT = "a_reason_past_three_lines_is_cut_on_the_third"
 W_FILLED = "the_prompts_are_filled_in_every_look"
+FAILURE_DEFAULT = "ask_is_what_a_failure_does_until_told_otherwise"
+FAILURE_REMEMBERED = (
+    "a_failed_file_is_asked_about_until_the_user_chooses_otherwise_and_the_choice_is_remembered"
+)
+FAILURE_MENU = "the_failure_choice_is_offered_on_the_folder_menu"
+FAILURE_SKIPS = "a_paste_told_to_skip_skips_a_file_it_cannot_copy_and_says_so_at_the_end"
 LINK_DRAG = "an_alt_drag_makes_a_link_or_reports_that_it_could_not"
 EXIF = "a_photographs_exif_is_three_columns"
 LATE = "exif_past_the_head_of_a_webp_is_found"
@@ -495,6 +501,40 @@ MAIN = [
         "                    .or_else(|| None)",
         [W_FAIL_ASKED],
     ),
+    # -- the folder menu's "When a file cannot be done" (2026-09-28, §1228) ------
+    (
+        "the failure choice is not offered",
+        "            self.conflict_menu(),\n            self.failure_menu(),\n",
+        "            self.conflict_menu(),\n",
+        [FAILURE_MENU],
+    ),
+    (
+        "the failure menu ticks the wrong choice",
+        "                        *policy == self.failure_policy,",
+        "                        *policy != self.failure_policy,",
+        [FAILURE_MENU],
+    ),
+    (
+        "choosing what a failure does changes nothing",
+        "        self.failure_policy = policy;\n        columnprefs::set_failure_policy",
+        "        let _ = policy;\n        columnprefs::set_failure_policy",
+        [FAILURE_REMEMBERED],
+    ),
+    (
+        "the failure choice is not read when a window opens",
+        "            failure_policy: columnprefs::failure_policy(&settingsfile::load(\n"
+        "                columnprefs::CONFIG_NAME,\n            )),",
+        "            failure_policy: ErrorPolicy::Ask,",
+        [FAILURE_REMEMBERED],
+    ),
+    (
+        "a paste asks whatever was chosen",
+        "            _ => OperationPlan::plan_copy(\n                &paths,\n                &self.current_path,\n"
+        "                self.conflict_policy,\n                self.failure_policy,",
+        "            _ => OperationPlan::plan_copy(\n                &paths,\n                &self.current_path,\n"
+        "                self.conflict_policy,\n                ErrorPolicy::Ask,",
+        [FAILURE_SKIPS],
+    ),
 ]
 
 COLUMNS = [
@@ -563,6 +603,19 @@ COLUMNPREFS = [
         # The array's length is its type, so the row is replaced, not removed.
         '    (ConflictPolicy::Rename, "ask", "Ask each time"),\n',
         [DEFAULT_ASK],
+    ),
+    # -- what an operation does with a file it cannot do (2026-09-28) -----------
+    (
+        "a failed file is skipped unasked by default",
+        "        .unwrap_or(ErrorPolicy::Ask)",
+        "        .unwrap_or(ErrorPolicy::SkipAndContinue)",
+        [FAILURE_DEFAULT],
+    ),
+    (
+        "the failure choice is not kept",
+        "        doc.set_str(&ON_FAILURE, spelled);",
+        "        let _ = spelled;",
+        [FAILURE_REMEMBERED],
     ),
 ]
 

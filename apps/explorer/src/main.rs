@@ -1394,6 +1394,10 @@ pub struct ExplorerState {
     /// user's choice from the folder menu, kept in `explorer.yaml` (C-Q26).
     /// Until 2026-09-27 it was always "keep both", for everyone.
     pub conflict_policy: ConflictPolicy,
+    /// What an operation does with a file it cannot carry out -- ask, or
+    /// skip it and say so at the end: the user's choice from the folder
+    /// menu, kept in `explorer.yaml` (design-decisions §1228).
+    pub failure_policy: ErrorPolicy,
     /// Thumbnails generated but not yet handed to the compositor.
     ///
     /// Drained by [`Self::take_pending_uploads`]. The explorer cannot register
@@ -1477,6 +1481,9 @@ impl ExplorerState {
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
             icon_labels: columnprefs::icon_labels(&settingsfile::load(columnprefs::CONFIG_NAME)),
             conflict_policy: columnprefs::conflict_policy(&settingsfile::load(
+                columnprefs::CONFIG_NAME,
+            )),
+            failure_policy: columnprefs::failure_policy(&settingsfile::load(
                 columnprefs::CONFIG_NAME,
             )),
             thumb_config: {
@@ -3028,6 +3035,52 @@ impl ExplorerState {
         }
     }
 
+    /// What an operation does with a file it cannot carry out, ticked at the
+    /// one in force.
+    fn failure_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_FAILURE_BASE,
+            label: String::from("When a file cannot be done"),
+            icon: None,
+            enabled: true,
+            children: columnprefs::FAILURE_CHOICES
+                .iter()
+                .zip(0u64..)
+                .map(|((policy, _, said), n)| {
+                    Self::label_row(
+                        MENU_FAILURE_BASE.saturating_add(n),
+                        said,
+                        *policy == self.failure_policy,
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Choose what an operation does with a file it cannot carry out, and
+    /// remember it. Answers whether the id was one of these. An operation
+    /// already running keeps the choice it started with.
+    fn failure_action(&mut self, id: u64) -> bool {
+        let Some(chosen) = id
+            .checked_sub(MENU_FAILURE_BASE)
+            .and_then(|n| usize::try_from(n).ok())
+            .and_then(|n| columnprefs::FAILURE_CHOICES.get(n))
+        else {
+            return false;
+        };
+        let (policy, _, said) = *chosen;
+        self.failure_policy = policy;
+        columnprefs::set_failure_policy(&mut self.column_prefs, policy);
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => format!("A file that cannot be done now: {}", said.to_lowercase()),
+                Err(e) => {
+                    format!("The choice holds until the window closes -- it was not saved: {e}")
+                }
+            };
+        true
+    }
+
     /// Choose what a paste does with a taken name, and remember it. Answers
     /// whether the id was one of these.
     fn conflict_action(&mut self, id: u64) -> bool {
@@ -3369,6 +3422,7 @@ impl ExplorerState {
             Self::menu_action(MENU_PASTE, "Paste", self.clipboard.is_some()),
             Self::menu_action(MENU_REFRESH, "Refresh", true),
             self.conflict_menu(),
+            self.failure_menu(),
         ];
         // Only where thumbnails are drawn. In Details and List the sizes
         // change nothing visible, and a submenu that silently does nothing is
@@ -3448,6 +3502,7 @@ impl ExplorerState {
             || self.thumb_size_action(id)
             || self.icon_label_action(id)
             || self.conflict_action(id)
+            || self.failure_action(id)
         {
             return;
         }
@@ -3653,13 +3708,13 @@ impl ExplorerState {
                 &paths,
                 &self.current_path,
                 self.conflict_policy,
-                ErrorPolicy::Ask,
+                self.failure_policy,
             ),
             _ => OperationPlan::plan_copy(
                 &paths,
                 &self.current_path,
                 self.conflict_policy,
-                ErrorPolicy::Ask,
+                self.failure_policy,
             ),
         };
 
@@ -3716,7 +3771,7 @@ impl ExplorerState {
         }
 
         if permanent {
-            match OperationPlan::plan_delete(&paths, ErrorPolicy::Ask) {
+            match OperationPlan::plan_delete(&paths, self.failure_policy) {
                 // No undo entries: a permanent delete has nothing to put back.
                 Ok(plan) => {
                     self.start_operation(plan, "Deleted", false);
@@ -4102,7 +4157,7 @@ impl ExplorerState {
                     &result.sources,
                     &result.target_dir,
                     self.conflict_policy,
-                    ErrorPolicy::Ask,
+                    self.failure_policy,
                 ),
                 "Moved",
             ),
@@ -4111,7 +4166,7 @@ impl ExplorerState {
                     &result.sources,
                     &result.target_dir,
                     self.conflict_policy,
-                    ErrorPolicy::Ask,
+                    self.failure_policy,
                 ),
                 "Copied",
             ),
@@ -4125,7 +4180,7 @@ impl ExplorerState {
                     // each one separately -- Windows needs a privilege -- and
                     // "Skip all" at the first lets the ones that would work
                     // go on, rather than the batch being abandoned.
-                    ErrorPolicy::Ask,
+                    self.failure_policy,
                 )),
                 "Linked",
             ),
@@ -5796,6 +5851,8 @@ const MENU_THUMB_SIZE_BASE: u64 = 2000;
 const MENU_ICON_LABEL_BASE: u64 = 3000;
 /// One id per choice of what a paste does with a taken name.
 const MENU_CONFLICT_BASE: u64 = 4000;
+/// One id per choice of what an operation does with a file it cannot do.
+const MENU_FAILURE_BASE: u64 = 5000;
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -13850,6 +13907,109 @@ mod tests {
             .iter()
             .any(|item| matches!(item, MenuItem::Submenu { id, .. } if *id == MENU_CONFLICT_BASE));
         assert!(offered, "the folder menu does not offer the choice");
+    }
+
+    // ---- what an operation does with a file it cannot do (2026-09-28) ----
+
+    #[test]
+    fn a_failed_file_is_asked_about_until_the_user_chooses_otherwise_and_the_choice_is_remembered()
+    {
+        settingsfile::testing::with_scratch_config("explorer-failure", |_root| {
+            let scratch = temp_dir("failure_choice");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+            let mut state = state_at(&root);
+            assert_eq!(state.failure_policy, ErrorPolicy::Ask);
+            let skip = columnprefs::FAILURE_CHOICES
+                .iter()
+                .position(|(p, _, _)| *p == ErrorPolicy::SkipAndContinue)
+                .expect("Skip is offered");
+            state.activate_menu_item(MENU_FAILURE_BASE + skip as u64);
+            assert_eq!(state.failure_policy, ErrorPolicy::SkipAndContinue);
+            assert!(
+                state
+                    .status_message
+                    .contains("skip it and say so at the end"),
+                "{}",
+                state.status_message
+            );
+            let again = state_at(&root);
+            assert_eq!(
+                again.failure_policy,
+                ErrorPolicy::SkipAndContinue,
+                "the choice did not survive"
+            );
+        });
+    }
+
+    /// **Told to skip, a paste skips a file it cannot copy and says so at
+    /// the end** -- nobody is asked, the rest is copied, and the end raises
+    /// the dialog, since nobody was shown the file.
+    #[test]
+    fn a_paste_told_to_skip_skips_a_file_it_cannot_copy_and_says_so_at_the_end() {
+        let scratch = temp_dir("failure_skip");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 2);
+        state.failure_policy = ErrorPolicy::SkipAndContinue;
+        state.paste();
+        fs::remove_file(root.join("src").join("f0.txt")).unwrap();
+        settle_until_asked(&mut state);
+        assert!(failure_prompt_of(&state).is_none(), "it asked anyway");
+        settle(&mut state);
+        assert!(root.join("dst").join("f1.txt").exists(), "it did not go on");
+        assert!(
+            state.status_message.contains("1 failed"),
+            "{}",
+            state.status_message
+        );
+        let notice = notice_text(&state).expect("a failure nobody saw was not reported");
+        assert!(notice.contains("f0.txt"), "{notice}");
+    }
+
+    #[test]
+    fn the_failure_choice_is_offered_on_the_folder_menu() {
+        let scratch = temp_dir("failure_menu");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        // Which row is ticked: the one in force, and only it.
+        let ticked = |state: &ExplorerState| -> Vec<String> {
+            state
+                .folder_menu_items()
+                .iter()
+                .find_map(|item| match item {
+                    MenuItem::Submenu { id, children, .. } if *id == MENU_FAILURE_BASE => {
+                        Some(children.clone())
+                    }
+                    _ => None,
+                })
+                .expect("the folder menu does not offer the choice")
+                .iter()
+                .filter_map(|row| match row {
+                    MenuItem::Action {
+                        label,
+                        checked: Some(true),
+                        ..
+                    } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        state.failure_policy = ErrorPolicy::Ask;
+        assert_eq!(ticked(&state), ["Ask each time"]);
+        state.failure_policy = ErrorPolicy::SkipAndContinue;
+        assert_eq!(ticked(&state), ["Skip it and say so at the end"]);
+    }
+
+    #[test]
+    fn ask_is_what_a_failure_does_until_told_otherwise() {
+        assert_eq!(
+            columnprefs::FAILURE_CHOICES.first().map(|(p, _, _)| *p),
+            Some(ErrorPolicy::Ask)
+        );
+        assert_eq!(
+            columnprefs::failure_policy(&yamldoc::Document::new()),
+            ErrorPolicy::Ask
+        );
     }
 
     // ---- a cut pasted back where it came from (2026-09-27) ----

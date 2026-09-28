@@ -1632,7 +1632,7 @@ pub unsafe extern "C" fn wcstod(nptr: *const WcharT, endptr: *mut *const WcharT)
         crate::decfloat::FloatToken::Nan(p) => return crate::decfloat::nan_f64(p, negative),
         crate::decfloat::FloatToken::Infinity => f64::INFINITY,
         crate::decfloat::FloatToken::Number => {
-            let (v, out_of_range) = acc.to_f64();
+            let (v, out_of_range) = acc.to_f64(negative);
             if out_of_range {
                 crate::errno::set_errno(crate::errno::ERANGE);
             }
@@ -1662,7 +1662,7 @@ pub unsafe extern "C" fn wcstof(nptr: *const WcharT, endptr: *mut *const WcharT)
         crate::decfloat::FloatToken::Nan(p) => return crate::decfloat::nan_f32(p, negative),
         crate::decfloat::FloatToken::Infinity => f32::INFINITY,
         crate::decfloat::FloatToken::Number => {
-            let (v, out_of_range) = acc.to_f32();
+            let (v, out_of_range) = acc.to_f32(negative);
             if out_of_range {
                 crate::errno::set_errno(crate::errno::ERANGE);
             }

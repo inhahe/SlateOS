@@ -450,10 +450,10 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
         crate::decfloat::FloatToken::Nan(p) => return crate::decfloat::nan_f64(p, negative),
         crate::decfloat::FloatToken::Infinity => f64::INFINITY,
         crate::decfloat::FloatToken::Number => {
-            let (v, out_of_range) = acc.to_f64();
-            // POSIX: ERANGE on overflow and on underflow.  `decimal_to_f64`
-            // also reports a subnormal result — gradual underflow — which is
-            // what glibc flags.
+            let (v, out_of_range) = acc.to_f64(negative);
+            // ERANGE on overflow, and on underflow as glibc judges it: a
+            // result tiny after rounding and inexact -- an exact subnormal
+            // is no error. Rounded in the current direction, as glibc's.
             if out_of_range {
                 crate::errno::set_errno(crate::errno::ERANGE);
             }
@@ -502,7 +502,7 @@ pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 
         crate::decfloat::FloatToken::Nan(p) => return crate::decfloat::nan_f32(p, negative),
         crate::decfloat::FloatToken::Infinity => f32::INFINITY,
         crate::decfloat::FloatToken::Number => {
-            let (v, out_of_range) = acc.to_f32();
+            let (v, out_of_range) = acc.to_f32(negative);
             if out_of_range {
                 crate::errno::set_errno(crate::errno::ERANGE);
             }
@@ -2115,11 +2115,15 @@ fn fcvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, b
         } else {
             0
         };
-        dec.round_to_place(k.saturating_neg());
+        dec.round_to_place_in(
+            k.saturating_neg(),
+            crate::decfloat::Rounding::current(),
+            sign,
+        );
         0
     } else {
         let p = ndigit.min(NDIGIT_MAX);
-        dec.round_to_place(p);
+        dec.round_to_place_in(p, crate::decfloat::Rounding::current(), sign);
         p
     };
     let decpt = dec.decpt();
@@ -2197,7 +2201,11 @@ fn ecvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, b
     }
     let mut dec = crate::decfloat::Decimal::new(value.abs());
     let before = dec.decpt();
-    dec.round_to_significant(n);
+    dec.round_to_significant_in(
+        n,
+        crate::decfloat::Rounding::current(),
+        value.is_sign_negative(),
+    );
     let carried = dec.decpt() > before;
     let digits = if carried { n.saturating_add(1) } else { n };
     for i in 0..digits {
@@ -2880,6 +2888,75 @@ mod tests {
         let digits = String::from_utf8(r).unwrap() + &"0".repeat(k);
         let dp = i32::try_from(digits.len()).unwrap();
         (digits, dp)
+    }
+
+    /// glibc 2.39's `strtod` and `strtof` of every input the conversion
+    /// oracle holds, in each of the four rounding directions
+    /// (`posix/tools/oracle/conv_harness.py`): the value's bits, the bytes
+    /// consumed, and `errno`.
+    #[test]
+    fn strtod_and_strtof_answer_as_glibc_does_in_every_rounding_mode() {
+        let modes = [
+            crate::fenv::FE_TONEAREST,
+            crate::fenv::FE_UPWARD,
+            crate::fenv::FE_DOWNWARD,
+            crate::fenv::FE_TOWARDZERO,
+        ];
+        let mut bad = Vec::new();
+        let mut calls = 0;
+        for line in crate::decfloat::CONV_ORACLE
+            .lines()
+            .filter(|l| l.starts_with("s "))
+        {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            let f = w[2];
+            if f != "strtod" && f != "strtof" {
+                continue;
+            }
+            let mode: usize = w[1].parse().unwrap();
+            let mut input: Vec<u8> = (0..w[3].len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&w[3][i..i + 2], 16).unwrap())
+                .collect();
+            input.push(0);
+            assert_eq!(crate::fenv::fesetround(modes[mode]), 0);
+            crate::errno::set_errno(0);
+            let mut end: *const u8 = core::ptr::null();
+            // SAFETY: a NUL-terminated input and an out-pointer of this frame.
+            let bits = unsafe {
+                if f == "strtod" {
+                    format!("{:016x}", strtod(input.as_ptr(), &raw mut end).to_bits())
+                } else {
+                    format!("{:08x}", strtof(input.as_ptr(), &raw mut end).to_bits())
+                }
+            };
+            let err = crate::errno::get_errno();
+            assert_eq!(crate::fenv::fesetround(crate::fenv::FE_TONEAREST), 0);
+            let used = end as usize - input.as_ptr() as usize;
+            let got = format!("{bits} {used} {err}");
+            calls += 1;
+            if got != want {
+                bad.push((mode, format!("{line}\n    ours {got}")));
+            }
+        }
+        assert!(calls > 1000, "only {calls} calls");
+        let mut per_mode = [0usize; 4];
+        for (m, _) in &bad {
+            per_mode[*m] += 1;
+        }
+        // Round-to-nearest first: it is the mode almost every program runs in.
+        bad.sort_by_key(|(m, _)| *m);
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ (by mode {per_mode:?}):\n{}",
+            bad.len(),
+            bad.iter()
+                .take(60)
+                .map(|(_, s)| s.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     #[test]

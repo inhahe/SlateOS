@@ -175490,7 +175490,7 @@ absent.
 comparing the symbol tables while adding the `long double` functions
 (design-decisions §1134).
 
-## D-POSIX-CONVERSIONS-IGNORE-THE-ROUNDING-MODE — `printf` and `strtod` always round to nearest; glibc's follow `fesetround` (lane D, 2026-09-28) — **Status: OPEN**
+## D-POSIX-CONVERSIONS-IGNORE-THE-ROUNDING-MODE — `printf` and `strtod` always round to nearest; glibc's follow `fesetround` (lane D, 2026-09-28) — **Status: FIXED 2026-09-28 for `double` and `float` -- `printf`'s `%f %e %g %a`, `strtod`, `strtof`, `wcstod`, `wcstof`, `scanf`, the `ecvt` family -- every line of glibc 2.39's in all four modes replayed (`posix/tools/oracle/conv_harness.py`); OPEN for `long double`, which still converts through `double` (TD-POSIX-LONG-DOUBLE-PRECISION)**
 
 **In short:** a program that changes the rounding direction with
 `fesetround` -- to round up, say, for interval arithmetic -- gets glibc's

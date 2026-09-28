@@ -21,6 +21,7 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `ldclass.c` | its output, pasted as `CLASS_ORACLE` | `mathl.rs` |
 | `complex_harness.py` | `posix/src/complex_oracle.txt` | `complex.rs`, `include_str!` |
 | `accounts_harness.py` | `posix/src/accounts_oracle.txt` | `accounts_oracle.rs`, `include_str!` (`fgetpwent` & co., `put*ent`, `sgetspent`, `getusershell`, `getpass`) |
+| `conv_harness.py` | `posix/src/conv_oracle.txt` | `printf.rs` and `stdlib.rs`, through `decfloat::CONV_ORACLE` (`printf` and `strto*`, every rounding mode) |
 | `cvt_harness.py` | `posix/src/cvt_oracle.txt` | `stdlib.rs`, `include_str!` (`ecvt`, `fcvt`, `gcvt`) |
 | `ns_harness.py` | `posix/src/ns_oracle.txt` | `resolv.rs`, `include_str!` (`ns_initparse` & co.) |
 | `strtod_nan_harness.py` | a table, pasted as `GLIBC_NAN` | `stdlib.rs` |

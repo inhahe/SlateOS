@@ -77,6 +77,8 @@
 // un-prefixed `printf`/`fprintf`/...).
 #![allow(clippy::used_underscore_items)]
 
+use crate::decfloat::Rounding;
+
 /// Emit a variadic trampoline that performs a real `va_start` and tail-calls
 /// the corresponding `v*` implementation.
 ///
@@ -1768,7 +1770,7 @@ fn format_float_fixed(
     // Handle special values.
     if val.is_nan() {
         let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, false, flags, width);
+        format_float_special(dst, s, val.is_sign_negative(), flags, width);
         return;
     }
     let negative = val.is_sign_negative();
@@ -1782,7 +1784,7 @@ fn format_float_fixed(
 
     // Format into a temporary buffer.
     let mut buf = [0u8; FLOAT_BUF];
-    let mut text = fmt_fixed(abs_val, precision, &mut buf);
+    let mut text = fmt_fixed(abs_val, precision, &mut buf, Rounding::current(), negative);
 
     // C99 '#' flag: always include a decimal point, even when precision is 0.
     if flags.alt_form && precision == 0 {
@@ -1805,7 +1807,7 @@ fn format_float_sci(
 ) {
     if val.is_nan() {
         let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, false, flags, width);
+        format_float_special(dst, s, val.is_sign_negative(), flags, width);
         return;
     }
     let negative = val.is_sign_negative();
@@ -1818,7 +1820,14 @@ fn format_float_sci(
     let abs_val = if negative { -val } else { val };
 
     let mut buf = [0u8; FLOAT_BUF];
-    let mut text = fmt_scientific(abs_val, precision, upper, &mut buf);
+    let mut text = fmt_scientific(
+        abs_val,
+        precision,
+        upper,
+        &mut buf,
+        Rounding::current(),
+        negative,
+    );
 
     // C99 '#' flag: always include a decimal point, even when precision is 0.
     // Insert '.' before the 'e'/'E' exponent marker.  Precision 0 means no
@@ -1845,7 +1854,7 @@ fn format_float_general(
 ) {
     if val.is_nan() {
         let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, false, flags, width);
+        format_float_special(dst, s, val.is_sign_negative(), flags, width);
         return;
     }
     let negative = val.is_sign_negative();
@@ -1866,7 +1875,7 @@ fn format_float_general(
     let p = if precision == 0 { 1 } else { precision };
     let pi = i32::try_from(p).unwrap_or(i32::MAX);
     let mut dec = crate::decfloat::Decimal::new(abs_val);
-    dec.round_to_significant(pi);
+    dec.round_to_significant_in(pi, Rounding::current(), negative);
     let exp = if dec.is_zero() {
         0
     } else {
@@ -1951,7 +1960,7 @@ fn format_float_hex(
 ) {
     if val.is_nan() {
         let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, false, flags, width);
+        format_float_special(dst, s, val.is_sign_negative(), flags, width);
         return;
     }
     let negative = val.is_sign_negative();
@@ -1996,13 +2005,17 @@ fn format_float_hex(
             let keep = mant >> dropped;
             let rest = mant & ((1u64 << dropped) - 1);
             let half = 1u64 << (dropped - 1);
-            // Ties to even, matching every other rounding in this library.
-            // "Even" is a property of the last *retained* digit, which at
-            // precision 0 is the leading one and not part of `keep` at all:
-            // `%.0a` of 3.0 (`0x1.8p+1`) is an exact tie whose leading `1` is
-            // odd, so it rounds to `0x2p+1`.
+            // In the current rounding direction, as glibc: to nearest, ties
+            // to even, where "even" is a property of the last *retained*
+            // digit, which at precision 0 is the leading one and not part of
+            // `keep` at all -- `%.0a` of 3.0 (`0x1.8p+1`) is an exact tie
+            // whose leading `1` is odd, so it rounds to `0x2p+1`.
             let last = if p == 0 { lead } else { keep };
-            let round_up = rest > half || (rest == half && (last & 1) == 1);
+            let round_up = Rounding::current().rounds_up(
+                negative,
+                last & 1 == 1,
+                crate::decfloat::Cut::of_part(rest, half),
+            );
             let mut keep = keep;
             if round_up {
                 keep = keep.wrapping_add(1);
@@ -2271,9 +2284,18 @@ struct FloatText {
 }
 
 /// Format a non-negative, finite `f64` in fixed notation into `buf`.
-fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> FloatText {
+///
+/// The digits are rounded in direction `dir` as for a value of sign
+/// `negative` -- `val` itself is the magnitude.
+fn fmt_fixed(
+    val: f64,
+    precision: usize,
+    buf: &mut [u8],
+    dir: Rounding,
+    negative: bool,
+) -> FloatText {
     let mut dec = crate::decfloat::Decimal::new(val);
-    dec.round_to_place(i32::try_from(precision).unwrap_or(i32::MAX));
+    dec.round_to_place_in(i32::try_from(precision).unwrap_or(i32::MAX), dir, negative);
     render_fixed(&dec, precision, buf)
 }
 
@@ -2323,13 +2345,24 @@ fn render_fixed(dec: &crate::decfloat::Decimal, precision: usize, buf: &mut [u8]
 }
 
 /// Format a non-negative, finite `f64` in scientific notation into `buf`.
-fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> FloatText {
+///
+/// Rounded as [`fmt_fixed`] rounds.
+fn fmt_scientific(
+    val: f64,
+    precision: usize,
+    upper: bool,
+    buf: &mut [u8],
+    dir: Rounding,
+    negative: bool,
+) -> FloatText {
     let mut dec = crate::decfloat::Decimal::new(val);
     // `precision` digits after the point plus the one before it.
-    dec.round_to_significant(
+    dec.round_to_significant_in(
         i32::try_from(precision)
             .unwrap_or(i32::MAX)
             .saturating_add(1),
+        dir,
+        negative,
     );
     render_scientific(&dec, precision, upper, buf)
 }
@@ -3954,6 +3987,128 @@ mod tests {
         core::str::from_utf8(&buf[..len])
             .unwrap_or("<invalid utf8>")
             .to_string()
+    }
+
+    /// The one argument a conversion-oracle line formats.
+    #[derive(Clone, Copy)]
+    enum ConvArg {
+        /// A `double`, by its bits: passed in the first vector register.
+        Double(u64),
+        /// A `long double`, as its sign-and-exponent word and significand:
+        /// passed in the overflow area, 16-byte aligned, as the ABI has it.
+        #[allow(dead_code)] // the long double rows arrive with the 80-bit work
+        Long(u16, u64),
+    }
+
+    /// `fmt` with its one argument, through `vsnprintf`, into a buffer big
+    /// enough for any line of the conversion oracle.
+    fn conv_format(fmt: &[u8], arg: ConvArg) -> String {
+        #[repr(align(16))]
+        struct Overflow([u8; 64]);
+        let mut reg = [0u8; 176];
+        let mut overflow = Overflow([0u8; 64]);
+        match arg {
+            ConvArg::Double(bits) => reg[48..56].copy_from_slice(&bits.to_le_bytes()),
+            ConvArg::Long(se, m) => {
+                overflow.0[..8].copy_from_slice(&m.to_le_bytes());
+                overflow.0[8..10].copy_from_slice(&se.to_le_bytes());
+            }
+        }
+        let mut va = VaList {
+            gp_offset: 48,
+            fp_offset: 48,
+            overflow_arg_area: overflow.0.as_mut_ptr(),
+            reg_save_area: reg.as_mut_ptr(),
+        };
+        let mut buf = std::vec![0u8; 32768];
+        // SAFETY: `va` describes the buffers above, which hold the one
+        // argument `fmt` asks for; `buf` is as long as it says.
+        let n = unsafe { vsnprintf(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &mut va) };
+        let n = usize::try_from(n).expect("vsnprintf failed");
+        assert!(n < buf.len(), "output truncated");
+        String::from_utf8(buf[..n].to_vec()).unwrap()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The four rounding directions, in the oracle's order.
+    const ORACLE_MODES: [i32; 4] = [
+        crate::fenv::FE_TONEAREST,
+        crate::fenv::FE_UPWARD,
+        crate::fenv::FE_DOWNWARD,
+        crate::fenv::FE_TOWARDZERO,
+    ];
+
+    /// The oracle's lines where glibc 2.39 is wrong: `(format, value bits,
+    /// the standard's answer)`, which this library gives.
+    ///
+    /// `%#.3g` of 999.5 rounds to 1000, whose `%e` exponent is 3, so C99
+    /// 7.21.6.1 makes it `%e` with precision P - 1 = 2 -- and `#` keeps the
+    /// trailing zeros: "1.00e+03". glibc sizes the fraction from the
+    /// exponent before the rounding carried, and prints "1.e+03", one
+    /// significant digit where three were asked for (in both rounding modes
+    /// that carry).
+    const GLIBC_PRINTF_BUGS: &[(usize, &str, u64, &str)] = &[
+        (0, "%#.3g", 0x408f_3c00_0000_0000, "1.00e+03"),
+        (1, "%#.3g", 0x408f_3c00_0000_0000, "1.00e+03"),
+    ];
+
+    /// glibc 2.39's `printf` of a `double`, every conversion the oracle asks
+    /// for, in each of the four rounding directions
+    /// (`posix/tools/oracle/conv_harness.py`): glibc rounds the digits it
+    /// prints in the current direction, and so does this.
+    #[test]
+    fn printf_of_a_double_answers_as_glibc_does_in_every_rounding_mode() {
+        let mut bad = Vec::new();
+        let mut per_mode = [0usize; 4];
+        let mut calls = 0;
+        for line in crate::decfloat::CONV_ORACLE
+            .lines()
+            .filter(|l| l.starts_with("p "))
+        {
+            let (lhs, rhs) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            if w[2] != "d" {
+                continue;
+            }
+            let mode: usize = w[1].parse().unwrap();
+            let mut fmt = unhex(w[3]);
+            fmt.push(0);
+            let bits = u64::from_str_radix(w[4], 16).unwrap();
+            let mut want = &rhs[1..rhs.len() - 1];
+            // Where glibc is wrong, the standard's answer instead.
+            if let Some(&(_, _, _, right)) = GLIBC_PRINTF_BUGS.iter().find(|&&(m, f, b, _)| {
+                m == mode && f.as_bytes() == &fmt[..fmt.len() - 1] && b == bits
+            }) {
+                want = right;
+            }
+            assert_eq!(crate::fenv::fesetround(ORACLE_MODES[mode]), 0);
+            let got = conv_format(&fmt, ConvArg::Double(bits));
+            assert_eq!(crate::fenv::fesetround(crate::fenv::FE_TONEAREST), 0);
+            calls += 1;
+            if got != want {
+                per_mode[mode] += 1;
+                bad.push((mode, format!("{line}\n    ours [{got}]")));
+            }
+        }
+        // Round-to-nearest first: it is the mode almost every program runs in.
+        bad.sort_by_key(|(m, _)| *m);
+        assert!(calls > 10_000, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ (by mode {per_mode:?}):\n{}",
+            bad.len(),
+            bad.iter()
+                .take(60)
+                .map(|(_, s)| s.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     #[test]

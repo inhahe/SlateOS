@@ -43,6 +43,111 @@
 //! which is exactly where a fast approximate algorithm would be least
 //! trustworthy anyway.
 
+/// Which way a conversion rounds what it cannot keep. glibc's `printf` and
+/// `strtod` both follow the current rounding direction (`fesetround`), and
+/// so do these: the printed digits of 0.25 to one place are "0.3" upward and
+/// "0.2" downward, and `strtod("0.1")` is a different `double` either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rounding {
+    /// To the nearest, ties to even (`FE_TONEAREST`).
+    Nearest,
+    /// Toward positive infinity (`FE_UPWARD`).
+    Upward,
+    /// Toward negative infinity (`FE_DOWNWARD`).
+    Downward,
+    /// Toward zero (`FE_TOWARDZERO`).
+    TowardZero,
+}
+
+impl Rounding {
+    /// The current direction, as `fegetround` reads it (the x87 control
+    /// word; `fesetround` keeps the SSE unit's the same).
+    pub(crate) fn current() -> Self {
+        match crate::fenv::fegetround() {
+            crate::fenv::FE_UPWARD => Self::Upward,
+            crate::fenv::FE_DOWNWARD => Self::Downward,
+            crate::fenv::FE_TOWARDZERO => Self::TowardZero,
+            _ => Self::Nearest,
+        }
+    }
+
+    /// For a directed mode, whether a magnitude of this sign that has lost
+    /// something nonzero goes up (away from zero): upward for a positive
+    /// value, downward for a negative one. Meaningless for `Nearest`.
+    pub(crate) fn away(self, negative: bool) -> bool {
+        match self {
+            Self::Upward => !negative,
+            Self::Downward => negative,
+            Self::Nearest | Self::TowardZero => false,
+        }
+    }
+
+    /// Whether a magnitude of sign `negative` rounds up (away from zero),
+    /// given what was `cut` off it and whether its last kept digit or bit is
+    /// `odd`. The one rule for decimal digits and binary bits alike.
+    pub(crate) fn rounds_up(self, negative: bool, odd: bool, cut: Cut) -> bool {
+        match self {
+            Self::Nearest => cut == Cut::AboveHalf || (cut == Cut::Half && odd),
+            _ => cut != Cut::Zero && self.away(negative),
+        }
+    }
+}
+
+/// What rounding cut off a magnitude, measured against one unit of the last
+/// place it kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cut {
+    /// Nothing: the value was exact at that place.
+    Zero,
+    /// Something, but less than half a unit.
+    BelowHalf,
+    /// Exactly half a unit: a tie.
+    Half,
+    /// More than half a unit.
+    AboveHalf,
+}
+
+impl Cut {
+    /// From the first cut bit (the guard) and whether any bit below it is set.
+    pub(crate) fn of_bits(guard: bool, rest: bool) -> Self {
+        match (guard, rest) {
+            (false, false) => Self::Zero,
+            (false, true) => Self::BelowHalf,
+            (true, false) => Self::Half,
+            (true, true) => Self::AboveHalf,
+        }
+    }
+
+    /// From the first cut decimal digit (ASCII) and whether any nonzero
+    /// digit follows it.
+    pub(crate) fn of_digit(first: u8, rest: bool) -> Self {
+        match first {
+            b'5' if !rest => Self::Half,
+            b'5'..=b'9' => Self::AboveHalf,
+            b'0' if !rest => Self::Zero,
+            _ => Self::BelowHalf,
+        }
+    }
+
+    /// From the cut part `rest` of a place whose half is `half`.
+    pub(crate) fn of_part(rest: u64, half: u64) -> Self {
+        if rest == 0 {
+            return Self::Zero;
+        }
+        match rest.cmp(&half) {
+            core::cmp::Ordering::Less => Self::BelowHalf,
+            core::cmp::Ordering::Equal => Self::Half,
+            core::cmp::Ordering::Greater => Self::AboveHalf,
+        }
+    }
+}
+
+/// glibc 2.39's `printf` and `strto*` answers, in every rounding mode
+/// (`posix/tools/oracle/conv_harness.py`), for the tests of `printf.rs` and
+/// `stdlib.rs` to replay: one copy for both.
+#[cfg(test)]
+pub(crate) const CONV_ORACLE: &str = include_str!("conv_oracle.txt");
+
 /// Number of 64-bit limbs needed for the largest exact expansion.
 ///
 /// The worst case is the smallest subnormal: `m` has 53 bits and `5^1074` has
@@ -52,7 +157,7 @@ const DEC_LIMBS: usize = 40;
 
 /// Number of limbs for the parsing direction, which scales the significand up
 /// by `2^L` before dividing so that the quotient is long enough to round.
-/// See [`decimal_to_f64`]; the worst case there is about 5165 bits.
+/// See [`decimal_to_binary`]; the worst case there is about 5165 bits.
 const PARSE_LIMBS: usize = 96;
 
 /// Largest number of significant decimal digits that can affect *which* `f64`
@@ -404,16 +509,39 @@ impl Decimal {
     ///
     /// `n == 0` asks whether the value reaches half of `10^decpt`; a negative
     /// `n` is below even that and rounds to zero.
-    #[allow(clippy::arithmetic_side_effects)]
+    #[cfg(test)]
     pub(crate) fn round_to_significant(&mut self, n: i32) {
+        self.round_to_significant_in(n, Rounding::Nearest, false);
+    }
+
+    /// Round to at most `n` significant digits in direction `dir`, for a
+    /// value of sign `negative` (a directed mode rounds a magnitude by its
+    /// sign: upward is away from zero for a positive value, toward it for a
+    /// negative one).
+    ///
+    /// `n == 0` puts the rounding place just above the leading digit; a
+    /// negative `n` puts it higher still. Rounding to nearest makes such a
+    /// value zero (or, for `n == 0`, one unit if it reaches half); rounding
+    /// away from zero makes it one unit of that place, for it is not zero.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub(crate) fn round_to_significant_in(&mut self, n: i32, dir: Rounding, negative: bool) {
         if self.len == 0 {
             return;
         }
         let Ok(keep) = usize::try_from(n) else {
-            // Every digit is past the rounding place, and the value is
-            // strictly below half of it, so the result is zero.
-            self.len = 0;
-            self.decpt = 0;
+            // Every digit is below the rounding place.
+            if dir != Rounding::Nearest && dir.away(negative) {
+                // One unit of the place, `10^(decpt - n)`.
+                if let Some(slot) = self.digits.get_mut(0) {
+                    *slot = b'1';
+                }
+                self.len = 1;
+                self.decpt = self.decpt.saturating_sub(n).saturating_add(1);
+            } else {
+                // Strictly below half of the place: zero.
+                self.len = 0;
+                self.decpt = 0;
+            }
             return;
         };
         if keep >= self.len {
@@ -428,21 +556,18 @@ impl Decimal {
             .digits
             .get(keep.wrapping_add(1)..self.len)
             .is_some_and(|tail| tail.iter().any(|&d| d != b'0'));
-        let round_up = if first_dropped > b'5' {
-            true
-        } else if first_dropped < b'5' {
-            false
-        } else if rest_nonzero {
-            true
-        } else {
-            // Exact tie: round towards an even last kept digit.  A dropped
-            // leading digit leaves an implicit 0, which is even.
-            let prev = keep
-                .checked_sub(1)
-                .and_then(|i| self.digits.get(i))
-                .map_or(0, |&d| d.wrapping_sub(b'0'));
-            prev % 2 == 1
-        };
+        // A dropped leading digit leaves an implicit 0 kept, which is even.
+        let prev_odd = keep
+            .checked_sub(1)
+            .and_then(|i| self.digits.get(i))
+            .is_some_and(|&d| d.wrapping_sub(b'0') % 2 == 1);
+        // The digits are stripped of trailing zeros, so something nonzero is
+        // always cut here: the last digit, at the least.
+        let round_up = dir.rounds_up(
+            negative,
+            prev_odd,
+            Cut::of_digit(first_dropped, rest_nonzero),
+        );
 
         self.len = keep;
         if round_up {
@@ -481,11 +606,20 @@ impl Decimal {
     ///
     /// The digit at `10^-p` is significant index `decpt + p - 1`, so keeping
     /// everything at or above it means keeping `decpt + p` digits.
+    #[cfg(test)]
     pub(crate) fn round_to_place(&mut self, p: i32) {
+        self.round_to_place_in(p, Rounding::Nearest, false);
+    }
+
+    /// Round so that no digit lies below the `10^-p` place, in direction
+    /// `dir` for a value of sign `negative` (see
+    /// [`Decimal::round_to_significant_in`]): the digit at `10^-p` is
+    /// significant index `decpt + p - 1`, so that keeps `decpt + p` digits.
+    pub(crate) fn round_to_place_in(&mut self, p: i32, dir: Rounding, negative: bool) {
         if self.len == 0 {
             return;
         }
-        self.round_to_significant(self.decpt.saturating_add(p));
+        self.round_to_significant_in(self.decpt.saturating_add(p), dir, negative);
     }
 
     /// Number of significant digits remaining.
@@ -603,30 +737,34 @@ impl DigitCollector {
         self.digits.get(..self.len).unwrap_or(&[])
     }
 
-    /// Round the accumulated value to the nearest `f64`, ties to even.
-    ///
-    /// Returns `(value, out_of_range)` as [`decimal_to_f64`] does.
-    pub(crate) fn to_f64(&self) -> (f64, bool) {
+    /// The accumulated value's magnitude as the raw bits of `fmt`, rounded in
+    /// the current direction for a value of sign `negative`, and the `ERANGE`
+    /// condition ([`round_to_binary`]).
+    fn to_bits(&self, fmt: &Format, negative: bool) -> (u64, bool) {
+        let dir = Rounding::current();
         if self.hex {
-            let (bits, oor) = hex_to_binary(self.stored(), self.exp, self.truncated, &F64_FORMAT);
-            (f64::from_bits(bits), oor)
+            hex_to_binary(self.stored(), self.exp, self.truncated, fmt, dir, negative)
         } else {
-            decimal_to_f64(self.stored(), self.exp, self.truncated)
+            decimal_to_binary(self.stored(), self.exp, self.truncated, fmt, dir, negative)
         }
     }
 
-    /// Round the accumulated value to the nearest `f32`, ties to even.
+    /// The accumulated value's magnitude as an `f64`, rounded in the current
+    /// direction (`fesetround`) for a value of sign `negative`, as glibc's
+    /// `strtod` rounds it: `(magnitude, out_of_range)`, the second being the
+    /// `ERANGE` condition of [`round_to_binary`].
+    pub(crate) fn to_f64(&self, negative: bool) -> (f64, bool) {
+        let (bits, oor) = self.to_bits(&F64_FORMAT, negative);
+        (f64::from_bits(bits), oor)
+    }
+
+    /// As [`DigitCollector::to_f64`], for an `f32`.
     ///
     /// Rounds straight from the literal rather than by way of `f64`; see
-    /// [`decimal_to_f32`] for why that distinction matters.
-    pub(crate) fn to_f32(&self) -> (f32, bool) {
-        if self.hex {
-            let (bits, oor) = hex_to_binary(self.stored(), self.exp, self.truncated, &F32_FORMAT);
-            #[allow(clippy::cast_possible_truncation)]
-            (f32::from_bits(bits as u32), oor)
-        } else {
-            decimal_to_f32(self.stored(), self.exp, self.truncated)
-        }
+    /// `decimal_to_f32` for why that distinction matters.
+    pub(crate) fn to_f32(&self, negative: bool) -> (f32, bool) {
+        let (bits, oor) = self.to_bits(&F32_FORMAT, negative);
+        (f32::from_bits(u32::try_from(bits).unwrap_or(0)), oor)
     }
 }
 
@@ -663,13 +801,20 @@ const fn hex_val(ascii: u8) -> u64 {
 ///
 /// `truncated` is the sticky bit for digits the caller could not store.
 /// Returns `(bits, out_of_range)` as [`decimal_to_binary`] does.
-fn hex_to_binary(digits: &[u8], exp2: i32, truncated: bool, fmt: &Format) -> (u64, bool) {
+fn hex_to_binary(
+    digits: &[u8],
+    exp2: i32,
+    truncated: bool,
+    fmt: &Format,
+    dir: Rounding,
+    negative: bool,
+) -> (u64, bool) {
     let mut b = Big::<HEX_LIMBS>::from_u64(0);
     for &d in digits {
         b.mul_small(16);
         b.add_small(hex_val(d));
     }
-    round_to_binary(&b, exp2, truncated, fmt)
+    round_to_binary(&b, exp2, truncated, fmt, dir, negative)
 }
 
 // ---------------------------------------------------------------------------
@@ -693,7 +838,7 @@ pub(crate) trait ByteSource {
 /// `strtod`, `strtof` and `wcstod` differ only in the format they round to, so
 /// the scan is shared and each finishes it in its own precision.  Rounding to
 /// `f64` and narrowing afterwards would round twice, which is not the same as
-/// rounding once — see [`decimal_to_f32`].
+/// rounding once — see `decimal_to_f32`.
 pub(crate) enum FloatToken {
     /// No valid subject sequence.
     None,
@@ -1040,8 +1185,18 @@ fn scan_exponent<S: ByteSource + ?Sized>(
 /// the caller applies the sign.  `out_of_range` is the C `ERANGE` condition:
 /// overflow to infinity, underflow to zero, or a subnormal result (gradual
 /// underflow).  glibc reports `ERANGE` for all three.
+///
+/// The rounding is in direction `dir`, for a value of sign `negative`
+/// ([`round_to_binary`]).
 #[allow(clippy::arithmetic_side_effects)]
-fn decimal_to_binary(digits: &[u8], exp10: i32, truncated: bool, fmt: &Format) -> (u64, bool) {
+fn decimal_to_binary(
+    digits: &[u8],
+    exp10: i32,
+    truncated: bool,
+    fmt: &Format,
+    dir: Rounding,
+    negative: bool,
+) -> (u64, bool) {
     let mut sticky = truncated;
     let mut exp10 = exp10;
 
@@ -1070,10 +1225,10 @@ fn decimal_to_binary(digits: &[u8], exp10: i32, truncated: bool, fmt: &Format) -
     // only to keep the big-integer work finite, and the rounding step below
     // handles anything inside them that still overflows the narrower format.
     if mag > 310 {
-        return (fmt.infinity(), true);
+        return (fmt.overflow(dir, negative), true);
     }
     if mag < -330 {
-        return (0, true);
+        return (Format::underflow(dir, negative), true);
     }
 
     // The exact integer formed by the digits, absorbed 19 at a time because
@@ -1136,15 +1291,23 @@ fn decimal_to_binary(digits: &[u8], exp10: i32, truncated: bool, fmt: &Format) -
         e = -i32::try_from(l).unwrap_or(i32::MAX) - i32::try_from(q).unwrap_or(i32::MAX);
     }
 
-    round_to_binary(&b, e, sticky, fmt)
+    round_to_binary(&b, e, sticky, fmt, dir, negative)
 }
 
 /// Convert `digits * 10^exp10` to the nearest `f64`, ties to even.
 ///
 /// See [`decimal_to_binary`]; `truncated` is the caller's sticky bit and the
 /// second result is the C `ERANGE` condition.
+#[cfg(test)]
 pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64, bool) {
-    let (bits, out_of_range) = decimal_to_binary(digits, exp10, truncated, &F64_FORMAT);
+    let (bits, out_of_range) = decimal_to_binary(
+        digits,
+        exp10,
+        truncated,
+        &F64_FORMAT,
+        Rounding::Nearest,
+        false,
+    );
     (f64::from_bits(bits), out_of_range)
 }
 
@@ -1156,8 +1319,16 @@ pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64
 /// wrong way.  `strtof("1.000000059604644830901776231257827021181583404541015625")`
 /// is such a value — it must give `1.00000012`, but via `f64` it gives `1.0`.
 /// So `f32` is rounded straight from the exact decimal expansion.
+#[cfg(test)]
 pub(crate) fn decimal_to_f32(digits: &[u8], exp10: i32, truncated: bool) -> (f32, bool) {
-    let (bits, out_of_range) = decimal_to_binary(digits, exp10, truncated, &F32_FORMAT);
+    let (bits, out_of_range) = decimal_to_binary(
+        digits,
+        exp10,
+        truncated,
+        &F32_FORMAT,
+        Rounding::Nearest,
+        false,
+    );
     (
         f32::from_bits(u32::try_from(bits).unwrap_or(0)),
         out_of_range,
@@ -1184,6 +1355,30 @@ impl Format {
     fn infinity(&self) -> u64 {
         self.inf_field << self.mant_bits.saturating_sub(1)
     }
+
+    /// The bit pattern of the largest finite value.
+    fn max_finite(&self) -> u64 {
+        self.infinity().saturating_sub(1)
+    }
+
+    /// The magnitude an overflow gives in direction `dir` for a value of
+    /// sign `negative`: glibc's `MAX_VALUE * MAX_VALUE`, which is infinity
+    /// when rounding to nearest or away from zero, and the largest finite
+    /// value when rounding toward it.
+    fn overflow(&self, dir: Rounding, negative: bool) -> u64 {
+        if dir == Rounding::Nearest || dir.away(negative) {
+            self.infinity()
+        } else {
+            self.max_finite()
+        }
+    }
+
+    /// The magnitude a value too small to reach by the rounding gives:
+    /// glibc's `MIN_VALUE * MIN_VALUE` -- zero, or the least subnormal when
+    /// rounding away from zero.
+    fn underflow(dir: Rounding, negative: bool) -> u64 {
+        u64::from(dir != Rounding::Nearest && dir.away(negative))
+    }
 }
 
 /// IEEE-754 binary64: 53-bit significand, least subnormal `2^-1074`.
@@ -1202,17 +1397,27 @@ const F32_FORMAT: Format = Format {
     inf_field: 0xff,
 };
 
-/// Round the exact value `b * 2^e` into `fmt`, ties to even.
+/// Round the exact value `b * 2^e` into `fmt` in direction `dir`, for a
+/// value of sign `negative` (`b * 2^e` is its magnitude; a directed mode
+/// rounds a magnitude by its sign).
 ///
 /// `sticky_in` says the true value is strictly greater than `b * 2^e`, by less
-/// than one unit in `b`'s last place.  Returns `(bits, out_of_range)` with the
-/// same `ERANGE` meaning as [`decimal_to_binary`].
+/// than one unit in `b`'s last place.  Returns `(bits, out_of_range)`, the
+/// second being glibc's `ERANGE`: an overflow -- to infinity, or to the
+/// largest finite value when rounding toward zero -- or a result that is
+/// both *tiny* and *inexact*. Tiny is x86's "tininess after rounding": still
+/// below the least normal number when rounded to the format's full
+/// precision, as if the exponent had no floor. So an exact subnormal is no
+/// error, and a value just under the least normal number that rounds up to
+/// it is no error either -- unless it was tiny all the same.
 #[allow(clippy::arithmetic_side_effects)]
 fn round_to_binary<const N: usize>(
     b: &Big<N>,
     e: i32,
     sticky_in: bool,
     fmt: &Format,
+    dir: Rounding,
+    negative: bool,
 ) -> (u64, bool) {
     let n = b.bits();
     if n == 0 {
@@ -1221,31 +1426,48 @@ fn round_to_binary<const N: usize>(
     let prec = fmt.mant_bits as usize;
     let implicit = 1u64 << (fmt.mant_bits - 1);
 
-    // Keep the top `mant_bits` bits, then, if that lands below the subnormal
-    // floor, drop further bits so the exponent is exactly `min_exp`.
-    // Everything below the cut is summarised by one guard bit and one sticky
-    // bit, which is all round-to-nearest-even needs.
-    let mut drop = n.saturating_sub(prec);
-    let mut exp = e.saturating_add(i32::try_from(drop).unwrap_or(i32::MAX));
+    // `b` with its lowest `drop` bits cut off and rounded in `dir`: the kept
+    // bits, possibly carried to `prec + 1` of them, and whether anything
+    // nonzero was cut.
+    let round_at = |drop: usize| -> (u64, bool) {
+        let m = b.window(drop);
+        let guard = drop > 0 && b.bit(drop.saturating_sub(1));
+        let rest = sticky_in || (drop > 1 && b.any_bits_below(drop.saturating_sub(1)));
+        let cut = Cut::of_bits(guard, rest);
+        let up = dir.rounds_up(negative, m & 1 == 1, cut);
+        (m + u64::from(up), cut != Cut::Zero)
+    };
+
+    // Keep the top `mant_bits` bits.
+    let drop_full = n.saturating_sub(prec);
+    let exp_full = e.saturating_add(i32::try_from(drop_full).unwrap_or(i32::MAX));
+
+    // Tininess after rounding: that rounding, with no exponent floor, still
+    // below the least normal number -- whose top bit is `prec - 1 + min_exp`.
+    let tiny = {
+        let (m, _) = round_at(drop_full);
+        let top = i32::try_from(u64::BITS - m.leading_zeros()).unwrap_or(0) - 1;
+        top.saturating_add(exp_full) < i32::try_from(prec).unwrap_or(0) - 1 + fmt.min_exp
+    };
+
+    // Below the subnormal floor, cut further, so the exponent is exactly
+    // `min_exp`; everything cut is summarised by the guard and sticky bits.
+    let mut drop = drop_full;
+    let mut exp = exp_full;
     if exp < fmt.min_exp {
         let extra = i64::from(fmt.min_exp).saturating_sub(i64::from(exp));
         drop = drop.saturating_add(usize::try_from(extra).unwrap_or(usize::MAX));
         exp = fmt.min_exp;
     }
-
-    let mut m = b.window(drop);
-    let guard = drop > 0 && b.bit(drop.saturating_sub(1));
-    let sticky = sticky_in || (drop > 1 && b.any_bits_below(drop.saturating_sub(1)));
-    if guard && (sticky || m & 1 == 1) {
-        m += 1;
-        if m == implicit << 1 {
-            m >>= 1;
-            exp = exp.saturating_add(1);
-        }
+    let (mut m, inexact) = round_at(drop);
+    if m == implicit << 1 {
+        m >>= 1;
+        exp = exp.saturating_add(1);
     }
+    let underflow = tiny && inexact;
 
     if m == 0 {
-        return (0, true);
+        return (0, underflow);
     }
     // A short significand (fewer bits than the format holds, so nothing was
     // dropped and nothing was rounded) is normalised by scaling up until it
@@ -1257,15 +1479,15 @@ fn round_to_binary<const N: usize>(
     if m < implicit {
         // Subnormal: the exponent is pinned at the floor, so `m` *is* the
         // stored bit pattern.
-        return (m, true);
+        return (m, underflow);
     }
 
     let biased = exp.saturating_add(fmt.bias);
     if biased >= i32::try_from(fmt.inf_field).unwrap_or(i32::MAX) {
-        return (fmt.infinity(), true);
+        return (fmt.overflow(dir, negative), true);
     }
     let biased = u64::try_from(biased).unwrap_or(0);
-    ((biased << (fmt.mant_bits - 1)) | (m - implicit), false)
+    ((biased << (fmt.mant_bits - 1)) | (m - implicit), underflow)
 }
 
 #[cfg(test)]

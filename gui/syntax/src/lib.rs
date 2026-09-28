@@ -17,7 +17,9 @@
 //! - **The queries** are the grammars' own `highlights.scm`, whose capture
 //!   names (`@keyword`, `@function.method`) map onto the toolkit's kinds of
 //!   code ([`guitk::highlight::Highlight::for_capture`]), which a theme
-//!   colours.
+//!   colours. The grammars' own highlight tests run against them here
+//!   (`src/highlight_tests.rs`), which is what says the highlighter reads a
+//!   query as tree-sitter's does.
 //!
 //! # Using it
 //!
@@ -43,6 +45,16 @@ mod highlighter;
     reason = "a test: a corpus that cannot be read is a failure to report loudly"
 )]
 mod corpus;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    reason = "a test: a file that cannot be read is a failure to report loudly"
+)]
+mod highlight_tests;
 
 use std::path::Path;
 use std::sync::OnceLock;

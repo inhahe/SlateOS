@@ -38,10 +38,15 @@
 //! The query's captures nest the way the tree does -- an escape inside a
 //! string, a string inside an attribute -- and one node can be captured by
 //! several patterns. Tree-sitter's own highlighter settles both the same way
-//! this does: of the captures of one node the first pattern's wins (a
-//! grammar's query lists the specific before the general), and inside a
-//! node, a node within it wins. What comes out is sorted, flat and within the
-//! range asked for, which is what the view draws.
+//! this does: of the captures of one node the last pattern's wins -- a
+//! grammar's query lists the general before the specific, `(identifier)
+//! @variable` before a function's name -- and inside a node, a node within
+//! it wins. (Tree-sitter's highlighter once let the first pattern win; the
+//! queries vendored here are written, and tested upstream, for the last --
+//! `highlight_tests.rs` runs those tests.) A capture
+//! whose name no kind answers to, `@text.emphasis`, takes no part: the
+//! node keeps what the other patterns said of it. What comes out is sorted,
+//! flat and within the range asked for, which is what the view draws.
 
 use core::cell::RefCell;
 use core::ops::Range;
@@ -312,8 +317,10 @@ impl SyntaxHighlighter {
         cursor.set_byte_range(range.clone());
         let mut captures =
             cursor.captures(&compiled.highlights, tree.root_node(), BufferText(text));
-        // Each node's first capture that paints anything, in the order the
-        // cursor gives them: by position, and for one node by pattern.
+        // A node's captures come one after another, by pattern: of those
+        // that paint, the last wins. (A capture of another node between
+        // them, starting where it does, parts them -- then each is a span
+        // of its own, stacked in that order, as tree-sitter's are.)
         let mut last_node: Option<usize> = None;
         while let Some((m, index)) = captures.next() {
             let Some(capture) = m.captures.get(*index) else {
@@ -331,6 +338,9 @@ impl SyntaxHighlighter {
             };
             let node = capture.node;
             if last_node == Some(node.id()) {
+                if let Some(last) = found.last_mut() {
+                    last.1 = kind;
+                }
                 continue;
             }
             last_node = Some(node.id());
@@ -508,18 +518,23 @@ fn content_ranges(node: Node<'_>, include_children: bool, out: &mut Vec<tree_sit
     }
 }
 
-/// Nested spans made flat: sorted by start, the outer before the inner, the
-/// inner winning where it is -- and cut to `within`. A span of no kind
-/// paints plainly: nothing is emitted for it, and what it covers shows the
-/// text's own ink.
+/// Stacked spans made flat -- cut to `within`. The spans are in the order
+/// the captures came, which is by where they start; each goes on top of
+/// those still open where it starts, and the one on top is what shows. So a
+/// node inside another wins where it is, and of two spans that start
+/// together the later pattern's is on top over its whole length, whether
+/// it is the shorter or the longer: TOML's `(pair (bare_key)) @property`
+/// colours a key over `(bare_key) @type` that way. A span stays open, and
+/// hidden, under one above it until that one closes. This is tree-sitter's
+/// highlighter's stack, event for event. A span of no kind paints plainly:
+/// nothing is emitted for it, and what it covers shows the text's own ink.
 fn flatten(
     mut spans: Vec<(Range<usize>, Option<Highlight>)>,
     within: &Range<usize>,
 ) -> Vec<HighlightSpan> {
-    // Stable: spans the same (a node and its only child) keep the cursor's
-    // order, which puts the parent first -- so the child wins, as it would
-    // nested.
-    spans.sort_by_key(|(r, _)| (r.start, core::cmp::Reverse(r.end)));
+    // Stable, so spans that start together keep the order they came in:
+    // the host's by pattern, then each injected language's over them.
+    spans.sort_by_key(|(r, _)| r.start);
     let mut out: Vec<HighlightSpan> = Vec::new();
     let mut emit = |from: usize, to: usize, kind: Option<Highlight>| {
         let (from, to) = (from.max(within.start), to.min(within.end));
@@ -534,28 +549,27 @@ fn flatten(
             }),
         }
     };
-    // The spans open at `pos`, innermost last: (end, kind).
+    // The spans open at `pos`, the top last: (end, kind).
     let mut open: Vec<(usize, Option<Highlight>)> = Vec::new();
     let mut pos = 0usize;
     for (range, kind) in spans {
-        // Close what ends before this starts, colouring up to each end.
-        while let Some(&(end, outer)) = open.last() {
+        // Close what ends before this starts, from the top down, colouring
+        // up to each end; one still open stops it, whatever is under it (a
+        // span under one that outlasts it is closed with it, having shown
+        // nowhere past it).
+        while let Some(&(end, top)) = open.last() {
             if end > range.start {
                 break;
             }
-            emit(pos, end, outer);
+            emit(pos, end, top);
             pos = pos.max(end);
             open.pop();
         }
-        if let Some(&(_, outer)) = open.last() {
-            emit(pos, range.start, outer);
+        if let Some(&(_, top)) = open.last() {
+            emit(pos, range.start, top);
         }
         pos = pos.max(range.start);
-        // A span running past the one it is in is held to it: trees nest.
-        let end = open
-            .last()
-            .map_or(range.end, |&(outer_end, _)| range.end.min(outer_end));
-        open.push((end, kind));
+        open.push((range.end, kind));
     }
     while let Some((end, kind)) = open.pop() {
         emit(pos, end, kind);
@@ -778,6 +792,52 @@ mod tests {
         let got: Vec<(Range<usize>, Highlight)> =
             plain.into_iter().map(|s| (s.range, s.highlight)).collect();
         assert_eq!(got, [(0..2, Str), (4..6, Keyword), (8..10, Str)]);
+    }
+
+    /// **Spans that start together stack in the order they came**, the
+    /// later on top over its whole length -- longer or shorter -- and one
+    /// under a longer one stays hidden until that one closes: TOML's key,
+    /// `(bare_key) @type` then `(pair (bare_key)) @property`, is a property.
+    #[test]
+    fn spans_that_start_together_stack_in_their_order() {
+        use Highlight::{Keyword, Property, String as Str, Type};
+        let flat =
+            |spans: Vec<(Range<usize>, Option<Highlight>)>| -> Vec<(Range<usize>, Highlight)> {
+                flatten(spans, &(0..30))
+                    .into_iter()
+                    .map(|s| (s.range, s.highlight))
+                    .collect()
+            };
+        // `title = "x"`: the key's type under the pair's property.
+        assert_eq!(
+            flat(vec![
+                (0..5, Some(Type)),
+                (0..22, Some(Property)),
+                (8..20, Some(Str)),
+            ]),
+            [(0..8, Property), (8..20, Str), (20..22, Property)]
+        );
+        // The other way round, the shorter on top where it is.
+        assert_eq!(
+            flat(vec![(0..22, Some(Property)), (0..5, Some(Type))]),
+            [(0..5, Type), (5..22, Property)]
+        );
+        // A span after the hidden one's end but inside the one over it
+        // goes on top of that one; the hidden one never shows again.
+        assert_eq!(
+            flat(vec![
+                (0..5, Some(Type)),
+                (0..20, Some(Property)),
+                (10..12, Some(Keyword)),
+                (24..26, Some(Str)),
+            ]),
+            [
+                (0..10, Property),
+                (10..12, Keyword),
+                (12..20, Property),
+                (24..26, Str)
+            ]
+        );
     }
 
     /// **A stretch in another language is coloured as that language**: a

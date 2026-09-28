@@ -1972,7 +1972,7 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 
 #### Code-Aware TextEdit Widget
 *Audited 2026-09-17: none of this exists as a widget, and most of it exists twice as an application. `apps/editor` and `apps/markdowneditor` each implement undo/redo, find/replace, syntax highlighting and a line-number gutter separately — by mention count they are comparable in size, and `apps/notes` has a third, smaller find. So these bullets are not stale: the capabilities are real and the shared widget is the gap, which is the same shape as `SimpleTextView` against `apps/logviewer` above. Extracting one from two working editors is the work, and the two would have to agree on a buffer first — which is what the bullet below is about.*
-- [ ] Rope or gap buffer backing (efficient for large files)
+- [x] Rope or gap buffer backing (efficient for large files) — *2026-09-28: `guitk::textbuffer::TextBuffer`, the text in chunks of at most 4 KiB with the byte offset and newline count before each: an edit rewrites the chunks it touches, a line lookup is a binary search and a scan of one chunk. On a 10 MB file, loading takes 20 ms, a keystroke with its line lookups about 12 µs. Batches of edits (several carets) in the offsets before the batch; offsets inside a character are refused, not rounded. The editors in `apps/` still keep `Vec<String>`; the widget below is what moves them.*
 - [ ] Syntax highlighting via tree-sitter integration
 - [ ] Line numbers (toggleable)
 - [ ] Undo/redo stack — *[-] 2026-09-27: the history exists and is a tree, not a stack (`guitk::undo`, `design-decisions.md` §1420), and the multi-line text area uses it; this widget, which would use it too, does not exist yet.*

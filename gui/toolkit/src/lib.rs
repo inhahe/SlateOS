@@ -84,6 +84,7 @@ pub mod table;
 pub mod tabs;
 pub mod text;
 pub mod textarea;
+pub mod textbuffer;
 pub mod textedit;
 pub mod textinput;
 pub mod textview;

@@ -32,7 +32,6 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -74,20 +73,24 @@ def main() -> int:
             failures.append(what + (f"\n{detail}" if detail else ""))
 
     # ---- the real tree -------------------------------------------------------
-    r = subprocess.run([sys.executable, str(SCRIPT), "--check"], capture_output=True,
-                       text=True, check=False)
-    last = (r.stdout.strip().splitlines() or [""])[-1]
+    # In this process, as `--check` does it, rather than by starting the
+    # script: a suite that starts no process reads only files, so lane A's
+    # gate cache (`requests/a-c-testing-without-a-full-boot-lane-a-takes-both.md`)
+    # can trace what it read and skip it when none of that changed.
+    rp = load()
+    files = sorted({d[1] for d in rp.DEFECTS})
+    status, out = checked(rp, rp.DEFECTS, rp.snapshot(files, missing_ok=True))
+    last = (out.strip().splitlines() or [""])[-1]
     report = "\n".join(
-        "    " + line for line in r.stdout.splitlines()
+        "    " + line for line in out.splitlines()
         if line.startswith(("PATTERN NOT FOUND", "AMBIGUOUS", "NO-OP", "    edit", "    every"))
     )
-    expect(r.returncode == 0 and last.endswith("0 stale, 0 ambiguous, 0 no-op"),
-           f"the harness has rotted -- {last or 'no summary line'} (exit {r.returncode}); "
+    expect(status == 0 and last.endswith("0 stale, 0 ambiguous, 0 no-op"),
+           f"the harness has rotted -- {last or 'no summary line'}; "
            "re-derive or retire each entry below (see this file's docstring)",
-           report or r.stderr.strip())
+           report)
 
     # ---- the controls ------------------------------------------------------------
-    rp = load()
     snap = {"f.rs": b"alpha\nbeta\nbeta\n"}
 
     status, out = checked(rp, [("A: applies once", "f.rs", [("alpha\n", "gamma\n")], [], [])], snap)

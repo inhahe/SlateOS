@@ -3015,6 +3015,7 @@ name = "renamer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "coreutils",
  "ere",
  "guitk",
  "oswindow",

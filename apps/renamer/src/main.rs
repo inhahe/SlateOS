@@ -618,8 +618,18 @@ struct RenameStep {
     to: String,
 }
 
+/// What a set of renames comes to: the steps to take, in order, and the
+/// renames that cannot be made at all -- each onto a name a file holds that no
+/// rename in the set moves out of the way.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct RenamePlan {
+    steps: Vec<RenameStep>,
+    refused: Vec<(String, String)>,
+}
+
 /// Order a set of renames so that no step overwrites a file a later step still
-/// needs, inserting temporary names where a cycle makes that impossible.
+/// needs, inserting temporary names where a cycle makes that impossible -- and
+/// refusing a rename onto a name held by a file that is not moving at all.
 ///
 /// `existing` is every filename present in the directory right now;
 /// `renames` is the `(from, to)` set the user asked for, in any order.
@@ -632,16 +642,24 @@ struct RenameStep {
 /// order at all, and needs one of them parked under a temporary name first.
 ///
 /// The algorithm is the obvious one: repeatedly emit every rename whose
-/// destination is currently free; when a full pass emits nothing, everything
-/// left is part of a cycle, so break one link by renaming its source to an
-/// unused temporary name and re-queue the rest of that rename. Breaking a link
-/// always frees the name some other queued rename wants — that is what being a
-/// cycle means — so each break makes progress and the loop terminates.
+/// destination is currently free. When a full pass emits nothing, a rename
+/// whose destination no queued rename will vacate can never go, and is
+/// refused; what is left after that is in a cycle, so break one link by
+/// renaming its source to an unused temporary name and re-queue the rest of
+/// that rename. Breaking a link frees a name some other queued rename wants --
+/// that is what being in a cycle means -- so each break leads to progress and
+/// the loop terminates.
+///
+/// **The refusal is what makes that last sentence true.** The planner took
+/// every stall for a cycle, and a rename blocked by a file nothing moves is no
+/// cycle: parking its source freed a name nobody wanted, the rename came back
+/// as blocked as before, and the loop minted temporary names until memory ran
+/// out. An undo that met a file made since under the old name did it.
 ///
 /// Note it is `fs::rename`'s *overwriting* that makes this necessary. Slate OS
 /// paths are case-sensitive, so `a.txt` → `A.txt` is a real rename between two
 /// distinct names and needs no special handling here.
-fn rename_plan(existing: &[String], renames: &[(String, String)]) -> Vec<RenameStep> {
+fn rename_plan(existing: &[String], renames: &[(String, String)]) -> RenamePlan {
     let mut occupied: BTreeSet<String> = existing.iter().cloned().collect();
     let mut pending: Vec<(String, String)> = renames
         .iter()
@@ -649,7 +667,9 @@ fn rename_plan(existing: &[String], renames: &[(String, String)]) -> Vec<RenameS
         .cloned()
         .collect();
     let mut steps = Vec::new();
+    let mut refused = Vec::new();
     let mut temp_counter: usize = 0;
+    let mut parks: usize = 0;
 
     while !pending.is_empty() {
         let mut blocked = Vec::new();
@@ -670,9 +690,31 @@ fn rename_plan(existing: &[String], renames: &[(String, String)]) -> Vec<RenameS
             continue;
         }
 
+        // Nothing moved. A rename waiting on a name that no rename left will
+        // vacate can never go: refuse it, and go round again with the rest.
+        let sources: BTreeSet<String> = pending.iter().map(|(from, _)| from.clone()).collect();
+        let (cyclic, stuck): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|(_, to)| sources.contains(to));
+        pending = cyclic;
+        if !stuck.is_empty() {
+            refused.extend(stuck);
+            continue;
+        }
+
         // Everything left is in a cycle. Park one source under a name nothing
         // uses, which frees its old name for whichever rename was waiting on
         // it, and re-queue the second half of the move.
+        //
+        // Every park is followed by progress, so no plan needs more parks
+        // than it has renames. One that would has met a case the reasoning
+        // above missed: what is left is refused rather than looped on -- a
+        // refusal loses nothing, and a loop mints names until memory runs out.
+        if parks >= renames.len() {
+            refused.append(&mut pending);
+            break;
+        }
+        parks = parks.saturating_add(1);
         let (from, to) = pending.remove(0);
         let temp = unused_temp_name(&occupied, &mut temp_counter);
         occupied.remove(&from);
@@ -684,7 +726,43 @@ fn rename_plan(existing: &[String], renames: &[(String, String)]) -> Vec<RenameS
         pending.push((temp, to));
     }
 
-    steps
+    RenamePlan { steps, refused }
+}
+
+/// Rename `from` to `to`, refusing rather than replacing a file already at
+/// `to` -- coreutils' `noreplace`, atomic on Slate OS. A plan is made from a
+/// listing, and another program can make a file under a name between the
+/// listing and the rename; `fs::rename` would destroy it without a word.
+///
+/// The one `to` that may be there is `from` itself, spelt in another case, on
+/// a filesystem that does not tell case apart -- the Windows host the tests
+/// run on, where `a.txt` to `A.txt` finds its own file at the name.
+fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    match coreutils::rename::noreplace(from, to) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && only_case_differs(from, to) => {
+            std::fs::rename(from, to)
+        }
+        answer => answer,
+    }
+}
+
+/// Whether `a` and `b` are one file whose names differ only in case: in one
+/// folder, spelt alike but for case, and one place once resolved. On a
+/// filesystem that tells case apart they are two files, and resolve apart.
+fn only_case_differs(a: &Path, b: &Path) -> bool {
+    let (Some(a_name), Some(b_name)) = (a.file_name(), b.file_name()) else {
+        return false;
+    };
+    let alike = match (a_name.to_str(), b_name.to_str()) {
+        (Some(x), Some(y)) => x != y && x.to_lowercase() == y.to_lowercase(),
+        _ => false,
+    };
+    alike
+        && a.parent() == b.parent()
+        && matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
 }
 
 /// A name that no file in `occupied` has, for parking one side of a rename
@@ -1404,8 +1482,7 @@ impl RenamerApp {
         // Ordered so that no step overwrites a name a later step still
         // needs; see `rename_plan`. The order matters to the filesystem, not
         // to the preview, which is why it was built before there was one.
-        let plan = rename_plan(&self.current_names(), &record.renames);
-        let (done, failures) = self.perform(&plan);
+        let (done, failures) = self.carry_out(&record.renames);
 
         if done > 0 {
             self.undo.record(record.clone());
@@ -1454,7 +1531,7 @@ impl RenamerApp {
                 .map_or_else(|| OsString::from(&step.from), |f| f.raw_name.clone());
             let from = folder.join(&from_raw);
             let to = folder.join(&step.to);
-            match std::fs::rename(&from, &to) {
+            match rename_without_replacing(&from, &to) {
                 Ok(()) => {
                     done = done.saturating_add(1);
                     if let Some(file) = self.files.iter_mut().find(|f| f.original_name == step.from)
@@ -1462,6 +1539,13 @@ impl RenamerApp {
                         file.original_name.clone_from(&step.to);
                         file.raw_name = OsString::from(&step.to);
                     }
+                }
+                // Something took the name after the plan was made.
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    failures.push(format!(
+                        "{} -> {}: a file named {} is already there",
+                        step.from, step.to, step.to
+                    ))
                 }
                 Err(err) => failures.push(format!("{} -> {}: {err}", step.from, step.to)),
             }
@@ -1614,14 +1698,12 @@ impl RenamerApp {
             .iter()
             .map(|(old, new)| (new.clone(), old.clone()))
             .collect();
-        let plan = rename_plan(&self.current_names(), &reversed);
-        self.perform(&plan)
+        self.carry_out(&reversed)
     }
 
     /// Rename `record`'s files to the names it gave them again.
     fn do_again(&mut self, record: &RenameRecord) -> (usize, Vec<String>) {
-        let plan = rename_plan(&self.current_names(), &record.renames);
-        self.perform(&plan)
+        self.carry_out(&record.renames)
     }
 
     /// Ctrl+Y or Ctrl+Shift+Z: redo, or nothing to draw when there is none.
@@ -1631,6 +1713,36 @@ impl RenamerApp {
         }
         self.redo();
         EventResult::Consumed
+    }
+
+    /// Plan `renames` against the folder as it is now and carry the plan out:
+    /// how many went, and what did not -- the renames the plan refused first,
+    /// since each is why others waiting on it could not go either.
+    fn carry_out(&mut self, renames: &[(String, String)]) -> (usize, Vec<String>) {
+        let plan = rename_plan(&self.names_on_disk(), renames);
+        let mut failures: Vec<String> = plan
+            .refused
+            .iter()
+            .map(|(from, to)| format!("{from} -> {to}: a file named {to} is already there"))
+            .collect();
+        let (done, more) = self.perform(&plan.steps);
+        failures.extend(more);
+        (done, failures)
+    }
+
+    /// The names in the folder as it is now, for planning: the files the list
+    /// shows, and whatever another program has put there since. A plan made
+    /// from the list alone renamed over a file it did not know was there. A
+    /// name that is not text is left out: every name this program makes is
+    /// text, so none can be one of them.
+    fn names_on_disk(&self) -> Vec<String> {
+        let mut names = self.current_names();
+        if let Some(folder) = &self.folder
+            && let Ok(listing) = std::fs::read_dir(folder)
+        {
+            names.extend(listing.filter_map(|entry| entry.ok()?.file_name().into_string().ok()));
+        }
+        names
     }
 
     /// The name every file in the list currently has on disk.
@@ -6362,7 +6474,8 @@ mod tests {
                 ("2.jpg".to_string(), "3.jpg".to_string()),
                 ("3.jpg".to_string(), "4.jpg".to_string()),
             ],
-        );
+        )
+        .steps;
         assert_eq!(
             plan,
             vec![
@@ -6390,7 +6503,8 @@ mod tests {
                 ("a.txt".to_string(), "b.txt".to_string()),
                 ("b.txt".to_string(), "a.txt".to_string()),
             ],
-        );
+        )
+        .steps;
         // Three steps, because no two-step order exists: whichever ran first
         // would overwrite the other file.
         assert_eq!(plan.len(), 3);
@@ -6503,7 +6617,8 @@ mod tests {
                 ("a.txt".to_string(), "b.txt".to_string()),
                 ("b.txt".to_string(), "a.txt".to_string()),
             ],
-        );
+        )
+        .steps;
         // The parking name must be one nothing in the directory holds, or the
         // cycle-breaker destroys an innocent bystander.
         assert_eq!(plan[0].to, ".renamer-tmp-1");
@@ -6511,6 +6626,152 @@ mod tests {
             plan.iter()
                 .all(|s| s.from != ".renamer-tmp-0" && s.to != ".renamer-tmp-0")
         );
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+            .collect()
+    }
+
+    /// `rename_plan` on a thread, failing the test rather than hanging it if
+    /// the plan never comes: a planner that loops on a stall mints temporary
+    /// names for ever.
+    fn plan_in_time(existing: &[&str], renames: &[(&str, &str)]) -> RenamePlan {
+        let (existing, renames) = (names(existing), pairs(renames));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The receiver is gone only when the test has already failed.
+            let _ = tx.send(rename_plan(&existing, &renames));
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the planner never finished: it looped on a stall")
+    }
+
+    /// **A rename onto a name held by a file nothing moves is refused, not
+    /// looped on.** The planner took any stall for a cycle and parked the
+    /// source under a temporary name -- which frees nothing anyone wants --
+    /// so the rename came back blocked, and temporaries were minted until
+    /// memory ran out.
+    #[test]
+    fn a_rename_onto_a_name_a_file_keeps_is_refused_not_looped_on() {
+        let plan = plan_in_time(&["b.txt", "a.txt"], &[("b.txt", "a.txt")]);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(plan.refused, pairs(&[("b.txt", "a.txt")]));
+    }
+
+    /// A chain whose last link is refused is refused whole: nothing in it
+    /// can be vacated.
+    #[test]
+    fn a_chain_ending_on_a_kept_name_is_refused_whole() {
+        let plan = plan_in_time(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(plan.refused.len(), 2);
+    }
+
+    /// What can go still goes beside what is refused, and a cycle still
+    /// goes by way of a temporary name.
+    #[test]
+    fn a_refusal_leaves_the_rest_of_the_plan_alone() {
+        let plan = plan_in_time(
+            &["a", "b", "x", "y", "kept"],
+            &[("a", "b"), ("b", "a"), ("x", "z"), ("y", "kept")],
+        );
+        assert_eq!(plan.refused, pairs(&[("y", "kept")]));
+        assert_eq!(plan.steps.len(), 4, "{:?}", plan.steps);
+    }
+
+    /// **An undo never renames over a file made since under the old name**:
+    /// it is refused and said, and both files are as they were. Planned
+    /// from the list alone, the undo renamed over the new file -- the list
+    /// did not know it was there -- and `fs::rename` replaces without a word.
+    #[test]
+    fn an_undo_onto_a_name_taken_since_leaves_both_files() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::write(dir.join("a.txt"), b"someone else's").expect("write");
+        app.undo();
+        assert_eq!(on_disk(&app), vec!["a.txt", "b.txt"]);
+        assert_eq!(
+            std::fs::read(dir.join("a.txt")).expect("read"),
+            b"someone else's",
+            "the undo renamed over another program's file"
+        );
+        assert!(
+            app.status_message.contains("already there"),
+            "{}",
+            app.status_message
+        );
+        assert!(app.undo.can_undo(), "the undo cannot be tried again");
+    }
+
+    /// Nor does a rename: a file another program put under the new name
+    /// between the preview and the rename is left alone.
+    #[test]
+    fn a_rename_never_replaces_a_file_the_list_does_not_know() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::write(dir.join("b.txt"), b"someone else's").expect("write");
+        app.execute_rename();
+        assert_eq!(on_disk(&app), vec!["a.txt", "b.txt"]);
+        assert_eq!(
+            std::fs::read(dir.join("b.txt")).expect("read"),
+            b"someone else's"
+        );
+    }
+
+    /// **The rename itself refuses a file already at the name**, so a file
+    /// made between the plan and the rename is not replaced either.
+    #[test]
+    fn a_rename_refuses_a_file_already_at_the_name() {
+        let dir = scratch("noreplace");
+        std::fs::write(dir.join("a.txt"), b"a").expect("write");
+        std::fs::write(dir.join("b.txt"), b"b").expect("write");
+        let err = rename_without_replacing(&dir.join("a.txt"), &dir.join("b.txt"))
+            .expect_err("it replaced b.txt");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(dir.join("a.txt")).expect("read"), b"a");
+        assert_eq!(std::fs::read(dir.join("b.txt")).expect("read"), b"b");
+    }
+
+    /// **The plan is made from the folder, not the list**: a swap goes
+    /// through whatever another program has left under the temporary name the
+    /// list would have chosen, and that file is left alone.
+    #[test]
+    fn a_swap_goes_round_a_file_left_under_the_temporary_name() {
+        let mut app = app_with(&["a.txt", "b.txt"]);
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::write(dir.join(".renamer-tmp-0"), b"theirs").expect("write");
+        preview(&mut app, &["b.txt", "a.txt"]);
+        app.execute_rename();
+        assert_eq!(
+            std::fs::read(dir.join("a.txt")).expect("read"),
+            b"b.txt",
+            "{}",
+            app.status_message
+        );
+        assert_eq!(std::fs::read(dir.join("b.txt")).expect("read"), b"a.txt");
+        assert_eq!(
+            std::fs::read(dir.join(".renamer-tmp-0")).expect("read"),
+            b"theirs"
+        );
+    }
+
+    /// A rename that changes only case goes through -- on the Windows host,
+    /// whose filesystem finds the file itself at the new name.
+    #[test]
+    fn a_rename_that_changes_only_case_goes_through() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["A.txt"]);
+        app.execute_rename();
+        assert_eq!(on_disk(&app), vec!["A.txt"], "{}", app.status_message);
     }
 
     #[test]
@@ -6524,7 +6785,8 @@ mod tests {
                 ("a.txt".to_string(), "a.txt".to_string()),
                 ("b.txt".to_string(), "c.txt".to_string()),
             ],
-        );
+        )
+        .steps;
         assert_eq!(
             plan,
             vec![RenameStep {
@@ -6544,7 +6806,7 @@ mod tests {
             .iter()
             .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
             .collect();
-        let plan = rename_plan(&existing, &pairs);
+        let plan = rename_plan(&existing, &pairs).steps;
 
         let mut disk: BTreeSet<String> = existing.iter().cloned().collect();
         for step in &plan {

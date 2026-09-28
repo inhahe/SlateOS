@@ -220,6 +220,43 @@ MUTATIONS = [
         "",
         ["ctrl_shift_z_redoes"],
     ),
+    # -- a rename never replaces a file (2026-09-28) -----------------------------
+    (
+        "a rename that can never go is taken for a cycle",
+        "        if !stuck.is_empty() {\n            refused.extend(stuck);\n            continue;\n        }",
+        "        pending.extend(stuck);",
+        ["a_rename_onto_a_name_a_file_keeps_is_refused_not_looped_on"],
+    ),
+    (
+        "a refusal breaks a link it need not",
+        "            refused.extend(stuck);\n            continue;",
+        "            refused.extend(stuck);",
+        ["a_chain_ending_on_a_kept_name_is_refused_whole"],
+    ),
+    (
+        "a plan is made from the list alone",
+        "        let plan = rename_plan(&self.names_on_disk(), renames);",
+        "        let plan = rename_plan(&self.current_names(), renames);",
+        ["a_swap_goes_round_a_file_left_under_the_temporary_name"],
+    ),
+    (
+        "a rename replaces what is at the name",
+        "    match coreutils::rename::noreplace(from, to) {",
+        "    match std::fs::rename(from, to) {",
+        ["a_rename_refuses_a_file_already_at_the_name"],
+    ),
+    (
+        "a case-only rename is refused as a clash",
+        "        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && only_case_differs(from, to) => {",
+        "        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && false => {",
+        ["a_rename_that_changes_only_case_goes_through"],
+    ),
+    (
+        "a refused rename is not said",
+        "        let mut failures: Vec<String> = plan\n            .refused",
+        "        let mut failures: Vec<String> = Vec::new();\n        let _said: Vec<String> = plan\n            .refused",
+        ["an_undo_onto_a_name_taken_since_leaves_both_files"],
+    ),
     (
         "AltGr is taken for Ctrl in the list",
         "        let ctrl = key.modifiers.ctrl && !key.modifiers.alt;",

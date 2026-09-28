@@ -120,59 +120,126 @@
 //!     was wrong. One arm now turns a key into an axis and a delta, and the
 //!     move rule decides the rest.
 
+use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::{Palette, SurfaceStyle};
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::collections::VecDeque;
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAROON: Color = Color::from_hex(0xEBA0AC);
-const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
-const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
 
-/// The scrim drawn over the yard by the victory panel and the puzzle sheet.
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// A well.
+    crust: Color,
+    /// Raised.
+    surface0: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's peach, inked for the page.
+    peach: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// The car you are trying to get out, and the exit it leaves through: one
+    /// colour for both, because the strip on the right-hand edge is a picture
+    /// of the car it is waiting for.
+    player: Color,
+    /// The colours the other vehicles are dealt from, in order, wrapping.
+    ///
+    /// The player's red is deliberately **not** among them, nor anything a
+    /// red could be taken for: a blocker painted like the red car is a
+    /// picture that lies about which car ends the game. Mocha's maroon and
+    /// flamingo were in this list once, and a palette has no roles for them
+    /// -- the nearest it has is red; its peach was too, and under a dark
+    /// theme the palette's own `hard_to_tell_apart` cannot tell it from red.
+    blockers: [Color; 8],
+    /// What the win panel's buttons sit on: the panel's ground, the page or
+    /// the band under the card look.
+    panel: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            crust: p.crust,
+            surface0: p.surface0,
+            text: p.text,
+            subtext0: p.subtext0,
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            peach: p.ink(p.peach),
+            lavender: p.ink(p.lavender),
+            player: p.ink(p.red),
+            blockers: [
+                p.ink(p.blue),
+                p.ink(p.green),
+                p.ink(p.yellow),
+                p.ink(p.mauve),
+                p.ink(p.teal),
+                p.ink(p.lavender),
+                p.ink(p.sapphire),
+                p.subtext0,
+            ],
+            panel: if p.surface_style() == SurfaceStyle::Cards {
+                p.mantle
+            } else {
+                p.base
+            },
+        }
+    }
+
+    /// The colour vehicle `v` is drawn in: the red car's, or its place in
+    /// the blockers' cycle.
+    fn vehicle(&self, v: &Vehicle) -> Color {
+        if v.player {
+            return self.player;
+        }
+        self.blockers
+            .get(v.paint.checked_rem(self.blockers.len()).unwrap_or(0))
+            .copied()
+            .unwrap_or(self.subtext0)
+    }
+}
+
+/// The two inks that may be written on a car, `(light, dark)`: whichever
+/// reads on it.
 ///
-/// Genuinely translucent — `Canvas::set` composites it with `Color::over`, so
-/// the position underneath shows through. The version this replaced was opaque
-/// and claimed otherwise in a comment.
-const SCRIM: Color = Color::rgba(0x11, 0x11, 0x1B, 0xB4);
-
-/// The colour of the car you are trying to get out, and of the exit it leaves
-/// through. One constant for both, because the strip on the right-hand edge is
-/// a picture of the car it is waiting for — not a separate decision that could
-/// come to disagree with it.
-const PLAYER_COLOR: Color = RED;
-
-/// The colours the other vehicles are dealt from, in order, wrapping.
-///
-/// `PLAYER_COLOR` is deliberately **not** in this list: the player's car is the
-/// one that ends the game, and a blocker painted the same colour would be a
-/// picture that lies about which car that is.
-const VEHICLE_COLORS: [Color; 11] = [
-    BLUE, GREEN, YELLOW, PEACH, MAUVE, TEAL, LAVENDER, MAROON, SAPPHIRE, FLAMINGO, SUBTEXT0,
-];
+/// The near-black is a neutral one rather than Mocha's crust (`11111B`),
+/// which it used to be: the palette test matches the game's own colours on
+/// RGB, and Mocha's crust among them would pass a leftover Mocha crust
+/// anywhere in a light window.
+const INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x161616));
 
 const GRID_SIZE: usize = 6;
 
@@ -246,7 +313,11 @@ pub struct Vehicle {
     /// Whether this is the car that has to get out. Carried explicitly, because
     /// inferring it from the paint is what let the palette decide the rules.
     pub player: bool,
-    pub color: Color,
+    /// A blocker's place in the colours it is dealt from; the colour itself
+    /// is the theme's, looked up when the yard is drawn, so a theme that
+    /// changes repaints every car. Unread for the red car, whose colour is
+    /// its own.
+    pub paint: usize,
     /// The letter drawn on it.
     pub label: char,
 }
@@ -318,13 +389,14 @@ impl Difficulty {
         }
     }
 
-    #[must_use]
-    pub fn color(self) -> Color {
+    /// The difficulty's colour in `c`: the palette's green, yellow, peach and
+    /// red, each inked for the page.
+    fn color(self, c: &Colours) -> Color {
         match self {
-            Self::Beginner => GREEN,
-            Self::Intermediate => YELLOW,
-            Self::Advanced => PEACH,
-            Self::Expert => RED,
+            Self::Beginner => c.green,
+            Self::Intermediate => c.yellow,
+            Self::Advanced => c.peach,
+            Self::Expert => c.red,
         }
     }
 }
@@ -863,6 +935,12 @@ pub struct RushHour {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size_drawn: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl Default for RushHour {
@@ -884,6 +962,8 @@ impl RushHour {
             sheet_open: false,
             sheet_cursor: 0,
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         game.load_puzzle(0);
         game
@@ -929,11 +1009,10 @@ impl RushHour {
             length: PLAYER_LENGTH,
             orientation: Orientation::Horizontal,
             player: true,
-            color: PLAYER_COLOR,
+            paint: 0,
             label: PLAYER_LABEL,
         });
-        let mut palette = VEHICLE_COLORS.iter().copied().cycle();
-        for &(row, col, length, orientation, label) in def.blockers {
+        for (paint, &(row, col, length, orientation, label)) in def.blockers.iter().enumerate() {
             self.vehicles.push(Vehicle {
                 id: take_id(),
                 row,
@@ -941,9 +1020,7 @@ impl RushHour {
                 length,
                 orientation,
                 player: false,
-                // `cycle` over a non-empty array never runs out; the fallback is
-                // the total spelling of that, not a case anything reaches.
-                color: palette.next().unwrap_or(SUBTEXT0),
+                paint,
                 label,
             });
         }
@@ -1036,10 +1113,9 @@ impl RushHour {
             length: PLAYER_LENGTH,
             orientation: Orientation::Horizontal,
             player: true,
-            color: PLAYER_COLOR,
+            paint: 0,
             label: PLAYER_LABEL,
         });
-        let mut palette = VEHICLE_COLORS.iter().copied().cycle();
         for (i, &(row, col, length, orientation)) in blockers.iter().enumerate() {
             self.vehicles.push(Vehicle {
                 id: take_id(),
@@ -1048,7 +1124,7 @@ impl RushHour {
                 length,
                 orientation,
                 player: false,
-                color: palette.next().unwrap_or(SUBTEXT0),
+                paint: i,
                 label: BLOCKER_LABELS.chars().nth(i).unwrap_or('?'),
             });
         }
@@ -1369,7 +1445,7 @@ impl RushHour {
             y: 0.0,
             width: l.window.w,
             height: l.window.h,
-            color: BASE,
+            color: self.colours.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1391,7 +1467,7 @@ impl RushHour {
         // and `centre_line` refuses a band that cannot hold the stack, so a
         // dropped header leaves this function without either of them drawing.
         // A guard a stronger one dominates reads as the bound and is not.
-        fill(f, l.header, MANTLE, CornerRadii::ZERO);
+        fill(f, l.header, self.colours.mantle, CornerRadii::ZERO);
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         let sub_h = text::line_height(l.small, FontWeightHint::Regular);
@@ -1420,13 +1496,14 @@ impl RushHour {
             text: &moves_text,
             size: l.font,
             weight: FontWeightHint::Regular,
-            color: TEXT_COLOR,
+            color: self.colours.text,
         };
         let undo = Label {
             text: &undo_text,
             size: l.small,
             weight: FontWeightHint::Regular,
-            color: OVERLAY0,
+            // Secondary text: the faintest grey is 2.3:1 on a light band.
+            color: self.colours.subtext0,
         };
         let counters_w = text::measure(moves.text, moves.size, moves.weight).max(if two_lines {
             text::measure(undo.text, undo.size, undo.weight)
@@ -1448,7 +1525,7 @@ impl RushHour {
                 text: "Rush Hour",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: LAVENDER,
+                color: self.colours.lavender,
             },
             left,
             top,
@@ -1467,7 +1544,7 @@ impl RushHour {
                     text: &subtitle,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: difficulty.color(),
+                    color: difficulty.color(&self.colours),
                 },
                 left,
                 top + title_h,
@@ -1493,14 +1570,24 @@ impl RushHour {
         // from went unnoticed. `board_mat` stops at the grid's ring; the exit
         // strip beyond it is covered by `board_frame`, the region the whole
         // pass is checked against.
-        fill(f, l.board_mat, CRUST, CornerRadii::all(l.gap.max(1.0)));
+        fill(
+            f,
+            l.board_mat,
+            self.colours.crust,
+            CornerRadii::all(l.gap.max(1.0)),
+        );
 
         // Empty cells first, so a car drawn over one takes the click: the hit
         // test answers with the *last* target covering the point.
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
                 let r = l.cell_rect(row, col);
-                fill(f, r, SURFACE0, CornerRadii::all(l.gap.max(1.0)));
+                fill(
+                    f,
+                    r,
+                    self.colours.surface0,
+                    CornerRadii::all(l.gap.max(1.0)),
+                );
                 f.hit(Target::Cell(row, col), r);
             }
         }
@@ -1509,7 +1596,12 @@ impl RushHour {
         // click and does nothing is worse than no control, because the click it
         // ate would otherwise have reached whatever is beneath.
         if !l.exit.is_empty() {
-            fill(f, l.exit, PLAYER_COLOR, CornerRadii::all(l.gap.max(1.0)));
+            fill(
+                f,
+                l.exit,
+                self.colours.player,
+                CornerRadii::all(l.gap.max(1.0)),
+            );
         }
 
         for v in &self.vehicles {
@@ -1531,11 +1623,12 @@ impl RushHour {
                 fill(
                     f,
                     Rect::new(r.x - grow, r.y - grow, r.w + grow * 2.0, r.h + grow * 2.0),
-                    TEXT_COLOR,
+                    self.colours.text,
                     CornerRadii::all(l.cell * 0.12),
                 );
             }
-            fill(f, r, v.color, CornerRadii::all(l.cell * 0.1));
+            let colour = self.colours.vehicle(v);
+            fill(f, r, colour, CornerRadii::all(l.cell * 0.1));
 
             let glyph = v.label.to_string();
             let size = (l.cell * 0.34).clamp(7.0, l.font);
@@ -1548,7 +1641,7 @@ impl RushHour {
                         text: &glyph,
                         size,
                         weight: FontWeightHint::Bold,
-                        color: CRUST,
+                        color: gamechrome::legible_on(INKS, colour),
                     },
                     r,
                 );
@@ -1557,11 +1650,43 @@ impl RushHour {
         }
     }
 
+    /// A control: the toolkit's push button at this window's size, on
+    /// `ground`; `on` draws the answer offered first as the toolkit's primary
+    /// button, and `live` false the switched-off look.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a button's place, label, size, two states and ground; a struct would be built at each call and read once"
+    )]
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        r: Rect,
+        name: &str,
+        size: f32,
+        on: bool,
+        live: bool,
+        ground: Color,
+    ) {
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            name,
+            size,
+            if on { Kind::Primary } else { Kind::Plain },
+            State {
+                disabled: !live,
+                ..State::default()
+            },
+            ground,
+        );
+    }
+
     fn draw_controls(&self, f: &mut Frame<Target>, l: &Layout) {
         // No band bail: `fill` refuses a rectangle with no area, and a dropped
         // controls band gives `button_rects` a zero `bw` and `bh`, so every
         // button is `Rect::EMPTY` and the loop below draws none of them.
-        fill(f, l.controls, MANTLE, CornerRadii::ZERO);
+        fill(f, l.controls, self.colours.mantle, CornerRadii::ZERO);
         for ((target, name), r) in BUTTONS.into_iter().zip(l.button_rects()) {
             if r.is_empty() {
                 continue;
@@ -1570,27 +1695,8 @@ impl RushHour {
                 Target::Undo => !self.undo_stack.is_empty(),
                 _ => true,
             };
-            fill(
-                f,
-                r,
-                if live { SURFACE1 } else { SURFACE0 },
-                CornerRadii::all(l.pad.max(1.0)),
-            );
             let size = (r.h * 0.4).clamp(7.0, l.small);
-            // The `line_height(size, …) <= r.h` test that used to guard this
-            // call is exactly what `centre_line` asks inside `label_centred`,
-            // written out once per call site. One reachable refusal beats
-            // several unreachable ones.
-            label_centred(
-                f,
-                &Label {
-                    text: name,
-                    size,
-                    weight: FontWeightHint::Regular,
-                    color: if live { TEXT_COLOR } else { OVERLAY0 },
-                },
-                r,
-            );
+            self.button(f, r, name, size, false, live, self.colours.mantle);
             // Recorded even when it is drawn dim: `undo` on an empty stack
             // answers `false` and changes nothing, and a target that reports
             // "nothing happened" is the thing the tests can hold on to.
@@ -1599,7 +1705,7 @@ impl RushHour {
     }
 
     fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        fill(f, l.footer, self.colours.mantle, CornerRadii::ZERO);
         let size = l.small;
         let lh = text::line_height(size, FontWeightHint::Regular);
         let shown = if lh * 2.0 <= l.footer.h { 2 } else { 1 };
@@ -1621,7 +1727,9 @@ impl RushHour {
                     text: line,
                     size,
                     weight: FontWeightHint::Regular,
-                    color: if i == 0 { SUBTEXT0 } else { OVERLAY0 },
+                    // Secondary text, both lines: the keys are read, and
+                    // the palette's faintest grey is 2.3:1 on a light band.
+                    color: self.colours.subtext0,
                 },
                 l.footer.x + l.pad,
                 top + lh * i as f32,
@@ -1635,14 +1743,33 @@ impl RushHour {
         // A translucent scrim, not an opaque one: the cleared jam is the thing
         // worth looking at, and painting it out to celebrate it was the joke
         // the old comment was making without meaning to.
-        fill(f, l.window, SCRIM, CornerRadii::ZERO);
+        fill(
+            f,
+            l.window,
+            Chrome::of(&self.palette).scrim,
+            CornerRadii::ZERO,
+        );
 
         // Nothing behind the panel is clickable any more — a modal that only
         // *looks* in front is one whose buttons you can press through.
         f.discard_hits();
 
         let panel = l.win_panel();
-        fill(f, panel, SURFACE0, CornerRadii::all(l.pad * 1.2));
+        // Less than a point either way is no panel: the toolkit's surface
+        // strokes its border half a point inside the box, and in a box that
+        // thin the stroke's own width reaches outside it.
+        if panel.w < 1.0 || panel.h < 1.0 {
+            return;
+        }
+        self.palette.push_surface(
+            f,
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            l.pad * 1.2,
+            Surface::Panel,
+        );
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         let line_h = text::line_height(l.font, FontWeightHint::Regular);
@@ -1662,7 +1789,7 @@ impl RushHour {
                 text: "Puzzle Solved!",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: GREEN,
+                color: self.colours.green,
             },
             Rect::new(panel.x, top, panel.w, title_h),
         );
@@ -1673,7 +1800,7 @@ impl RushHour {
                 text: &tally,
                 size: l.font,
                 weight: FontWeightHint::Regular,
-                color: TEXT_COLOR,
+                color: self.colours.text,
             },
             Rect::new(panel.x, top + title_h, panel.w, line_h),
         );
@@ -1694,24 +1821,28 @@ impl RushHour {
         let by = top + title_h + line_h;
         for (i, (target, name)) in choices.into_iter().enumerate() {
             let r = Rect::new(panel.x + l.pad + i as f32 * (bw + l.pad), by, bw, btn_h);
-            fill(f, r, SURFACE1, CornerRadii::all(l.pad.max(1.0)));
             let size = (r.h * 0.4).clamp(7.0, l.font);
-            label_centred(
+            // The next puzzle is the answer the panel offers first.
+            self.button(
                 f,
-                &Label {
-                    text: name,
-                    size,
-                    weight: FontWeightHint::Regular,
-                    color: TEXT_COLOR,
-                },
                 r,
+                name,
+                size,
+                target == Target::Next,
+                true,
+                self.colours.panel,
             );
             f.hit(target, r);
         }
     }
 
     fn draw_sheet(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.window, SCRIM, CornerRadii::ZERO);
+        fill(
+            f,
+            l.window,
+            Chrome::of(&self.palette).scrim,
+            CornerRadii::ZERO,
+        );
         f.discard_hits();
 
         // The whole window dismisses the sheet, and the rows drawn after this
@@ -1722,7 +1853,21 @@ impl RushHour {
         f.hit(Target::CloseSheet, l.window);
 
         let panel = l.sheet_panel();
-        fill(f, panel, MANTLE, CornerRadii::all(l.pad * 1.2));
+        // The toolkit's panel. Under a point either way its border, stroked
+        // half a point in, would reach outside it -- and the rows and the
+        // hint are placed from their own edges, so a panel too thin to draw
+        // is not a sheet with nothing on it.
+        if panel.w >= 1.0 && panel.h >= 1.0 {
+            self.palette.push_surface(
+                f,
+                panel.x,
+                panel.y,
+                panel.w,
+                panel.h,
+                l.pad * 1.2,
+                Surface::Panel,
+            );
+        }
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         // Cut to the panel rather than merely placed inside it. The title's box
@@ -1742,7 +1887,7 @@ impl RushHour {
                     text: "Select Puzzle",
                     size: l.big,
                     weight: FontWeightHint::Bold,
-                    color: LAVENDER,
+                    color: self.colours.lavender,
                 },
                 head,
             );
@@ -1757,12 +1902,23 @@ impl RushHour {
             };
             let on_cursor = i == self.sheet_cursor;
             let current = i == self.current_puzzle;
-            fill(
-                f,
-                r,
-                if on_cursor { SURFACE1 } else { SURFACE0 },
-                CornerRadii::all(l.pad.max(1.0)),
-            );
+            // The toolkit's rows: the one the cursor is on is the selected
+            // one.
+            if r.w >= 1.0 && r.h >= 1.0 {
+                self.palette.push_surface(
+                    f,
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h,
+                    l.pad.max(1.0),
+                    if on_cursor {
+                        Surface::Selected
+                    } else {
+                        Surface::Card
+                    },
+                );
+            }
             let line = format!(
                 "{}{}. {}",
                 if current { "> " } else { "  " },
@@ -1781,9 +1937,9 @@ impl RushHour {
                         FontWeightHint::Regular
                     },
                     color: if on_cursor {
-                        TEXT_COLOR
+                        self.colours.text
                     } else {
-                        def.difficulty.color()
+                        def.difficulty.color(&self.colours)
                     },
                 },
                 r,
@@ -1808,7 +1964,9 @@ impl RushHour {
                     text: "Up/Down: browse   Enter: open   1-8: jump   Esc: close",
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    // Secondary text: the faintest grey is 2.3:1 on a light
+                    // panel.
+                    color: self.colours.subtext0,
                 },
                 hint,
             );
@@ -2123,6 +2281,11 @@ pub fn handle_event(game: &mut RushHour, event: &Event) -> EventResult {
 }
 
 impl App for RushHour {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Rush Hour".to_string()
     }
@@ -2195,6 +2358,302 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every look in `p`'s colours: the opening yard, a car picked up (its
+    /// halo drawn), a puzzle solved under its panel, the puzzle sheet open,
+    /// a later puzzle's yard (more blockers, more colours), and a cramped
+    /// window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, RushHour)> {
+        let mut picked = game();
+        picked.selected = Some(labelled(&picked, 'A'));
+        let mut sheet = game();
+        sheet.sheet_open = true;
+        let mut later = game();
+        later.load_puzzle(PUZZLE_COUNT - 1);
+        let mut cramped = game();
+        cramped.resize(320.0, 420.0);
+        let mut looks = vec![
+            ("opening", game()),
+            ("picked up", picked),
+            ("solved", already_won()),
+            ("sheet", sheet),
+            ("later", later),
+            ("cramped", cramped),
+        ];
+        for (_, g) in &mut looks {
+            g.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's, the toolkit's
+    /// buttons', or one of the two inks written on a car (the operator's
+    /// C-Q16). It drew in its own copy of Catppuccin Mocha, dark on a light
+    /// desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let mut derived = vec![INKS.0, INKS.1];
+            for ground in [c.mantle, c.panel] {
+                derived.extend(gamechrome::button_colours(&p, Kind::Plain, ground));
+                derived.extend(gamechrome::button_colours(&p, Kind::Primary, ground));
+            }
+            for (what, g) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    g.frame(g.size_drawn.0, g.size_drawn.1).commands(),
+                    &derived,
+                    &format!("rush, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`) -- every car's letter
+    /// and every puzzle's difficulty among them. A switched-off button's
+    /// label is exempt, as WCAG exempts an inactive control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let off = guitk::button::paint(
+                &p,
+                Kind::Plain,
+                State {
+                    disabled: true,
+                    ..State::default()
+                },
+                c.mantle,
+            );
+            for (what, g) in every_look(&p) {
+                let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+                let exempt = |r: &gamechrome::legibility::Read| {
+                    r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+                };
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "rush: {bad:#?}");
+    }
+
+    /// A light palette whose hues are the dark theme's pastels: a theme a
+    /// user can put together, and the one a hue drawn without the palette's
+    /// ink would vanish on.
+    fn pale_light() -> Palette {
+        let mut p = Palette::for_mode(true);
+        let dark = Palette::for_mode(false);
+        p.blue = dark.blue;
+        p.green = dark.green;
+        p.red = dark.red;
+        p.yellow = dark.yellow;
+        p.peach = dark.peach;
+        p.mauve = dark.mauve;
+        p.teal = dark.teal;
+        p.lavender = dark.lavender;
+        p.sapphire = dark.sapphire;
+        p
+    }
+
+    /// **The yard is seen in either theme** (WCAG 1.4.11's 3:1): the red car
+    /// and every blocker's colour on an empty cell, and the halo of the car
+    /// picked up on the mat it is drawn over.
+    #[test]
+    fn the_yard_is_seen_in_either_theme() {
+        // The stock light palette's hues are dark already, so on it a hue
+        // the game forgot to ink is still seen. A user's own light theme
+        // may carry a dark theme's pastels -- `pale_light` -- and on that
+        // one only the palette's inks keep the cars off the cells.
+        for (light, p) in [
+            (false, Palette::for_mode(false)),
+            (true, Palette::for_mode(true)),
+            (true, pale_light()),
+        ] {
+            let c = Colours::of(&p);
+            let cars = std::iter::once(("the red car".to_string(), c.player)).chain(
+                c.blockers
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (format!("blocker colour {i}"), *b)),
+            );
+            for (what, colour) in cars {
+                let ratio = guitk::theme::contrast_ratio(colour, c.surface0);
+                assert!(
+                    ratio >= 3.0,
+                    "{what} is {ratio:.2}:1 on an empty cell (light: {light})"
+                );
+            }
+            let halo = guitk::theme::contrast_ratio(c.text, c.crust);
+            assert!(
+                halo >= 3.0,
+                "the halo is {halo:.2}:1 on the mat (light: {light})"
+            );
+        }
+    }
+
+    /// **A theme that changes repaints every car**: a car carries its place
+    /// in the colours, not a colour, so the light theme's yard is drawn in
+    /// the light theme's colours.
+    #[test]
+    fn a_theme_that_changes_repaints_every_car() {
+        let mut g = game();
+        let dark = g.frame(SIZE.0, SIZE.1);
+        let light = palette(true, false);
+        g.theme_changed(&light);
+        let c = Colours::of(&light);
+        let l = Layout::new(SIZE.0, SIZE.1);
+        let drawn = fill_rects(&g.frame(SIZE.0, SIZE.1));
+        for v in g.vehicles() {
+            let r = l.vehicle_rect(v);
+            assert!(
+                drawn
+                    .iter()
+                    .any(|(d, colour)| *d == r && *colour == c.vehicle(v)),
+                "car {} is not in the light theme's colour",
+                v.label
+            );
+        }
+        assert_ne!(
+            fill_rects(&dark),
+            drawn,
+            "the yard looks the same in both themes"
+        );
+    }
+
+    /// **The win panel has a ground of its own** over the scrim, the
+    /// toolkit's panel, in either look; and **the next puzzle is the answer
+    /// it offers first**, the toolkit's primary button.
+    #[test]
+    fn the_win_panel_is_grounded_and_offers_the_next_puzzle_first() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let mut g = already_won();
+            g.theme_changed(&p);
+            let f = g.frame(SIZE.0, SIZE.1);
+            let fills = fill_rects(&f);
+            let panel = Layout::new(SIZE.0, SIZE.1).win_panel();
+            let scrim = fills
+                .iter()
+                .position(|(r, c)| r.w >= SIZE.0 - 0.01 && *c == Chrome::of(&p).scrim)
+                .expect("no scrim");
+            assert!(
+                fills
+                    .iter()
+                    .skip(scrim + 1)
+                    .any(|(r, c)| *r == panel && *c == p.painted(Surface::Panel)),
+                "the win panel has no ground of its own (light: {light}, cards: {cards})"
+            );
+            // A toolkit button is its face and then the gloss on its upper
+            // half: the same box, half as tall.
+            let buttons: Vec<(Rect, Color)> = fills
+                .windows(2)
+                .filter_map(|pair| {
+                    let [(face, colour), (gloss, _)] = pair else {
+                        return None;
+                    };
+                    ((gloss.x - face.x).abs() < 0.01
+                        && (gloss.y - face.y).abs() < 0.01
+                        && (gloss.w - face.w).abs() < 0.01
+                        && (gloss.h * 2.0 - face.h).abs() < 0.01)
+                        .then_some((*face, *colour))
+                })
+                .collect();
+            let next = f
+                .commands()
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::Text { text, x, y, .. } if text == "Next" => Some((*x, *y)),
+                    _ => None,
+                })
+                .filter(|(x, y)| panel.contains(*x + 1.0, *y + 1.0))
+                .find_map(|(x, y)| {
+                    buttons
+                        .iter()
+                        .find(|(r, _)| r.contains(x + 1.0, y + 1.0))
+                        .map(|(_, colour)| *colour)
+                })
+                .expect("the panel offers no Next");
+            let c = Colours::of(&p);
+            let primary = guitk::button::paint(&p, Kind::Primary, State::default(), c.panel).lower;
+            assert_eq!(
+                next, primary,
+                "Next is not offered first (light: {light}, cards: {cards})"
+            );
+        }
+    }
+
+    /// **The puzzle sheet is the toolkit's panel and rows**, in either look:
+    /// the panel a ground of its own over the scrim, the row under the
+    /// cursor the selected row and the others plain cards.
+    #[test]
+    fn the_puzzle_sheet_is_the_toolkits_panel_and_rows() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let mut g = game();
+            g.sheet_open = true;
+            g.sheet_cursor = 2;
+            g.theme_changed(&p);
+            let l = Layout::new(SIZE.0, SIZE.1);
+            let fills = fill_rects(&g.frame(SIZE.0, SIZE.1));
+            let scrim = fills
+                .iter()
+                .position(|(r, c)| r.w >= SIZE.0 - 0.01 && *c == Chrome::of(&p).scrim)
+                .expect("no scrim");
+            let after = &fills[scrim + 1..];
+            assert!(
+                after
+                    .iter()
+                    .any(|(r, c)| *r == l.sheet_panel() && *c == p.painted(Surface::Panel)),
+                "the sheet has no ground of its own (light: {light}, cards: {cards})"
+            );
+            if !cards {
+                // Under the bordered look a card and a selected row have no
+                // fill to tell them by; the card look fills both.
+                continue;
+            }
+            for (i, row) in l.sheet_rows().into_iter().enumerate() {
+                if row.is_empty() {
+                    continue;
+                }
+                let want = p.painted(if i == 2 {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                });
+                assert!(
+                    after.iter().any(|(r, c)| *r == row && *c == want),
+                    "puzzle {i}'s row is not drawn as it should be (light: {light})"
+                );
+            }
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
     use std::collections::HashSet;
@@ -2877,7 +3336,7 @@ mod tests {
             length: 2,
             orientation: Orientation::Horizontal,
             player: false,
-            color: BLUE,
+            paint: 0,
             label: 'Q',
         };
         assert!(l.vehicle_rect(&v).is_empty());
@@ -3046,23 +3505,30 @@ mod tests {
         // The old victory overlay filled the window with opaque `0x11111B`
         // under the comment `// Semi-transparent overlay` — an assertion
         // nobody checked.
-        let mut g = one_slide_from_winning();
-        let id = player_id(&g);
-        assert!(g.slide(id, 1));
-        let f = g.frame(SIZE.0, SIZE.1);
-        // Two window-sized fills: the ground the game is drawn on, and the
-        // scrim laid over it. The last painted is the scrim.
-        let full: Vec<Color> = fill_rects(&f)
-            .into_iter()
-            .filter(|(r, _)| (r.w - SIZE.0).abs() < 0.01 && (r.h - SIZE.1).abs() < 0.01)
-            .map(|(_, c)| c)
-            .collect();
-        assert!(full.len() >= 2, "no scrim was drawn over the won yard");
-        let scrim = *full.last().unwrap();
-        assert!(
-            scrim.a < 0xFF,
-            "the scrim is opaque, so it paints out the jam it is celebrating"
-        );
+        //
+        // Both overlays that cover the yard: the victory panel's and the
+        // puzzle sheet's, which are separate calls now and can each go wrong.
+        let mut won = one_slide_from_winning();
+        let id = player_id(&won);
+        assert!(won.slide(id, 1));
+        let mut sheet = game();
+        sheet.sheet_open = true;
+        for (what, g) in [("the won yard", won), ("the puzzle sheet", sheet)] {
+            let f = g.frame(SIZE.0, SIZE.1);
+            // Two window-sized fills: the ground the game is drawn on, and the
+            // scrim laid over it. The last painted is the scrim.
+            let full: Vec<Color> = fill_rects(&f)
+                .into_iter()
+                .filter(|(r, _)| (r.w - SIZE.0).abs() < 0.01 && (r.h - SIZE.1).abs() < 0.01)
+                .map(|(_, c)| c)
+                .collect();
+            assert!(full.len() >= 2, "no scrim was drawn under {what}");
+            let scrim = *full.last().unwrap();
+            assert!(
+                scrim.a < 0xFF,
+                "the scrim under {what} is opaque, so it paints out the jam under it"
+            );
+        }
     }
 
     // ── Every pass stays inside the region it owns ─────────────────
@@ -3869,16 +4335,30 @@ mod tests {
         // claim that catches both is about where the run *ends*: `x + max_width`
         // is the box's right edge, whatever the string measures.
         //
-        // The buttons are the check because their box is known independently:
-        // `button_rects` is the same rect `draw_controls` centres the name in.
-        let g = game();
+        // The buttons were the check once, because their box is known
+        // independently. They are the toolkit's now: a toolkit button places
+        // its own label and stops it at its own padding (`gamechrome`'s tests
+        // hold that). The puzzle sheet's rows are the check instead, for the
+        // reason the buttons were: `sheet_rows` is the same rect `draw_sheet`
+        // centres each row's words in.
+        let mut g = game();
+        g.sheet_open = true;
         let l = Layout::new(SIZE.0, SIZE.1);
         let f = g.frame(SIZE.0, SIZE.1);
         let mut checked = 0;
-        for ((_, name), r) in BUTTONS.into_iter().zip(l.button_rects()) {
+        for (i, r) in l.sheet_rows().into_iter().enumerate() {
             if r.is_empty() {
                 continue;
             }
+            let Some(def) = PUZZLES.get(i) else {
+                continue;
+            };
+            let name = format!(
+                "{}{}. {}",
+                if i == g.current_puzzle { "> " } else { "  " },
+                i + 1,
+                def.difficulty.label()
+            );
             let found = f.commands().iter().find_map(|c| match c {
                 RenderCommand::Text {
                     text,
@@ -3888,7 +4368,7 @@ mod tests {
                     max_width,
                     overflow,
                     ..
-                } if text == name => Some((*x, *font_size, *font_weight, *max_width, *overflow)),
+                } if *text == name => Some((*x, *font_size, *font_weight, *max_width, *overflow)),
                 _ => None,
             });
             let Some((x, size, weight, max_width, overflow)) = found else {
@@ -3901,13 +4381,13 @@ mod tests {
             assert!(
                 (x + max - r.right()).abs() < 0.01,
                 "{name:?} starts at {x} with {max} points of room, so it may reach {}, \
-                 in a button running to {}",
+                 in a row running to {}",
                 x + max,
                 r.right()
             );
             assert!(
                 x >= r.x - 0.01,
-                "{name:?} starts at {x}, left of its button's edge at {}",
+                "{name:?} starts at {x}, left of its row's edge at {}",
                 r.x
             );
             assert_eq!(
@@ -3915,15 +4395,15 @@ mod tests {
                 TextOverflow::Ellipsis,
                 "{name:?} has a width limit but is cut without a mark"
             );
-            let ink = text::measure(name, size, weight).min(r.w);
+            let ink = text::measure(&name, size, weight).min(r.w);
             assert!(
                 (x - (r.x + (r.w - ink) / 2.0)).abs() <= 0.01,
-                "{name:?} starts at {x} rather than centred in its button"
+                "{name:?} starts at {x} rather than centred in its row"
             );
         }
         assert!(
             checked > 0,
-            "no button name was drawn at {SIZE:?}, so nothing here is centred"
+            "no puzzle's row was drawn at {SIZE:?}, so nothing here is centred"
         );
     }
 
@@ -3996,7 +4476,7 @@ mod tests {
             assert_eq!(p.length, PLAYER_LENGTH);
             assert_eq!(p.orientation, Orientation::Horizontal);
             assert_eq!(p.label, PLAYER_LABEL);
-            assert_eq!(p.color, PLAYER_COLOR);
+            assert_eq!(g.colours.vehicle(p), g.colours.player);
         }
     }
 
@@ -4016,15 +4496,28 @@ mod tests {
     fn no_blocker_wears_the_red_cars_colour() {
         // A blocker painted like the player is a picture that lies about which
         // car ends the game.
-        assert!(
-            !VEHICLE_COLORS.contains(&PLAYER_COLOR),
-            "the blocker palette contains the player's colour"
-        );
+        //
+        // In either theme, and not merely a different shade of red: a colour
+        // the palette's test calls hard to tell from the red car's lies as
+        // well as the red car's own would.
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for (i, b) in c.blockers.iter().enumerate() {
+                assert!(
+                    *b != c.player && !guitk::palette::hard_to_tell_apart(*b, c.player),
+                    "blocker colour {i} is hard to tell from the red car's (light: {light})"
+                );
+            }
+        }
         for i in 0..PUZZLE_COUNT {
             let mut g = game();
             g.load_puzzle(i);
             for v in g.vehicles().iter().filter(|v| !v.player) {
-                assert_ne!(v.color, PLAYER_COLOR, "puzzle {i} has a red blocker");
+                assert_ne!(
+                    g.colours.vehicle(v),
+                    g.colours.player,
+                    "puzzle {i} has a red blocker"
+                );
             }
         }
     }
@@ -4235,7 +4728,7 @@ mod tests {
                 length: 3,
                 orientation,
                 player: false,
-                color: BLUE,
+                paint: 0,
                 label: 'A',
             };
             let cells = v.cells();
@@ -4685,11 +5178,28 @@ mod tests {
         let mut g = game();
         let l = Layout::new(SIZE.0, SIZE.1);
         let slot = l.button_rects()[0];
+        // The toolkit's faces, switched off and live.
+        let face = |disabled| {
+            guitk::button::paint(
+                &Palette::for_mode(false),
+                Kind::Plain,
+                State {
+                    disabled,
+                    ..State::default()
+                },
+                Palette::for_mode(false).mantle,
+            )
+            .lower
+        };
         let dim = fill_rects(&g.frame(SIZE.0, SIZE.1))
             .into_iter()
             .find(|(r, _)| *r == slot)
             .map(|(_, c)| c);
-        assert_eq!(dim, Some(SURFACE0), "undo looks live with nothing to undo");
+        assert_eq!(
+            dim,
+            Some(face(true)),
+            "undo looks live with nothing to undo"
+        );
         let id = labelled(&g, 'B');
         assert!(g.slide(id, 1));
         let live = fill_rects(&g.frame(SIZE.0, SIZE.1))
@@ -4698,7 +5208,7 @@ mod tests {
             .map(|(_, c)| c);
         assert_eq!(
             live,
-            Some(SURFACE1),
+            Some(face(false)),
             "undo still looks dead with a move made"
         );
     }

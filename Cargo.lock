@@ -3077,6 +3077,8 @@ dependencies = [
 name = "rush"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]

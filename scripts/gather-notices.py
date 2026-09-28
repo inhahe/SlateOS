@@ -32,6 +32,11 @@ notice the source tree carries, from three places:
 
 * **crates.io libraries.** Every registry package in `Cargo.lock`, read from
   cargo's registry cache -- which the build that uses them has already filled.
+  Two exceptions. A package that ships no licence file but is a procedural
+  macro (`[lib] proc-macro = true`) is skipped: it runs inside the compiler
+  and none of it is in anything the image carries. And a package a manifest
+  names -- same name, same version -- takes the manifest's notice, which is
+  how a package that ships no licence file is given one by hand.
 
 Usage:
 
@@ -292,8 +297,13 @@ def cargo_home() -> Path:
     return Path(home) if home else Path.home() / ".cargo"
 
 
-def gather_registry(root: Path, home: Path) -> list[Notice]:
-    """Every crates.io package in `Cargo.lock`, from the registry cache."""
+def gather_registry(root: Path, home: Path, covered=frozenset(), skipped=None) -> list[Notice]:
+    """Every crates.io package in `Cargo.lock`, from the registry cache.
+
+    `covered` holds `(name, version)` pairs a manifest already gives a notice
+    for; those are left to the manifest. A procedural macro that ships no
+    licence file is appended to `skipped`, when given, rather than refused.
+    """
     lock = root / "Cargo.lock"
     if not lock.is_file():
         return []
@@ -307,6 +317,8 @@ def gather_registry(root: Path, home: Path) -> list[Notice]:
         if not str(package.get("source", "")).startswith("registry+"):
             continue
         name, version = package["name"], package["version"]
+        if (name, version) in covered:
+            continue
         found = sorted(sources.glob(f"*/{name}-{version}"))
         if not found:
             raise NoticeError(
@@ -319,10 +331,26 @@ def gather_registry(root: Path, home: Path) -> list[Notice]:
         if isinstance(extra, str) and extra not in licence_files and (directory / extra).is_file():
             licence_files.append(extra)
         if not licence_files:
-            raise NoticeError(f"Cargo.lock: {name} {version} ships no licence file to carry")
+            # A procedural macro runs in the compiler; nothing of it is in any
+            # binary the image carries, so its notice is not owed there.
+            library = _lib_section(directory / "Cargo.toml", f"{name}-{version}/Cargo.toml")
+            if library.get("proc-macro") is True:
+                if skipped is not None:
+                    skipped.append(f"{name} {version}")
+                continue
+            raise NoticeError(
+                f"Cargo.lock: {name} {version} ships no licence file to carry; give it one in "
+                "a `licenses/notices.yaml` of the crate that depends on it (same name and version)")
         notices.append(_crate_notice(directory, licence_files, "crates.io",
                                      f"{name}-{version}/Cargo.toml", "crates.io"))
     return notices
+
+
+def _lib_section(cargo_toml: Path, where: str) -> dict:
+    try:
+        return tomllib.loads(cargo_toml.read_text(encoding="utf-8")).get("lib", {})
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise NoticeError(f"{where}: cannot read Cargo.toml ({exc})") from exc
 
 
 def key_for(notice: Notice) -> str:
@@ -330,19 +358,47 @@ def key_for(notice: Notice) -> str:
     return f"{base}-{notice.version}" if notice.version else base
 
 
-def gather(root: Path, home: Path) -> list[Notice]:
-    """Every notice, sorted by component, each with a unique key."""
-    notices = sorted(gather_tree(root) + gather_registry(root, home), key=Notice.sort_key)
-    seen: dict[str, Notice] = {}
-    for notice in notices:
+def gather(root: Path, home: Path, skipped=None) -> list[Notice]:
+    """Every notice, sorted by component, each with a unique key.
+
+    `skipped`, when given, collects the procedural macros left out."""
+    tree = gather_tree(root)
+    covered = frozenset((n.component, n.version) for n in tree if n.kind == "manifest")
+    found = sorted(tree + gather_registry(root, home, covered, skipped), key=Notice.sort_key)
+    kept: dict[str, Notice] = {}
+    for notice in found:
         notice.key = key_for(notice)
-        if notice.key in seen:
-            other = seen[notice.key]
+        other = kept.get(notice.key)
+        if other is None:
+            kept[notice.key] = notice
+            continue
+        # The same component at the same version from two places. Two
+        # manifests naming it is an authoring mistake; a vendored copy and the
+        # crates.io package of one crate (cfg-if 1.0.5 is both) is one
+        # component, and its notice is carried once -- the tree's copy, which
+        # is the one the image's build used when both exist -- unless the two
+        # disagree about its licence, which nobody should resolve by guessing.
+        if notice.kind == "manifest" and other.kind == "manifest":
             raise NoticeError(
-                f"{notice.component} {notice.version or ''} is gathered twice, from {other.origin} "
-                f"and {notice.origin}; name it once")
-        seen[notice.key] = notice
-    return notices
+                f"{notice.component} {notice.version or ''} is named by two manifests, "
+                f"{other.origin} and {notice.origin}; name it once")
+        if _licence_key(notice.licence) != _licence_key(other.licence):
+            raise NoticeError(
+                f"{notice.component} {notice.version or ''} is under {other.licence!r} in "
+                f"{other.origin} and {notice.licence!r} in {notice.origin}")
+        if RANK[notice.kind] < RANK[other.kind]:
+            kept[notice.key] = notice
+    return sorted(kept.values(), key=Notice.sort_key)
+
+
+#: Which source's notice is kept when one component comes from two.
+RANK = {"manifest": 0, "vendored": 1, "crates.io": 2}
+
+
+def _licence_key(licence: str) -> str:
+    """A licence expression, compared: crates.io's old `MIT/Apache-2.0` is
+    `MIT OR Apache-2.0`, and spacing does not matter."""
+    return " ".join(licence.replace("/", " OR ").split()).casefold()
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +596,45 @@ def self_test() -> int:
         (reg / "LICENSE").write_bytes(("back\n").encode("utf-8"))
         raises(lambda: gather(root, Path(tmp) / "nowhere"), "not in the registry cache",
                "a registry package missing from the cache")
+
+        # A vendored copy and the crates.io package of one crate are one notice.
+        twin = home / "registry" / "src" / "index.crates.io-0" / "cfg-if-1.0.5"
+        twin.mkdir(parents=True)
+        (twin / "Cargo.toml").write_bytes(b'[package]\nname = "cfg-if"\nversion = "1.0.5"\nlicense = "MIT/Apache-2.0"\n')
+        (twin / "LICENSE-MIT").write_bytes(b"MIT text\n")
+        lock = (root / "Cargo.lock").read_bytes()
+        (root / "Cargo.lock").write_bytes(lock + b'\n[[package]]\nname = "cfg-if"\nversion = "1.0.5"\n'
+                                          b'source = "registry+https://github.com/rust-lang/crates.io-index"\n')
+        twins = [n for n in gather(root, home) if n.component == "cfg-if"]
+        expect([(n.key, n.kind) for n in twins] == [("cfg-if-1.0.5", "vendored")],
+               f"a crate both vendored and from crates.io was not carried once: {twins}")
+        (twin / "Cargo.toml").write_bytes(b'[package]\nname = "cfg-if"\nversion = "1.0.5"\nlicense = "GPL-3.0"\n')
+        raises(lambda: gather(root, home), "is under", "two copies of one crate disagreeing about its licence")
+        (twin / "Cargo.toml").write_bytes(b'[package]\nname = "cfg-if"\nversion = "1.0.5"\nlicense = "MIT/Apache-2.0"\n')
+
+        # A procedural macro with no licence file is left out, and said to be.
+        pm = home / "registry" / "src" / "index.crates.io-0" / "derive-it-1.0.0"
+        pm.mkdir(parents=True)
+        (pm / "Cargo.toml").write_bytes(b'[package]\nname = "derive-it"\nversion = "1.0.0"\n'
+                                        b'license = "MIT"\n\n[lib]\nproc-macro = true\n')
+        lock = (root / "Cargo.lock").read_bytes()
+        (root / "Cargo.lock").write_bytes(lock + b'\n[[package]]\nname = "derive-it"\nversion = "1.0.0"\n'
+                                          b'source = "registry+https://github.com/rust-lang/crates.io-index"\n')
+        left_out: list[str] = []
+        keys = [n.key for n in gather(root, home, left_out)]
+        expect("derive-it-1.0.0" not in keys and left_out == ["derive-it 1.0.0"],
+               f"a proc-macro with no licence was not left out cleanly: {keys} {left_out}")
+        # The same crate as an ordinary library is refused...
+        (pm / "Cargo.toml").write_bytes(b'[package]\nname = "derive-it"\nversion = "1.0.0"\nlicense = "MIT"\n')
+        raises(lambda: gather(root, home), "ships no licence file", "a library with no licence file")
+        # ...until a manifest gives it a notice by name and version.
+        (root / "gui" / "codec" / "licenses" / "derive-it-LICENSE").write_bytes(b"MIT, by hand\n")
+        manifest = root / "gui" / "codec" / "licenses" / "notices.yaml"
+        manifest.write_bytes(manifest.read_bytes() + b"derive-it:\n  version: 1.0.0\n  licence: MIT\n"
+                             b"  texts:\n    - derive-it-LICENSE\n")
+        given = {n.key: n for n in gather(root, home)}
+        expect(given.get("derive-it-1.0.0") is not None and given["derive-it-1.0.0"].kind == "manifest",
+               f"a manifest did not give the crate its notice: {sorted(given)}")
         (root / "vendor" / "cfg-if" / "Cargo.toml").write_bytes((
             '[package]\nname = "cfg-if"\nversion = "1.0.5"\n').encode("utf-8"))
         raises(lambda: gather(root, home), "names no licence", "a vendored crate that names no licence")
@@ -561,8 +656,9 @@ def main(argv: list[str]) -> int:
         print(__doc__.split("\n\n", 1)[0], file=sys.stderr)
         print("usage: gather-notices.py --check | --list | --out DIR | --self-test", file=sys.stderr)
         return 2
+    skipped: list[str] = []
     try:
-        notices = gather(ROOT, cargo_home())
+        notices = gather(ROOT, cargo_home(), skipped)
         if argv[0] == "--out":
             write_bundle(notices, Path(argv[1]))
     except NoticeError as exc:
@@ -577,6 +673,8 @@ def main(argv: list[str]) -> int:
     print(f"gather-notices: {len(notices)} notices "
           f"({kinds['manifest']} from manifests, {kinds['vendored']} vendored crates, "
           f"{kinds['crates.io']} from crates.io)")
+    if skipped:
+        print(f"  left out, as procedural macros with no licence file: {', '.join(skipped)}")
     return 0
 
 

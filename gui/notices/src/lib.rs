@@ -220,7 +220,10 @@ fn entry(doc: &Document, dir: &Path, key: &str) -> Result<Notice, String> {
     {
         return Err("a key is lower-case letters, digits, `-` and `.`".to_owned());
     }
-    let field = |name: &str| doc.get_str(&["notices", key, name]).filter(|v| !v.is_empty());
+    let field = |name: &str| {
+        doc.get_str(&["notices", key, name])
+            .filter(|v| !v.is_empty())
+    };
     let required = |name: &str| field(name).ok_or_else(|| format!("no `{name}`"));
     let texts = doc
         .get_seq(&["notices", key, "texts"])
@@ -252,7 +255,9 @@ fn text_in(dir: &Path, rel: &str) -> Result<Text, String> {
             name: name.to_owned(),
             path: dir.join(path),
         }),
-        _ => Err(format!("the text {rel:?} is not a path inside the notices folder")),
+        _ => Err(format!(
+            "the text {rel:?} is not a path inside the notices folder"
+        )),
     }
 }
 
@@ -289,7 +294,10 @@ mod tests {
     #[test]
     fn an_index_with_no_entries_is_a_system_with_nothing_to_credit() {
         let dir = bundle("empty", "notices:\n");
-        assert_eq!(load(dir.dir()).expect("an empty list is a list"), Vec::new());
+        assert_eq!(
+            load(dir.dir()).expect("an empty list is a list"),
+            Vec::new()
+        );
     }
 
     #[test]
@@ -321,7 +329,13 @@ mod tests {
 
     #[test]
     fn a_text_outside_the_folder_is_refused_not_read() {
-        for escape in ["../../etc/passwd", "/etc/passwd", "spin-0.9.8/../../x", "./LICENSE", ""] {
+        for escape in [
+            "../../etc/passwd",
+            "/etc/passwd",
+            "spin-0.9.8/../../x",
+            "./LICENSE",
+            "",
+        ] {
             let index = ONE.replace("spin-0.9.8/LICENSE", escape);
             let dir = bundle("escape", &index);
             match load(dir.dir()) {
@@ -348,7 +362,10 @@ mod tests {
                 other => panic!("without {field}: expected Malformed, got {other:?}"),
             }
         }
-        let dir = bundle("no-texts", &ONE.replace("      - 'spin-0.9.8/LICENSE'\n", ""));
+        let dir = bundle(
+            "no-texts",
+            &ONE.replace("      - 'spin-0.9.8/LICENSE'\n", ""),
+        );
         assert!(
             matches!(load(dir.dir()), Err(NoticesError::Malformed { what, .. }) if what.ends_with("no `texts`")),
             "a notice with no text to show"
@@ -379,7 +396,10 @@ mod tests {
     fn an_index_that_is_not_utf8_or_has_no_list_is_malformed() {
         let dir = ScratchDir::new("notices-bytes");
         std::fs::write(dir.path(INDEX), b"notices:\n  \xff:\n").expect("write");
-        assert!(matches!(load(dir.dir()), Err(NoticesError::Malformed { .. })));
+        assert!(matches!(
+            load(dir.dir()),
+            Err(NoticesError::Malformed { .. })
+        ));
         let dir = bundle("no-list", "credits:\n");
         assert!(
             matches!(load(dir.dir()), Err(NoticesError::Malformed { what, .. }) if what == "no `notices:` list")

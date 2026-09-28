@@ -14,7 +14,10 @@
 use std::path::{Path, PathBuf};
 
 fn golden_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("bundle")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("bundle")
 }
 
 fn golden() -> Vec<notices::Notice> {
@@ -25,10 +28,22 @@ fn golden() -> Vec<notices::Notice> {
 fn the_golden_bundle_reads_back_as_the_gatherer_wrote_it() {
     let found: Vec<(String, String, String, String)> = golden()
         .iter()
-        .map(|n| (n.key.clone(), n.title(), n.licence.clone(), n.origin.clone()))
+        .map(|n| {
+            (
+                n.key.clone(),
+                n.title(),
+                n.licence.clone(),
+                n.origin.clone(),
+            )
+        })
         .collect();
     let want = [
-        ("cfg-if-1.0.5", "cfg-if 1.0.5", "MIT OR Apache-2.0", "vendor/cfg-if"),
+        (
+            "cfg-if-1.0.5",
+            "cfg-if 1.0.5",
+            "MIT OR Apache-2.0",
+            "vendor/cfg-if",
+        ),
         (
             "libjpeg-turbo-3.1.1",
             "libjpeg-turbo 3.1.1",
@@ -62,7 +77,10 @@ fn every_text_reads_back_byte_for_byte() {
     };
     assert_eq!(
         text(1),
-        ("LICENSE.md".to_owned(), b"IJG text \xc2\xa9 1991\nno final newline".to_vec())
+        (
+            "LICENSE.md".to_owned(),
+            b"IJG text \xc2\xa9 1991\nno final newline".to_vec()
+        )
     );
     assert_eq!(text(0), ("LICENSE-MIT".to_owned(), b"MIT text\n".to_vec()));
     assert_eq!(text(2), ("LICENSE".to_owned(), b"spin MIT text\n".to_vec()));

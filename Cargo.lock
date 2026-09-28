@@ -2295,6 +2295,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "notices"
+version = "0.1.0"
+dependencies = [
+ "scratchdir",
+ "yamldoc",
+]
+
+[[package]]
 name = "notifications"
 version = "0.1.0"
 dependencies = [

@@ -1968,6 +1968,21 @@ live.
   Linux (90-181 s, about 2.4% of a boot test, under load), and it has caught
   real cross-crate breaks; option A is in force, and nothing is added.
 
+- `[-]` `[C]` **The image carries the third-party notices its licences
+  require** -- lane C's part done 2026-09-28 (`design-decisions.md` §1433).
+  `scripts/gather-notices.py` collects every notice in the tree into one folder:
+  ported code named by a `licenses/notices.yaml`, vendored Rust crates by
+  their licence files, crates.io libraries from `Cargo.lock` and the registry
+  cache. `gui/notices` reads it, and `scripts/test-gather-notices.py` fails a
+  boot if a notice cannot be gathered or the Python writer and Rust reader
+  drift apart. **Still to do, in other lanes:** lane D runs the gatherer into
+  the image's `/usr/share/licenses`
+  (`requests/c-d-put-the-third-party-notices-in-the-image.md`); lane E shows
+  them on an About page in Settings (`requests/c-e-show-the-third-party-notices.md`),
+  after which lane C deletes the shell's orphaned `about.rs`; lane F writes
+  the manifests for `imagecodec` and `osfont`, and every lane adds one when it
+  ports code (`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`).
+
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in
   `appearance.yaml`, each picture up from its time until the next's. The

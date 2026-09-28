@@ -288,6 +288,43 @@ fn a_buttons_label_is_centred_on_its_line() {
     );
 }
 
+/// A label's room ends at the button's padding, measured from where the
+/// label starts: the whole room from a centred start reached past the
+/// button's right edge, which is a promise to clip that clips nothing.
+#[test]
+fn a_labels_room_ends_at_the_buttons_padding() {
+    let p = Palette::for_mode(false);
+    let (x, w, h) = (10.0, 120.0, 30.0);
+    for label in ["OK", "New game", "A label much longer than the button"] {
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+        button(
+            &mut cmds,
+            &p,
+            (x, 0.0, w, h),
+            label,
+            13.0,
+            Kind::Plain,
+            State::default(),
+            p.base,
+        );
+        let (tx, room) = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { x, max_width, .. } => {
+                    Some((*x, max_width.unwrap_or(f32::MAX)))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label:?} is not drawn"));
+        let edge = x + w - (h * 0.3).min(guitk::button::PADDING_H);
+        assert!(
+            (tx + room - edge).abs() < 0.01,
+            "{label:?}'s room ends at {}, the padding at {edge}",
+            tx + room
+        );
+    }
+}
+
 /// A label taller than its button is left out, not drawn over the button's
 /// edges; the face is still drawn, because it is still the control.
 #[test]

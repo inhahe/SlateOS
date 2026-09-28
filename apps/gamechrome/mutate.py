@@ -47,6 +47,12 @@ LIB_MUTATIONS = [
         ["a_buttons_label_is_centred_on_its_line"],
     ),
     (
+        "a label's room is measured from the button's edge, not its start",
+        "        max_width: Some(x + w - label_pad(h) - text_x),",
+        "        max_width: Some(room),",
+        ["a_labels_room_ends_at_the_buttons_padding"],
+    ),
+    (
         "large text is held to the small floor",
         "            large: to(legibility::LARGE_TEXT_FLOOR),",
         "            large: to(legibility::TEXT_FLOOR),",

@@ -476,14 +476,18 @@ pub fn button(
         return;
     }
     let text_w = text::measure(label, font_size, FontWeightHint::Bold).min(room);
+    let text_x = x + (w - text_w) / 2.0;
     sink.emit(RenderCommand::Text {
-        x: x + (w - text_w) / 2.0,
+        x: text_x,
         y: y + (h - line) / 2.0,
         text: label.to_owned(),
         color: paint.ink,
         font_size,
         font_weight: FontWeightHint::Bold,
-        max_width: Some(room),
+        // The room from where the label starts to the padding's edge -- not
+        // the whole room, which measured from a centred start reaches past
+        // the button's right edge by half the slack.
+        max_width: Some(x + w - label_pad(h) - text_x),
         overflow: TextOverflow::Ellipsis,
     });
 }

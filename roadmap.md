@@ -1945,10 +1945,14 @@ live.
   would make it a rule is put to the operator as C-Q31.
 
 - `[C]` **A program may ask the password manager for a password -- with a key
-  for it, and the user's consent** -- open (C-Q25, §1417). In the credential
-  service (`gui/credentials`): the request over the service's IPC, refused
-  without a capability granted for it, and a prompt naming the asking program
-  to allow or refuse. The capability's shape may need lane A.
+  for it, and the user's consent** -- open, **waiting on lane A for the
+  capability's shape** (C-Q25, §1417;
+  `requests/c-a-a-capability-to-ask-the-credential-service-for-a-password.md`).
+  In the credential service (`gui/credentials`): the request over the service's
+  IPC (`SYS_SERVICE_CONNECT`), refused without the capability, and a prompt
+  naming the asking program (`SYS_CHANNEL_PEER_CRED`) to allow or refuse. The
+  service today is an in-process model with no transport, and its vault waits on
+  the ported cipher and password hash (lane E's question to lane A).
 
 - `[C]` **A settings service that tells open windows when a setting
   changes** -- open, **blocked on lane F** (C-Q26, §1418). Beside

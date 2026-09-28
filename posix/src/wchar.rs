@@ -2428,7 +2428,7 @@ pub unsafe extern "C" fn wcsncasecmp(s1: *const WcharT, s2: *const WcharT, n: us
 
 /// `wc` as UTF-8 in `buf`: the length, or `None` for no character (a
 /// surrogate, or above U+10FFFF -- glibc's UTF-8 converter refuses both).
-fn encode_wide(wc: WcharT, buf: &mut [u8; 4]) -> Option<usize> {
+pub(crate) fn encode_wide(wc: WcharT, buf: &mut [u8; 4]) -> Option<usize> {
     let cp = u32::try_from(wc).ok()?;
     match utf8_encode(cp, buf) {
         0 => None,
@@ -2442,7 +2442,7 @@ fn encode_wide(wc: WcharT, buf: &mut [u8; 4]) -> Option<usize> {
 /// -- after which the stream is in error and `errno` is `EILSEQ`
 /// ([`BadSequence`]).  A byte
 /// that cannot continue the sequence is left to be read again.
-fn read_wide(ws: &crate::stdio::WideStream) -> Result<Option<WcharT>, BadSequence> {
+pub(crate) fn read_wide(ws: &crate::stdio::WideStream) -> Result<Option<WcharT>, BadSequence> {
     let first = ws.getc();
     let Ok(b0) = u8::try_from(first) else {
         return Ok(None);
@@ -2475,7 +2475,7 @@ fn read_wide(ws: &crate::stdio::WideStream) -> Result<Option<WcharT>, BadSequenc
 
 /// A byte sequence that was no character, already reported: `EILSEQ` and a
 /// stream error.
-struct BadSequence;
+pub(crate) struct BadSequence;
 
 /// Report a byte sequence that is no character: `EILSEQ` and a stream error,
 /// as glibc's converter reports it.
@@ -2600,22 +2600,22 @@ pub unsafe extern "C" fn ungetwc(wc: WcharT, stream: *mut u8) -> WcharT {
     let Some(ws) = crate::stdio::lock_wide_stream(stream) else {
         return WEOF;
     };
+    if unget_wide(&ws, wc) { wc } else { WEOF }
+}
+
+/// `ungetwc`'s body, for a stream already held: push `wc`'s UTF-8 back.
+/// `false` for a character UTF-8 cannot encode (`EILSEQ`) or no room.
+pub(crate) fn unget_wide(ws: &crate::stdio::WideStream, wc: WcharT) -> bool {
     let mut buf = [0u8; 4];
     let Some(len) = encode_wide(wc, &mut buf) else {
         crate::errno::set_errno(crate::errno::EILSEQ);
-        return WEOF;
+        return false;
     };
-    if buf
-        .get(..len)
+    buf.get(..len)
         .unwrap_or(&[])
         .iter()
         .rev()
         .all(|&b| ws.unget(b))
-    {
-        wc
-    } else {
-        WEOF
-    }
 }
 
 /// `fputws`'s body.

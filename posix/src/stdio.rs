@@ -2885,6 +2885,28 @@ impl WideStream {
     }
 }
 
+/// Lock `stream` for a `wscanf` call and claim wide orientation, as glibc's
+/// `vfwscanf` does: `None` (the call answers `EOF`) for a byte stream or NULL
+/// (`EBADF`).  A stream not open for reading is `EBADF` -- after the
+/// orientation is claimed, and with no stream error, as glibc's `ORIENT`
+/// then `ARGCHECK` have it -- the same as [`lock_scan_stream`].
+pub(crate) fn lock_wscan_stream(stream: *mut u8) -> Option<WideStream> {
+    let f = stream_to_file(stream)?;
+    // SAFETY: a non-null `FILE *` is a live stream.
+    let lock = unsafe { locked(f) };
+    // SAFETY: locked.
+    unsafe {
+        if orient(f, 1) < 0 {
+            return None;
+        }
+        if (*f).flags & F_NORD != 0 {
+            errno::set_errno(errno::EBADF);
+            return None;
+        }
+    }
+    Some(WideStream { f, _lock: lock })
+}
+
 /// A stream held for one `scanf` call, byte-oriented: the engine in
 /// `scanf.rs` reads it with glibc's `inchar` and gives back the one
 /// character it looked at too far with `ungetc`.
@@ -2895,8 +2917,9 @@ pub(crate) struct ScanStream {
 
 /// Lock `stream` for a `scanf` call and claim byte orientation, as glibc's
 /// `vfscanf` does: `None` (the call answers `EOF`) for a wide stream or NULL
-/// (`EBADF`).  A stream not open for reading is `EBADF` and a stream error,
-/// as glibc's `ARGCHECK` makes it.
+/// (`EBADF`).  A stream not open for reading is `EBADF`, after the
+/// orientation is claimed: glibc's `ARGCHECK` sets `errno` and not the
+/// stream's error (`vfscanf-internal.c`; `ferror` answers 0 after it).
 pub(crate) fn lock_scan_stream(stream: *mut u8) -> Option<ScanStream> {
     let f = stream_to_file(stream)?;
     // SAFETY: a non-null `FILE *` is a live stream.
@@ -2907,7 +2930,6 @@ pub(crate) fn lock_scan_stream(stream: *mut u8) -> Option<ScanStream> {
             return None;
         }
         if (*f).flags & F_NORD != 0 {
-            (*f).flags |= F_ERR;
             errno::set_errno(errno::EBADF);
             return None;
         }

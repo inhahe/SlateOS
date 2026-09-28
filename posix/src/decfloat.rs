@@ -165,6 +165,13 @@ const PARSE_LIMBS: usize = 96;
 /// value sits exactly on a rounding boundary, which a sticky bit records.
 pub(crate) const MAX_PARSE_DIGITS: usize = 768;
 
+/// The same for a `long double`. A rounding boundary there is an odd
+/// multiple of `2^-16446` at the finest, below `2^65` times it, so its
+/// decimal expansion runs to `log10(5^16446 * 2^65)` -- 11,515 -- significant
+/// digits, and an input agreeing with one that far is decided by the digits
+/// after.
+pub(crate) const LD_PARSE_DIGITS: usize = 11_520;
+
 /// Largest number of significant decimal digits a finite `f64` can have.
 ///
 /// 2548 bits is at most `ceil(2548 * log10 2) = 767` digits.  One extra slot
@@ -180,23 +187,121 @@ const POW10_CHUNK: u64 = 10_000_000_000_000_000_000;
 /// The exponent of [`POW10_CHUNK`].
 const POW10_CHUNK_EXP: usize = 19;
 
-/// A fixed-capacity unsigned big integer, little-endian limbs.
-struct Big<const N: usize> {
-    limbs: [u64; N],
+/// Element types a [`MallocBuf`] may hold: those for which all-zero bytes
+/// are a value, so a `calloc` block is initialised.
+pub(crate) trait Zeroable: Copy {}
+impl Zeroable for u8 {}
+impl Zeroable for u64 {}
+
+/// A `malloc` block of zeroed `T`s, freed when this goes: the storage for the
+/// `long double` conversions, whose worst cases -- a thousand limbs, eleven
+/// thousand digits -- are too big for a stack. A `printf` or `strtold` that
+/// cannot get one fails with `ENOMEM`, as glibc's do.
+pub(crate) struct MallocBuf<T: Zeroable> {
+    ptr: *mut T,
+    len: usize,
+}
+
+impl<T: Zeroable> MallocBuf<T> {
+    /// `len` zeroed `T`s (at least one), or `None` when memory runs out.
+    pub(crate) fn zeroed(len: usize) -> Option<Self> {
+        let len = len.max(1);
+        let ptr = crate::malloc::calloc(len, core::mem::size_of::<T>()).cast::<T>();
+        (!ptr.is_null()).then_some(Self { ptr, len })
+    }
+}
+
+impl<T: Zeroable> AsRef<[T]> for MallocBuf<T> {
+    fn as_ref(&self) -> &[T] {
+        // SAFETY: `ptr` is this buffer's own block of `len` initialised `T`s
+        // (zeroed by `calloc`, a value for a `Zeroable`).
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl<T: Zeroable> AsMut<[T]> for MallocBuf<T> {
+    fn as_mut(&mut self) -> &mut [T] {
+        // SAFETY: as in `as_ref`, and `&mut self` makes the borrow unique.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl<T: Zeroable> Drop for MallocBuf<T> {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` is this buffer's own `calloc` block.
+        unsafe { crate::malloc::free(self.ptr.cast()) };
+    }
+}
+
+/// A fixed-capacity unsigned big integer, little-endian limbs, in storage
+/// `S`: a `[u64; N]` for the `f64` conversions, whose worst cases fit a
+/// stack, or [`Limbs`] for the `long double` ones, whose worst cases (over a
+/// thousand limbs) do not.
+struct Big<S> {
+    limbs: S,
     /// Number of significant limbs; `0` means the value is zero.
     len: usize,
 }
 
-impl<const N: usize> Big<N> {
+impl<const N: usize> Big<[u64; N]> {
     fn from_u64(v: u64) -> Self {
-        let mut limbs = [0u64; N];
-        let len = if v == 0 {
-            0
-        } else {
-            limbs[0] = v;
-            1
+        Self::with([0u64; N], v)
+    }
+}
+
+/// A bignum's limbs where the size is known only at run time: inline while
+/// they fit a `double`'s worst case, in a block of their own past it.
+// The inline variant's size is the point: it is what lets an ordinary
+// `long double` conversion run without an allocation, and the value is built
+// in place, in one frame, never moved about.
+#[allow(clippy::large_enum_variant)]
+enum Limbs {
+    Inline([u64; PARSE_LIMBS]),
+    Heap(MallocBuf<u64>),
+}
+
+impl AsRef<[u64]> for Limbs {
+    fn as_ref(&self) -> &[u64] {
+        match self {
+            Self::Inline(limbs) => limbs,
+            Self::Heap(block) => block.as_ref(),
+        }
+    }
+}
+
+impl AsMut<[u64]> for Limbs {
+    fn as_mut(&mut self) -> &mut [u64] {
+        match self {
+            Self::Inline(limbs) => limbs,
+            Self::Heap(block) => block.as_mut(),
+        }
+    }
+}
+
+impl<S: AsRef<[u64]> + AsMut<[u64]>> Big<S> {
+    /// `v` in `limbs`, which are all zero.
+    fn with(mut limbs: S, v: u64) -> Self {
+        let len = match limbs.as_mut().first_mut() {
+            Some(first) if v != 0 => {
+                *first = v;
+                1
+            }
+            _ => 0,
         };
         Self { limbs, len }
+    }
+
+    fn l(&self) -> &[u64] {
+        self.limbs.as_ref()
+    }
+
+    fn lm(&mut self) -> &mut [u64] {
+        self.limbs.as_mut()
+    }
+
+    /// How many limbs the storage holds.
+    fn cap(&self) -> usize {
+        self.l().len()
     }
 
     fn is_zero(&self) -> bool {
@@ -204,8 +309,8 @@ impl<const N: usize> Big<N> {
     }
 
     /// `self *= x`.  Saturates by dropping the overflow, which cannot happen
-    /// for the inputs this module produces: `N` is sized for the worst case
-    /// and every caller stays inside it.
+    /// for the inputs this module produces: the storage is sized for the
+    /// worst case and every caller stays inside it.
     #[allow(clippy::arithmetic_side_effects)]
     fn mul_small(&mut self, x: u64) {
         if x == 0 || self.is_zero() {
@@ -215,15 +320,16 @@ impl<const N: usize> Big<N> {
         let mut carry: u128 = 0;
         for i in 0..self.len {
             // SAFETY-of-indexing: `i < self.len <= LIMBS`.
-            let Some(slot) = self.limbs.get_mut(i) else {
+            let Some(slot) = self.lm().get_mut(i) else {
                 break;
             };
             let prod = u128::from(*slot) * u128::from(x) + carry;
             *slot = prod as u64;
             carry = prod >> 64;
         }
-        while carry != 0 && self.len < N {
-            if let Some(slot) = self.limbs.get_mut(self.len) {
+        while carry != 0 && self.len < self.cap() {
+            let at = self.len;
+            if let Some(slot) = self.lm().get_mut(at) {
                 *slot = carry as u64;
             }
             carry >>= 64;
@@ -243,18 +349,15 @@ impl<const N: usize> Big<N> {
 
         // Move limbs up by `whole`, then shift within limbs by `part`.
         let old_len = self.len;
-        let new_len = (old_len + whole + usize::from(part != 0)).min(N);
+        let new_len = (old_len + whole + usize::from(part != 0)).min(self.cap());
         let mut i = new_len;
         while i > 0 {
             i -= 1;
-            let hi = i
-                .checked_sub(whole)
-                .and_then(|j| self.limbs.get(j))
-                .copied();
+            let hi = i.checked_sub(whole).and_then(|j| self.l().get(j)).copied();
             let lo = i
                 .checked_sub(whole)
                 .and_then(|j| j.checked_sub(1))
-                .and_then(|j| self.limbs.get(j))
+                .and_then(|j| self.l().get(j))
                 .copied();
             let v = match (hi, lo, part) {
                 (Some(h), _, 0) => h,
@@ -262,7 +365,7 @@ impl<const N: usize> Big<N> {
                 (Some(h), None, p) => h << p,
                 (None, _, _) => 0,
             };
-            if let Some(slot) = self.limbs.get_mut(i) {
+            if let Some(slot) = self.lm().get_mut(i) {
                 *slot = v;
             }
         }
@@ -278,7 +381,7 @@ impl<const N: usize> Big<N> {
         let mut i = self.len;
         while i > 0 {
             i -= 1;
-            let Some(slot) = self.limbs.get_mut(i) else {
+            let Some(slot) = self.lm().get_mut(i) else {
                 continue;
             };
             let cur = (rem << 64) | u128::from(*slot);
@@ -298,7 +401,7 @@ impl<const N: usize> Big<N> {
         let mut carry = x;
         let mut i = 0usize;
         while carry != 0 {
-            let Some(slot) = self.limbs.get_mut(i) else {
+            let Some(slot) = self.lm().get_mut(i) else {
                 debug_assert!(false, "big-integer overflow in add_small");
                 return;
             };
@@ -315,7 +418,7 @@ impl<const N: usize> Big<N> {
     /// Position of the most significant set bit, plus one; `0` when zero.
     #[allow(clippy::arithmetic_side_effects)]
     fn bits(&self) -> usize {
-        match self.len.checked_sub(1).and_then(|i| self.limbs.get(i)) {
+        match self.len.checked_sub(1).and_then(|i| self.l().get(i)) {
             Some(&top) if top != 0 => (self.len - 1) * 64 + (64 - top.leading_zeros() as usize),
             _ => 0,
         }
@@ -324,7 +427,7 @@ impl<const N: usize> Big<N> {
     /// Is bit `i` set?
     #[allow(clippy::arithmetic_side_effects)]
     fn bit(&self, i: usize) -> bool {
-        self.limbs
+        self.l()
             .get(i / 64)
             .is_some_and(|&w| (w >> (i % 64)) & 1 == 1)
     }
@@ -335,13 +438,13 @@ impl<const N: usize> Big<N> {
         let top = i / 64;
         let off = (i % 64) as u32;
         for k in 0..top.min(self.len) {
-            if self.limbs.get(k).copied().unwrap_or(0) != 0 {
+            if self.l().get(k).copied().unwrap_or(0) != 0 {
                 return true;
             }
         }
         off != 0
             && self
-                .limbs
+                .l()
                 .get(top)
                 .is_some_and(|&w| w & ((1u64 << off) - 1) != 0)
     }
@@ -352,18 +455,18 @@ impl<const N: usize> Big<N> {
     fn window(&self, i: usize) -> u64 {
         let idx = i / 64;
         let off = (i % 64) as u32;
-        let lo = self.limbs.get(idx).copied().unwrap_or(0);
+        let lo = self.l().get(idx).copied().unwrap_or(0);
         if off == 0 {
             lo
         } else {
-            let hi = self.limbs.get(idx + 1).copied().unwrap_or(0);
+            let hi = self.l().get(idx + 1).copied().unwrap_or(0);
             (lo >> off) | (hi << (64 - off))
         }
     }
 
     #[allow(clippy::arithmetic_side_effects)]
     fn normalize(&mut self) {
-        while self.len > 0 && self.limbs.get(self.len - 1).copied() == Some(0) {
+        while self.len > 0 && self.l().get(self.len - 1).copied() == Some(0) {
             self.len -= 1;
         }
     }
@@ -395,22 +498,94 @@ pub(crate) fn decompose(val: f64) -> (u64, i32) {
     (m, e)
 }
 
-/// The exact decimal expansion of a finite, non-negative `f64`.
+/// The exact decimal expansion of a finite, non-negative binary value.
 ///
 /// The value is `0.d[0]d[1]…d[len-1] * 10^decpt` — that is, `decpt` is the
 /// number of digits that lie before the decimal point, and may be zero or
 /// negative (the value is below 1) or greater than `len` (the value has
 /// trailing zeros before the point).  Trailing zero digits are always
 /// stripped, so `d[len-1]` is never `b'0'` and zero is `len == 0`.
-pub(crate) struct Decimal {
-    digits: [u8; MAX_DIGITS],
+///
+/// The digits live in `D`: a fixed array for an `f64` ([`Decimal::new`]),
+/// whose 767 digits at most fit a stack, or a [`DigitBuf`] for a `long
+/// double` ([`Decimal::of_parts`]), whose can run to eleven thousand.
+pub(crate) struct Decimal<D = [u8; MAX_DIGITS]> {
+    digits: D,
     len: usize,
     decpt: i32,
 }
 
+/// Make `big` hold `big * 2^e / 10^scale` exactly, and return `scale`: a
+/// shift for `e >= 0`, else a multiplication by `5^-e`, since
+/// `2^e == 5^-e * 10^e` clears a binary exponent into a decimal one.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn scale_to_decimal<S: AsRef<[u64]> + AsMut<[u64]>>(big: &mut Big<S>, e: i32) -> i32 {
+    if e >= 0 {
+        big.shl(e as u32);
+        return 0;
+    }
+    // Applied `POW5_CHUNK_EXP` at a time because that is the most that fits
+    // in a limb multiplier.
+    let mut left = e.unsigned_abs();
+    while left >= POW5_CHUNK_EXP {
+        big.mul_small(POW5_CHUNK);
+        left -= POW5_CHUNK_EXP;
+    }
+    if left > 0 {
+        let mut f: u64 = 1;
+        for _ in 0..left {
+            f *= 5;
+        }
+        big.mul_small(f);
+    }
+    e
+}
+
+/// Write `big * 10^scale` into `out` as an exact expansion -- `out` must hold
+/// all of `big`'s digits -- most significant first, trailing zeros stripped:
+/// `(len, decpt)`. `big` is consumed (left zero).
+///
+/// The digits are produced least significant first, a `10^19` chunk at a time,
+/// into the end of `out`, and then moved to its front.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn expand_into<S: AsRef<[u64]> + AsMut<[u64]>>(
+    big: &mut Big<S>,
+    scale: i32,
+    out: &mut [u8],
+) -> (usize, i32) {
+    let cap = out.len();
+    let mut pos = cap;
+    while !big.is_zero() {
+        let mut chunk = big.divmod_small(POW10_CHUNK);
+        let last = big.is_zero();
+        let mut emitted = 0usize;
+        while pos > 0 && (chunk != 0 || (!last && emitted < POW10_CHUNK_EXP)) {
+            pos -= 1;
+            if let Some(slot) = out.get_mut(pos) {
+                *slot = b'0' + (chunk % 10) as u8;
+            }
+            chunk /= 10;
+            emitted += 1;
+        }
+        debug_assert!(chunk == 0, "decimal buffer too small");
+    }
+    let total = cap - pos;
+    // Strip trailing zeros; `decpt` accounts for their place.
+    let mut end = cap;
+    while end > pos && out.get(end - 1).copied() == Some(b'0') {
+        end -= 1;
+    }
+    let len = end - pos;
+    out.copy_within(pos..end, 0);
+    if len == 0 {
+        return (0, 0);
+    }
+    // `scale` counts the digits that sit to the right of the point.
+    (len, i32::try_from(total).unwrap_or(i32::MAX) + scale)
+}
+
 impl Decimal {
     /// Compute the exact expansion of `val`, which must be finite and `>= 0`.
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     pub(crate) fn new(val: f64) -> Self {
         let mut out = Self {
             digits: [0u8; MAX_DIGITS],
@@ -421,68 +596,94 @@ impl Decimal {
         if m == 0 {
             return out;
         }
-
-        // val == big * 10^scale, exactly.
-        let mut big = Big::<DEC_LIMBS>::from_u64(m);
-        let scale: i32 = if e >= 0 {
-            big.shl(e as u32);
-            0
-        } else {
-            // 2^e == 5^-e * 10^e, so multiplying by 5^-e clears the binary
-            // exponent into a decimal one.  Applied `POW5_CHUNK_EXP` at a
-            // time because that is the most that fits in a limb multiplier.
-            let mut left = (-e) as u32;
-            while left >= POW5_CHUNK_EXP {
-                big.mul_small(POW5_CHUNK);
-                left -= POW5_CHUNK_EXP;
-            }
-            if left > 0 {
-                let mut f: u64 = 1;
-                for _ in 0..left {
-                    f *= 5;
-                }
-                big.mul_small(f);
-            }
-            e
-        };
-
-        // Convert `big` to decimal, least-significant chunk first, into a
-        // scratch buffer written back-to-front so the digits end up in order.
-        let mut scratch = [b'0'; MAX_DIGITS];
-        let mut pos = MAX_DIGITS;
-        while !big.is_zero() {
-            let mut chunk = big.divmod_small(POW10_CHUNK);
-            let last = big.is_zero();
-            let mut emitted = 0usize;
-            while pos > 0 && (chunk != 0 || (!last && emitted < POW10_CHUNK_EXP)) {
-                pos -= 1;
-                if let Some(slot) = scratch.get_mut(pos) {
-                    *slot = b'0' + (chunk % 10) as u8;
-                }
-                chunk /= 10;
-                emitted += 1;
-            }
-            debug_assert!(chunk == 0, "decimal buffer too small");
-        }
-
-        let total = MAX_DIGITS - pos;
-        // `scale` counts the digits that sit to the right of the point.
-        out.decpt = total as i32 + scale;
-        // Strip trailing zeros; `decpt` already accounts for their place.
-        let mut end = MAX_DIGITS;
-        while end > pos && scratch.get(end - 1).copied() == Some(b'0') {
-            end -= 1;
-        }
-        out.len = end - pos;
-        if let (Some(dst), Some(src)) = (out.digits.get_mut(..out.len), scratch.get(pos..end)) {
-            dst.copy_from_slice(src);
-        }
-        if out.len == 0 {
-            out.decpt = 0;
-        }
+        let mut big = Big::<[u64; DEC_LIMBS]>::from_u64(m);
+        let scale = scale_to_decimal(&mut big, e);
+        (out.len, out.decpt) = expand_into(&mut big, scale, &mut out.digits);
         out
     }
+}
 
+/// An expansion's digits where their count is known only at run time:
+/// inline while they fit a `double`'s worst case, in a block of their own
+/// past it.
+// As for `Limbs`: the inline variant is what keeps an ordinary `%Lf` from
+// allocating.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum DigitBuf {
+    Inline([u8; MAX_DIGITS]),
+    Heap(MallocBuf<u8>),
+}
+
+impl AsRef<[u8]> for DigitBuf {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Inline(digits) => digits,
+            Self::Heap(block) => block.as_ref(),
+        }
+    }
+}
+
+impl AsMut<[u8]> for DigitBuf {
+    fn as_mut(&mut self) -> &mut [u8] {
+        match self {
+            Self::Inline(digits) => digits,
+            Self::Heap(block) => block.as_mut(),
+        }
+    }
+}
+
+impl Decimal<DigitBuf> {
+    /// The exact expansion of `m * 2^e` -- any 64-bit significand, any
+    /// exponent: a `long double`'s, whose integer bit is explicit. `None`
+    /// when memory runs out.
+    ///
+    /// The integer needs `bits(m) + e` bits for `e >= 0`, else `bits(m) +
+    /// ceil(-e * log2 5)`: at most about 38,300, for the least subnormal
+    /// `long double`, `2^-16445`, whose expansion has 11,496 significant
+    /// digits. The integer and the digits are on the stack while they fit a
+    /// `double`'s worst case -- every value from about `1e-300` to `1e760`
+    /// -- and in blocks sized to the value past that.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub(crate) fn of_parts(m: u64, e: i32) -> Option<Self> {
+        if m == 0 {
+            return Some(Self {
+                digits: DigitBuf::Inline([0; MAX_DIGITS]),
+                len: 0,
+                decpt: 0,
+            });
+        }
+        // An odd significand keeps the power of five as small as it can be.
+        let tz = m.trailing_zeros();
+        let m = m >> tz;
+        let e = e.saturating_add(i32::try_from(tz).unwrap_or(0));
+        let m_bits = u64::from(u64::BITS - m.leading_zeros());
+        let e_bits = if e >= 0 {
+            u64::from(e.unsigned_abs())
+        } else {
+            // log2 5 < 2.321929, so this never falls short.
+            (u64::from(e.unsigned_abs()) * 2_321_929).div_ceil(1_000_000)
+        };
+        let bits = m_bits + e_bits;
+        let limbs = usize::try_from(bits / 64 + 2).ok()?;
+        let mut big = if limbs <= PARSE_LIMBS {
+            Big::with(Limbs::Inline([0; PARSE_LIMBS]), m)
+        } else {
+            Big::with(Limbs::Heap(MallocBuf::zeroed(limbs)?), m)
+        };
+        let scale = scale_to_decimal(&mut big, e);
+        // log10 2 < 0.30103: every digit the integer has, and a spare.
+        let ndigits = usize::try_from((bits * 30_103).div_ceil(100_000) + 2).ok()?;
+        let mut digits = if ndigits <= MAX_DIGITS {
+            DigitBuf::Inline([0; MAX_DIGITS])
+        } else {
+            DigitBuf::Heap(MallocBuf::zeroed(ndigits)?)
+        };
+        let (len, decpt) = expand_into(&mut big, scale, digits.as_mut());
+        Some(Self { digits, len, decpt })
+    }
+}
+
+impl<D: AsRef<[u8]> + AsMut<[u8]>> Decimal<D> {
     /// Is the value zero?
     pub(crate) fn is_zero(&self) -> bool {
         self.len == 0
@@ -500,7 +701,7 @@ impl Decimal {
     /// zero.
     pub(crate) fn digit(&self, i: i32) -> u8 {
         match usize::try_from(i) {
-            Ok(u) if u < self.len => self.digits.get(u).copied().unwrap_or(b'0'),
+            Ok(u) if u < self.len => self.digits.as_ref().get(u).copied().unwrap_or(b'0'),
             _ => b'0',
         }
     }
@@ -532,7 +733,7 @@ impl Decimal {
             // Every digit is below the rounding place.
             if dir != Rounding::Nearest && dir.away(negative) {
                 // One unit of the place, `10^(decpt - n)`.
-                if let Some(slot) = self.digits.get_mut(0) {
+                if let Some(slot) = self.digits.as_mut().get_mut(0) {
                     *slot = b'1';
                 }
                 self.len = 1;
@@ -551,15 +752,16 @@ impl Decimal {
         // Decide the direction from the first dropped digit and whether any
         // nonzero digit follows it.  Because the expansion is exact, "5 with
         // nothing after" is precisely a tie — no separate analysis needed.
-        let first_dropped = self.digits.get(keep).copied().unwrap_or(b'0');
+        let first_dropped = self.digits.as_ref().get(keep).copied().unwrap_or(b'0');
         let rest_nonzero = self
             .digits
+            .as_ref()
             .get(keep.wrapping_add(1)..self.len)
             .is_some_and(|tail| tail.iter().any(|&d| d != b'0'));
         // A dropped leading digit leaves an implicit 0 kept, which is even.
         let prev_odd = keep
             .checked_sub(1)
-            .and_then(|i| self.digits.get(i))
+            .and_then(|i| self.digits.as_ref().get(i))
             .is_some_and(|&d| d.wrapping_sub(b'0') % 2 == 1);
         // The digits are stripped of trailing zeros, so something nonzero is
         // always cut here: the last digit, at the least.
@@ -576,7 +778,7 @@ impl Decimal {
                 if i == 0 {
                     // Carried out of the most significant digit: the result is
                     // a single 1 one place higher.
-                    if let Some(slot) = self.digits.get_mut(0) {
+                    if let Some(slot) = self.digits.as_mut().get_mut(0) {
                         *slot = b'1';
                     }
                     self.len = 1;
@@ -584,7 +786,7 @@ impl Decimal {
                     return;
                 }
                 i -= 1;
-                match self.digits.get_mut(i) {
+                match self.digits.as_mut().get_mut(i) {
                     Some(slot) if *slot == b'9' => *slot = b'0',
                     Some(slot) => {
                         *slot += 1;
@@ -594,7 +796,7 @@ impl Decimal {
                 }
             }
         }
-        while self.len > 0 && self.digits.get(self.len - 1).copied() == Some(b'0') {
+        while self.len > 0 && self.digits.as_ref().get(self.len - 1).copied() == Some(b'0') {
             self.len -= 1;
         }
         if self.len == 0 {
@@ -644,8 +846,18 @@ impl Decimal {
 /// boundary — but they are still accounted for, either in the exponent or in
 /// the sticky bit.
 pub(crate) struct DigitCollector {
-    /// Significant digits as ASCII, most significant first.
+    /// The first significant digits as ASCII, most significant first.
     digits: [u8; MAX_PARSE_DIGITS],
+    /// Every significant digit so far, once there are more than `digits`
+    /// holds: a block of `limit` bytes, which only a `long double`'s
+    /// collector ever needs.
+    spill: Option<MallocBuf<u8>>,
+    /// How many significant digits can decide the rounding:
+    /// [`MAX_PARSE_DIGITS`] for a `double` or a `float`, [`LD_PARSE_DIGITS`]
+    /// for a `long double`. Lowered to the digits stored if the spill cannot
+    /// be allocated, which `out_of_memory` records.
+    limit: usize,
+    out_of_memory: bool,
     len: usize,
     /// Power of ten for a decimal literal, power of two for a hex one.
     exp: i32,
@@ -654,9 +866,24 @@ pub(crate) struct DigitCollector {
 }
 
 impl DigitCollector {
+    /// A collector for a `double` or a `float`, which never allocates.
     pub(crate) const fn new() -> Self {
+        Self::with_limit(MAX_PARSE_DIGITS)
+    }
+
+    /// A collector for a `long double`: the first [`MAX_PARSE_DIGITS`]
+    /// significant digits inline, as for a `double`, and a block for all of
+    /// them -- [`LD_PARSE_DIGITS`] at the most -- only when there are more.
+    pub(crate) const fn for_long_double() -> Self {
+        Self::with_limit(LD_PARSE_DIGITS)
+    }
+
+    const fn with_limit(limit: usize) -> Self {
         Self {
             digits: [b'0'; MAX_PARSE_DIGITS],
+            spill: None,
+            limit,
+            out_of_memory: false,
             len: 0,
             exp: 0,
             truncated: false,
@@ -682,7 +909,7 @@ impl DigitCollector {
         if self.hex {
             (MAX_HEX_DIGITS, 4)
         } else {
-            (MAX_PARSE_DIGITS, 1)
+            (self.limit, 1)
         }
     }
 
@@ -694,12 +921,9 @@ impl DigitCollector {
         let (cap, step) = self.shape();
         if self.len == 0 && ascii == b'0' {
             // A leading zero contributes nothing at all.
-        } else if self.len < cap {
-            if let Some(slot) = self.digits.get_mut(self.len) {
-                *slot = ascii;
-            }
-            self.len = self.len.saturating_add(1);
-        } else {
+            return;
+        }
+        if self.len >= cap || !self.store(ascii) {
             self.exp = self.exp.saturating_add(step);
             if ascii != b'0' {
                 self.truncated = true;
@@ -717,11 +941,7 @@ impl DigitCollector {
         let (cap, step) = self.shape();
         if self.len == 0 && ascii == b'0' {
             self.exp = self.exp.saturating_sub(step);
-        } else if self.len < cap {
-            if let Some(slot) = self.digits.get_mut(self.len) {
-                *slot = ascii;
-            }
-            self.len = self.len.saturating_add(1);
+        } else if self.len < cap && self.store(ascii) {
             self.exp = self.exp.saturating_sub(step);
         } else if ascii != b'0' {
             self.truncated = true;
@@ -733,20 +953,119 @@ impl DigitCollector {
         self.exp = self.exp.saturating_add(exp);
     }
 
-    fn stored(&self) -> &[u8] {
-        self.digits.get(..self.len).unwrap_or(&[])
+    /// Store a significant digit, below `limit`: inline while it fits,
+    /// then in the spill, which the first digit past the inline array
+    /// allocates. `false` if that allocation failed -- the collector then
+    /// stores nothing more, and [`DigitCollector::to_ld80`] answers `None`.
+    fn store(&mut self, ascii: u8) -> bool {
+        if self.spill.is_none() {
+            if let Some(slot) = self.digits.get_mut(self.len) {
+                *slot = ascii;
+                self.len = self.len.saturating_add(1);
+                return true;
+            }
+            let Some(mut block) = MallocBuf::<u8>::zeroed(self.limit) else {
+                self.out_of_memory = true;
+                self.limit = self.len;
+                return false;
+            };
+            if let Some(head) = block.as_mut().get_mut(..self.len) {
+                head.copy_from_slice(self.digits.get(..self.len).unwrap_or(&[]));
+            }
+            self.spill = Some(block);
+        }
+        let Some(slot) = self
+            .spill
+            .as_mut()
+            .and_then(|b| b.as_mut().get_mut(self.len))
+        else {
+            return false;
+        };
+        *slot = ascii;
+        self.len = self.len.saturating_add(1);
+        true
     }
 
-    /// The accumulated value's magnitude as the raw bits of `fmt`, rounded in
-    /// the current direction for a value of sign `negative`, and the `ERANGE`
-    /// condition ([`round_to_binary`]).
-    fn to_bits(&self, fmt: &Format, negative: bool) -> (u64, bool) {
+    fn stored(&self) -> &[u8] {
+        match &self.spill {
+            Some(block) => block.as_ref().get(..self.len).unwrap_or(&[]),
+            None => self.digits.get(..self.len).unwrap_or(&[]),
+        }
+    }
+
+    /// The accumulated value's magnitude rounded into `fmt` in the current
+    /// direction for a value of sign `negative`, and the `ERANGE` condition
+    /// ([`round_to_binary`]); a decimal literal's bignum on the stack.
+    fn to_rounded(&self, fmt: &Format, negative: bool) -> (Rounded, bool) {
         let dir = Rounding::current();
         if self.hex {
             hex_to_binary(self.stored(), self.exp, self.truncated, fmt, dir, negative)
         } else {
-            decimal_to_binary(self.stored(), self.exp, self.truncated, fmt, dir, negative)
+            decimal_to_binary(
+                self.stored(),
+                self.exp,
+                self.truncated,
+                fmt,
+                dir,
+                negative,
+                |limbs| {
+                    debug_assert!(limbs <= PARSE_LIMBS, "a double's bignum outgrew the stack");
+                    Some(Big::<[u64; PARSE_LIMBS]>::from_u64(0))
+                },
+            )
+            .unwrap_or((Rounded::Finite { field: 0, m: 0 }, false))
         }
+    }
+
+    /// The raw bits of `fmt` for [`DigitCollector::to_rounded`].
+    fn to_bits(&self, fmt: &Format, negative: bool) -> (u64, bool) {
+        let (r, oor) = self.to_rounded(fmt, negative);
+        (r.pack_ieee(fmt), oor)
+    }
+
+    /// The accumulated value's magnitude as a `long double`, rounded in the
+    /// current direction for a value of sign `negative`, as glibc's `strtold`
+    /// rounds it: `(magnitude, out_of_range)`.
+    ///
+    /// The bignum is on the stack while it fits a `double`'s worst case,
+    /// which covers a literal of a few digits for any value from about
+    /// `1e-2550` to `1e1800`, and one of hundreds over a narrower span; past
+    /// that it is a block sized to the literal, twelve hundred limbs at the
+    /// most. `None` when that block, or the collector's spill, could not be
+    /// allocated.
+    pub(crate) fn to_ld80(&self, negative: bool) -> Option<(crate::x87::LongDouble, bool)> {
+        if self.out_of_memory {
+            return None;
+        }
+        let dir = Rounding::current();
+        let (r, oor) = if self.hex {
+            hex_to_binary(
+                self.stored(),
+                self.exp,
+                self.truncated,
+                &LD80_FORMAT,
+                dir,
+                negative,
+            )
+        } else {
+            decimal_to_binary(
+                self.stored(),
+                self.exp,
+                self.truncated,
+                &LD80_FORMAT,
+                dir,
+                negative,
+                |limbs| {
+                    if limbs <= PARSE_LIMBS {
+                        Some(Big::with(Limbs::Inline([0; PARSE_LIMBS]), 0))
+                    } else {
+                        Some(Big::with(Limbs::Heap(MallocBuf::zeroed(limbs)?), 0))
+                    }
+                },
+            )?
+        };
+        let (field, m) = r.pack_x87();
+        Some((crate::x87::LongDouble::from_bits(field, m), oor))
     }
 
     /// The accumulated value's magnitude as an `f64`, rounded in the current
@@ -770,9 +1089,11 @@ impl DigitCollector {
 
 /// Largest number of significant hex digits that can affect the result.
 ///
-/// Twenty digits are 80 bits: more than a `double`'s 53-bit significand plus
-/// the guard bit, with room to spare.  Anything past that can only tell the
-/// rounding whether the tail is nonzero, which is what the sticky bit is for.
+/// Twenty digits are 80 bits, 77 of them significant at the least (the first
+/// digit may be a 1): more than a `long double`'s 64-bit significand plus the
+/// guard bit, and so more than a `double`'s.  Anything past that can only tell
+/// the rounding whether the tail is nonzero, which is what the sticky bit is
+/// for.
 const MAX_HEX_DIGITS: usize = 20;
 
 /// Limbs needed for [`MAX_HEX_DIGITS`] digits: 80 bits fits in two.
@@ -808,8 +1129,8 @@ fn hex_to_binary(
     fmt: &Format,
     dir: Rounding,
     negative: bool,
-) -> (u64, bool) {
-    let mut b = Big::<HEX_LIMBS>::from_u64(0);
+) -> (Rounded, bool) {
+    let mut b = Big::<[u64; HEX_LIMBS]>::from_u64(0);
     for &d in digits {
         b.mul_small(16);
         b.add_small(hex_val(d));
@@ -927,6 +1248,36 @@ pub(crate) fn nan_f32(payload: Option<u64>, negative: bool) -> f32 {
     }
     let v = f32::from_bits(bits);
     if negative { -v } else { v }
+}
+
+/// [`nan_f64`] for a `long double`: 62 payload bits, below x87's integer and
+/// quiet bits -- glibc's ldbl-96 `SET_NAN_PAYLOAD`, as `nanl` has it.
+pub(crate) fn nan_ld80(payload: Option<u64>, negative: bool) -> crate::x87::LongDouble {
+    const LOW: u64 = (1 << 62) - 1;
+    let sig = 0xC000_0000_0000_0000 | payload.map_or(0, |p| p & LOW);
+    crate::x87::LongDouble::from_bits(if negative { 0xFFFF } else { 0x7FFF }, sig)
+}
+
+/// The `long double` a scanned subject sequence names, as glibc's `strtold`
+/// gives it -- `(value, out_of_range)`, the second the C `ERANGE` condition
+/// -- or `None` when its digits need more memory than there is
+/// ([`DigitCollector::to_ld80`]).
+pub(crate) fn ld80_of(
+    token: FloatToken,
+    negative: bool,
+    acc: &DigitCollector,
+) -> Option<(crate::x87::LongDouble, bool)> {
+    let (magnitude, out_of_range) = match token {
+        FloatToken::None => return Some((crate::x87::LongDouble::POS_ZERO, false)),
+        FloatToken::Nan(p) => return Some((nan_ld80(p, negative), false)),
+        FloatToken::Infinity => (crate::x87::LongDouble::INFINITY, false),
+        FloatToken::Number => acc.to_ld80(negative)?,
+    };
+    let sign = if negative { 0x8000 } else { 0 };
+    Some((
+        crate::x87::LongDouble::from_bits(magnitude.sign_exp | sign, magnitude.significand),
+        out_of_range,
+    ))
 }
 
 /// A byte slice read as a C string: its bytes, then 0 forever.
@@ -1181,22 +1532,23 @@ fn scan_exponent<S: ByteSource + ?Sized>(
 /// remainder feeds the sticky bit, so the final rounding step sees the true
 /// value and not an approximation of it.
 ///
-/// Returns `(bits, out_of_range)` — the raw encoding of a *positive* value;
-/// the caller applies the sign.  `out_of_range` is the C `ERANGE` condition:
-/// overflow to infinity, underflow to zero, or a subnormal result (gradual
-/// underflow).  glibc reports `ERANGE` for all three.
+/// Returns the rounded magnitude and the C `ERANGE` condition; the caller
+/// applies the sign. The rounding is in direction `dir`, for a value of sign
+/// `negative` ([`round_to_binary`]).
 ///
-/// The rounding is in direction `dir`, for a value of sign `negative`
-/// ([`round_to_binary`]).
-#[allow(clippy::arithmetic_side_effects)]
-fn decimal_to_binary(
+/// The bignum comes from `big`, given the limbs the literal needs once the
+/// magnitude cut-offs have passed it -- so an absurd exponent never asks for
+/// an absurd block. `None` if `big` has none to give.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+fn decimal_to_binary<S: AsRef<[u64]> + AsMut<[u64]>>(
     digits: &[u8],
     exp10: i32,
     truncated: bool,
     fmt: &Format,
     dir: Rounding,
     negative: bool,
-) -> (u64, bool) {
+    big: impl FnOnce(usize) -> Option<Big<S>>,
+) -> Option<(Rounded, bool)> {
     let mut sticky = truncated;
     let mut exp10 = exp10;
 
@@ -1213,27 +1565,43 @@ fn decimal_to_binary(
     }
     let digits = digits.get(start..end).unwrap_or(&[]);
     if digits.is_empty() {
-        return (0, false);
+        return Some((Rounded::Finite { field: 0, m: 0 }, false));
     }
 
     // Position of the decimal point: the value lies in `[10^(mag-1), 10^mag)`.
     // `DBL_MAX` is just under `10^309` and the smallest subnormal is just over
-    // `10^-324`, so these cut-offs are decided by magnitude alone and keep the
-    // big-integer work bounded.
+    // `10^-324` -- `LDBL_MAX` under `10^4933`, the least subnormal `long
+    // double` over `10^-4952` -- so these cut-offs are decided by magnitude
+    // alone and keep the big-integer work bounded.
     let mag = exp10.saturating_add(i32::try_from(digits.len()).unwrap_or(i32::MAX));
-    // The bounds are the `f64` ones even when rounding to `f32`; they exist
-    // only to keep the big-integer work finite, and the rounding step below
-    // handles anything inside them that still overflows the narrower format.
-    if mag > 310 {
-        return (fmt.overflow(dir, negative), true);
+    if mag > fmt.mag_max {
+        return Some((Rounded::overflow(dir, negative), true));
     }
-    if mag < -330 {
-        return (Format::underflow(dir, negative), true);
+    if mag < fmt.mag_min {
+        return Some((Rounded::underflow(dir, negative), true));
     }
+
+    // `L = ceil(Q * log2 5)` plus the format's significand and eleven bits
+    // for guard and round: `2321929/10^6` is above `log2 5`, so the ceiling
+    // is never short and the quotient always keeps what the rounding needs.
+    let q = exp10.min(0).unsigned_abs();
+    let scaled = (u64::from(q) * 2_321_929).div_ceil(1_000_000);
+    let l = u32::try_from(scaled)
+        .unwrap_or(u32::MAX)
+        .saturating_add(fmt.mant_bits + 11);
+    // The bignum's size: the digits' integer (`log2 10 < 3.3220`), times
+    // `10^exp10` or shifted by `L`, and a limb to spare.
+    let digit_bits = (digits.len() as u64 * 33_220).div_ceil(10_000) + 1;
+    let scale_bits = if exp10 >= 0 {
+        (u64::from(exp10.unsigned_abs()) * 33_220).div_ceil(10_000)
+    } else {
+        u64::from(l)
+    };
+    let limbs = usize::try_from((digit_bits + scale_bits) / 64 + 2).unwrap_or(usize::MAX);
+    let mut b = big(limbs)?;
 
     // The exact integer formed by the digits, absorbed 19 at a time because
     // `10^19` is the largest power of ten that fits in a `u64`.
-    let mut b = Big::<PARSE_LIMBS>::from_u64(0);
     let mut i = 0usize;
     while i < digits.len() {
         let take = POW10_CHUNK_EXP.min(digits.len() - i);
@@ -1263,11 +1631,6 @@ fn decimal_to_binary(
         }
         e = 0;
     } else {
-        let q = exp10.unsigned_abs();
-        // `L = ceil(Q * log2 5) + 64`.  `2321929/10^6` is above `log2 5`, so
-        // the ceiling is never short and the quotient always keeps >= 64 bits.
-        let scaled = (u64::from(q) * 2_321_929 + 999_999) / 1_000_000;
-        let l = u32::try_from(scaled).unwrap_or(u32::MAX).saturating_add(64);
         b.shl(l);
         let mut left = q;
         while left > 0 {
@@ -1291,7 +1654,7 @@ fn decimal_to_binary(
         e = -i32::try_from(l).unwrap_or(i32::MAX) - i32::try_from(q).unwrap_or(i32::MAX);
     }
 
-    round_to_binary(&b, e, sticky, fmt, dir, negative)
+    Some(round_to_binary(&b, e, sticky, fmt, dir, negative))
 }
 
 /// Convert `digits * 10^exp10` to the nearest `f64`, ties to even.
@@ -1300,15 +1663,17 @@ fn decimal_to_binary(
 /// second result is the C `ERANGE` condition.
 #[cfg(test)]
 pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64, bool) {
-    let (bits, out_of_range) = decimal_to_binary(
+    let (r, out_of_range) = decimal_to_binary(
         digits,
         exp10,
         truncated,
         &F64_FORMAT,
         Rounding::Nearest,
         false,
-    );
-    (f64::from_bits(bits), out_of_range)
+        |_| Some(Big::<[u64; PARSE_LIMBS]>::from_u64(0)),
+    )
+    .unwrap_or((Rounded::Finite { field: 0, m: 0 }, false));
+    (f64::from_bits(r.pack_ieee(&F64_FORMAT)), out_of_range)
 }
 
 /// Convert `digits * 10^exp10` to the nearest `f32`, ties to even.
@@ -1321,14 +1686,17 @@ pub(crate) fn decimal_to_f64(digits: &[u8], exp10: i32, truncated: bool) -> (f64
 /// So `f32` is rounded straight from the exact decimal expansion.
 #[cfg(test)]
 pub(crate) fn decimal_to_f32(digits: &[u8], exp10: i32, truncated: bool) -> (f32, bool) {
-    let (bits, out_of_range) = decimal_to_binary(
+    let (r, out_of_range) = decimal_to_binary(
         digits,
         exp10,
         truncated,
         &F32_FORMAT,
         Rounding::Nearest,
         false,
-    );
+        |_| Some(Big::<[u64; PARSE_LIMBS]>::from_u64(0)),
+    )
+    .unwrap_or((Rounded::Finite { field: 0, m: 0 }, false));
+    let bits = r.pack_ieee(&F32_FORMAT);
     (
         f32::from_bits(u32::try_from(bits).unwrap_or(0)),
         out_of_range,
@@ -1348,36 +1716,83 @@ struct Format {
     bias: i32,
     /// The reserved all-ones exponent field, which encodes infinity.
     inf_field: u64,
+    /// A decimal literal whose leading digit sits above `10^(mag_max - 1)`
+    /// overflows whatever its digits, and one below `10^(mag_min - 1)`
+    /// underflows: a cut-off decided by magnitude alone, which keeps the
+    /// bignum work bounded. `float` shares `double`'s; the rounding catches
+    /// anything between that the narrower format cannot hold.
+    mag_max: i32,
+    mag_min: i32,
 }
 
 impl Format {
-    /// The bit pattern of positive infinity.
+    /// The bit pattern of positive infinity (an IEEE format's).
     fn infinity(&self) -> u64 {
         self.inf_field << self.mant_bits.saturating_sub(1)
     }
+}
 
-    /// The bit pattern of the largest finite value.
-    fn max_finite(&self) -> u64 {
-        self.infinity().saturating_sub(1)
-    }
+/// A value rounded into a format, before its encoding: the biased exponent
+/// field -- 0 for zero and the subnormals -- and the significand, whose top
+/// bit (`mant_bits - 1`) is set for a normal number and clear for a
+/// subnormal; or an overflow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rounded {
+    Finite {
+        field: u64,
+        m: u64,
+    },
+    /// Past the largest finite value: infinity (`to_infinity`) or the
+    /// largest finite value, by the rounding direction.
+    Overflow {
+        to_infinity: bool,
+    },
+}
 
-    /// The magnitude an overflow gives in direction `dir` for a value of
-    /// sign `negative`: glibc's `MAX_VALUE * MAX_VALUE`, which is infinity
-    /// when rounding to nearest or away from zero, and the largest finite
-    /// value when rounding toward it.
-    fn overflow(&self, dir: Rounding, negative: bool) -> u64 {
-        if dir == Rounding::Nearest || dir.away(negative) {
-            self.infinity()
-        } else {
-            self.max_finite()
+impl Rounded {
+    /// An overflow in direction `dir` for a value of sign `negative`:
+    /// glibc's `MAX_VALUE * MAX_VALUE`, which is infinity when rounding to
+    /// nearest or away from zero, the largest finite value toward it.
+    fn overflow(dir: Rounding, negative: bool) -> Self {
+        Self::Overflow {
+            to_infinity: dir == Rounding::Nearest || dir.away(negative),
         }
     }
 
-    /// The magnitude a value too small to reach by the rounding gives:
-    /// glibc's `MIN_VALUE * MIN_VALUE` -- zero, or the least subnormal when
-    /// rounding away from zero.
-    fn underflow(dir: Rounding, negative: bool) -> u64 {
-        u64::from(dir != Rounding::Nearest && dir.away(negative))
+    /// A value too small for the rounding to reach: glibc's `MIN_VALUE *
+    /// MIN_VALUE` -- zero, or the least subnormal when rounding away from
+    /// zero.
+    fn underflow(dir: Rounding, negative: bool) -> Self {
+        Self::Finite {
+            field: 0,
+            m: u64::from(dir != Rounding::Nearest && dir.away(negative)),
+        }
+    }
+
+    /// The IEEE encoding in `fmt`, whose leading significand bit is implicit.
+    fn pack_ieee(self, fmt: &Format) -> u64 {
+        // The stored fraction: the significand less its leading bit, 23 or
+        // 52 bits.
+        let frac_bits = fmt.mant_bits.saturating_sub(1);
+        match self {
+            Self::Finite { field, m } => {
+                let frac_mask = (1u64 << frac_bits).wrapping_sub(1);
+                (field << frac_bits) | (m & frac_mask)
+            }
+            Self::Overflow { to_infinity: true } => fmt.infinity(),
+            // The largest finite value is the pattern just below infinity's.
+            Self::Overflow { to_infinity: false } => fmt.infinity().saturating_sub(1),
+        }
+    }
+
+    /// x87's encoding, whose integer bit is explicit: the exponent field and
+    /// the significand as they are stored.
+    fn pack_x87(self) -> (u16, u64) {
+        match self {
+            Self::Finite { field, m } => (u16::try_from(field).unwrap_or(0x7FFF), m),
+            Self::Overflow { to_infinity: true } => (0x7FFF, 1 << 63),
+            Self::Overflow { to_infinity: false } => (0x7FFE, u64::MAX),
+        }
     }
 }
 
@@ -1387,6 +1802,8 @@ const F64_FORMAT: Format = Format {
     min_exp: -1074,
     bias: 1075,
     inf_field: 0x7ff,
+    mag_max: 310,
+    mag_min: -330,
 };
 
 /// IEEE-754 binary32: 24-bit significand, least subnormal `2^-149`.
@@ -1395,6 +1812,19 @@ const F32_FORMAT: Format = Format {
     min_exp: -149,
     bias: 150,
     inf_field: 0xff,
+    mag_max: 310,
+    mag_min: -330,
+};
+
+/// x87's 80-bit extended format, a `long double`: a 64-bit significand whose
+/// integer bit is stored, least subnormal `2^-16445`.
+const LD80_FORMAT: Format = Format {
+    mant_bits: 64,
+    min_exp: -16445,
+    bias: 16446,
+    inf_field: 0x7fff,
+    mag_max: 4934,
+    mag_min: -4972,
 };
 
 /// Round the exact value `b * 2^e` into `fmt` in direction `dir`, for a
@@ -1411,31 +1841,32 @@ const F32_FORMAT: Format = Format {
 /// error, and a value just under the least normal number that rounds up to
 /// it is no error either -- unless it was tiny all the same.
 #[allow(clippy::arithmetic_side_effects)]
-fn round_to_binary<const N: usize>(
-    b: &Big<N>,
+fn round_to_binary<S: AsRef<[u64]> + AsMut<[u64]>>(
+    b: &Big<S>,
     e: i32,
     sticky_in: bool,
     fmt: &Format,
     dir: Rounding,
     negative: bool,
-) -> (u64, bool) {
+) -> (Rounded, bool) {
+    let zero = Rounded::Finite { field: 0, m: 0 };
     let n = b.bits();
     if n == 0 {
-        return (0, false);
+        return (zero, false);
     }
     let prec = fmt.mant_bits as usize;
     let implicit = 1u64 << (fmt.mant_bits - 1);
 
     // `b` with its lowest `drop` bits cut off and rounded in `dir`: the kept
-    // bits, possibly carried to `prec + 1` of them, and whether anything
-    // nonzero was cut.
-    let round_at = |drop: usize| -> (u64, bool) {
+    // bits, possibly carried to `prec + 1` of them -- 65, for a `long
+    // double`, hence the `u128` -- and whether anything nonzero was cut.
+    let round_at = |drop: usize| -> (u128, bool) {
         let m = b.window(drop);
         let guard = drop > 0 && b.bit(drop.saturating_sub(1));
         let rest = sticky_in || (drop > 1 && b.any_bits_below(drop.saturating_sub(1)));
         let cut = Cut::of_bits(guard, rest);
         let up = dir.rounds_up(negative, m & 1 == 1, cut);
-        (m + u64::from(up), cut != Cut::Zero)
+        (u128::from(m) + u128::from(up), cut != Cut::Zero)
     };
 
     // Keep the top `mant_bits` bits.
@@ -1446,7 +1877,7 @@ fn round_to_binary<const N: usize>(
     // below the least normal number -- whose top bit is `prec - 1 + min_exp`.
     let tiny = {
         let (m, _) = round_at(drop_full);
-        let top = i32::try_from(u64::BITS - m.leading_zeros()).unwrap_or(0) - 1;
+        let top = i32::try_from(u128::BITS - m.leading_zeros()).unwrap_or(0) - 1;
         top.saturating_add(exp_full) < i32::try_from(prec).unwrap_or(0) - 1 + fmt.min_exp
     };
 
@@ -1459,15 +1890,17 @@ fn round_to_binary<const N: usize>(
         drop = drop.saturating_add(usize::try_from(extra).unwrap_or(usize::MAX));
         exp = fmt.min_exp;
     }
-    let (mut m, inexact) = round_at(drop);
-    if m == implicit << 1 {
-        m >>= 1;
+    let (mut wide, inexact) = round_at(drop);
+    if wide == u128::from(implicit) << 1 {
+        wide >>= 1;
         exp = exp.saturating_add(1);
     }
+    // At most `prec <= 64` bits now.
+    let mut m = u64::try_from(wide).unwrap_or(u64::MAX);
     let underflow = tiny && inexact;
 
     if m == 0 {
-        return (0, underflow);
+        return (zero, underflow);
     }
     // A short significand (fewer bits than the format holds, so nothing was
     // dropped and nothing was rounded) is normalised by scaling up until it
@@ -1478,16 +1911,16 @@ fn round_to_binary<const N: usize>(
     }
     if m < implicit {
         // Subnormal: the exponent is pinned at the floor, so `m` *is* the
-        // stored bit pattern.
-        return (m, underflow);
+        // stored significand.
+        return (Rounded::Finite { field: 0, m }, underflow);
     }
 
     let biased = exp.saturating_add(fmt.bias);
     if biased >= i32::try_from(fmt.inf_field).unwrap_or(i32::MAX) {
-        return (fmt.overflow(dir, negative), true);
+        return (Rounded::overflow(dir, negative), true);
     }
-    let biased = u64::try_from(biased).unwrap_or(0);
-    ((biased << (fmt.mant_bits - 1)) | (m - implicit), underflow)
+    let field = u64::try_from(biased).unwrap_or(0);
+    (Rounded::Finite { field, m }, underflow)
 }
 
 #[cfg(test)]

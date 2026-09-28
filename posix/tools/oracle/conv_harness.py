@@ -11,7 +11,9 @@ case here is run under each of the four directions, one line each:
     p <mode> l <format-hex> <SSSS:MMMMMMMMMMMMMMMM> = [<output>]
     s <mode> <function> <input-hex> = <result> <consumed> <errno>
 
-`<mode>` is 0-3 for FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO; a
+`strtold` alone also reads a few literals of thousands of digits
+(`long_inputs`). `<mode>` is 0-3 for FE_TONEAREST, FE_UPWARD, FE_DOWNWARD,
+FE_TOWARDZERO; a
 double is its bits in hex, a float its bits, a long double `SSSS:MMMM...`
 (sign-and-exponent word, significand) as the 80-bit format holds it. Formats
 and input strings are hex, so that a space or any other byte can be in one.
@@ -158,10 +160,44 @@ def s_inputs(rng):
     return base
 
 
+def exact_sci(num: int, k: int) -> str:
+    """`num * 2^-k` written out exactly, `D.DDD...e-N`: all its digits."""
+    digits = str(num * 5 ** k)
+    return f"{digits[0]}.{digits[1:]}e{len(digits) - 1 - k}"
+
+
+def long_inputs():
+    """Literals of thousands of significant digits, for `strtold` alone:
+    exact rounding boundaries of the 80-bit format written out in full, and
+    each nudged either way in its last digits -- which a `long double`
+    parser must keep every digit of to decide (a `double`'s 768 are not
+    enough), and where only glibc's own arithmetic can be trusted.
+    """
+    # Python refuses a decimal string past 4,300 digits unless told otherwise.
+    if hasattr(sys, "set_int_max_str_digits"):
+        sys.set_int_max_str_digits(0)
+    out = []
+    # 2.5 least subnormals: a tie between 2 and 3 of them, 11,497 digits;
+    # then a hair above it, and a hair below.
+    tie = exact_sci(5, 16446)
+    mant, exp = tie.split("e")
+    out += [tie, f"{mant}1e{exp}", f"{mant[:-1]}4999e{exp}"]
+    # The midpoint between LDBL_MAX and the step past it, 4,933 digits: a
+    # tie whose even neighbour is the overflow.
+    top = (2 ** 65 - 1) * 2 ** 16319
+    out += [str(top), str(top - 1), f"{top}.0000000001"]
+    # The midpoint between 1 and its successor, padded out to 3,000 digits.
+    mant, exp = exact_sci(2 ** 64 + 1, 64).split("e")
+    pad = "0" * (3000 - len(mant))
+    out += [f"{mant}{pad}e{exp}", f"{mant}{pad}1e{exp}"]
+    return out
+
+
 def gen_c(rng) -> str:
     dv = d_values(rng)
     lv = l_values(rng)
     ins = s_inputs(rng)
+    longs = long_inputs()
     c = [
         "#define _GNU_SOURCE",
         "#include <errno.h>", "#include <fenv.h>", "#include <stdio.h>", "#include <stdlib.h>",
@@ -178,6 +214,7 @@ def gen_c(rng) -> str:
         "static const unsigned long long lm[] = {" + ", ".join(f"0x{m:016x}ull" for _, m in lv) + "};",
         "static const unsigned char lext[] = {" + ", ".join(str(int(extreme(se))) for se, _ in lv) + "};",
         "static const char *const sin_[] = {" + ", ".join(cstr(s) for s in ins) + "};",
+        "static const char *const lin_[] = {" + ", ".join(cstr(s) for s in longs) + "};",
         "int main(void) {",
         "  for (int mode = 0; mode < 4; mode++) {",
         "    fesetround(modes[mode]);",
@@ -205,6 +242,12 @@ def gen_c(rng) -> str:
         "      errno = 0; memset(&u, 0, sizeof u); u.v = strtold(sin_[i], &end); e = errno;",
         '      printf("s %d strtold ", mode); hexs(sin_[i]); '
         'printf(" = %04x:%016llx %d %d\\n", u.s.se, u.s.m, (int)(end - sin_[i]), e);',
+        "    }",
+        "    for (unsigned i = 0; i < sizeof lin_ / sizeof lin_[0]; i++) {",
+        "      char *end; U u; int e;",
+        "      errno = 0; memset(&u, 0, sizeof u); u.v = strtold(lin_[i], &end); e = errno;",
+        '      printf("s %d strtold ", mode); hexs(lin_[i]); '
+        'printf(" = %04x:%016llx %d %d\\n", u.s.se, u.s.m, (int)(end - lin_[i]), e);',
         "    }",
         "  }",
         "  return 0;",

@@ -20205,14 +20205,20 @@ comes first.
 
 ### TD-POSIX-LONG-DOUBLE-PRECISION. `long double` has the right *ABI* but only `double` (53-bit) *precision* — ACCEPTED LIMITATION 2026-07-30
 
-**Status (2026-09-28): PARTLY FIXED.** The maths functions now compute in
-80 bits: all 72 `long double` names of `<math.h>` exist, on the x87 unit
-(`posix/src/mathl.rs`, `ld80.rs`, `ld_abi.rs`; design-decisions §1134). What
-this entry still describes is conversion: `printf`'s `%Lf`/`%Le`/`%Lg`,
-`scanf`'s `%Lf` and `strtold` narrow through `f64` at the `x87::to_f64` /
-`from_f64` boundary, so a long double printed or parsed carries 53 bits and a
-double's range. The arithmetic the fix below asked for exists now
-(`ld80.rs`), so what is left is decimal conversion with a 64-bit significand.
+**Status (2026-09-28): FIXED.** Nothing in the C library narrows a `long
+double` to a `double` any more, except where a C signature does
+(`nexttoward`). The maths functions compute in 80 bits on the x87 unit
+(`posix/src/mathl.rs`, `ld80.rs`, `ld_abi.rs`; design-decisions §1134), and
+the conversions carry all 64 bits of the significand: `printf`'s `%La %Le %Lf
+%Lg` print the value's exact digits, and `strtold`, `strtold_l`, `wcstold` and
+`scanf`'s `%Lf` round the text into the 80-bit format -- both in the current
+rounding direction, and over the whole range, subnormals and all
+(`posix/src/decfloat.rs`, design-decisions §1138). Replayed against glibc
+2.39: 15,780 `printf` calls of long doubles, the encodings the unit rejects
+among them, and 624 `strtold` calls (`wcstold` the same 624), literals of
+11,500 digits among them, in all four rounding modes
+(`posix/tools/oracle/conv_harness.py`). What follows is the entry as it
+stood.
 
 **Where:** `posix/src/x87.rs` (`to_f64`/`from_f64`), `posix/src/printf.rs`
 (`va_arg_long_double`), `posix/src/stdlib.rs` (`strtold`).
@@ -175490,7 +175496,7 @@ absent.
 comparing the symbol tables while adding the `long double` functions
 (design-decisions §1134).
 
-## D-POSIX-CONVERSIONS-IGNORE-THE-ROUNDING-MODE — `printf` and `strtod` always round to nearest; glibc's follow `fesetround` (lane D, 2026-09-28) — **Status: FIXED 2026-09-28 for `double` and `float` -- `printf`'s `%f %e %g %a`, `strtod`, `strtof`, `wcstod`, `wcstof`, `scanf`, the `ecvt` family -- every line of glibc 2.39's in all four modes replayed (`posix/tools/oracle/conv_harness.py`); OPEN for `long double`, which still converts through `double` (TD-POSIX-LONG-DOUBLE-PRECISION)**
+## D-POSIX-CONVERSIONS-IGNORE-THE-ROUNDING-MODE — `printf` and `strtod` always round to nearest; glibc's follow `fesetround` (lane D, 2026-09-28) — **Status: FIXED 2026-09-28 -- `printf`'s `%f %e %g %a` and their `%L` forms, `strtod`, `strtof`, `strtold`, `wcstod`, `wcstof`, `wcstold`, `scanf`, the `ecvt` family -- every line of glibc 2.39's in all four modes replayed (`posix/tools/oracle/conv_harness.py`); `long double` the same day as `double`, with its full precision (TD-POSIX-LONG-DOUBLE-PRECISION)**
 
 **In short:** a program that changes the rounding direction with
 `fesetround` -- to round up, say, for interval arithmetic -- gets glibc's

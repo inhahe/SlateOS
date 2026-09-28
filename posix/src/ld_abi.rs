@@ -45,6 +45,8 @@
 /// | `l_lp` | `L f(L, P)` | `(*const L, P, *mut L)` |
 /// | `l_llp` | `L f(L, L, P)` | `(*const L, *const L, P, *mut L)` |
 /// | `l_p` | `L f(P)` | `(P, *mut L)` |
+/// | `l_pp` | `L f(P, P)` | `(P, P, *mut L)` |
+/// | `l_ppp` | `L f(P, P, P)` | `(P, P, P, *mut L)` |
 /// | `v_lpp` | `void f(L, P, P)` | `(*const L, P, P)` |
 /// | `i_l` | `I f(L)` (or `N f(L)`) | `(*const L) -> I` |
 /// | `d_dl` | `D f(D, L)` | `(*const L, D) -> D` |
@@ -140,6 +142,29 @@ macro_rules! ld_c {
         $crate::ld_c!(@thunk $c,
             "sub rsp, 24",
             "mov rsi, rsp",
+            concat!("call ", stringify!($rust)),
+            "fld tbyte ptr [rsp]",
+            "add rsp, 24",
+            "ret",
+        );
+    };
+    // strtold(nptr, endptr) and wcstold: the pointers stay where they are,
+    // and the result slot follows them.
+    (l_pp $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "sub rsp, 24",
+            "mov rdx, rsp",
+            concat!("call ", stringify!($rust)),
+            "fld tbyte ptr [rsp]",
+            "add rsp, 24",
+            "ret",
+        );
+    };
+    // strtold_l(nptr, endptr, locale) and wcstold_l: likewise, one on.
+    (l_ppp $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "sub rsp, 24",
+            "mov rcx, rsp",
             concat!("call ", stringify!($rust)),
             "fld tbyte ptr [rsp]",
             "add rsp, 24",

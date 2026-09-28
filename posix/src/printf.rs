@@ -77,7 +77,7 @@
 // un-prefixed `printf`/`fprintf`/...).
 #![allow(clippy::used_underscore_items)]
 
-use crate::decfloat::Rounding;
+use crate::decfloat::{Decimal, DigitBuf, MallocBuf, Rounding};
 
 /// Emit a variadic trampoline that performs a real `va_start` and tail-calls
 /// the corresponding `v*` implementation.
@@ -462,8 +462,8 @@ unsafe fn va_arg_double(va: &mut VaList) -> u64 {
     }
 }
 
-/// Pull the next `long double` (x87 80-bit) argument from a `va_list`,
-/// returning it narrowed to the bit pattern of an `f64`.
+/// Pull the next `long double` (x87 80-bit) argument from a `va_list`, all
+/// 80 bits of it.
 ///
 /// `long double` classifies as X87/X87UP, which the SysV ABI resolves to
 /// MEMORY: it is *never* passed in a register, so this touches neither
@@ -472,15 +472,15 @@ unsafe fn va_arg_double(va: &mut VaList) -> u64 {
 /// why skipping the `L` and treating the value as a `double` did not merely
 /// lose precision, it desynchronised every argument after it.
 ///
-/// The narrowing to `f64` is the sysroot's documented `long double`
-/// limitation; see [`crate::x87`] and `TD-POSIX-LONG-DOUBLE-PRECISION`.
+/// Until 2026-09-28 it was narrowed to a `double` here, and printed at a
+/// `double`'s precision (`TD-POSIX-LONG-DOUBLE-PRECISION`).
 ///
 /// # Safety
 /// Same contract as [`va_arg_int`], except the argument occupies 16 bytes.
-unsafe fn va_arg_long_double(va: &mut VaList) -> u64 {
+unsafe fn va_arg_long_double(va: &mut VaList) -> crate::x87::LongDouble {
     let area = va.overflow_arg_area;
     if area.is_null() {
-        return 0;
+        return crate::x87::LongDouble::from_bits(0, 0);
     }
     // Round the cursor up to the ABI's 16-byte alignment for this argument.
     let aligned = (area as usize).wrapping_add(15) & !15usize;
@@ -491,12 +491,7 @@ unsafe fn va_arg_long_double(va: &mut VaList) -> u64 {
     let significand = unsafe { p.cast::<u64>().read_unaligned() };
     // SAFETY: as above; bytes 8..10 of the same 16-byte slot.
     let sign_exp = unsafe { p.add(8).cast::<u16>().read_unaligned() };
-    crate::x87::to_f64(crate::x87::LongDouble {
-        significand,
-        sign_exp,
-        pad: [0; 6],
-    })
-    .to_bits()
+    crate::x87::LongDouble::from_bits(sign_exp, significand)
 }
 
 /// Consume the length modifier at `*fpos`, reporting whether it was `L`.
@@ -609,11 +604,11 @@ impl<'a> Args<'a> {
     }
 
     /// Next `long double` argument, narrowed to `f64` bits.
-    fn long_double(&mut self) -> u64 {
+    fn long_double(&mut self) -> crate::x87::LongDouble {
         match self.va.as_deref_mut() {
             // SAFETY: the va_list contract is upheld by `Args::new`.
             Some(va) => unsafe { va_arg_long_double(va) },
-            None => 0,
+            None => crate::x87::LongDouble::from_bits(0, 0),
         }
     }
 }
@@ -1276,54 +1271,50 @@ fn dispatch_spec(
         // Floating-point specifiers.  `%Lf` fetches 16 bytes from the overflow
         // area (X87/X87UP is MEMORY-class), not a `double` from %xmm.
         b'f' | b'F' => {
-            let bits = if spec.long_double {
-                args.long_double()
+            let arg = if spec.long_double {
+                FloatArg::Long(args.long_double())
             } else {
-                args.double()
+                FloatArg::Double(f64::from_bits(args.double()))
             };
-            let val = f64::from_bits(bits);
             let prec = spec.precision.unwrap_or(6);
-            format_float_fixed(dst, val, ch == b'F', &spec.flags, spec.width, prec);
+            format_float_fixed(dst, arg, ch == b'F', &spec.flags, spec.width, prec);
         }
 
         b'e' | b'E' => {
-            let bits = if spec.long_double {
-                args.long_double()
+            let arg = if spec.long_double {
+                FloatArg::Long(args.long_double())
             } else {
-                args.double()
+                FloatArg::Double(f64::from_bits(args.double()))
             };
-            let val = f64::from_bits(bits);
             let prec = spec.precision.unwrap_or(6);
-            format_float_sci(dst, val, ch == b'E', &spec.flags, spec.width, prec);
+            format_float_sci(dst, arg, ch == b'E', &spec.flags, spec.width, prec);
         }
 
         b'g' | b'G' => {
-            let bits = if spec.long_double {
-                args.long_double()
+            let arg = if spec.long_double {
+                FloatArg::Long(args.long_double())
             } else {
-                args.double()
+                FloatArg::Double(f64::from_bits(args.double()))
             };
-            let val = f64::from_bits(bits);
             let prec = if spec.precision == Some(0) {
                 1
             } else {
                 spec.precision.unwrap_or(6)
             };
-            format_float_general(dst, val, ch == b'G', &spec.flags, spec.width, prec);
+            format_float_general(dst, arg, ch == b'G', &spec.flags, spec.width, prec);
         }
 
         b'a' | b'A' => {
-            let bits = if spec.long_double {
-                args.long_double()
+            let arg = if spec.long_double {
+                FloatArg::Long(args.long_double())
             } else {
-                args.double()
+                FloatArg::Double(f64::from_bits(args.double()))
             };
-            let val = f64::from_bits(bits);
             // No default precision: C99 says an absent one means "as many
             // digits as it takes to be exact", which is not any fixed number.
             format_float_hex(
                 dst,
-                val,
+                arg,
                 ch == b'A',
                 &spec.flags,
                 spec.width,
@@ -1757,115 +1748,279 @@ fn u64_to_base(mut val: u64, base: u32, upper: bool, buf: &mut [u8; NUM_BUF_SIZE
 // Floating-point formatting
 // ---------------------------------------------------------------------------
 
-/// Format a floating-point value in fixed notation (%f/%F).
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
-fn format_float_fixed(
-    dst: &mut FmtOutput,
-    val: f64,
-    upper: bool,
-    flags: &FormatFlags,
-    width: usize,
-    precision: usize,
-) {
-    // Handle special values.
-    if val.is_nan() {
-        let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, val.is_sign_negative(), flags, width);
-        return;
-    }
-    let negative = val.is_sign_negative();
-    if val.is_infinite() {
-        let s = if upper { b"INF" } else { b"inf" };
-        format_float_special(dst, s, negative, flags, width);
-        return;
-    }
-
-    let abs_val = if negative { -val } else { val };
-
-    // Format into a temporary buffer.
-    let mut buf = [0u8; FLOAT_BUF];
-    let mut text = fmt_fixed(abs_val, precision, &mut buf, Rounding::current(), negative);
-
-    // C99 '#' flag: always include a decimal point, even when precision is 0.
-    if flags.alt_form && precision == 0 {
-        put(&mut buf, &mut text.len, b'.');
-        text.zeros_at = text.len;
-    }
-
-    emit_float_padded(dst, &buf, text, negative, flags, width);
+/// A floating-point conversion's argument: a `double`, or a `long double`
+/// kept in its own 80 bits (`%L`), which glibc prints at full precision --
+/// every digit of it, where this printed the value's nearest `double`
+/// (`TD-POSIX-LONG-DOUBLE-PRECISION`).
+#[derive(Clone, Copy)]
+enum FloatArg {
+    /// A `double` (and a `float`, promoted to one).
+    Double(f64),
+    /// A `long double`: x87's 80-bit format, integer bit explicit.
+    Long(crate::x87::LongDouble),
 }
 
-/// Format a floating-point value in scientific notation (%e/%E).
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
-fn format_float_sci(
+impl FloatArg {
+    /// A NaN -- for a `long double`, any encoding the x87 unit rejects too,
+    /// which glibc prints as `nan` as well.
+    fn is_nan(self) -> bool {
+        match self {
+            Self::Double(v) => v.is_nan(),
+            Self::Long(l) => l.is_nan(),
+        }
+    }
+
+    fn is_infinite(self) -> bool {
+        match self {
+            Self::Double(v) => v.is_infinite(),
+            Self::Long(l) => l.is_infinite(),
+        }
+    }
+
+    fn is_sign_negative(self) -> bool {
+        match self {
+            Self::Double(v) => v.is_sign_negative(),
+            Self::Long(l) => l.is_sign_negative(),
+        }
+    }
+}
+
+/// The exact expansion of a finite `long double`'s magnitude: its
+/// significand times `2^(exponent - 16383 - 63)`, an exponent field of 0
+/// reading as 1 (the subnormals, and the pseudo-denormals the unit reads as
+/// their value). On the stack for a value within about a `double`'s range;
+/// `None` when the blocks one far outside it needs cannot be allocated.
+fn long_expansion(l: crate::x87::LongDouble) -> Option<Decimal<DigitBuf>> {
+    // A 15-bit field less the bias and the significand's 63 places: no wrap.
+    let e = i32::from(l.biased_exponent().max(1)).wrapping_sub(16383 + 63);
+    Decimal::of_parts(l.significand, e)
+}
+
+/// A conversion that cannot get the memory its digits need fails, as
+/// glibc's does: the call returns -1 with `errno` `ENOMEM`.
+fn fail_no_memory(dst: &mut FmtOutput) {
+    crate::errno::set_errno(crate::errno::ENOMEM);
+    dst.failed = true;
+}
+
+/// Run `f` with a buffer of at least `need` bytes for a float's text: on the
+/// stack when it fits `FLOAT_BUF`, as every `double`'s does, else in a block
+/// of its own -- a `long double` can have eleven thousand digits.
+fn with_float_buf(dst: &mut FmtOutput, need: usize, f: impl FnOnce(&mut FmtOutput, &mut [u8])) {
+    if need <= FLOAT_BUF {
+        let mut buf = [0u8; FLOAT_BUF];
+        f(dst, &mut buf);
+    } else if let Some(mut heap) = MallocBuf::<u8>::zeroed(need) {
+        f(dst, heap.as_mut());
+    } else {
+        fail_no_memory(dst);
+    }
+}
+
+/// Emit `nan` or `inf` -- upper-cased for `%F %E %G %A` -- signed and
+/// padded, if the argument is one; whether it was.
+fn emit_nonfinite(
     dst: &mut FmtOutput,
-    val: f64,
+    arg: FloatArg,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+) -> bool {
+    let text: &[u8] = if arg.is_nan() {
+        if upper { b"NAN" } else { b"nan" }
+    } else if arg.is_infinite() {
+        if upper { b"INF" } else { b"inf" }
+    } else {
+        return false;
+    };
+    // glibc writes a NaN's sign too: "-nan".
+    format_float_special(dst, text, arg.is_sign_negative(), flags, width);
+    true
+}
+
+/// Bytes [`render_fixed`] writes for `dec` at `precision`, with one to spare
+/// for the point `#` may add.
+fn fixed_len<D: AsRef<[u8]> + AsMut<[u8]>>(dec: &Decimal<D>, precision: usize) -> usize {
+    let int = usize::try_from(dec.decpt()).unwrap_or(0).max(1);
+    let avail = usize::try_from(
+        i64::try_from(dec.len())
+            .unwrap_or(i64::MAX)
+            .saturating_sub(i64::from(dec.decpt())),
+    )
+    .unwrap_or(0);
+    int.saturating_add(precision.min(avail)).saturating_add(2)
+}
+
+/// Bytes [`render_scientific`] writes for `dec` at `precision` -- a digit, a
+/// point, the fraction's digits the expansion holds, and an exponent of up
+/// to five digits with its `e` and sign -- with one to spare for `#`'s point.
+fn sci_len<D: AsRef<[u8]> + AsMut<[u8]>>(dec: &Decimal<D>, precision: usize) -> usize {
+    precision
+        .min(dec.len().saturating_sub(1))
+        .saturating_add(10)
+}
+
+/// Format a floating-point value in fixed notation (%f/%F).
+fn format_float_fixed(
+    dst: &mut FmtOutput,
+    arg: FloatArg,
     upper: bool,
     flags: &FormatFlags,
     width: usize,
     precision: usize,
 ) {
-    if val.is_nan() {
-        let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, val.is_sign_negative(), flags, width);
+    if emit_nonfinite(dst, arg, upper, flags, width) {
         return;
     }
-    let negative = val.is_sign_negative();
-    if val.is_infinite() {
-        let s = if upper { b"INF" } else { b"inf" };
-        format_float_special(dst, s, negative, flags, width);
-        return;
+    let negative = arg.is_sign_negative();
+    match arg {
+        FloatArg::Double(v) => fixed_from(
+            dst,
+            Decimal::new(v.abs()),
+            flags,
+            width,
+            precision,
+            negative,
+        ),
+        FloatArg::Long(l) => match long_expansion(l) {
+            Some(dec) => fixed_from(dst, dec, flags, width, precision, negative),
+            None => fail_no_memory(dst),
+        },
     }
+}
 
-    let abs_val = if negative { -val } else { val };
-
-    let mut buf = [0u8; FLOAT_BUF];
-    let mut text = fmt_scientific(
-        abs_val,
-        precision,
-        upper,
-        &mut buf,
+/// `%f` of an expansion: rounded to `precision` places in the current
+/// direction, for a value of sign `negative`.
+fn fixed_from<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dst: &mut FmtOutput,
+    mut dec: Decimal<D>,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+    negative: bool,
+) {
+    dec.round_to_place_in(
+        i32::try_from(precision).unwrap_or(i32::MAX),
         Rounding::current(),
         negative,
     );
+    with_float_buf(dst, fixed_len(&dec, precision), |dst, buf| {
+        let mut text = render_fixed(&dec, precision, buf);
+        // C99 '#' flag: always include a decimal point, even when precision is 0.
+        if flags.alt_form && precision == 0 {
+            put(buf, &mut text.len, b'.');
+            text.zeros_at = text.len;
+        }
+        emit_float_padded(dst, buf, text, negative, flags, width);
+    });
+}
 
-    // C99 '#' flag: always include a decimal point, even when precision is 0.
-    // Insert '.' before the 'e'/'E' exponent marker.  Precision 0 means no
-    // fraction digits were omitted, so there is nothing to keep in step.
-    if flags.alt_form && precision == 0 {
-        insert_point_before_exponent(&mut buf, &mut text);
+/// Format a floating-point value in scientific notation (%e/%E).
+fn format_float_sci(
+    dst: &mut FmtOutput,
+    arg: FloatArg,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+) {
+    if emit_nonfinite(dst, arg, upper, flags, width) {
+        return;
     }
+    let negative = arg.is_sign_negative();
+    match arg {
+        FloatArg::Double(v) => sci_from(
+            dst,
+            Decimal::new(v.abs()),
+            upper,
+            flags,
+            width,
+            precision,
+            negative,
+        ),
+        FloatArg::Long(l) => match long_expansion(l) {
+            Some(dec) => sci_from(dst, dec, upper, flags, width, precision, negative),
+            None => fail_no_memory(dst),
+        },
+    }
+}
 
-    emit_float_padded(dst, &buf, text, negative, flags, width);
+/// `%e` of an expansion: rounded to `precision + 1` significant digits in the
+/// current direction, for a value of sign `negative`.
+#[allow(clippy::too_many_arguments)] // a conversion's four, the value's two
+fn sci_from<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dst: &mut FmtOutput,
+    mut dec: Decimal<D>,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+    negative: bool,
+) {
+    // `precision` digits after the point plus the one before it.
+    dec.round_to_significant_in(
+        i32::try_from(precision)
+            .unwrap_or(i32::MAX)
+            .saturating_add(1),
+        Rounding::current(),
+        negative,
+    );
+    with_float_buf(dst, sci_len(&dec, precision), |dst, buf| {
+        let mut text = render_scientific(&dec, precision, upper, buf);
+        // C99 '#' flag: always include a decimal point, even when precision
+        // is 0 -- before the exponent marker.  Precision 0 means no fraction
+        // digits were omitted, so there is nothing to keep in step.
+        if flags.alt_form && precision == 0 {
+            insert_point_before_exponent(buf, &mut text);
+        }
+        emit_float_padded(dst, buf, text, negative, flags, width);
+    });
 }
 
 /// Format a floating-point value in %g/%G notation.
 ///
 /// Uses %e if exponent < -4 or >= precision, else %f.
 /// Trailing zeros are removed unless `#` flag is set.
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
 fn format_float_general(
     dst: &mut FmtOutput,
-    val: f64,
+    arg: FloatArg,
     upper: bool,
     flags: &FormatFlags,
     width: usize,
     precision: usize,
 ) {
-    if val.is_nan() {
-        let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, val.is_sign_negative(), flags, width);
+    if emit_nonfinite(dst, arg, upper, flags, width) {
         return;
     }
-    let negative = val.is_sign_negative();
-    if val.is_infinite() {
-        let s = if upper { b"INF" } else { b"inf" };
-        format_float_special(dst, s, negative, flags, width);
-        return;
+    let negative = arg.is_sign_negative();
+    match arg {
+        FloatArg::Double(v) => general_from(
+            dst,
+            Decimal::new(v.abs()),
+            upper,
+            flags,
+            width,
+            precision,
+            negative,
+        ),
+        FloatArg::Long(l) => match long_expansion(l) {
+            Some(dec) => general_from(dst, dec, upper, flags, width, precision, negative),
+            None => fail_no_memory(dst),
+        },
     }
+}
 
-    let abs_val = if negative { -val } else { val };
-
+/// `%g` of an expansion, for a value of sign `negative`.
+#[allow(clippy::too_many_arguments)] // a conversion's four, the value's two
+fn general_from<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dst: &mut FmtOutput,
+    mut dec: Decimal<D>,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+    negative: bool,
+) {
     // C99 7.21.6.1p8: let P be the precision, or 1 if the precision is zero.
     // The style is chosen from X, the exponent a %e conversion *would* produce
     // — that is, the exponent after rounding to P significant digits, which is
@@ -1874,42 +2029,43 @@ fn format_float_general(
     // nor the exact powers of ten.
     let p = if precision == 0 { 1 } else { precision };
     let pi = i32::try_from(p).unwrap_or(i32::MAX);
-    let mut dec = crate::decfloat::Decimal::new(abs_val);
     dec.round_to_significant_in(pi, Rounding::current(), negative);
     let exp = if dec.is_zero() {
         0
     } else {
         dec.decpt().wrapping_sub(1)
     };
-
-    let mut buf = [0u8; FLOAT_BUF];
-    let mut text = if exp < -4 || exp >= pi {
-        // Scientific, with P-1 digits after the point.
-        render_scientific(&dec, p.wrapping_sub(1), upper, &mut buf)
+    let scientific = exp < -4 || exp >= pi;
+    // Fixed, with P-1-X digits after the point.  `dec` is already rounded to
+    // P significant digits, and `decpt + (P-1-X) == P`, so that is the same
+    // place: no second rounding is needed or wanted.
+    let fix_prec = usize::try_from(pi.saturating_sub(1).saturating_sub(exp)).unwrap_or(0);
+    let need = if scientific {
+        sci_len(&dec, p.saturating_sub(1))
     } else {
-        // Fixed, with P-1-X digits after the point.  `dec` is already rounded
-        // to P significant digits, and `decpt + (P-1-X) == P`, so that is the
-        // same place: no second rounding is needed or wanted.
-        let fix_prec = usize::try_from(pi.saturating_sub(1).saturating_sub(exp)).unwrap_or(0);
-        render_fixed(&dec, fix_prec, &mut buf)
+        fixed_len(&dec, fix_prec)
     };
-
-    // Remove trailing zeros (unless # flag).
-    if !flags.alt_form {
-        text = trim_float_text(&mut buf, text);
-    }
-
-    // C99 '#' flag for %g: always include a decimal point.
-    // When precision is low enough that the computed sub-precision is 0,
-    // fmt_fixed / fmt_scientific won't emit a '.'.  Insert one if missing.
-    if flags.alt_form {
-        let has_dot = buf.get(..text.len).is_some_and(|b| b.contains(&b'.'));
-        if !has_dot {
-            insert_point_before_exponent(&mut buf, &mut text);
+    with_float_buf(dst, need, |dst, buf| {
+        let mut text = if scientific {
+            // Scientific, with P-1 digits after the point.
+            render_scientific(&dec, p.saturating_sub(1), upper, buf)
+        } else {
+            render_fixed(&dec, fix_prec, buf)
+        };
+        // Remove trailing zeros (unless # flag).
+        if !flags.alt_form {
+            text = trim_float_text(buf, text);
         }
-    }
-
-    emit_float_padded(dst, &buf, text, negative, flags, width);
+        // C99 '#' flag for %g: always include a decimal point.  When the
+        // precision leaves no fraction digit, the render wrote no '.'.
+        if flags.alt_form {
+            let has_dot = buf.get(..text.len).is_some_and(|b| b.contains(&b'.'));
+            if !has_dot {
+                insert_point_before_exponent(buf, &mut text);
+            }
+        }
+        emit_float_padded(dst, buf, text, negative, flags, width);
+    });
 }
 
 /// `sprintf(buf, "%.*g", precision, val)` for this library's own callers
@@ -1924,7 +2080,14 @@ pub(crate) unsafe fn format_g_into(buf: *mut u8, val: f64, precision: usize) -> 
     let mut out = FmtOutput::new(buf, usize::MAX);
     // `%.0g` is `%.1g`, as the dispatcher treats it.
     let prec = if precision == 0 { 1 } else { precision };
-    format_float_general(&mut out, val, false, &FormatFlags::new(), 0, prec);
+    format_float_general(
+        &mut out,
+        FloatArg::Double(val),
+        false,
+        &FormatFlags::new(),
+        0,
+        prec,
+    );
     let n = out.pos;
     // SAFETY: the caller's buffer has room for the terminator after `n`.
     unsafe { buf.add(n).write(0) };
@@ -1934,76 +2097,85 @@ pub(crate) unsafe fn format_g_into(buf: *mut u8, val: f64, precision: usize) -> 
 /// Format a floating-point value as a C99 hexadecimal float (`%a`/`%A`).
 ///
 /// The form is `0xh.hhhhp±d`: a hex significand scaled by a power of two.
-/// Because the radix is a power of the base, *every* `double` has an exact
-/// such representation in at most 13 fraction digits — the significand is 52
-/// bits — and no rounding of any kind is involved in producing it. That is
-/// what `%a` is for: it is the only `printf` conversion guaranteed to
-/// round-trip a `double` through a short string, which is why C99 requires it
-/// and why the standard's own `strtod` must read it back.
+/// Because the radix is a power of the base, *every* value has an exact such
+/// representation -- 13 fraction digits for a `double`'s 52 bits, 15 for a
+/// `long double`'s 60 below its leading digit -- and no rounding of any kind
+/// is involved in producing it. That is what `%a` is for: it is the only
+/// `printf` conversion guaranteed to round-trip a value through a short
+/// string, which is why C99 requires it and why `strtod` must read it back.
 ///
 /// Omitting the precision asks for exactly that shortest exact form, with
 /// trailing zeros dropped. Giving one rounds the significand to that many hex
-/// digits, ties to even, and the carry can reach the leading digit — `%.0a` of
-/// `0x1.fp+0` is `0x2p+0`.
+/// digits, in the current direction, and the carry can reach the leading
+/// digit -- `%.0a` of `0x1.fp+0` is `0x2p+0`.
 ///
-/// The leading digit is `1` for a normal value and `0` for zero and the
-/// subnormals, which is how glibc writes them; a subnormal's exponent is then
-/// pinned at the format's minimum (`p-1022`) rather than normalised away.
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+/// The leading digit is glibc's. For a `double` it is `1` for a normal value
+/// and `0` for zero and the subnormals, whose exponent is then pinned at the
+/// format's minimum (`p-1022`) rather than normalised away. For a `long
+/// double` it is the significand's top four bits, integer bit first -- 1.0L
+/// is `0x8p-3` -- and a carry out of it renormalises: `0xf.f8p-3` to one
+/// place is `0x1.0p+1`.
+// Hex digits and bit positions: shifts of at most 60 and counts of at most
+// 15, which clippy cannot see bounded.
+#[allow(clippy::arithmetic_side_effects)]
 fn format_float_hex(
     dst: &mut FmtOutput,
-    val: f64,
+    arg: FloatArg,
     upper: bool,
     flags: &FormatFlags,
     width: usize,
     precision: Option<usize>,
 ) {
-    if val.is_nan() {
-        let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, val.is_sign_negative(), flags, width);
+    if emit_nonfinite(dst, arg, upper, flags, width) {
         return;
     }
-    let negative = val.is_sign_negative();
-    if val.is_infinite() {
-        let s = if upper { b"INF" } else { b"inf" };
-        format_float_special(dst, s, negative, flags, width);
-        return;
-    }
+    let negative = arg.is_sign_negative();
 
-    /// Fraction bits in an `f64` significand.
-    const FRAC_BITS: u32 = 52;
-    /// Hex digits those bits make: 52 / 4, exactly.
-    const HEX_DIGITS: usize = 13;
-
-    let bits = if negative {
-        (-val).to_bits()
-    } else {
-        val.to_bits()
+    // The leading digit, the fraction below it and how many bits that is, and
+    // the power of two.
+    let (mut lead, frac, frac_bits, mut exp2): (u64, u64, u32, i32) = match arg {
+        FloatArg::Double(v) => {
+            let bits = v.abs().to_bits();
+            let exp_field = (bits >> 52) & 0x7ff;
+            let mant = bits & ((1u64 << 52) - 1);
+            if exp_field == 0 {
+                // Zero prints as `0x0p+0`; a subnormal keeps the minimum
+                // exponent instead of being normalised, so its digits show
+                // where it sits in the subnormal range.
+                (0, mant, 52, if mant == 0 { 0 } else { -1022 })
+            } else {
+                (
+                    1,
+                    mant,
+                    52,
+                    i32::try_from(exp_field).unwrap_or(0).wrapping_sub(1023),
+                )
+            }
+        }
+        FloatArg::Long(l) => {
+            let m = l.significand;
+            let e = i32::from(l.biased_exponent().max(1)) - 16383 - 3;
+            (
+                m >> 60,
+                m & ((1u64 << 60) - 1),
+                60,
+                if m == 0 { 0 } else { e },
+            )
+        }
     };
-    let exp_field = (bits >> FRAC_BITS) & 0x7ff;
-    let mant = bits & ((1u64 << FRAC_BITS) - 1);
-
-    // The leading digit and the power of two, before any rounding.
-    let (mut lead, exp2) = if exp_field == 0 {
-        // Zero prints as `0x0p+0`; a subnormal keeps the minimum exponent
-        // instead of being normalised, so its digits show where it sits in
-        // the subnormal range.
-        (0u64, if mant == 0 { 0i32 } else { -1022 })
-    } else {
-        (
-            1u64,
-            i32::try_from(exp_field).unwrap_or(0).wrapping_sub(1023),
-        )
-    };
+    let long = matches!(arg, FloatArg::Long(_));
+    // Hex digits the fraction makes: 13 or 15, exactly.
+    let hex_digits = (frac_bits / 4) as usize;
 
     // Fraction digits, rounded to `precision` if one was given.  `kept` holds
     // them right-aligned, `digits` says how many there are and `pad` how many
-    // further zeros the precision asks for beyond the 13 that can differ.
+    // further zeros the precision asks for beyond those that can differ.
     let (kept, digits, pad) = match precision {
-        Some(p) if p < HEX_DIGITS => {
-            let dropped = FRAC_BITS - (u32::try_from(p).unwrap_or(0) * 4);
-            let keep = mant >> dropped;
-            let rest = mant & ((1u64 << dropped) - 1);
+        Some(p) if p < hex_digits => {
+            let p32 = u32::try_from(p).unwrap_or(0);
+            let dropped = frac_bits - p32 * 4;
+            let keep = frac >> dropped;
+            let rest = frac & ((1u64 << dropped) - 1);
             let half = 1u64 << (dropped - 1);
             // In the current rounding direction, as glibc: to nearest, ties
             // to even, where "even" is a property of the last *retained*
@@ -2019,22 +2191,27 @@ fn format_float_hex(
             let mut keep = keep;
             if round_up {
                 keep = keep.wrapping_add(1);
-                if keep >> (u32::try_from(p).unwrap_or(0) * 4) != 0 {
-                    // The carry left the fraction: it lands on the leading
-                    // digit, which C leaves as `2` rather than renormalising.
+                if keep >> (p32 * 4) != 0 {
+                    // The carry left the fraction and lands on the leading
+                    // digit: a `double`'s becomes `2`, as C has it, and a
+                    // `long double`'s, carried past `f`, is renormalised.
                     keep = 0;
                     lead = lead.wrapping_add(1);
+                    if long && lead == 16 {
+                        lead = 1;
+                        exp2 = exp2.wrapping_add(4);
+                    }
                 }
             }
             (keep, p, 0usize)
         }
-        Some(p) => (mant, HEX_DIGITS, p.wrapping_sub(HEX_DIGITS)),
-        None if mant == 0 => (0, 0, 0usize),
+        Some(p) => (frac, hex_digits, p.wrapping_sub(hex_digits)),
+        None if frac == 0 => (0, 0, 0usize),
         None => {
-            // Shortest exact form: drop whole trailing zero digits.  `mant` is
-            // 52 bits and nonzero here, so at most 12 of the 13 can go.
-            let zero_digits = (mant.trailing_zeros() / 4) as usize;
-            (mant >> (zero_digits * 4), HEX_DIGITS - zero_digits, 0usize)
+            // Shortest exact form: drop whole trailing zero digits.  `frac`
+            // is nonzero here, so at least one digit stays.
+            let zero_digits = (frac.trailing_zeros() / 4) as usize;
+            (frac >> (zero_digits * 4), hex_digits - zero_digits, 0usize)
         }
     };
 
@@ -2049,7 +2226,7 @@ fn format_float_hex(
     put(
         &mut buf,
         &mut pos,
-        hex.get(lead as usize % 16).copied().unwrap_or(b'0'),
+        hex.get((lead % 16) as usize).copied().unwrap_or(b'0'),
     );
 
     if digits > 0 || pad > 0 || flags.alt_form {
@@ -2283,26 +2460,14 @@ struct FloatText {
     zeros: usize,
 }
 
-/// Format a non-negative, finite `f64` in fixed notation into `buf`.
-///
-/// The digits are rounded in direction `dir` as for a value of sign
-/// `negative` -- `val` itself is the magnitude.
-fn fmt_fixed(
-    val: f64,
-    precision: usize,
-    buf: &mut [u8],
-    dir: Rounding,
-    negative: bool,
-) -> FloatText {
-    let mut dec = crate::decfloat::Decimal::new(val);
-    dec.round_to_place_in(i32::try_from(precision).unwrap_or(i32::MAX), dir, negative);
-    render_fixed(&dec, precision, buf)
-}
-
 /// Write an already-rounded expansion as `III.FFF` with exactly `precision`
 /// fraction digits.
 #[allow(clippy::arithmetic_side_effects)]
-fn render_fixed(dec: &crate::decfloat::Decimal, precision: usize, buf: &mut [u8]) -> FloatText {
+fn render_fixed<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dec: &Decimal<D>,
+    precision: usize,
+    buf: &mut [u8],
+) -> FloatText {
     let decpt = dec.decpt();
     let mut pos = 0usize;
 
@@ -2344,33 +2509,10 @@ fn render_fixed(dec: &crate::decfloat::Decimal, precision: usize, buf: &mut [u8]
     }
 }
 
-/// Format a non-negative, finite `f64` in scientific notation into `buf`.
-///
-/// Rounded as [`fmt_fixed`] rounds.
-fn fmt_scientific(
-    val: f64,
-    precision: usize,
-    upper: bool,
-    buf: &mut [u8],
-    dir: Rounding,
-    negative: bool,
-) -> FloatText {
-    let mut dec = crate::decfloat::Decimal::new(val);
-    // `precision` digits after the point plus the one before it.
-    dec.round_to_significant_in(
-        i32::try_from(precision)
-            .unwrap_or(i32::MAX)
-            .saturating_add(1),
-        dir,
-        negative,
-    );
-    render_scientific(&dec, precision, upper, buf)
-}
-
 /// Write an already-rounded expansion as `D.FFFe+XX`.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-fn render_scientific(
-    dec: &crate::decfloat::Decimal,
+fn render_scientific<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dec: &Decimal<D>,
     precision: usize,
     upper: bool,
     buf: &mut [u8],
@@ -2402,20 +2544,21 @@ fn render_scientific(
 
     put(buf, &mut pos, if upper { b'E' } else { b'e' });
     put(buf, &mut pos, if exp < 0 { b'-' } else { b'+' });
-    // An `f64` exponent never leaves [-323, 308], so three digits is the most
-    // that can be needed and the leading one is always in range.
+    // At least two digits, as C requires; a `double`'s exponent needs at most
+    // three, a `long double`'s four.
     let abs_exp = exp.unsigned_abs();
-    debug_assert!(abs_exp < 1000, "decimal exponent out of f64 range");
-    if abs_exp >= 100 {
-        put(buf, &mut pos, b'0'.wrapping_add((abs_exp / 100) as u8));
+    let mut place = 1u32;
+    while place <= abs_exp / 10 || place < 10 {
+        place *= 10;
     }
-    // C requires at least two exponent digits.
-    put(
-        buf,
-        &mut pos,
-        b'0'.wrapping_add(((abs_exp / 10) % 10) as u8),
-    );
-    put(buf, &mut pos, b'0'.wrapping_add((abs_exp % 10) as u8));
+    while place > 0 {
+        put(
+            buf,
+            &mut pos,
+            b'0'.wrapping_add(((abs_exp / place) % 10) as u8),
+        );
+        place /= 10;
+    }
 
     FloatText {
         len: pos,
@@ -3996,7 +4139,6 @@ mod tests {
         Double(u64),
         /// A `long double`, as its sign-and-exponent word and significand:
         /// passed in the overflow area, 16-byte aligned, as the ABI has it.
-        #[allow(dead_code)] // the long double rows arrive with the 80-bit work
         Long(u16, u64),
     }
 
@@ -4058,6 +4200,13 @@ mod tests {
         (1, "%#.3g", 0x408f_3c00_0000_0000, "1.00e+03"),
     ];
 
+    /// [`GLIBC_PRINTF_BUGS`] for a `long double`, whose `%#.3Lg` of 999.5 --
+    /// `(sign-and-exponent, significand)` -- glibc gets wrong the same way.
+    const GLIBC_PRINTF_BUGS_L: &[(usize, &str, (u16, u64), &str)] = &[
+        (0, "%#.3Lg", (0x4008, 0xf9e0_0000_0000_0000), "1.00e+03"),
+        (1, "%#.3Lg", (0x4008, 0xf9e0_0000_0000_0000), "1.00e+03"),
+    ];
+
     /// glibc 2.39's `printf` of a `double`, every conversion the oracle asks
     /// for, in each of the four rounding directions
     /// (`posix/tools/oracle/conv_harness.py`): glibc rounds the digits it
@@ -4106,6 +4255,60 @@ mod tests {
             bad.iter()
                 .take(60)
                 .map(|(_, s)| s.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// glibc 2.39's `printf` of a `long double` -- every `%L` conversion the
+    /// oracle asks for, of values across the whole 80-bit range and the
+    /// encodings the x87 unit rejects, in each of the four rounding
+    /// directions: all 64 bits of the significand, printed exactly.
+    #[test]
+    fn printf_of_a_long_double_answers_as_glibc_does_in_every_rounding_mode() {
+        let mut bad = Vec::new();
+        let mut per_mode = [0usize; 4];
+        let mut calls = 0;
+        for line in crate::decfloat::CONV_ORACLE
+            .lines()
+            .filter(|l| l.starts_with("p "))
+        {
+            let (lhs, rhs) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            if w[2] != "l" {
+                continue;
+            }
+            let mode: usize = w[1].parse().unwrap();
+            let mut fmt = unhex(w[3]);
+            fmt.push(0);
+            let (se, m) = w[4].split_once(':').unwrap();
+            let se = u16::from_str_radix(se, 16).unwrap();
+            let m = u64::from_str_radix(m, 16).unwrap();
+            let mut want = &rhs[1..rhs.len() - 1];
+            // Where glibc is wrong, the standard's answer instead.
+            if let Some(&(_, _, _, right)) = GLIBC_PRINTF_BUGS_L.iter().find(|&&(md, f, v, _)| {
+                md == mode && f.as_bytes() == &fmt[..fmt.len() - 1] && v == (se, m)
+            }) {
+                want = right;
+            }
+            assert_eq!(crate::fenv::fesetround(ORACLE_MODES[mode]), 0);
+            let got = conv_format(&fmt, ConvArg::Long(se, m));
+            assert_eq!(crate::fenv::fesetround(crate::fenv::FE_TONEAREST), 0);
+            calls += 1;
+            if got != want {
+                per_mode[mode] += 1;
+                bad.push((mode, format!("{line}\n    ours [{got}]")));
+            }
+        }
+        bad.sort_by_key(|(m, _)| *m);
+        assert!(calls > 10_000, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ (by mode {per_mode:?}):\n{}",
+            bad.len(),
+            bad.iter()
+                .take(60)
+                .map(|(_, s)| s.chars().take(400).collect::<String>())
                 .collect::<Vec<_>>()
                 .join("\n")
         );

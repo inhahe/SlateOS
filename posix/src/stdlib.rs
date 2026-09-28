@@ -431,8 +431,8 @@ unsafe fn scan_float_cstr(
 /// Parses decimal floating-point strings of the form:
 ///   `[whitespace][sign]digits[.digits][e[sign]digits]`
 ///
-/// Also supports `INF`, `INFINITY`, and `NAN` (case-insensitive).
-/// Hex floats (`0x` prefix) are not currently supported.
+/// Also supports `INF`, `INFINITY`, `NAN` and `NAN(chars)` (case-insensitive),
+/// and C99's hexadecimal form, `0x1.8p+3`.
 ///
 /// The digits are collected exactly and rounded once, so the result is the
 /// nearest `double` to the input, ties to even.
@@ -463,16 +463,6 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
     if negative { -value } else { value }
 }
 
-/// Convert a C string to a float (`strtof`).
-///
-/// Rounds to `f32` directly from the decimal digits rather than by way of
-/// `strtod`: two roundings are not one, and a value a hair above an `f32`
-/// midpoint can land exactly on that midpoint in `f64` and then be sent the
-/// wrong way by ties-to-even.
-///
-/// # Safety
-///
-/// `nptr` must be a valid null-terminated string.
 /// `strtof` in an explicit locale.
 ///
 /// We have exactly one locale, so this is `strtof` and the handle is ignored —
@@ -492,6 +482,16 @@ pub unsafe extern "C" fn strtof_l(
     unsafe { strtof(nptr, endptr) }
 }
 
+/// Convert a C string to a float (`strtof`).
+///
+/// Rounds to `f32` directly from the decimal digits rather than by way of
+/// `strtod`: two roundings are not one, and a value a hair above an `f32`
+/// midpoint can land exactly on that midpoint in `f64` and then be sent the
+/// wrong way by ties-to-even.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 {
     let mut acc = crate::decfloat::DigitCollector::new();
@@ -512,60 +512,77 @@ pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 
     if negative { -value } else { value }
 }
 
-/// Convert a C string to a long double — the `f64` core of `strtold`.
+/// `strtold`'s conversion, for this library's own callers: the `long double`
+/// the text names, to all 64 bits of x87's significand, rounded in the
+/// current direction -- glibc's answer for every input, `ERANGE` included.
 ///
-/// On x86_64 a `long double` is 80-bit extended precision, classified
-/// X87/X87UP, and is **returned in `%st(0)`** — never in `%xmm0`. Rust has no
-/// 80-bit float type and cannot express that return convention, so this
-/// function is *not* `strtold`: it is exported as `__strtold_f64` and returns
-/// the value in `%xmm0` like any other `f64`. The `strtold` symbol a C caller
-/// links against is the assembly thunk below, which calls this and pushes the
-/// result onto the x87 stack.
-///
-/// (Before this split, the Rust function was exported as `strtold` directly,
-/// so every C caller read `%st(0)` — whatever stale value the x87 stack
-/// happened to hold — and got garbage regardless of the input string. See
-/// BUG-POSIX-LONG-DOUBLE-ABI.)
-///
-/// The value itself is computed by `strtod`, so it carries only `f64`
-/// precision; that is the sysroot's documented limitation
-/// (TD-POSIX-LONG-DOUBLE-PRECISION), and unlike the return-register bug it
-/// degrades gracefully rather than corrupting.
+/// `None`, with `*endptr` set to `nptr` as if nothing were converted, when
+/// the digits need more memory than there is: a literal of more than 768
+/// significant digits, or a value outside about `1e-2550` to `1e1800`, takes a
+/// block sized to it ([`crate::decfloat::DigitCollector::to_ld80`]).
 ///
 /// # Safety
 ///
-/// `nptr` must be a valid null-terminated string.
-#[cfg_attr(target_os = "none", unsafe(export_name = "__strtold_f64"))]
-pub unsafe extern "C" fn strtold(nptr: *const u8, endptr: *mut *const u8) -> f64 {
-    // SAFETY: strtod safety requirements are identical.
-    unsafe { strtod(nptr, endptr) }
+/// `nptr` must be a valid null-terminated string, and `endptr` either NULL or
+/// a valid `char **`.
+pub(crate) unsafe fn strtold_ld(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+) -> Option<crate::x87::LongDouble> {
+    let mut acc = crate::decfloat::DigitCollector::for_long_double();
+    // SAFETY: forwarding this function's own contract.
+    let (token, negative) = unsafe { scan_float_cstr(nptr, endptr, &mut acc) };
+    let Some((value, out_of_range)) = crate::decfloat::ld80_of(token, negative, &acc) else {
+        if !endptr.is_null() {
+            // SAFETY: the caller promises `endptr` is writable.
+            unsafe { *endptr = nptr };
+        }
+        return None;
+    };
+    if out_of_range {
+        crate::errno::set_errno(crate::errno::ERANGE);
+    }
+    Some(value)
 }
 
-// `strtold` returns a `long double` in `%st(0)`. Rust cannot express that, so
-// the exported symbol is this thunk: it forwards `nptr`/`endptr` untouched in
-// `%rdi`/`%rsi`, takes the `f64` back in `%xmm0`, and re-loads it through
-// memory with `fld qword` — which widens exactly, since every f64 is
-// representable in the 80-bit format.
-//
-// Stack discipline: `push rbp; mov rbp, rsp` leaves `%rsp` 16-byte aligned, so
-// the `call` below satisfies the ABI's alignment requirement. The 16-byte
-// frame is the spill slot for `%xmm0` (8 needed, 16 to keep the alignment).
-// Exactly one x87 register is live on return, as the ABI requires.
+/// Convert a C string to a `long double` (`strtold`), at the format's full
+/// precision ([`strtold_ld`]).
+///
+/// When the digits need more memory than there is, nothing is converted:
+/// the result is 0, `*endptr` is `nptr`, and `errno` is `ENOMEM` -- rather
+/// than a value the text does not name. glibc never allocates here, so it
+/// has no such case; it can arise only for a literal of more than 768
+/// significant digits or a value outside about `1e-2550` to `1e1800`.
+///
+/// A `long double` comes back in `%st(0)`, which Rust cannot express, so the
+/// C symbol is a thunk ([`crate::ld_c`]) into `__slate_ld_strtold`. Until
+/// 2026-09-28 it was a `double` conversion widened, 53 bits of the 64
+/// (`TD-POSIX-LONG-DOUBLE-PRECISION`).
+///
+/// # Safety
+///
+/// As [`strtold_ld`].
+pub unsafe fn strtold(nptr: *const u8, endptr: *mut *const u8) -> crate::x87::LongDouble {
+    // SAFETY: forwarding this function's own contract.
+    unsafe { strtold_ld(nptr, endptr) }.unwrap_or_else(|| {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        crate::x87::LongDouble::POS_ZERO
+    })
+}
+
+/// `strtold` for C, through the thunk: the result into `out`.
 #[cfg(target_os = "none")]
-core::arch::global_asm!(
-    ".global strtold",
-    ".type strtold, @function",
-    "strtold:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 16",
-    "call __strtold_f64",
-    "movsd [rsp], xmm0",
-    "fld qword ptr [rsp]",
-    "add rsp, 16",
-    "pop rbp",
-    "ret",
-);
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __slate_ld_strtold(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    out: *mut crate::x87::LongDouble,
+) {
+    // SAFETY: `strtold`'s contract is the C caller's; `out` is the thunk's
+    // result slot.
+    unsafe { out.write(strtold(nptr, endptr)) }
+}
+crate::ld_c!(l_pp "strtold" => __slate_ld_strtold);
 
 // The `_l` variants: same conversion, explicit locale object.
 //
@@ -599,42 +616,34 @@ pub unsafe extern "C" fn strtod_l(
     unsafe { strtod(nptr, endptr) }
 }
 
-/// `strtold_l(nptr, endptr, loc)` — `strtold` in an explicit locale.
-///
-/// Exported through the same `fld`-widening thunk as `strtold`; see the
-/// commentary on that one for why Rust cannot return the value directly.
+/// `strtold_l(nptr, endptr, loc)` — `strtold` in an explicit locale, which
+/// is always C's here, as for [`strtod_l`].
 ///
 /// # Safety
 ///
-/// As [`strtod_l`].
-#[cfg_attr(target_os = "none", unsafe(export_name = "__strtold_l_f64"))]
-pub unsafe extern "C" fn strtold_l(
+/// As [`strtold`].
+pub unsafe fn strtold_l(
     nptr: *const u8,
     endptr: *mut *const u8,
     _loc: crate::locale::LocaleT,
-) -> f64 {
+) -> crate::x87::LongDouble {
     // SAFETY: identical requirements, forwarded.
-    unsafe { strtod(nptr, endptr) }
+    unsafe { strtold(nptr, endptr) }
 }
 
-// As for `strtold`: `%rdi`/`%rsi`/`%rdx` carry `nptr`/`endptr`/`loc` and are
-// left untouched, so the thunk only has to move the `f64` result out of
-// `%xmm0` and back in through the x87 stack.
+/// `strtold_l` for C, through the thunk: the result into `out`.
 #[cfg(target_os = "none")]
-core::arch::global_asm!(
-    ".global strtold_l",
-    ".type strtold_l, @function",
-    "strtold_l:",
-    "push rbp",
-    "mov rbp, rsp",
-    "sub rsp, 16",
-    "call __strtold_l_f64",
-    "movsd [rsp], xmm0",
-    "fld qword ptr [rsp]",
-    "add rsp, 16",
-    "pop rbp",
-    "ret",
-);
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __slate_ld_strtold_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    loc: crate::locale::LocaleT,
+    out: *mut crate::x87::LongDouble,
+) {
+    // SAFETY: as in `__slate_ld_strtold`.
+    unsafe { out.write(strtold_l(nptr, endptr, loc)) }
+}
+crate::ld_c!(l_ppp "strtold_l" => __slate_ld_strtold_l);
 
 /// Convert a C string to a double (`atof`).
 ///
@@ -2890,12 +2899,14 @@ mod tests {
         (digits, dp)
     }
 
-    /// glibc 2.39's `strtod` and `strtof` of every input the conversion
-    /// oracle holds, in each of the four rounding directions
+    /// glibc 2.39's `strtod`, `strtof` and `strtold` of every input the
+    /// conversion oracle holds, in each of the four rounding directions
     /// (`posix/tools/oracle/conv_harness.py`): the value's bits, the bytes
-    /// consumed, and `errno`.
+    /// consumed, and `errno`. `strtold`'s answers include literals of
+    /// thousands of digits, exact rounding boundaries written out in full;
+    /// `wcstold` must give each of them too, from the same text widened.
     #[test]
-    fn strtod_and_strtof_answer_as_glibc_does_in_every_rounding_mode() {
+    fn strtod_strtof_and_strtold_answer_as_glibc_does_in_every_rounding_mode() {
         let modes = [
             crate::fenv::FE_TONEAREST,
             crate::fenv::FE_UPWARD,
@@ -2911,9 +2922,6 @@ mod tests {
             let (lhs, want) = line.split_once(" = ").unwrap();
             let w: Vec<&str> = lhs.split(' ').collect();
             let f = w[2];
-            if f != "strtod" && f != "strtof" {
-                continue;
-            }
             let mode: usize = w[1].parse().unwrap();
             let mut input: Vec<u8> = (0..w[3].len())
                 .step_by(2)
@@ -2925,19 +2933,49 @@ mod tests {
             let mut end: *const u8 = core::ptr::null();
             // SAFETY: a NUL-terminated input and an out-pointer of this frame.
             let bits = unsafe {
-                if f == "strtod" {
-                    format!("{:016x}", strtod(input.as_ptr(), &raw mut end).to_bits())
-                } else {
-                    format!("{:08x}", strtof(input.as_ptr(), &raw mut end).to_bits())
+                match f {
+                    "strtod" => format!("{:016x}", strtod(input.as_ptr(), &raw mut end).to_bits()),
+                    "strtof" => format!("{:08x}", strtof(input.as_ptr(), &raw mut end).to_bits()),
+                    "strtold" => {
+                        let v = strtold(input.as_ptr(), &raw mut end);
+                        format!("{:04x}:{:016x}", v.sign_exp, v.significand)
+                    }
+                    other => panic!("oracle function {other}"),
                 }
             };
             let err = crate::errno::get_errno();
-            assert_eq!(crate::fenv::fesetround(crate::fenv::FE_TONEAREST), 0);
             let used = end as usize - input.as_ptr() as usize;
             let got = format!("{bits} {used} {err}");
+            let wide_got = (f == "strtold").then(|| {
+                let wide: Vec<crate::wchar::WcharT> = input
+                    .iter()
+                    .map(|&b| crate::wchar::WcharT::from(b))
+                    .collect();
+                crate::errno::set_errno(0);
+                let mut wend: *const crate::wchar::WcharT = core::ptr::null();
+                // SAFETY: as above, over the widened copy.
+                let v = unsafe { crate::wchar::wcstold(wide.as_ptr(), &raw mut wend) };
+                let wused = (wend as usize - wide.as_ptr() as usize)
+                    / core::mem::size_of::<crate::wchar::WcharT>();
+                let werr = crate::errno::get_errno();
+                format!("{:04x}:{:016x} {wused} {werr}", v.sign_exp, v.significand)
+            });
+            assert_eq!(crate::fenv::fesetround(crate::fenv::FE_TONEAREST), 0);
             calls += 1;
             if got != want {
-                bad.push((mode, format!("{line}\n    ours {got}")));
+                bad.push((
+                    mode,
+                    format!("{}\n    ours {got}", &line[..line.len().min(300)]),
+                ));
+            }
+            if let Some(wide_got) = wide_got.filter(|g| g != want) {
+                bad.push((
+                    mode,
+                    format!(
+                        "wcstold {}\n    ours {wide_got}",
+                        &line[..line.len().min(300)]
+                    ),
+                ));
             }
         }
         assert!(calls > 1000, "only {calls} calls");
@@ -3873,7 +3911,7 @@ mod tests {
         let mut e2: *const u8 = core::ptr::null();
         let a = unsafe { strtold(s.as_ptr(), &mut e1) };
         let b = unsafe { strtold_l(s.as_ptr(), &mut e2, crate::locale::LC_GLOBAL_LOCALE) };
-        assert!((a - b).abs() < f64::EPSILON);
+        assert_eq!((a.sign_exp, a.significand), (b.sign_exp, b.significand));
         assert_eq!(e1, e2);
     }
 
@@ -5780,21 +5818,108 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // strtold — LP64 alias for strtod
+    // strtold -- at the long double's own precision
     // -----------------------------------------------------------------------
+
+    /// A `long double`'s bits, `(sign_exp, significand)`.
+    fn ld_bits(v: crate::x87::LongDouble) -> (u16, u64) {
+        (v.sign_exp, v.significand)
+    }
 
     #[test]
     fn test_strtold_basic() {
         let s = b"3.14\0";
         let mut end: *const u8 = core::ptr::null();
         let val = unsafe { strtold(s.as_ptr(), &raw mut end) };
-        assert!((val - 3.14).abs() < 0.001);
+        // 3.14 to 64 bits: 0xc8f5c28f5c28f5c3 * 2^-62, rounded up.
+        assert_eq!(ld_bits(val), (0x4000, 0xC8F5_C28F_5C28_F5C3));
+        assert_eq!(end, unsafe { s.as_ptr().add(4) });
     }
 
     #[test]
     fn test_strtold_null() {
         let val = unsafe { strtold(core::ptr::null(), core::ptr::null_mut()) };
-        assert_eq!(val, 0.0);
+        assert_eq!(ld_bits(val), (0, 0));
+    }
+
+    /// The digits a `double` cannot hold: 2^64 + 1 is a `long double`, and
+    /// 0.1 has eleven more bits than a `double` gives it.
+    #[test]
+    fn strtold_keeps_all_64_bits() {
+        let v = unsafe { strtold(b"18446744073709551617\0".as_ptr(), core::ptr::null_mut()) };
+        // 2^64 + 1 needs 65 bits: a tie between 2^64 and 2^64 + 2, to even.
+        assert_eq!(ld_bits(v), (0x403F, 0x8000_0000_0000_0000));
+        let v = unsafe { strtold(b"18446744073709551615\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x403E, u64::MAX));
+        let v = unsafe { strtold(b"0.1\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x3FFB, 0xCCCC_CCCC_CCCC_CCCD));
+        let v = unsafe {
+            strtold(
+                b"-0x1.fffffffffffffffep+16383\0".as_ptr(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ld_bits(v), (0xFFFE, u64::MAX));
+    }
+
+    /// The range ends: the least subnormal, the greatest finite value, and
+    /// one past each; `ERANGE` as glibc sets it.
+    #[test]
+    fn strtold_range_ends() {
+        let conv = |t: &[u8]| {
+            crate::errno::set_errno(0);
+            let v = unsafe { strtold(t.as_ptr(), core::ptr::null_mut()) };
+            (
+                ld_bits(v),
+                crate::errno::get_errno() == crate::errno::ERANGE,
+            )
+        };
+        assert_eq!(
+            conv(b"1.18973149535723176502e+4932\0"),
+            ((0x7FFE, u64::MAX), false)
+        );
+        assert_eq!(conv(b"1.2e4932\0"), ((0x7FFF, 1 << 63), true));
+        assert_eq!(conv(b"3.64519953188247460253e-4951\0"), ((0, 1), true));
+        assert_eq!(conv(b"1e-4952\0"), ((0, 0), true));
+        assert_eq!(conv(b"1e-10000\0"), ((0, 0), true));
+        assert_eq!(conv(b"1e10000\0"), ((0x7FFF, 1 << 63), true));
+        // The least normal number is no error, and neither is an exact
+        // subnormal.
+        assert_eq!(conv(b"0x1p-16382\0"), ((0x0001, 1 << 63), false));
+        assert_eq!(conv(b"0x1p-16445\0"), ((0, 1), false));
+    }
+
+    /// NaN and infinity keep their sign; a payload lands in the low 62 bits.
+    #[test]
+    fn strtold_nan_and_infinity() {
+        let v = unsafe { strtold(b"-inf\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0xFFFF, 1 << 63));
+        let v = unsafe { strtold(b"nan\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x7FFF, 0xC000_0000_0000_0000));
+        let v = unsafe { strtold(b"-nan(0x12)\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0xFFFF, 0xC000_0000_0000_0012));
+    }
+
+    /// A literal longer than a `double`'s 768 digits spills its digits to
+    /// the heap, and every one of them still counts: this is the midpoint
+    /// between 1 and the next `long double` up, `1 + 2^-64`, written out in
+    /// full and then nudged either side.
+    #[test]
+    fn strtold_digits_past_a_doubles_worth() {
+        // 2^-64 = 5.42101086242752217003726400434970855712890625e-20 exactly,
+        // so 1 + 2^-64 has 64 significant decimal digits; padded with
+        // zeroes to 2000 digits it is still the exact tie.
+        let mut tie =
+            b"1.0000000000000000000542101086242752217003726400434970855712890625".to_vec();
+        tie.resize(2002, b'0');
+        let mut above = tie.clone();
+        above.push(b'1');
+        tie.push(0);
+        above.push(0);
+        let v = unsafe { strtold(tie.as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x3FFF, 1 << 63), "a tie goes to even");
+        let v = unsafe { strtold(above.as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(ld_bits(v), (0x3FFF, (1 << 63) | 1), "a hair above goes up");
     }
 
     // -----------------------------------------------------------------------

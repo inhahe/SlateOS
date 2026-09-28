@@ -1683,9 +1683,15 @@ impl<I: Input> Engine<'_, '_, '_, I> {
         // caller's pointer of the type its modifier names.
         unsafe {
             if flags & LONGDBL != 0 {
-                let d = crate::stdlib::strtold(text, &raw mut end);
+                // At the long double's own precision; out of memory for a
+                // literal of hundreds of digits is glibc's own `ENOMEM`,
+                // which it gives when its text buffer cannot grow.
+                let Some(d) = crate::stdlib::strtold_ld(text, &raw mut end) else {
+                    errno::set_errno(errno::ENOMEM);
+                    return Err(Stop::NoMem);
+                };
                 if p != 0 && !core::ptr::eq(end, text) {
-                    (p as *mut crate::x87::LongDouble).write_unaligned(crate::x87::from_f64(d));
+                    (p as *mut crate::x87::LongDouble).write_unaligned(d);
                 }
             } else if flags & LONG != 0 {
                 let d = crate::stdlib::strtod(text, &raw mut end);

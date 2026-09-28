@@ -4,11 +4,11 @@
  *
  * Guards BUG-POSIX-LONG-DOUBLE-ABI (known-issues.md).
  *
- * The sysroot's printf, scanf and strtold handle `long double` by computing
- * in `double`.  As a *precision* limitation that is documented and
- * acceptable (TD-POSIX-LONG-DOUBLE-PRECISION).  It was also applied to the
- * *ABI*, where it is not a limitation but silent corruption, in two
- * independent ways:
+ * The sysroot's printf, scanf and strtold used to handle `long double` by
+ * computing in `double` -- a *precision* limitation, documented
+ * (TD-POSIX-LONG-DOUBLE-PRECISION) and lifted on 2026-09-28.  It was also
+ * applied to the *ABI*, where it was not a limitation but silent corruption,
+ * in two independent ways:
  *
  *   1. `printf`/`scanf` never consumed the `L` length modifier, so `L` was
  *      read as the *conversion character*.  It matches no conversion, so the
@@ -36,7 +36,10 @@
  * Since 2026-09-28 it also calls libm's `long double` functions (codes
  * 60-84), which compute in the full 80-bit format and reach C through one
  * assembly thunk per signature shape (posix/src/ld_abi.rs): every shape is
- * called here, with values a double could not produce.
+ * called here, with values a double could not produce.  And the conversions
+ * (85-91), which carry all 64 bits of the significand since the same day:
+ * `strtold`, `strtold_l`, `wcstold`, `%Lf` both ways, on values a double
+ * would round.
  *
  * Exit code 42 == every check passed; anything else identifies the first
  * failing check (see the `return` values below, and the legend in
@@ -46,10 +49,12 @@
 #define _GNU_SOURCE /* sincosl, lgammal_r, signgam */
 
 #include <errno.h>
+#include <locale.h>
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
 /*
  * Launder values through a volatile global so the compiler cannot constant
@@ -118,8 +123,8 @@ int main(void)
     }
 
     /* ------------------------------------------------------------------
-     * 20-25: printf's `%L` conversions.  The value itself carries only f64
-     * precision by design, so these use values a double represents exactly.
+     * 20-25: printf's `%L` conversions: the argument plumbing, on values a
+     * double represents exactly (85-91 are the precision).
      * ------------------------------------------------------------------ */
     memset(buf, 0, sizeof buf);
     if (snprintf(buf, sizeof buf, "%.2Lf", opaque_ld(3.25L)) < 0) {
@@ -425,6 +430,62 @@ int main(void)
         if (!exact_ld(acc, 32 * 25.5L)) {
             return 84;
         }
+    }
+
+    /* ------------------------------------------------------------------
+     * 85-91: the conversions, at the 80-bit format's own precision.  0.1L
+     * is 0xcccccccccccccccd * 2^-67; a conversion that went through a
+     * double would give 0xccccccccccccd000 * 2^-67 instead, and compare
+     * unequal.  The compiler's literals are correctly rounded.
+     * ------------------------------------------------------------------ */
+    end = NULL;
+    if (!exact_ld(strtold("0.1", &end), 0.1L) || end == NULL || *end != '\0') {
+        return 85;
+    }
+    /* strtold_l: three pointers in, the result slot after them (l_ppp).
+     * A real locale object: LC_GLOBAL_LOCALE is undefined behaviour for the
+     * `_l` functions, and glibc's crash on it. */
+    {
+        locale_t c_locale = newlocale(LC_ALL_MASK, "C", (locale_t)0);
+        int ok;
+        if (c_locale == (locale_t)0) {
+            return 86;
+        }
+        end = NULL;
+        ok = exact_ld(strtold_l("0.1x", &end, c_locale), 0.1L)
+             && end != NULL && strcmp(end, "x") == 0;
+        freelocale(c_locale);
+        if (!ok) {
+            return 86;
+        }
+    }
+    {
+        wchar_t *wend = NULL;
+        if (!exact_ld(wcstold(L"0.1", &wend), 0.1L) || wend == NULL || *wend != L'\0') {
+            return 87;
+        }
+    }
+    /* 0.1L is exactly 0.10000000000000000000135525271560688...; a double's
+     * 0.1 would print as 0.1000000000000000055511151. */
+    memset(buf, 0, sizeof buf);
+    snprintf(buf, sizeof buf, "%.25Lf", opaque_ld(0.1L));
+    if (strcmp(buf, "0.1000000000000000000013553") != 0) {
+        return 88;
+    }
+    {
+        long double v = -1e30L;
+        if (sscanf("0.1", "%Lf", &v) != 1 || !exact_ld(v, 0.1L)) {
+            return 89;
+        }
+    }
+    /* Past a double's range, both ways. */
+    memset(buf, 0, sizeof buf);
+    snprintf(buf, sizeof buf, "%Le", opaque_ld(1e4000L));
+    if (strcmp(buf, "1.000000e+4000") != 0) {
+        return 90;
+    }
+    if (!exact_ld(strtold("1e4000", NULL), 1e4000L)) {
+        return 91;
     }
 
     return 42;

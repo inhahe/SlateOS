@@ -1951,8 +1951,12 @@ live.
   to allow or refuse. The capability's shape may need lane A.
 
 - `[C]` **A settings service that tells open windows when a setting
-  changes** -- open (C-Q26, §1418). Beside `gui/settingsfile`, never in front
-  of it: saving stays a program writing its own file.
+  changes** -- open, **blocked on lane F** (C-Q26, §1418). Beside
+  `gui/settingsfile`, never in front of it: saving stays a program writing its
+  own file. The announcement for a program's own file is a protocol change in
+  lane F's codec (`requests/c-f-announce-a-change-to-any-programs-settings-file.md`);
+  then lane C's `gui/settingswatch` (an `inotify` watch on the settings folder)
+  sends it, and `settingsfile` refuses names that could not be announced.
 
 - `[C]` **C-Q11: measure the whole-workspace check under the machine's normal
   load, then decide the gate** -- open, waiting for the lanes to be running

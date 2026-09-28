@@ -385,7 +385,15 @@ mod tests {
                 focused: true,
                 ..State::default()
             };
-            draw(&mut cmds, &p, (0.0, 0.0, HEIGHT), "", CheckState::Checked, focused, 2.0);
+            draw(
+                &mut cmds,
+                &p,
+                (0.0, 0.0, HEIGHT),
+                "",
+                CheckState::Checked,
+                focused,
+                2.0,
+            );
             let well = cmds.iter().find_map(|c| match c {
                 RenderCommand::FillRect { corner_radii, .. } => Some(corner_radii.top_left),
                 _ => None,

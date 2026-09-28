@@ -3975,10 +3975,12 @@ mod tests {
                 .commands
                 .iter()
                 .find_map(|c| match c {
-                    RenderCommand::FillRect { y, width, color, .. }
-                        if *y == thumb.y
-                            && (color.r, color.g, color.b) != (palette.crust.r, palette.crust.g, palette.crust.b)
-                            && *width <= scrollbar::WIDTH =>
+                    RenderCommand::FillRect {
+                        y, width, color, ..
+                    } if *y == thumb.y
+                        && (color.r, color.g, color.b)
+                            != (palette.crust.r, palette.crust.g, palette.crust.b)
+                        && *width <= scrollbar::WIDTH =>
                     {
                         Some(*width)
                     }
@@ -3987,7 +3989,10 @@ mod tests {
                 .expect("no thumb was drawn");
             (thumb.w, drawn)
         };
-        assert_eq!(thumb_width(&dialog), (scrollbar::WIDTH, scrollbar::IDLE_WIDTH));
+        assert_eq!(
+            thumb_width(&dialog),
+            (scrollbar::WIDTH, scrollbar::IDLE_WIDTH)
+        );
 
         let (x, y) = centre_of(&dialog, DialogTarget::ScrollTrack);
         let at = |kind| MouseEvent { x, y, kind };
@@ -3995,7 +4000,10 @@ mod tests {
         assert_eq!(thumb_width(&dialog), (scrollbar::WIDTH, scrollbar::WIDTH));
 
         dialog.handle_mouse(&at(MouseEventKind::Leave), W, H);
-        assert_eq!(thumb_width(&dialog), (scrollbar::WIDTH, scrollbar::IDLE_WIDTH));
+        assert_eq!(
+            thumb_width(&dialog),
+            (scrollbar::WIDTH, scrollbar::IDLE_WIDTH)
+        );
     }
 
     #[test]

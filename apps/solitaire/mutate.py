@@ -135,8 +135,8 @@ MUTATIONS = [
     ),
     (
         "the stock's count is the waste's",
-        '            self.draw_pile_count(f, l, stock, &format!("{}", self.stock.len()));',
-        '            self.draw_pile_count(f, l, stock, &format!("{}", self.waste.len()));',
+        "            self.draw_pile_count(f, l, stock, &format!(\"{}\", self.stock.len()), c);",
+        "            self.draw_pile_count(f, l, stock, &format!(\"{}\", self.waste.len()), c);",
         ["the_stock_says_how_many_cards_are_left_and_the_count_follows_it"],
     ),
     # -- The hit boxes -------------------------------------------------
@@ -178,15 +178,8 @@ MUTATIONS = [
     ),
     (
         "a covered card's box is the whole card, so it steals the clicks above it",
-        "                    let rect = t.back_rect(col, i);\n"
-        "                    self.draw_card_back(f, rect, t, false);\n"
-        "                    f.hit(Target::TableauBack(col, i), rect);",
-        "                    let rect = t.back_rect(col, i);\n"
-        "                    self.draw_card_back(f, rect, t, false);\n"
-        "                    f.hit(\n"
-        "                        Target::TableauBack(col, i),\n"
-        "                        Rect::new(rect.x, rect.y, rect.w, rect.h * 4.0),\n"
-        "                    );",
+        "                    let rect = t.back_rect(col, i);\n                    self.draw_card_back(f, rect, t, false, c);\n                    f.hit(Target::TableauBack(col, i), rect);",
+        "                    let rect = t.back_rect(col, i);\n                    self.draw_card_back(f, rect, t, false, c);\n                    f.hit(\n                        Target::TableauBack(col, i),\n                        Rect::new(rect.x, rect.y, rect.w, rect.h * 4.0),\n                    );",
         ["a_covered_card_is_clickable_only_where_it_can_be_seen"],
     ),
     # -- The mouse -----------------------------------------------------
@@ -405,6 +398,30 @@ MUTATIONS = [
         "                offset.saturating_add(step).min(max_idx)",
         "                offset.saturating_add(step)",
         ["test_move_within_tableau_up_down"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.state.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a card's face is not outlined",
+        "            color: c.table.face_edge(),",
+        "            color: cards::FACE,",
+        ["the_cards_are_white_and_seen_on_either_themes_table"],
+    ),
+    (
+        "the win banner's scrim is Mocha's whatever the theme",
+        "            color: c.chrome.scrim,",
+        "            color: Color::rgba(17, 17, 27, 180),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the red suits are the pale pink they were",
+        "        cards::suit_ink(self.is_red())",
+        "        if self.is_red() {\n            Color::from_hex(0xF38BA8)\n        } else {\n            cards::BLACK\n        }",
+        ["the_window_is_drawn_in_the_users_colours"],
     ),
 ]
 

@@ -11,7 +11,9 @@
 //!   [`TSLexer`] and the table rows), so the runtime reads the generated
 //!   statics as it would read the C compiler's;
 //! - [`Lexer`], the runtime's lexer as a safe type, which every generated
-//!   lexer and every hand-ported scanner works through;
+//!   lexer and every hand-ported scanner works through -- and which counts
+//!   the characters they step over ([`advances`]), the part of parsing's
+//!   work the runtime's own count of its steps does not see;
 //! - [`ExternalScanner`], the trait a hand-ported scanner implements, and
 //!   [`scanner_table`], which turns one into the five functions the runtime
 //!   calls.
@@ -20,6 +22,7 @@
 //! runtime's contract with a grammar -- which the C grammars rely on too --
 //! written down where it is relied on.
 
+use core::cell::Cell;
 use core::ffi::{c_char, c_void};
 use core::marker::PhantomData;
 
@@ -42,6 +45,23 @@ pub(crate) struct TSLexer {
     /// `log`, which is variadic and never called from here: present for its
     /// size and place only.
     log: *const c_void,
+}
+
+thread_local! {
+    /// Characters every lexer on this thread has stepped over: see
+    /// [`advances`].
+    static ADVANCES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many characters every lexer on this thread -- generated or
+/// hand-ported -- has stepped over, ever. The difference across a parse is
+/// the lexing it did: work the runtime's own count of its steps does not
+/// see, since a scanner may read a whole line again for every token it is
+/// asked for (Markdown's does, for a line of `*`s). With the runtime's steps
+/// it measures a parse by what it did rather than by the clock, which a
+/// busy machine stretches.
+pub(crate) fn advances() -> u64 {
+    ADVANCES.with(Cell::get)
 }
 
 /// The runtime's lexer, as a grammar's lexer or scanner uses it: the
@@ -88,6 +108,7 @@ impl Lexer<'_> {
 
     /// Step over the character ahead: into the token, or skipped.
     pub fn advance_with(&mut self, skip: bool) {
+        ADVANCES.with(|n| n.set(n.get().wrapping_add(1)));
         // SAFETY: `raw` is valid while `self` lives; the function is the
         // runtime's own, called with the lexer it belongs to, as C does.
         unsafe {

@@ -18,9 +18,11 @@
 //! A grammar with a mistake in it can send the parser round in circles. The
 //! budget keeps that from freezing the window -- the runtime stops each slice
 //! on time -- but it would still take a slice of every frame for ever. So a
-//! parse of one text is given up once it has run far longer than any real
-//! file needs ([`parse_limit`]: five seconds, and a second more per megabyte);
-//! the colours stay as the moved tree has them, and the next edit tries again.
+//! parse of one text is given up once it has done far more work than any
+//! real file needs ([`parse_limit`]); the colours stay as the moved tree has
+//! them, and the next edit tries again. The work is counted, not timed: the
+//! runtime's own steps and the characters the lexers read, which a busy
+//! machine cannot stretch the way it stretches a clock (§1439).
 //!
 //! # Languages inside languages
 //!
@@ -61,7 +63,7 @@ use tree_sitter::{
     TextProvider, Tree,
 };
 
-use crate::{Compiled, Error, Injections, Language, Paint};
+use crate::{Compiled, Error, Injections, Language, Paint, ffi};
 
 /// How many languages deep injections go: Markdown's code fence in Markdown
 /// is two, a macro's body in that fence's Rust three.
@@ -106,19 +108,37 @@ pub struct SyntaxHighlighter {
     /// Whether a parse of the text as it is was stopped part-way: the next
     /// call resumes it.
     halted: bool,
-    /// How long parsing the text as it is has taken so far, over every
-    /// slice.
-    spent: Duration,
+    /// The work parsing the text as it is has done so far, over every slice,
+    /// in [`parse_limit`]'s units.
+    used: u64,
     /// Whether the parse of the text as it is was given up ([`parse_limit`]).
     abandoned: bool,
 }
 
-/// How long parsing a text of `len` bytes may take, over every slice, before
-/// it is given up: five seconds, and a second more for every mebibyte.
+/// The runtime's steps between two calls of a parse's progress callback
+/// (`OP_COUNT_PER_PARSER_TIMEOUT_CHECK` in its `parser.c`).
+const STEPS_PER_CHECK: u64 = 100;
+
+/// The work any parse may do, however short its text.
+const WORK_FLOOR: u64 = 2_000_000;
+
+/// The work a parse may do for each byte of its text, on top.
+const WORK_PER_BYTE: u64 = 200;
+
+/// How much work parsing a text of `len` bytes may do, over every slice,
+/// before it is given up: the runtime's steps and the characters its lexers
+/// step over ([`ffi::advances`]), together -- two million, and two hundred a
+/// byte.
+///
+/// Measured (§1439): real files in every language here, each language fed
+/// the others' files and random bytes, all take under ten a byte. What
+/// passes the limit is a grammar going round in circles, or a scanner that
+/// reads the rest of a line again for every token of it -- Markdown's does,
+/// on a line of thousands of `*`s: five thousand a byte on ten thousand.
 #[must_use]
-pub fn parse_limit(len: usize) -> Duration {
-    let mebibytes = u64::try_from(len >> 20).unwrap_or(u64::MAX);
-    Duration::from_secs(5).saturating_add(Duration::from_secs(mebibytes))
+pub fn parse_limit(len: usize) -> u64 {
+    let len = u64::try_from(len).unwrap_or(u64::MAX);
+    WORK_FLOOR.saturating_add(len.saturating_mul(WORK_PER_BYTE))
 }
 
 impl core::fmt::Debug for SyntaxHighlighter {
@@ -150,7 +170,7 @@ impl SyntaxHighlighter {
             tree: None,
             stale: true,
             halted: false,
-            spent: Duration::ZERO,
+            used: 0,
             abandoned: false,
         })
     }
@@ -216,7 +236,7 @@ impl Highlighter for SyntaxHighlighter {
         self.parser.reset();
         self.halted = false;
         self.stale = true;
-        self.spent = Duration::ZERO;
+        self.used = 0;
         self.abandoned = false;
     }
 
@@ -233,7 +253,7 @@ impl Highlighter for SyntaxHighlighter {
             self.halted = false;
         }
         self.stale = true;
-        self.spent = Duration::ZERO;
+        self.used = 0;
         self.abandoned = false;
     }
 
@@ -241,19 +261,30 @@ impl Highlighter for SyntaxHighlighter {
         if !self.stale {
             return false;
         }
-        let started = Instant::now();
-        let deadline = started.checked_add(budget);
-        let mut stopped = false;
+        let deadline = Instant::now().checked_add(budget);
+        let limit = parse_limit(text.len());
+        let (before, lexed) = (self.used, ffi::advances());
+        // The work so far, this slice's included: the steps the callback has
+        // been called for, and the characters lexed since the slice began.
+        let done = |checks: u64| {
+            before
+                .saturating_add(checks.saturating_mul(STEPS_PER_CHECK))
+                .saturating_add(ffi::advances().wrapping_sub(lexed))
+        };
+        let mut checks: u64 = 0;
+        let (mut late, mut over) = (false, false);
         let mut progress = |_: &ParseState| {
-            let late = deadline.is_none_or(|d| Instant::now() >= d);
-            stopped |= late;
-            late
+            checks = checks.saturating_add(1);
+            over = done(checks) > limit;
+            late = deadline.is_none_or(|d| Instant::now() >= d);
+            over || late
         };
         let parsed = self.parser.parse_with_options(
             &mut |byte: usize, _: Point| text.bytes_from(byte),
             self.tree.as_ref(),
             Some(ParseOptions::new().progress_callback(&mut progress)),
         );
+        self.used = done(checks);
         match parsed {
             Some(tree) => {
                 self.tree = Some(tree);
@@ -261,17 +292,16 @@ impl Highlighter for SyntaxHighlighter {
                 self.halted = false;
                 false
             }
-            None if stopped => {
-                self.spent = self.spent.saturating_add(started.elapsed());
-                if self.spent > parse_limit(text.len()) {
-                    // Round in circles: give this text up (see the module
-                    // docs); the next edit starts again.
-                    self.parser.reset();
-                    self.halted = false;
-                    self.stale = false;
-                    self.abandoned = true;
-                    return false;
-                }
+            None if over => {
+                // Round in circles, or as good as: give this text up (see
+                // the module docs); the next edit starts again.
+                self.parser.reset();
+                self.halted = false;
+                self.stale = false;
+                self.abandoned = true;
+                false
+            }
+            None if late => {
                 self.halted = true;
                 true
             }
@@ -735,25 +765,26 @@ mod tests {
         assert_eq!(root.named_child(0).unwrap().kind(), "import_statement");
     }
 
-    /// **A parse is given up past its limit** -- five seconds and one a
-    /// mebibyte -- and the next edit tries again.
+    /// **A parse is given up past its limit** -- two million steps and
+    /// characters, and two hundred a byte -- and the next edit tries again.
     #[test]
     fn a_parse_past_its_limit_is_given_up_until_the_next_edit() {
-        assert_eq!(parse_limit(0), Duration::from_secs(5));
-        assert_eq!(parse_limit(3 << 20), Duration::from_secs(8));
-        let mut buffer = TextBuffer::from_text("fn a() {}\n");
+        assert_eq!(parse_limit(0), 2_000_000);
+        assert_eq!(parse_limit(1 << 20), 2_000_000 + 200 * (1 << 20));
+        assert_eq!(parse_limit(usize::MAX), u64::MAX);
+        // Long enough that the runtime checks its progress at least once.
+        let mut text = String::new();
+        for i in 0..200 {
+            text.push_str(&format!("fn a{i}() {{}}\n"));
+        }
+        let mut buffer = TextBuffer::from_text(&text);
         let mut h = Language::named("rust").unwrap().highlighter().unwrap();
         h.reset(&buffer);
-        // As if the slices so far had taken the whole limit.
-        h.spent = parse_limit(buffer.len());
-        let mut calls = 0;
-        while h.work(&buffer, Duration::ZERO) {
-            calls += 1;
-            assert!(calls < 10_000, "never gave up");
-        }
-        // A text this small parses inside one zero budget's first check, or
-        // is given up: either way the work stops.
-        assert!(h.is_abandoned() || h.tree().is_some());
+        // As if the slices so far had done the whole limit's work: however
+        // long the budget, the first check gives it up.
+        h.used = parse_limit(buffer.len());
+        assert!(!h.work(&buffer, Duration::from_mins(1)), "not given up");
+        assert!(h.is_abandoned() && h.tree().is_none() && !h.is_stale());
         let _ = buffer.take_changes();
         buffer.insert(0, "x").unwrap();
         let changes = buffer.take_changes();
@@ -761,6 +792,33 @@ mod tests {
         assert!(!h.is_abandoned() && h.is_stale());
         while h.work(&buffer, Duration::from_secs(5)) {}
         assert!(h.tree().is_some() && !h.is_stale());
+    }
+
+    /// **Work is what is limited, the lexers' included**: on a line of three
+    /// thousand `*`s, Markdown's scanner reads the rest of the line again for
+    /// every one of them -- four and a half million characters, for a few
+    /// thousand of the runtime's steps -- and the parse is given up for
+    /// that, however long the budget, on any machine.
+    #[test]
+    fn a_scanner_rereading_its_line_is_given_up_for_its_work() {
+        let text = "*".repeat(3000);
+        let buffer = TextBuffer::from_text(&text);
+        let mut h = Language::named("markdown").unwrap().highlighter().unwrap();
+        h.reset(&buffer);
+        while h.work(&buffer, Duration::from_mins(1)) {}
+        assert!(h.is_abandoned(), "finished, in {} units", h.used);
+        assert!(h.used > parse_limit(buffer.len()));
+        // A file as long of ordinary text is nowhere near it.
+        let prose = "Some words, *emphasis*, and `code`.\n".repeat(90);
+        let buffer = TextBuffer::from_text(&prose);
+        h.reset(&buffer);
+        while h.work(&buffer, Duration::from_mins(1)) {}
+        assert!(!h.is_abandoned() && h.tree().is_some());
+        assert!(
+            h.used < 20 * u64::try_from(prose.len()).unwrap(),
+            "{}",
+            h.used
+        );
     }
 
     /// **Flattening**: nested spans become flat ones, the inner winning, cut

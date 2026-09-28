@@ -572,6 +572,12 @@ MUTATIONS = [
         "                disabled: false,",
         ["the_roll_button_is_switched_off_with_no_rolls_left"],
     ),
+    (
+        "a category's words are the page's inks, 3.0:1 on its row",
+        "                let on = c.chrome.on(ground);",
+        "                let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

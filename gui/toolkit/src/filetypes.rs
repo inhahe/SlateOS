@@ -1996,7 +1996,11 @@ mod tests {
         };
         let picture = |ext, mime| Some((ext, mime, FileCategory::Image));
         assert_eq!(ftyp(b"avif"), picture(".avif", "image/avif"));
-        assert_eq!(ftyp(b"avis"), picture(".avif", "image/avif"), "an animated AVIF is a picture");
+        assert_eq!(
+            ftyp(b"avis"),
+            picture(".avif", "image/avif"),
+            "an animated AVIF is a picture"
+        );
         assert_eq!(ftyp(b"heic"), picture(".heic", "image/heic"));
         assert_eq!(ftyp(b"heix"), picture(".heic", "image/heic"));
         assert_eq!(ftyp(b"mif1"), picture(".heif", "image/heif"));

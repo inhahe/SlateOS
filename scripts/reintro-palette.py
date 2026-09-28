@@ -17479,8 +17479,8 @@ DEFECTS = [
         # others, since `appearance` now re-exports what this breaks.
         THEME,
         [
-            ('        if v <= 0.039_28 {\n            v / 12.92\n        } else {\n            ((v + 0.055) / 1.055).powf(2.4)\n        }\n',
-             '        v\n'),
+            ('    if v <= 0.039_28 {\n        v / 12.92\n    } else {\n        ((v + 0.055) / 1.055).powf(2.4)\n    }\n',
+             '    v\n'),
         ],
         ["guitk", "appearance", "desktop"],
         [
@@ -18351,11 +18351,12 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the start menu reopens wherever it was last left",
         DESK,
         [
-            ('            self.start_menu_open = true;\n            self.start_menu_scroll = 0;\n',
-             '            self.start_menu_open = true;\n'),
+            ('            self.shortcut_card_open = false;\n            self.start_menu_scroll = 0;\n',
+             '            self.shortcut_card_open = false;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `toggle_start_menu` rewinds the list.
             # A menu that reopens scrolled hides the first application from a
             # user who has no idea it ever scrolled -- and who therefore has no
             # reason to scroll back up to look for it.
@@ -18482,22 +18483,24 @@ DEFECTS = [
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the taskbar button minimizes the window you were trying to reach",
         DESK,
         [
-            ('                if self.focused_window == Some(id) {\n                    ShellControlAction::Minimize\n                } else {\n',
-             '                if self.focused_window != Some(id) {\n                    ShellControlAction::Minimize\n                } else {\n'),
+            ('            if press.was_focused {\n                ShellControlAction::Minimize\n',
+             '            if !press.was_focused {\n                ShellControlAction::Minimize\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A taskbar click is decided on release now
+            # (`finish_window_press`), from the focus at the press.
             # The toggle inverted. Clicking an unfocused window's button
             # minimizes it instead of raising it, and clicking the focused one
             # raises what is already raised -- so the taskbar becomes a way to
             # make windows disappear and nothing else.
-            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
-            'a_minimized_window_can_be_got_back_from_its_taskbar_button',
-            'the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop',
             'a_double_click_is_the_same_event_to_this_shell_as_a_single_one',
+            'a_minimized_window_can_be_got_back_from_its_taskbar_button',
             'a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised',
             'a_taskbar_button_asks_the_compositor_rather_than_changing_anything',
+            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
             'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+            'the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop',
         ],
     ),
     (
@@ -18612,11 +18615,13 @@ DEFECTS = [
         "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: an update rebuilds each window from nothing, losing the shell's own state",
         DESK,
         [
-            ('            let previous = self.windows.get(&id);\n',
-             '            let previous: Option<&ManagedWindow> = None;\n'),
+            ('            let carried = self\n                .windows\n                .get(&id)\n                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));\n',
+             '            let carried = self\n                .windows\n                .get(&id)\n                .filter(|_| false)\n                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. What a window carries over is read out as
+            # `carried` now.
             # `icon_id` has no counterpart in the compositor's list -- it is
             # shell-local, and an update that does not look up the existing
             # window cannot preserve it. The symptom is every taskbar icon
@@ -18628,11 +18633,12 @@ DEFECTS = [
         "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: every taskbar button acts on the first window on the bar",
         DESK,
         [
-            ('                if self.taskbar_button_rect(index).contains(x, y) {\n                    return Hit::TaskbarButton(window.id);\n',
-             '                if self.taskbar_button_rect(index).contains(x, y) {\n                    let _ = window;\n                    return Hit::TaskbarButton(self.taskbar_windows()[0].id);\n'),
+            ('                        TaskbarSlot::Window(id) => Hit::TaskbarButton(id),\n',
+             '                        TaskbarSlot::Window(_) => Hit::TaskbarButton(self.taskbar_windows()[0].id),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The bar hit-tests slots, pinned and window.
             # The pairing of slot to window, which is what the hit test is for
             # once the hit carries an id. The old form of
             # `a_taskbar_button_is_clickable_where_it_is_drawn` compared the
@@ -19797,29 +19803,32 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a single window opens the Alt-Tab switcher, which then has nothing to switch to",
         DESK,
         [
-            ('        let count = self.taskbar_windows().len();\n        if count > 1 {\n            self.alt_tab_active = true;\n',
-             '        let count = self.taskbar_windows().len();\n        if count > 0 {\n            self.alt_tab_active = true;\n'),
+            ('        if count < 2 {\n            return;\n        }\n        self.alt_tab_active = true;\n',
+             '        if count < 1 {\n            return;\n        }\n        self.alt_tab_active = true;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A switch starts in `begin_switch`.
             'alt_tab_with_one_window_is_consumed_without_opening_the_switcher',
         ],
     ),
     (
-        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: Alt-Tab opens on index 1, which with exactly two windows is the window you are already in",
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: Alt-Tab opens on index 0, which is the window you are already in",
         DESK,
         [
-            ('            self.alt_tab_index = step::wrapping_before(count, count.saturating_sub(1));\n',
-             '            self.alt_tab_index = 1;\n'),
+            ('        } else {\n            step::wrapping_after(count, 0)\n        };\n',
+             '        } else {\n            0\n        };\n'),
         ],
         ["desktop"],
         [
-            'stepping_backwards_from_the_end_lands_in_the_list_not_past_it',
-            'alt_tab_between_two_windows_swaps_them',
+            # Re-derived 2026-09-27 against the code as it now reads. The switcher lists the most recent window
+            # first now, so index 0 is the one you are in.
             # The documented historical bug, restored. `taskbar_windows` is
             # ordered bottom-to-top, so the window below the top one is the
             # second from the *end*, not index 1.
             'a_key_release_only_ends_the_window_switcher',
+            'alt_tab_between_two_windows_swaps_them',
+            'stepping_backwards_from_the_end_lands_in_the_list_not_past_it',
         ],
     ),
     (
@@ -19876,11 +19885,13 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a switcher whose window closed under it stays open forever, because the early return skips the close",
         DESK,
         [
-            ('        self.alt_tab_active = false;\n        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;\n',
-             '        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;\n        self.alt_tab_active = false;\n'),
+            ('        self.alt_tab_active = false;\n        let chosen = self\n            .switcher_windows()\n            .get(self.alt_tab_index)\n            .map(|w| w.id);\n',
+             '        let chosen = Some(self\n            .switcher_windows()\n            .get(self.alt_tab_index)\n            .map(|w| w.id)?);\n        self.alt_tab_active = false;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `finish_alt_tab` reads the choice after closing;
+            # this returns before closing, as the old code did.
             # Escaped, as predicted, and now closed. The `?` only fires on a
             # stale index, and every fixture reached `finish_alt_tab` through
             # `next_alt_tab`, which wraps and therefore always lands in range.
@@ -19926,41 +19937,47 @@ DEFECTS = [
     ),
     (
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: Shift+Alt+Tab is bound to the forwards cycle, so the two chords do the same thing",
-        DESK,
+        HOTKEYS,
         [
-            ('            (true, false, true, false, Key::Tab) => Some(Self::CycleWindowsBackwards),\n',
-             '            (true, false, true, false, Key::Tab) => Some(Self::CycleWindows),\n'),
+            ('            Hotkey::new(Key::Tab, mods(false, true, true, false)),\n            HotkeyAction::CycleWindowsBackwards,\n',
+             '            Hotkey::new(Key::Tab, mods(false, true, true, false)),\n            HotkeyAction::CycleWindows,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The shortcut table is the registry's defaults now (hotkeys.rs), cut back to a handful by 1416; this one is still in it.
             'shift_alt_tab_goes_round_the_other_way',
         ],
     ),
     (
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: Alt+F4 is bound to Alt+Super+F4, so plain Alt+F4 falls through to the application",
-        DESK,
+        HOTKEYS,
         [
-            ('            (false, false, true, false, Key::F4) => Some(Self::CloseFocused),\n',
-             '            (false, false, true, true, Key::F4) => Some(Self::CloseFocused),\n'),
+            ('            Hotkey::new(Key::F4, Modifiers::alt()),\n            HotkeyAction::CloseWindow,\n',
+             '            Hotkey::new(Key::F4, mods(false, true, false, true)),\n            HotkeyAction::CloseWindow,\n'),
         ],
         ["desktop"],
         [
-            'alt_f4_asks_the_compositor_to_close_the_focused_window',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The shortcut table is the registry's defaults now (hotkeys.rs), cut back to a handful by 1416; this one is still in it.
             'a_window_shortcut_with_nothing_focused_asks_for_nothing',
             'alt_f4_asks_the_compositor_and_changes_nothing_itself',
+            'alt_f4_asks_the_compositor_to_close_the_focused_window',
         ],
     ),
     (
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: Super+D maximises the focused window instead of clearing the desktop",
         DESK,
         [
-            ('            (false, false, false, true, Key::D) => Some(Self::ShowDesktop),\n',
-             '            (false, false, false, true, Key::D) => Some(Self::Maximize),\n'),
+            ('            HotkeyAction::ShowDesktop => HotkeyOutcome::ask_all(self.show_desktop_requests()),\n',
+             '            HotkeyAction::ShowDesktop => {\n                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Maximize))\n            }\n'),
         ],
         ["desktop"],
         [
-            'show_desktop_does_not_ask_an_already_minimized_window_to_minimize',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Super+D, Super+arrows and Ctrl+Super+arrows are no longer bound by default (1416), so the defect moves to what the action does once bound, which is what the tests press.
             'a_refused_shortcut_does_not_swallow_the_rest_of_the_batch',
+            'show_desktop_does_not_ask_an_already_minimized_window_to_minimize',
             'super_d_asks_for_every_window_to_be_minimised',
             'super_d_minimizes_everything_on_the_current_desktop',
         ],
@@ -19969,53 +19986,60 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: Super+Right tiles the window to the left, so both arrows snap the same way",
         DESK,
         [
-            ('            (false, false, false, true, Key::Right) => Some(Self::SnapRight),\n',
-             '            (false, false, false, true, Key::Right) => Some(Self::SnapLeft),\n'),
+            ('            HotkeyAction::SnapRight => {\n                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapRight))\n',
+             '            HotkeyAction::SnapRight => {\n                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapLeft))\n'),
         ],
         ["desktop"],
         [
-            'super_right_asks_for_a_tile_and_computes_no_geometry',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Super+D, Super+arrows and Ctrl+Super+arrows are no longer bound by default (1416), so the defect moves to what the action does once bound, which is what the tests press.
             'snapping_and_switching_desktops_are_different_shortcuts',
+            'super_right_asks_for_a_tile_and_computes_no_geometry',
         ],
     ),
     (
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: Super+Down maximises rather than walking the window down a step",
         DESK,
         [
-            ('            (false, false, false, true, Key::Down) => Some(Self::RestoreOrMinimize),\n',
-             '            (false, false, false, true, Key::Down) => Some(Self::Maximize),\n'),
+            ('                let want = if restore {\n                    ShellControlAction::Restore\n                } else {\n                    ShellControlAction::Minimize\n                };\n',
+             '                let _ = restore;\n                let want = ShellControlAction::Maximize;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Super+D, Super+arrows and Ctrl+Super+arrows are no longer bound by default (1416), so the defect moves to what the action does once bound, which is what the tests press.
             'super_down_restores_a_maximized_window_and_minimizes_any_other',
         ],
     ),
     (
         "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Super+Right binding stops naming Ctrl, and swallows Ctrl+Super+Right the way it used to",
-        DESK,
+        HOTKEYS,
         [
-            ('            (false, false, false, true, Key::Right) => Some(Self::SnapRight),\n',
-             '            (false, _, false, true, Key::Right) => Some(Self::SnapRight),\n'),
+            ('            Key::LeftSuper | Key::RightSuper => super_key = false,\n            _ => {}\n',
+             '            Key::LeftSuper | Key::RightSuper => super_key = false,\n            Key::Right => ctrl = false,\n            _ => {}\n'),
         ],
         ["desktop"],
         [
-            'desktop_navigation_stops_at_both_ends',
-            'switching_desktop_names_no_window',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A binding is an exact chord in a registry now, so a pattern cannot wildcard a modifier; the loosening lives in `Hotkey::normalized`, which every press goes through.
             # The exact bug the whole match-the-full-chord table exists to
             # prevent, reintroduced on the right-hand side.
+            'desktop_navigation_stops_at_both_ends',
             'snapping_and_switching_desktops_are_different_shortcuts',
+            'switching_desktop_names_no_window',
         ],
     ),
     (
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the same loosening on the left-hand side: Ctrl+Super+Left snaps instead of switching desktop",
-        DESK,
+        HOTKEYS,
         [
-            ('            (false, false, false, true, Key::Left) => Some(Self::SnapLeft),\n',
-             '            (false, _, false, true, Key::Left) => Some(Self::SnapLeft),\n'),
+            ('            Key::LeftSuper | Key::RightSuper => super_key = false,\n            _ => {}\n',
+             '            Key::LeftSuper | Key::RightSuper => super_key = false,\n            Key::Left => ctrl = false,\n            _ => {}\n'),
         ],
         ["desktop"],
         [
-            'switching_desktop_names_no_window',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A binding is an exact chord in a registry now, so a pattern cannot wildcard a modifier; the loosening lives in `Hotkey::normalized`, which every press goes through.
             # Predicted escape, and the interesting one: the table's own
             # regression test presses Ctrl+Super+*Right* and never
             # Ctrl+Super+Left. `desktop_navigation_stops_at_both_ends` does press
@@ -20023,19 +20047,22 @@ DEFECTS = [
             # nothing', and a snap request on a shell with no focused window is
             # also nothing. The two answers coincide at exactly the one point
             # the suite looks at.
+            'switching_desktop_names_no_window',
         ],
     ),
     (
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: Ctrl+Super+Left goes to the next desktop, so both chords go the same way",
         DESK,
         [
-            ('            (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),\n',
-             '            (false, true, false, true, Key::Left) => Some(Self::NextDesktop),\n'),
+            ('            HotkeyAction::PreviousDesktop => {\n                HotkeyOutcome::ask(self.previous_desktop().and_then(|d| self.switch_desktop(d)))\n',
+             '            HotkeyAction::PreviousDesktop => {\n                HotkeyOutcome::ask(self.next_desktop().and_then(|d| self.switch_desktop(d)))\n'),
         ],
         ["desktop"],
         [
-            'switching_desktop_names_no_window',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Super+D, Super+arrows and Ctrl+Super+arrows are no longer bound by default (1416), so the defect moves to what the action does once bound, which is what the tests press.
             'desktop_navigation_stops_at_both_ends',
+            'switching_desktop_names_no_window',
         ],
     ),
     (
@@ -20070,8 +20097,8 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: Super+D asks an already-minimised window to minimise again, which the user must then undo twice",
         DESK,
         [
-            ('                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
-             '                    .filter(|w| w.mapped && w.desktop == self.current_desktop)\n'),
+            ('            .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
+             '            .filter(|w| w.mapped && w.desktop == self.current_desktop)\n'),
         ],
         ["desktop"],
         [
@@ -20089,8 +20116,8 @@ DEFECTS = [
         "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: Super+D minimises every window on every desktop, not just the one on screen",
         DESK,
         [
-            ('                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
-             '                    .filter(|w| w.on_glass())\n'),
+            ('            .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
+             '            .filter(|w| w.on_glass())\n'),
         ],
         ["desktop"],
         [
@@ -20125,14 +20152,16 @@ DEFECTS = [
         "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the taskbar lists every desktop's windows at once",
         DESK,
         [
-            ('            .filter(|w| w.mapped && w.desktop == self.current_desktop)\n',
-             '            .filter(|w| w.mapped)\n'),
+            ('            .filter(|w| w.mapped && w.desktop == self.current_desktop && also(w))\n',
+             '            .filter(|w| w.mapped && also(w))\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The bar, the switcher and the overview share
+            # `listed_windows`.
+            'a_window_is_only_visible_on_its_own_desktop',
             'a_window_list_is_what_says_which_desktop_a_window_is_on',
             'switching_desktop_names_no_window',
-            'a_window_is_only_visible_on_its_own_desktop',
         ],
     ),
     (

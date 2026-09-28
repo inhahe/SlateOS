@@ -257,6 +257,13 @@ fn toml_passes_its_corpus() {
     check("TOML", "toml", 17);
 }
 
+/// **The YAML grammar -- tables, lexers and its large ported scanner --
+/// parses its whole corpus as upstream's does.**
+#[test]
+fn yaml_passes_its_corpus() {
+    check("YAML", "yaml", 95);
+}
+
 /// **The JSON grammar parses its whole corpus as upstream's does.**
 #[test]
 fn json_passes_its_corpus() {

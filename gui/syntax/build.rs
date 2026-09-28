@@ -12,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Every grammar in `grammars/`, by directory.
-const GRAMMARS: &[&str] = &["c", "css", "json", "python", "rust", "toml"];
+const GRAMMARS: &[&str] = &["c", "css", "json", "python", "rust", "toml", "yaml"];
 
 fn main() -> Result<(), Box<dyn Error>> {
     let out = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);

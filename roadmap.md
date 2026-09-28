@@ -2030,8 +2030,8 @@ live.
   build time (`gui/tsgrammar`), external scanners ported by hand; parsing a
   few milliseconds at a time, re-parsing only what an edit touched; colours
   from the grammars' own highlight queries through the theme. **Grammars:**
-  C, CSS, JSON, Python, Rust and TOML, each passing its authors' test
-  corpus. **Next:** YAML (every settings file), Markdown and shell, then
+  C, CSS, JSON, Python, Rust, TOML and YAML (every settings file), each
+  passing its authors' test corpus. **Next:** Markdown and shell, then
   JavaScript and HTML; and injections
   (a language inside another: code blocks in Markdown, doc comments).
 

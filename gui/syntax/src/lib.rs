@@ -119,7 +119,7 @@ impl PartialEq for Language {
 impl Eq for Language {}
 
 /// Every language, by name.
-static LANGUAGES: [Language; 6] = [
+static LANGUAGES: [Language; 7] = [
     Language {
         name: "C",
         extensions: &["c", "h"],
@@ -175,11 +175,20 @@ static LANGUAGES: [Language; 6] = [
         highlights: grammars::toml::HIGHLIGHTS,
         index: 5,
     },
+    Language {
+        name: "YAML",
+        extensions: &["yaml", "yml"],
+        file_names: &[],
+        interpreters: &[],
+        grammar: grammars::yaml::generated::language_fn,
+        highlights: grammars::yaml::HIGHLIGHTS,
+        index: 6,
+    },
 ];
 
 /// Each language's compiled highlight query, made the first time it is
 /// asked for.
-static QUERIES: [OnceLock<Result<tree_sitter::Query, Error>>; 6] = [const { OnceLock::new() }; 6];
+static QUERIES: [OnceLock<Result<tree_sitter::Query, Error>>; 7] = [const { OnceLock::new() }; 7];
 
 impl Language {
     /// Every language the highlighter knows.
@@ -313,6 +322,7 @@ mod tests {
             ("C", Some("c"), 15, 363, 39),
             ("CSS", Some("css"), 15, 151, 0),
             ("TOML", None, 14, 66, 0),
+            ("YAML", None, 14, 301, 2),
             ("JSON", None, 14, 25, 2),
             ("Python", Some("python"), 15, 274, 32),
             ("Rust", Some("rust"), 15, 355, 31),
@@ -360,6 +370,8 @@ mod tests {
         assert_eq!(found("gui/syntax/Cargo.toml"), Some("TOML"));
         assert_eq!(found("stdio.h"), Some("C"));
         assert_eq!(found("site.css"), Some("CSS"));
+        assert_eq!(found("appearance.yaml"), Some("YAML"));
+        assert_eq!(found(".github/ci.YML"), Some("YAML"));
         assert_eq!(found(".rs"), None);
         assert_eq!(found("notes.txt"), None);
         assert_eq!(found("rs"), None);

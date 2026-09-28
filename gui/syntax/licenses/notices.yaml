@@ -63,3 +63,9 @@ tree-sitter-toml:
   licence: MIT
   texts:
     - tree-sitter-toml-LICENSE
+
+tree-sitter-yaml:
+  version: 0.7.2
+  licence: MIT
+  texts:
+    - tree-sitter-yaml-LICENSE

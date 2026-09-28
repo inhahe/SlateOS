@@ -715,6 +715,13 @@ pub struct SettingsState {
     /// file somewhere, which is not something this application can be
     /// notified about -- unlike the settings file, which has a watcher.
     font_families: Vec<String>,
+    /// The installed themes -- colour themes and icon packs -- read on
+    /// entering the Themes page, since installing one is a folder appearing
+    /// that nothing here is told about.
+    themes: Vec<appearance::themes::ThemeInfo>,
+    /// Where they are read from: the standard folders, or a scratch pair in a
+    /// test, which must not read the machine's.
+    theme_dirs: appearance::themes::ThemeDirs,
     /// The fixed-pitch families, for the terminal font picker. A subset of
     /// `font_families`, kept separately because the filter is the whole point:
     /// offering the unfiltered list under "Terminal Font" is what breaks a
@@ -835,6 +842,11 @@ pub enum DropdownId {
     AutoLightFrom,
     /// When it turns dark again.
     AutoDarkFrom,
+    /// The colour theme: an installed theme's colours, or the built-in ones
+    /// (`AppearanceSettings::color_theme`, design-decisions §874).
+    ColorTheme,
+    /// The icon theme, chosen apart from the colours (`icon_theme`, §880).
+    IconTheme,
     Resolution,
     RefreshRate,
     Scale,
@@ -891,11 +903,13 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 18] = [
+    pub const FIXED: [Self; 20] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::AutoLightFrom,
         Self::AutoDarkFrom,
+        Self::ColorTheme,
+        Self::IconTheme,
         Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
@@ -968,6 +982,85 @@ impl SettingsState {
         self.mono_families = guitk::text::available_mono_families();
     }
 
+    /// Read the installed themes, the built-in one first.
+    ///
+    /// I/O, and so on entering the Themes page rather than per frame.
+    pub fn refresh_themes(&mut self) {
+        self.themes = appearance::themes::available_in(&self.theme_dirs);
+    }
+
+    /// The listed theme a chosen colour or icon theme is, by its id.
+    fn listed_theme(&self, id: &std::ffi::OsStr) -> Option<&appearance::themes::ThemeInfo> {
+        self.themes.iter().find(|t| t.id.as_os_str() == id)
+    }
+
+    /// A theme's row in the Colors list: its name, and why it cannot be
+    /// chosen when it cannot -- listed rather than left out, so a theme's
+    /// author can see why theirs is not offered.
+    fn color_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_colors() {
+            match (info.has_dark, info.has_light) {
+                (true, false) => format!("{} (dark only)", info.name),
+                (false, true) => format!("{} (light only)", info.name),
+                _ => info.name.clone(),
+            }
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else if info.provides_icons() {
+            // An icon pack: nothing wrong with it, and chosen under Icons.
+            format!("{} -- icons only", info.name)
+        } else {
+            // Read, and setting no colours: the listing leaves `problem` for
+            // a file it could not read, so the reason is said here.
+            format!(
+                "{} -- cannot be used: it {}",
+                info.name,
+                appearance::themes::ThemeError::NoColors
+            )
+        }
+    }
+
+    /// A theme's row in the Icons list.
+    fn icon_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_icons() {
+            info.name.clone()
+        } else {
+            format!("{} -- no icons", info.name)
+        }
+    }
+
+    /// What the page says under the colour theme: that it draws one mode
+    /// only, that high contrast hides it, and why a chosen theme is not in
+    /// use.
+    fn color_theme_notes(&self) -> Vec<String> {
+        let settings = &self.appearance.settings;
+        let mut notes = Vec::new();
+        if let Some(info) = self.listed_theme(settings.color_theme.id())
+            && info.provides_colors()
+        {
+            match (info.has_dark, info.has_light) {
+                (true, false) => notes.push(
+                    "Dark only: this theme is shown dark whichever mode is chosen above."
+                        .to_string(),
+                ),
+                (false, true) => notes.push(
+                    "Light only: this theme is shown light whichever mode is chosen above."
+                        .to_string(),
+                ),
+                _ => {}
+            }
+        }
+        if settings.high_contrast.is_some() && !settings.color_theme.is_built_in() {
+            notes.push(
+                "High contrast is on, so no theme's colours are shown until it is off.".to_string(),
+            );
+        }
+        if let Some(problem) = settings.color_theme.problem() {
+            notes.push(problem.to_string());
+        }
+        notes
+    }
+
     /// Re-read the file associations the File Associations program writes.
     ///
     /// I/O, and so out of [`new`](Self::new) for the reason given above.
@@ -992,6 +1085,9 @@ impl SettingsState {
         self.current_page = page;
         if page == SettingsPage::DefaultApps {
             self.refresh_default_apps();
+        }
+        if page == SettingsPage::Themes {
+            self.refresh_themes();
         }
     }
 
@@ -1464,6 +1560,8 @@ impl SettingsState {
             // Empty for the same reason as `default_apps`: enumerating
             // installed fonts is I/O, and this constructor does none.
             font_families: Vec::new(),
+            themes: Vec::new(),
+            theme_dirs: appearance::themes::ThemeDirs::standard(),
             mono_families: Vec::new(),
             lock_after_minutes: 0,
             lock_clock_seconds: false,
@@ -3970,6 +4068,38 @@ impl SettingsState {
         s.advance(THEME_CARD_HEIGHT);
         s.gap();
 
+        // The colour theme and the icon theme: the installed themes, chosen
+        // here rather than by editing appearance.yaml (lane C,
+        // c-e-a-colour-theme-picker). The accent below applies under any
+        // theme: a theme never sets it.
+        s.section("Theme");
+        let color_name = self
+            .listed_theme(self.appearance.settings.color_theme.id())
+            .map_or_else(
+                || {
+                    std::path::Path::new(self.appearance.settings.color_theme.id())
+                        .shown()
+                        .to_string()
+                },
+                |t| t.name.clone(),
+            );
+        s.dropdown_row("Colors", DropdownId::ColorTheme, &color_name);
+        for note in self.color_theme_notes() {
+            s.note(&note, 28.0);
+        }
+        let icon_name = self
+            .listed_theme(self.appearance.settings.icon_theme.id())
+            .map_or_else(
+                || {
+                    std::path::Path::new(self.appearance.settings.icon_theme.id())
+                        .shown()
+                        .to_string()
+                },
+                |t| t.name.clone(),
+            );
+        s.dropdown_row("Icons", DropdownId::IconTheme, &icon_name);
+        s.gap();
+
         // The automatic mode's hours, where it is chosen. "System (Auto)" is
         // light from one time to the other in the clock's time zone; the hours
         // were a setting with nowhere here to change them (lane C,
@@ -5224,6 +5354,24 @@ impl SettingsState {
                     at,
                 )
             }
+            DropdownId::ColorTheme => {
+                let items = self.themes.iter().map(Self::color_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.color_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::IconTheme => {
+                let items = self.themes.iter().map(Self::icon_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.icon_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
             DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
                 let (current, other) = self.auto_hour_ends(dropdown_id);
                 let choices = Self::auto_time_choices(current, other);
@@ -6332,6 +6480,28 @@ impl SettingsState {
                     self.scale = *scale;
                 }
             }
+            // A theme that cannot be used is listed saying why, and choosing it
+            // changes nothing: its row already says what is wrong.
+            DropdownId::ColorTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_colors()
+                {
+                    self.appearance.settings.color_theme =
+                        appearance::themes::ColorTheme::load_from(&self.theme_dirs, &info.id);
+                }
+            }
+            DropdownId::IconTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_icons()
+                {
+                    self.appearance.settings.icon_theme =
+                        if info.origin == appearance::themes::Origin::BuiltIn {
+                            appearance::icons::IconTheme::built_in()
+                        } else {
+                            appearance::icons::IconTheme::load(&info.id)
+                        };
+                }
+            }
             DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
                 let hours = self.appearance.settings.auto_light_hours;
                 let (current, other) = self.auto_hour_ends(dropdown_id);
@@ -6700,6 +6870,10 @@ fn main() -> ExitCode {
     // The installed font families, for the Fonts page's picker. Once: a font
     // appears by a file being put somewhere, which nothing here is told about.
     state.load_font_families();
+
+    // The installed themes, in case the Themes page is the first shown;
+    // entering it reads them again.
+    state.refresh_themes();
 
     // The screen-lock delay, for the Lock Screen page.
     state.load_lock_delay();
@@ -7127,6 +7301,135 @@ mod tests {
         assert!(
             app.notif.settings.quiet_hours.days[3],
             "it did not come back"
+        );
+    }
+
+    // == The theme picker (lane C, c-e-a-colour-theme-picker) ==================
+
+    /// Every text the window draws.
+    fn drawn_texts(state: &SettingsState) -> Vec<String> {
+        state
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Themes in a scratch directory: one of both modes, one dark only, one
+    /// whose file sets no colours, and an icon pack.
+    fn scratch_themes() -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("settings-themes");
+        let theme = |id: &str, yaml: Option<&str>, icons: bool| {
+            let folder = dir.dir().join(id);
+            std::fs::create_dir_all(&folder).expect("theme folder");
+            if let Some(yaml) = yaml {
+                std::fs::write(folder.join("theme.yaml"), yaml).expect("theme file");
+            }
+            if icons {
+                std::fs::create_dir_all(folder.join("icons")).expect("icons folder");
+            }
+        };
+        theme(
+            "nord",
+            Some(
+                "meta:\n  name: Nord\ncolors:\n  base: \"#2e3440\"\ncolors-light:\n  base: \"#eceff4\"\n",
+            ),
+            false,
+        );
+        theme(
+            "dusk",
+            Some("meta:\n  name: Dusk\ncolors:\n  base: \"#101018\"\n"),
+            false,
+        );
+        theme("plain", Some("meta:\n  name: Plain\n"), false);
+        theme("pack", None, true);
+        dir
+    }
+
+    fn themes_state(dir: &scratchdir::ScratchDir) -> SettingsState {
+        let mut app = SettingsState::new();
+        app.theme_dirs = appearance::themes::ThemeDirs {
+            user: Some(dir.dir().to_path_buf()),
+            system: dir.dir().join("no-system-themes"),
+        };
+        app.go_to_page(SettingsPage::Themes);
+        app
+    }
+
+    #[test]
+    fn the_installed_themes_are_listed_and_one_that_cannot_be_used_says_why() {
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        app.show_dropdown(DropdownId::ColorTheme);
+        let items = app.dropdown_layout().expect("a layout").items;
+        assert!(
+            items.len() >= 5,
+            "the built-in theme and four installed: {items:?}"
+        );
+        assert!(items.contains(&"Nord".to_string()), "{items:?}");
+        assert!(items.contains(&"Dusk (dark only)".to_string()), "{items:?}");
+        assert!(
+            items
+                .iter()
+                .any(|i| i.starts_with("Plain -- cannot be used: it sets no colours")),
+            "{items:?}"
+        );
+        assert!(
+            items.iter().any(|i| i.ends_with("-- icons only")),
+            "{items:?}"
+        );
+
+        // Choosing one that cannot be used changes nothing.
+        let before = app.appearance.settings.color_theme.id().to_os_string();
+        let plain = items
+            .iter()
+            .position(|i| i.starts_with("Plain"))
+            .expect("listed");
+        app.apply_dropdown_selection(plain);
+        assert_eq!(app.appearance.settings.color_theme.id(), before.as_os_str());
+    }
+
+    #[test]
+    fn a_chosen_theme_is_the_settings_and_one_mode_themes_say_so() {
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        app.show_dropdown(DropdownId::ColorTheme);
+        let items = app.dropdown_layout().expect("a layout").items;
+        let dusk = items
+            .iter()
+            .position(|i| i.starts_with("Dusk"))
+            .expect("listed");
+        app.apply_dropdown_selection(dusk);
+        assert_eq!(
+            app.appearance.settings.color_theme.id(),
+            std::ffi::OsStr::new("dusk")
+        );
+        assert_eq!(app.appearance.settings.color_theme.problem(), None);
+        let texts = drawn_texts(&app);
+        assert!(
+            texts.iter().any(|t| t.starts_with("Dark only")),
+            "a dark-only theme does not say so: {texts:?}"
+        );
+
+        app.show_dropdown(DropdownId::IconTheme);
+        let icons = app.dropdown_layout().expect("a layout").items;
+        let pack = icons
+            .iter()
+            .position(|i| i == "pack")
+            .expect("the pack is listed");
+        app.apply_dropdown_selection(pack);
+        assert_eq!(
+            app.appearance.settings.icon_theme.id(),
+            std::ffi::OsStr::new("pack")
+        );
+        assert_eq!(
+            app.appearance.settings.color_theme.id(),
+            std::ffi::OsStr::new("dusk"),
+            "choosing icons changed the colours"
         );
     }
 
@@ -8910,6 +9213,13 @@ mod tests {
         // And the automatic mode's hours, which are beside "System (Auto)"
         // only when it is the mode chosen.
         state.appearance.settings.theme_mode = ThemeMode::System;
+        // The themes list, from folders that do not exist: the built-in
+        // theme alone, and nothing of the machine running the test read.
+        state.theme_dirs = appearance::themes::ThemeDirs {
+            user: None,
+            system: std::path::PathBuf::from("/nonexistent/slateos-test/themes"),
+        };
+        state.refresh_themes();
         // And the two font pickers, which are drawn only when the system has
         // families to offer -- a chooser with nothing in it reads as broken,
         // so the page says so in a note instead. A test enumerates no fonts,

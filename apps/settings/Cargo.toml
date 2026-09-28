@@ -53,6 +53,8 @@ yamldoc = { path = "../../yamldoc" }
 # Settings binary does not link a display server.
 [dev-dependencies]
 compositor = { path = "../../gui/compositor" }
+# Theme folders for the theme picker's tests, so none of the machine's is read.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 # `settingsfile::testing` -- reached here as `appearance::config::testing` -- for the tests that
 # run against a scratch configuration directory instead of the developer's

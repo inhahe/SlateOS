@@ -477,28 +477,6 @@ pub struct UserAccount {
 // Accessibility types
 // ============================================================================
 
-/// Cursor size option.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CursorSize {
-    Small,
-    Medium,
-    Large,
-    XLarge,
-}
-
-impl CursorSize {
-    const ALL: &[Self] = &[Self::Small, Self::Medium, Self::Large, Self::XLarge];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Small => "Small",
-            Self::Medium => "Medium",
-            Self::Large => "Large",
-            Self::XLarge => "Extra Large",
-        }
-    }
-}
-
 /// Narrator verbosity level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NarratorVerbosity {
@@ -671,7 +649,6 @@ pub struct SettingsState {
     // Accessibility settings
     /// Range stated by [`SliderId::range`], not repeated here.
     pub text_size_percent: u16,
-    pub cursor_size: CursorSize,
     pub reduce_animations: bool,
     pub reduce_transparency: bool,
     pub mono_audio: bool,
@@ -863,6 +840,8 @@ pub enum DropdownId {
     Scale,
     ColorFilter,
     CursorSize,
+    /// The pointer's colours: `appearance.yaml`'s `cursors.scheme`.
+    CursorScheme,
     NarratorVerbosity,
     HighContrast,
     /// How the desktop picture is placed on the screen.
@@ -912,7 +891,7 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 17] = [
+    pub const FIXED: [Self; 18] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::AutoLightFrom,
@@ -923,6 +902,7 @@ impl DropdownId {
         Self::Scale,
         Self::ColorFilter,
         Self::CursorSize,
+        Self::CursorScheme,
         Self::NarratorVerbosity,
         Self::HighContrast,
         Self::RotationInterval,
@@ -1459,7 +1439,6 @@ impl SettingsState {
 
             // Accessibility defaults
             text_size_percent: 100,
-            cursor_size: CursorSize::Small,
             reduce_animations: false,
             reduce_transparency: false,
             mono_audio: false,
@@ -4538,10 +4517,20 @@ impl SettingsState {
             DropdownId::HighContrast,
             high_contrast_label(self.appearance.settings.high_contrast),
         );
+        // The pointer's size and colours are `appearance.yaml`'s `cursors.size`
+        // and `cursors.scheme`, the one pair of pointer settings that survives
+        // (design-decisions §872) and what the compositor draws the pointer
+        // from. This dropdown was this app's own four sizes, kept in memory
+        // and saved nowhere.
         s.dropdown_row(
             "Cursor Size",
             DropdownId::CursorSize,
-            self.cursor_size.label(),
+            self.appearance.settings.cursor_size.label(),
+        );
+        s.dropdown_row(
+            "Cursor Colors",
+            DropdownId::CursorScheme,
+            self.appearance.settings.cursor_scheme.label(),
         );
         s.toggle_row(
             "Reduce Animations",
@@ -5348,13 +5337,24 @@ impl SettingsState {
                 (items, sel)
             }
             DropdownId::CursorSize => {
-                let items: Vec<String> = CursorSize::ALL
+                let items: Vec<String> = appearance::CursorSize::ALL
                     .iter()
                     .map(|c| c.label().to_string())
                     .collect();
-                let sel = CursorSize::ALL
+                let sel = appearance::CursorSize::ALL
                     .iter()
-                    .position(|c| *c == self.cursor_size)
+                    .position(|c| *c == self.appearance.settings.cursor_size)
+                    .unwrap_or(0);
+                (items, sel)
+            }
+            DropdownId::CursorScheme => {
+                let items: Vec<String> = appearance::CursorScheme::ALL
+                    .iter()
+                    .map(|c| c.label().to_string())
+                    .collect();
+                let sel = appearance::CursorScheme::ALL
+                    .iter()
+                    .position(|c| *c == self.appearance.settings.cursor_scheme)
                     .unwrap_or(0);
                 (items, sel)
             }
@@ -6430,8 +6430,13 @@ impl SettingsState {
                 }
             }
             DropdownId::CursorSize => {
-                if let Some(size) = CursorSize::ALL.get(index) {
-                    self.cursor_size = *size;
+                if let Some(size) = appearance::CursorSize::ALL.get(index) {
+                    self.appearance.settings.cursor_size = *size;
+                }
+            }
+            DropdownId::CursorScheme => {
+                if let Some(scheme) = appearance::CursorScheme::ALL.get(index) {
+                    self.appearance.settings.cursor_scheme = *scheme;
                 }
             }
             DropdownId::HighContrast => {
@@ -10691,6 +10696,51 @@ mod tests {
         click(&mut state, layout.x + 20.0, layout.y + 1.0);
         assert_eq!(state.resolution_index, 2);
         assert!(state.open_dropdown.is_none());
+    }
+
+    /// **The pointer's size and colours are the appearance settings the
+    /// compositor reads**: every size appearance offers, Huge and Giant
+    /// included, and each choice reaching `appearance.yaml`.
+    #[test]
+    fn the_cursor_size_and_colours_reach_the_file_the_compositor_reads() {
+        appearance::config::testing::with_scratch_config("settings-cursor", |root| {
+            let mut app = SettingsState::new();
+            app.current_page = SettingsPage::Visual;
+            app.show_dropdown(DropdownId::CursorSize);
+            let items = app.dropdown_layout().expect("a layout").items;
+            let offered: Vec<String> = appearance::CursorSize::ALL
+                .iter()
+                .map(|c| c.label().to_string())
+                .collect();
+            assert_eq!(items, offered, "not every size appearance has is offered");
+            let giant = items
+                .iter()
+                .position(|l| l.starts_with("Giant"))
+                .expect("Giant is offered");
+            app.apply_dropdown_selection(giant);
+            assert_eq!(
+                app.appearance.settings.cursor_size,
+                appearance::CursorSize::Giant
+            );
+
+            app.show_dropdown(DropdownId::CursorScheme);
+            let schemes = app.dropdown_layout().expect("a layout").items;
+            let inverted = schemes
+                .iter()
+                .position(|l| l == "Inverted")
+                .expect("Inverted is offered");
+            app.apply_dropdown_selection(inverted);
+
+            // What handle_event does after a change; the auto-hide test drives
+            // that path end to end.
+            app.save_appearance();
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "nothing was written to {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(saved.cursor_size, appearance::CursorSize::Giant);
+            assert_eq!(saved.cursor_scheme, appearance::CursorScheme::Inverted);
+        });
     }
 
     #[test]

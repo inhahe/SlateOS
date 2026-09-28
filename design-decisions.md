@@ -42154,7 +42154,7 @@ pair of 26 special values per part, random points at every magnitude, and
 points crowding the branch points and `|z| = 1` -- requiring Annex G's
 special values (infinities, NaNs, signed zeros) to match glibc's exactly and
 the rest to lie within a few ulp (`posix/src/complex.rs` tests; the harness is
-`dlm/oracle/complex_harness.py`, lane D's scratch). A line mistranslated in a
+`posix/tools/oracle/complex_harness.py`). A line mistranslated in a
 branch shows up as a run of mismatches in the region the branch covers.
 
 **Not done:** the `long double` functions (`cabsl` ...), which need 80-bit

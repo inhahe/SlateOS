@@ -174828,7 +174828,7 @@ and disagreed with glibc at the edges programs meet:
 **Fix.** glibc 2.40's `inet_aton_end`, `inet_pton4`/`inet_pton6`,
 `inet_ntop4`/`inet_ntop6`, `inet_network`, the classful helpers and the
 `ether_*` functions, ported. The tests replay glibc 2.39's answers for 186
-inputs (`dlm/oracle/addr_oracle.c`, run under WSL) and compare every one.
+inputs (`posix/tools/oracle/addr_oracle.c`, run under WSL) and compare every one.
 `ether_aton`'s and `inet_ntoa`'s buffers are the calling thread's.
 
 ### [D] D-POSIX-SERVICES-WERE-A-BUILT-IN-TABLE — 2026-09-27 — FIXED 2026-09-27
@@ -174851,7 +174851,7 @@ when there is one, a built-in copy when there is not (design-decisions.md
 §1127), parsed by `files-parse.c`'s rules -- including the service port's
 base-0 number (`0x1f/tcp` is 31) that the macro's argument order gives it.
 The tests replay glibc 2.39's answers to 100 lookups and enumerations over files built to
-exercise the parser (`dlm/oracle/netdb_oracle.c`, run under WSL with those
+exercise the parser (`posix/tools/oracle/netdb_oracle.c`, run under WSL with those
 files in place of `/etc`). A number past 32 bits clamps to `0xffffffff` as
 upstream glibc clamps it; Debian's glibc refuses the line instead (its
 `local-nss-overflow.diff`), so those lines are tested apart.
@@ -174882,7 +174882,7 @@ numbers answered as themselves, then `/etc/hosts` (`multi`, `reorder` and
 `trim` from `host.conf`), then the kernel -- whose failures are reported as
 glibc's DNS module reports them. The tests replay glibc 2.39's answers to 66
 lookups under two `host.conf` files, with the network down
-(`dlm/oracle/hosts_oracle.c`), and its `host.conf` warnings byte for byte.
+(`posix/tools/oracle/hosts_oracle.c`), and its `host.conf` warnings byte for byte.
 
 **What remains.** The kernel's resolver answers one IPv4 address and no
 canonical name: see `requests/d-a-sys-dns-resolve-answers-one-ipv4-address.md`.
@@ -174907,7 +174907,7 @@ canonical name: see `requests/d-a-sys-dns-resolve-answers-one-ipv4-address.md`.
 **Fix.** glibc 2.40's `getaddrinfo` and `getnameinfo`, ported, over the hosts
 database (§1128), with RFC 3484 sorting and `/etc/gai.conf` (§1129). The
 tests replay glibc 2.39's answers to 100 calls under two `gai.conf` files, on
-a sandbox with one IPv4 address and no IPv6 (`dlm/oracle/gai_oracle.c`).
+a sandbox with one IPv4 address and no IPv6 (`posix/tools/oracle/gai_oracle.c`).
 
 ### [D] D-POSIX-GETSOCKNAME-SAID-0.0.0.0-AFTER-CONNECT — 2026-09-27 — FIXED 2026-09-27
 
@@ -174934,7 +174934,7 @@ say which it used.
 
 **What it was.** `getifaddrs` listed one `AF_INET` entry per interface that
 had an address.  glibc 2.39's list, printed field by field in network
-sandboxes shaped like this system (`dlm/oracle/ifaddrs_oracle.c`: `lo`, and a
+sandboxes shaped like this system (`posix/tools/oracle/ifaddrs_oracle.c`: `lo`, and a
 veth named `eth0` with QEMU's MAC), differs in four ways:
 
 | | Was | glibc (now) |
@@ -175000,7 +175000,7 @@ wide `scanf` -- did not exist, so a program that reads wide text with them
 did not link.  They are glibc's now: the `scanf` engine, written once over a
 character unit as glibc compiles `vfscanf-internal.c` twice
 (design-decisions.md §1131).  The tests replay glibc 2.39's answers for 78
-`swscanf` calls and seven stream cases (`dlm/oracle/wscanf_harness.py`,
+`swscanf` calls and seven stream cases (`posix/tools/oracle/wscanf_harness.py`,
 `wscanf_stream_oracle.c`).
 
 **Two byte-path answers the oracle showed were not glibc's**, fixed in the
@@ -175125,7 +175125,7 @@ glibc's `errno` (design-decisions §1132).
 **Where:** `posix/src/math.rs` (the C ABI and glibc's `errno` rules),
 `posix/vendor/libm` (the implementations, vendored as published).
 **Tests:** `math::tests::every_answer_is_glibcs_or_within_its_error` replays
-23,113 calls answered by glibc 2.39 under WSL (`dlm/oracle/math_harness.py`).
+23,113 calls answered by glibc 2.39 under WSL (`posix/tools/oracle/math_harness.py`).
 
 ## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: OPEN (`<fenv.h>` done 2026-09-27: posix/src/fenv.rs, glibc's x86-64 fenv; `<complex.h>` done 2026-09-28 but for its `long double` functions: posix/src/complex.rs, FreeBSD's msun; the `long double` functions done 2026-09-28: posix/src/mathl.rs, §1134; the 22 `long double` complex functions remain)**
 

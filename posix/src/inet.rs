@@ -1024,9 +1024,10 @@ mod tests {
         );
     }
 
-    /// glibc 2.39's answers, from `addr_oracle.c` run under WSL: the
+    /// glibc 2.39's answers (`posix/tools/oracle/addr_harness.py`): the
     /// input (`s` text, `a6`/`a4` address bytes, `mk` net host, `e`
-    /// Ethernet bytes -- all hex) and the line it printed.
+    /// Ethernet bytes, `el` an ethers line -- all hex) and the line
+    /// `addr_oracle.c` printed.
     const GLIBC: &[(&str, &str)] = &[
         (
             "s 312e322e332e34",

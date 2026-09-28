@@ -1,4 +1,4 @@
-# glibc 2.39 libm under WSL (dlm/oracle/math_harness.py), one call a line:
+# glibc 2.39 libm under WSL (posix/tools/oracle/math_harness.py), one call a line:
 # <function> <inputs> = <outputs> <errno>; floats as bit patterns in hex.
 fabs 0000000000000000 = 0000000000000000 0
 fabs 8000000000000000 = 0000000000000000 0

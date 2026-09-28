@@ -1923,7 +1923,7 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // glibc 2.39, call by call (dlm/oracle/complex_harness.py)
+    // glibc 2.39, call by call (posix/tools/oracle/complex_harness.py)
     // -----------------------------------------------------------------------
 
     /// The glibc oracle's table: one call a line, `<function> <re> <im>

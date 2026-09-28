@@ -1,11 +1,9 @@
 """glibc 2.39's `long double` <math.h> as the oracle for posix/src/mathl.rs.
 
-    python posix/tools/oracle/mathl_harness.py
+    python posix/tools/oracle/mathl_harness.py   # writes posix/src/mathl_oracle.txt
 
-Generates a C program, builds it with gcc under WSL (which must have glibc
-2.39 -- Ubuntu 24.04's), runs it there, and writes posix/src/mathl_oracle.txt,
-which the tests in posix/src/mathl.rs replay. The cases are drawn from a
-seeded generator, so a rerun on the same glibc writes the same file.
+The cases are drawn from a seeded generator, so a rerun on the same glibc
+writes the same file.
 
 One call a line:
 
@@ -21,14 +19,14 @@ neither fold a call nor substitute its own answer.
 import math
 import random
 import struct
-import subprocess
 import sys
-import tempfile
 from fractions import Fraction
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-OUT = HERE.parent.parent / "src" / "mathl_oracle.txt"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _wsl import POSIX_SRC, run, workdir, wsl_path  # noqa: E402
+
+OUT = POSIX_SRC / "mathl_oracle.txt"
 
 
 def enc(x):
@@ -239,19 +237,11 @@ def gen_c():
     return "\n".join(L) + "\n"
 
 
-def to_wsl(p):
-    t = str(p).replace("\\", "/")
-    return "/mnt/" + t[0].lower() + t[2:]
-
-
 def main():
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "mathl_oracle.c"
-        src.write_text(gen_c(), encoding="utf-8", newline="\n")
-        exe = Path(tmp) / "mathl_oracle"
-        cmd = (f"gcc -O0 -fno-builtin -o '{to_wsl(exe)}' '{to_wsl(src)}' -lm && "
-               f"'{to_wsl(exe)}' > '{to_wsl(OUT)}'")
-        r = subprocess.run(["wsl", "bash", "-lc", cmd], capture_output=True, text=True)
+    with workdir() as tmp:
+        (Path(tmp) / "mathl_oracle.c").write_text(gen_c(), encoding="utf-8", newline="\n")
+        r = run(f"cd {wsl_path(tmp)} && gcc -O0 -fno-builtin -o mathl_oracle mathl_oracle.c -lm "
+                f"&& ./mathl_oracle > '{wsl_path(OUT)}'")
     print(r.stdout[-2000:], r.stderr[-3000:])
     if r.returncode != 0:
         sys.exit("oracle build or run failed")

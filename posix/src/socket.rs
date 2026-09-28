@@ -5576,10 +5576,10 @@ mod tests {
 
     // -- getifaddrs / freeifaddrs, against glibc --
 
-    /// What `dlm/oracle/ifaddrs_oracle.c` printed for glibc 2.39's
+    /// What `posix/tools/oracle/ifaddrs_oracle.c` printed for glibc 2.39's
     /// `getifaddrs` in network sandboxes shaped like this system -- `lo`,
     /// and a veth named `eth0` with QEMU's MAC and DHCP address
-    /// (`dlm/oracle/ifaddrs_run.sh`; the veth's peer left out, IPv6 off).
+    /// (`posix/tools/oracle/ifaddrs_run.sh`; the veth's peer left out, IPv6 off).
     /// `eth0` up, 10.0.2.15/24 with its broadcast address:
     const GLIBC_UP: &[&str] = &[
         "name=lo family=17 flags=0x10049 addr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) netmask=- broadaddr=ll(proto=0,ifindex=1,hatype=772,pkttype=0,halen=6,addr=00:00:00:00:00:00:00:00) data=stats",

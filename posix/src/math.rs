@@ -45,7 +45,7 @@
 //! ## Tested against glibc
 //!
 //! The tests replay 23,113 calls to glibc 2.39 under WSL
-//! (`dlm/oracle/math_harness.py`, table `math_oracle.txt`): bit for bit, with
+//! (`posix/tools/oracle/math_harness.py`, table `math_oracle.txt`): bit for bit, with
 //! `errno`, for everything IEEE fixes exactly (rounding, `fma`, `sqrt`,
 //! `fmod`, `ldexp`, `frexp`, `nextafter` ...), and within a stated distance in
 //! units in the last place for the rest, where glibc and musl use different
@@ -4423,7 +4423,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // glibc 2.39, call by call (dlm/oracle/math_harness.py)
+    // glibc 2.39, call by call (posix/tools/oracle/math_harness.py)
     // -----------------------------------------------------------------------
 
     /// The glibc oracle's table: one call a line, `<function> <inputs> =

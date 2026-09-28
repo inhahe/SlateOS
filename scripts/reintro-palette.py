@@ -446,6 +446,9 @@ DEFECTS = [
             # modes, which is what catches a colour frozen to its dark value.
             'every_colour_a_field_draws_is_its_palettes_in_both_modes',
             'every_colour_the_dialog_draws_comes_from_its_palette',
+            # The login screen draws the same field, focused: swept 2026-09-28.
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
     (
@@ -8068,6 +8071,8 @@ DEFECTS = [
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
+            # The run box draws the same field, wrong: swept 2026-09-28.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
         ],
     ),
     (
@@ -8086,6 +8091,14 @@ DEFECTS = [
             'a_wrong_fields_edge_is_red_whatever_else_is_true',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
+            # Every other field that can be wrong -- the run box, a path bar,
+            # a dialog's input, the code view's find bar -- swept 2026-09-28.
+            'test_not_found_error',
+            'the_input_field_shows_an_error_even_while_it_is_being_fixed',
+            'a_refused_path_leaves_everything_where_it_was',
+            'a_typed_path_the_host_refuses_stays_to_be_corrected',
+            'the_field_is_an_inputs_well_in_both_modes',
+            'the_switches_search_again_and_a_bad_pattern_says_why',
         ],
     ),
     (
@@ -8122,6 +8135,9 @@ DEFECTS = [
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
+            # The run box's well and the drop-down's, swept 2026-09-28.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'the_field_is_an_inputs_well_in_both_modes',
         ],
     ),
     (

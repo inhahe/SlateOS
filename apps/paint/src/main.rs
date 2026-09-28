@@ -2210,12 +2210,14 @@ impl PaintApp {
 
     /// Adds a new transparent layer above the active layer.
     ///
-    /// The layer operations do not go through `push_history` -- they cannot
-    /// be undone, a fault of their own -- so each marks the picture changed
-    /// itself. None is reachable from the window yet (the layers panel takes
-    /// no clicks); the marks are here so they are right when it does.
+    /// Each layer operation is an edit the history keeps, as a stroke is: it
+    /// goes through [`push_history`](Self::push_history) -- which also marks
+    /// the picture changed -- once it knows it will change something, so a
+    /// refused one leaves nothing to undo. They did not, and a layer deleted
+    /// could not be had back. None is reachable from the window yet (the
+    /// layers panel takes no clicks); they are right for when it is.
     pub fn add_layer(&mut self) {
-        self.dirty = true;
+        self.push_history("add layer");
         let idx = self.layers.len();
         let name = format!("Layer {}", idx.saturating_add(1));
         self.layers
@@ -2235,9 +2237,9 @@ impl PaintApp {
         if self.layers.len() <= 1 || self.active_layer >= self.layers.len() {
             return false;
         }
+        self.push_history("delete layer");
         self.layers.remove(self.active_layer);
         self.active_layer = self.active_layer.min(self.layers.len().saturating_sub(1));
-        self.dirty = true;
         true
     }
 
@@ -2245,9 +2247,9 @@ impl PaintApp {
     pub fn move_layer_up(&mut self) -> bool {
         let above = self.active_layer.saturating_add(1);
         if above < self.layers.len() {
+            self.push_history("move layer up");
             self.layers.swap(self.active_layer, above);
             self.active_layer = above;
-            self.dirty = true;
             true
         } else {
             false
@@ -2262,9 +2264,14 @@ impl PaintApp {
         let Some(below) = self.active_layer.checked_sub(1) else {
             return false;
         };
+        // `Vec::swap` panics on an index out of range, and `active_layer` is
+        // a public field: checked here, as `delete_layer` checks it.
+        if self.active_layer >= self.layers.len() {
+            return false;
+        }
+        self.push_history("move layer down");
         self.layers.swap(self.active_layer, below);
         self.active_layer = below;
-        self.dirty = true;
         true
     }
 
@@ -2280,6 +2287,12 @@ impl PaintApp {
         let Some(below) = self.active_layer.checked_sub(1) else {
             return false;
         };
+        // Whether the merge can happen is decided before the history is told
+        // of it, so a refused merge leaves nothing to undo.
+        if self.active_layer >= self.layers.len() {
+            return false;
+        }
+        self.push_history("merge layer down");
         let Some((beneath, from_active)) = self.layers.split_at_mut_checked(self.active_layer)
         else {
             return false;
@@ -2301,7 +2314,6 @@ impl PaintApp {
 
         self.layers.remove(self.active_layer);
         self.active_layer = below;
-        self.dirty = true;
         true
     }
 
@@ -6741,6 +6753,8 @@ mod tests {
         app.active_layer = 7;
         assert!(!app.delete_layer());
         assert_eq!(app.layers.len(), 2, "nothing should have been removed");
+        assert!(app.undo());
+        assert_eq!(app.layers.len(), 1, "the refusal was recorded as an edit");
     }
 
     #[test]
@@ -6750,6 +6764,8 @@ mod tests {
         app.active_layer = 7;
         assert!(!app.merge_layer_down());
         assert_eq!(app.layers.len(), 2, "nothing should have been merged away");
+        assert!(app.undo());
+        assert_eq!(app.layers.len(), 1, "the refusal was recorded as an edit");
     }
 
     #[test]
@@ -6766,6 +6782,65 @@ mod tests {
         assert_eq!(app.layers.len(), 1);
         assert_eq!(app.active_layer, 0);
         assert_eq!(app.layers[0].pixels.get(3, 3).unwrap(), Color::RED);
+    }
+
+    #[test]
+    fn moving_down_with_a_stale_active_index_declines_rather_than_panicking() {
+        let mut app = PaintApp::new(100.0, 100.0);
+        app.add_layer();
+        app.active_layer = 7;
+        assert!(!app.move_layer_down());
+        assert_eq!(app.layers.len(), 2);
+        assert!(app.undo());
+        assert_eq!(app.layers.len(), 1, "the refusal was recorded as an edit");
+    }
+
+    /// **Every layer operation can be undone**, and a layer's pixels come
+    /// back with it. They went round the history, so a layer deleted could
+    /// not be had back.
+    #[test]
+    fn every_layer_operation_can_be_undone() {
+        let mut app = PaintApp::new(20.0, 20.0);
+        app.add_layer();
+        assert_eq!(app.layers.len(), 2);
+        app.layers[1].pixels.set(3, 3, Color::RED);
+        app.dirty = false;
+
+        assert!(app.delete_layer());
+        assert!(app.dirty, "a deletion did not mark the picture");
+        assert!(app.undo());
+        assert_eq!(app.layers.len(), 2, "the deleted layer did not come back");
+        assert_eq!(app.layers[1].pixels.get(3, 3), Some(Color::RED));
+
+        assert!(app.move_layer_down());
+        assert!(app.undo());
+        assert_eq!(app.layers[1].pixels.get(3, 3), Some(Color::RED));
+        assert_eq!(app.active_layer, 1);
+
+        app.active_layer = 0;
+        assert!(app.move_layer_up());
+        assert!(app.undo());
+        assert_eq!(app.layers[1].pixels.get(3, 3), Some(Color::RED));
+
+        app.active_layer = 1;
+        assert!(app.merge_layer_down());
+        assert!(app.undo());
+        assert_eq!(app.layers.len(), 2, "the merged layer did not come back");
+
+        assert!(app.undo(), "adding the layer could not be undone");
+        assert_eq!(app.layers.len(), 1);
+    }
+
+    /// A layer operation that is refused leaves nothing to undo.
+    #[test]
+    fn a_refused_layer_operation_leaves_nothing_to_undo() {
+        let mut app = PaintApp::new(20.0, 20.0);
+        assert!(!app.delete_layer());
+        assert!(!app.move_layer_up());
+        assert!(!app.move_layer_down());
+        assert!(!app.merge_layer_down());
+        assert!(!app.history.can_undo());
+        assert!(!app.dirty);
     }
 
     #[test]

@@ -45,6 +45,7 @@ ALTGR = "altgr_z_does_not_undo"
 SUPER = "alt_z_with_the_windows_key_goes_nowhere"
 STATUS = "the_status_bar_says_whether_undo_and_redo_can_go"
 CAP = "the_history_keeps_the_last_fifty_edits"
+LAYERS = "every_layer_operation_can_be_undone"
 
 MUTATIONS = [
     (
@@ -206,6 +207,82 @@ MUTATIONS = [
         "            history: StateHistory::new(UNDO_LIMIT),",
         "            history: StateHistory::new(UNDO_LIMIT.saturating_add(20)),",
         [CAP],
+    ),
+    # -- the layer operations, edits the history keeps ------------------------
+    (
+        "adding a layer is not recorded",
+        '        self.push_history("add layer");\n',
+        "        self.dirty = true;\n",
+        [LAYERS],
+    ),
+    (
+        "deleting a layer is not recorded",
+        '        self.push_history("delete layer");\n',
+        "        self.dirty = true;\n",
+        [LAYERS],
+    ),
+    (
+        "moving a layer up is not recorded",
+        '            self.push_history("move layer up");\n',
+        "            self.dirty = true;\n",
+        [LAYERS],
+    ),
+    (
+        "moving a layer down is not recorded",
+        '        self.push_history("move layer down");\n',
+        "        self.dirty = true;\n",
+        [LAYERS],
+    ),
+    (
+        "merging a layer down is not recorded",
+        '        self.push_history("merge layer down");\n',
+        "        self.dirty = true;\n",
+        [LAYERS],
+    ),
+    (
+        "a refused deletion is recorded",
+        "        if self.layers.len() <= 1 || self.active_layer >= self.layers.len() {\n"
+        "            return false;\n"
+        "        }\n"
+        '        self.push_history("delete layer");\n',
+        '        self.push_history("delete layer");\n'
+        "        if self.layers.len() <= 1 || self.active_layer >= self.layers.len() {\n"
+        "            return false;\n"
+        "        }\n",
+        ["deleting_a_layer_with_a_stale_active_index_declines_rather_than_panicking"],
+    ),
+    (
+        "a refused move down is recorded",
+        "        if self.active_layer >= self.layers.len() {\n"
+        "            return false;\n"
+        "        }\n"
+        '        self.push_history("move layer down");\n',
+        '        self.push_history("move layer down");\n'
+        "        if self.active_layer >= self.layers.len() {\n"
+        "            return false;\n"
+        "        }\n",
+        ["moving_down_with_a_stale_active_index_declines_rather_than_panicking"],
+    ),
+    (
+        "a move down with a stale index is not refused",
+        "        // a public field: checked here, as `delete_layer` checks it.\n"
+        "        if self.active_layer >= self.layers.len() {\n"
+        "            return false;\n"
+        "        }\n",
+        "        // a public field: checked here, as `delete_layer` checks it.\n",
+        ["moving_down_with_a_stale_active_index_declines_rather_than_panicking"],
+    ),
+    (
+        "a refused merge is recorded",
+        "        if self.active_layer >= self.layers.len() {\n"
+        "            return false;\n"
+        "        }\n"
+        '        self.push_history("merge layer down");\n',
+        '        self.push_history("merge layer down");\n'
+        "        if self.active_layer >= self.layers.len() {\n"
+        "            return false;\n"
+        "        }\n",
+        ["merging_down_with_a_stale_active_index_declines_rather_than_panicking"],
     ),
     # -- pictures of every format --------------------------------------------
     (

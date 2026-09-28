@@ -60,6 +60,7 @@ use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::textinput::TextInput;
+use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -116,7 +117,14 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("PageUp / PageDown", "Move the selected rule up / down"),
     ("Ctrl+Backspace", "Remove every rule"),
     ("Enter", "Rename the selected files"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo the rename"),
+    (
+        "Ctrl+Z / Ctrl+Y",
+        "Undo / redo the rename; Ctrl+Shift+Z redoes too",
+    ),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The names before / after these, on any branch",
+    ),
     ("Ctrl+O", "Open a folder"),
     ("/", "Search the file names"),
     ("Ctrl+E", "Show only one extension"),
@@ -210,7 +218,7 @@ fn find_replace_detail(find: &str, replace: &str, width: f32) -> String {
 
 const MAX_FILES: usize = 10_000;
 const MAX_OPERATIONS: usize = 50;
-const MAX_UNDO: usize = 100;
+const MAX_UNDO: core::num::NonZeroUsize = core::num::NonZeroUsize::MIN.saturating_add(99);
 const MAX_HISTORY: usize = 50;
 
 // ============================================================================
@@ -1055,10 +1063,12 @@ struct RenamerApp {
     files: Vec<FileEntry>,
     /// Active rename operations (applied in order).
     operations: Vec<RenameOp>,
-    /// Undo stack of rename records.
-    undo_stack: Vec<RenameRecord>,
-    /// Redo stack.
-    redo_stack: Vec<RenameRecord>,
+    /// The renames done, kept as a tree: a rename done after undoing starts
+    /// a branch beside what was undone, rather than throwing it away (C-Q24,
+    /// `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go back and forth
+    /// along the branch the folder is on; Alt+Z and Alt+Shift+Z walk every
+    /// set of names it has had, in the order each was made.
+    undo: UndoHistory<RenameRecord>,
     /// The first file row shown.
     ///
     /// Was `scroll_offset: f32`, which nothing but the folder loader ever
@@ -1128,8 +1138,7 @@ impl RenamerApp {
             last_height: WINDOW_HEIGHT_PX as f32,
             files: Vec::new(),
             operations: Vec::new(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            undo: UndoHistory::new(MAX_UNDO),
             file_scroll: 0,
             files_wheel: wheel::Accumulator::default(),
             ops_scroll: 0.0,
@@ -1176,11 +1185,10 @@ impl RenamerApp {
         // what a person wants to run over the next, and opening a folder used
         // to throw them away without a word.
         //
-        // The stacks describe renames in the old folder. Undo across a folder
-        // change would look up names that are not here and silently do
-        // nothing, which reads exactly like an undo that failed.
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        // The history describes renames in the old folder. Undo across a
+        // folder change would look up names that are not here and silently
+        // do nothing, which reads exactly like an undo that failed.
+        self.undo.clear();
         self.selected_file = 0;
         self.file_scroll = 0;
 
@@ -1400,11 +1408,7 @@ impl RenamerApp {
         let (done, failures) = self.perform(&plan);
 
         if done > 0 {
-            self.undo_stack.push(record.clone());
-            if self.undo_stack.len() > MAX_UNDO {
-                self.undo_stack.remove(0);
-            }
-            self.redo_stack.clear();
+            self.undo.record(record.clone());
 
             self.history.push(record);
             if self.history.len() > MAX_HISTORY {
@@ -1504,45 +1508,129 @@ impl RenamerApp {
     /// touched `original_path`, so an undone rename left the path naming the
     /// file it had just been renamed *away* from.
     fn undo(&mut self) {
-        if let Some(record) = self.undo_stack.pop() {
-            let reversed: Vec<(String, String)> = record
-                .renames
-                .iter()
-                .map(|(old, new)| (new.clone(), old.clone()))
-                .collect();
-            let plan = rename_plan(&self.current_names(), &reversed);
-            let (done, failures) = self.perform(&plan);
-
-            // The record goes to the redo stack only if something was undone.
-            // Moving it regardless would offer to redo a rename that never
-            // came back, and the redo would then fail against names that are
-            // still in place.
-            if done > 0 {
-                self.redo_stack.push(record);
-            }
-            self.status_message = match Self::describe(done, &failures) {
-                m if done > 0 && failures.is_empty() => m.replace("Renamed", "Put back"),
-                m => m,
-            };
-            self.apply_operations();
+        let Some(record) = self.undo.undo() else {
+            return;
+        };
+        let (done, failures) = self.put_back(&record);
+        // Nothing came back: the history steps forward again, to where the
+        // files still are, so the undo can be tried again. Left where it was,
+        // it would offer to redo a rename that never came back, and the redo
+        // would fail against names that are still in place.
+        if done == 0 {
+            let _ = self.undo.redo();
         }
+        self.status_message = match Self::describe(done, &failures) {
+            m if done > 0 && failures.is_empty() => m.replace("Renamed", "Put back"),
+            m => m,
+        };
+        self.apply_operations();
     }
 
-    /// Redo the last undone rename.
+    /// Redo the last undone rename, on the branch the folder is on -- the
+    /// one undone out of, or the one made since.
     fn redo(&mut self) {
-        if let Some(record) = self.redo_stack.pop() {
-            let plan = rename_plan(&self.current_names(), &record.renames);
-            let (done, failures) = self.perform(&plan);
-
-            if done > 0 {
-                self.undo_stack.push(record);
-            }
-            self.status_message = match Self::describe(done, &failures) {
-                m if done > 0 && failures.is_empty() => m.replace("Renamed", "Redid"),
-                m => m,
-            };
-            self.apply_operations();
+        let Some(record) = self.undo.redo() else {
+            return;
+        };
+        let (done, failures) = self.do_again(&record);
+        // As in `undo`: a redo that renamed nothing leaves the history where
+        // the files are.
+        if done == 0 {
+            let _ = self.undo.undo();
         }
+        self.status_message = match Self::describe(done, &failures) {
+            m if done > 0 && failures.is_empty() => m.replace("Renamed", "Redid"),
+            m => m,
+        };
+        self.apply_operations();
+    }
+
+    /// Go to the names the folder had before these were first reached, on
+    /// whichever branch -- Alt+Z.
+    fn earlier(&mut self) {
+        let steps = self.undo.earlier();
+        self.travel(
+            steps,
+            "Nothing earlier to go back to",
+            "Back to the names before these",
+        );
+    }
+
+    /// Go to the names first reached after these, on whichever branch --
+    /// Alt+Shift+Z.
+    fn later(&mut self) {
+        let steps = self.undo.later();
+        self.travel(
+            steps,
+            "These are the newest names",
+            "On to the names after these",
+        );
+    }
+
+    /// Carry out a journey through the history, one batch of renames at a
+    /// time, and say what came of it.
+    ///
+    /// **A step that does not go through whole ends the journey and the
+    /// history.** It means the folder has changed outside the renamer, so
+    /// the history no longer describes its files: going on would rename by
+    /// names that are not there, and keeping it would offer the same. It is
+    /// cleared, and the status says why. (A single undo or redo that renames
+    /// nothing is simpler -- one step is put back where the files are.)
+    fn travel(&mut self, steps: Vec<Travel<RenameRecord>>, nowhere: &str, done_note: &str) {
+        if steps.is_empty() {
+            self.status_message = nowhere.to_string();
+            return;
+        }
+        for step in steps {
+            let (done, failures) = match &step {
+                Travel::Undo(record) => self.put_back(record),
+                Travel::Redo(record) => self.do_again(record),
+            };
+            if done == 0 || !failures.is_empty() {
+                self.undo.clear();
+                let why = failures
+                    .first()
+                    .map_or_else(String::new, |f| format!(" {f}"));
+                self.status_message = format!(
+                    "The folder changed outside the renamer, so the undo history no longer \
+                     matched its files and was cleared.{why}"
+                );
+                self.apply_operations();
+                return;
+            }
+        }
+        self.status_message = done_note.to_string();
+        self.apply_operations();
+    }
+
+    /// Rename `record`'s files back to the names they had before it.
+    ///
+    /// Goes through [`rename_plan`]: putting a batch back is itself a batch,
+    /// and reversing a swap or a shifted sequence by walking the pairs in
+    /// stored order clobbers exactly as the forward direction would.
+    fn put_back(&mut self, record: &RenameRecord) -> (usize, Vec<String>) {
+        let reversed: Vec<(String, String)> = record
+            .renames
+            .iter()
+            .map(|(old, new)| (new.clone(), old.clone()))
+            .collect();
+        let plan = rename_plan(&self.current_names(), &reversed);
+        self.perform(&plan)
+    }
+
+    /// Rename `record`'s files to the names it gave them again.
+    fn do_again(&mut self, record: &RenameRecord) -> (usize, Vec<String>) {
+        let plan = rename_plan(&self.current_names(), &record.renames);
+        self.perform(&plan)
+    }
+
+    /// Ctrl+Y or Ctrl+Shift+Z: redo, or nothing to draw when there is none.
+    fn redo_key(&mut self) -> EventResult {
+        if !self.undo.can_redo() {
+            return EventResult::Ignored;
+        }
+        self.redo();
+        EventResult::Consumed
     }
 
     /// The name every file in the list currently has on disk.
@@ -1693,7 +1781,10 @@ impl RenamerApp {
         if self.focus != Focus::List && !matches!(key.key, Key::F1) {
             return self.handle_key_in_box(key);
         }
-        let ctrl = key.modifiers.ctrl;
+        // Ctrl without Alt: Ctrl+Alt is AltGr, which types a letter on
+        // several layouts.
+        let ctrl = key.modifiers.ctrl && !key.modifiers.alt;
+        let alt = key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key;
         match key.key {
             // Panels.
             Key::Tab => {
@@ -1793,20 +1884,25 @@ impl RenamerApp {
                 self.open_folder();
                 EventResult::Consumed
             }
+            // Every set of names the folder has had, in the order each was
+            // made: the way back to a rename undone out of.
+            Key::Z if alt => {
+                if key.modifiers.shift {
+                    self.later();
+                } else {
+                    self.earlier();
+                }
+                EventResult::Consumed
+            }
+            Key::Z if ctrl && key.modifiers.shift => self.redo_key(),
             Key::Z if ctrl => {
-                if self.undo_stack.is_empty() {
+                if !self.undo.can_undo() {
                     return EventResult::Ignored;
                 }
                 self.undo();
                 EventResult::Consumed
             }
-            Key::Y if ctrl => {
-                if self.redo_stack.is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.redo();
-                EventResult::Consumed
-            }
+            Key::Y if ctrl => self.redo_key(),
             // The shortcut list. Before the unguarded `Key::Slash` below,
             // which would otherwise take a shifted slash and open the search
             // box -- a guard narrows only the arm it is on.
@@ -2809,7 +2905,9 @@ enum Focus {
 /// Returns whether the key was an editing key.
 fn edit_text(input: &mut TextInput, key: &KeyEvent) -> bool {
     let shift = key.modifiers.shift;
-    let ctrl = key.modifiers.ctrl;
+    // Ctrl without Alt: Ctrl+Alt is AltGr, and what it types is text -- a
+    // box refused it, and AltGr+A (Polish's ą) selected everything instead.
+    let ctrl = key.modifiers.ctrl && !key.modifiers.alt;
     match key.key {
         Key::Left => input.move_cursor_left(shift, NORMAL_TEXT, FontWeightHint::Regular),
         Key::Right => input.move_cursor_right(shift, NORMAL_TEXT, FontWeightHint::Regular),
@@ -3927,7 +4025,7 @@ impl RenamerApp {
             }
             Target::Rename => self.rename_selected(),
             Target::Undo => {
-                if self.undo_stack.is_empty() {
+                if !self.undo.can_undo() {
                     self.status_message = "Nothing to undo".to_string();
                 } else {
                     self.undo();
@@ -3935,7 +4033,7 @@ impl RenamerApp {
                 EventResult::Consumed
             }
             Target::Redo => {
-                if self.redo_stack.is_empty() {
+                if !self.undo.can_redo() {
                     self.status_message = "Nothing to redo".to_string();
                 } else {
                     self.redo();
@@ -4365,7 +4463,7 @@ mod tests {
             renamed.handle_event(e);
         }
         assert!(
-            !renamed.undo_stack.is_empty(),
+            renamed.undo.can_undo(),
             "nothing was renamed, so the undo state this test needs was never reached"
         );
 
@@ -5249,7 +5347,7 @@ mod tests {
             replace_all: false,
         });
         app.execute_rename();
-        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app.undo.can_undo());
         assert_eq!(app.history.len(), 1);
         // The undo stack used to be pushed whether or not anything happened,
         // which is what made an undo of nothing report "Undid rename of 1
@@ -5268,7 +5366,7 @@ mod tests {
         app.execute_rename();
 
         assert!(
-            app.undo_stack.is_empty(),
+            !app.undo.can_undo(),
             "queued an undo for a rename that did not happen"
         );
         assert!(app.history.is_empty());
@@ -7081,6 +7179,180 @@ mod tests {
         assert!(
             probe::is_visible_sized(&app, Target::Field(Slot::E), size),
             "the last box of the editor cannot be reached"
+        );
+    }
+
+    // ---- the renames as a tree, and the keys (C-Q24, §1416) ----------------
+
+    fn alt_z(shift: bool) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// `a.txt` renamed to `b.txt`, undone, then renamed to `c.txt`.
+    fn a_rename_undone_and_another_done() -> RenamerApp {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        app.undo();
+        assert_eq!(on_disk(&app), vec!["a.txt"]);
+        preview(&mut app, &["c.txt"]);
+        app.execute_rename();
+        assert_eq!(on_disk(&app), vec!["c.txt"]);
+        app
+    }
+
+    /// **A rename done after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z renames the files back
+    /// through every set of names they have had, in the order each was made;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut app = a_rename_undone_and_another_done();
+        assert!(!app.undo.can_redo(), "redo would go onto the branch left");
+        app.handle_event(&alt_z(false));
+        assert_eq!(on_disk(&app), vec!["b.txt"], "the undone rename was lost");
+        app.handle_event(&alt_z(false));
+        assert_eq!(on_disk(&app), vec!["a.txt"]);
+        app.handle_event(&alt_z(false));
+        assert_eq!(app.status_message, "Nothing earlier to go back to");
+        app.handle_event(&alt_z(true));
+        app.handle_event(&alt_z(true));
+        assert_eq!(on_disk(&app), vec!["c.txt"]);
+        app.handle_event(&alt_z(true));
+        assert_eq!(app.status_message, "These are the newest names");
+    }
+
+    /// **A journey through a folder changed outside the renamer ends, and
+    /// the history with it** -- it no longer describes the files, and going
+    /// on would rename by names that are not there.
+    #[test]
+    fn a_journey_through_a_folder_changed_outside_clears_the_history_and_says_so() {
+        let mut app = a_rename_undone_and_another_done();
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::rename(dir.join("c.txt"), dir.join("elsewhere.txt")).expect("rename");
+        app.handle_event(&alt_z(false));
+        assert!(
+            app.status_message.contains("changed outside the renamer"),
+            "{}",
+            app.status_message
+        );
+        assert!(!app.undo.can_undo() && !app.undo.can_redo());
+        assert_eq!(on_disk(&app), vec!["elsewhere.txt"]);
+    }
+
+    /// **An undo that renames nothing can be tried again**, and does not
+    /// offer to redo a rename that never came back.
+    #[test]
+    fn an_undo_that_renames_nothing_can_be_tried_again() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::rename(dir.join("b.txt"), dir.join("moved.txt")).expect("rename");
+        app.undo();
+        assert!(app.undo.can_undo(), "the undo cannot be tried again");
+        assert!(
+            !app.undo.can_redo(),
+            "it offers to redo what never came back"
+        );
+        std::fs::rename(dir.join("moved.txt"), dir.join("b.txt")).expect("rename");
+        app.undo();
+        assert_eq!(on_disk(&app), vec!["a.txt"]);
+    }
+
+    /// And a redo that renames nothing, the same way round.
+    #[test]
+    fn a_redo_that_renames_nothing_can_be_tried_again() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        app.undo();
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::rename(dir.join("a.txt"), dir.join("moved.txt")).expect("rename");
+        app.redo();
+        assert!(app.undo.can_redo(), "the redo cannot be tried again");
+        std::fs::rename(dir.join("moved.txt"), dir.join("a.txt")).expect("rename");
+        app.redo();
+        assert_eq!(on_disk(&app), vec!["b.txt"]);
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(on_disk(&app), vec!["a.txt"]);
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        }));
+        assert_eq!(on_disk(&app), vec!["b.txt"]);
+    }
+
+    /// **AltGr types into a box, and is not Ctrl.** AltGr arrives as
+    /// Ctrl+Alt: the boxes refused what it typed, and AltGr+A -- Polish's ą
+    /// -- selected everything instead.
+    #[test]
+    fn an_altgr_letter_is_typed_into_a_box() {
+        let mut app = app_with(&["a.txt"]);
+        app.handle_event(&press(Key::Slash));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: "\u{105}".to_string(),
+        }));
+        assert_eq!(app.search_text, "\u{105}");
+    }
+
+    /// AltGr+Z in the file list does not undo the rename.
+    #[test]
+    fn altgr_z_does_not_undo_a_rename() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: "\u{17c}".to_string(),
+        }));
+        assert_eq!(on_disk(&app), vec!["b.txt"], "AltGr+Z undid the rename");
+    }
+
+    /// The shortcut list names the new keys.
+    #[test]
+    fn the_shortcut_list_names_the_history_keys() {
+        assert!(SHORTCUTS.iter().any(|(k, _)| *k == "Alt+Z / Alt+Shift+Z"));
+        assert!(
+            SHORTCUTS
+                .iter()
+                .any(|(_, what)| what.contains("Ctrl+Shift+Z"))
         );
     }
 }

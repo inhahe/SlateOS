@@ -165,6 +165,73 @@ MUTATIONS = [
         "                .map_or(0, |_| 0),",
         ["the_history_says_when"],
     ),
+    # -- the renames as a tree, and the keys (C-Q24, §1416) ----------------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(record) => self.put_back(record),",
+        "                Travel::Undo(record) => self.do_again(record),",
+        ["a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.undo.earlier();",
+        "        let steps = self.undo.later();",
+        ["a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "an undo that renamed nothing is left undone",
+        "            let _ = self.undo.redo();",
+        "",
+        ["an_undo_that_renames_nothing_can_be_tried_again"],
+    ),
+    (
+        "a redo that renamed nothing is left redone",
+        "            let _ = self.undo.undo();",
+        "",
+        ["a_redo_that_renames_nothing_can_be_tried_again"],
+    ),
+    (
+        "a journey goes on through a folder changed outside",
+        "            if done == 0 || !failures.is_empty() {",
+        "            if false {",
+        ["a_journey_through_a_folder_changed_outside_clears_the_history_and_says_so"],
+    ),
+    (
+        "a history that no longer matches the files is kept",
+        "                self.undo.clear();\n                let why",
+        "                let why",
+        ["a_journey_through_a_folder_changed_outside_clears_the_history_and_says_so"],
+    ),
+    (
+        "Alt+Z is not a key",
+        "            Key::Z if alt => {",
+        "            Key::Z if false && alt => {",
+        ["a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "                    self.later();",
+        "                    self.earlier();",
+        ["a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "            Key::Z if ctrl && key.modifiers.shift => self.redo_key(),\n",
+        "",
+        ["ctrl_shift_z_redoes"],
+    ),
+    (
+        "AltGr is taken for Ctrl in the list",
+        "        let ctrl = key.modifiers.ctrl && !key.modifiers.alt;",
+        "        let ctrl = key.modifiers.ctrl;",
+        ["altgr_z_does_not_undo_a_rename"],
+    ),
+    (
+        "AltGr is taken for Ctrl in a box",
+        "    let ctrl = key.modifiers.ctrl && !key.modifiers.alt;\n    match key.key {",
+        "    let ctrl = key.modifiers.ctrl;\n    match key.key {",
+        ["an_altgr_letter_is_typed_into_a_box"],
+    ),
 ]
 
 if __name__ == "__main__":

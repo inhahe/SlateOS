@@ -222,6 +222,8 @@ version = "1.8.3"
 name = "battleship"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -294,6 +296,8 @@ dependencies = [
 name = "breakout"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -2094,6 +2098,8 @@ dependencies = [
 name = "match3"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2487,6 +2493,8 @@ dependencies = [
 name = "pacman"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -3831,6 +3839,8 @@ dependencies = [
 name = "towers"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -4193,6 +4203,8 @@ dependencies = [
 name = "yahtzee"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",

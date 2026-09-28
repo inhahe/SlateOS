@@ -203,6 +203,12 @@ MUTATIONS = [
         "        let _ = settings;",
         ["the_caret_is_as_wide_as_the_setting_says"],
     ),
+    (
+        "the compose form stops naming the clipboard keys",
+        "  \\u{00B7}  Ctrl+A: select all  \\u{00B7}  Ctrl+C / Ctrl+X / Ctrl+V: copy, cut, paste",
+        "",
+        ["the_compose_forms_keys_are_all_on_its_line"],
+    ),
 ]
 
 DECODE_MUTATIONS = [

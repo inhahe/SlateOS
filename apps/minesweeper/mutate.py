@@ -949,6 +949,12 @@ MUTATIONS = [
         "            covered: p.mantle,",
         ["covered_and_open_tiles_are_clearly_apart"],
     ),
+    (
+        "the New chip is written in Mocha's text colour whatever the theme",
+        "            \"New\",\n            l.font,\n            c.chrome.title,",
+        "            \"New\",\n            l.font,\n            Color::from_hex(0xCDD6F4),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

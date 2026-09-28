@@ -68,7 +68,10 @@ const TILE_SHADOW: Color = Color::rgba(0, 0, 0, 90);
 const BAMBOO_COLOR: Color = Color::from_hex(0x166534);
 const CIRCLE_COLOR: Color = Color::from_hex(0x1F5AA6);
 const CHARACTER_COLOR: Color = Color::from_hex(0xA30D25);
-const WIND_COLOR: Color = Color::from_hex(0x1E1E2E);
+/// A neutral near-black, not Mocha's base (`1E1E2E`) that it was: the
+/// palette test matches these inks on RGB, and Mocha's base among them would
+/// pass a leftover Mocha page in a light window.
+const WIND_COLOR: Color = Color::from_hex(0x161616);
 const DRAGON_COLOR: Color = Color::from_hex(0x7B2FBE);
 const SEASON_COLOR: Color = Color::from_hex(0x9A3412);
 const FLOWER_COLOR: Color = Color::from_hex(0x0B5E57);

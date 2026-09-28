@@ -646,6 +646,18 @@ MUTATIONS = [
         "            Self::Filled => ABSENT,",
         ["the_grid_shows_the_row_as_it_is_typed"],
     ),
+    (
+        "the page is Mocha's crust whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, CornerRadii::ZERO);",
+        "        fill(&mut f, l.window, Color::from_hex(0x11111B), CornerRadii::ZERO);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a switched-off key is Mocha's grey whatever the theme",
+        "            let fg = if !live {\n                c.chrome.off\n",
+        "            let fg = if !live {\n                Color::from_hex(0x6C7086)\n",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

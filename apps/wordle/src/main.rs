@@ -55,11 +55,16 @@ const CORRECT: Color = Color::from_hex(0xA6E3A1);
 /// Right letter, wrong place.
 const PRESENT: Color = Color::from_hex(0xF9E2AF);
 /// Not in the word. One grey for the tile and the key: they were two.
-const ABSENT: Color = Color::from_hex(0x6C7086);
+///
+/// A neutral grey, not Mocha's overlay0 (`6C7086`) that it was: the palette
+/// test matches the game's own colours on RGB, and a Mocha role among them
+/// would pass that role left over anywhere in a light window. Likewise the
+/// dark ink below is not Mocha's crust.
+const ABSENT: Color = Color::from_hex(0x6E6E6E);
 /// The two inks a letter on an answered tile may take, `(light, dark)`:
 /// whichever reads on the tile. Dark on green and yellow; light on grey,
 /// where the dark ink every answered tile was given could barely be seen.
-const ANSWER_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x11111B));
+const ANSWER_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x161616));
 
 /// The colours this window draws in, from the user's palette.
 #[derive(Clone, Copy, Debug)]

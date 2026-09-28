@@ -90,8 +90,11 @@ const DIGITS: &[(Color, Color)] = &[
     (Color::from_hex(0xB4BEFE), Color::from_hex(0x000080)), // 4 navy
     (Color::from_hex(0xEBA0AC), Color::from_hex(0x800000)), // 5 maroon
     (Color::from_hex(0x94E2D5), Color::from_hex(0x007878)), // 6 teal
-    (Color::from_hex(0xCDD6F4), Color::from_hex(0x000000)), // 7 black
-    (Color::from_hex(0x9399B2), Color::from_hex(0x6E6E6E)), // 8 grey
+    // Neutral greys, not Mocha's text and overlay2 (`CDD6F4`, `9399B2`):
+    // the palette test matches these on RGB, and a Mocha role among them
+    // would pass that role left over anywhere in a light window.
+    (Color::from_hex(0xCCCCCC), Color::from_hex(0x000000)), // 7 black
+    (Color::from_hex(0x999999), Color::from_hex(0x6E6E6E)), // 8 grey
 ];
 
 /// The colours this window draws in, from the user's palette: the page, the

@@ -109,7 +109,11 @@ const TILES: [(u32, Color); 13] = [
 /// ink used to be written on all but the 2 and the 4, which put near-white
 /// numbers on the pale yellow of a 128 and the pale blue of a 2048. Past the
 /// table the face is the board's, and the ink whichever the theme needs.
-const TILE_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x1E1E2E));
+///
+/// The dark ink is a neutral near-black, not Mocha's base: the palette test
+/// matches the game's own colours on RGB, and Mocha's base among them would
+/// pass a leftover Mocha page in a light window.
+const TILE_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x161616));
 
 /// The colours this window draws in: the chrome from the user's palette, the
 /// tiles by value from [`TILES`]. It drew everything from its own copy of

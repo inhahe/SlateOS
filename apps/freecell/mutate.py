@@ -399,6 +399,12 @@ MUTATIONS = [
         "        if self.is_red() {\n            Color::from_hex(0xF38BA8)\n        } else {\n            cards::BLACK\n        }",
         ["test_suit_color"],
     ),
+    (
+        "the felt is Mocha's base whatever the theme",
+        "        fill(&mut f, l.window, c.table.felt, CornerRadii::ZERO);",
+        "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), CornerRadii::ZERO);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

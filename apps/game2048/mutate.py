@@ -994,6 +994,12 @@ MUTATIONS = [
         "                centred(f, r, &body, size, c.tile_face(val), FontWeightHint::Bold);",
         ["every_tiles_number_is_drawn_in_an_ink_that_reads_on_it"],
     ),
+    (
+        "the page is Mocha's base whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

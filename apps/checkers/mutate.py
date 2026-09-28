@@ -419,6 +419,12 @@ MUTATIONS = [
         "            Side::Red => RED_TEXT.0,",
         ["the_marks_on_the_board_read_in_either_theme"],
     ),
+    (
+        "the page is Mocha's surface whatever the theme",
+        "            height: l.window.h,\n            color: c.chrome.page,",
+        "            height: l.window.h,\n            color: Color::from_hex(0x313244),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

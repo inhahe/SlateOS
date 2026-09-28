@@ -441,8 +441,11 @@ pub extern "C" fn __sched_cpucount(setsize: usize, setp: *const CpuSetT) -> i32 
     i32::try_from(count).unwrap_or(i32::MAX)
 }
 
-/// Get the CPU affinity mask for a process: every online CPU, since this
-/// scheduler has no per-thread affinity yet.
+/// Get the CPU affinity mask for a process: every online CPU, which is the
+/// mask every process here has -- nothing a program can call narrows one
+/// (see [`affinity_change`]).  The kernel shell's `taskset`, a debugging
+/// console's command, can; a mask set that way is not seen here.  The process must exist: another pid is looked up,
+/// and `ESRCH` if there is none, as Linux answers.
 ///
 /// Linux 6.6's `SYSCALL_DEFINE3(sched_getaffinity)` and glibc 2.39's wrapper
 /// (sysdeps/unix/sysv/linux/sched_getaffinity.c), in their order:
@@ -460,24 +463,47 @@ pub extern "C" fn __sched_cpucount(setsize: usize, setp: *const CpuSetT) -> i32 
 /// left as it was.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut CpuSetT) -> i32 {
-    // glibc passes `MIN (INT_MAX, cpusetsize)` as the kernel's `unsigned int
-    // len`.
+    let ncpus = online_cpus();
+    let result = affinity_len_ok(cpusetsize, ncpus)
+        .and_then(|()| affinity_target_exists(pid))
+        .and_then(|()| fill_affinity(cpusetsize, mask, ncpus));
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// The CPUs a mask can report: the online ones, as many as a `CpuSetT` holds.
+pub(crate) fn online_cpus() -> usize {
+    online_cpu_count().min(CPU_SETSIZE_BITS)
+}
+
+/// Linux's two length tests for reading a mask, before anything else
+/// (`SYSCALL_DEFINE3(sched_getaffinity)`): `EINVAL` if `cpusetsize` bytes
+/// cannot hold every CPU, or are not a whole number of `unsigned long`s.
+/// glibc passes the kernel `MIN (INT_MAX, cpusetsize)`.
+pub(crate) fn affinity_len_ok(cpusetsize: usize, ncpus: usize) -> Result<(), i32> {
     let len = cpusetsize.min(i32::MAX as usize);
-    let ncpus = online_cpu_count().min(CPU_SETSIZE_BITS);
     if len.saturating_mul(8) < ncpus || len % 8 != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+        return Err(errno::EINVAL);
     }
-    if pid < 0 {
-        // Linux: find_process_by_pid(negative) → NULL → -ESRCH.
-        errno::set_errno(errno::ESRCH);
-        return -1;
-    }
-    // `len` is at least 8 here (a positive multiple of 8, since there is at
-    // least one CPU), so the kernel's copy would touch the mask.
+    Ok(())
+}
+
+/// Write the mask of CPUs `0..ncpus` over `cpusetsize` bytes at `mask` --
+/// what the kernel copies out, and the zeroes glibc writes after it.  `len` is
+/// at least 8 once [`affinity_len_ok`] passed, so the copy touches the mask:
+/// `EFAULT` for a NULL one.
+pub(crate) fn fill_affinity(
+    cpusetsize: usize,
+    mask: *mut CpuSetT,
+    ncpus: usize,
+) -> Result<(), i32> {
     if mask.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
+        return Err(errno::EFAULT);
     }
     let out = mask.cast::<u8>();
     for i in 0..cpusetsize {
@@ -485,7 +511,25 @@ pub extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut CpuS
         // `cpusetsize` bytes, which may be more or fewer than a `CpuSetT`.
         unsafe { out.add(i).write(affinity_byte(i, ncpus)) };
     }
-    0
+    Ok(())
+}
+
+/// Whether `pid` names a process there is, as Linux's `find_process_by_pid`
+/// asks before anything is done with it: the caller by 0 or by its own pid,
+/// another found by `kill(pid, 0)`.  `ESRCH` for none, and for a negative
+/// pid, which is never found.  The caller's `errno` is left as it was.
+fn affinity_target_exists(pid: i32) -> Result<(), i32> {
+    if pid < 0 {
+        return Err(errno::ESRCH);
+    }
+    if pid == 0 || pid == crate::process::getpid() {
+        return Ok(());
+    }
+    let saved = errno::get_errno();
+    let probe = crate::signal::kill(pid, 0);
+    let found = probe == 0 || errno::get_errno() != errno::ESRCH;
+    errno::set_errno(saved);
+    if found { Ok(()) } else { Err(errno::ESRCH) }
 }
 
 /// Byte `i` of a mask holding CPUs `0..ncpus`.
@@ -500,66 +544,30 @@ fn affinity_byte(i: usize, ncpus: usize) -> u8 {
     }
 }
 
-/// Set the CPU affinity mask for a process.
+/// Set the CPU affinity mask for a process -- which here can only be to the
+/// mask it has.
 ///
-/// Validates the mask (non-NULL, sufficient size, at least one valid CPU bit
-/// set) but does not actually constrain scheduling — our scheduler treats all
-/// online CPUs as eligible.  Returns 0 on success, -1 with errno on failure.
+/// Every process runs on every online CPU, and nothing a program can call
+/// narrows that: the scheduler's per-task mask (`Task::cpu_affinity`) is set
+/// only inside the kernel -- its own tasks at spawn, and the kernel shell's
+/// `taskset` debugging command -- the native ABI has no call for it, and the
+/// Linux ABI's `sys_sched_setaffinity` (`kernel/src/syscall/linux.rs`) checks
+/// its arguments and applies nothing.  So a mask holding every online CPU is
+/// already in force and succeeds, and a narrower one is `ENOSYS` -- until
+/// 2026-09-27 it was accepted and ignored, and `taskset` reported pinning a
+/// process that went on running everywhere
+/// (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`).
+/// `ENOSYS` is what glibc answers where the kernel has no such call, and what
+/// hwloc and the OpenMP runtimes take to mean "affinity is not available
+/// here" rather than a failure.  Returns 0 on success, -1 with errno.
 ///
-/// Validation order matches Linux's `SYSCALL_DEFINE3(sched_setaffinity)`
-/// in `kernel/sched/syscalls.c`:
-///   1. `mask` unreadable → `EFAULT` (Linux: `get_user_cpu_mask` calls
-///      `copy_from_user`, which is the first thing the syscall does).
-///   2. `cpusetsize` too small → `EINVAL` (Linux is more forgiving here,
-///      zero-extending undersized masks; we are stricter because our
-///      stub does not zero-pad).
-///   3. `pid` not found → `ESRCH` (Linux: `find_process_by_pid` → NULL →
-///      `-ESRCH`; negative pids fall into this case).
-///   4. Mask has no valid CPU bit → `EINVAL` (Linux: `cpumask_subset`
-///      against `cpus_allowed` returns false).
+/// Linux's order (`SYSCALL_DEFINE3(sched_setaffinity)`, kernel/sched/):
+///   1. `mask` unreadable → `EFAULT`: `get_user_cpu_mask` copies it first.
+///   2. `pid` not found → `ESRCH` (negative pids included).
+///   3. No online CPU in the mask → `EINVAL`.
+///   4. Then the change itself, which is where `ENOSYS` sits.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const CpuSetT) -> i32 {
-    // `get_user_cpu_mask` (kernel/sched/core.c): the kernel's mask is
-    // cleared, then `min(len, cpumask_size())` bytes are copied in -- so a
-    // short mask is zero-extended, not refused, and a NULL one faults only if
-    // a byte is copied.  Until 2026-09-26 a mask shorter than the whole
-    // `cpu_set_t` was EINVAL, "because our stub does not zero-pad", and
-    // Linux's `cpumask_size()` is only as large as the machine's CPUs need:
-    // `sizeof (unsigned long)` is a size Linux programs pass.
-    let mut local = CpuSetT {
-        bits: [0; CPU_SETSIZE_BITS / 64],
-    };
-    let copy = cpusetsize.min(core::mem::size_of::<CpuSetT>());
-    if copy > 0 {
-        if mask.is_null() {
-            errno::set_errno(errno::EFAULT);
-            return -1;
-        }
-        // SAFETY: the caller's contract makes `mask` readable for
-        // `cpusetsize >= copy` bytes, and `local` holds a whole `CpuSetT`.
-        unsafe {
-            core::ptr::copy_nonoverlapping(mask.cast::<u8>(), (&raw mut local).cast::<u8>(), copy);
-        }
-    }
-    if pid < 0 {
-        // Linux: find_process_by_pid(negative) → NULL → -ESRCH.
-        errno::set_errno(errno::ESRCH);
-        return -1;
-    }
-
-    let ncpus = online_cpu_count().min(CPU_SETSIZE_BITS);
-    let any_valid = (0..ncpus).any(|cpu| {
-        local
-            .bits
-            .get(cpu / 64)
-            .is_some_and(|word| word & (1u64 << (cpu % 64)) != 0)
-    });
-
-    if !any_valid {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
     // §314: no capability gate here.  Linux's `sched_setaffinity` calls
     // `check_same_owner(p)` and only falls back to `ns_capable(CAP_SYS_NICE)`
     // when that fails — so the capability is the *alternative*, not the rule.
@@ -572,12 +580,65 @@ pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const Cp
     // it cannot evaluate `check_same_owner` for the cases where the answer is
     // not already obvious, and a test it cannot evaluate is a guess.
     //
-    // This function does not yet reach the kernel (it validates its arguments
-    // and reports success), so there is no syscall answer to defer to either.
-    // When the real call lands it carries the check, as `sys_fs_set_owner`
-    // does for `chown`.
+    // It does not reach the kernel -- there is no call to reach -- so there
+    // is no syscall answer to defer to either.  When the real call lands it
+    // carries the check, as `sys_fs_set_owner` does for `chown`.
+    let result = read_affinity_mask(cpusetsize, mask).and_then(|local| {
+        affinity_target_exists(pid)?;
+        affinity_change(&local, online_cpus())
+    });
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
 
-    0
+/// A caller's mask as the kernel reads one (`get_user_cpu_mask`,
+/// kernel/sched/core.c): cleared, then `min(len, cpumask_size())` bytes
+/// copied in -- so a short mask is zero-extended, not refused, and a NULL one
+/// faults (`EFAULT`) only if a byte is copied.  Until 2026-09-26 a mask
+/// shorter than the whole `cpu_set_t` was `EINVAL`, though
+/// `sizeof (unsigned long)` is a size Linux programs pass.
+pub(crate) fn read_affinity_mask(cpusetsize: usize, mask: *const CpuSetT) -> Result<CpuSetT, i32> {
+    let mut local = CpuSetT {
+        bits: [0; CPU_SETSIZE_BITS / 64],
+    };
+    let copy = cpusetsize.min(core::mem::size_of::<CpuSetT>());
+    if copy > 0 {
+        if mask.is_null() {
+            return Err(errno::EFAULT);
+        }
+        // SAFETY: the caller's contract makes `mask` readable for
+        // `cpusetsize >= copy` bytes, and `local` holds a whole `CpuSetT`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(mask.cast::<u8>(), (&raw mut local).cast::<u8>(), copy);
+        }
+    }
+    Ok(local)
+}
+
+/// What making `mask` a task's affinity would take, with CPUs `0..ncpus`
+/// online: `EINVAL` if it holds none of them, as Linux says of a mask with no
+/// CPU the task may use; nothing, if it holds every one -- the mask every task
+/// already has; and otherwise `ENOSYS`, because confining a task to some CPUs
+/// is a change nothing here can make (see [`sched_setaffinity`]).
+pub(crate) fn affinity_change(mask: &CpuSetT, ncpus: usize) -> Result<(), i32> {
+    let holds = |cpu: usize| {
+        mask.bits
+            .get(cpu / 64)
+            .is_some_and(|word| word & (1u64 << (cpu % 64)) != 0)
+    };
+    if !(0..ncpus).any(holds) {
+        return Err(errno::EINVAL);
+    }
+    if (0..ncpus).all(holds) {
+        Ok(())
+    } else {
+        Err(errno::ENOSYS)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1133,6 +1194,61 @@ mod tests {
         let ret = sched_setaffinity(0, 128, &raw const cpuset);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// With more than one CPU online, a mask naming only some of them is a
+    /// change nothing can make: `ENOSYS`, where it used to be accepted and
+    /// ignored.  Every CPU -- with or without bits past the last -- is the
+    /// mask already in force; none of them is `EINVAL`.
+    #[test]
+    fn test_affinity_change_verdicts() {
+        let mask = |cpus: &[usize]| {
+            let mut m = CpuSetT { bits: [0; 16] };
+            for &c in cpus {
+                cpu_set(i32::try_from(c).unwrap(), &raw mut m);
+            }
+            m
+        };
+        assert_eq!(affinity_change(&mask(&[0, 1, 2, 3]), 4), Ok(()));
+        assert_eq!(affinity_change(&mask(&[0, 1, 2, 3, 9]), 4), Ok(()));
+        assert_eq!(affinity_change(&mask(&[0]), 4), Err(errno::ENOSYS));
+        assert_eq!(affinity_change(&mask(&[1, 3]), 4), Err(errno::ENOSYS));
+        assert_eq!(affinity_change(&mask(&[]), 4), Err(errno::EINVAL));
+        assert_eq!(affinity_change(&mask(&[4, 100]), 4), Err(errno::EINVAL));
+        assert_eq!(affinity_change(&mask(&[0]), 1), Ok(()));
+    }
+
+    /// `sched_setaffinity` reaches the verdict: on the host's one CPU, CPU 0
+    /// is every CPU, so it succeeds; a mask without it holds no CPU at all.
+    #[test]
+    fn test_sched_setaffinity_to_every_cpu_succeeds() {
+        let mut m = CpuSetT { bits: [0; 16] };
+        cpu_set(0, &raw mut m);
+        errno::set_errno(0);
+        assert_eq!(sched_setaffinity(0, 8, &raw const m), 0);
+        assert_eq!(errno::get_errno(), 0);
+        let none = CpuSetT { bits: [0; 16] };
+        assert_eq!(sched_setaffinity(0, 8, &raw const none), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Another process's mask is read only if there is one: on the host the
+    /// probe finds nothing, so `ESRCH` -- where every pid used to answer
+    /// "every CPU".  The caller, by 0 or by its own pid, always answers, and
+    /// the lookup leaves `errno` as it was.
+    #[test]
+    fn test_sched_getaffinity_looks_the_process_up() {
+        let me = crate::process::getpid();
+        let other = if me == 1 { 2 } else { 1 };
+        let mut m = CpuSetT { bits: [0; 16] };
+        errno::set_errno(0);
+        assert_eq!(sched_getaffinity(other, 128, &raw mut m), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+        errno::set_errno(errno::EAGAIN);
+        assert_eq!(sched_getaffinity(me.max(1), 128, &raw mut m), 0);
+        assert_eq!(sched_getaffinity(0, 128, &raw mut m), 0);
+        assert_eq!(errno::get_errno(), errno::EAGAIN, "errno untouched");
+        assert_eq!(m.bits[0], 1, "the host's one CPU");
     }
 
     #[test]
@@ -2904,19 +3020,24 @@ mod tests {
             );
         }
 
-        /// pid > 0 with cap held succeeds.
+        /// Another pid is looked up, cap or no cap: on the host nothing
+        /// answers the probe, so `ESRCH` -- never a success for a process
+        /// that is not there.
         #[test]
         fn test_setaffinity_other_cap_held() {
             assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
-                0,
+                sched_setaffinity(other_pid(), core::mem::size_of::<CpuSetT>(), &m as *const _,),
+                -1,
             );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
         }
 
-        /// pid > 0 without `CAP_SYS_NICE` is not denied by libc (§314).
+        /// Another pid without `CAP_SYS_NICE` is not refused for the want of
+        /// it (§314): it is looked up like any other -- `ESRCH` on the host,
+        /// not `EPERM`.
         #[test]
         fn test_setaffinity_other_no_cap_is_not_libc_denied() {
             let _g = CapGuard::snapshot();
@@ -2924,10 +3045,15 @@ mod tests {
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
-                0,
+                sched_setaffinity(other_pid(), core::mem::size_of::<CpuSetT>(), &m as *const _,),
+                -1,
             );
-            assert_ne!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+        }
+
+        /// A pid that is not the caller's.
+        fn other_pid() -> i32 {
+            if crate::process::getpid() == 1 { 2 } else { 1 }
         }
 
         /// The bug the Phase-207 gate actually had: setting **your own**
@@ -2982,7 +3108,11 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
         }
 
-        /// EINVAL (no valid CPU) takes priority over EPERM.
+        /// EINVAL (no valid CPU) takes priority over EPERM: without
+        /// `CAP_SYS_NICE`, the caller -- which the lookup finds -- is told its
+        /// empty mask is invalid, not that it may not ask.  (Another pid is
+        /// looked up first, and on the host is not found: `ESRCH`, as
+        /// `test_setaffinity_other_no_cap_is_not_libc_denied` shows.)
         #[test]
         fn test_setaffinity_einval_mask_before_eperm() {
             let _g = CapGuard::snapshot();
@@ -2991,7 +3121,7 @@ mod tests {
             let m = CpuSetT { bits: [0u64; 16] };
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
+                sched_setaffinity(0, core::mem::size_of::<CpuSetT>(), &m as *const _,),
                 -1,
             );
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);

@@ -373,10 +373,8 @@ pub(crate) fn abi_asserts() -> String {
         "pthread.h"
     );
     abi!(out, hdrs, crate::semaphore::SemT, "sem_t", "semaphore.h");
-    // Two independent `CpuSetT` definitions exist -- `pthread::CpuSetT` with a
-    // `__bits` field and `sched::CpuSetT` with a `bits` field. Both are
-    // checked, because a duplicate type is exactly the thing that drifts.
-    abi!(out, hdrs, crate::pthread::CpuSetT, "cpu_set_t", "sched.h");
+    // One `cpu_set_t`: pthread.rs's copy, with its `__bits` field, went on
+    // 2026-09-27, and its affinity calls take sched.rs's.
     abi!(out, hdrs, crate::sched::CpuSetT, "cpu_set_t", "sched.h");
 
     // --- regex: `regex_t` is declared by value too ---------------------------

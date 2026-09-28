@@ -135,6 +135,7 @@
 //!   `pthread_mutex_init` refuses them with `ENOTSUP`.
 
 use crate::errno;
+use crate::sched::CpuSetT;
 // The stack floor lives with the other pthread limits; `pthread_attr_setstack`
 // and `pthread_attr_setstacksize` are the only users, and they must agree with
 // it rather than carry a second, hardcoded value of their own.
@@ -4333,76 +4334,11 @@ pub(crate) fn atfork_run_child() {
 // pthread_setaffinity_np / pthread_getaffinity_np — CPU affinity
 // ---------------------------------------------------------------------------
 
-/// CPU set type — bitmask of CPUs.
-///
-/// Matches the Linux `cpu_set_t` layout (1024 bits = 128 bytes on
-/// x86_64).  Each bit corresponds to a CPU number.
-#[repr(C)]
-pub struct CpuSetT {
-    /// Bitmask of CPUs (1024 bits = 128 bytes).
-    pub __bits: [u64; 16],
-}
-
-impl CpuSetT {
-    /// Create an empty CPU set (no CPUs selected).
-    pub fn new() -> Self {
-        // SAFETY: zero-init is valid for CpuSetT.
-        unsafe { core::mem::zeroed() }
-    }
-}
-
-impl Default for CpuSetT {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Set a CPU in the CPU set.
-pub fn cpu_set(cpu: usize, set: &mut CpuSetT) {
-    // `cpu < 1024` ⇒ `cpu / 64 < 16 == set.__bits.len()`.
-    #[allow(clippy::indexing_slicing)]
-    if cpu < 1024 {
-        set.__bits[cpu / 64] |= 1u64 << (cpu % 64);
-    }
-}
-
-/// Clear a CPU in the CPU set.
-pub fn cpu_clr(cpu: usize, set: &mut CpuSetT) {
-    // `cpu < 1024` ⇒ `cpu / 64 < 16 == set.__bits.len()`.
-    #[allow(clippy::indexing_slicing)]
-    if cpu < 1024 {
-        set.__bits[cpu / 64] &= !(1u64 << (cpu % 64));
-    }
-}
-
-/// Test whether a CPU is set in the CPU set.
-pub fn cpu_isset(cpu: usize, set: &CpuSetT) -> bool {
-    // `cpu < 1024` short-circuits before the indexing op, so
-    // `cpu / 64 < 16 == set.__bits.len()` whenever we index.
-    #[allow(clippy::indexing_slicing)]
-    {
-        cpu < 1024 && (set.__bits[cpu / 64] & (1u64 << (cpu % 64))) != 0
-    }
-}
-
-/// Zero all CPUs in the set.
-pub fn cpu_zero(set: &mut CpuSetT) {
-    set.__bits = [0; 16];
-}
-
-/// Count the number of CPUs in the set.
-pub fn cpu_count(set: &CpuSetT) -> i32 {
-    let mut count: i32 = 0;
-    for &word in &set.__bits {
-        count = count.wrapping_add(word.count_ones() as i32);
-    }
-    count
-}
-
-/// Set the CPU affinity mask for a thread.
-///
-/// Stub: returns 0 (success) — our scheduler doesn't support per-thread
-/// affinity yet.  The `cpuset` is accepted but not enforced.
+/// Set the CPU affinity mask for a thread -- which, as for a process
+/// ([`crate::sched::sched_setaffinity`]), can only be to the mask it has:
+/// every online CPU succeeds, a narrower mask is `ENOSYS`, and one with no
+/// online CPU is `EINVAL`.  Until 2026-09-27 any mask of a whole `cpu_set_t`
+/// was accepted and ignored, and a shorter one refused.
 ///
 /// Unlike the rest of this file, `EFAULT` here is the *kernel's* verdict rather
 /// than a substitute for a glibc segfault: glibc's
@@ -4418,22 +4354,20 @@ pub extern "C" fn pthread_setaffinity_np(
     cpusetsize: usize,
     cpuset: *const CpuSetT,
 ) -> i32 {
-    if cpuset.is_null() {
-        return crate::errno::EFAULT;
+    let result = crate::sched::read_affinity_mask(cpusetsize, cpuset)
+        .and_then(|mask| crate::sched::affinity_change(&mask, crate::sched::online_cpus()));
+    match result {
+        Ok(()) => 0,
+        Err(e) => e,
     }
-    // A too-small mask is `EINVAL` on Linux too, but reached the long way
-    // round: the kernel clears the mask, then `__sched_setaffinity` rejects the
-    // resulting empty CPU set.  Same answer, so we short-circuit it.
-    if cpusetsize < core::mem::size_of::<CpuSetT>() {
-        return crate::errno::EINVAL;
-    }
-    // Accept silently — no enforcement.
-    0
 }
 
-/// Get the CPU affinity mask for a thread.
-///
-/// Stub: returns a mask with all CPUs set (no affinity restrictions).
+/// Get the CPU affinity mask for a thread: every online CPU, the mask every
+/// thread has, written as [`crate::sched::sched_getaffinity`] writes it --
+/// the CPUs there are, and zeroes to the end of `cpusetsize` (glibc's
+/// `memset` after the kernel's copy).  Until 2026-09-27 it set all 1024 bits,
+/// CPUs that do not exist included, and refused any mask shorter than a whole
+/// `cpu_set_t`, though Linux takes `CPU_ALLOC_SIZE`'s 8 bytes.
 ///
 /// Both length rejections precede the null check, because glibc's
 /// `__pthread_getaffinity_np` (nptl/pthread_getaffinity.c) forwards straight to
@@ -4447,21 +4381,13 @@ pub extern "C" fn pthread_getaffinity_np(
     cpusetsize: usize,
     cpuset: *mut CpuSetT,
 ) -> i32 {
-    // The kernel spells the second test `len & (sizeof (unsigned long) - 1)`;
-    // `usize` is a power of two wide, so the mask is exactly that subtraction,
-    // and doing it in a `const` keeps `arithmetic_side_effects` quiet.
-    const WORD_MASK: usize = core::mem::size_of::<usize>().wrapping_sub(1);
-    if cpusetsize < core::mem::size_of::<CpuSetT>() || cpusetsize & WORD_MASK != 0 {
-        return crate::errno::EINVAL;
+    let ncpus = crate::sched::online_cpus();
+    let result = crate::sched::affinity_len_ok(cpusetsize, ncpus)
+        .and_then(|()| crate::sched::fill_affinity(cpusetsize, cpuset, ncpus));
+    match result {
+        Ok(()) => 0,
+        Err(e) => e,
     }
-    if cpuset.is_null() {
-        return crate::errno::EFAULT;
-    }
-    // SAFETY: caller guarantees cpuset is valid and big enough.
-    let set = unsafe { &mut *cpuset };
-    // Set all CPUs as available (single-node system).
-    set.__bits = [u64::MAX; 16];
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -7505,77 +7431,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CpuSetT — CPU set operations
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_cpu_set_layout() {
-        // 16 × u64 = 128 bytes = 1024 bits.
-        assert_eq!(core::mem::size_of::<CpuSetT>(), 128);
-    }
-
-    #[test]
-    fn test_cpu_set_and_isset() {
-        let mut set = CpuSetT::new();
-        assert!(!cpu_isset(0, &set));
-        cpu_set(0, &mut set);
-        assert!(cpu_isset(0, &set));
-        assert!(!cpu_isset(1, &set));
-    }
-
-    #[test]
-    fn test_cpu_clr() {
-        let mut set = CpuSetT::new();
-        cpu_set(5, &mut set);
-        assert!(cpu_isset(5, &set));
-        cpu_clr(5, &mut set);
-        assert!(!cpu_isset(5, &set));
-    }
-
-    #[test]
-    fn test_cpu_zero() {
-        let mut set = CpuSetT::new();
-        cpu_set(0, &mut set);
-        cpu_set(63, &mut set);
-        cpu_set(1023, &mut set);
-        cpu_zero(&mut set);
-        assert!(!cpu_isset(0, &set));
-        assert!(!cpu_isset(63, &set));
-        assert!(!cpu_isset(1023, &set));
-    }
-
-    #[test]
-    fn test_cpu_count() {
-        let mut set = CpuSetT::new();
-        assert_eq!(cpu_count(&set), 0);
-        cpu_set(0, &mut set);
-        cpu_set(7, &mut set);
-        cpu_set(100, &mut set);
-        assert_eq!(cpu_count(&set), 3);
-    }
-
-    #[test]
-    fn test_cpu_set_boundary() {
-        // Test first and last CPU in each 64-bit word boundary.
-        let mut set = CpuSetT::new();
-        cpu_set(63, &mut set);
-        assert!(cpu_isset(63, &set));
-        cpu_set(64, &mut set);
-        assert!(cpu_isset(64, &set));
-        cpu_set(1023, &mut set);
-        assert!(cpu_isset(1023, &set));
-    }
-
-    #[test]
-    fn test_cpu_set_out_of_range() {
-        // Out of range (≥ 1024) should be silently ignored.
-        let mut set = CpuSetT::new();
-        cpu_set(1024, &mut set);
-        assert!(!cpu_isset(1024, &set));
-        assert_eq!(cpu_count(&set), 0);
-    }
-
-    // -----------------------------------------------------------------------
     // pthread_setaffinity_np / pthread_getaffinity_np
     // -----------------------------------------------------------------------
 
@@ -7585,19 +7440,27 @@ mod tests {
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
+    /// A short mask is zero-extended, as the kernel reads one: one byte
+    /// holding the host's one CPU is every CPU; one holding none is `EINVAL`.
     #[test]
     fn test_pthread_setaffinity_np_small_size() {
-        let set = CpuSetT::new();
-        let ret = pthread_setaffinity_np(0, 1, &set);
-        assert_eq!(ret, crate::errno::EINVAL);
+        let mut set = empty_set();
+        assert_eq!(pthread_setaffinity_np(0, 1, &set), crate::errno::EINVAL);
+        set.bits[0] = 1;
+        assert_eq!(pthread_setaffinity_np(0, 1, &set), 0);
+        assert_eq!(pthread_setaffinity_np(0, 8, &set), 0);
     }
 
     #[test]
     fn test_pthread_setaffinity_np_success() {
-        let mut set = CpuSetT::new();
-        cpu_set(0, &mut set);
+        let mut set = empty_set();
+        set.bits[0] = 1;
         let ret = pthread_setaffinity_np(0, core::mem::size_of::<CpuSetT>(), &set);
         assert_eq!(ret, 0);
+    }
+
+    fn empty_set() -> CpuSetT {
+        CpuSetT { bits: [0; 16] }
     }
 
     #[test]
@@ -7606,11 +7469,17 @@ mod tests {
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
+    /// One byte is not a whole `unsigned long`: `EINVAL`.  Eight are, and
+    /// hold the host's one CPU, as `CPU_ALLOC_SIZE(1)` asks.
     #[test]
     fn test_pthread_getaffinity_np_small_size() {
-        let mut set = CpuSetT::new();
+        let mut set = empty_set();
         let ret = pthread_getaffinity_np(0, 1, &raw mut set);
         assert_eq!(ret, crate::errno::EINVAL);
+        set.bits = [u64::MAX; 16];
+        assert_eq!(pthread_getaffinity_np(0, 8, &raw mut set), 0);
+        assert_eq!(set.bits[0], 1, "the host's one CPU");
+        assert_eq!(set.bits[1], u64::MAX, "past the 8 bytes, left alone");
     }
 
     /// A length that is not a whole number of `unsigned long`s is `EINVAL` —
@@ -7619,7 +7488,7 @@ mod tests {
     /// `sched_setaffinity`.  See `design-decisions.md` §303.
     #[test]
     fn test_pthread_getaffinity_np_unaligned_size() {
-        let mut set = CpuSetT::new();
+        let mut set = empty_set();
         let unaligned = core::mem::size_of::<CpuSetT>() + 1;
         let ret = pthread_getaffinity_np(0, unaligned, &raw mut set);
         assert_eq!(ret, crate::errno::EINVAL);
@@ -7643,15 +7512,17 @@ mod tests {
         );
     }
 
+    /// The CPUs there are, not all 1024 bits: on the host, CPU 0 alone, and
+    /// every other bit cleared.
     #[test]
-    fn test_pthread_getaffinity_np_returns_all_cpus() {
-        let mut set = CpuSetT::new();
+    fn test_pthread_getaffinity_np_returns_the_online_cpus() {
+        let mut set = CpuSetT {
+            bits: [u64::MAX; 16],
+        };
         let ret = pthread_getaffinity_np(0, core::mem::size_of::<CpuSetT>(), &raw mut set);
         assert_eq!(ret, 0);
-        // All bits should be set.
-        for word in &set.__bits {
-            assert_eq!(*word, u64::MAX);
-        }
+        assert_eq!(set.bits[0], 1);
+        assert!(set.bits[1..].iter().all(|&w| w == 0));
     }
 
     // -----------------------------------------------------------------------

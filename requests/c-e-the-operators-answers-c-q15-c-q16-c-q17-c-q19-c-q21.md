@@ -7,8 +7,12 @@ look through `set_surface_style`, both places. 6 (C-Q25, the export) DONE:
 every field quoted, a byte-exact round trip over every character a password
 can hold, and a warning that names spreadsheets. 1 (C-Q16, the games) UNDER
 WAY: `apps/gamechrome` gives every game its chrome from the palette and the
-toolkit's buttons (§1225); tic-tac-toe and minesweeper are done, the rest
-follow one by one. 2 (C-Q17, five features), 3 (C-Q19, the two warnings --
+toolkit's buttons (§1225), a board's squares, an outline that keeps a piece
+seen on a square its own shade, and the playing cards the four card games
+share. Done by your table, as of 2026-09-28: tic-tac-toe, minesweeper, 2048,
+connect four, wordle, simon, reversi, gomoku, checkers, chess, tetris,
+solitaire, freecell, hearts, spades, mahjong, memory; the rest follow one by
+one. 2 (C-Q17, five features), 3 (C-Q19, the two warnings --
 the calendar has no event-colour picker to warn in yet, so it gets one) and
 4 (C-Q21, the backup schedule's format with lane D) are open.
 

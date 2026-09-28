@@ -2332,9 +2332,19 @@ word; text inside them that says "lane C" is history.
   -- and "try to make the games look as polished as possible". How, §1225:
   `apps/gamechrome` (the chrome's roles from the palette, the toolkit's
   buttons at a game's own size, a second side apart from the accent, a read
-  colour in the shade that reads on its tile), and in each game a
-  `palette_check` guard over its states in both modes. **Done:** tic-tac-toe,
-  minesweeper (2026-09-28). **Next:** the other thirty-three, one commit each.
+  colour in the shade that reads on its tile, a board's two squares, the
+  outline that keeps a piece seen on a square its own shade, and the playing
+  cards every card game shares), and in each game a `palette_check` guard
+  over its states in both modes. **Done** (2026-09-28): tic-tac-toe,
+  minesweeper, 2048, connect four, wordle, simon, reversi, gomoku, checkers,
+  chess, tetris, solitaire, freecell, hearts, spades, mahjong, memory -- each
+  swept. On the way: chess drew black's pieces light in a dark theme;
+  solitaire's and freecell's red suits were 1.6:1 on their faces; gomoku's
+  cursor was 1.04:1 on its wood; a new game in minesweeper, reversi, chess
+  and tetris dropped the user's colours. **Next:** match3, battleship,
+  towers, breakout, pacman, yahtzee, sudoku, crossword, nonogram, wordsearch,
+  asteroids, pong, snake, maze, nim, hangman, lightsout, pinball, sokoban,
+  and the rest, one commit each.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

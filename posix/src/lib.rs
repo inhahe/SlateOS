@@ -99,7 +99,10 @@
 //! - **System**: `uname`
 //! - **Logging**: `openlog`, `syslog`, `closelog`, `setlogmask`
 //! - **User/Group**: `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid`,
-//!   `getlogin`, password/group enumeration
+//!   `getlogin`, password/group enumeration; the account files read from and
+//!   written to a caller's stream (`fgetpwent`, `putpwent`, `fgetgrent`,
+//!   `putgrent`, `fgetspent`, `sgetspent`, `putspent`), `lckpwdf`,
+//!   `cuserid`, `getusershell`, `getpass`
 //! - **Math**: `fabs`, `floor`, `ceil`, `round`, `trunc`, `fmod`,
 //!   `sqrt`, `cbrt`, `hypot`, `pow`, `exp`/`exp2`/`expm1`/`exp10`,
 //!   `log`/`log2`/`log10`/`log1p`, `sin`, `cos`, `tan`, `sincos`,
@@ -336,6 +339,11 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[cfg(test)]
 mod abi_layout;
 
+// Replays glibc's answers for the account-file functions
+// (`posix/tools/oracle/accounts_harness.py`). Test-only.
+#[cfg(test)]
+mod accounts_oracle;
+
 pub mod aio;
 pub mod alloca;
 pub mod assert;
@@ -372,6 +380,7 @@ pub mod fts;
 pub mod ftw;
 pub mod gai;
 pub mod getopt;
+pub mod getpass;
 pub mod glob;
 pub mod hosts;
 pub mod iconv;
@@ -497,6 +506,7 @@ pub mod uchar;
 pub(crate) mod uio;
 pub mod ulimit;
 pub mod unistd;
+pub mod usershell;
 pub mod utime;
 pub mod utmpx;
 pub mod utsname;

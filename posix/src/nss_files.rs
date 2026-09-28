@@ -14,9 +14,9 @@
 //! - **Lines** are `__nss_readline`'s: leading white space is skipped, and
 //!   empty lines and `#` comments are not entries.
 //! - **Fields** are `files-parse.c`'s: `:`-separated strings, a missing one
-//!   empty; numbers are `strtoul` in base 10, clamped to 32 bits as
-//!   `strtou32` clamps them, and a line whose number is malformed is not an
-//!   entry.
+//!   empty; numbers are `strtoull` in base 10, and a line whose number is
+//!   malformed, or past 32 bits as Debian's glibc has it (design-decisions
+//!   §1136), is not an entry.
 //!
 //! Host tests read each database from a per-thread hook instead -- as text,
 //! as missing, or as an error ([`set_test_text`], [`set_test_error`]) --
@@ -39,12 +39,14 @@ pub(crate) enum Which {
     HostConf,
     /// `/etc/gai.conf` -- likewise.
     GaiConf,
+    /// `/etc/shells` -- the login shells `getusershell` lists.
+    Shells,
 }
 
 impl Which {
     /// How many there are: the host tests keep a slot for each.
     #[cfg(test)]
-    const COUNT: usize = 10;
+    const COUNT: usize = 11;
 }
 
 impl Which {
@@ -61,6 +63,7 @@ impl Which {
             Which::Hosts => b"/etc/hosts\0",
             Which::HostConf => b"/etc/host.conf\0",
             Which::GaiConf => b"/etc/gai.conf\0",
+            Which::Shells => b"/etc/shells\0",
         }
     }
 }
@@ -202,8 +205,9 @@ fn read_file(path: &[u8]) -> Result<Db, i32> {
     result.map(|()| Db::Text(text))
 }
 
-/// `__nss_readline`'s entries: each line with its leading white space
-/// skipped, and neither empty nor a `#` comment -- with the offset just past
+/// `__nss_readline`'s entries: each line as glibc's parsers see it -- up to
+/// its first NUL, since they read a C string, with its leading white space
+/// skipped -- and neither empty nor a `#` comment; with the offset just past
 /// it, so enumeration can resume there.
 pub(crate) fn lines(text: &[u8], from: usize) -> impl Iterator<Item = (&[u8], usize)> + Clone {
     let mut at = from;
@@ -218,12 +222,7 @@ pub(crate) fn lines(text: &[u8], from: usize) -> impl Iterator<Item = (&[u8], us
                 None => (rest, text.len()),
             };
             at = next;
-            let start = line
-                .iter()
-                .position(|&b| !is_space(b))
-                .unwrap_or(line.len());
-            let line = line.get(start..).unwrap_or(&[]);
-            if !line.is_empty() && line.first() != Some(&b'#') {
+            if let Some(line) = entry_text(line) {
                 return Some((line, next));
             }
         }
@@ -272,7 +271,9 @@ impl<'a> Fields<'a> {
     /// `INT_FIELD`: a number, which must be followed by `:` (consumed) or by
     /// the end of the line; `None` makes the line no entry.
     pub(crate) fn int(&mut self) -> Option<u32> {
-        let (value, used) = strtou32(self.rest)?;
+        let Number::Fits(value, used) = strtou32(self.rest) else {
+            return None;
+        };
         self.after_number(used)?;
         Some(value)
     }
@@ -285,16 +286,17 @@ impl<'a> Fields<'a> {
             return Err(());
         }
         match strtou32(self.rest) {
-            Some((value, used)) => {
+            Number::Fits(value, used) => {
                 self.after_number(used).ok_or(())?;
                 Ok(Some(value))
             }
-            None => {
+            Number::Absent => {
                 // No digits: the field is empty, and what follows it is
                 // judged as after a number.
                 self.after_number(0).ok_or(())?;
                 Ok(None)
             }
+            Number::PastU32 => Err(()),
         }
     }
 
@@ -305,8 +307,9 @@ impl<'a> Fields<'a> {
             return Err(());
         }
         let (value, used) = match strtou32(self.rest) {
-            Some((v, used)) => (Some(v), used),
-            None => (None, 0),
+            Number::Fits(v, used) => (Some(v), used),
+            Number::Absent => (None, 0),
+            Number::PastU32 => return Err(()),
         };
         if self.rest.len() != used {
             return Err(());
@@ -332,10 +335,27 @@ impl<'a> Fields<'a> {
     }
 }
 
-/// glibc's `strtou32`: `strtoul` in base 10 -- leading white space, a sign,
-/// digits -- clamped to 32 bits. The value and the bytes used, or `None`
-/// when there are no digits (`endp == nptr`).
-pub(crate) fn strtou32(s: &[u8]) -> Option<(u32, usize)> {
+/// What a number field starts with, as [`strtou32`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Number {
+    /// No digits (`endp == nptr`): an empty field, where one may be empty.
+    Absent,
+    /// A number that fits in 32 bits, and the bytes it used.
+    Fits(u32, usize),
+    /// A number past 32 bits -- a negative one among them, which `strtoull`
+    /// negates as unsigned, so anything but `-0`. Debian's glibc makes the
+    /// line no entry (design-decisions §1136).
+    PastU32,
+}
+
+/// The number at the start of a field, as Debian's glibc reads it
+/// (`local-nss-overflow.diff`, in Debian and Ubuntu since 2009): `strtoull`
+/// in base 10 -- leading white space, a sign, digits -- and a value past
+/// `UINT_MAX` refuses the line. Upstream glibc's `strtou32` clamps it to
+/// `0xffffffff` instead, which is `(uid_t) -1`: to `setresuid` that means
+/// "leave unchanged", so a daemon dropping root to such a user would keep
+/// root and be told it had succeeded (design-decisions §1136).
+pub(crate) fn strtou32(s: &[u8]) -> Number {
     let mut i = s.iter().take_while(|&&b| is_space(b)).count();
     let negative = match s.get(i) {
         Some(b'-') => {
@@ -349,29 +369,33 @@ pub(crate) fn strtou32(s: &[u8]) -> Option<(u32, usize)> {
         _ => false,
     };
     let digits = s
-        .get(i..)?
+        .get(i..)
+        .unwrap_or(&[])
         .iter()
         .take_while(|b| b.is_ascii_digit())
         .count();
     if digits == 0 {
-        return None;
+        return Number::Absent;
     }
-    let mut value: u64 = 0;
-    for &d in s.get(i..i + digits)? {
-        // strtoul saturates at ULONG_MAX on overflow.
+    // `None` once the digits overflow 64 bits: strtoull then answers
+    // ULLONG_MAX, unnegated, which is past 32 bits whatever the sign.
+    let mut value = Some(0u64);
+    for &d in s.get(i..i + digits).unwrap_or(&[]) {
         value = value
-            .checked_mul(10)
-            .and_then(|v| v.checked_add(u64::from(d - b'0')))
-            .unwrap_or(u64::MAX);
+            .and_then(|v| v.checked_mul(10))
+            .and_then(|v| v.checked_add(u64::from(d - b'0')));
     }
-    // A negative number is negated as unsigned long: anything but -0 comes
-    // out past 32 bits, and is clamped like any other.
-    let value = if negative {
-        value.wrapping_neg()
-    } else {
-        value
+    // A negative number is negated as unsigned: anything but -0 comes out
+    // past 32 bits.
+    let value = match value {
+        Some(v) if negative => v.wrapping_neg(),
+        Some(v) => v,
+        None => return Number::PastU32,
     };
-    Some((u32::try_from(value).unwrap_or(u32::MAX), i + digits))
+    match u32::try_from(value) {
+        Ok(v) => Number::Fits(v, i + digits),
+        Err(_) => Number::PastU32,
+    }
 }
 
 /// Room for `need` bytes at `buf`, as the `_r` functions have it: `ERANGE`
@@ -725,6 +749,392 @@ pub(crate) unsafe fn next_entry<T>(
 }
 
 // ---------------------------------------------------------------------------
+// The caller's stream: the fgetXXent readers and the putXXent writers
+// ---------------------------------------------------------------------------
+
+/// A line as glibc's parsers see it: a C string, so it ends at its first NUL
+/// -- or at its newline -- with its leading white space skipped; `None` for
+/// a line that is empty then, or a `#` comment (`__nss_readline`).
+fn entry_text(raw: &[u8]) -> Option<&[u8]> {
+    let end = raw
+        .iter()
+        .position(|&b| b == 0 || b == b'\n')
+        .unwrap_or(raw.len());
+    let line = raw.get(..end).unwrap_or(&[]);
+    let from = line
+        .iter()
+        .position(|&b| !is_space(b))
+        .unwrap_or(line.len());
+    let line = line.get(from..).unwrap_or(&[]);
+    (!line.is_empty() && line.first() != Some(&b'#')).then_some(line)
+}
+
+/// The next entry of `stream`, read as glibc's `__nss_fgetent_r` reads it:
+/// line by line -- blank lines and `#` comments passed over, and a line
+/// `place` finds no entry in skipped, with `errno` set to `EINVAL` as
+/// glibc's `__nss_parse_line_result` sets it -- until `place` makes an entry
+/// of one. `Ok` with what `place` made; `Err` with `ENOENT` at the end of the
+/// stream, the stream's own error, or `place`'s.
+///
+/// `place` is also given the line's length as read, newline and all: glibc
+/// reads a line into the caller's buffer, which is too small for it unless
+/// it has two bytes to spare, whatever the line holds.
+///
+/// `place`'s `ERANGE` -- the caller's buffer is too small -- puts the stream
+/// back at the start of the line, so that the next call, with a bigger
+/// buffer, reads the same entry; a stream that cannot seek back is marked in
+/// error and the answer is `ESPIPE`, as glibc's is, since a retry would miss
+/// the entry. The stream is held (`flockfile`) for the whole call.
+///
+/// # Safety
+///
+/// `stream` is an open stream.
+pub(crate) unsafe fn fget_entry<R>(
+    stream: *mut u8,
+    mut place: impl FnMut(&[u8], usize) -> Option<Result<R, i32>>,
+) -> Result<R, i32> {
+    crate::stdio::flockfile(stream.cast());
+    let mut line: *mut u8 = core::ptr::null_mut();
+    let mut cap = 0usize;
+    let result = loop {
+        let start = crate::stdio::ftello(stream);
+        // SAFETY: `line`/`cap` are this call's buffer; the stream the caller's.
+        let got = unsafe { crate::stdio::read_line_as_fgets(&raw mut line, &raw mut cap, stream) };
+        let n = match got {
+            Ok(0) => break Err(errno::ENOENT),
+            Ok(n) => n,
+            // An ERANGE would read as "buffer too small" to the caller, who
+            // would retry for ever: glibc makes it EINVAL.
+            Err(errno::ERANGE) => break Err(errno::EINVAL),
+            Err(e) => break Err(e),
+        };
+        // SAFETY: the read wrote `n` bytes at `line`.
+        let raw = unsafe { core::slice::from_raw_parts(line, n) };
+        let placed = match entry_text(raw) {
+            Some(text) => place(text, n),
+            // Blank or a comment -- but read into the caller's buffer first,
+            // so a long one is too big for a small buffer all the same.
+            None => place(&[], n).filter(|r| matches!(r, Err(e) if *e == errno::ERANGE)),
+        };
+        match placed {
+            None => {
+                if entry_text(raw).is_some() {
+                    errno::set_errno(errno::EINVAL);
+                }
+            }
+            Some(Err(errno::ERANGE)) => {
+                break Err(
+                    if start >= 0
+                        && crate::stdio::fseeko(stream, start, crate::stdio::SEEK_SET) == 0
+                    {
+                        errno::ERANGE
+                    } else {
+                        crate::stdio::set_stream_error(stream);
+                        errno::ESPIPE
+                    },
+                );
+            }
+            Some(other) => break other,
+        }
+    };
+    // SAFETY: the read's block, or NULL.
+    unsafe { crate::malloc::free(line) };
+    crate::stdio::funlockfile(stream.cast());
+    result
+}
+
+/// Whether a buffer of `buflen` bytes holds a line of `len` bytes as glibc's
+/// `__nss_readline` reads it: `fgets` with a marker in the last byte, so the
+/// line needs two to spare.
+fn line_fits(len: usize, buflen: usize) -> bool {
+    len.checked_add(2).is_some_and(|need| need <= buflen)
+}
+
+/// The `fgetXXent_r` functions, over [`fget_entry`]: the entry `take` makes
+/// of the next line, into the caller's structure and buffer. 0 with
+/// `*result` set; `ENOENT` at the end; `ERANGE` (the same entry comes next
+/// time); `ESPIPE` if it cannot; the stream's error. `errno` is set to what
+/// is returned, when that is not 0, as glibc's is.
+///
+/// A NULL stream is `EBADF` (design-decisions §1120) and a NULL `out`, `buf`
+/// or `result` `EFAULT` (§303), where glibc would fault; a `buflen` below
+/// 3 -- a character, its newline and the NUL -- is `ERANGE`, before
+/// anything is read, as glibc's.
+///
+/// # Safety
+///
+/// `stream` is NULL or an open stream; non-null `out` and `result` are
+/// writable, and `buf` writable for `buflen` bytes.
+pub(crate) unsafe fn fget_reentrant<T>(
+    stream: *mut u8,
+    take: impl Fn(&[u8], &mut Room) -> Option<Result<T, i32>>,
+    out: *mut T,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const T,
+) -> i32 {
+    if !result.is_null() {
+        // SAFETY: the caller's, non-null.
+        unsafe { result.write(core::ptr::null()) };
+    }
+    let rc = if stream.is_null() {
+        errno::EBADF
+    } else if buflen < 3 {
+        errno::ERANGE
+    } else if out.is_null() || buf.is_null() || result.is_null() {
+        errno::EFAULT
+    } else {
+        let place = |text: &[u8], len: usize| {
+            if !line_fits(len, buflen) {
+                return Some(Err(errno::ERANGE));
+            }
+            if text.is_empty() {
+                return None;
+            }
+            // SAFETY: the caller gives `buflen` writable bytes at `buf`.
+            let mut room = unsafe { Room::new(buf, buflen) };
+            take(text, &mut room)
+        };
+        // SAFETY: an open stream, the caller's.
+        let got = unsafe { fget_entry(stream, place) };
+        match got {
+            Ok(value) => {
+                // SAFETY: the caller's, checked non-null above.
+                unsafe { deliver(value, out, result) };
+                return 0;
+            }
+            Err(e) => e,
+        }
+    };
+    errno::set_errno(rc);
+    rc
+}
+
+/// The `fgetXXent` functions: the next entry of `stream`, in this process's
+/// `held` storage -- which grows until the entry fits, in `BUFLEN` steps as
+/// glibc's buffer does, with `errno` set to `ERANGE` when it had to, as
+/// glibc's retry leaves it. The line is read once, so unlike glibc's, which
+/// re-reads it after growing and so refuses a stream it cannot seek
+/// (`fgetpos` first), this reads a pipe too. NULL at the end, `errno`
+/// `ENOENT`, or on an error, with its `errno`; a NULL stream is `EBADF`.
+///
+/// # Safety
+///
+/// `stream` is NULL or an open stream; `held` is this process's storage,
+/// used by one call at a time.
+pub(crate) unsafe fn fget_held<T>(
+    stream: *mut u8,
+    held: *mut Held<T>,
+    take: impl Fn(&[u8], &mut Room) -> Option<Result<T, i32>>,
+) -> *const T {
+    if stream.is_null() {
+        errno::set_errno(errno::EBADF);
+        return core::ptr::null();
+    }
+    // SAFETY: this process's storage, used by one call at a time.
+    let h = unsafe { &mut *held };
+    // SAFETY: an open stream, the caller's.
+    let got = unsafe {
+        fget_entry(stream, |text, len| {
+            // The buffer glibc would have read the line into: grown to hold
+            // it, in the steps glibc's retries take.
+            if let Err(e) = h.reserve(len.saturating_add(2)) {
+                return Some(Err(e));
+            }
+            if text.is_empty() {
+                return None;
+            }
+            h.make(|room| take(text, room))
+        })
+    };
+    match got {
+        Ok(p) => p,
+        Err(e) => {
+            errno::set_errno(e);
+            core::ptr::null()
+        }
+    }
+}
+
+impl<T> Held<T> {
+    /// Grow the block to at least `need` bytes, in [`BUFLEN`] steps, with
+    /// `errno` set to `ERANGE` if it grew -- what glibc's retry loop leaves.
+    fn reserve(&mut self, need: usize) -> Result<(), i32> {
+        if !self.buf.is_null() && self.cap >= need {
+            return Ok(());
+        }
+        let steps = need.div_ceil(BUFLEN).max(1);
+        let cap = steps.checked_mul(BUFLEN).ok_or(errno::ENOMEM)?;
+        let first = self.buf.is_null();
+        // SAFETY: `buf` is NULL or this storage's block; kept on failure.
+        let p = unsafe { crate::malloc::realloc(self.buf, cap) };
+        if p.is_null() {
+            return Err(errno::ENOMEM);
+        }
+        self.buf = p;
+        self.cap = cap;
+        if !first || cap > BUFLEN {
+            errno::set_errno(errno::ERANGE);
+        }
+        Ok(())
+    }
+
+    /// The entry `make` fills into this storage's block, growing it a step
+    /// at a time while `make` answers `ERANGE`: a pointer to it, or `None`
+    /// when `make` finds no entry.
+    fn make(
+        &mut self,
+        make: impl Fn(&mut Room) -> Option<Result<T, i32>>,
+    ) -> Option<Result<*const T, i32>> {
+        loop {
+            // SAFETY: `buf` is this storage's block of `cap` bytes.
+            let mut room = unsafe { Room::new(self.buf, self.cap) };
+            match make(&mut room)? {
+                Ok(entry) => {
+                    self.entry = entry;
+                    return Some(Ok(&raw const self.entry));
+                }
+                Err(errno::ERANGE) => {
+                    let Some(more) = self.cap.checked_add(BUFLEN) else {
+                        return Some(Err(errno::ENOMEM));
+                    };
+                    if let Err(e) = self.reserve(more) {
+                        return Some(Err(e));
+                    }
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+}
+
+/// glibc's `__nss_valid_field`: a field a database line can hold -- NULL,
+/// or without `:` and newline, which would end it early.
+pub(crate) fn valid_field(s: *const u8) -> bool {
+    // SAFETY: NULL or the caller's C string.
+    s.is_null()
+        || !unsafe { c_bytes(s) }
+            .iter()
+            .any(|&b| b == b':' || b == b'\n')
+}
+
+/// glibc's `__nss_valid_list_field`: a NULL list, or members none of which
+/// holds `:`, newline or the `,` that separates them.
+///
+/// # Safety
+///
+/// `list` is NULL or a NULL-terminated array of C strings.
+pub(crate) unsafe fn valid_list_field(list: *const *const u8) -> bool {
+    if list.is_null() {
+        return true;
+    }
+    let mut at = list;
+    loop {
+        // SAFETY: the array is NULL-terminated, and `at` has not passed it.
+        let member = unsafe { at.read() };
+        if member.is_null() {
+            return true;
+        }
+        // SAFETY: a member: the caller's C string.
+        if unsafe { c_bytes(member) }
+            .iter()
+            .any(|&b| matches!(b, b':' | b'\n' | b','))
+        {
+            return false;
+        }
+        // SAFETY: not past the terminator, which is still ahead.
+        at = unsafe { at.add(1) };
+    }
+}
+
+/// Writes one entry's fields to a stream, under its lock, remembering
+/// whether any write failed: the `putXXent` functions' `fprintf`s.
+pub(crate) struct EntryWriter {
+    stream: *mut u8,
+    failed: bool,
+}
+
+impl EntryWriter {
+    /// Hold `stream` for the whole entry, so that another thread's writes
+    /// cannot land inside it.
+    pub(crate) fn new(stream: *mut u8) -> Self {
+        crate::stdio::flockfile(stream.cast());
+        Self {
+            stream,
+            failed: false,
+        }
+    }
+
+    /// Write `bytes`.
+    pub(crate) fn bytes(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() || self.failed {
+            return;
+        }
+        // SAFETY: `bytes` is readable; the stream is the caller's, held.
+        let n =
+            unsafe { crate::stdio::fwrite_unlocked(bytes.as_ptr(), 1, bytes.len(), self.stream) };
+        if n != bytes.len() {
+            self.failed = true;
+        }
+    }
+
+    /// Write C string `s`, nothing for NULL: glibc's `_S(x)`.
+    pub(crate) fn c_str_or_empty(&mut self, s: *const u8) {
+        if !s.is_null() {
+            // SAFETY: the caller's C string.
+            self.bytes(unsafe { c_bytes(s) });
+        }
+    }
+
+    /// Write C string `s` with each `:` and newline in it as a space, and
+    /// nothing for NULL: glibc's `__nss_rewrite_field`, which `putpwent`
+    /// applies to the GECOS field rather than refuse it.
+    pub(crate) fn rewritten(&mut self, s: *const u8) {
+        if s.is_null() {
+            return;
+        }
+        // SAFETY: the caller's C string.
+        let text = unsafe { c_bytes(s) };
+        for (i, part) in text.split(|&b| b == b':' || b == b'\n').enumerate() {
+            if i > 0 {
+                self.bytes(b" ");
+            }
+            self.bytes(part);
+        }
+    }
+
+    /// Write `v` in decimal, as `%lu` or `%ld` does.
+    pub(crate) fn int(&mut self, v: i128) {
+        let mut digits = [0u8; 40];
+        let mut at = digits.len();
+        let mut m = v.unsigned_abs();
+        loop {
+            at = at.saturating_sub(1);
+            if let Some(slot) = digits.get_mut(at) {
+                // `m % 10` is a digit.
+                #[allow(clippy::cast_possible_truncation)]
+                let d = (m % 10) as u8;
+                *slot = b'0' + d;
+            }
+            m /= 10;
+            if m == 0 {
+                break;
+            }
+        }
+        if v < 0 {
+            self.bytes(b"-");
+        }
+        self.bytes(digits.get(at..).unwrap_or(&[]));
+    }
+
+    /// Release the stream, and say whether everything was written: 0, or -1.
+    pub(crate) fn finish(self) -> i32 {
+        crate::stdio::funlockfile(self.stream.cast());
+        if self.failed { -1 } else { 0 }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Host tests: a database's text, per thread
 // ---------------------------------------------------------------------------
 
@@ -798,25 +1208,58 @@ mod tests {
     }
 
     #[test]
-    fn strtou32_is_glibcs() {
-        assert_eq!(strtou32(b"42:"), Some((42, 2)));
-        assert_eq!(strtou32(b"  7x"), Some((7, 3)), "leading space is skipped");
-        assert_eq!(strtou32(b"+5"), Some((5, 2)));
-        assert_eq!(strtou32(b"-0"), Some((0, 2)));
+    fn strtou32_is_debians_glibcs() {
+        assert_eq!(strtou32(b"42:"), Number::Fits(42, 2));
         assert_eq!(
-            strtou32(b"-1"),
-            Some((u32::MAX, 2)),
-            "negated as unsigned, clamped"
+            strtou32(b"  7x"),
+            Number::Fits(7, 3),
+            "leading space is skipped"
         );
+        assert_eq!(strtou32(b"+5"), Number::Fits(5, 2));
+        assert_eq!(strtou32(b"05"), Number::Fits(5, 2), "base 10, not octal");
+        assert_eq!(strtou32(b"-0"), Number::Fits(0, 2));
+        assert_eq!(strtou32(b"4294967295"), Number::Fits(u32::MAX, 10));
+        // Past 32 bits: the line is no entry, where upstream would clamp.
+        assert_eq!(strtou32(b"4294967296"), Number::PastU32);
+        assert_eq!(strtou32(b"-1"), Number::PastU32, "negated as unsigned");
         assert_eq!(
-            strtou32(b"4294967296"),
-            Some((u32::MAX, 10)),
-            "clamped to 32 bits"
+            strtou32(b"-4294967295"),
+            Number::PastU32,
+            "strtoull makes it 18446744069414584321, not 1"
         );
-        assert_eq!(strtou32(b"99999999999999999999999"), Some((u32::MAX, 23)));
-        assert_eq!(strtou32(b""), None);
-        assert_eq!(strtou32(b":"), None);
-        assert_eq!(strtou32(b" -"), None);
+        assert_eq!(strtou32(b"18446744073709551615"), Number::PastU32);
+        assert_eq!(
+            strtou32(b"-99999999999999999999999"),
+            Number::PastU32,
+            "an overflow is ULLONG_MAX whatever the sign -- not negated to 1"
+        );
+        assert_eq!(strtou32(b""), Number::Absent);
+        assert_eq!(strtou32(b":"), Number::Absent);
+        assert_eq!(strtou32(b" -"), Number::Absent);
+        assert_eq!(
+            strtou32(b"0x10"),
+            Number::Fits(0, 1),
+            "the 0, then x ends it"
+        );
+    }
+
+    /// A number past 32 bits makes the line no entry, in every kind of number
+    /// field (glibc 2.39 as Debian and Ubuntu build it, asked: the oracle
+    /// files carry such lines, and these are its answers).
+    #[test]
+    fn a_number_past_32_bits_makes_no_entry() {
+        let mut f = Fields::new(b"4294967296:1");
+        assert_eq!(f.int(), None);
+        let mut f = Fields::new(b"-1:1");
+        assert_eq!(f.int(), None);
+        let mut f = Fields::new(b"4294967296:1");
+        assert_eq!(f.int_or_empty(), Err(()));
+        let mut f = Fields::new(b"-2");
+        assert_eq!(f.last_int_or_empty(), Err(()));
+        let mut f = Fields::new(b":1");
+        assert_eq!(f.int_or_empty(), Ok(None), "an empty field is still empty");
+        let mut f = Fields::new(b"4294967295");
+        assert_eq!(f.last_int_or_empty(), Ok(Some(u32::MAX)));
     }
 
     #[test]

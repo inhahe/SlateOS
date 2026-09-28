@@ -304,6 +304,11 @@ pub(crate) fn stdout_stream() -> *mut u8 {
     (&raw mut STDOUT_FILE).cast()
 }
 
+/// `stderr` as a `FILE *`.
+pub(crate) fn stderr_stream() -> *mut u8 {
+    (&raw mut STDERR_FILE).cast()
+}
+
 /// A C `FILE *` as a Rust static: `stdin`, `stdout` and `stderr` are data
 /// symbols C reads, and they hold the addresses of the three streams.
 #[repr(transparent)]
@@ -2509,6 +2514,56 @@ mod gnu_getline {
     }
 }
 pub use gnu_getline::getline;
+
+/// One line of `stream`, through its newline, into `*lineptr` (grown with
+/// `realloc`, as `getline`'s): for the account-file readers
+/// (`nss_files::fget_entry`), which glibc builds on `fgets`. So, unlike
+/// `getline`, a stream already in error is still read -- the error stays
+/// set, and only a new one is an error, as glibc's `fgets` has it.
+/// `Ok(0)` at end of file.
+///
+/// # Safety
+///
+/// `stream` is an open stream; `lineptr` and `n` are a `getline` pair.
+pub(crate) unsafe fn read_line_as_fgets(
+    lineptr: *mut *mut u8,
+    n: *mut usize,
+    stream: *mut u8,
+) -> Result<usize, i32> {
+    let Some(f) = stream_to_file(stream) else {
+        return Err(errno::EBADF);
+    };
+    // SAFETY: a live stream.
+    let _g = unsafe { locked(f) };
+    // SAFETY: locked; the pointers are the caller's.
+    unsafe {
+        let old_error = (*f).flags & F_ERR;
+        (*f).flags &= !F_ERR;
+        let got = getdelim_raw(lineptr, n, i32::from(b'\n'), f);
+        let new_error = (*f).flags & F_ERR != 0;
+        (*f).flags |= old_error;
+        match usize::try_from(got) {
+            Ok(len) => Ok(len),
+            Err(_) if new_error => Err(match errno::get_errno() {
+                0 => errno::EIO,
+                e => e,
+            }),
+            Err(_) => Ok(0),
+        }
+    }
+}
+
+/// Mark `stream` in error, as glibc's `fseterr_unlocked`: an account-file
+/// reader that could not seek back to re-read a line.
+pub(crate) fn set_stream_error(stream: *mut u8) {
+    let Some(f) = stream_to_file(stream) else {
+        return;
+    };
+    // SAFETY: a live stream.
+    let _g = unsafe { locked(f) };
+    // SAFETY: locked.
+    unsafe { (*f).flags |= F_ERR };
+}
 
 /// `__getdelim`: glibc's internal name for `getdelim`, which glibc-built
 /// objects call.

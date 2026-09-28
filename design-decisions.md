@@ -42326,6 +42326,94 @@ the rest to the exact digits from Rust's own formatter.
   most 15 digits from `ecvt`, no carry digit -- where glibc's are the ones
   the tests and ported programs expect.
 
+## 1136. A number past 32 bits in `/etc/passwd` & co. makes the line no entry, as Debian's glibc has it
+
+**Date:** 2026-09-28
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** the account files (`/etc/passwd`, `/etc/group`, `/etc/shadow`)
+and the network ones (`/etc/services`, `/etc/protocols`, `/etc/networks`)
+hold numbers -- user and group ids, ports, days. When one is too big for 32
+bits, or negative (`-1`), upstream glibc quietly turns it into 4294967295,
+while the glibc that Debian and Ubuntu ship ignores the whole line. This
+library did what upstream does; it now does what Debian's does. The reason
+is safety: 4294967295 is `(uid_t) -1`, which to `setresuid` means "leave this
+id as it is", so a server that drops root by switching to such a user would
+stay root -- and be told the switch worked.
+
+**What changes, observably.** A line like `evil:x:-1:0::/:/bin/sh` or
+`big:x:4294967296:1::/:/bin/sh` is no longer an entry: `getpwnam("evil")`
+finds nobody, and enumeration skips it, where it used to find a user with
+uid 4294967295. `-0`, `+5`, ` 5` and `05` still read as numbers, exactly as
+before; only values past `UINT_MAX` change.
+
+**The two glibcs.** Upstream's `files-parse.c` reads a number field with
+`strtou32`, which clamps anything past `0xffffffff` to `0xffffffff`.
+Debian's `local-nss-overflow.diff` (in Debian's glibc since 2009, so in
+every Debian and Ubuntu release since) reads it with `strtoull` and makes
+the line no entry when the value passes `UINT_MAX`. The oracle this library
+is tested against is Ubuntu 24.04's glibc 2.39 under WSL, so it is the
+second: asked, it refuses `4294967296`, `10000000000`, `-1`, `-4294967295`
+and `18446744073709551616`, and accepts `4294967295`, `-0`, `+5`, ` 5` and
+`05` (`posix/tools/oracle/accounts_harness.py`'s files carry such lines).
+The netdb change of 2026-09-27 had chosen upstream's clamp and kept those
+lines out of its oracle; this reverses that, for every one of these files at
+once, so no two parsers in this library disagree about the same line.
+
+**Found on the way:** `strtoull` answers `ULLONG_MAX` for a number too long
+for 64 bits whatever its sign. Both parsers here saturated and then negated,
+so `-99999999999999999999` came out as 1. It is past 32 bits now, as it is
+in both glibcs.
+
+**Alternatives:**
+
+- **Upstream's clamp** (what this library did). The reference glibc, and
+  what Fedora and Arch ship. Rejected: it makes an id of `(uid_t) -1` out of
+  a line nobody meant to say that, and the privilege-drop failure above is
+  silent; the oracle does not do it either.
+- **Clamp for the network files, refuse for the account files.** Only the
+  account files carry the `setresuid` hazard. Rejected: glibc -- either one
+  -- reads all of them with the same macros, and a port of `-1` is no more
+  meaningful than a uid of `-1`.
+
+## 1137. Where the account-file functions part from glibc
+
+**Date:** 2026-09-28
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** the old functions for reading and writing `/etc/passwd`-style
+files -- `fgetpwent`, `putpwent`, `sgetspent`, `lckpwdf`, `cuserid`,
+`getusershell` and their relatives -- now exist, and answer as glibc 2.39
+does in everything its tests could ask (`posix/tools/oracle/accounts_harness.py`
+replays 272 of its answers). In five places glibc's answer is an accident
+that can hurt a caller, and this library answers differently, on purpose.
+
+| where | glibc | here | why |
+|---|---|---|---|
+| `sgetspent_r` on a string that is no entry | returns whatever `errno` held -- often 0, "success", with a NULL result | `EINVAL`, and `errno` too | a caller that checks the return value then reads through NULL |
+| `cuserid` with a name too long for the buffer | cuts it to fit | an empty string, as musl | a cut name is someone else's, or no one's; `L_cuserid` is musl's 20, the header callers here size by |
+| `fgetpwent`, `fgetgrent`, `fgetspent` on a pipe | NULL at once: it must re-read a line after growing its buffer, so it refuses a stream `fgetpos` cannot place | reads it -- the line is read once, then the buffer grown | nothing is lost, and a pipe is a natural thing to read a password file from |
+| `lckpwdf` waiting for another process | `F_SETLKW` under `alarm(15)`, which cancels the caller's own alarm | `F_SETLK` tried against the clock for 15 s | the caller's alarm survives; the answer (-1, `EINTR`) is the same |
+| `getusershell` on a file of very short lines | overruns the array it sized as the file's length over three | counts the shells | a heap overrun |
+
+**And one bug of glibc's not copied:** its `__nss_readline` moves a line past
+its leading white space without the NUL, so the last line of a file, if it
+has both leading white space and no newline, reads with its tail doubled --
+a shell of `/sh` becomes `/shsh`. The readers here read what is written.
+
+**What was copied, though it is an artifact:** after a successful read,
+`errno` is `EINVAL` if a malformed line was skipped on the way, and
+`ERANGE` if the non-reentrant form had to grow its buffer -- both left by
+glibc's internal retries. Harmless (`errno` means nothing after a success)
+and cheap, and it keeps the oracle's lines comparable without exceptions.
+
+**Alternatives:** copying glibc exactly in all five. Rejected for each for
+the reason in its row: every one is either a crash waiting for a caller, a
+wrong answer that looks right, or a limitation with no purpose. None is
+something a program could be relying on.
+
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
 **Date:** 2026-08-22

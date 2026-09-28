@@ -34,8 +34,9 @@
 
 use crate::errno;
 use crate::nss_files::{
-    Cursor, Fields, Held, Room, Which, c_bytes, enumerated, hold, is_compat, is_space, lines,
-    lookup_result, next_entry, reentrant, string_or_null, with_text,
+    Cursor, EntryWriter, Fields, Held, Room, Which, c_bytes, enumerated, fget_held, fget_reentrant,
+    hold, is_compat, is_space, lines, lookup_result, next_entry, reentrant, string_or_null,
+    valid_field, valid_list_field, with_text,
 };
 use crate::perprocess::process_global;
 use crate::types::*;
@@ -77,7 +78,7 @@ pub struct Group {
 }
 
 impl Passwd {
-    const EMPTY: Self = Self {
+    pub(crate) const EMPTY: Self = Self {
         pw_name: core::ptr::null(),
         pw_passwd: core::ptr::null(),
         pw_uid: 0,
@@ -89,7 +90,7 @@ impl Passwd {
 }
 
 impl Group {
-    const EMPTY: Self = Self {
+    pub(crate) const EMPTY: Self = Self {
         gr_name: core::ptr::null(),
         gr_passwd: core::ptr::null(),
         gr_gid: 0,
@@ -504,6 +505,218 @@ pub extern "C" fn endgrent() {
 }
 
 // ---------------------------------------------------------------------------
+// A caller's stream: fgetpwent, fgetgrent, putpwent, putgrent
+// ---------------------------------------------------------------------------
+
+process_global! {
+    fn held_fpw() -> Held<Passwd> = Held::new(Passwd::EMPTY);
+    fn held_fgr() -> Held<Group> = Held::new(Group::EMPTY);
+}
+
+/// The next `/etc/passwd`-format entry of `stream` into the caller's buffer
+/// (GNU), as glibc's `fgetpwent_r` reads it -- the NIS `+`/`-` lines
+/// included, a line that is no entry skipped. 0 with `*result` set;
+/// `ENOENT` at the end; `ERANGE` when the buffer cannot hold the line (the
+/// same entry comes next time); the stream's error. `errno` is set to what
+/// is returned, when that is not 0.
+///
+/// # Safety
+///
+/// `stream` is NULL or an open stream; non-null `pwd` and `result` are
+/// writable, and `buf` writable for `buflen` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fgetpwent_r(
+    stream: *mut u8,
+    pwd: *mut Passwd,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Passwd,
+) -> i32 {
+    // SAFETY: the pointers are the caller's, as documented.
+    unsafe {
+        fget_reentrant(
+            stream,
+            |line, room| parse_pw(line).map(|e| fill_pw(&e, room)),
+            pwd,
+            buf,
+            buflen,
+            result,
+        )
+    }
+}
+
+/// The next `/etc/passwd`-format entry of `stream`, or NULL -- with `errno`
+/// `ENOENT` at the end. The entry is this process's, overwritten by the
+/// next call. Unlike glibc's, it reads a stream that cannot seek, such as a
+/// pipe (see `nss_files::fget_held`).
+///
+/// # Safety
+///
+/// `stream` is NULL or an open stream.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fgetpwent(stream: *mut u8) -> *const Passwd {
+    // SAFETY: `stream` as given; the storage is this process's.
+    unsafe {
+        fget_held(stream, held_fpw(), |line, room| {
+            parse_pw(line).map(|e| fill_pw(&e, room))
+        })
+    }
+}
+
+/// The next `/etc/group`-format entry of `stream` into the caller's buffer
+/// (GNU): as [`fgetpwent_r`].
+///
+/// # Safety
+///
+/// As [`fgetpwent_r`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fgetgrent_r(
+    stream: *mut u8,
+    grp: *mut Group,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Group,
+) -> i32 {
+    // SAFETY: the pointers are the caller's, as documented.
+    unsafe {
+        fget_reentrant(
+            stream,
+            |line, room| parse_gr(line).map(|e| fill_gr(&e, room)),
+            grp,
+            buf,
+            buflen,
+            result,
+        )
+    }
+}
+
+/// The next `/etc/group`-format entry of `stream`, or NULL: as
+/// [`fgetpwent`].
+///
+/// # Safety
+///
+/// `stream` is NULL or an open stream.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fgetgrent(stream: *mut u8) -> *const Group {
+    // SAFETY: `stream` as given; the storage is this process's.
+    unsafe {
+        fget_held(stream, held_fgr(), |line, room| {
+            parse_gr(line).map(|e| fill_gr(&e, room))
+        })
+    }
+}
+
+/// Write `p` to `stream` as an `/etc/passwd` line, as glibc's `putpwent`
+/// writes it: 0, or -1 with `errno`. `EINVAL` for a NULL `p` or `stream`, a
+/// NULL name, or a name, password, home or shell holding a `:` or newline,
+/// which would end the field early -- a GECOS field's are written as spaces
+/// instead. A NULL field other than the name is written empty, and a NIS
+/// `+`/`-` entry without its ids.
+///
+/// # Safety
+///
+/// `p` is NULL or a `struct passwd` whose non-null strings are C strings;
+/// `stream` is NULL or an open stream.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn putpwent(p: *const Passwd, stream: *mut u8) -> i32 {
+    if p.is_null() || stream.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: non-null, the caller's.
+    let p = unsafe { &*p };
+    if p.pw_name.is_null()
+        || !valid_field(p.pw_name)
+        || !valid_field(p.pw_passwd)
+        || !valid_field(p.pw_dir)
+        || !valid_field(p.pw_shell)
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let mut w = EntryWriter::new(stream);
+    w.c_str_or_empty(p.pw_name);
+    w.bytes(b":");
+    w.c_str_or_empty(p.pw_passwd);
+    w.bytes(b":");
+    // SAFETY: the name is a non-null C string (checked above).
+    if is_compat(unsafe { c_bytes(p.pw_name) }) {
+        w.bytes(b"::");
+    } else {
+        w.int(i128::from(p.pw_uid));
+        w.bytes(b":");
+        w.int(i128::from(p.pw_gid));
+        w.bytes(b":");
+    }
+    w.rewritten(p.pw_gecos);
+    w.bytes(b":");
+    w.c_str_or_empty(p.pw_dir);
+    w.bytes(b":");
+    w.c_str_or_empty(p.pw_shell);
+    w.bytes(b"\n");
+    w.finish()
+}
+
+/// Write `g` to `stream` as an `/etc/group` line, as glibc's `putgrent`
+/// writes it: 0, or -1 with `errno`. `EINVAL` for a NULL `g` or `stream`, a
+/// NULL name, a name or password holding a `:` or newline, or a member
+/// holding one of those or a `,`. A NULL password is written empty, a NULL
+/// member list as no members, and a NIS `+`/`-` entry without its id.
+///
+/// # Safety
+///
+/// `g` is NULL or a `struct group` whose non-null strings are C strings and
+/// whose non-null member list is NULL-terminated; `stream` is NULL or an
+/// open stream.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn putgrent(g: *const Group, stream: *mut u8) -> i32 {
+    if g.is_null() || stream.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: non-null, the caller's.
+    let g = unsafe { &*g };
+    if g.gr_name.is_null()
+        || !valid_field(g.gr_name)
+        || !valid_field(g.gr_passwd)
+        // SAFETY: NULL or the caller's NULL-terminated list.
+        || !unsafe { valid_list_field(g.gr_mem) }
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let mut w = EntryWriter::new(stream);
+    w.c_str_or_empty(g.gr_name);
+    w.bytes(b":");
+    w.c_str_or_empty(g.gr_passwd);
+    w.bytes(b":");
+    // SAFETY: the name is a non-null C string (checked above).
+    if !is_compat(unsafe { c_bytes(g.gr_name) }) {
+        w.int(i128::from(g.gr_gid));
+    }
+    w.bytes(b":");
+    if !g.gr_mem.is_null() {
+        let mut at = g.gr_mem;
+        loop {
+            // SAFETY: the list is NULL-terminated, and `at` has not passed
+            // its terminator.
+            let member = unsafe { at.read() };
+            if member.is_null() {
+                break;
+            }
+            if at != g.gr_mem {
+                w.bytes(b",");
+            }
+            w.c_str_or_empty(member);
+            // SAFETY: the terminator is still ahead.
+            at = unsafe { at.add(1) };
+        }
+    }
+    w.bytes(b"\n");
+    w.finish()
+}
+
+// ---------------------------------------------------------------------------
 // getgrouplist / initgroups
 // ---------------------------------------------------------------------------
 
@@ -685,6 +898,63 @@ pub extern "C" fn getlogin_r(buf: *mut u8, bufsize: usize) -> i32 {
     0
 }
 
+/// `L_cuserid` in musl's `<stdio.h>` -- the header a program compiled here
+/// sizes its `cuserid` buffer by: the name and its NUL fit in it.
+pub const L_cuserid: usize = 20;
+
+process_global! {
+    fn held_cuserid() -> Held<Passwd> = Held::new(Passwd::EMPTY);
+    fn cuserid_name() -> [u8; L_cuserid] = [0; L_cuserid];
+}
+
+/// The effective user's name (`cuserid`, POSIX.1-1988, withdrawn in 2001):
+/// copied into `s`, which holds `L_cuserid` bytes -- or, when `s` is NULL,
+/// into this process's own buffer -- and that returned. With no such user,
+/// or a name too long for `L_cuserid`, `s` is made an empty string and
+/// returned, NULL staying NULL. glibc cuts a long name short instead, which
+/// makes it someone else's name or no one's; musl refuses it, as this does
+/// (design-decisions §1137).
+///
+/// # Safety
+///
+/// `s` is NULL or writable for `L_cuserid` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn cuserid(s: *mut u8) -> *mut u8 {
+    let uid = crate::unistd::geteuid();
+    // SAFETY: this process's storage.
+    let found = hold(held_cuserid(), |p, b, l, r| unsafe {
+        getpwuid_r(uid, p, b, l, r)
+    });
+    let name = match found {
+        Ok(p) if !p.is_null() => {
+            // SAFETY: the entry, in this process's storage.
+            let name = unsafe { (*p).pw_name };
+            // SAFETY: a name the lookup filled in is a C string.
+            (!name.is_null()).then(|| unsafe { c_bytes(name) })
+        }
+        _ => None,
+    };
+    let Some(name) = name.filter(|n| n.len() < L_cuserid) else {
+        if !s.is_null() {
+            // SAFETY: the caller's buffer, of at least one byte.
+            unsafe { s.write(0) };
+        }
+        return s;
+    };
+    let dst = if s.is_null() {
+        cuserid_name().cast::<u8>()
+    } else {
+        s
+    };
+    // SAFETY: `dst` holds `L_cuserid` bytes -- the caller's or this
+    // process's -- and the name and its NUL fit (checked above).
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), dst, name.len());
+        dst.add(name.len()).write(0);
+    }
+    dst
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -799,11 +1069,16 @@ staff:x:50:bob,alice
         assert_eq!(parse_pw(b"x:x::0::/:/bin/sh"), None, "an empty uid");
         assert_eq!(parse_pw(b"x:x:5a:0::/:/bin/sh"), None, "junk after the uid");
         assert_eq!(parse_pw(b"justaname"), None);
-        // Numbers are strtoul's: signs and clamping.
+        // Numbers are strtoull's -- a sign is allowed -- and one past 32
+        // bits, `-1` among them, makes the line no entry, as Debian's glibc
+        // has it; upstream would clamp it to (uid_t) -1 (design-decisions
+        // §1136).
         assert_eq!(
-            parse_pw(b"x:x:-1:+2:::").map(|e| (e.uid, e.gid)),
+            parse_pw(b"x:x:4294967295:+2:::").map(|e| (e.uid, e.gid)),
             Some((u32::MAX, 2))
         );
+        assert_eq!(parse_pw(b"x:x:-1:2:::"), None, "-1 is past 32 bits");
+        assert_eq!(parse_pw(b"x:x:1:4294967296:::"), None);
     }
 
     #[test]
@@ -1400,5 +1675,240 @@ staff:x:50:bob,alice
         let (r, n, groups) = grouplist(c"alice", 1000, 4);
         assert_eq!((r, n, groups[0]), (1, 1, 1000));
         set_test_text(Which::Group, None);
+    }
+
+    // -- A caller's stream (glibc's answers are accounts_oracle's; these are
+    // -- the cases the oracle cannot put: NULLs, pipes, glibc's own bug) --
+
+    /// A stream over `text`, which it outlives.
+    fn stream_of(text: &[u8]) -> *mut u8 {
+        let bytes: &'static mut [u8] = std::boxed::Box::leak(text.to_vec().into_boxed_slice());
+        // SAFETY: a leaked buffer of the length given.
+        let s = unsafe {
+            crate::stdio_mem::fmemopen(bytes.as_mut_ptr().cast(), bytes.len(), c"r".as_ptr().cast())
+        };
+        assert!(!s.is_null());
+        s
+    }
+
+    /// A stream that cannot seek, as a pipe cannot: a cookie stream with a
+    /// read function and no seek.
+    fn pipe_of(text: &[u8]) -> *mut u8 {
+        struct Source {
+            text: Vec<u8>,
+            at: usize,
+        }
+        unsafe extern "C" fn read(c: *mut core::ffi::c_void, buf: *mut u8, size: usize) -> isize {
+            // SAFETY: the cookie is the leaked `Source` below.
+            let s = unsafe { &mut *c.cast::<Source>() };
+            let rest = &s.text[s.at..];
+            let n = rest.len().min(size);
+            // SAFETY: the stream gives `size` bytes at `buf`.
+            unsafe { core::ptr::copy_nonoverlapping(rest.as_ptr(), buf, n) };
+            s.at += n;
+            isize::try_from(n).unwrap()
+        }
+        let source = std::boxed::Box::leak(std::boxed::Box::new(Source {
+            text: text.to_vec(),
+            at: 0,
+        }));
+        let io = crate::stdio::CookieIoFunctions {
+            read: Some(read),
+            write: None,
+            seek: None,
+            close: None,
+        };
+        // SAFETY: a cookie that outlives the stream; a C string.
+        let s = unsafe {
+            crate::stdio::fopencookie(core::ptr::from_mut(source).cast(), c"r".as_ptr().cast(), io)
+        };
+        assert!(!s.is_null());
+        s
+    }
+
+    fn read_pw(stream: *mut u8, buflen: usize) -> (i32, Option<Vec<u8>>) {
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = std::vec![0u8; buflen.max(1)];
+        let mut result: *const Passwd = core::ptr::null();
+        // SAFETY: the stream is open; `buf` holds at least `buflen` bytes.
+        let rc = unsafe { fgetpwent_r(stream, &mut pwd, buf.as_mut_ptr(), buflen, &mut result) };
+        // SAFETY: the entry, when there is one.
+        (
+            rc,
+            (!result.is_null()).then(|| s(unsafe { (*result).pw_name })),
+        )
+    }
+
+    #[test]
+    fn a_line_too_big_for_the_buffer_is_read_again_or_is_espipe() {
+        let text = b"root:x:0:0:root:/root:/bin/bash\nbin:x:1:1::/:/s\n";
+        let f = stream_of(text);
+        assert_eq!(read_pw(f, 16), (errno::ERANGE, None));
+        assert_eq!(
+            read_pw(f, 256),
+            (0, Some(b"root".to_vec())),
+            "the same entry again"
+        );
+        crate::stdio::fclose(f);
+        // A pipe cannot be put back, so a retry would miss the entry: glibc
+        // says ESPIPE, and marks the stream in error.
+        let p = pipe_of(text);
+        assert_eq!(read_pw(p, 16), (errno::ESPIPE, None));
+        assert_eq!(crate::stdio::ferror(p), 1);
+        crate::stdio::fclose(p);
+    }
+
+    #[test]
+    fn fgetpwent_reads_a_pipe_whatever_the_size_of_its_entries() {
+        // glibc's refuses a stream it cannot `fgetpos`, since it re-reads a
+        // line after growing its buffer; this reads the line once.
+        let mut text = b"big:x:1:1:".to_vec();
+        text.extend(std::iter::repeat_n(b'g', 5000));
+        text.extend_from_slice(b":/h:/s\nnext:x:2:2::/:/s\n");
+        let p = pipe_of(&text);
+        errno::set_errno(0);
+        // SAFETY: an open stream.
+        let e = found(unsafe { fgetpwent(p) });
+        assert_eq!(s(e.pw_gecos).len(), 5000);
+        assert_eq!(
+            errno::get_errno(),
+            errno::ERANGE,
+            "grown, as glibc's retry leaves errno"
+        );
+        // SAFETY: as above.
+        assert_eq!(s(found(unsafe { fgetpwent(p) }).pw_name), b"next");
+        // SAFETY: as above.
+        assert!(unsafe { fgetpwent(p) }.is_null());
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+        crate::stdio::fclose(p);
+    }
+
+    #[test]
+    fn the_readers_refuse_what_glibc_would_fault_on() {
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = [0u8; 64];
+        let mut result: *const Passwd = &raw const pwd;
+        // SAFETY: a NULL stream is what is tested.
+        let rc = unsafe {
+            fgetpwent_r(
+                core::ptr::null_mut(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                64,
+                &mut result,
+            )
+        };
+        assert_eq!((rc, errno::get_errno()), (errno::EBADF, errno::EBADF));
+        assert!(result.is_null(), "*result is NULL on every failure");
+        // SAFETY: as above.
+        assert!(unsafe { fgetpwent(core::ptr::null_mut()) }.is_null());
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        let f = stream_of(b"root:x:0:0::/:/s\n");
+        // Below three bytes nothing is read (glibc's __nss_readline).
+        assert_eq!(read_pw(f, 2), (errno::ERANGE, None));
+        // SAFETY: a NULL structure is what is tested.
+        let rc =
+            unsafe { fgetpwent_r(f, core::ptr::null_mut(), buf.as_mut_ptr(), 64, &mut result) };
+        assert_eq!(rc, errno::EFAULT);
+        assert_eq!(
+            read_pw(f, 64),
+            (0, Some(b"root".to_vec())),
+            "and nothing was read"
+        );
+        crate::stdio::fclose(f);
+        // SAFETY: NULLs are what is tested.
+        assert_eq!(
+            unsafe { putpwent(core::ptr::null(), core::ptr::null_mut()) },
+            -1
+        );
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "glibc checks, and says EINVAL"
+        );
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { putgrent(core::ptr::null(), core::ptr::null_mut()) },
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// glibc 2.39's `__nss_readline` moves a line over its leading white
+    /// space without the NUL, so a last line that has both and no newline
+    /// reads with its tail doubled -- `/sh` as `/shsh`. This reads the line.
+    #[test]
+    fn a_last_line_with_leading_space_is_read_as_written() {
+        let f = stream_of(b"  u:x:1:1::/h:/sh");
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = [0u8; 256];
+        let mut result: *const Passwd = core::ptr::null();
+        // SAFETY: an open stream and this frame's buffers.
+        let rc = unsafe { fgetpwent_r(f, &mut pwd, buf.as_mut_ptr(), 256, &mut result) };
+        assert_eq!(rc, 0);
+        assert_eq!(s(pwd.pw_shell), b"/sh");
+        crate::stdio::fclose(f);
+    }
+
+    #[test]
+    fn a_line_ends_at_its_first_nul_as_a_c_string_does() {
+        let f = stream_of(b"a:x:1:1:g\0junk:/h:/s\n\0b:x:9:9::/:/s\nc:x:2:2::/:/s\n");
+        let mut pwd = Passwd::EMPTY;
+        let mut buf = [0u8; 256];
+        let mut result: *const Passwd = core::ptr::null();
+        // SAFETY: an open stream and this frame's buffers.
+        assert_eq!(
+            unsafe { fgetpwent_r(f, &mut pwd, buf.as_mut_ptr(), 256, &mut result) },
+            0
+        );
+        assert_eq!(
+            (s(pwd.pw_gecos), s(pwd.pw_dir), s(pwd.pw_shell)),
+            (b"g".to_vec(), Vec::new(), Vec::new())
+        );
+        // The line that begins with a NUL is an empty one.
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { fgetpwent_r(f, &mut pwd, buf.as_mut_ptr(), 256, &mut result) },
+            0
+        );
+        assert_eq!(s(pwd.pw_name), b"c");
+        crate::stdio::fclose(f);
+        // The databases read the same way.
+        set_test_text(Which::Passwd, Some(b"a:x:1:1:g\0junk:/h:/s\n"));
+        // SAFETY: a NUL-terminated name.
+        let e = found(unsafe { getpwnam(c"a".as_ptr().cast()) });
+        assert_eq!(s(e.pw_shell), b"");
+        set_test_text(Which::Passwd, None);
+    }
+
+    // -- cuserid --
+
+    fn cuserid_into_buffer() -> Vec<u8> {
+        let mut buf = [0xAAu8; L_cuserid];
+        // SAFETY: `buf` holds L_cuserid bytes.
+        let r = unsafe { cuserid(buf.as_mut_ptr()) };
+        assert_eq!(r, buf.as_mut_ptr());
+        s(r)
+    }
+
+    #[test]
+    fn cuserid_is_the_effective_users_name_if_it_fits() {
+        // The host tests' effective uid is 0.
+        set_test_text(Which::Passwd, Some(b"root:x:0:0::/:/bin/sh\n"));
+        assert_eq!(cuserid_into_buffer(), b"root");
+        // SAFETY: NULL: this process's buffer.
+        assert_eq!(s(unsafe { cuserid(core::ptr::null_mut()) }), b"root");
+        // Nineteen bytes and the NUL fit L_cuserid; twenty do not, and are
+        // refused rather than cut to someone else's name.
+        set_test_text(Which::Passwd, Some(b"abcdefghijklmnopqrs:x:0:0::/:/s\n"));
+        assert_eq!(cuserid_into_buffer(), b"abcdefghijklmnopqrs");
+        set_test_text(Which::Passwd, Some(b"abcdefghijklmnopqrst:x:0:0::/:/s\n"));
+        assert_eq!(cuserid_into_buffer(), b"");
+        // SAFETY: as above.
+        assert!(unsafe { cuserid(core::ptr::null_mut()) }.is_null());
+        // No such user: the same.
+        set_test_text(Which::Passwd, Some(b"alice:x:1000:1000::/:/s\n"));
+        assert_eq!(cuserid_into_buffer(), b"");
+        set_test_text(Which::Passwd, None);
     }
 }

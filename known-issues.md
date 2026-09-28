@@ -174852,9 +174852,10 @@ when there is one, a built-in copy when there is not (design-decisions.md
 base-0 number (`0x1f/tcp` is 31) that the macro's argument order gives it.
 The tests replay glibc 2.39's answers to 100 lookups and enumerations over files built to
 exercise the parser (`posix/tools/oracle/netdb_oracle.c`, run under WSL with those
-files in place of `/etc`). A number past 32 bits clamps to `0xffffffff` as
-upstream glibc clamps it; Debian's glibc refuses the line instead (its
-`local-nss-overflow.diff`), so those lines are tested apart.
+files in place of `/etc`). A number past 32 bits clamped to `0xffffffff` as
+upstream glibc clamps it; since 2026-09-28 it makes the line no entry, as
+Debian's glibc (its `local-nss-overflow.diff`, and the oracle) has it --
+for every one of these files at once (design-decisions §1136).
 
 ### [D] D-POSIX-HOSTS-FILE-WAS-NEVER-READ — 2026-09-27 — FIXED 2026-09-27
 
@@ -175415,7 +175416,7 @@ nonzero is dropped, toward -inf a negative one's, toward zero never. Due with
 the 80-bit conversions (TD-POSIX-LONG-DOUBLE-PRECISION), which go through the
 same code.
 
-## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: OPEN (79 of the 104 done 2026-09-28: C11 `<threads.h>` (posix/src/threads.rs), the pthread cleanup helpers, scheduling attributes, `pthread_setschedprio`, the concurrency hint and default attributes, the nine `_l` functions, `wcsnlen`, `wcswcs`, the seven signal functions; then `ecvt`/`fcvt`/`gcvt` (exact digits, design-decisions §1135), `hcreate_r`/`hsearch_r`/`hdestroy_r`, `tcgetwinsize`/`tcsetwinsize`, `posix_close`, `_Fork`, `ftime`, `stime`, `clock_getcpuclockid`, `ftok`, `lcong48`, `scalb`/`scalbf`, `dlinfo`, and `vhangup`/`acct`/`remap_file_pages` as `ENOSYS` -- the kernel has no such facility. The other 25 -- the accounts functions, `getdate`, the `ns_*` DNS parsers, the `ucontext` four, the two `_np` joins -- are `scripts/check-libc-declared.py`'s baseline, which refuses a new one)**
+## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: OPEN (93 of the 104 done 2026-09-28: C11 `<threads.h>` (posix/src/threads.rs), the pthread cleanup helpers, scheduling attributes, `pthread_setschedprio`, the concurrency hint and default attributes, the nine `_l` functions, `wcsnlen`, `wcswcs`, the seven signal functions; then `ecvt`/`fcvt`/`gcvt` (exact digits, design-decisions §1135), `hcreate_r`/`hsearch_r`/`hdestroy_r`, `tcgetwinsize`/`tcsetwinsize`, `posix_close`, `_Fork`, `ftime`, `stime`, `clock_getcpuclockid`, `ftok`, `lcong48`, `scalb`/`scalbf`, `dlinfo`, and `vhangup`/`acct`/`remap_file_pages` as `ENOSYS` -- the kernel has no such facility; then the account-file functions -- `fgetpwent`, `putpwent`, `fgetgrent`, `putgrent`, `fgetspent`, `sgetspent`, `putspent`, `lckpwdf`, `ulckpwdf`, the `getusershell` three, `cuserid`, `getpass` (design-decisions §1137). The other 11 -- `getdate`, the `ns_*` DNS parsers, the `ucontext` four, the two `_np` joins -- are `scripts/check-libc-declared.py`'s baseline, which refuses a new one)**
 
 **In short:** C programs here are compiled against musl's headers (`zig cc`)
 and linked against our `libc.a`. The headers declare 126 functions the library
@@ -175463,3 +175464,39 @@ function a header declares cannot go missing unnoticed. `ecvt`/`fcvt`/`gcvt`
 need a decision first: glibc's scale by powers of ten in floating point and
 so round differently from the exact digits musl's `sprintf`-based versions
 give.
+
+## D-POSIX-FCNTL-RECORD-LOCKS-NEVER-REACH-THE-KERNEL — a native program's `fcntl(F_SETLK)` still says yes to every lock (lane D, 2026-09-28) — **Status: OPEN (blocked on lane A: `requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`)**
+
+**In short:** two SlateOS programs can both "hold" the same exclusive file
+lock. File locks are how SQLite keeps two writers from corrupting a
+database, how `login` and `who` share the utmp file, and how the tools that
+edit `/etc/passwd` keep out of each other's way (`lckpwdf`). A program built
+for SlateOS gets its `fcntl` from this libc, whose record locking never asks
+the kernel -- it answers "granted" to everything.
+
+**Where:** `posix/src/fcntl_ops.rs`, `F_GETLK`/`F_SETLK`/`F_SETLKW`: the
+first always reports "no conflicting lock", the other two always succeed.
+
+**Why it is still open:** the kernel's lock table is real now (lane A,
+`kernel/src/fs/reclock.rs`, 2026-09-21, with its release on exit and on
+final close), but only the Linux personality reaches it -- `linux.rs`'s
+`fcntl` is its one caller. A native program runs on this libc's descriptor
+table, which holds a kernel file handle for each descriptor and has no
+system call to lock through one. Lane A's answer to lane B
+(`requests/a-b-record-locks-are-real-now-do-not-return-enolck.md`) was
+written when `posix/**` was lane B's; under the six-lane map it is lane D's,
+and the missing piece is a native system call, which is lane A's.
+
+**Who is waiting on it:** SQLite inside CPython (lane B's original report,
+`requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`);
+`posix/src/utmpx.rs`, which locks with `F_SETLKW` as glibc's does; and
+`lckpwdf` (`posix/src/shadow.rs`, 2026-09-28), which locks
+`/etc/.pwd.lock` the same way -- written against `fcntl` so that it becomes
+real with nothing further to change.
+
+**Proper fix:** lane A's native call (the request proposes
+`SYS_FS_RECORD_LOCK(handle, op, flock *)` with `linux.rs`'s semantics), then
+`fcntl_ops.rs` wired through it: `F_SETLK` and `F_GETLK` as they are asked,
+`F_SETLKW` as `F_SETLK` retried with a yield until granted (the kernel does
+not block for locks yet -- the same shape `flock` has), and `F_OFD_*`
+refused with `EINVAL` until they are wired too.

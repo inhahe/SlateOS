@@ -82,9 +82,6 @@ BASELINE_MISSING = frozenset({
     "csinhl", "csqrtl", "ctanl", "ctanhl",
     # threads
     "pthread_timedjoin_np", "pthread_tryjoin_np",
-    # accounts
-    "fgetpwent", "putpwent", "fgetgrent", "putgrent", "fgetspent", "sgetspent", "putspent",
-    "lckpwdf", "ulckpwdf", "getusershell", "setusershell", "endusershell", "cuserid", "getpass",
     # time
     "getdate",
     # DNS messages

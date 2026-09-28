@@ -378,11 +378,13 @@ pub(crate) fn strtou64(s: &[u8], base: u32) -> Option<(u64, usize)> {
     Some((value, i))
 }
 
-/// `strtoul (s, &end, base)`, clamped to 32 bits as glibc's `strtou32`
-/// clamps it: leading white space, a sign (a negative number is negated as
-/// unsigned, so anything but -0 clamps), a `0x` prefix for bases 16 and 0,
-/// a leading `0` meaning octal for base 0.  The value and the bytes used,
-/// or `None` when there are no digits (`end == s`).
+/// `strtoull (s, &end, base)` as Debian's glibc takes a number field: leading
+/// white space, a sign, a `0x` prefix for bases 16 and 0, a leading `0`
+/// meaning octal for base 0.  The value and the bytes used; `None` when there
+/// are no digits (`end == s`) or the value is past 32 bits -- a negative one
+/// among them, which `strtoull` negates as unsigned, so anything but `-0` --
+/// either of which makes the line no entry.  Upstream glibc clamps the
+/// second to `0xffffffff` instead (design-decisions §1136).
 pub(crate) fn strtou32(s: &[u8], base: u32) -> Option<(u32, usize)> {
     let mut i = s.iter().take_while(|&&b| nss_files::is_space(b)).count();
     let negative = match s.get(i) {
@@ -417,24 +419,24 @@ pub(crate) fn strtou32(s: &[u8], base: u32) -> Option<(u32, usize)> {
         (u32::from(d) < base).then_some(u64::from(d))
     };
     let start = i;
-    let mut value: u64 = 0;
+    // `None` once the digits overflow 64 bits: strtoull then answers
+    // ULLONG_MAX, unnegated -- past 32 bits whatever the sign.
+    let mut value = Some(0u64);
     while let Some(d) = s.get(i).copied().and_then(digit) {
-        // strtoul saturates at ULONG_MAX on overflow.
         value = value
-            .checked_mul(u64::from(base))
-            .and_then(|v| v.checked_add(d))
-            .unwrap_or(u64::MAX);
+            .and_then(|v| v.checked_mul(u64::from(base)))
+            .and_then(|v| v.checked_add(d));
         i += 1;
     }
     if i == start {
         return None;
     }
     let value = if negative {
-        value.wrapping_neg()
+        value?.wrapping_neg()
     } else {
-        value
+        value?
     };
-    Some((u32::try_from(value).unwrap_or(u32::MAX), i))
+    Some((u32::try_from(value).ok()?, i))
 }
 
 /// One database line, taken apart as `files-parse.c`'s `LINE_PARSER`
@@ -1830,30 +1832,47 @@ mod tests {
         );
     }
 
-    /// Upstream glibc clamps a number past 32 bits, and a negative one, to
-    /// `0xffffffff` (`strtou32` in `files-parse.c`); Debian's glibc refuses
-    /// the line instead (its `local-nss-overflow.diff`), which is why these
-    /// lines are not among the oracle's.
+    /// A number past 32 bits -- a negative one among them, which `strtoull`
+    /// negates as unsigned -- makes the line no entry, as Debian's glibc has
+    /// it (its `local-nss-overflow.diff`, carried by the oracle's WSL glibc);
+    /// upstream glibc would clamp it to `0xffffffff` (design-decisions
+    /// §1136).
     #[test]
-    fn numbers_past_32_bits_clamp_as_upstream_glibc_clamps_them() {
-        set_test_text(Which::Services, Some(b"neg -1/tcp\nbig 99999999999/tcp\n"));
-        set_test_text(Which::Protocols, Some(b"neg -1 NEG\nbig 99999999999 BIG\n"));
+    fn a_number_past_32_bits_makes_no_entry_as_debians_glibc_has_it() {
+        set_test_text(
+            Which::Services,
+            Some(b"neg -1/tcp\nbig 99999999999/tcp\nok 7/tcp\n"),
+        );
+        set_test_text(
+            Which::Protocols,
+            Some(b"neg -1 NEG\nbig 99999999999 BIG\nok 7 OK\n"),
+        );
         let mut out = Vec::new();
         run("serv neg -", &mut out);
         run("serv big -", &mut out);
         run("proto neg", &mut out);
         run("protonum -1", &mut out);
+        run("proto big", &mut out);
+        for (i, line) in out.iter().enumerate() {
+            assert!(line.starts_with("NULL"), "{i}: {line}");
+        }
+        let mut out = Vec::new();
+        run("serv ok -", &mut out);
+        run("proto ok", &mut out);
         assert_eq!(
             out,
             [
-                "name=neg port=65535 proto=tcp aliases=[]",
-                "name=big port=65535 proto=tcp aliases=[]",
-                "name=neg proto=-1 aliases=[NEG]",
-                "name=neg proto=-1 aliases=[NEG]",
+                "name=ok port=7 proto=tcp aliases=[]",
+                "name=ok proto=7 aliases=[OK]"
             ]
         );
         assert_eq!(strtou32(b"-0", 10), Some((0, 2)));
-        assert_eq!(strtou32(b"4294967296", 10), Some((u32::MAX, 10)));
+        assert_eq!(strtou32(b"4294967295", 10), Some((u32::MAX, 10)));
+        assert_eq!(strtou32(b"4294967296", 10), None);
+        assert_eq!(strtou32(b"-1", 10), None);
+        assert_eq!(strtou32(b"-99999999999999999999999", 10), None);
+        assert_eq!(strtou32(b"0xffffffff", 0), Some((u32::MAX, 10)));
+        assert_eq!(strtou32(b"0x100000000", 0), None);
         assert_eq!(strtou32(b"0x1f/", 0), Some((31, 4)));
         assert_eq!(strtou32(b"010", 0), Some((8, 3)));
         assert_eq!(

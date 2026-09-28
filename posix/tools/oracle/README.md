@@ -8,7 +8,7 @@ answers come from. Each one builds a C program with gcc under WSL -- whose C
 library is the oracle -- runs it, and records what glibc said.
 
 Everything here needs WSL with the `Ubuntu` distribution (24.04, glibc 2.39)
-and gcc in it. The sandboxed ones (`gai`, `hosts`, `netdb`, `ifaddrs`) use
+and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs`) use
 `unshare -r`, which needs no root. Build products go in a temporary directory
 (`_wsl.workdir`); a run changes nothing in the tree but its own output.
 
@@ -20,6 +20,7 @@ and gcc in it. The sandboxed ones (`gai`, `hosts`, `netdb`, `ifaddrs`) use
 | `mathl_harness.py` | `posix/src/mathl_oracle.txt` | `mathl.rs`, `include_str!` |
 | `ldclass.c` | its output, pasted as `CLASS_ORACLE` | `mathl.rs` |
 | `complex_harness.py` | `posix/src/complex_oracle.txt` | `complex.rs`, `include_str!` |
+| `accounts_harness.py` | `posix/src/accounts_oracle.txt` | `accounts_oracle.rs`, `include_str!` (`fgetpwent` & co., `put*ent`, `sgetspent`, `getusershell`, `getpass`) |
 | `cvt_harness.py` | `posix/src/cvt_oracle.txt` | `stdlib.rs`, `include_str!` (`ecvt`, `fcvt`, `gcvt`) |
 | `strtod_nan_harness.py` | a table, pasted as `GLIBC_NAN` | `stdlib.rs` |
 | `cp125x_harness.py` | a table, pasted as `GLIBC_CP125X` | `iconv.rs` |

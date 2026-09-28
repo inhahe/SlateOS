@@ -43,8 +43,9 @@
 
 use crate::errno;
 use crate::nss_files::{
-    Cursor, Fields, Held, Room, Which, c_bytes, enumerated, hold, is_compat, lines, lookup_result,
-    next_entry, reentrant, string_or_null, with_text,
+    Cursor, EntryWriter, Fields, Held, Room, Which, c_bytes, deliver, enumerated, fget_held,
+    fget_reentrant, hold, is_compat, lines, lookup_result, next_entry, reentrant, string_or_null,
+    valid_field, with_text,
 };
 use crate::perprocess::process_global;
 
@@ -79,7 +80,7 @@ pub struct Spwd {
 }
 
 impl Spwd {
-    const EMPTY: Self = Self {
+    pub(crate) const EMPTY: Self = Self {
         sp_namp: core::ptr::null(),
         sp_pwdp: core::ptr::null(),
         sp_lstchg: -1,
@@ -292,6 +293,345 @@ pub extern "C" fn getspent() -> *const Spwd {
 pub extern "C" fn endspent() {
     // SAFETY: this process's cursor.
     unsafe { *sp_cursor() = Cursor::CLOSED };
+}
+
+// ---------------------------------------------------------------------------
+// A caller's stream or string: fgetspent, sgetspent, putspent
+// ---------------------------------------------------------------------------
+
+process_global! {
+    fn held_fsp() -> Held<Spwd> = Held::new(Spwd::EMPTY);
+    fn held_ssp() -> Held<Spwd> = Held::new(Spwd::EMPTY);
+}
+
+/// The next `/etc/shadow`-format entry of `stream` into the caller's buffer
+/// (GNU), as glibc's `fgetspent_r` reads it: 0 with `*result` set; `ENOENT`
+/// at the end; `ERANGE` when the buffer cannot hold the line (the same entry
+/// comes next time); the stream's error. `errno` is set to what is
+/// returned, when that is not 0.
+///
+/// # Safety
+///
+/// `stream` is NULL or an open stream; non-null `spwd` and `result` are
+/// writable, and `buf` writable for `buflen` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fgetspent_r(
+    stream: *mut u8,
+    spwd: *mut Spwd,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Spwd,
+) -> i32 {
+    // SAFETY: the pointers are the caller's, as documented.
+    unsafe {
+        fget_reentrant(
+            stream,
+            |line, room| parse_sp(line).map(|e| fill_sp(&e, room)),
+            spwd,
+            buf,
+            buflen,
+            result,
+        )
+    }
+}
+
+/// The next `/etc/shadow`-format entry of `stream`, or NULL -- `errno`
+/// `ENOENT` at the end; as `crate::pwd::fgetpwent`.
+///
+/// # Safety
+///
+/// `stream` is NULL or an open stream.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fgetspent(stream: *mut u8) -> *const Spwd {
+    // SAFETY: `stream` as given; the storage is this process's.
+    unsafe {
+        fget_held(stream, held_fsp(), |line, room| {
+            parse_sp(line).map(|e| fill_sp(&e, room))
+        })
+    }
+}
+
+/// `string` read as an `/etc/shadow` line, into the caller's structure and
+/// buffer (GNU): 0 with `*result` set. The line ends at the string's first
+/// newline, and white space before the name is part of it, as in glibc.
+///
+/// `ERANGE` when the buffer cannot hold the whole string -- glibc copies it
+/// there first, and so asks that much -- with `errno` untouched, as
+/// glibc's. A string that is no entry is `EINVAL`, and `errno` too, where
+/// glibc returns whatever `errno` already held, 0 included, which reads as
+/// success to a caller that checks the return (design-decisions §1137). A
+/// NULL pointer is `EFAULT` (§303).
+///
+/// # Safety
+///
+/// `string` is NULL or a C string; non-null `spwd` and `result` are
+/// writable, and `buf` writable for `buflen` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn sgetspent_r(
+    string: *const u8,
+    spwd: *mut Spwd,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Spwd,
+) -> i32 {
+    if !result.is_null() {
+        // SAFETY: the caller's, non-null.
+        unsafe { result.write(core::ptr::null()) };
+    }
+    if string.is_null() || spwd.is_null() || buf.is_null() || result.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return errno::EFAULT;
+    }
+    // SAFETY: non-null, the caller's C string.
+    let text = unsafe { c_bytes(string) };
+    if text.len() >= buflen {
+        return errno::ERANGE;
+    }
+    let line = text.split(|&b| b == b'\n').next().unwrap_or(&[]);
+    // SAFETY: the caller gives `buflen` writable bytes at `buf`.
+    let mut room = unsafe { Room::new(buf, buflen) };
+    let rc = match parse_sp(line).map(|e| fill_sp(&e, &mut room)) {
+        Some(Ok(entry)) => {
+            // SAFETY: both the caller's, checked non-null above.
+            unsafe { deliver(entry, spwd, result) };
+            return 0;
+        }
+        // Cannot happen -- the fields are a part of the string the buffer
+        // holds -- but passed on if it did.
+        Some(Err(e)) => e,
+        None => errno::EINVAL,
+    };
+    errno::set_errno(rc);
+    rc
+}
+
+/// `string` read as an `/etc/shadow` line: the entry, this process's until
+/// the next call, or NULL -- `errno` `EINVAL` for a string that is no entry
+/// (glibc leaves `errno` as it was; see [`sgetspent_r`]).
+///
+/// # Safety
+///
+/// `string` is NULL or a C string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn sgetspent(string: *const u8) -> *const Spwd {
+    // SAFETY: `string` as given; the rest is this process's.
+    match hold(held_ssp(), |p, b, l, r| unsafe {
+        sgetspent_r(string, p, b, l, r)
+    }) {
+        Ok(p) => p,
+        Err(e) => {
+            errno::set_errno(e);
+            core::ptr::null()
+        }
+    }
+}
+
+/// Write `p` to `stream` as an `/etc/shadow` line, as glibc's `putspent`
+/// writes it: 0, or -1 with `errno`. A number of -1 -- a flag of all ones --
+/// is written empty, "not set"; the flag is written signed, as glibc's
+/// `%ld` writes it. `EINVAL` for a NULL name, or a name or password holding
+/// a `:` or newline; a NULL `p` is `EFAULT` (§303) and a NULL stream
+/// `EBADF` (§1120), where glibc would fault.
+///
+/// # Safety
+///
+/// `p` is NULL or a `struct spwd` whose non-null strings are C strings;
+/// `stream` is NULL or an open stream.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn putspent(p: *const Spwd, stream: *mut u8) -> i32 {
+    if p.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: non-null, the caller's.
+    let p = unsafe { &*p };
+    if p.sp_namp.is_null() || !valid_field(p.sp_namp) || !valid_field(p.sp_pwdp) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if stream.is_null() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    let mut w = EntryWriter::new(stream);
+    w.c_str_or_empty(p.sp_namp);
+    w.bytes(b":");
+    w.c_str_or_empty(p.sp_pwdp);
+    w.bytes(b":");
+    for v in [
+        p.sp_lstchg,
+        p.sp_min,
+        p.sp_max,
+        p.sp_warn,
+        p.sp_inact,
+        p.sp_expire,
+    ] {
+        if v != -1 {
+            w.int(i128::from(v));
+        }
+        w.bytes(b":");
+    }
+    if p.sp_flag != u64::MAX {
+        // `%ld`: the flag's bits as a signed number.
+        w.int(i128::from(p.sp_flag.cast_signed()));
+    }
+    w.bytes(b"\n");
+    w.finish()
+}
+
+// ---------------------------------------------------------------------------
+// lckpwdf / ulckpwdf
+// ---------------------------------------------------------------------------
+
+/// The file `lckpwdf` locks.
+const PWD_LOCKFILE: &[u8] = b"/etc/.pwd.lock\0";
+
+/// How long `lckpwdf` waits for another process's lock: glibc's 15 seconds.
+const LCKPWDF_TIMEOUT_NS: u64 = 15_000_000_000;
+
+/// How long it sleeps between tries.
+const LCKPWDF_POLL_NS: i64 = 10_000_000;
+
+/// [`lock_state`] while `lckpwdf` is opening the file or waiting for the
+/// lock: neither free (-1) nor held (a descriptor).
+const LOCKING: i32 = -2;
+
+process_global! {
+    /// The descriptor the lock is held through, -1 when there is none, or
+    /// [`LOCKING`] while `lckpwdf` is taking it.
+    fn lock_state() -> core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+}
+
+/// Take the lock the account files' writers share (`lckpwdf`): an exclusive
+/// `fcntl` lock on the whole of `/etc/.pwd.lock`, which is created, mode
+/// 0600, if it is not there. 0, or -1: when this process holds it already or
+/// another thread is taking it (`errno` untouched, as glibc's), when the file
+/// cannot be opened, or when another process holds the lock for 15 seconds
+/// -- `EINTR` then, what glibc's alarm leaves.
+///
+/// glibc waits in `F_SETLKW` under `alarm(15)`, which cancels an alarm the
+/// caller had set; this tries `F_SETLK` against the clock instead.
+///
+/// The lock excludes only as well as `fcntl`'s record locks do, and on
+/// SlateOS those do not yet reach the kernel, so for now two processes can
+/// both hold it (known-issues.md, the `fcntl_ops.rs` row;
+/// requests/d-a-native-programs-cannot-reach-the-record-lock-table.md).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lckpwdf() -> i32 {
+    use core::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+    // SAFETY: this process's state, an atomic.
+    let state = unsafe { &*lock_state() };
+    if state
+        .compare_exchange(-1, LOCKING, AcqRel, Acquire)
+        .is_err()
+    {
+        return -1;
+    }
+    let fd = crate::file::open(
+        PWD_LOCKFILE.as_ptr(),
+        crate::fcntl::O_WRONLY | crate::fcntl::O_CREAT | crate::fcntl::O_CLOEXEC,
+        0o600,
+    );
+    if fd < 0 {
+        state.store(-1, Release);
+        return -1;
+    }
+    let whole_file = crate::fcntl_ops::Flock {
+        l_type: crate::fcntl_ops::F_WRLCK,
+        l_whence: 0, // SEEK_SET
+        l_start: 0,
+        l_len: 0,
+        l_pid: 0,
+    };
+    let got = poll_lock(
+        || {
+            let arg = (&raw const whole_file) as i64;
+            if crate::fcntl_ops::fcntl(fd, crate::fcntl_ops::F_SETLK, arg) == 0 {
+                Ok(())
+            } else {
+                Err(errno::get_errno())
+            }
+        },
+        monotonic_ns,
+        || {
+            let pause = crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: LCKPWDF_POLL_NS,
+            };
+            // A short or failed sleep only means an earlier retry.
+            let _ = crate::time::nanosleep(&raw const pause, core::ptr::null_mut());
+        },
+        LCKPWDF_TIMEOUT_NS,
+    );
+    match got {
+        Ok(()) => {
+            state.store(fd, Release);
+            0
+        }
+        Err(e) => {
+            // The lock was not taken, so there is nothing for the close to
+            // lose; its own error would only hide the one that matters.
+            let _ = crate::file::close(fd);
+            errno::set_errno(e);
+            state.store(-1, Release);
+            -1
+        }
+    }
+}
+
+/// Release [`lckpwdf`]'s lock by closing its descriptor: `close`'s answer,
+/// or -1 (`errno` untouched) when this process does not hold it -- or
+/// another thread is still taking it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ulckpwdf() -> i32 {
+    use core::sync::atomic::Ordering::{AcqRel, Acquire};
+    // SAFETY: this process's state, an atomic.
+    let state = unsafe { &*lock_state() };
+    let fd = state.load(Acquire);
+    if fd < 0 || state.compare_exchange(fd, -1, AcqRel, Acquire).is_err() {
+        return -1;
+    }
+    crate::file::close(fd)
+}
+
+/// Try `try_lock` until it succeeds; fails with anything but contention
+/// (`EAGAIN`, `EACCES`); or `timeout_ns` have passed by `now` -- `EINTR`
+/// then -- with `sleep` between tries. Apart so the tests can drive the
+/// clock.
+fn poll_lock(
+    mut try_lock: impl FnMut() -> Result<(), i32>,
+    mut now: impl FnMut() -> u64,
+    mut sleep: impl FnMut(),
+    timeout_ns: u64,
+) -> Result<(), i32> {
+    let deadline = now().saturating_add(timeout_ns);
+    loop {
+        match try_lock() {
+            Ok(()) => return Ok(()),
+            Err(e) if e == errno::EAGAIN || e == errno::EACCES => {}
+            Err(e) => return Err(e),
+        }
+        if now() >= deadline {
+            return Err(errno::EINTR);
+        }
+        sleep();
+    }
+}
+
+/// `CLOCK_MONOTONIC` in nanoseconds; `u64::MAX` if the clock cannot be
+/// read, which ends the wait at its first check rather than never.
+fn monotonic_ns() -> u64 {
+    let mut ts = crate::stat::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if crate::time::clock_gettime(crate::time::CLOCK_MONOTONIC, &raw mut ts) != 0 {
+        return u64::MAX;
+    }
+    u64::try_from(ts.tv_sec)
+        .unwrap_or(0)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::try_from(ts.tv_nsec).unwrap_or(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +872,8 @@ mod tests {
 root:$6$salt$hash:19000:0:99999:7:::
 alice:!:19500::::::
 old:x:1:2:3
-neg:*:-1:2147483648:-1::::
+neg:*:4294967295:2147483648:0::::
+minus:*:-1:1:1::::
 short:x:1:2
 +nis
 ";
@@ -592,9 +933,13 @@ short:x:1:2
         crate::nss_files::set_test_text(Which::Shadow, Some(SHADOW));
         // SAFETY: a NUL-terminated name; the library's entry.
         let n = found(unsafe { getspnam(b"neg\0".as_ptr()) });
-        // `(long int) (int)` of the 32-bit value: -1 stays -1, and 2^31
+        // `(long int) (int)` of the 32-bit value: 2^32 - 1 is -1, and 2^31
         // wraps as it does in glibc.
-        assert_eq!((n.sp_lstchg, n.sp_min, n.sp_max), (-1, -2_147_483_648, -1));
+        assert_eq!((n.sp_lstchg, n.sp_min, n.sp_max), (-1, -2_147_483_648, 0));
+        // A number past 32 bits -- `-1` written as such is one -- makes the
+        // line no entry, as Debian's glibc has it (design-decisions §1136).
+        // SAFETY: as above.
+        assert!(unsafe { getspnam(b"minus\0".as_ptr()) }.is_null());
     }
 
     #[test]
@@ -682,5 +1027,156 @@ short:x:1:2
         assert_eq!(ask(), errno::EFAULT, "the first comparison");
         crate::nss_files::set_test_text(Which::Shadow, None);
         assert!(result.is_null());
+    }
+
+    // -- sgetspent_r's buffer, putspent's NULLs --
+
+    #[test]
+    fn sgetspent_r_wants_room_for_the_whole_string_as_glibc_does() {
+        let s = b"root:!:19000:0:99999:7:::\0";
+        let len = s.len() - 1;
+        let mut sp = Spwd::EMPTY;
+        let mut buf = [0u8; 64];
+        let mut result: *const Spwd = core::ptr::null();
+        for (buflen, want) in [(len, errno::ERANGE), (len + 1, 0), (0, errno::ERANGE)] {
+            errno::set_errno(1234);
+            // SAFETY: a C string; `buf` holds 64 bytes.
+            let rc = unsafe {
+                sgetspent_r(
+                    s.as_ptr(),
+                    &raw mut sp,
+                    buf.as_mut_ptr(),
+                    buflen,
+                    &raw mut result,
+                )
+            };
+            assert_eq!(rc, want, "buflen {buflen}");
+            if want == errno::ERANGE {
+                assert_eq!(errno::get_errno(), 1234, "glibc leaves errno as it was");
+                assert!(result.is_null());
+            }
+        }
+        // SAFETY: non-null pointers; a NULL string is what is tested.
+        let rc = unsafe {
+            sgetspent_r(
+                core::ptr::null(),
+                &raw mut sp,
+                buf.as_mut_ptr(),
+                64,
+                &raw mut result,
+            )
+        };
+        assert_eq!(rc, errno::EFAULT);
+    }
+
+    #[test]
+    fn putspent_refuses_what_glibc_would_fault_on() {
+        // SAFETY: NULL is what is tested; the stream is never reached.
+        assert_eq!(
+            unsafe { putspent(core::ptr::null(), core::ptr::null_mut()) },
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let sp = Spwd {
+            sp_namp: c"u".as_ptr().cast(),
+            ..Spwd::EMPTY
+        };
+        // SAFETY: a record of C strings; a NULL stream is what is tested.
+        assert_eq!(
+            unsafe { putspent(&raw const sp, core::ptr::null_mut()) },
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        let bad = Spwd {
+            sp_namp: c"a:b".as_ptr().cast(),
+            ..Spwd::EMPTY
+        };
+        // SAFETY: as above: the fields are judged before the stream.
+        assert_eq!(
+            unsafe { putspent(&raw const bad, core::ptr::null_mut()) },
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- lckpwdf --
+
+    #[test]
+    fn the_lock_wait_ends_at_the_lock_or_the_deadline() {
+        use core::cell::Cell;
+        let clock = Cell::new(0u64);
+        let tries = Cell::new(0u32);
+        // Contended throughout: EINTR once the 15 seconds are up, as
+        // glibc's alarm leaves it -- after trying all the while.
+        let got = poll_lock(
+            || {
+                tries.set(tries.get() + 1);
+                Err(errno::EAGAIN)
+            },
+            || clock.get(),
+            || clock.set(clock.get() + 10_000_000),
+            LCKPWDF_TIMEOUT_NS,
+        );
+        assert_eq!(got, Err(errno::EINTR));
+        assert_eq!(
+            tries.get(),
+            1501,
+            "every 10 ms for 15 s, and once at the start"
+        );
+        // Granted on the third try.
+        tries.set(0);
+        let got = poll_lock(
+            || {
+                tries.set(tries.get() + 1);
+                if tries.get() == 3 {
+                    Ok(())
+                } else {
+                    Err(errno::EACCES)
+                }
+            },
+            || 0,
+            || {},
+            LCKPWDF_TIMEOUT_NS,
+        );
+        assert_eq!((got, tries.get()), (Ok(()), 3));
+        // Any other failure is the answer at once.
+        let got = poll_lock(|| Err(errno::EBADF), || 0, || {}, LCKPWDF_TIMEOUT_NS);
+        assert_eq!(got, Err(errno::EBADF));
+    }
+
+    #[test]
+    fn a_lock_held_or_being_taken_is_not_taken_again() {
+        use core::sync::atomic::Ordering::SeqCst;
+        // SAFETY: this thread's state.
+        let state = unsafe { &*lock_state() };
+        for held in [LOCKING, 99] {
+            state.store(held, SeqCst);
+            errno::set_errno(1234);
+            assert_eq!(lckpwdf(), -1);
+            assert_eq!(errno::get_errno(), 1234, "glibc leaves errno as it was");
+            assert_eq!(state.load(SeqCst), held, "and the lock where it was");
+        }
+        // Released while another thread is still taking it: not ours to drop.
+        state.store(LOCKING, SeqCst);
+        assert_eq!(ulckpwdf(), -1);
+        assert_eq!(state.load(SeqCst), LOCKING);
+        state.store(-1, SeqCst);
+        errno::set_errno(1234);
+        assert_eq!(ulckpwdf(), -1, "nothing held");
+        assert_eq!(errno::get_errno(), 1234);
+    }
+
+    #[test]
+    fn a_lock_file_that_cannot_be_opened_leaves_the_lock_free() {
+        use core::sync::atomic::Ordering::SeqCst;
+        // The host has no /etc to create the file in: the open fails, and
+        // the next call tries again rather than finding the lock "taken".
+        // SAFETY: this thread's state.
+        let state = unsafe { &*lock_state() };
+        state.store(-1, SeqCst);
+        errno::set_errno(0);
+        assert_eq!(lckpwdf(), -1);
+        assert_ne!(errno::get_errno(), 0, "the open's own errno");
+        assert_eq!(state.load(SeqCst), -1);
     }
 }

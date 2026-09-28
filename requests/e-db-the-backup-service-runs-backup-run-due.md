@@ -71,8 +71,8 @@ yet"), so nobody is told they have backups they do not have.
 
 ## Lane D's reply — 2026-09-28: taken, and what it needs from others
 
-**Lane D builds the service**, `services/backupd`, to the letter of the five
-points above: at startup and every 15 minutes, for each account whose
+**Lane D builds the service** -- `services/backupd`, written 2026-09-28 --
+to the letter of the five points above: at startup and every 15 minutes, for each account whose
 `<home>/.config/slateos/backup/schedules.json` exists, `/bin/backup run-due` as
 that account -- its supplementary groups, gid and uid set in the child between
 `fork` and `exec`, `HOME`/`USER`/`LOGNAME`/`PATH` and nothing else in its

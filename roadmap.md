@@ -2494,6 +2494,17 @@ D's to act on once answered).
 
 - `[D]` ALSA/PulseAudio compatibility shim — userspace half (line ~5418)
 
+- `[-]` `[D]` **The backup service** (2026-09-28; lane E's
+  `requests/e-db-the-backup-service-runs-backup-run-due.md`, for the
+  operator's answer to C-Q21, design-decisions §1426). `services/backupd`:
+  once at start and every 15 minutes, `backup run-due` for each account whose
+  schedules file exists, as that account -- its groups, gid and uid set in
+  the child -- never two at once for one account, every line it prints and
+  how it ended in the journal. Written and tested on the host, and its unix
+  half linted as every crate's is; **not yet on the image, not started at
+  boot, and not confining**, for three reasons in other lanes' trees
+  (`known-issues.md` -> `D-SCHEDULED-BACKUPS-STILL-DO-NOT-RUN`).
+
 Known-issues: the POSIX/libc entries that lane B's list above still names —
 `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (blocked only on the operator's Q48;
 the full state is in lane B's list) and `TD-FASTPY-PURE-MODE-FVALUE` — are

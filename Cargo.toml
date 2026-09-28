@@ -223,6 +223,14 @@ members = [
     # tests run with the rest; the vendored crates themselves are excluded
     # below. no_std + alloc, so kept out of `default-members` like `yamldoc`.
     "rustcrypto/seal",
+    # The backup service (design-decisions.md §1426; lane E's
+    # requests/e-db-the-backup-service-runs-backup-run-due.md). A `std`
+    # daemon, so a member although `services` is excluded below: that
+    # exclusion is for the bare-metal services, each with its own target and
+    # lockfile, and a member named explicitly inside an excluded directory is
+    # a member, as `rustcrypto/seal` is. Out of `default-members` for
+    # procinfo's reason.
+    "services/backupd",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

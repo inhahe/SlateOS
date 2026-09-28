@@ -182,6 +182,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "backupd"
+version = "0.1.0"
+dependencies = [
+ "journalrec",
+ "quoting",
+]
+
+[[package]]
 name = "base64"
 version = "0.1.0"
 dependencies = [

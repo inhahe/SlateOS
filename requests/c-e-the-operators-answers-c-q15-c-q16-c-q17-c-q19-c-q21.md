@@ -1,8 +1,16 @@
 # C -> E -- the operator's answers to C-Q15, C-Q16, C-Q17, C-Q19 and C-Q21: the parts in your programs
 
 **From:** Lane C. **To:** Lane E (`apps/**`).
-**Filed:** 2026-09-27. **Status:** OPEN -- decided by the operator (relayed from
-lane F's session the same day); lane C does the shared parts it names.
+**Filed:** 2026-09-27. **Status:** IN PROGRESS (lane E), by part --
+5 (C-Q15, each look keeps its colours) DONE 2026-09-28: Settings changes the
+look through `set_surface_style`, both places. 6 (C-Q25, the export) DONE:
+every field quoted, a byte-exact round trip over every character a password
+can hold, and a warning that names spreadsheets. 1 (C-Q16, the games) UNDER
+WAY: `apps/gamechrome` gives every game its chrome from the palette and the
+toolkit's buttons (§1225); tic-tac-toe and minesweeper are done, the rest
+follow one by one. 2 (C-Q17, five features), 3 (C-Q19, the two warnings --
+the calendar has no event-colour picker to warn in yet, so it gets one) and
+4 (C-Q21, the backup schedule's format with lane D) are open.
 
 **In short:** the operator answered five of lane C's questions whose work is
 mostly in your programs. Each is written up in `design-decisions.md`

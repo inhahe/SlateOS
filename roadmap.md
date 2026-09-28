@@ -2325,11 +2325,16 @@ word; text inside them that says "lane C" is history.
   prerequisite of the two items that open this list. Do not start until the
   large-initiative ordering reaches it.
 
-- `[E]` **Games and the theme** — `open-questions.md` → **C-Q16**, filed by
-  lane C and still open. The theme sweep it follows is lane C's finished
-  entry "Twelve applications ignore the user's theme"; if the operator
-  answers that the games should follow the theme, the recolouring is in
-  `apps/`, so it is lane E's.
+- `[-]` `[E]` **Games and the theme** — **C-Q16**, answered by the operator
+  (`design-decisions.md` §1422): every game's chrome follows the palette, and
+  on the board a colour keeps its own value only where a player reads it --
+  per game, the table in `requests/c-e-the-operators-answers-c-q15-c-q16-c-q17-c-q19-c-q21.md`
+  -- and "try to make the games look as polished as possible". How, §1225:
+  `apps/gamechrome` (the chrome's roles from the palette, the toolkit's
+  buttons at a game's own size, a second side apart from the accent, a read
+  colour in the shade that reads on its tile), and in each game a
+  `palette_check` guard over its states in both modes. **Done:** tic-tac-toe,
+  minesweeper (2026-09-28). **Next:** the other thirty-three, one commit each.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

@@ -8,7 +8,9 @@ program is not testing the program.
 It could not save at all: its toolbar drew a Save button -- and New, Open,
 Undo, Redo, Find and GoTo -- that answered nothing, no key saved, and closing
 the window threw away every edit without a word.  The table covers what was
-added for that; the rest of the suite predates it.
+added for that, and -- since 2026-09-28 (C-Q24, §1416) -- the history kept
+as a tree, reached with Alt+Z and Alt+Shift+Z, Ctrl+Shift+Z and Ctrl+F4, and
+AltGr no longer taken for Ctrl; the rest of the suite predates it.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -101,6 +103,55 @@ MUTATIONS = [
         "                Key::W if self.focused_panel != FocusedPanel::SearchBar => {",
         "                Key::W => {",
         ["ctrl_w_decides_whether_the_search_starts_again_at_the_top"],
+    ),
+    # -- the history as a tree, and the keys (C-Q24, §1416) ----------------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(entry) => self.revert(&entry),",
+        "                Travel::Undo(entry) => self.reapply(&entry),",
+        ["a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.history.earlier();",
+        "        let steps = self.history.later();",
+        ["a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "a several-byte edit is spliced short",
+        "        self.data.splice(start..end, insert.iter().copied());",
+        "        self.data.splice(start..end, insert.iter().copied().take(1));",
+        ["a_several_byte_edit_goes_back_and_forth_whole"],
+    ),
+    (
+        "Alt+Z is not a key",
+        "        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        "        if false && key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        ["alt_z_reaches_the_branch_an_undo_left"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "                doc.later();",
+        "                doc.earlier();",
+        ["alt_z_reaches_the_branch_an_undo_left"],
+    ),
+    (
+        "AltGr is taken for Ctrl",
+        "        if key.modifiers.ctrl && !key.modifiers.alt {",
+        "        if key.modifiers.ctrl {",
+        ["altgr_z_does_not_undo"],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "                Key::Z if key.modifiers.shift => {\n                    self.active_doc_mut().redo();",
+        "                Key::Z if key.modifiers.shift => {\n                    self.active_doc_mut().undo();",
+        ["ctrl_shift_z_redoes"],
+    ),
+    (
+        "Ctrl+F4 closes nothing",
+        "                Key::F4 => {\n                    self.request_close_tab(self.active_tab);",
+        "                Key::F4 => {\n                    let _ = self.active_tab;",
+        ["ctrl_f4_closes_the_tab_even_in_the_search_bar"],
     ),
 ]
 

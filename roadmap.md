@@ -1978,9 +1978,11 @@ live.
   `guitk::grab` is the rule for every draggable thing: a handle is a 24-pixel
   target however small it is drawn (WCAG 2.5.8), an edge gets three pixels
   either side. The notification pane's volume and brightness drag now.
-  **Lane C, next:** the toolkit's colour picker sliders and scrollbar thumbs
-  onto it. (`WidgetKind::Slider` is one of five widgets the unused retained
-  tree never drew -- `known-issues.md`
+  The colour picker's parts and the file dialog's and tree view's scrollbar
+  thumbs take hold by the same rule (a thumb in a track grows along it only),
+  and fixing the colour picker found the first move of its RGB/HSV sliders
+  jumping the value. (`WidgetKind::Slider` is one of five widgets the unused
+  retained tree never drew -- `known-issues.md`
   `TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING`.)
   **Lane E:** the applications' own sliders
   (`requests/c-e-the-toolkit-has-a-slider-now.md`).

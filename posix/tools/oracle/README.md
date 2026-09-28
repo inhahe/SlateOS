@@ -18,6 +18,8 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 |---|---|---|
 | `math_harness.py` (cases: `math_cases.py`) | `posix/src/math_oracle.txt` | `math.rs`, `include_str!` |
 | `mathl_harness.py` | `posix/src/mathl_oracle.txt` | `mathl.rs`, `include_str!` |
+| `lgammal_zeros.py table 30` (mpmath, not glibc) | the `LGAMMAL_ZEROS` table, pasted | `mathl.rs` (`lgammal_near_zero`) |
+| `lgammal_zeros.py oracle` (mpmath, not glibc) | `posix/src/lgammal_zero_oracle.txt` | `mathl.rs`, `include_str!` |
 | `ldclass.c` | its output, pasted as `CLASS_ORACLE` | `mathl.rs` |
 | `complex_harness.py` | `posix/src/complex_oracle.txt` | `complex.rs`, `include_str!` |
 | `complexl_harness.py` | `posix/src/complexl_oracle.txt` | `complexl.rs`, `include_str!` |

@@ -2499,6 +2499,1493 @@ fn sin_pi(x: L) -> L {
     }
 }
 
+/// One of the zeros of `log|gamma|` below -2, with the constants
+/// [`lgammal_near_zero`] evaluates `lgammal` near it with.
+///
+/// Below -2 musl's `lgammal` -- the rest of this function -- uses the
+/// reflection formula, `log(pi / |x sin(pi x)|) - lgamma(-x)`: two numbers
+/// the size of `log(n!)` subtracted to give one near zero wherever |gamma(x)|
+/// is near 1, twice in every unit interval. There it was right only
+/// absolutely (known-issues.md, D-POSIX-LGAMMA-LOSES-DIGITS-NEAR-NEGATIVE-ROOTS).
+/// The table is `posix/tools/oracle/lgammal_zeros.py table 30`'s, from
+/// mpmath at 80 digits: the zeros for n = 2..=30, beyond which the
+/// reflection loses at most a few bits even beside a pole.
+struct LdZero {
+    /// The integer nearest the zero: the pole it lies beside.
+    pole: i32,
+    /// The zero's offset from `pole`, `e0`, as `hi + lo`.
+    e0: (L, L),
+    /// `sin(pi e0)`, as `hi + lo`.
+    sin_e0: (L, L),
+    /// `cot(pi e0)`, as `hi + lo`.
+    cot_e0: (L, L),
+    /// `B(d) = lgamma(1 - x0) - lgamma(1 - x0 - d) = sum c_k d^k`: the first
+    /// coefficient, `psi(1 - x0)`, as `hi + lo`...
+    c1: (L, L),
+    /// ...and the rest, `c_k = (-1)^(k+1) psi^(k-1)(1 - x0) / k!` from
+    /// `k = 2`, as many as `|d| <= 1/4` needs for 2^-72.
+    c: &'static [L],
+}
+
+// Double-long-double arithmetic: a value as `hi + lo`, `lo` at most half an
+// ulp of `hi` -- twice the 64-bit significand. Each transformation below is
+// exact given the x87 unit's 64-bit precision control and rounding to
+// nearest: the state a SlateOS (or Linux) thread starts in, and the one
+// every function in this file assumes.
+
+/// `a + b` as `(s, e)` exactly, for `|a| >= |b|` or `a` zero.
+fn dd_fast_two_sum(a: L, b: L) -> (L, L) {
+    let s = a + b;
+    (s, b - (s - a))
+}
+
+/// `a + b` as `(s, e)` exactly, either way round (Knuth's TwoSum).
+fn dd_two_sum(a: L, b: L) -> (L, L) {
+    let s = a + b;
+    let bb = s - a;
+    (s, (a - (s - bb)) + (b - bb))
+}
+
+/// `a` as `hi + lo` of at most 32 significant bits each (Veltkamp's split by
+/// 2^32 + 1), so that the product of two halves is exact in 64 bits.
+fn dd_split(a: L) -> (L, L) {
+    const C: L = L::from_bits(0x401F, 0x8000_0000_8000_0000); // 2^32 + 1
+    let g = C * a;
+    let hi = g - (g - a);
+    (hi, a - hi)
+}
+
+/// `a b` as `(p, e)` exactly (Dekker's product).
+fn dd_two_prod(a: L, b: L) -> (L, L) {
+    let p = a * b;
+    let (ah, al) = dd_split(a);
+    let (bh, bl) = dd_split(b);
+    (p, ((ah * bh - p) + ah * bl + al * bh) + al * bl)
+}
+
+/// `(ah + al)(bh + bl)`, to about 2^-125 relative.
+fn dd_mul(ah: L, al: L, bh: L, bl: L) -> (L, L) {
+    let (p, e) = dd_two_prod(ah, bh);
+    dd_fast_two_sum(p, e + (ah * bl + al * bh))
+}
+
+/// `(ah + al) + (bh + bl)`: the high parts' sum exact, the rest to within
+/// the low parts' rounding.
+fn dd_add(ah: L, al: L, bh: L, bl: L) -> (L, L) {
+    let (s, e) = dd_two_sum(ah, bh);
+    dd_fast_two_sum(s, e + (al + bl))
+}
+
+/// `(ah + al) / (bh + bl)`: a quotient and one correction.
+fn dd_div(ah: L, al: L, bh: L, bl: L) -> (L, L) {
+    let q = ah / bh;
+    let (p, e) = dd_two_prod(q, bh);
+    let r = (((ah - p) - e) + al) - q * bl;
+    dd_fast_two_sum(q, r / bh)
+}
+
+/// `pi` as `hi + lo`.
+const DD_PI: (L, L) = (
+    L::from_bits(0x4000, 0xC90F_DAA2_2168_C235),
+    L::from_bits(0xBFBE, 0xECE6_75D1_FC8F_8CBB),
+);
+
+/// `sin(pi (dh + dl))` as `hi + lo`, for `|dh| <= 1/4`: the argument
+/// `t = pi d` as a pair, and the series `t - t^3/3! + ...` with its leading
+/// term kept as that pair and the rest -- a tenth of it at most -- summed in
+/// long double.
+fn dd_sinpi(dh: L, dl: L) -> (L, L) {
+    // (-1)^k / (2k+1)!, k = 1..=10; the next term is below 2^-70 of t for
+    // |t| <= pi/4.
+    const S: [L; 10] = [
+        L::from_bits(0xBFFC, 0xAAAA_AAAA_AAAA_AAAB),
+        L::from_bits(0x3FF8, 0x8888_8888_8888_8889),
+        L::from_bits(0xBFF2, 0xD00D_00D0_0D00_D00D),
+        L::from_bits(0x3FEC, 0xB8EF_1D2A_B639_9C7D),
+        L::from_bits(0xBFE5, 0xD732_2B3F_AA27_1C7F),
+        L::from_bits(0x3FDE, 0xB092_309D_4368_4BE5),
+        L::from_bits(0xBFD6, 0xD73F_9F39_9DC0_F88F),
+        L::from_bits(0x3FCE, 0xCA96_3B81_856A_5359),
+        L::from_bits(0xBFC6, 0x97A4_DA34_0A0A_B926),
+        L::from_bits(0x3FBD, 0xB8DC_77B6_E7AB_8C5F),
+    ];
+    let (th, tl) = dd_mul(DD_PI.0, DD_PI.1, dh, dl);
+    let t2 = th * th;
+    // t^3 (S1 + t^2 S2 + ...), and the first-order effect of `tl` on the
+    // cubic term, -t^2 tl / 2.
+    let tail = th * t2 * horner_l(t2, &S) - t2 * tl * ld(0.5);
+    dd_fast_two_sum(th, tl + tail)
+}
+
+/// `1 / (2k + 1)`, `k = 1..=24`: the odd series of `atanh`, `w + w^3/3 + ...`
+/// after its first term. For `|w| < 1/3` the next term, `w^51 / 51`, is below
+/// 2^-80 of `w`.
+const DD_ATANH: [L; 24] = [
+    L::from_bits(0x3FFD, 0xAAAA_AAAA_AAAA_AAAB),
+    L::from_bits(0x3FFC, 0xCCCC_CCCC_CCCC_CCCD),
+    L::from_bits(0x3FFC, 0x9249_2492_4924_9249),
+    L::from_bits(0x3FFB, 0xE38E_38E3_8E38_E38E),
+    L::from_bits(0x3FFB, 0xBA2E_8BA2_E8BA_2E8C),
+    L::from_bits(0x3FFB, 0x9D89_D89D_89D8_9D8A),
+    L::from_bits(0x3FFB, 0x8888_8888_8888_8889),
+    L::from_bits(0x3FFA, 0xF0F0_F0F0_F0F0_F0F1),
+    L::from_bits(0x3FFA, 0xD794_35E5_0D79_435E),
+    L::from_bits(0x3FFA, 0xC30C_30C3_0C30_C30C),
+    L::from_bits(0x3FFA, 0xB216_42C8_590B_2164),
+    L::from_bits(0x3FFA, 0xA3D7_0A3D_70A3_D70A),
+    L::from_bits(0x3FFA, 0x97B4_25ED_097B_425F),
+    L::from_bits(0x3FFA, 0x8D3D_CB08_D3DC_B08D),
+    L::from_bits(0x3FFA, 0x8421_0842_1084_2108),
+    L::from_bits(0x3FF9, 0xF83E_0F83_E0F8_3E10),
+    L::from_bits(0x3FF9, 0xEA0E_A0EA_0EA0_EA0F),
+    L::from_bits(0x3FF9, 0xDD67_C8A6_0DD6_7C8A),
+    L::from_bits(0x3FF9, 0xD20D_20D2_0D20_D20D),
+    L::from_bits(0x3FF9, 0xC7CE_0C7C_E0C7_CE0C),
+    L::from_bits(0x3FF9, 0xBE82_FA0B_E82F_A0BF),
+    L::from_bits(0x3FF9, 0xB60B_60B6_0B60_B60B),
+    L::from_bits(0x3FF9, 0xAE4C_415C_9882_B931),
+    L::from_bits(0x3FF9, 0xA72F_0539_7829_CBC1),
+];
+
+/// `log1p(uh + ul)` as `hi + lo`, for `|u| < 1/2`: `2 atanh(w)` with
+/// `w = u / (2 + u)`, below 1/3 in magnitude, the leading `2 w` kept as a
+/// pair and the odd series after it -- under a twentieth of it -- in long
+/// double.
+fn dd_log1p(uh: L, ul: L) -> (L, L) {
+    let (vh, vl) = dd_add(ld(2.0), ZERO, uh, ul);
+    let (wh, wl) = dd_div(uh, ul, vh, vl);
+    let w2 = wh * wh;
+    let tail = wh * w2 * horner_l(w2, &DD_ATANH);
+    let (sh, sl) = dd_fast_two_sum(wh, wl + tail);
+    (ld(2.0) * sh, ld(2.0) * sl)
+}
+
+/// `log 2` as `hi + lo`.
+const DD_LN2: (L, L) = (
+    L::from_bits(0x3FFE, 0xB172_17F7_D1CF_79AC),
+    L::from_bits(0xBFBC, 0xD871_319F_F034_2543),
+);
+
+/// `log(rh + rl)` as `hi + lo`, for a positive finite normal `rh`: `r` scaled
+/// by a power of two, exactly, into `[sqrt(1/2), sqrt(2))`, where
+/// `w = (m - 1) / (m + 1)` is at most 0.172 and `2 atanh(w)` needs 14 terms;
+/// then `k log 2` added.
+fn dd_log(rh: L, rl: L) -> (L, L) {
+    const SQRT2: L = L::from_bits(0x3FFF, 0xB504_F333_F9DE_6484);
+    let mut k = i32::from(rh.biased_exponent()) - 0x3FFF;
+    let (mut mh, mut ml) = (rh.scalbn(-k), rl.scalbn(-k));
+    if mh >= SQRT2 {
+        k += 1;
+        (mh, ml) = (mh * ld(0.5), ml * ld(0.5));
+    }
+    let (nh, nl) = dd_add(mh, ml, -ONE, ZERO);
+    let (dh, dl) = dd_add(mh, ml, ONE, ZERO);
+    let (wh, wl) = dd_div(nh, nl, dh, dl);
+    let w2 = wh * wh;
+    let tail = wh * w2 * horner_l(w2, &DD_ATANH);
+    let (sh, sl) = dd_fast_two_sum(wh, wl + tail);
+    let kl = L::from_i64(i64::from(k));
+    let (kh, ke) = dd_two_prod(kl, DD_LN2.0);
+    dd_add(kh, ke + kl * DD_LN2.1, ld(2.0) * sh, ld(2.0) * sl)
+}
+
+/// `lgammal(x)` for `x` below -2 and within 1/4 of a zero of `lgamma`, where
+/// the reflection formula cancels; `None` elsewhere, where it does not.
+///
+/// With `x0` the zero and `d = x - x0`, the reflection formula at `x` less
+/// the same at `x0`, where `lgamma` is 0, is
+///
+/// ```text
+/// lgamma(x) = A + B,   A = log|sin(pi x0) / sin(pi x)|,
+///                      B = lgamma(1 - x0) - lgamma(1 - x),
+/// ```
+///
+/// both small wherever the result is: nothing the size of `log(n!)` is
+/// subtracted. They can still cancel each other by a factor of a few --
+/// by 2.2 at the zero near -2.748, where `A` falls three times as fast as
+/// `B` rises -- so both are formed in double-long-double: `A` as
+/// `-log1p(u)`, `u = sin(pi x) / sin(pi x0) - 1` formed without subtracting
+/// the sines, `cot(pi e0) sin(pi d) - 2 sin(pi d / 2)^2` with `e0` the
+/// zero's offset from its pole; `B` as its Taylor series about `1 - x0`,
+/// which is above 3, so it converges fast, the leading `psi(1 - x0) d`
+/// exact. Where `|u| >= 1/2`, `A` is the logarithm of the ratio itself,
+/// still in pairs: `1 + u` above 3/2, and below 1/2 the quotient of the two
+/// sines, which beside a pole keeps the digits `1 + u` would lose.
+fn lgammal_near_zero(x: L) -> Option<L> {
+    let n = (-x).round_int_toward(3).to_i64_rint();
+    if !(2..=30).contains(&n) {
+        return None;
+    }
+    // x is in (-n - 1, -n), whose zeros are these two.
+    let base = usize::try_from((n - 2) * 2).ok()?;
+    let mut best: Option<(&LdZero, L, L, L)> = None;
+    for z in LGAMMAL_ZEROS.get(base..base.checked_add(2)?)? {
+        // Exact: x is within 1 of the pole and at least 2 in magnitude.
+        let e = x - L::from_i64(i64::from(z.pole));
+        // d = e - e0 as a pair: the first difference exact, the second
+        // rounded where it is already far below the first.
+        let (t, te) = dd_two_sum(e, -z.e0.0);
+        let (dh, dl) = dd_fast_two_sum(t, te - z.e0.1);
+        if best.is_none_or(|(_, _, bh, _)| dh.abs() < bh.abs()) {
+            best = Some((z, e, dh, dl));
+        }
+    }
+    let (z, e, dh, dl) = best?;
+    let half = ld(0.5);
+    if dh.abs() > half * half {
+        return None;
+    }
+    // u = cot(pi e0) sin(pi d) - 2 sin(pi d / 2)^2
+    let (sh, sl) = dd_sinpi(dh, dl);
+    let (qh, ql) = dd_sinpi(dh * half, dl * half);
+    let (ksh, ksl) = dd_mul(z.cot_e0.0, z.cot_e0.1, sh, sl);
+    let (q2h, q2l) = dd_mul(qh, ql, qh, ql);
+    let (uh, ul) = dd_add(ksh, ksl, ld(-2.0) * q2h, ld(-2.0) * q2l);
+    let (ah, al) = if uh.abs() < half {
+        let (lh, ll) = dd_log1p(uh, ul);
+        (-lh, -ll)
+    } else {
+        // The ratio sin(pi x) / sin(pi x0), positive: x and the zero share an
+        // interval. Above 3/2 it is 1 + u, which loses nothing; below 1/2 --
+        // x nearer the pole than the zero is, |e| < |e0| <= 1/4 -- it is the
+        // quotient of the two sines, since beside the pole it is far smaller
+        // than u's rounding.
+        let (rh, rl) = if uh > ZERO {
+            dd_add(ONE, ZERO, uh, ul)
+        } else {
+            let (seh, sel) = dd_sinpi(e, ZERO);
+            dd_div(seh, sel, z.sin_e0.0, z.sin_e0.1)
+        };
+        if rh <= ZERO {
+            return None;
+        }
+        let (lh, ll) = dd_log(rh, rl);
+        (-lh, -ll)
+    };
+    // B = d (c1 + d (c2 + ...)): c1 d as a pair, the rest -- a few hundredths
+    // of it at most -- in long double.
+    let rest = dh * dh * horner_l(dh, z.c);
+    let (bh, bl) = dd_mul(z.c1.0, z.c1.1, dh, dl);
+    let (bh, bl) = dd_fast_two_sum(bh, bl + rest);
+    let (rh, rl) = dd_add(ah, al, bh, bl);
+    Some(rh + rl)
+}
+
+// 58 zeros, n = 2..=30; at most 18 coefficients each.
+#[rustfmt::skip]
+static LGAMMAL_ZEROS: [LdZero; 58] = [
+    LdZero {
+        // -2.457024738220800623039454
+        pole: -2,
+        e0: (L::from_bits(0xBFFD, 0xE9FF25803E1B0558), L::from_bits(0x3FBB, 0x9B0675072FC769E6)),
+        sin_e0: (L::from_bits(0xBFFE, 0xFDAB9D5B090D8C8A), L::from_bits(0xBFBD, 0xD8497535758B32A1)),
+        cot_e0: (L::from_bits(0xBFFC, 0x8B18E25FF6D1C846), L::from_bits(0x3FBB, 0x8DA7C4E6343744EF)),
+        c1: (L::from_bits(0x3FFF, 0x8B5FB7B6880FD368), L::from_bits(0xBFBE, 0xDF2BBC1C473B8BCB)),
+        c: &[
+            L::from_bits(0xBFFC, 0xAB8EC74C2879E6D6),
+            L::from_bits(0xBFF9, 0x97F27937C683E28B),
+            L::from_bits(0xBFF6, 0xC82F93C76A0F320A),
+            L::from_bits(0xBFF4, 0x9CFFA779944CAF99),
+            L::from_bits(0xBFF2, 0x87CC4E40B2CF4B51),
+            L::from_bits(0xBFEF, 0xF9F57F5313486EB1),
+            L::from_bits(0xBFED, 0xEFFD01F376FD83A3),
+            L::from_bits(0xBFEB, 0xED83885F6FA57F5A),
+            L::from_bits(0xBFE9, 0xF06EB7BFADB05DAD),
+            L::from_bits(0xBFE7, 0xF7A1CEC1A5CB6A26),
+            L::from_bits(0xBFE6, 0x8143907B7350BE06),
+            L::from_bits(0xBFE4, 0x886BFBE015BDDB73),
+            L::from_bits(0xBFE2, 0x91400932001E660F),
+            L::from_bits(0xBFE0, 0x9BC73EE73897AF09),
+            L::from_bits(0xBFDE, 0xA816AE7BE6778C48),
+            L::from_bits(0xBFDC, 0xB64EC6D4473CA1D7),
+            L::from_bits(0xBFDA, 0xC69A4C5DF70F590E),
+        ],
+    },
+    LdZero {
+        // -2.747682646727412601391488
+        pole: -3,
+        e0: (L::from_bits(0x3FFD, 0x812FBD7909BFCD0D), L::from_bits(0xBFBB, 0xAD25A320F575FA58)),
+        sin_e0: (L::from_bits(0x3FFE, 0xB65516E54FC82724), L::from_bits(0x3FBC, 0xEFF1B7A299A02063)),
+        cot_e0: (L::from_bits(0x3FFE, 0xFC4CA701ABE590FD), L::from_bits(0x3FBC, 0xB9C924C144432D52)),
+        c1: (L::from_bits(0x3FFF, 0x974630E62BE0B753), L::from_bits(0x3FBE, 0xCEFE9899DC066DF9)),
+        c: &[
+            L::from_bits(0xBFFC, 0x9C71A2840322D3AF),
+            L::from_bits(0xBFF8, 0xFD10E9BFD589FCDA),
+            L::from_bits(0xBFF6, 0x986DD71D29FE701F),
+            L::from_bits(0xBFF3, 0xDADF061EA0EBD0D3),
+            L::from_bits(0xBFF1, 0xAD7C9A9CA12F6937),
+            L::from_bits(0xBFEF, 0x9273722965972C4A),
+            L::from_bits(0xBFED, 0x81139D60C62D2E33),
+            L::from_bits(0xBFEA, 0xEAB41BADF71D083A),
+            L::from_bits(0xBFE8, 0xDA645728F3603113),
+            L::from_bits(0xBFE6, 0xCEDE94FFDB143A14),
+            L::from_bits(0xBFE4, 0xC6B89CE10D65836B),
+            L::from_bits(0xBFE2, 0xC10CE17FF45D2668),
+            L::from_bits(0xBFE0, 0xBD43E72302714D58),
+            L::from_bits(0xBFDE, 0xBAF669B7353BC545),
+            L::from_bits(0xBFDC, 0xB9DC28EF91AE759A),
+            L::from_bits(0xBFDA, 0xB9C18BF7DB0B9D43),
+        ],
+    },
+    LdZero {
+        // -3.143580888349980058694359
+        pole: -3,
+        e0: (L::from_bits(0xBFFC, 0x9306DE4F2CD7BEE3), L::from_bits(0x3FB7, 0xCB32961322CD5D5A)),
+        sin_e0: (L::from_bits(0xBFFD, 0xDF325E7ED8C79966), L::from_bits(0xBFBC, 0x84FBB464DC1B23EF)),
+        cot_e0: (L::from_bits(0xC000, 0x8420C5DDE11E850B), L::from_bits(0xBFBF, 0x8F3A103BDD7C91E3)),
+        c1: (L::from_bits(0x3FFF, 0xA5E57AF2D3ADC83A), L::from_bits(0x3FBD, 0xACEB7BA6B1193B61)),
+        c: &[
+            L::from_bits(0xBFFC, 0x8BA9393415BA6568),
+            L::from_bits(0xBFF8, 0xC9F93DF17165C7F2),
+            L::from_bits(0xBFF5, 0xD9CFFCB0B4535B1D),
+            L::from_bits(0xBFF3, 0x8C2964C606CDBFDA),
+            L::from_bits(0xBFF0, 0xC7609E395FC293F5),
+            L::from_bits(0xBFEE, 0x972C830BF1444169),
+            L::from_bits(0xBFEB, 0xEF913D6CE1CEDE96),
+            L::from_bits(0xBFE9, 0xC3F797E3FF64DF77),
+            L::from_bits(0xBFE7, 0xA42E48B60FC81126),
+            L::from_bits(0xBFE5, 0x8C1CBD9CC038C364),
+            L::from_bits(0xBFE2, 0xF2A74E062D1A485B),
+            L::from_bits(0xBFE0, 0xD4987E7F66A16690),
+            L::from_bits(0xBFDE, 0xBC0D49D41D9C1AD1),
+            L::from_bits(0xBFDC, 0xA7AA3071854B231A),
+            L::from_bits(0xBFDA, 0x967BD863A05F87A2),
+            L::from_bits(0xBFD8, 0x87D33F66C0EA4A1A),
+        ],
+    },
+    LdZero {
+        // -3.955294284858597928532797
+        pole: -4,
+        e0: (L::from_bits(0x3FFA, 0xB71D5707A035E8F3), L::from_bits(0xBFB9, 0x8AC252246D986415)),
+        sin_e0: (L::from_bits(0x3FFC, 0x8F5874D99AEBF587), L::from_bits(0x3FB9, 0x951A06F7B82F44C7)),
+        cot_e0: (L::from_bits(0x4001, 0xE257F8E2C9659C6E), L::from_bits(0x3FBF, 0x9D24FA2942AD0489)),
+        c1: (L::from_bits(0x3FFF, 0xBF82A2C85DEF58BC), L::from_bits(0xBFBA, 0xB55A6D65E584056D)),
+        c: &[
+            L::from_bits(0xBFFB, 0xE4E3EFD2DB0E7255),
+            L::from_bits(0xBFF8, 0x87E219E358CE63CD),
+            L::from_bits(0xBFF4, 0xF10D5C802D6E86F0),
+            L::from_bits(0xBFF1, 0xFF96C8A7AB3B302E),
+            L::from_bits(0xBFEF, 0x95FFB4365F4AF641),
+            L::from_bits(0xBFEC, 0xBBF63D0DBCB923DA),
+            L::from_bits(0xBFE9, 0xF6750FDF5E94D92B),
+            L::from_bits(0xBFE7, 0xA7021A54DDA4E1C1),
+            L::from_bits(0xBFE4, 0xE811DBFC8978741D),
+            L::from_bits(0xBFE2, 0xA46722CEE86753BD),
+            L::from_bits(0xBFDF, 0xEC8F148A17C350D6),
+            L::from_bits(0xBFDD, 0xAC554CBDC7D56CBE),
+            L::from_bits(0xBFDA, 0xFDAE938F9F639688),
+            L::from_bits(0xBFD8, 0xBC517C4A29B221A6),
+            L::from_bits(0xBFD6, 0x8CCE379943F73AD5),
+        ],
+    },
+    LdZero {
+        // -4.039361839740536874234577
+        pole: -4,
+        e0: (L::from_bits(0xBFFA, 0xA139E16656030C3A), L::from_bits(0x3FB6, 0xF4F21E7EED53E840)),
+        sin_e0: (L::from_bits(0xBFFB, 0xFC9BC1069587C199), L::from_bits(0xBFBA, 0xBA25C6F24F13C369)),
+        cot_e0: (L::from_bits(0xC002, 0x80BA6004BDF7DF78), L::from_bits(0xBFC1, 0x987B096B1511FB30)),
+        c1: (L::from_bits(0x3FFF, 0xC1E4B2564D190A3F), L::from_bits(0x3FBE, 0x82AE923879959B65)),
+        c: &[
+            L::from_bits(0xBFFB, 0xE0AF5D25FA6CEA26),
+            L::from_bits(0xBFF8, 0x82F46B021320EC55),
+            L::from_bits(0xBFF4, 0xE41AE3EECD85D83E),
+            L::from_bits(0xBFF1, 0xED83C159FE2C43ED),
+            L::from_bits(0xBFEF, 0x88E735E1B1D198DA),
+            L::from_bits(0xBFEC, 0xA88231F6595B8DEB),
+            L::from_bits(0xBFE9, 0xD90DA73E9D2973FF),
+            L::from_bits(0xBFE7, 0x9080D67B100AC75C),
+            L::from_bits(0xBFE4, 0xC54B1BBD9C97B298),
+            L::from_bits(0xBFE2, 0x8956BE0F0A217E61),
+            L::from_bits(0xBFDF, 0xC232D408663166DF),
+            L::from_bits(0xBFDD, 0x8B09494C81296E42),
+            L::from_bits(0xBFDA, 0xC9275E23F68FA90C),
+            L::from_bits(0xBFD8, 0x92C4ED0F0003CF58),
+            L::from_bits(0xBFD5, 0xD7BBD68BC77EC6D2),
+        ],
+    },
+    LdZero {
+        // -4.99154464056004772234526
+        pole: -5,
+        e0: (L::from_bits(0x3FF8, 0x8A8859115032BBCC), L::from_bits(0xBFB6, 0xAA4076988501D7D8)),
+        sin_e0: (L::from_bits(0x3FF9, 0xD994B7676B00F839), L::from_bits(0x3FB8, 0xC7709178D2525854)),
+        cot_e0: (L::from_bits(0x4004, 0x968C5DF154631C93), L::from_bits(0xBFC3, 0x8733F42B04FABBC0)),
+        c1: (L::from_bits(0x3FFF, 0xDA2FC97AA6F6C6BD), L::from_bits(0x3FBD, 0xED6A13B80CB0F0FF)),
+        c: &[
+            L::from_bits(0xBFFB, 0xB9F583DB79B1B91D),
+            L::from_bits(0xBFF7, 0xB39F82962FEB6A6F),
+            L::from_bits(0xBFF4, 0x81C86187E648FEE2),
+            L::from_bits(0xBFF0, 0xE077C4F086A84614),
+            L::from_bits(0xBFED, 0xD7230AC29932688B),
+            L::from_bits(0xBFEA, 0xDC5FE926F33F39FF),
+            L::from_bits(0xBFE7, 0xEC748AE836CD3637),
+            L::from_bits(0xBFE5, 0x833E9FF6DC5C42FA),
+            L::from_bits(0xBFE2, 0x9584553898175E8C),
+            L::from_bits(0xBFDF, 0xADD22F29EB2F206F),
+            L::from_bits(0xBFDC, 0xCD61540EFBD4BA80),
+            L::from_bits(0xBFD9, 0xF5E597AD7FF9B94A),
+            L::from_bits(0xBFD7, 0x94D1E8CFACB449F4),
+            L::from_bits(0xBFD4, 0xB5CA48A9295B0520),
+        ],
+    },
+    LdZero {
+        // -5.008218168322593521552368
+        pole: -5,
+        e0: (L::from_bits(0xBFF8, 0x86A57F0B6D90CA93), L::from_bits(0xBFB5, 0xADCB2A729BD98D5E)),
+        sin_e0: (L::from_bits(0xBFF9, 0xD37A8B073D058242), L::from_bits(0xBFB7, 0x9F8E6C0278AD7EC0)),
+        cot_e0: (L::from_bits(0xC004, 0x9AE53A33780D7C78), L::from_bits(0x3FC3, 0x88244C2C223F95F8)),
+        c1: (L::from_bits(0x3FFF, 0xDA92DB43CDE80671), L::from_bits(0x3FBD, 0xD27A00AB001972DF)),
+        c: &[
+            L::from_bits(0xBFFB, 0xB96630699CDC6C07),
+            L::from_bits(0xBFF7, 0xB28BC4F698F4D75D),
+            L::from_bits(0xBFF4, 0x809EC0B074B40ED2),
+            L::from_bits(0xBFF0, 0xDDCC29E47B747D29),
+            L::from_bits(0xBFED, 0xD3F3486F8994A0F7),
+            L::from_bits(0xBFEA, 0xD8790B9A268998C0),
+            L::from_bits(0xBFE7, 0xE796E854154FFD69),
+            L::from_bits(0xBFE5, 0x802B6676F8F6358D),
+            L::from_bits(0xBFE2, 0x919713396284E303),
+            L::from_bits(0xBFDF, 0xA8C44A30B5D9A4C9),
+            L::from_bits(0xBFDC, 0xC6D57B5007E41014),
+            L::from_bits(0xBFD9, 0xED602D77B814AA71),
+            L::from_bits(0xBFD7, 0x8F406BA70F15DC5C),
+            L::from_bits(0xBFD4, 0xAE7D1F6349C8113D),
+        ],
+    },
+    LdZero {
+        // -5.998607480080875629442408
+        pole: -6,
+        e0: (L::from_bits(0x3FF5, 0xB6853705F9504562), L::from_bits(0x3FB4, 0xA74D0B38481C701C)),
+        sin_e0: (L::from_bits(0x3FF7, 0x8F59C7EB986AE18A), L::from_bits(0xBFB6, 0xCCFE120375FD3590)),
+        cot_e0: (L::from_bits(0x4006, 0xE49584E65D899479), L::from_bits(0x3FC2, 0xFFAE86F1A539D531)),
+        c1: (L::from_bits(0x3FFF, 0xEFB063DB3E08815F), L::from_bits(0x3FBD, 0xCF00554D93F8B9B6)),
+        c: &[
+            L::from_bits(0xBFFB, 0x9D4389DDE6A5728C),
+            L::from_bits(0xBFF7, 0x80900112221E5F2C),
+            L::from_bits(0xBFF3, 0x9D58EDBCBEEF5911),
+            L::from_bits(0xBFEF, 0xE6A821051320450B),
+            L::from_bits(0xBFEC, 0xBB7F2FD8BFD598E4),
+            L::from_bits(0xBFE9, 0xA3008487267C325C),
+            L::from_bits(0xBFE6, 0x9486E2B971022891),
+            L::from_bits(0xBFE3, 0x8C1ABA8DDB3BBFC9),
+            L::from_bits(0xBFE0, 0x87B4104E2BA9D91F),
+            L::from_bits(0xBFDD, 0x86343160EAF727FE),
+            L::from_bits(0xBFDA, 0x86F5936AC9DEAAD1),
+            L::from_bits(0xBFD7, 0x8996D656F55AF461),
+            L::from_bits(0xBFD4, 0x8DDFB870B6C97AC5),
+        ],
+    },
+    LdZero {
+        // -6.001385294453155097261982
+        pole: -6,
+        e0: (L::from_bits(0xBFF5, 0xB592C4BE4676C0F8), L::from_bits(0xBFB4, 0xB65B458E172E1AB1)),
+        sin_e0: (L::from_bits(0xBFF7, 0x8E9B5DA457B87C64), L::from_bits(0x3FB6, 0xDF7A0CF13F4F0534)),
+        cot_e0: (L::from_bits(0xC006, 0xE5C6BD9E0A007612), L::from_bits(0x3FC5, 0x9E81DB479E20ACAC)),
+        c1: (L::from_bits(0x3FFF, 0xEFBE5DC47E4C157C), L::from_bits(0xBFBD, 0xEA20E5F2DC995BA8)),
+        c: &[
+            L::from_bits(0xBFFB, 0x9D326767E7D74574),
+            L::from_bits(0xBFF7, 0x80740C79EAF052B8),
+            L::from_bits(0xBFF3, 0x9D25B6DC83139B5B),
+            L::from_bits(0xBFEF, 0xE6443C23F11A1747),
+            L::from_bits(0xBFEC, 0xBB19E3EBE7B29367),
+            L::from_bits(0xBFE9, 0xA2970D7BCD76C2D4),
+            L::from_bits(0xBFE6, 0x9416FD27709B18C1),
+            L::from_bits(0xBFE3, 0x8BA25454E162D0FB),
+            L::from_bits(0xBFE0, 0x87311D69E5DE986B),
+            L::from_bits(0xBFDD, 0x85A490AB2C04A438),
+            L::from_bits(0xBFDA, 0x8656FAC3692C1322),
+            L::from_bits(0xBFD7, 0x88E6C22B4D42DCF3),
+            L::from_bits(0xBFD4, 0x8D1B5C87FEBC5AC8),
+        ],
+    },
+    LdZero {
+        // -6.999801507890637697892097
+        pole: -7,
+        e0: (L::from_bits(0x3FF2, 0xD02251E4400C29D9), L::from_bits(0x3FB1, 0x9347B805BC17F9FF)),
+        sin_e0: (L::from_bits(0x3FF4, 0xA377D55E4F8CE61D), L::from_bits(0xBFB3, 0xA2EA64E1025C4EE0)),
+        cot_e0: (L::from_bits(0x4009, 0xC874792C955F8726), L::from_bits(0x3FC8, 0xB5C859E8893378F5)),
+        c1: (L::from_bits(0x4000, 0x80FFD6454CB8E63D), L::from_bits(0x3FBE, 0x8786DBE61E309A32)),
+        c: &[
+            L::from_bits(0xBFFB, 0x8855FD96533840CD),
+            L::from_bits(0xBFF6, 0xC15630DD6C4CC728),
+            L::from_bits(0xBFF2, 0xCD5441AB37AC5707),
+            L::from_bits(0xBFEF, 0x82A6E8325F362917),
+            L::from_bits(0xBFEB, 0xB87B73C95610A00A),
+            L::from_bits(0xBFE8, 0x8B5AB606C62F1075),
+            L::from_bits(0xBFE4, 0xDCC1193590D1178E),
+            L::from_bits(0xBFE1, 0xB515010E02CAAB65),
+            L::from_bits(0xBFDE, 0x9894AF6607BD2236),
+            L::from_bits(0xBFDB, 0x8351007E9555D601),
+            L::from_bits(0xBFD7, 0xE5EC67E2B82BD762),
+            L::from_bits(0xBFD4, 0xCC213381C26E0D91),
+            L::from_bits(0xBFD1, 0xB75BFFE47BFA90F1),
+        ],
+    },
+    LdZero {
+        // -7.000198333407324751606981
+        pole: -7,
+        e0: (L::from_bits(0xBFF2, 0xCFF7B7F87ADF4483), L::from_bits(0x3FB0, 0x8C919E1F5536678D)),
+        sin_e0: (L::from_bits(0xBFF4, 0xA3565FE137EC26DE), L::from_bits(0xBFB2, 0xC9B7A7F9CCDE8B50)),
+        cot_e0: (L::from_bits(0xC009, 0xC89D89212ACC99A9), L::from_bits(0xBFC8, 0xCAB8D5A530064664)),
+        c1: (L::from_bits(0x4000, 0x8100B3DD67B750A3), L::from_bits(0x3FBE, 0x8C48D2AECA6D95A3)),
+        c: &[
+            L::from_bits(0xBFFB, 0x8854263D181C3331),
+            L::from_bits(0xBFF6, 0xC150FA012E88124E),
+            L::from_bits(0xBFF2, 0xCD4BF64732F304FB),
+            L::from_bits(0xBFEF, 0x829FE14A85A0E09F),
+            L::from_bits(0xBFEB, 0xB86F1132C8D7E020),
+            L::from_bits(0xBFE8, 0x8B4F800B65CCAAC3),
+            L::from_bits(0xBFE4, 0xDCAC685F0DAC5753),
+            L::from_bits(0xBFE1, 0xB501A221717167CB),
+            L::from_bits(0xBFDE, 0x988258E9845EA4B4),
+            L::from_bits(0xBFDB, 0x833F7D2C9976D4DA),
+            L::from_bits(0xBFD7, 0xE5CAB7FCC5236220),
+            L::from_bits(0xBFD4, 0xCC009D6E5C76751A),
+            L::from_bits(0xBFD1, 0xB73C54100D12364C),
+        ],
+    },
+    LdZero {
+        // -7.999975197095820664154336
+        pole: -8,
+        e0: (L::from_bits(0x3FEF, 0xD00FD4C61E1AB0BF), L::from_bits(0xBFAE, 0xB522B0CA9D2E8838)),
+        sin_e0: (L::from_bits(0x3FF1, 0xA36950AB7F61BF16), L::from_bits(0xBFAF, 0xE41A12FCD51FFFFB)),
+        cot_e0: (L::from_bits(0x400C, 0xC8864AEC4A2F1C21), L::from_bits(0x3FCB, 0x8551CA48F8866A41)),
+        c1: (L::from_bits(0x4000, 0x890038E37ED94267), L::from_bits(0x3FBF, 0xA635D83D5244754C)),
+        c: &[
+            L::from_bits(0xBFFA, 0xF0AA518AFA62B913),
+            L::from_bits(0xBFF6, 0x96A923E68A0943C4),
+            L::from_bits(0xBFF2, 0x8D506C3270351FA0),
+            L::from_bits(0xBFEE, 0x9EE0DB1872C39A91),
+            L::from_bits(0xBFEA, 0xC6409515D277965F),
+            L::from_bits(0xBFE7, 0x8461A6CB9D07A923),
+            L::from_bits(0xBFE3, 0xB96E74ED72BC45AF),
+            L::from_bits(0xBFE0, 0x868933821C5E41BC),
+            L::from_bits(0xBFDC, 0xC895C77C01145774),
+            L::from_bits(0xBFD9, 0x98C4FFD7733CC232),
+            L::from_bits(0xBFD5, 0xECC57717F85AD0CA),
+            L::from_bits(0xBFD2, 0xBA1DDB118E52A131),
+        ],
+    },
+    LdZero {
+        // -8.00002480027068195969771
+        pole: -8,
+        e0: (L::from_bits(0xBFEF, 0xD00A2CFE4FB0659E), L::from_bits(0xBFAE, 0xEC1CEC8576677CA5)),
+        sin_e0: (L::from_bits(0xBFF1, 0xA364DF95F5600B41), L::from_bits(0x3FB0, 0xF6EE303B25E2AC20)),
+        cot_e0: (L::from_bits(0xC00C, 0xC88BBE678014C75E), L::from_bits(0x3FCB, 0xEB6249C0FDEAD2B2)),
+        c1: (L::from_bits(0x4000, 0x890051564DA6A19E), L::from_bits(0xBFBE, 0x833F9FC3DD635828)),
+        c: &[
+            L::from_bits(0xBFFA, 0xF0A9F5B64E2D6113),
+            L::from_bits(0xBFF6, 0x96A8B10E46238262),
+            L::from_bits(0xBFF2, 0x8D4FCACC75FC8771),
+            L::from_bits(0xBFEE, 0x9EDFE96B87A299E7),
+            L::from_bits(0xBFEA, 0xC63F1C8A43D6CD3E),
+            L::from_bits(0xBFE7, 0x84607966D8613411),
+            L::from_bits(0xBFE3, 0xB96C88EBF72A567E),
+            L::from_bits(0xBFE0, 0x86879BFB1C19D119),
+            L::from_bits(0xBFDC, 0xC8931CA605FE5A10),
+            L::from_bits(0xBFD9, 0x98C2BE96BAE9ECD4),
+            L::from_bits(0xBFD5, 0xECC19FF588EF5B90),
+            L::from_bits(0xBFD2, 0xBA1A90D864F90826),
+        ],
+    },
+    LdZero {
+        // -8.999997244250977468194357
+        pole: -9,
+        e0: (L::from_bits(0x3FEC, 0xB8EF685FC00DE6C6), L::from_bits(0xBFAB, 0xABA492CF3F101087)),
+        sin_e0: (L::from_bits(0x3FEE, 0x913F6CEB42205201), L::from_bits(0xBFAD, 0xCDB8ACC350D86D41)),
+        cot_e0: (L::from_bits(0x400F, 0xE199C990F95BF448), L::from_bits(0xBFCE, 0xFFADAC8C98AF64C5)),
+        c1: (L::from_bits(0x4000, 0x901CB5ACFF755874), L::from_bits(0xBFBF, 0xF6A34D8CDA821D56)),
+        c: &[
+            L::from_bits(0xBFFA, 0xD76176B96B003937),
+            L::from_bits(0xBFF5, 0xF163311837F8FD97),
+            L::from_bits(0xBFF1, 0xCAB75BD40C56712A),
+            L::from_bits(0xBFED, 0xCC1A9190E3DFC46F),
+            L::from_bits(0xBFE9, 0xE4212BEE857E92DE),
+            L::from_bits(0xBFE6, 0x887A1AE51AEB56C4),
+            L::from_bits(0xBFE2, 0xAB4E82644E1B4982),
+            L::from_bits(0xBFDE, 0xDECB8464E5231E5E),
+            L::from_bits(0xBFDB, 0x94E4006BF5AF4872),
+            L::from_bits(0xBFD7, 0xCB5A52B82E74AE39),
+            L::from_bits(0xBFD4, 0x8D5248179612A1C6),
+            L::from_bits(0xBFD0, 0xC7481EB0FA616D6C),
+        ],
+    },
+    LdZero {
+        // -9.000002755714822650346361
+        pole: -9,
+        e0: (L::from_bits(0xBFEC, 0xB8EED1F61B5B6110), L::from_bits(0x3FA7, 0x91E5710A4297B09D)),
+        sin_e0: (L::from_bits(0xBFEE, 0x913EF6C8FF2A5AD7), L::from_bits(0xBFAD, 0xAA6C7CC5DF7442AD)),
+        cot_e0: (L::from_bits(0xC00F, 0xE19A810E3CAA55D3), L::from_bits(0xBFCE, 0x811CBA5773BF834C)),
+        c1: (L::from_bits(0x4000, 0x901CB81B5C50FE3B), L::from_bits(0x3FBF, 0xEBE29806C16CE4DC)),
+        c: &[
+            L::from_bits(0xBFFA, 0xD7616E8CE232D54D),
+            L::from_bits(0xBFF5, 0xF1631ECA14BA4943),
+            L::from_bits(0xBFF1, 0xCAB744CA48997F9F),
+            L::from_bits(0xBFED, 0xCC1A72AA7A71D238),
+            L::from_bits(0xBFE9, 0xE42100CC5FBFED7C),
+            L::from_bits(0xBFE6, 0x8879FBF5031FA295),
+            L::from_bits(0xBFE2, 0xAB4E552029C84A4D),
+            L::from_bits(0xBFDE, 0xDECB412B9934F7AB),
+            L::from_bits(0xBFDB, 0x94E3CDECA395841E),
+            L::from_bits(0xBFD7, 0xCB5A0626E37F59D3),
+            L::from_bits(0xBFD4, 0x8D520D9BB6118CA0),
+            L::from_bits(0xBFD0, 0xC747C4CC1D7E0DCC),
+        ],
+    },
+    LdZero {
+        // -9.999999724426629166468352
+        pole: -10,
+        e0: (L::from_bits(0x3FE9, 0x93F2840465F3AA31), L::from_bits(0x3FA5, 0xB5F57072C5A2921A)),
+        sin_e0: (L::from_bits(0x3FEA, 0xE865266ECEE0D74A), L::from_bits(0xBFA9, 0x83BE0AB94F12DE81)),
+        cot_e0: (L::from_bits(0x4013, 0x8D005154C7EF2C88), L::from_bits(0x3FD0, 0xD123E36F205B3BC4)),
+        c1: (L::from_bits(0x4000, 0x96831D2E6C090F90), L::from_bits(0xBFBE, 0x904ED8F787E7CE55)),
+        c: &[
+            L::from_bits(0xBFFA, 0xC2E691B1274CDC89),
+            L::from_bits(0xBFF5, 0xC5B25916FDCC7269),
+            L::from_bits(0xBFF1, 0x96498B3EDAD1BE53),
+            L::from_bits(0xBFED, 0x88FEA48B33779DDB),
+            L::from_bits(0xBFE9, 0x8AA699898309F719),
+            L::from_bits(0xBFE5, 0x963D7A33D7E4AC62),
+            L::from_bits(0xBFE1, 0xAAD0627E40843BED),
+            L::from_bits(0xBFDD, 0xC940C9A3C8E24B60),
+            L::from_bits(0xBFD9, 0xF3B7A2582E4007D2),
+            L::from_bits(0xBFD6, 0x96D1741AB7A3F9DD),
+            L::from_bits(0xBFD2, 0xBDFBE432BC21E4E9),
+        ],
+    },
+    LdZero {
+        // -10.00000027557301364660025
+        pole: -10,
+        e0: (L::from_bits(0xBFE9, 0x93F2777324F68BB3), L::from_bits(0x3FA8, 0x87AAEF87F3DE491C)),
+        sin_e0: (L::from_bits(0xBFEA, 0xE86512B1285671F9), L::from_bits(0x3FA7, 0xF6D70D7F44131161)),
+        cot_e0: (L::from_bits(0xC013, 0x8D005D4EFD5A00D4), L::from_bits(0x3FD2, 0xB671255414A46AB2)),
+        c1: (L::from_bits(0x4000, 0x96831D66BD8AA2CC), L::from_bits(0xBFBF, 0xE09FC751513EE9FE)),
+        c: &[
+            L::from_bits(0xBFFA, 0xC2E69105C64A2CDB),
+            L::from_bits(0xBFF5, 0xC5B257BB9375107F),
+            L::from_bits(0xBFF1, 0x964989B2FEE60775),
+            L::from_bits(0xBFED, 0x88FEA2AA6D7D3AB9),
+            L::from_bits(0xBFE9, 0x8AA69729B9C4ABF7),
+            L::from_bits(0xBFE5, 0x963D771E1C429B0A),
+            L::from_bits(0xBFE1, 0xAAD05E677B0DABB1),
+            L::from_bits(0xBFDD, 0xC940C4234BF0CCFD),
+            L::from_bits(0xBFD9, 0xF3B79ADAA57A6BC8),
+            L::from_bits(0xBFD6, 0x96D16EF52C8B25AC),
+            L::from_bits(0xBFD2, 0xBDFBDD1254483D55),
+        ],
+    },
+    LdZero {
+        // -10.99999997494789008152378
+        pole: -11,
+        e0: (L::from_bits(0x3FE5, 0xD7322C1C9924A65B), L::from_bits(0xBFA4, 0xB6F4634169391602)),
+        sin_e0: (L::from_bits(0x3FE7, 0xA903B85C0D505A7A), L::from_bits(0xBFA3, 0x918B471E7E60D35F)),
+        cot_e0: (L::from_bits(0x4016, 0xC1E077498C57C270), L::from_bits(0x3FD3, 0xCB927391BF01F0F4)),
+        c1: (L::from_bits(0x4000, 0x9C5491A555A2D56F), L::from_bits(0xBFBF, 0x93C43B23C16DF19A)),
+        c: &[
+            L::from_bits(0xBFFA, 0xB1F99BF60F46A8C7),
+            L::from_bits(0xBFF5, 0xA4DF08202BE50D66),
+            L::from_bits(0xBFF0, 0xE4F49451210A7FCF),
+            L::from_bits(0xBFEC, 0xBEA69599D5EAD1CF),
+            L::from_bits(0xBFE8, 0xB048F48FF6EF51BB),
+            L::from_bits(0xBFE4, 0xAE899C5C974B584A),
+            L::from_bits(0xBFE0, 0xB55654C2634C1B32),
+            L::from_bits(0xBFDC, 0xC342F26FAF29D027),
+            L::from_bits(0xBFD8, 0xD821EF803D89DFBC),
+            L::from_bits(0xBFD4, 0xF486B1E0B1356546),
+            L::from_bits(0xBFD1, 0x8CCDB3C2AF548C28),
+        ],
+    },
+    LdZero {
+        // -11.00000002505210685240754
+        pole: -11,
+        e0: (L::from_bits(0xBFE5, 0xD7322A62BB2CB4E0), L::from_bits(0x3F9F, 0xADF8DA0AE37FF91A)),
+        sin_e0: (L::from_bits(0xBFE7, 0xA903B70102AB4D7C), L::from_bits(0xBFA5, 0xFE7BF764FAD59A38)),
+        cot_e0: (L::from_bits(0xC016, 0xC1E078D7A3E28417), L::from_bits(0x3FD5, 0xA92349F22A1FEE6F)),
+        c1: (L::from_bits(0x4000, 0x9C5491AA027EEBAD), L::from_bits(0x3FBF, 0xD8CD25977011E5DE)),
+        c: &[
+            L::from_bits(0xBFFA, 0xB1F99BE9110FBC00),
+            L::from_bits(0xBFF5, 0xA4DF08081D1C2FA4),
+            L::from_bits(0xBFF0, 0xE4F4941F0C05283B),
+            L::from_bits(0xBFEC, 0xBEA6956243FC5323),
+            L::from_bits(0xBFE8, 0xB048F44FC6887343),
+            L::from_bits(0xBFE4, 0xAE899C105FC6147D),
+            L::from_bits(0xBFE0, 0xB55654660F558552),
+            L::from_bits(0xBFDC, 0xC342F1FE21E0E7B2),
+            L::from_bits(0xBFD8, 0xD821EEF2EC9281BE),
+            L::from_bits(0xBFD4, 0xF486B12F26AEC55C),
+            L::from_bits(0xBFD1, 0x8CCDB3524B900B6B),
+        ],
+    },
+    LdZero {
+        // -11.99999999791232429020392
+        pole: -12,
+        e0: (L::from_bits(0x3FE2, 0x8F76C78C7821BE53), L::from_bits(0x3FA0, 0xF0B0DA1D09F18DCF)),
+        sin_e0: (L::from_bits(0x3FE3, 0xE15A4A51FABCE460), L::from_bits(0xBFA2, 0xC2B5D000AA9B74A4)),
+        cot_e0: (L::from_bits(0x401A, 0x916859FF94B3F59C), L::from_bits(0x3FD8, 0xC10A6B22CA3F1685)),
+        c1: (L::from_bits(0x4000, 0xA1A9E6FCD383E799), L::from_bits(0xBFBF, 0xBC8F92D3338C91A0)),
+        c: &[
+            L::from_bits(0xBFFA, 0xA3C0B861CC9E3B64),
+            L::from_bits(0xBFF5, 0x8B96571815870CCD),
+            L::from_bits(0xBFF0, 0xB263323FE7C5F008),
+            L::from_bits(0xBFEC, 0x88B62CFDC9B2785F),
+            L::from_bits(0xBFE7, 0xE8B48EDF0299D15F),
+            L::from_bits(0xBFE3, 0xD4163F4765D4A8B3),
+            L::from_bits(0xBFDF, 0xCADADBD1C525656C),
+            L::from_bits(0xBFDB, 0xC91B75CDFD5408D2),
+            L::from_bits(0xBFD7, 0xCCF759B3213BC6B0),
+            L::from_bits(0xBFD3, 0xD589D96C9BD78DF2),
+            L::from_bits(0xBFCF, 0xE27997B7734BF44B),
+        ],
+    },
+    LdZero {
+        // -12.00000000208767568777754
+        pole: -12,
+        e0: (L::from_bits(0xBFE2, 0x8F76C7731567C0F0), L::from_bits(0xBFA0, 0x943CE1E4837D59D6)),
+        sin_e0: (L::from_bits(0xBFE3, 0xE15A4A2A1A8FE662), L::from_bits(0x3F9E, 0x8DE13B97DEAD4795)),
+        cot_e0: (L::from_bits(0xC01A, 0x91685A194F7950F4), L::from_bits(0xBFD9, 0xADC99372D833335C)),
+        c1: (L::from_bits(0x4000, 0xA1A9E6FD2F488909), L::from_bits(0xBFBF, 0xED290352D614790F)),
+        c: &[
+            L::from_bits(0xBFFA, 0xA3C0B860E1F0FF37),
+            L::from_bits(0xBFF5, 0x8B96571685A65594),
+            L::from_bits(0xBFF0, 0xB263323CE9A1FFA5),
+            L::from_bits(0xBFEC, 0x88B62CFABB3D7E24),
+            L::from_bits(0xBFE7, 0xE8B48ED882A22D2A),
+            L::from_bits(0xBFE3, 0xD4163F404AEEACC8),
+            L::from_bits(0xBFDF, 0xCADADBC9D883B64A),
+            L::from_bits(0xBFDB, 0xC91B75C5040AA818),
+            L::from_bits(0xBFD7, 0xCCF759A8D8880628),
+            L::from_bits(0xBFD3, 0xD589D960B5CF8778),
+            L::from_bits(0xBFCF, 0xE27997A9937300BB),
+        ],
+    },
+    LdZero {
+        // -12.99999999983940956156466
+        pole: -13,
+        e0: (L::from_bits(0x3FDE, 0xB092309E80685A00), L::from_bits(0x3F9C, 0xE2A0AADCB5DBCCBB)),
+        sin_e0: (L::from_bits(0x3FE0, 0x8AADB7899D104C09), L::from_bits(0xBF9F, 0xFC496DE73D8F450D)),
+        cot_e0: (L::from_bits(0x401D, 0xEC499252912F1D13), L::from_bits(0x3FDB, 0xA1816598950ADED8)),
+        c1: (L::from_bits(0x4000, 0xA69635C1EA704B30), L::from_bits(0x3FBC, 0xB99F70B765D10D17)),
+        c: &[
+            L::from_bits(0xBFFA, 0x97A26CA405A5A734),
+            L::from_bits(0xBFF4, 0xEF66C94B182068A2),
+            L::from_bits(0xBFF0, 0x8DAC8658B3C81598),
+            L::from_bits(0xBFEB, 0xC92032C9D42811D1),
+            L::from_bits(0xBFE7, 0x9E8DD642D71F78CF),
+            L::from_bits(0xBFE3, 0x85DC84F6E97E2E96),
+            L::from_bits(0xBFDE, 0xED39616C0DB76CC4),
+            L::from_bits(0xBFDA, 0xD9E36816C0618939),
+            L::from_bits(0xBFD6, 0xCDC1746BECBAE8A3),
+            L::from_bits(0xBFD2, 0xC6A0A04C59852640),
+            L::from_bits(0xBFCE, 0xC33648739B3A1309),
+        ],
+    },
+    LdZero {
+        // -13.00000000016059043830109
+        pole: -13,
+        e0: (L::from_bits(0xBFDE, 0xB092309C06683DD2), L::from_bits(0x3F9D, 0x8DF8391FEF50BD48)),
+        sin_e0: (L::from_bits(0xBFE0, 0x8AADB787AB1EF271), L::from_bits(0x3F9F, 0x8BCA2091EFA18EE2)),
+        cot_e0: (L::from_bits(0xC01D, 0xEC499255E19A7A40), L::from_bits(0xBFDC, 0xC1430812D622B333)),
+        c1: (L::from_bits(0x4000, 0xA69635C1F0F9AF52), L::from_bits(0xBFBC, 0xF76177365AB3949B)),
+        c: &[
+            L::from_bits(0xBFFA, 0x97A26CA3F62AB629),
+            L::from_bits(0xBFF4, 0xEF66C94AE744A6CD),
+            L::from_bits(0xBFF0, 0x8DAC8658886E4662),
+            L::from_bits(0xBFEB, 0xC92032C982230717),
+            L::from_bits(0xBFE7, 0x9E8DD6428655EDC9),
+            L::from_bits(0xBFE3, 0x85DC84F697AEB935),
+            L::from_bits(0xBFDE, 0xED39616B64A58F8F),
+            L::from_bits(0xBFDA, 0xD9E368160EFC69EC),
+            L::from_bits(0xBFD6, 0xCDC1746B305B1AC8),
+            L::from_bits(0xBFD2, 0xC6A0A04B8F8DF47F),
+            L::from_bits(0xBFCE, 0xC3364872C0FAA3EA),
+        ],
+    },
+    LdZero {
+        // -13.99999999998852925440192
+        pole: -14,
+        e0: (L::from_bits(0x3FDA, 0xC9CBA5461E7B5C1F), L::from_bits(0x3F99, 0xC5DD12476E37013A)),
+        sin_e0: (L::from_bits(0x3FDC, 0x9E7D6409F4FCC502), L::from_bits(0x3F9B, 0xF510CFE009FFC134)),
+        cot_e0: (L::from_bits(0x4021, 0xCEC0600996FA9594), L::from_bits(0xBFE0, 0xF4B26BF265B96B71)),
+        c1: (L::from_bits(0x4000, 0xAB287EE67FC67C87), L::from_bits(0x3FBD, 0xC562E5CCF3DA5900)),
+        c: &[
+            L::from_bits(0xBFFA, 0x8D2F7C5066E046FF),
+            L::from_bits(0xBFF4, 0xCF8E9789335C5A9B),
+            L::from_bits(0xBFEF, 0xE4C1DBF74B8C5E7C),
+            L::from_bits(0xBFEB, 0x9736E1AAA325D8F8),
+            L::from_bits(0xBFE6, 0xDE09ED6ED42CA2DB),
+            L::from_bits(0xBFE2, 0xAE97FB25CB891D7F),
+            L::from_bits(0xBFDE, 0x901852A403689FE9),
+            L::from_bits(0xBFD9, 0xF68FD6B78E8CB283),
+            L::from_bits(0xBFD5, 0xD8E3F6E22A9C7376),
+            L::from_bits(0xBFD1, 0xC30D2749A06B916D),
+            L::from_bits(0xBFCD, 0xB297829458F71801),
+        ],
+    },
+    LdZero {
+        // -14.00000000001147074559738
+        pole: -14,
+        e0: (L::from_bits(0xBFDA, 0xC9CBA545E94E75EC), L::from_bits(0xBF99, 0xAE31EEA7C4A03CEB)),
+        sin_e0: (L::from_bits(0xBFDC, 0x9E7D6409CB393939), L::from_bits(0x3F92, 0x86A6C8931B586997)),
+        cot_e0: (L::from_bits(0xC021, 0xCEC06009CD75CEDC), L::from_bits(0x3FDE, 0xC35B18FD98B2BE49)),
+        c1: (L::from_bits(0x4000, 0xAB287EE68035C720), L::from_bits(0xBFBF, 0xFCCE756E025BACC3)),
+        c: &[
+            L::from_bits(0xBFFA, 0x8D2F7C5065EADCE5),
+            L::from_bits(0xBFF4, 0xCF8E9789308B11DF),
+            L::from_bits(0xBFEF, 0xE4C1DBF746E466AF),
+            L::from_bits(0xBFEB, 0x9736E1AA9F0BB26C),
+            L::from_bits(0xBFE6, 0xDE09ED6ECCA5DFD3),
+            L::from_bits(0xBFE2, 0xAE97FB25C46FC1EC),
+            L::from_bits(0xBFDE, 0x901852A3FC936C3F),
+            L::from_bits(0xBFD9, 0xF68FD6B781315C12),
+            L::from_bits(0xBFD5, 0xD8E3F6E21D65E8B4),
+            L::from_bits(0xBFD1, 0xC30D27499338E8C6),
+            L::from_bits(0xBFCD, 0xB29782944BAD794D),
+        ],
+    },
+    LdZero {
+        // -14.99999999999923528362682
+        pole: -15,
+        e0: (L::from_bits(0x3FD6, 0xD73F9F399FB10CFD), L::from_bits(0xBF95, 0xE3F13A6E6AF93C7C)),
+        sin_e0: (L::from_bits(0x3FD8, 0xA90E489312B37BB0), L::from_bits(0xBF97, 0xD91E471636C536F4)),
+        cot_e0: (L::from_bits(0x4025, 0xC1D45A091555F7DB), L::from_bits(0xBFE3, 0xB5801C988A444826)),
+        c1: (L::from_bits(0x4000, 0xAF6CC32AC43EEDA2), L::from_bits(0xBFBF, 0x850052E09C534309)),
+        c: &[
+            L::from_bits(0xBFFA, 0x84155114190E4B6A),
+            L::from_bits(0xBFF4, 0xB5AA8E5522C1E52E),
+            L::from_bits(0xBFEF, 0xBB550070CA81385E),
+            L::from_bits(0xBFEA, 0xE7BACE62112DCB30),
+            L::from_bits(0xBFE6, 0x9F31F7414F80D655),
+            L::from_bits(0xBFE1, 0xEA45F9A0959D9CAB),
+            L::from_bits(0xBFDD, 0xB4EFDB975A935357),
+            L::from_bits(0xBFD9, 0x90DEBC7671AAC048),
+            L::from_bits(0xBFD4, 0xEE885F32D5AE302A),
+            L::from_bits(0xBFD0, 0xC8C5673C772FC99A),
+        ],
+    },
+    LdZero {
+        // -15.00000000000076471637318
+        pole: -15,
+        e0: (L::from_bits(0xBFD6, 0xD73F9F399BD0E421), L::from_bits(0x3F91, 0xF42C239C9E8EDF17)),
+        sin_e0: (L::from_bits(0xBFD8, 0xA90E48930FA83E29), L::from_bits(0xBF97, 0xDDD6842C29993A6A)),
+        cot_e0: (L::from_bits(0xC025, 0xC1D45A0918D3664E), L::from_bits(0x3FE4, 0xA88F971EA3C04650)),
+        c1: (L::from_bits(0x4000, 0xAF6CC32AC445DE8D), L::from_bits(0x3FBF, 0xCAB93BE9B8B3973F)),
+        c: &[
+            L::from_bits(0xBFFA, 0x8415511418FFF979),
+            L::from_bits(0xBFF4, 0xB5AA8E55229A8471),
+            L::from_bits(0xBFEF, 0xBB550070CA445508),
+            L::from_bits(0xBFEA, 0xE7BACE6210C9674B),
+            L::from_bits(0xBFE6, 0x9F31F7414F2AA886),
+            L::from_bits(0xBFE1, 0xEA45F9A095057A42),
+            L::from_bits(0xBFDD, 0xB4EFDB975A0A4A64),
+            L::from_bits(0xBFD9, 0x90DEBC76712D6666),
+            L::from_bits(0xBFD4, 0xEE885F32D4C61299),
+            L::from_bits(0xBFD0, 0xC8C5673C7656C84F),
+        ],
+    },
+    LdZero {
+        // -15.99999999999995220522668
+        pole: -16,
+        e0: (L::from_bits(0x3FD2, 0xD73F9F399DE0AED2), L::from_bits(0xBF91, 0xE5C9A226C4D3E84D)),
+        sin_e0: (L::from_bits(0x3FD4, 0xA90E48931146C4FE), L::from_bits(0xBF93, 0x962B64DEAF32E38C)),
+        cot_e0: (L::from_bits(0x4029, 0xC1D45A0916F820A7), L::from_bits(0x3FE7, 0x93E69172EF8CFDB3)),
+        c1: (L::from_bits(0x4000, 0xB36CC32AC44231ED), L::from_bits(0x3FBE, 0xCAB10A3841AFBB5E)),
+        c: &[
+            L::from_bits(0xBFF9, 0xF82AA228320F0F1A),
+            L::from_bits(0xBFF4, 0xA05538FFCD59E4B0),
+            L::from_bits(0xBFEF, 0x9B550070CA64422E),
+            L::from_bits(0xBFEA, 0xB4879B2EDDCAB1EA),
+            L::from_bits(0xBFE5, 0xE90E992D4959DDE4),
+            L::from_bits(0xBFE1, 0xA121675770C254E6),
+            L::from_bits(0xBFDC, 0xE9DFB72EB4A2D14B),
+            L::from_bits(0xBFD8, 0xAFF65C7B1BC02D87),
+            L::from_bits(0xBFD4, 0x8821F8CC6ED79EE9),
+            L::from_bits(0xBFCF, 0xD75C42D604D33975),
+        ],
+    },
+    LdZero {
+        // -16.00000000000004779477332
+        pole: -16,
+        e0: (L::from_bits(0xBFD2, 0xD73F9F399DA1424C), L::from_bits(0x3F8D, 0xD88DC1D1060BA500)),
+        sin_e0: (L::from_bits(0xBFD4, 0xA90E48931114F4DB), L::from_bits(0xBF93, 0x9ACEBB9FB466DD1A)),
+        cot_e0: (L::from_bits(0xC029, 0xC1D45A0917313D81), L::from_bits(0xBFE8, 0xB2CF893CA68489C9)),
+        c1: (L::from_bits(0x4000, 0xB36CC32AC4429A42), L::from_bits(0xBFBC, 0xFCFBDE9A4B050739)),
+        c: &[
+            L::from_bits(0xBFF9, 0xF82AA228320D7AAC),
+            L::from_bits(0xBFF4, 0xA05538FFCD57DA44),
+            L::from_bits(0xBFEF, 0x9B550070CA614B38),
+            L::from_bits(0xBFEA, 0xB4879B2EDDC61A2B),
+            L::from_bits(0xBFE5, 0xE90E992D49527529),
+            L::from_bits(0xBFE1, 0xA121675770BC2FBE),
+            L::from_bits(0xBFDC, 0xE9DFB72EB4986A2A),
+            L::from_bits(0xBFD8, 0xAFF65C7B1BB73C48),
+            L::from_bits(0xBFD4, 0x8821F8CC6ECFD70D),
+            L::from_bits(0xBFCF, 0xD75C42D604C58D45),
+        ],
+    },
+    LdZero {
+        // -16.99999999999999718854275
+        pole: -17,
+        e0: (L::from_bits(0x3FCE, 0xCA963B81856C1E3C), L::from_bits(0xBF8D, 0xD41145C0115331D7)),
+        sin_e0: (L::from_bits(0x3FD0, 0x9F1C808A6A86ED0B), L::from_bits(0xBF8F, 0xEEE77400E3DDD6CE)),
+        cot_e0: (L::from_bits(0x402D, 0xCDF19FA9A8842788), L::from_bits(0x3FEC, 0xF92FE9A02DE29AFB)),
+        c1: (L::from_bits(0x4000, 0xB73086EE880626F7), L::from_bits(0xBFBF, 0xB5B1390BBBC879EE)),
+        c: &[
+            L::from_bits(0xBFF9, 0xE9FE57BFAB698C95),
+            L::from_bits(0xBFF4, 0x8E8C12D6FC39D9B0),
+            L::from_bits(0xBFEF, 0x823906CDC1460948),
+            L::from_bits(0xBFEA, 0x8EB7D4F41554D58F),
+            L::from_bits(0xBFE5, 0xADBEA37BBE96D73C),
+            L::from_bits(0xBFE0, 0xE290515430F5ECBC),
+            L::from_bits(0xBFDC, 0x9B107D20415A4C41),
+            L::from_bits(0xBFD7, 0xDC0F7AF5769BAE6E),
+            L::from_bits(0xBFD3, 0xA09192E98B9C0252),
+            L::from_bits(0xBFCE, 0xEF94FAEACDF82924),
+        ],
+    },
+    LdZero {
+        // -17.00000000000000281145725
+        pole: -17,
+        e0: (L::from_bits(0xBFCE, 0xCA963B8185688877), L::from_bits(0x3F8C, 0xD697166C4FA893D6)),
+        sin_e0: (L::from_bits(0xBFD0, 0x9F1C808A6A841C3A), L::from_bits(0xBF8E, 0xB95C8F4C4750CB8A)),
+        cot_e0: (L::from_bits(0xC02D, 0xCDF19FA9A887CC83), L::from_bits(0x3FEC, 0xECA0D683D672EEA7)),
+        c1: (L::from_bits(0x4000, 0xB73086EE88062CC0), L::from_bits(0x3FBB, 0xA7951829AB0CAA3A)),
+        c: &[
+            L::from_bits(0xBFF9, 0xE9FE57BFAB69776F),
+            L::from_bits(0xBFF4, 0x8E8C12D6FC39BFED),
+            L::from_bits(0xBFEF, 0x823906CDC145E5FC),
+            L::from_bits(0xBFEA, 0x8EB7D4F41554A1FF),
+            L::from_bits(0xBFE5, 0xADBEA37BBE9688CB),
+            L::from_bits(0xBFE0, 0xE290515430F57206),
+            L::from_bits(0xBFDC, 0x9B107D204159EA4C),
+            L::from_bits(0xBFD7, 0xDC0F7AF5769B0F99),
+            L::from_bits(0xBFD3, 0xA09192E98B9B7FF9),
+            L::from_bits(0xBFCE, 0xEF94FAEACDF7511A),
+        ],
+    },
+    LdZero {
+        // -17.99999999999999984380793
+        pole: -18,
+        e0: (L::from_bits(0x3FCA, 0xB413C31DCBECD2F7), L::from_bits(0x3F89, 0x9A91B3CF06F7C68E)),
+        sin_e0: (L::from_bits(0x3FCC, 0x8D6EAB25B404F9D1), L::from_bits(0x3F8B, 0xE6BE2D4CC1521B93)),
+        cot_e0: (L::from_bits(0x4031, 0xE7AFD39EDD969B8E), L::from_bits(0xBFF0, 0xF55551870296780E)),
+        c1: (L::from_bits(0x4000, 0xBABEBFD2163F0D43), L::from_bits(0xBFBF, 0xBE03C5E49DEDCCDF)),
+        c: &[
+            L::from_bits(0xBFF9, 0xDD59FF413FF49256),
+            L::from_bits(0xBFF3, 0xFF20CF2CF9BD3B8A),
+            L::from_bits(0xBFEE, 0xDC7D9A44D998C720),
+            L::from_bits(0xBFE9, 0xE49C88B6DF5B0584),
+            L::from_bits(0xBFE5, 0x83A6FCAC90499DDD),
+            L::from_bits(0xBFE0, 0xA26C46F3EA67DCCC),
+            L::from_bits(0xBFDB, 0xD25AB138F8824436),
+            L::from_bits(0xBFD7, 0x8D39EBEC586D95F9),
+            L::from_bits(0xBFD2, 0xC300A75E1A2173B3),
+            L::from_bits(0xBFCE, 0x89A7A6D4AC1ECDAC),
+        ],
+    },
+    LdZero {
+        // -18.00000000000000015619207
+        pole: -18,
+        e0: (L::from_bits(0xBFCA, 0xB413C31DCBECA4C4), L::from_bits(0x3F89, 0x9A00A6896D9A1CE4)),
+        sin_e0: (L::from_bits(0xBFCC, 0x8D6EAB25B404D588), L::from_bits(0xBF89, 0x96031E9BFD0B0516)),
+        cot_e0: (L::from_bits(0xC031, 0xE7AFD39EDD96D6FF), L::from_bits(0x3FEE, 0xF226E3930A4242D8)),
+        c1: (L::from_bits(0x4000, 0xBABEBFD2163F0D90), L::from_bits(0x3FBF, 0xF65A173F2574CB9B)),
+        c: &[
+            L::from_bits(0xBFF9, 0xDD59FF413FF49149),
+            L::from_bits(0xBFF3, 0xFF20CF2CF9BD391E),
+            L::from_bits(0xBFEE, 0xDC7D9A44D998C3FC),
+            L::from_bits(0xBFE9, 0xE49C88B6DF5B012C),
+            L::from_bits(0xBFE5, 0x83A6FCAC90499ABD),
+            L::from_bits(0xBFE0, 0xA26C46F3EA67D82D),
+            L::from_bits(0xBFDB, 0xD25AB138F8823D3A),
+            L::from_bits(0xBFD7, 0x8D39EBEC586D909D),
+            L::from_bits(0xBFD2, 0xC300A75E1A216B61),
+            L::from_bits(0xBFCE, 0x89A7A6D4AC1EC726),
+        ],
+    },
+    LdZero {
+        // -18.99999999999999999177936
+        pole: -19,
+        e0: (L::from_bits(0x3FC6, 0x97A4DA340A0ABA31), L::from_bits(0x3F84, 0x9B3471EDE8208B5A)),
+        sin_e0: (L::from_bits(0x3FC7, 0xEE33A6FC21B76CE1), L::from_bits(0x3F83, 0xF0DE602AB4FCEA37)),
+        cot_e0: (L::from_bits(0x4036, 0x899065A653917D10), L::from_bits(0xBFF5, 0xC18FE48C1A76C0C6)),
+        c1: (L::from_bits(0x4000, 0xBE1D10A9AA74F275), L::from_bits(0x3FBD, 0xAE0688E19275E3AE)),
+        c: &[
+            L::from_bits(0xBFF9, 0xD2015ABBEE677358),
+            L::from_bits(0xBFF3, 0xE5A61A5B6B0710DB),
+            L::from_bits(0xBFEE, 0xBC4E65064046E202),
+            L::from_bits(0xBFE9, 0xB93F490EFDE9FBDE),
+            L::from_bits(0xBFE4, 0xCA71462EA0CC299D),
+            L::from_bits(0xBFDF, 0xECFC1D8BAEA2DED9),
+            L::from_bits(0xBFDB, 0x919D50F5124644A0),
+            L::from_bits(0xBFD6, 0xB9883D4023C7B628),
+            L::from_bits(0xBFD1, 0xF31823BA057E54FD),
+            L::from_bits(0xBFCD, 0xA2D798869A1A4260),
+        ],
+    },
+    LdZero {
+        // -19.00000000000000000822064
+        pole: -19,
+        e0: (L::from_bits(0xBFC6, 0x97A4DA340A0AB81B), L::from_bits(0xBF85, 0xF63E3E0038E57F23)),
+        sin_e0: (L::from_bits(0xBFC7, 0xEE33A6FC21B7699B), L::from_bits(0x3F85, 0xEA8BF326A432DCCE)),
+        cot_e0: (L::from_bits(0xC036, 0x899065A653917EF4), L::from_bits(0x3FF5, 0x840C89A3D8E02155)),
+        c1: (L::from_bits(0x4000, 0xBE1D10A9AA74F279), L::from_bits(0xBFBB, 0xE1DD79A7EB187ABB)),
+        c: &[
+            L::from_bits(0xBFF9, 0xD2015ABBEE67734B),
+            L::from_bits(0xBFF3, 0xE5A61A5B6B0710BF),
+            L::from_bits(0xBFEE, 0xBC4E65064046E1DF),
+            L::from_bits(0xBFE9, 0xB93F490EFDE9FBB1),
+            L::from_bits(0xBFE4, 0xCA71462EA0CC2960),
+            L::from_bits(0xBFDF, 0xECFC1D8BAEA2DE83),
+            L::from_bits(0xBFDB, 0x919D50F512464462),
+            L::from_bits(0xBFD6, 0xB9883D4023C7B5CE),
+            L::from_bits(0xBFD1, 0xF31823BA057E5479),
+            L::from_bits(0xBFCD, 0xA2D798869A1A41FD),
+        ],
+    },
+    LdZero {
+        // -19.99999999999999999958897
+        pole: -20,
+        e0: (L::from_bits(0x3FC1, 0xF2A15D2010112853), L::from_bits(0x3F7B, 0xC6F9543D5D7EA412)),
+        sin_e0: (L::from_bits(0x3FC3, 0xBE8FB8C9B492BC43), L::from_bits(0xBF82, 0xD71C5F8EB9E08C07)),
+        cot_e0: (L::from_bits(0x403A, 0xABF47F0FE875DD73), L::from_bits(0xBFF9, 0x8FCF15A7125517A9)),
+        c1: (L::from_bits(0x4000, 0xC15043DCDDA825AA), L::from_bits(0x3FBE, 0x8B8608549A9191C5)),
+        c: &[
+            L::from_bits(0xBFF9, 0xC7C3EA18175D35E1),
+            L::from_bits(0xBFF3, 0xCFCDB2977E246B99),
+            L::from_bits(0xBFEE, 0xA217821B2403B54C),
+            L::from_bits(0xBFE9, 0x97B159CD920EE15B),
+            L::from_bits(0xBFE4, 0x9DB4072CBBA80643),
+            L::from_bits(0xBFDF, 0xAFA0CE7323EDA70C),
+            L::from_bits(0xBFDA, 0xCD546661625BA185),
+            L::from_bits(0xBFD5, 0xF8E57B29DE0B4A90),
+            L::from_bits(0xBFD1, 0x9B2224341FEBFF3D),
+            L::from_bits(0xBFCC, 0xC5BDBD61B7BCC231),
+        ],
+    },
+    LdZero {
+        // -20.00000000000000000041103
+        pole: -20,
+        e0: (L::from_bits(0xBFC1, 0xF2A15D2010112828), L::from_bits(0x3F80, 0xCCDD72B00976701D)),
+        sin_e0: (L::from_bits(0xBFC3, 0xBE8FB8C9B492BC20), L::from_bits(0xBF82, 0xF7C76E50570AED5C)),
+        cot_e0: (L::from_bits(0xC03A, 0xABF47F0FE875DD91), L::from_bits(0xBFF9, 0xF8CB8BEB223140F8)),
+        c1: (L::from_bits(0x4000, 0xC15043DCDDA825AA), L::from_bits(0x3FBF, 0xA46D9340657002EE)),
+        c: &[
+            L::from_bits(0xBFF9, 0xC7C3EA18175D35E0),
+            L::from_bits(0xBFF3, 0xCFCDB2977E246B98),
+            L::from_bits(0xBFEE, 0xA217821B2403B54A),
+            L::from_bits(0xBFE9, 0x97B159CD920EE159),
+            L::from_bits(0xBFE4, 0x9DB4072CBBA80641),
+            L::from_bits(0xBFDF, 0xAFA0CE7323EDA709),
+            L::from_bits(0xBFDA, 0xCD546661625BA181),
+            L::from_bits(0xBFD5, 0xF8E57B29DE0B4A8A),
+            L::from_bits(0xBFD1, 0x9B2224341FEBFF39),
+            L::from_bits(0xBFCC, 0xC5BDBD61B7BCC22C),
+        ],
+    },
+    LdZero {
+        // -20.99999999999999999998043
+        pole: -21,
+        e0: (L::from_bits(0x3FBD, 0xB8DC77B6E7AB8C60), L::from_bits(0x3F7C, 0x8AD8AD5212E8D195)),
+        sin_e0: (L::from_bits(0x3FBF, 0x91308CCA7132D888), L::from_bits(0xBF7C, 0xDFE6CDDE04DF31FD)),
+        cot_e0: (L::from_bits(0x403E, 0xE1B0E6C4E11AB2BA), L::from_bits(0xBFFC, 0xDE43C91B12DF69DB)),
+        c1: (L::from_bits(0x4000, 0xC45C749FE9D8E8B6), L::from_bits(0x3FBF, 0xD47834A1EA5507E3)),
+        c: &[
+            L::from_bits(0xBFF9, 0xBE7A30EA3B5AE372),
+            L::from_bits(0xBFF3, 0xBCEEC48375FF31D5),
+            L::from_bits(0xBFEE, 0x8C8672043F46E0FE),
+            L::from_bits(0xBFE8, 0xFACDD3154E341E9D),
+            L::from_bits(0xBFE3, 0xF8A2E0FCB8F2895B),
+            L::from_bits(0xBFDF, 0x8405EA4B789675F5),
+            L::from_bits(0xBFDA, 0x93308B81D33CB566),
+            L::from_bits(0xBFD5, 0xAA2556C385D69230),
+            L::from_bits(0xBFD0, 0xCA44167CCE309B39),
+            L::from_bits(0xBFCB, 0xF5DEF31DF8D1EA43),
+        ],
+    },
+    LdZero {
+        // -21.00000000000000000001957
+        pole: -21,
+        e0: (L::from_bits(0xBFBD, 0xB8DC77B6E7AB8C5F), L::from_bits(0x3F7C, 0xA84AB375365E8E86)),
+        sin_e0: (L::from_bits(0xBFBF, 0x91308CCA7132D887), L::from_bits(0x3F7E, 0xBB5335198D21D7E8)),
+        cot_e0: (L::from_bits(0xC03E, 0xE1B0E6C4E11AB2BC), L::from_bits(0x3FFD, 0x8712C03921BF4D5F)),
+        c1: (L::from_bits(0x4000, 0xC45C749FE9D8E8B6), L::from_bits(0x3FBF, 0xD8C4938BD4948702)),
+        c: &[
+            L::from_bits(0xBFF9, 0xBE7A30EA3B5AE372),
+            L::from_bits(0xBFF3, 0xBCEEC48375FF31D5),
+            L::from_bits(0xBFEE, 0x8C8672043F46E0FE),
+            L::from_bits(0xBFE8, 0xFACDD3154E341E9D),
+            L::from_bits(0xBFE3, 0xF8A2E0FCB8F2895B),
+            L::from_bits(0xBFDF, 0x8405EA4B789675F5),
+            L::from_bits(0xBFDA, 0x93308B81D33CB566),
+            L::from_bits(0xBFD5, 0xAA2556C385D69230),
+            L::from_bits(0xBFD0, 0xCA44167CCE309B39),
+            L::from_bits(0xBFCB, 0xF5DEF31DF8D1EA43),
+        ],
+    },
+    LdZero {
+        // -21.99999999999999999999911
+        pole: -22,
+        e0: (L::from_bits(0x3FB9, 0x8671CB6DBFC294A3), L::from_bits(0xBF78, 0xE5B1D35EB4978181)),
+        sin_e0: (L::from_bits(0x3FBA, 0xD32F586C478FC696), L::from_bits(0x3F78, 0xF7D1D1B15FF8504D)),
+        cot_e0: (L::from_bits(0x4043, 0x9B299EA75AC25AE0), L::from_bits(0x4002, 0xBB826754C70F887A)),
+        c1: (L::from_bits(0x4000, 0xC7452ECE757BD171), L::from_bits(0xBFBF, 0xCC623BCE159F2DAB)),
+        c: &[
+            L::from_bits(0xBFF9, 0xB603B634480C9B83),
+            L::from_bits(0xBFF3, 0xAC851C58E3F3036A),
+            L::from_bits(0xBFED, 0xF53DA3AB9CFED112),
+            L::from_bits(0xBFE8, 0xD1227A39843EA931),
+            L::from_bits(0xBFE3, 0xC620C2DB09F78E6B),
+            L::from_bits(0xBFDE, 0xC9132A0934F0AFBC),
+            L::from_bits(0xBFD9, 0xD63BE0DAE5729291),
+            L::from_bits(0xBFD4, 0xECAB5FBEF5A976D3),
+            L::from_bits(0xBFD0, 0x8670C2FE7E9DE876),
+            L::from_bits(0xBFCB, 0x9C2F2DF801D8ECF6),
+        ],
+    },
+    LdZero {
+        // -22.00000000000000000000089
+        pole: -22,
+        e0: (L::from_bits(0xBFB9, 0x8671CB6DBFC294A2), L::from_bits(0xBF78, 0xFED3434526706C71)),
+        sin_e0: (L::from_bits(0xBFBA, 0xD32F586C478FC696), L::from_bits(0xBF78, 0xA17CFE1D01EBA2D7)),
+        cot_e0: (L::from_bits(0xC043, 0x9B299EA75AC25AE0), L::from_bits(0xC002, 0xDB396762A34025F4)),
+        c1: (L::from_bits(0x4000, 0xC7452ECE757BD171), L::from_bits(0xBFBF, 0xCC32706142BD14E4)),
+        c: &[
+            L::from_bits(0xBFF9, 0xB603B634480C9B83),
+            L::from_bits(0xBFF3, 0xAC851C58E3F3036A),
+            L::from_bits(0xBFED, 0xF53DA3AB9CFED112),
+            L::from_bits(0xBFE8, 0xD1227A39843EA931),
+            L::from_bits(0xBFE3, 0xC620C2DB09F78E6B),
+            L::from_bits(0xBFDE, 0xC9132A0934F0AFBC),
+            L::from_bits(0xBFD9, 0xD63BE0DAE5729291),
+            L::from_bits(0xBFD4, 0xECAB5FBEF5A976D3),
+            L::from_bits(0xBFD0, 0x8670C2FE7E9DE876),
+            L::from_bits(0xBFCB, 0x9C2F2DF801D8ECF6),
+        ],
+    },
+    LdZero {
+        // -22.99999999999999999999996
+        pole: -23,
+        e0: (L::from_bits(0x3FB4, 0xBB0DA098B1C0CECC), L::from_bits(0xBF72, 0x8D6FE5AA56AB0430)),
+        sin_e0: (L::from_bits(0x3FB6, 0x92E948A45E4DC1CD), L::from_bits(0xBF75, 0xAD06103C71FB87D0)),
+        cot_e0: (L::from_bits(0x4047, 0xDF0BD410927762A3), L::from_bits(0xC006, 0xDCAA4669E5372AC5)),
+        c1: (L::from_bits(0x4000, 0xCA0D87D996DFFDF6), L::from_bits(0x3FBE, 0xAA31AF8387CC5298)),
+        c: &[
+            L::from_bits(0xBFF9, 0xAE4586C76591B052),
+            L::from_bits(0xBFF3, 0x9E280371386452D4),
+            L::from_bits(0xBFED, 0xD743B27A36F66BAD),
+            L::from_bits(0xBFE8, 0xAFC50BD18F56B4FE),
+            L::from_bits(0xBFE3, 0x9F71A705C17F07B2),
+            L::from_bits(0xBFDE, 0x9AF13EE7E01AFD94),
+            L::from_bits(0xBFD9, 0x9E1296167E2BA36C),
+            L::from_bits(0xBFD4, 0xA736C2F896179CFC),
+            L::from_bits(0xBFCF, 0xB5E91AB8E782F594),
+        ],
+    },
+    LdZero {
+        // -23.00000000000000000000004
+        pole: -23,
+        e0: (L::from_bits(0xBFB4, 0xBB0DA098B1C0CECC), L::from_bits(0x3F72, 0x90CEE2F5D0B69A9A)),
+        sin_e0: (L::from_bits(0xBFB6, 0x92E948A45E4DC1CD), L::from_bits(0x3F75, 0xAE58F565823ABF72)),
+        cot_e0: (L::from_bits(0xC047, 0xDF0BD410927762A3), L::from_bits(0x4006, 0xDAA7C06E71F64A7D)),
+        c1: (L::from_bits(0x4000, 0xCA0D87D996DFFDF6), L::from_bits(0x3FBE, 0xAA35AA340A438155)),
+        c: &[
+            L::from_bits(0xBFF9, 0xAE4586C76591B052),
+            L::from_bits(0xBFF3, 0x9E280371386452D4),
+            L::from_bits(0xBFED, 0xD743B27A36F66BAD),
+            L::from_bits(0xBFE8, 0xAFC50BD18F56B4FE),
+            L::from_bits(0xBFE3, 0x9F71A705C17F07B2),
+            L::from_bits(0xBFDE, 0x9AF13EE7E01AFD94),
+            L::from_bits(0xBFD9, 0x9E1296167E2BA36C),
+            L::from_bits(0xBFD4, 0xA736C2F896179CFC),
+            L::from_bits(0xBFCF, 0xB5E91AB8E782F594),
+        ],
+    },
+    LdZero {
+        // -24.0
+        pole: -24,
+        e0: (L::from_bits(0x3FAF, 0xF96780CB97ABBE65), L::from_bits(0x3F6D, 0x96991963B8280036)),
+        sin_e0: (L::from_bits(0x3FB1, 0xC3E1B6307DBD0266), L::from_bits(0x3F6F, 0xDB946146EBEBD7BB)),
+        cot_e0: (L::from_bits(0x404C, 0xA748DF0C6DD989FA), L::from_bits(0xC009, 0x931B9F4A91971CBF)),
+        c1: (L::from_bits(0x4000, 0xCCB83284418AA8A1), L::from_bits(0xBFBE, 0xAB21BCD4DDAF320A)),
+        c: &[
+            L::from_bits(0xBFF9, 0xA7291500491FE936),
+            L::from_bits(0xBFF3, 0x9183AAF2CCEF62A1),
+            L::from_bits(0xBFED, 0xBDFB017D600C8B48),
+            L::from_bits(0xBFE8, 0x94CCD790AA18F8D7),
+            L::from_bits(0xBFE3, 0x817A5084C2C8A869),
+            L::from_bits(0xBFDD, 0xF164013B30DE45F0),
+            L::from_bits(0xBFD8, 0xEC3C457FAA70F36D),
+            L::from_bits(0xBFD3, 0xEFB84E9F0401CD9D),
+            L::from_bits(0xBFCE, 0xFA2BF30F386902BC),
+        ],
+    },
+    LdZero {
+        // -24.0
+        pole: -24,
+        e0: (L::from_bits(0xBFAF, 0xF96780CB97ABBE65), L::from_bits(0xBF6D, 0x966885C6BE008167)),
+        sin_e0: (L::from_bits(0xBFB1, 0xC3E1B6307DBD0266), L::from_bits(0xBF6F, 0xDB6E3A5E88D8BF97)),
+        cot_e0: (L::from_bits(0xC04C, 0xA748DF0C6DD989FA), L::from_bits(0x4009, 0x92DA753E73F14306)),
+        c1: (L::from_bits(0x4000, 0xCCB83284418AA8A1), L::from_bits(0xBFBE, 0xAB21941E3AEBA4B3)),
+        c: &[
+            L::from_bits(0xBFF9, 0xA7291500491FE936),
+            L::from_bits(0xBFF3, 0x9183AAF2CCEF62A1),
+            L::from_bits(0xBFED, 0xBDFB017D600C8B48),
+            L::from_bits(0xBFE8, 0x94CCD790AA18F8D7),
+            L::from_bits(0xBFE3, 0x817A5084C2C8A869),
+            L::from_bits(0xBFDD, 0xF164013B30DE45F0),
+            L::from_bits(0xBFD8, 0xEC3C457FAA70F36D),
+            L::from_bits(0xBFD3, 0xEFB84E9F0401CD9D),
+            L::from_bits(0xBFCE, 0xFA2BF30F386902BC),
+        ],
+    },
+    LdZero {
+        // -25.0
+        pole: -25,
+        e0: (L::from_bits(0x3FAB, 0x9F9E66E8B2FD46A7), L::from_bits(0x3F69, 0x8948D41972ADA531)),
+        sin_e0: (L::from_bits(0x3FAC, 0xFABA82CD6DBEBB64), L::from_bits(0x3F69, 0xEA42C18BD6249408)),
+        cot_e0: (L::from_bits(0x4051, 0x82B0EE41B5D1F3CB), L::from_bits(0x4010, 0x834AB603F6CE85D9)),
+        c1: (L::from_bits(0x4000, 0xCF478EAD374D37FD), L::from_bits(0xBFB9, 0xE953E08C6CE30B34)),
+        c: &[
+            L::from_bits(0xBFF9, 0xA09B5C45820F1E0C),
+            L::from_bits(0xBFF3, 0x86545B3253A659D2),
+            L::from_bits(0xBFED, 0xA881729B2F805168),
+            L::from_bits(0xBFE7, 0xFD9EAF5E6168C6ED),
+            L::from_bits(0xBFE2, 0xD40B07B10B21233A),
+            L::from_bits(0xBFDD, 0xBDEBC2509BE8515A),
+            L::from_bits(0xBFD8, 0xB296E04FF95D7B16),
+            L::from_bits(0xBFD3, 0xAE21ABB4FBF4C0B6),
+            L::from_bits(0xBFCE, 0xAE9D22E6FDFBC4C5),
+        ],
+    },
+    LdZero {
+        // -25.0
+        pole: -25,
+        e0: (L::from_bits(0xBFAB, 0x9F9E66E8B2FD46A7), L::from_bits(0xBF69, 0x894791C449953D1F)),
+        sin_e0: (L::from_bits(0xBFAC, 0xFABA82CD6DBEBB64), L::from_bits(0xBF69, 0xEA3ECCE887FBA7AA)),
+        cot_e0: (L::from_bits(0xC051, 0x82B0EE41B5D1F3CB), L::from_bits(0xC010, 0x834B39F9461CD773)),
+        c1: (L::from_bits(0x4000, 0xCF478EAD374D37FD), L::from_bits(0xBFB9, 0xE953AE7A7D8209F0)),
+        c: &[
+            L::from_bits(0xBFF9, 0xA09B5C45820F1E0C),
+            L::from_bits(0xBFF3, 0x86545B3253A659D2),
+            L::from_bits(0xBFED, 0xA881729B2F805168),
+            L::from_bits(0xBFE7, 0xFD9EAF5E6168C6ED),
+            L::from_bits(0xBFE2, 0xD40B07B10B21233A),
+            L::from_bits(0xBFDD, 0xBDEBC2509BE8515A),
+            L::from_bits(0xBFD8, 0xB296E04FF95D7B16),
+            L::from_bits(0xBFD3, 0xAE21ABB4FBF4C0B6),
+            L::from_bits(0xBFCE, 0xAE9D22E6FDFBC4C5),
+        ],
+    },
+    LdZero {
+        // -26.0
+        pole: -26,
+        e0: (L::from_bits(0x3FA6, 0xC4742FE35272CD1C), L::from_bits(0x3F65, 0xF2050F82D1AD2538)),
+        sin_e0: (L::from_bits(0x3FA8, 0x9A4B642FA5FF383E), L::from_bits(0xBF67, 0xC844CAA033F4B5D0)),
+        cot_e0: (L::from_bits(0x4055, 0xD45F832AC7752C2A), L::from_bits(0x4014, 0x9559CED18DABE827)),
+        c1: (L::from_bits(0x4000, 0xD1BDB60FAD749A73), L::from_bits(0x3FBE, 0x963F3A5A049727B0)),
+        c: &[
+            L::from_bits(0xBFF9, 0x9A8C3666D55F66C2),
+            L::from_bits(0xBFF2, 0xF8C5C3F2D98F4662),
+            L::from_bits(0xBFED, 0x96261CA84A33EC8D),
+            L::from_bits(0xBFE7, 0xD9789BC6F483920B),
+            L::from_bits(0xBFE2, 0xAEF7AB64812F7D65),
+            L::from_bits(0xBFDD, 0x96CEE52A1002B61A),
+            L::from_bits(0xBFD8, 0x8877CAC4003ED3E5),
+            L::from_bits(0xBFD3, 0x800CCAD5D588D31A),
+            L::from_bits(0xBFCD, 0xF723A655C65B247E),
+        ],
+    },
+    LdZero {
+        // -26.0
+        pole: -26,
+        e0: (L::from_bits(0xBFA6, 0xC4742FE35272CD1C), L::from_bits(0xBF65, 0xF20507CA8E7C0396)),
+        sin_e0: (L::from_bits(0xBFA8, 0x9A4B642FA5FF383E), L::from_bits(0x3F67, 0xC844D0B05B1A05ED)),
+        cot_e0: (L::from_bits(0xC055, 0xD45F832AC7752C2A), L::from_bits(0xC014, 0x9559D729F5528F74)),
+        c1: (L::from_bits(0x4000, 0xD1BDB60FAD749A73), L::from_bits(0x3FBE, 0x963F3A68D7C6EABB)),
+        c: &[
+            L::from_bits(0xBFF9, 0x9A8C3666D55F66C2),
+            L::from_bits(0xBFF2, 0xF8C5C3F2D98F4662),
+            L::from_bits(0xBFED, 0x96261CA84A33EC8D),
+            L::from_bits(0xBFE7, 0xD9789BC6F483920B),
+            L::from_bits(0xBFE2, 0xAEF7AB64812F7D65),
+            L::from_bits(0xBFDD, 0x96CEE52A1002B61A),
+            L::from_bits(0xBFD8, 0x8877CAC4003ED3E5),
+            L::from_bits(0xBFD3, 0x800CCAD5D588D31A),
+            L::from_bits(0xBFCD, 0xF723A655C65B247E),
+        ],
+    },
+    LdZero {
+        // -27.0
+        pole: -27,
+        e0: (L::from_bits(0x3FA1, 0xE8D58E16E6751905), L::from_bits(0x3F60, 0x9A18F1891FE4EAFF)),
+        sin_e0: (L::from_bits(0x3FA3, 0xB6DE17EC9ECFAAF4), L::from_bits(0xBF62, 0xA180F39B826330A1)),
+        cot_e0: (L::from_bits(0x405A, 0xB33096AC184ADD44), L::from_bits(0xC019, 0xA1FC361BA6EF1C43)),
+        c1: (L::from_bits(0x4000, 0xD41C86A7619A877D), L::from_bits(0xBFBF, 0xBE5BA52E3B5D2135)),
+        c: &[
+            L::from_bits(0xBFF9, 0x94EDD62EA59D34E5),
+            L::from_bits(0xBFF2, 0xE703C9937206C211),
+            L::from_bits(0xBFED, 0x865D3E1A98D70529),
+            L::from_bits(0xBFE7, 0xBB89EC44B1749518),
+            L::from_bits(0xBFE2, 0x916795C115DE5100),
+            L::from_bits(0xBFDC, 0xF18D5D595E5C6F77),
+            L::from_bits(0xBFD7, 0xD2A5A94196791378),
+            L::from_bits(0xBFD2, 0xBE7A966F2EBCC24F),
+            L::from_bits(0xBFCD, 0xB124B83763DE75AC),
+        ],
+    },
+    LdZero {
+        // -27.0
+        pole: -27,
+        e0: (L::from_bits(0xBFA1, 0xE8D58E16E6751905), L::from_bits(0xBF60, 0x9A18F13165097E42)),
+        sin_e0: (L::from_bits(0xBFA3, 0xB6DE17EC9ECFAAF4), L::from_bits(0x3F62, 0xA180F3E06988588B)),
+        cot_e0: (L::from_bits(0xC05A, 0xB33096AC184ADD44), L::from_bits(0x4019, 0xA1FC35D8228A2ED2)),
+        c1: (L::from_bits(0x4000, 0xD41C86A7619A877D), L::from_bits(0xBFBF, 0xBE5BA52DF7A33DE2)),
+        c: &[
+            L::from_bits(0xBFF9, 0x94EDD62EA59D34E5),
+            L::from_bits(0xBFF2, 0xE703C9937206C211),
+            L::from_bits(0xBFED, 0x865D3E1A98D70529),
+            L::from_bits(0xBFE7, 0xBB89EC44B1749518),
+            L::from_bits(0xBFE2, 0x916795C115DE5100),
+            L::from_bits(0xBFDC, 0xF18D5D595E5C6F77),
+            L::from_bits(0xBFD7, 0xD2A5A94196791378),
+            L::from_bits(0xBFD2, 0xBE7A966F2EBCC24F),
+            L::from_bits(0xBFCD, 0xB124B83763DE75AC),
+        ],
+    },
+    LdZero {
+        // -28.0
+        pole: -28,
+        e0: (L::from_bits(0x3F9D, 0x850C5131A842E9BA), L::from_bits(0xBF5A, 0xE8EB8F273739FD81)),
+        sin_e0: (L::from_bits(0x3F9E, 0xD0FDD232FEA43116), L::from_bits(0x3F5D, 0xFE480E03C07A94FF)),
+        cot_e0: (L::from_bits(0x405F, 0x9CCA83D69541819B), L::from_bits(0x401D, 0xE486A1888DC0A90C)),
+        c1: (L::from_bits(0x4000, 0xD665AB39AABF19C6), L::from_bits(0xBFBE, 0xEA6E25C9EC3149C4)),
+        c: &[
+            L::from_bits(0xBFF9, 0x8FB45E04D9DBE687),
+            L::from_bits(0xBFF2, 0xD717B0B28B275954),
+            L::from_bits(0xBFEC, 0xF16EE3D8382F0DA0),
+            L::from_bits(0xBFE7, 0xA29543B52C6E31B7),
+            L::from_bits(0xBFE1, 0xF3464BF6E5368F60),
+            L::from_bits(0xBFDC, 0xC2FCD5F581C4336D),
+            L::from_bits(0xBFD7, 0xA41521DDB9E0D76E),
+            L::from_bits(0xBFD2, 0x8F2CD811DCDD0759),
+            L::from_bits(0xBFCD, 0x807CFBBA25994057),
+        ],
+    },
+    LdZero {
+        // -28.0
+        pole: -28,
+        e0: (L::from_bits(0xBF9D, 0x850C5131A842E9BA), L::from_bits(0x3F5A, 0xE8EB8F2E745BED59)),
+        sin_e0: (L::from_bits(0xBF9E, 0xD0FDD232FEA43116), L::from_bits(0xBF5D, 0xFE480E00E8C16086)),
+        cot_e0: (L::from_bits(0xC05F, 0x9CCA83D69541819B), L::from_bits(0xC01D, 0xE486A18CD1AB138F)),
+        c1: (L::from_bits(0x4000, 0xD665AB39AABF19C6), L::from_bits(0xBFBE, 0xEA6E25C9E7864FD6)),
+        c: &[
+            L::from_bits(0xBFF9, 0x8FB45E04D9DBE687),
+            L::from_bits(0xBFF2, 0xD717B0B28B275954),
+            L::from_bits(0xBFEC, 0xF16EE3D8382F0DA0),
+            L::from_bits(0xBFE7, 0xA29543B52C6E31B7),
+            L::from_bits(0xBFE1, 0xF3464BF6E5368F60),
+            L::from_bits(0xBFDC, 0xC2FCD5F581C4336D),
+            L::from_bits(0xBFD7, 0xA41521DDB9E0D76E),
+            L::from_bits(0xBFD2, 0x8F2CD811DCDD0759),
+            L::from_bits(0xBFCD, 0x807CFBBA25994057),
+        ],
+    },
+    LdZero {
+        // -29.0
+        pole: -29,
+        e0: (L::from_bits(0x3F98, 0x92CFCC5A1AC56BD6), L::from_bits(0xBF54, 0xE78C44C82F7A4EE5)),
+        sin_e0: (L::from_bits(0x3F99, 0xE69C7E034DF2F85F), L::from_bits(0x3F58, 0xE39EF4F9CC762384)),
+        cot_e0: (L::from_bits(0x4064, 0x8E17877A77435D75), L::from_bits(0xC023, 0xA872FECD30FFE6CB)),
+        c1: (L::from_bits(0x4000, 0xD89AA265CE0E8C88), L::from_bits(0xBFBB, 0xB48BA9E561255CC3)),
+        c: &[
+            L::from_bits(0xBFF9, 0x8AD58BFBB8121567),
+            L::from_bits(0xBFF2, 0xC8C2E29D8EB81259),
+            L::from_bits(0xBFEC, 0xD9B6629B004ABB73),
+            L::from_bits(0xBFE7, 0x8DA4B55F5A6DE92D),
+            L::from_bits(0xBFE1, 0xCCC3CD8E07C92A56),
+            L::from_bits(0xBFDC, 0x9E908BCC558A220C),
+            L::from_bits(0xBFD7, 0x80EA5EAD253ED84E),
+            L::from_bits(0xBFD1, 0xD95D18B7ACB71F20),
+            L::from_bits(0xBFCC, 0xBC772C1C68A5E071),
+        ],
+    },
+    LdZero {
+        // -29.0
+        pole: -29,
+        e0: (L::from_bits(0xBF98, 0x92CFCC5A1AC56BD6), L::from_bits(0x3F54, 0xE78C44C8BDF3DAB4)),
+        sin_e0: (L::from_bits(0xBF99, 0xE69C7E034DF2F85F), L::from_bits(0xBF58, 0xE39EF4F9B07C9320)),
+        cot_e0: (L::from_bits(0xC064, 0x8E17877A77435D75), L::from_bits(0x4023, 0xA872FECD1FC347BF)),
+        c1: (L::from_bits(0x4000, 0xD89AA265CE0E8C88), L::from_bits(0xBFBB, 0xB48BA9E55FE6E2D6)),
+        c: &[
+            L::from_bits(0xBFF9, 0x8AD58BFBB8121567),
+            L::from_bits(0xBFF2, 0xC8C2E29D8EB81259),
+            L::from_bits(0xBFEC, 0xD9B6629B004ABB73),
+            L::from_bits(0xBFE7, 0x8DA4B55F5A6DE92D),
+            L::from_bits(0xBFE1, 0xCCC3CD8E07C92A56),
+            L::from_bits(0xBFDC, 0x9E908BCC558A220C),
+            L::from_bits(0xBFD7, 0x80EA5EAD253ED84E),
+            L::from_bits(0xBFD1, 0xD95D18B7ACB71F20),
+            L::from_bits(0xBFCC, 0xBC772C1C68A5E071),
+        ],
+    },
+    LdZero {
+        // -30.0
+        pole: -30,
+        e0: (L::from_bits(0x3F93, 0x9C9962823EB07306), L::from_bits(0x3F52, 0xADED4C298A174E73)),
+        sin_e0: (L::from_bits(0x3F94, 0xF5FC4225A87AA288), L::from_bits(0xBF50, 0xF22B08BDE6DECA79)),
+        cot_e0: (L::from_bits(0x4069, 0x85360F02CFCF279D), L::from_bits(0x4028, 0xC214311FA9DEE1DC)),
+        c1: (L::from_bits(0x4000, 0xDABCC487F030AEAA), L::from_bits(0x3FBD, 0xE3EE2697B8EE408B)),
+        c: &[
+            L::from_bits(0xBFF9, 0x8648765D9162DDA7),
+            L::from_bits(0xBFF2, 0xBBD0DE03871551A2),
+            L::from_bits(0xBFEC, 0xC4FFF4D7C0DFED81),
+            L::from_bits(0xBFE6, 0xF7EFF0451C40D946),
+            L::from_bits(0xBFE1, 0xAD57D277473F6961),
+            L::from_bits(0xBFDC, 0x81D60CA196E04D0F),
+            L::from_bits(0xBFD6, 0xCC345881F7A711F6),
+            L::from_bits(0xBFD1, 0xA6848B97217DA526),
+            L::from_bits(0xBFCC, 0x8BA748780BF3D1BF),
+        ],
+    },
+    LdZero {
+        // -30.0
+        pole: -30,
+        e0: (L::from_bits(0xBF93, 0x9C9962823EB07306), L::from_bits(0xBF52, 0xADED4C2989739AF0)),
+        sin_e0: (L::from_bits(0xBF94, 0xF5FC4225A87AA288), L::from_bits(0x3F50, 0xF22B08BDEEE7EBCD)),
+        cot_e0: (L::from_bits(0xC069, 0x85360F02CFCF279D), L::from_bits(0xC028, 0xC214311FAA6A2283)),
+        c1: (L::from_bits(0x4000, 0xDABCC487F030AEAA), L::from_bits(0x3FBD, 0xE3EE2697B8F0D1B0)),
+        c: &[
+            L::from_bits(0xBFF9, 0x8648765D9162DDA7),
+            L::from_bits(0xBFF2, 0xBBD0DE03871551A2),
+            L::from_bits(0xBFEC, 0xC4FFF4D7C0DFED81),
+            L::from_bits(0xBFE6, 0xF7EFF0451C40D946),
+            L::from_bits(0xBFE1, 0xAD57D277473F6961),
+            L::from_bits(0xBFDC, 0x81D60CA196E04D0F),
+            L::from_bits(0xBFD6, 0xCC345881F7A711F6),
+            L::from_bits(0xBFD1, 0xA6848B97217DA526),
+            L::from_bits(0xBFCC, 0x8BA748780BF3D1BF),
+        ],
+    },
+    LdZero {
+        // -31.0
+        pole: -31,
+        e0: (L::from_bits(0x3F8E, 0xA1A6973C1FADE217), L::from_bits(0x3F4A, 0xF7237D35FE328C65)),
+        sin_e0: (L::from_bits(0x3F8F, 0xFDEB9F1E9D65D110), L::from_bits(0x3F4E, 0xE902B48CA7E6FC42)),
+        cot_e0: (L::from_bits(0x406E, 0x810C5E8AB950AE60), L::from_bits(0x402D, 0xEC038F96ACD12BD9)),
+        c1: (L::from_bits(0x4000, 0xDCCD48A8F872BF2E), L::from_bits(0x3FBE, 0xF6181B8DECFBE076)),
+        c: &[
+            L::from_bits(0xBFF9, 0x820555111D3D9244),
+            L::from_bits(0xBFF2, 0xB015538EAA779AE3),
+            L::from_bits(0xBFEC, 0xB2D55001C61D4628),
+            L::from_bits(0xBFE6, 0xD9EEE00662044F9D),
+            L::from_bits(0xBFE1, 0x938874A9EBDC8A5C),
+            L::from_bits(0xBFDB, 0xD5FFCCEE3260AEBA),
+            L::from_bits(0xBFD6, 0xA2F38F6F0416A073),
+            L::from_bits(0xBFD1, 0x80AA5CBA0AF39A96),
+            L::from_bits(0xBFCB, 0xD0F994B37080BFC4),
+        ],
+    },
+];
+
 /// `log|gamma(x)|` and the sign of `gamma(x)` (musl's ld80 `__lgammal_r`).
 #[allow(clippy::too_many_lines)]
 fn lgammal_core(x: L) -> (L, i32) {
@@ -2529,6 +4016,9 @@ fn lgammal_core(x: L) -> (L, i32) {
             sg = -1;
         } else {
             t = -t;
+        }
+        if let Some(r) = lgammal_near_zero(-x) {
+            return (r, sg);
         }
         nadj = logl_raw(LG_PI / (t * x));
     }
@@ -3751,6 +5241,47 @@ mod tests {
         Ok(())
     }
 
+    /// mpmath's `log|gamma|` at 80 digits, correctly rounded, near each
+    /// zero and pole below -2 -- at 1 to 10^4 ulps from the zero, 10^-15 to
+    /// 1/4 from it, 1 ulp to 3/10 from the pole, on both sides -- and at 1,500
+    /// random points in (-35, -2): `posix/tools/oracle/lgammal_zeros.py
+    /// oracle`. Before `lgammal_near_zero`, the first rows were wrong in
+    /// their leading digits; now all are within 3 ulps, most exact.
+    #[test]
+    fn lgammal_keeps_its_digits_near_the_zeros_below_minus_two() {
+        extended();
+        let oracle = include_str!("lgammal_zero_oracle.txt");
+        let line =
+            |v: L| (i128::from(v.biased_exponent()) << 63) | i128::from(v.significand & !(1 << 63));
+        let mut n = 0;
+        let mut bad = Vec::new();
+        for l in oracle.lines().filter(|l| !l.is_empty()) {
+            let (xs, ys) = l.split_once(' ').expect("x y");
+            let (x, want) = (parse_l(xs), parse_l(ys));
+            let got = lgammal(x);
+            let d = if got.is_sign_negative() == want.is_sign_negative() {
+                (line(got) - line(want)).unsigned_abs()
+            } else {
+                u128::MAX
+            };
+            if d > 3 {
+                bad.push(format!("{l}: {d} ulp"));
+            }
+            n += 1;
+        }
+        assert!(
+            bad.is_empty(),
+            "{} of {n}:
+{}",
+            bad.len(),
+            bad.join(
+                "
+"
+            )
+        );
+        assert_eq!(n, 3776);
+    }
+
     fn check(line: &str) -> Result<(), String> {
         let (lhs, rhs) = line.split_once(" = ").ok_or("no =")?;
         let mut w = lhs.split(' ');
@@ -3795,26 +5326,10 @@ mod tests {
             "exp10l" => same(exp10l(x()), r(outs[0]), tol),
             "erfl" => same(erfl(x()), r(outs[0]), tol),
             "erfcl" => same(erfcl(x()), r(outs[0]), tol),
-            "lgammal" => {
-                // Near a root of lgamma -- where gamma(x) is +-1, which
-                // glibc's lgamma_neg.c treats specially and musl does not --
-                // a relative comparison says nothing: a result under 1 is
-                // compared by its absolute error, within the tolerance's
-                // ulps of 1, as math.rs does for lgamma (known-issues.md,
-                // D-POSIX-LGAMMA-LOSES-DIGITS-NEAR-NEGATIVE-ROOTS).
-                let ours = lgammal(x());
-                let glibc = r(outs[0]);
-                let abs_ok = glibc.is_finite()
-                    && ours.is_finite()
-                    && glibc.abs() < ONE
-                    && (ours - glibc).abs()
-                        <= L::from_i64(i64::try_from(tol).unwrap_or(0)).scalbn(-63);
-                if abs_ok {
-                    Ok(())
-                } else {
-                    same(ours, glibc, tol)
-                }
-            }
+            // Relative everywhere, the zeros below -2 included, since
+            // lgammal_near_zero (known-issues.md,
+            // D-POSIX-LGAMMA-LOSES-DIGITS-NEAR-NEGATIVE-ROOTS).
+            "lgammal" => same(lgammal(x()), r(outs[0]), tol),
             "tgammal" => same(tgammal(x()), r(outs[0]), tol),
             "fmal" => same(fmal(x(), y(), parse_l(ins[2])), r(outs[0]), 0),
             "hypotl" => same(hypotl(x(), y()), r(outs[0]), tol),

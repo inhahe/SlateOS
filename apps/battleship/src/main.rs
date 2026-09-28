@@ -14,30 +14,76 @@
 
 use std::process::ExitCode;
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// A hit is a red cross and a miss a blue dot -- how a player reads the board
+// -- so the two marks keep their hues in every theme, each in the shade that
+// reads on the cell under it; the water, the ships and the chrome follow the
+// user's palette (the operator's answer to C-Q16, §1422, and lane C's call for
+// this game). It was all a copy of Catppuccin Mocha, dark on a light desktop.
+
+/// A hit's cross, `(pale, deep)`: the shade that reads on the cell is drawn.
+const HIT: (Color, Color) = (Color::from_hex(0xF38BA8), Color::from_hex(0xB0103A));
+/// A miss's dot, the same way.
+const MISS: (Color, Color) = (Color::from_hex(0x89B4FA), Color::from_hex(0x1A4FC0));
+/// The halo round a mark: white or black, whichever stands off the cell. Not
+/// a grey: a wreck is the palette's mid grey, where no grey reaches 3:1.
+const HALOS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x000000));
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// Open water, the mat a grid lies on, and a wreck.
+    water: Color,
+    mat: Color,
+    wreck: Color,
+    /// The five hulls, one palette hue each, in `FLEET`'s order. Ships are
+    /// told apart by length first; the two of one length, the cruiser and the
+    /// submarine, are green and peach, which no theme lets be mistaken.
+    hulls: [Color; 5],
+    /// The ship being placed, where it would be accepted and where refused.
+    fits: Color,
+    refused: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            water: p.surface0,
+            mat: p.crust,
+            wreck: p.overlay0,
+            hulls: [p.blue, p.mauve, p.green, p.peach, p.yellow],
+            fits: with_alpha(p.green, 120),
+            refused: with_alpha(p.red, 120),
+        }
+    }
+
+    /// Ship `kind`'s hull.
+    fn hull(&self, kind: ShipKind) -> Color {
+        let i = match kind {
+            ShipKind::Carrier => 0,
+            ShipKind::Battleship => 1,
+            ShipKind::Cruiser => 2,
+            ShipKind::Submarine => 3,
+            ShipKind::Destroyer => 4,
+        };
+        self.hulls.get(i).copied().unwrap_or(self.water)
+    }
+}
 
 // ── The board ───────────────────────────────────────────────────────
 
@@ -325,16 +371,6 @@ impl ShipKind {
             Self::Cruiser => 3,
             Self::Submarine => 3,
             Self::Destroyer => 2,
-        }
-    }
-
-    fn color(self) -> Color {
-        match self {
-            Self::Carrier => TEAL,
-            Self::Battleship => LAVENDER,
-            Self::Cruiser => GREEN,
-            Self::Submarine => YELLOW,
-            Self::Destroyer => PEACH,
         }
     }
 }
@@ -719,6 +755,11 @@ struct BattleshipApp {
     /// is read against. Not a size the drawing falls back on: every frame is
     /// solved from the size the window reports for that frame.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame. A new game is set up in this same state, so they carry
+    /// over.
+    palette: Palette,
 }
 
 impl BattleshipApp {
@@ -761,6 +802,7 @@ impl BattleshipApp {
             last_sunk_message: String::new(),
             player_won: false,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
         };
         app.place_ai_ships();
         app.message = app.placement_prompt();
@@ -1048,12 +1090,12 @@ impl BattleshipApp {
     /// One `match`, not two. The word and its colour used to be chosen by two
     /// separate `match self.phase` arms twenty lines apart, so a phase could
     /// be renamed in one and left coloured by the other.
-    fn phase_label(&self) -> (&'static str, Color) {
+    fn phase_label(&self, c: &Colours) -> (&'static str, Color) {
         match self.phase {
-            GamePhase::Placement => ("Ship Placement", YELLOW),
-            GamePhase::Firing => ("Battle", GREEN),
-            GamePhase::GameOver if self.player_won => ("Victory!", GREEN),
-            GamePhase::GameOver => ("Defeat!", RED),
+            GamePhase::Placement => ("Ship Placement", c.chrome.even),
+            GamePhase::Firing => ("Battle", c.chrome.good),
+            GamePhase::GameOver if self.player_won => ("Victory!", c.chrome.good),
+            GamePhase::GameOver => ("Defeat!", c.chrome.bad),
         }
     }
 
@@ -1073,36 +1115,37 @@ impl BattleshipApp {
     /// Draw one whole frame at `w` x `h`, hit boxes and all.
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
+        let c = Colours::of(&self.palette);
         let mut f = Frame::new(l.window.w, l.window.h);
         f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: l.window.w,
             height: l.window.h,
-            color: BASE,
+            color: c.chrome.page,
             corner_radii: CornerRadii::ZERO,
         });
         // A window too small for its own contents crops them rather than
         // painting over its neighbours: the clip is the window itself, so the
         // last row of a grid that does not fit is cut off, not spilled.
         f.clip(l.window);
-        self.draw_header(&l, &mut f);
-        self.draw_message(&l, &mut f);
-        self.draw_body(&l, &mut f);
-        self.draw_stats(&l, &mut f);
-        self.draw_help(&l, &mut f);
+        self.draw_header(&l, &mut f, &c);
+        self.draw_message(&l, &mut f, &c);
+        self.draw_body(&l, &mut f, &c);
+        self.draw_stats(&l, &mut f, &c);
+        self.draw_help(&l, &mut f, &c);
         f.unclip();
         f
     }
 
     /// The title on the left of the header, the phase on the right.
-    fn draw_header(&self, l: &Layout, f: &mut Frame<Target>) {
-        let ink = Ink::new(l.title, FontWeightHint::Bold, LAVENDER);
+    fn draw_header(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
+        let ink = Ink::new(l.title, FontWeightHint::Bold, c.chrome.title);
         let band = inset(l.header, l.pad);
         let title = label_in(f, band, "Battleship", ink);
         f.hit(Target::Title, title);
 
-        let (word, colour) = self.phase_label();
+        let (word, colour) = self.phase_label(c);
         let ink = Ink::new(l.title, FontWeightHint::Bold, colour);
         // Right-aligned by measuring the words, not by a column the words are
         // assumed to fit in: the phase names differ in length by half again,
@@ -1114,7 +1157,7 @@ impl BattleshipApp {
     }
 
     /// The single line of running commentary under the header.
-    fn draw_message(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_message(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         if l.message.is_empty() {
             return;
         }
@@ -1123,11 +1166,11 @@ impl BattleshipApp {
             y: l.message.y,
             width: (l.message.w - l.pad * 2.0).max(0.0),
             height: l.message.h,
-            color: SURFACE0,
+            color: c.chrome.raised,
             corner_radii: CornerRadii::all(3.0),
         });
         let band = inset(l.message, l.pad);
-        let ink = Ink::new(l.font, FontWeightHint::Regular, TEXT_COLOR);
+        let ink = Ink::new(l.font, FontWeightHint::Regular, c.chrome.text);
         label_in(f, band, &self.message, ink);
         // The box a click is answered by is the whole bar, not the glyphs: the
         // message is what the bar is *for*, and an empty message would
@@ -1136,17 +1179,17 @@ impl BattleshipApp {
     }
 
     /// The two grids, side by side, captions and labels and all.
-    fn draw_body(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_body(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         let g = l.grids();
-        self.draw_own_grid(l, f, g);
-        self.draw_ocean_grid(l, f, g);
+        self.draw_own_grid(l, f, g, c);
+        self.draw_ocean_grid(l, f, g, c);
     }
 
     /// The caption, the A-J column and the 1-10 row around one grid.
-    fn draw_grid_chrome(l: &Layout, f: &mut Frame<Target>, g: Grids, side: Side) {
+    fn draw_grid_chrome(l: &Layout, f: &mut Frame<Target>, g: Grids, side: Side, c: &Colours) {
         let origin = side.origin(g);
         let board = g.board_rect(origin);
-        let ink = Ink::new(l.small, FontWeightHint::Bold, SUBTEXT0);
+        let ink = Ink::new(l.small, FontWeightHint::Bold, c.chrome.dim);
         let caption = side.caption();
         // Centred over the grid it names, by measuring it. The old drawing
         // subtracted a hand-tuned half-width -- 40 for "Your Fleet", 55 for
@@ -1157,7 +1200,7 @@ impl BattleshipApp {
         let rect = label(f, x, g.caption_y, caption, ink);
         f.hit(side.label_target(), rect);
 
-        let ink = Ink::new(l.small, FontWeightHint::Regular, OVERLAY0);
+        let ink = Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim);
         let line = ink.height();
         for c in 0..GRID_SIZE {
             let s = format!("{}", c.saturating_add(1));
@@ -1176,28 +1219,28 @@ impl BattleshipApp {
     }
 
     /// The player's own fleet, ships visible, with the AI's shots marked.
-    fn draw_own_grid(&self, l: &Layout, f: &mut Frame<Target>, g: Grids) {
-        Self::draw_grid_chrome(l, f, g, Side::Own);
+    fn draw_own_grid(&self, l: &Layout, f: &mut Frame<Target>, g: Grids, c: &Colours) {
+        Self::draw_grid_chrome(l, f, g, Side::Own, c);
         let origin = g.own;
         let board = g.board_rect(origin);
-        Self::draw_board_backing(f, g, board);
+        Self::draw_board_backing(f, g, board, c);
         f.hit(Target::OwnBoard, board);
 
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                let rect = g.cell_rect(origin, r, c);
-                let colour = match self.player_fleet.ship_at(r, c) {
-                    Some(idx) if self.player_fleet.is_ship_sunk(idx) => OVERLAY0,
+        for row in 0..GRID_SIZE {
+            for col in 0..GRID_SIZE {
+                let rect = g.cell_rect(origin, row, col);
+                let colour = match self.player_fleet.ship_at(row, col) {
+                    Some(idx) if self.player_fleet.is_ship_sunk(idx) => c.wreck,
                     Some(idx) => self
                         .player_fleet
                         .ships
                         .get(idx)
-                        .map_or(SURFACE0, |s| s.kind.color()),
-                    None => SURFACE0,
+                        .map_or(c.water, |s| c.hull(s.kind)),
+                    None => c.water,
                 };
                 Self::draw_cell(f, rect, colour, g.cell);
-                Self::draw_mark(f, rect, self.player_fleet.mark_at(r, c));
-                f.hit(Target::Own(byte(r), byte(c)), rect);
+                Self::draw_mark(f, rect, self.player_fleet.mark_at(row, col), colour);
+                f.hit(Target::Own(byte(row), byte(col)), rect);
             }
         }
 
@@ -1206,43 +1249,43 @@ impl BattleshipApp {
             && let Some(ship) = self.placement_preview_ship()
         {
             let tint = if self.is_placement_valid() {
-                Color::rgba(166, 227, 161, 120)
+                c.fits
             } else {
-                Color::rgba(243, 139, 168, 120)
+                c.refused
             };
-            for (r, c) in ship.cells() {
-                if r < GRID_SIZE && c < GRID_SIZE {
-                    Self::draw_cell(f, g.cell_rect(origin, r, c), tint, g.cell);
+            for (row, col) in ship.cells() {
+                if row < GRID_SIZE && col < GRID_SIZE {
+                    Self::draw_cell(f, g.cell_rect(origin, row, col), tint, g.cell);
                 }
             }
         }
     }
 
     /// The opponent's ocean: water until fired upon, ships revealed at the end.
-    fn draw_ocean_grid(&self, l: &Layout, f: &mut Frame<Target>, g: Grids) {
-        Self::draw_grid_chrome(l, f, g, Side::Ocean);
+    fn draw_ocean_grid(&self, l: &Layout, f: &mut Frame<Target>, g: Grids, c: &Colours) {
+        Self::draw_grid_chrome(l, f, g, Side::Ocean, c);
         let origin = g.ocean;
         let board = g.board_rect(origin);
-        Self::draw_board_backing(f, g, board);
+        Self::draw_board_backing(f, g, board, c);
         f.hit(Target::OceanBoard, board);
 
         let reveal = self.phase == GamePhase::GameOver;
-        for r in 0..GRID_SIZE {
-            for c in 0..GRID_SIZE {
-                let rect = g.cell_rect(origin, r, c);
-                let colour = if self.opponent_fleet.is_cell_sunk(r, c) {
-                    OVERLAY0
+        for row in 0..GRID_SIZE {
+            for col in 0..GRID_SIZE {
+                let rect = g.cell_rect(origin, row, col);
+                let colour = if self.opponent_fleet.is_cell_sunk(row, col) {
+                    c.wreck
                 } else if reveal {
                     self.opponent_fleet
-                        .ship_at(r, c)
+                        .ship_at(row, col)
                         .and_then(|idx| self.opponent_fleet.ships.get(idx))
-                        .map_or(SURFACE0, |s| s.kind.color())
+                        .map_or(c.water, |s| c.hull(s.kind))
                 } else {
-                    SURFACE0
+                    c.water
                 };
                 Self::draw_cell(f, rect, colour, g.cell);
-                Self::draw_mark(f, rect, self.opponent_fleet.mark_at(r, c));
-                f.hit(Target::Ocean(byte(r), byte(c)), rect);
+                Self::draw_mark(f, rect, self.opponent_fleet.mark_at(row, col), colour);
+                f.hit(Target::Ocean(byte(row), byte(col)), rect);
             }
         }
 
@@ -1253,7 +1296,7 @@ impl BattleshipApp {
                 y: rect.y,
                 width: rect.w,
                 height: rect.h,
-                color: YELLOW,
+                color: c.chrome.ring,
                 line_width: (g.cell * 0.07).max(1.0),
                 corner_radii: CornerRadii::all(g.cell * 0.12),
             });
@@ -1261,14 +1304,14 @@ impl BattleshipApp {
     }
 
     /// The dark mat a grid's cells sit on, a hair larger than the cells.
-    fn draw_board_backing(f: &mut Frame<Target>, g: Grids, board: Rect) {
+    fn draw_board_backing(f: &mut Frame<Target>, g: Grids, board: Rect, c: &Colours) {
         let bleed = (g.step - g.cell).max(0.0);
         f.push(RenderCommand::FillRect {
             x: board.x - bleed,
             y: board.y - bleed,
             width: (board.w + bleed).max(0.0),
             height: (board.h + bleed).max(0.0),
-            color: CRUST,
+            color: c.mat,
             corner_radii: CornerRadii::all(g.cell * 0.2),
         });
     }
@@ -1285,40 +1328,54 @@ impl BattleshipApp {
         });
     }
 
-    /// What a shot left behind: a red cross for a hit, a blue dot for a miss.
-    fn draw_mark(f: &mut Frame<Target>, rect: Rect, mark: CellMark) {
+    /// What a shot left behind on a cell of colour `ground`: a red cross for
+    /// a hit, a blue dot for a miss.
+    ///
+    /// Each in the shade of its hue that reads on the cell, over a halo -- a
+    /// light or a dark grey, whichever stands off the cell -- because a hit
+    /// lands on a hull as well as on water, and on a light theme's mid-tone
+    /// hulls no red at all reaches 3:1.
+    fn draw_mark(f: &mut Frame<Target>, rect: Rect, mark: CellMark, ground: Color) {
         let (cx, cy) = rect.centre();
         let half = rect.w * 0.26;
+        let halo = gamechrome::legible_on(HALOS, ground);
         match mark {
             CellMark::Hit => {
                 let width = (rect.w * 0.08).max(1.0);
-                for (dx, dy) in [(-half, -half), (half, -half)] {
-                    f.push(RenderCommand::Line {
-                        x1: cx + dx,
-                        y1: cy + dy,
-                        x2: cx - dx,
-                        y2: cy - dy,
-                        color: RED,
-                        width,
-                    });
+                let red = gamechrome::legible_on(HIT, ground);
+                for (ink, line) in [(halo, width * 2.0), (red, width)] {
+                    for (dx, dy) in [(-half, -half), (half, -half)] {
+                        f.push(RenderCommand::Line {
+                            x1: cx + dx,
+                            y1: cy + dy,
+                            x2: cx - dx,
+                            y2: cy - dy,
+                            color: ink,
+                            width: line,
+                        });
+                    }
                 }
             }
             CellMark::Miss => {
-                f.push(RenderCommand::FillRect {
-                    x: cx - half / 2.0,
-                    y: cy - half / 2.0,
-                    width: half,
-                    height: half,
-                    color: BLUE,
-                    corner_radii: CornerRadii::all(half / 2.0),
-                });
+                let edge = (half * 0.2).max(1.0);
+                let blue = gamechrome::legible_on(MISS, ground);
+                for (ink, side) in [(halo, half + edge * 2.0), (blue, half)] {
+                    f.push(RenderCommand::FillRect {
+                        x: cx - side / 2.0,
+                        y: cy - side / 2.0,
+                        width: side,
+                        height: side,
+                        color: ink,
+                        corner_radii: CornerRadii::all(side / 2.0),
+                    });
+                }
             }
             CellMark::Empty => {}
         }
     }
 
     /// Six figures on two rows: the player's, the fleets', the AI's.
-    fn draw_stats(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_stats(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         if l.stats.is_empty() {
             return;
         }
@@ -1327,17 +1384,27 @@ impl BattleshipApp {
             y: l.stats.y,
             width: (l.stats.w - l.pad * 2.0).max(0.0),
             height: l.stats.h,
-            color: MANTLE,
+            color: c.chrome.band,
             corner_radii: CornerRadii::all(6.0),
         });
         f.hit(Target::Stats, l.stats);
 
         let mine = self.player_fleet.ships_remaining();
         let theirs = self.opponent_fleet.ships_remaining();
-        let fleet_colour = |left: usize| if left <= 1 { RED } else { GREEN };
+        let fleet_colour = |left: usize| {
+            if left <= 1 {
+                c.chrome.bad
+            } else {
+                c.chrome.good
+            }
+        };
         let rows = [
             [
-                (format!("Shots: {}", self.player_shots), TEXT_COLOR, false),
+                (
+                    format!("Shots: {}", self.player_shots),
+                    c.chrome.text,
+                    false,
+                ),
                 (
                     format!("Your Ships: {}/{}", mine, FLEET.len()),
                     fleet_colour(mine),
@@ -1345,14 +1412,14 @@ impl BattleshipApp {
                 ),
                 (
                     format!("AI Shots: {}", self.ai_state.shots),
-                    TEXT_COLOR,
+                    c.chrome.text,
                     false,
                 ),
             ],
             [
                 (
                     format!("Hit Rate: {:.1}%", self.player_hit_rate()),
-                    TEXT_COLOR,
+                    c.chrome.text,
                     false,
                 ),
                 (
@@ -1362,7 +1429,7 @@ impl BattleshipApp {
                 ),
                 (
                     format!("AI Hit Rate: {:.1}%", self.ai_hit_rate()),
-                    TEXT_COLOR,
+                    c.chrome.text,
                     false,
                 ),
             ],
@@ -1393,11 +1460,11 @@ impl BattleshipApp {
     }
 
     /// The key help along the bottom.
-    fn draw_help(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_help(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         if l.help.is_empty() {
             return;
         }
-        let ink = Ink::new(l.small, FontWeightHint::Regular, OVERLAY0);
+        let ink = Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim);
         label_in(f, inset(l.help, l.pad), self.help_line(), ink);
         f.hit(Target::Help, l.help);
     }
@@ -1596,6 +1663,10 @@ fn f32_from_u32(v: u32) -> f32 {
 }
 
 impl App for BattleshipApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Battleship".to_string()
     }
@@ -1698,6 +1769,99 @@ mod tests {
     use guitk::probe;
 
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    fn chrome() -> Chrome {
+        colours().chrome
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark -- a
+    /// ship being placed, a battle with hits and misses on water and hulls,
+    /// and a game over with the fleet revealed -- with only the marks' own
+    /// reds and blues and their halos not the palette's (the operator's
+    /// C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        let derived = [HIT.0, HIT.1, MISS.0, MISS.1, HALOS.0, HALOS.1];
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut placing = BattleshipApp::with_seed(7);
+            placing.theme_changed(&p);
+            let mut battle = firing_app();
+            battle.theme_changed(&p);
+            for r in 0..GRID_SIZE {
+                battle.player_fleet.receive_fire(r, r);
+                battle.opponent_fleet.receive_fire(r, (r + 3) % GRID_SIZE);
+            }
+            let mut over = firing_app();
+            over.theme_changed(&p);
+            over.phase = GamePhase::GameOver;
+            for (what, app) in [("placing", &placing), ("battle", &battle), ("over", &over)] {
+                let f = app.draw(SIZE);
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("battleship, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **A mark is seen on every cell it can land on**, in either theme:
+    /// water, each hull and a wreck. The halo stands off the cell, and the
+    /// mark keeps its hue -- the red of a hit, the blue of a miss.
+    #[test]
+    fn a_mark_is_seen_on_every_cell_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            let mut grounds = vec![c.water, c.wreck];
+            grounds.extend(c.hulls);
+            for ground in grounds {
+                let halo = gamechrome::legible_on(HALOS, ground);
+                let ratio = guitk::theme::contrast_ratio(halo, ground);
+                assert!(
+                    ratio >= 3.0,
+                    "the halo is {ratio:.2}:1 on {ground:?} (light: {light})"
+                );
+                for (what, pair) in [("hit", HIT), ("miss", MISS)] {
+                    let ink = gamechrome::legible_on(pair, ground);
+                    assert!(
+                        ink == pair.0 || ink == pair.1,
+                        "a {what} is not its own hue"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Every hull is seen on the water, and the two ships of one length are
+    /// told apart**, in either theme. A ship's length says which it is; only
+    /// the cruiser and the submarine share one, so only they need their
+    /// colours to tell them apart.
+    #[test]
+    fn every_hull_is_seen_and_the_two_three_cell_ships_told_apart() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for hull in c.hulls {
+                assert!(
+                    !guitk::palette::hard_to_tell_apart(hull, c.water),
+                    "a hull is lost on the water: {hull:?} (light: {light})"
+                );
+            }
+            assert!(
+                !guitk::palette::hard_to_tell_apart(
+                    c.hull(ShipKind::Cruiser),
+                    c.hull(ShipKind::Submarine)
+                ),
+                "the cruiser and the submarine look alike (light: {light})"
+            );
+        }
+    }
 
     // ── AI fleet placement is not confined to one colour of the board ──
     //
@@ -3749,10 +3913,10 @@ mod tests {
     #[test]
     fn the_phase_is_named_in_the_header_and_coloured_by_how_it_is_going() {
         for (phase, won, word, colour) in [
-            (GamePhase::Placement, false, "Ship Placement", YELLOW),
-            (GamePhase::Firing, false, "Battle", GREEN),
-            (GamePhase::GameOver, true, "Victory!", GREEN),
-            (GamePhase::GameOver, false, "Defeat!", RED),
+            (GamePhase::Placement, false, "Ship Placement", chrome().even),
+            (GamePhase::Firing, false, "Battle", chrome().good),
+            (GamePhase::GameOver, true, "Victory!", chrome().good),
+            (GamePhase::GameOver, false, "Defeat!", chrome().bad),
         ] {
             let mut app = firing_app();
             app.phase = phase;
@@ -3880,7 +4044,7 @@ mod tests {
         app.placement_col = 1;
         let g = Layout::solve(SIZE.0, SIZE.1).grids();
         let f = app.draw(SIZE);
-        let tint = Color::rgba(166, 227, 161, 120);
+        let tint = colours().fits;
         for c in 1..=ShipKind::Carrier.size() {
             assert!(
                 fills_at(&f, g.cell_rect(g.own, 2, c)).contains(&tint),
@@ -3907,7 +4071,7 @@ mod tests {
         let g = Layout::solve(SIZE.0, SIZE.1).grids();
         let f = app.draw(SIZE);
         assert!(
-            fills_at(&f, g.cell_rect(g.own, 0, 0)).contains(&Color::rgba(243, 139, 168, 120)),
+            fills_at(&f, g.cell_rect(g.own, 0, 0)).contains(&colours().refused),
             "an overlapping placement was shown as if it would be accepted"
         );
     }
@@ -3917,10 +4081,7 @@ mod tests {
         let app = firing_app();
         let g = Layout::solve(SIZE.0, SIZE.1).grids();
         let f = app.draw(SIZE);
-        for tint in [
-            Color::rgba(166, 227, 161, 120),
-            Color::rgba(243, 139, 168, 120),
-        ] {
+        for tint in [colours().fits, colours().refused] {
             for c in 0..GRID_SIZE {
                 assert!(
                     !fills_at(&f, g.cell_rect(g.own, 0, c)).contains(&tint),
@@ -3956,22 +4117,54 @@ mod tests {
             .commands()
             .iter()
             .filter(|c| {
-                matches!(c, RenderCommand::Line { x1, y1, .. }
-                    if hit_cell.contains(*x1, *y1))
+                // The red strokes: each is drawn over a halo stroke too.
+                matches!(c, RenderCommand::Line { x1, y1, color, .. }
+                    if hit_cell.contains(*x1, *y1) && (*color == HIT.0 || *color == HIT.1))
             })
             .count();
         assert_eq!(crosses, 2, "a hit was not marked with a two-stroke cross");
-        assert!(
-            fills_at(&f, g.cell_rect(g.ocean, mr, mc)).is_empty()
-                || !fills_at(&f, g.cell_rect(g.ocean, mr, mc)).contains(&RED),
-            "a miss was marked in the colour of a hit"
-        );
-        let dots = f
+        // Each stroke over a halo of white or black, wider than it, so the
+        // cross is seen on a hull as on water.
+        let halos = f
             .commands()
             .iter()
-            .filter(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BLUE))
+            .filter(|c| {
+                matches!(c, RenderCommand::Line { x1, y1, color, .. }
+                    if hit_cell.contains(*x1, *y1) && (*color == HALOS.0 || *color == HALOS.1))
+            })
             .count();
-        assert!(dots >= 1, "a miss left no mark at all");
+        assert_eq!(halos, 2, "the cross has no halo under it");
+        // The marks inside the missed cell: fills smaller than it, centred in
+        // it. Counting every fill in the miss's blue found the dark theme's
+        // carrier, whose hull is the same blue, and passed without the miss.
+        let miss_cell = g.cell_rect(g.ocean, mr, mc);
+        let marks: Vec<Color> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *width < miss_cell.w
+                    && miss_cell.contains(x + width / 2.0, y + height / 2.0) =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !marks.iter().any(|c| *c == HIT.0 || *c == HIT.1),
+            "a miss was marked in the colour of a hit"
+        );
+        assert!(
+            marks.iter().any(|c| *c == MISS.0 || *c == MISS.1),
+            "a miss left no dot"
+        );
     }
 
     #[test]
@@ -3979,7 +4172,7 @@ mod tests {
         let app = firing_app();
         let g = Layout::solve(SIZE.0, SIZE.1).grids();
         let f = app.draw(SIZE);
-        let hull = ShipKind::Carrier.color();
+        let hull = colours().hull(ShipKind::Carrier);
         let ship = app
             .opponent_fleet
             .ships
@@ -4024,7 +4217,7 @@ mod tests {
         let f = app.draw(SIZE);
         for (r, c) in destroyer.cells() {
             assert!(
-                fills_at(&f, g.cell_rect(g.ocean, r, c)).contains(&OVERLAY0),
+                fills_at(&f, g.cell_rect(g.ocean, r, c)).contains(&colours().wreck),
                 "the wreck at {r},{c} is still drawn as open water"
             );
         }
@@ -4061,7 +4254,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{prefix:?} was never drawn"))
                 .1
         };
-        assert_eq!(colour_of(&f, "Your Ships"), GREEN);
+        assert_eq!(colour_of(&f, "Your Ships"), chrome().good);
 
         // Sink four of the player's five.
         let doomed: Vec<_> = app.player_fleet.ships.iter().copied().take(4).collect();
@@ -4073,7 +4266,7 @@ mod tests {
         let f = app.draw(SIZE);
         assert_eq!(
             colour_of(&f, "Your Ships"),
-            RED,
+            chrome().bad,
             "one ship left was not called out"
         );
         assert!(drew(&f, "Your Ships: 1/5"));

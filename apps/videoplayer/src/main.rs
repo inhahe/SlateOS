@@ -93,6 +93,24 @@ const NO_PICTURE_LINES: [&str; 2] = [
 /// What Play says, with a file open and nothing to decode it.
 const CANNOT_DECODE: &str = "Cannot play: nothing here decodes video";
 
+/// How far Left and Right seek, and Shift with them, in milliseconds.
+///
+/// The shortcut table binds them and the Settings tab says them, and both
+/// read these. The tab read two preferences instead -- `seek_small_step` and
+/// `seek_large_step` -- which nothing could change and the keys never
+/// consulted: the two agreed only because nobody had touched either.
+const SEEK_SMALL_MS: i64 = 10_000;
+const SEEK_LARGE_MS: i64 = 60_000;
+
+/// What a row whose setting acts on playback says beside its value.
+///
+/// Resume, what happens at the end of a film, hardware decoding and
+/// deinterlacing all act on a film being played, and nothing here plays one.
+/// They stay -- they are what the user will want set when something does --
+/// but a row that reads "On" and changes nothing has to say so, for the
+/// reason `NO_SCREENSHOTS` gives about the screenshot options.
+const NOT_APPLIED: &str = "Not applied: nothing here decodes video";
+
 const WINDOW_WIDTH: f32 = 1280.0;
 const WINDOW_HEIGHT: f32 = 720.0;
 /// A window smaller than this has no room left for the controls.
@@ -483,6 +501,91 @@ pub enum SubtitlePosition {
     Top,
     Bottom,
     Custom { x_percent: u32, y_percent: u32 },
+}
+
+// ============================================================================
+// Subtitle files beside a film
+// ============================================================================
+
+/// A subtitle file larger than this is not read. A film's are a few hundred
+/// kilobytes; a file this size named `.srt` is something else.
+const MAX_SUBTITLE_FILE: u64 = 8 * 1024 * 1024;
+
+/// The subtitle files that may sit beside `video`, in the order they are
+/// tried: in the preferred language first, by each of its codes --
+/// `Film.en.srt`, `Film.eng.srt`, and Matroska's `Film.ger.srt` where the
+/// bibliographic code differs -- then `Film.srt`.
+///
+/// Names are built as `OsString`s from the film's own, so a film whose name
+/// is not UTF-8 finds its subtitles too.
+fn subtitle_candidates(video: &Path, language: Option<Language>) -> Vec<PathBuf> {
+    let Some(stem) = video.file_stem() else {
+        return Vec::new();
+    };
+    let named = |code: &str| {
+        let mut name = stem.to_os_string();
+        if !code.is_empty() {
+            name.push(".");
+            name.push(code);
+        }
+        name.push(".srt");
+        video.with_file_name(name)
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(language) = language {
+        for code in [language.two_letter, language.code, language.bibliographic] {
+            let path = named(code);
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out.push(named(""));
+    out
+}
+
+/// Why a subtitle file's bytes were not read as text.
+const NOT_UNICODE: &str = "is not UTF-8 or UTF-16 text";
+
+/// The text of a subtitle file: UTF-8, with or without its byte-order mark,
+/// or UTF-16 with one.
+///
+/// Anything else is refused rather than guessed. An older `.srt` is often in
+/// a Windows code page, and which one the bytes do not say: read as the wrong
+/// one, every accented letter comes out as another, silently.
+fn subtitle_text(bytes: &[u8]) -> Result<String, &'static str> {
+    let utf16 = |rest: &[u8], little: bool| -> Result<String, &'static str> {
+        let pairs = rest.chunks_exact(2);
+        if !pairs.remainder().is_empty() {
+            return Err(NOT_UNICODE);
+        }
+        let units = pairs
+            .filter_map(|pair| <[u8; 2]>::try_from(pair).ok())
+            .map(|pair| {
+                if little {
+                    u16::from_le_bytes(pair)
+                } else {
+                    u16::from_be_bytes(pair)
+                }
+            });
+        char::decode_utf16(units)
+            .collect::<Result<String, _>>()
+            .map_err(|_| NOT_UNICODE)
+    };
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return std::str::from_utf8(rest)
+            .map(str::to_owned)
+            .map_err(|_| NOT_UNICODE);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return utf16(rest, true);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return utf16(rest, false);
+    }
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| NOT_UNICODE)
 }
 
 // ============================================================================
@@ -1858,25 +1961,25 @@ impl Shortcuts {
                 "Right",
                 "Seek Forward 10s",
                 Press::Plain(Key::Right),
-                Command::SeekBy(10_000),
+                Command::SeekBy(SEEK_SMALL_MS),
             ),
             sc(
                 "Left",
                 "Seek Backward 10s",
                 Press::Plain(Key::Left),
-                Command::SeekBy(-10_000),
+                Command::SeekBy(-SEEK_SMALL_MS),
             ),
             sc(
                 "Shift+Right",
                 "Seek Forward 60s",
                 Press::Shift(Key::Right),
-                Command::SeekBy(60_000),
+                Command::SeekBy(SEEK_LARGE_MS),
             ),
             sc(
                 "Shift+Left",
                 "Seek Backward 60s",
                 Press::Shift(Key::Left),
-                Command::SeekBy(-60_000),
+                Command::SeekBy(-SEEK_LARGE_MS),
             ),
             sc(
                 "N",
@@ -2212,7 +2315,6 @@ impl Default for RecentHistory {
 pub struct PlayerPreferences {
     pub resume_playback: bool,
     pub remember_volume: bool,
-    pub default_volume: u32,
     pub hardware_decode: bool,
     pub subtitle_auto_load: bool,
     /// The subtitle track a file opens with, when it has one in this
@@ -2222,8 +2324,6 @@ pub struct PlayerPreferences {
     pub audio_preferred_lang: Option<Language>,
     pub on_finish: OnFinishAction,
     pub osd_duration_ms: u64,
-    pub seek_small_step: u64,
-    pub seek_large_step: u64,
     pub screenshot_config: ScreenshotConfig,
     pub deinterlace: DeinterlaceMode,
 }
@@ -2266,7 +2366,6 @@ impl Default for PlayerPreferences {
         Self {
             resume_playback: true,
             remember_volume: true,
-            default_volume: 100,
             hardware_decode: true,
             subtitle_auto_load: true,
             // The file's own choice for both. Subtitles were "eng" here when
@@ -2278,8 +2377,6 @@ impl Default for PlayerPreferences {
             audio_preferred_lang: None,
             on_finish: OnFinishAction::PlayNext,
             osd_duration_ms: 2000,
-            seek_small_step: 10_000,
-            seek_large_step: 60_000,
             screenshot_config: ScreenshotConfig::default(),
             deinterlace: DeinterlaceMode::Auto,
         }
@@ -2476,6 +2573,16 @@ impl SettingRow {
         }
     }
 
+    /// Whether this row's setting acts on a film being played -- which
+    /// nothing here does, so the panel says [`NOT_APPLIED`] beside it.
+    #[must_use]
+    pub fn needs_decoding(self) -> bool {
+        matches!(
+            self,
+            Self::ResumePlayback | Self::HardwareDecode | Self::OnFinish | Self::Deinterlace
+        )
+    }
+
     /// Move this row to its next value. Booleans flip; lists step and wrap.
     pub fn cycle(self, prefs: &mut PlayerPreferences) {
         match self {
@@ -2506,6 +2613,9 @@ impl SettingRow {
 /// default when the window closed, so a choice lasted exactly as long as the
 /// window it was made in.
 const CONFIG_NAME: &str = "videoplayer";
+
+/// Where the volume is kept, while Remember Volume is on.
+const VOLUME_KEY: &str = "volume";
 
 settingsfile::yaml_enum!(OnFinishAction {
     DoNothing => "nothing",
@@ -2615,7 +2725,9 @@ fn write_preferences(doc: &mut yamldoc::Document, prefs: &PlayerPreferences) {
             Some(language) => doc.set_str(&[key], language.code),
             // Absent is the file's own choice; whether there was a line to
             // remove makes no difference to what the file now says.
-            None => drop(doc.remove(&[key])),
+            None => {
+                doc.remove(&[key]);
+            }
         }
     }
     doc.set_str(&["on_finish"], prefs.on_finish.yaml_name());
@@ -3046,11 +3158,20 @@ impl VideoPlayerApp {
     pub fn volume_up(&mut self) {
         self.volume.increase(5);
         self.show_osd(&format!("Volume: {}", self.volume.label()));
+        self.keep_volume();
     }
 
     pub fn volume_down(&mut self) {
         self.volume.decrease(5);
         self.show_osd(&format!("Volume: {}", self.volume.label()));
+        self.keep_volume();
+    }
+
+    /// Keep the volume for the next window, while Remember Volume is on.
+    fn keep_volume(&mut self) {
+        if self.preferences.remember_volume {
+            self.save_settings();
+        }
     }
 
     pub fn toggle_mute(&mut self) {
@@ -3122,11 +3243,15 @@ impl VideoPlayerApp {
             Ok(file) => {
                 let name = file.file_name.clone();
                 self.show_file(file);
-                if self.decodes {
+                let opened = if self.decodes {
                     self.state = PlaybackState::Playing;
-                    self.show_osd(&format!("Now playing: {name}"));
+                    format!("Now playing: {name}")
                 } else {
-                    self.show_osd(&format!("Opened {name}"));
+                    format!("Opened {name}")
+                };
+                match self.load_sibling_subtitles() {
+                    Some(subtitles) => self.show_osd(&format!("{opened}; {subtitles}")),
+                    None => self.show_osd(&opened),
                 }
             }
             Err(why) => {
@@ -3136,6 +3261,59 @@ impl VideoPlayerApp {
                 self.show_osd(&why);
             }
         }
+    }
+
+    /// Load the subtitle file beside the film on screen, when Auto-load
+    /// Subtitles is on: in the preferred subtitle language first, then the
+    /// one named for the film alone ([`subtitle_candidates`]).
+    ///
+    /// Returns what to say about it -- the file loaded, or why the one found
+    /// was not -- and nothing when there was none to find. The first file
+    /// found is the answer either way: one in the preferred language that
+    /// cannot be read is said, not quietly replaced by one in another.
+    ///
+    /// The switch was drawn "On" and read by nothing, and nothing else loads
+    /// a subtitle file: a film's own `.srt` was never shown.
+    fn load_sibling_subtitles(&mut self) -> Option<String> {
+        if !self.preferences.subtitle_auto_load {
+            return None;
+        }
+        let video = self.current_file.as_ref()?.path.clone();
+        for candidate in subtitle_candidates(&video, self.preferences.subtitle_preferred_lang) {
+            let name = candidate
+                .file_name()
+                .map_or_else(|| candidate.shown(), |n| Path::new(n).shown());
+            let meta = match std::fs::metadata(&candidate) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Some(format!("{name} was not loaded: {e}")),
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            if meta.len() > MAX_SUBTITLE_FILE {
+                return Some(format!(
+                    "{name} was not loaded: it is too large to be subtitles"
+                ));
+            }
+            let text = match std::fs::read(&candidate) {
+                Ok(bytes) => match subtitle_text(&bytes) {
+                    Ok(text) => text,
+                    Err(why) => return Some(format!("{name} was not loaded: it {why}")),
+                },
+                Err(e) => return Some(format!("{name} was not loaded: {e}")),
+            };
+            let cues = parse_srt(&text);
+            if cues.is_empty() {
+                return Some(format!(
+                    "{name} was not loaded: it holds no subtitles this player can read"
+                ));
+            }
+            let count = cues.len();
+            self.external_subtitles = cues;
+            return Some(format!("{count} subtitles from {name}"));
+        }
+        None
     }
 
     /// Make `file` the one on screen: at its start, stopped, the sound and
@@ -3158,7 +3336,26 @@ impl VideoPlayerApp {
     /// player knows -- the last of which is also said on screen.
     pub fn keep_settings(&mut self) -> Vec<String> {
         self.keeps_settings = true;
-        let problems = read_preferences(&settingsfile::load(CONFIG_NAME), &mut self.preferences);
+        let doc = settingsfile::load(CONFIG_NAME);
+        let mut problems = read_preferences(&doc, &mut self.preferences);
+        // The volume the last window was left at -- which is what Remember
+        // Volume promised, and nothing kept.
+        if self.preferences.remember_volume {
+            let kept = doc
+                .get_i64(&[VOLUME_KEY])
+                .and_then(|level| u32::try_from(level).ok())
+                .filter(|level| *level <= Volume::MAX);
+            match (kept, doc.get_str(&[VOLUME_KEY])) {
+                (Some(level), _) => self.volume.set_level(level),
+                (None, Some(value)) => problems.push(format!(
+                    "{CONFIG_NAME}.yaml: {VOLUME_KEY} is {value:?}, which is not a volume \
+                     from 0 to {}, so {} is kept",
+                    Volume::MAX,
+                    self.volume.label()
+                )),
+                (None, None) => {}
+            }
+        }
         if let Some(last) = problems.last() {
             self.show_osd(last);
         }
@@ -3174,6 +3371,14 @@ impl VideoPlayerApp {
         }
         let mut doc = settingsfile::load(CONFIG_NAME);
         write_preferences(&mut doc, &self.preferences);
+        if self.preferences.remember_volume {
+            doc.set_i64(&[VOLUME_KEY], i64::from(self.volume.level()));
+        } else {
+            // Not remembered: the next window starts at the normal level,
+            // and a number left in the file would tell a reader otherwise.
+            // Whether there was one to remove changes nothing.
+            doc.remove(&[VOLUME_KEY]);
+        }
         if let Err(e) = settingsfile::store(CONFIG_NAME, &doc) {
             self.show_osd(&format!(
                 "Changed until the window closes -- it was not saved: {e}"
@@ -3411,13 +3616,14 @@ impl VideoPlayerApp {
                 // Deliberately does nothing outside the Settings tab rather
                 // than acting on a row the user cannot see.
                 if self.active_tab == PlayerTab::Settings {
-                    if let Some(row) = SettingRow::ALL.get(self.settings_row) {
+                    if let Some(&row) = SettingRow::ALL.get(self.settings_row) {
                         row.cycle(&mut self.preferences);
-                        self.show_osd(&format!(
-                            "{}: {}",
-                            row.label(),
-                            row.value(&self.preferences)
-                        ));
+                        let mut said = format!("{}: {}", row.label(), row.value(&self.preferences));
+                        if row.needs_decoding() && !self.decodes {
+                            said.push_str(" -- ");
+                            said.push_str(NOT_APPLIED);
+                        }
+                        self.show_osd(&said);
                         self.save_settings();
                     }
                 }
@@ -5245,6 +5451,7 @@ impl VideoPlayerApp {
             } else {
                 self.palette.subtext1
             };
+            let not_applied = row.needs_decoding() && !self.decodes;
             cmds.push(RenderCommand::Text {
                 x: value_x,
                 y: sy + 6.0,
@@ -5252,9 +5459,22 @@ impl VideoPlayerApp {
                 font_size: 13.0,
                 color: value_color,
                 font_weight: FontWeightHint::Bold,
-                max_width: Some(200.0),
+                max_width: Some(if not_applied { 140.0 } else { 200.0 }),
                 overflow: TextOverflow::Ellipsis,
             });
+            if not_applied {
+                let note_x = value_x + 150.0;
+                cmds.push(RenderCommand::Text {
+                    x: note_x,
+                    y: sy + 7.0,
+                    text: NOT_APPLIED.to_string(),
+                    font_size: 11.0,
+                    color: self.palette.subtext0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some((self.width - note_x - 24.0).max(0.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
         }
 
         // Additional settings
@@ -5275,9 +5495,9 @@ impl VideoPlayerApp {
             x: label_x + 8.0,
             y: extra_y + 24.0,
             text: format!(
-                "Small: {}s | Large: {}s",
-                prefs.seek_small_step / 1000,
-                prefs.seek_large_step / 1000
+                "Left / Right: {}s | Shift+Left / Right: {}s",
+                SEEK_SMALL_MS / 1000,
+                SEEK_LARGE_MS / 1000
             ),
             font_size: 12.0,
             color: self.palette.subtext0,
@@ -8783,5 +9003,309 @@ as many times as before",
         change_setting(&mut app, SettingRow::HardwareDecode, 1);
         let said = app.osd_message.clone().expect("the change is said");
         assert!(drawn_texts(&app).contains(&said), "{said:?} is not drawn");
+    }
+
+    // == Every settings row does what it says, or says it cannot (2026-09-27) =====
+
+    const SRT_EN: &str =
+        "1\n00:00:01,000 --> 00:00:03,000\nHello\n\n2\n00:00:04,000 --> 00:00:06,000\nAgain\n";
+    const SRT_ES: &str = "1\n00:00:01,000 --> 00:00:03,000\nHola\n";
+
+    /// A film in `dir`, with these files beside it.
+    fn film_with(dir: &Scratch, beside: &[(&str, &[u8])]) -> PathBuf {
+        for (name, bytes) in beside {
+            dir.file(name, bytes);
+        }
+        dir.file("film.mp4", &mediaprobe::testing::mp4(1920, 1080, 90, 25))
+    }
+
+    fn first_cue(app: &VideoPlayerApp) -> Option<&str> {
+        app.external_subtitles.first().map(|c| c.text.as_str())
+    }
+
+    #[test]
+    fn a_films_own_subtitles_are_loaded_from_beside_it_and_drawn_at_their_time() {
+        let dir = Scratch::new("subs");
+        let film = film_with(&dir, &[("film.srt", SRT_EN.as_bytes())]);
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let said = app.open_path(&film);
+        assert_eq!(app.external_subtitles.len(), 2, "{said}");
+        assert!(said.contains("2 subtitles from film.srt"), "{said}");
+        app.seek_to(Duration::from_secs(2));
+        assert!(
+            drawn_texts(&app).iter().any(|t| t == "Hello"),
+            "the cue is not drawn"
+        );
+    }
+
+    #[test]
+    fn the_preferred_languages_subtitles_come_first_and_the_switch_turns_them_off() {
+        let dir = Scratch::new("subs-lang");
+        let film = film_with(
+            &dir,
+            &[
+                ("film.srt", SRT_EN.as_bytes()),
+                ("film.es.srt", SRT_ES.as_bytes()),
+            ],
+        );
+        let mut spanish = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        spanish.preferences.subtitle_preferred_lang = Some(language("spa"));
+        spanish.open_path(&film);
+        assert_eq!(first_cue(&spanish), Some("Hola"));
+
+        let mut plain = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        plain.open_path(&film);
+        assert_eq!(
+            first_cue(&plain),
+            Some("Hello"),
+            "no preference: the film's own name"
+        );
+
+        // A language with no file of its own falls through to the film's.
+        let mut german = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        german.preferences.subtitle_preferred_lang = Some(language("deu"));
+        let said = german.open_path(&film);
+        assert_eq!(first_cue(&german), Some("Hello"), "{said}");
+
+        let mut off = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        off.preferences.subtitle_auto_load = false;
+        let said = off.open_path(&film);
+        assert!(
+            off.external_subtitles.is_empty(),
+            "loaded with the switch off"
+        );
+        assert!(!said.contains("subtitles"), "{said}");
+    }
+
+    #[test]
+    fn a_subtitle_file_is_read_as_unicode_and_one_in_a_code_page_is_refused_and_said() {
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain(SRT_EN.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        let bom8: Vec<u8> = [0xEF, 0xBB, 0xBF]
+            .into_iter()
+            .chain(SRT_EN.bytes())
+            .collect();
+        for (what, bytes) in [("UTF-16", utf16), ("UTF-8 with its mark", bom8)] {
+            let dir = Scratch::new("subs-unicode");
+            let film = film_with(&dir, &[("film.srt", &bytes)]);
+            let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.open_path(&film);
+            assert_eq!(app.external_subtitles.len(), 2, "{what} was not read whole");
+            assert_eq!(first_cue(&app), Some("Hello"), "{what}");
+        }
+        // A mark before a first cue with no number: read as a character, it
+        // would spoil the first timestamp and lose the cue.
+        let dir = Scratch::new("subs-bom-bare");
+        let film = film_with(
+            &dir,
+            &[(
+                "film.srt",
+                "\u{feff}00:00:01,000 --> 00:00:03,000\nHello\n".as_bytes(),
+            )],
+        );
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.open_path(&film);
+        assert_eq!(first_cue(&app), Some("Hello"), "the mark was read as text");
+        // UTF-16 with a byte left over is not UTF-16.
+        let dir = Scratch::new("subs-utf16-odd");
+        let film = film_with(&dir, &[("film.srt", &[0xFF, 0xFE, b'1', 0, b'\n'])]);
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(app.open_path(&film).contains(NOT_UNICODE));
+
+        let dir = Scratch::new("subs-cp1252");
+        let film = film_with(
+            &dir,
+            &[("film.srt", b"1\n00:00:01,000 --> 00:00:03,000\nCaf\xe9\n")],
+        );
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let said = app.open_path(&film);
+        assert!(app.external_subtitles.is_empty());
+        assert!(
+            said.contains("film.srt was not loaded") && said.contains(NOT_UNICODE),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_subtitle_file_too_large_or_a_folder_by_that_name_is_not_read() {
+        let dir = Scratch::new("subs-odd");
+        let film = film_with(&dir, &[]);
+        std::fs::create_dir(dir.0.join("film.srt")).expect("a folder");
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let said = app.open_path(&film);
+        assert!(app.external_subtitles.is_empty());
+        assert!(
+            !said.contains("film.srt"),
+            "a folder was taken for subtitles: {said}"
+        );
+
+        let big = Scratch::new("subs-big");
+        let film = film_with(&big, &[]);
+        let file = std::fs::File::create(big.0.join("film.srt")).expect("create");
+        file.set_len(MAX_SUBTITLE_FILE + 1).expect("sparse");
+        drop(file);
+        let said = app.open_path(&film);
+        assert!(said.contains("too large"), "{said}");
+    }
+
+    #[test]
+    fn the_candidates_are_the_languages_codes_then_the_films_own_name() {
+        let names = |language| {
+            subtitle_candidates(Path::new("/v/Film.2024.mkv"), language)
+                .iter()
+                .map(|p| {
+                    p.file_name()
+                        .expect("a name")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(None), ["Film.2024.srt"]);
+        assert_eq!(
+            names(Some(language("deu"))),
+            [
+                "Film.2024.de.srt",
+                "Film.2024.deu.srt",
+                "Film.2024.ger.srt",
+                "Film.2024.srt"
+            ]
+        );
+        assert_eq!(
+            names(Some(language("eng"))),
+            ["Film.2024.en.srt", "Film.2024.eng.srt", "Film.2024.srt"],
+            "one code tried once"
+        );
+    }
+
+    #[test]
+    fn a_remembered_volume_is_the_next_windows_and_a_forgotten_one_is_not() {
+        settingsfile::testing::with_scratch_config("videoplayer-volume", |dir| {
+            let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            assert!(app.keep_settings().is_empty());
+            assert!(
+                app.preferences.remember_volume,
+                "control: on from the start"
+            );
+            app.volume_down();
+            app.volume_down();
+            let level = app.volume.level();
+            assert_ne!(level, Volume::NORMAL, "control");
+
+            let mut next = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            assert!(next.keep_settings().is_empty());
+            assert_eq!(next.volume.level(), level, "the volume was not remembered");
+
+            change_setting(&mut next, SettingRow::RememberVolume, 1);
+            let mut third = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            assert!(third.keep_settings().is_empty());
+            assert_eq!(
+                third.volume.level(),
+                Volume::NORMAL,
+                "a forgotten volume came back"
+            );
+            let text =
+                std::fs::read_to_string(settingsfile::testing::scratch_path(dir, CONFIG_NAME))
+                    .unwrap_or_default();
+            assert!(!text.lines().any(|l| l.starts_with("volume:")), "{text:?}");
+        });
+    }
+
+    #[test]
+    fn a_kept_volume_that_is_not_one_is_said_and_the_normal_level_kept() {
+        settingsfile::testing::with_scratch_config("videoplayer-volume-bad", |dir| {
+            let path = settingsfile::testing::scratch_path(dir, CONFIG_NAME);
+            std::fs::create_dir_all(path.parent().expect("a folder")).expect("folder");
+            std::fs::write(&path, "volume: 400\n").expect("write");
+            let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let problems = app.keep_settings();
+            assert!(problems.iter().any(|p| p.contains("400")), "{problems:?}");
+            assert_eq!(app.volume.level(), Volume::NORMAL);
+        });
+    }
+
+    #[test]
+    fn a_row_that_acts_on_playback_says_it_is_not_applied() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.active_tab = PlayerTab::Settings;
+        let playback: Vec<SettingRow> = SettingRow::ALL
+            .into_iter()
+            .filter(|r| r.needs_decoding())
+            .collect();
+        assert_eq!(
+            playback,
+            [
+                SettingRow::ResumePlayback,
+                SettingRow::HardwareDecode,
+                SettingRow::OnFinish,
+                SettingRow::Deinterlace
+            ]
+        );
+        let notes = |app: &VideoPlayerApp| {
+            drawn_texts(app)
+                .iter()
+                .filter(|t| *t == NOT_APPLIED)
+                .count()
+        };
+        assert_eq!(notes(&app), playback.len());
+        change_setting(&mut app, SettingRow::HardwareDecode, 1);
+        assert!(
+            app.osd_message
+                .as_deref()
+                .is_some_and(|m| m.contains(NOT_APPLIED)),
+            "{:?}",
+            app.osd_message
+        );
+        change_setting(&mut app, SettingRow::SubtitleAutoLoad, 1);
+        assert!(
+            app.osd_message
+                .as_deref()
+                .is_some_and(|m| !m.contains(NOT_APPLIED)),
+            "a row that acts said it does not"
+        );
+        app.decodes = true;
+        assert_eq!(
+            notes(&app),
+            0,
+            "a player that decodes says nothing is not applied"
+        );
+    }
+
+    #[test]
+    fn the_seek_keys_move_by_the_steps_their_labels_and_the_settings_tab_name() {
+        let steps: Vec<i64> = Shortcuts::list()
+            .iter()
+            .filter_map(|s| match s.command {
+                Command::SeekBy(ms) => Some(ms),
+                _ => None,
+            })
+            .collect();
+        for ms in [SEEK_SMALL_MS, -SEEK_SMALL_MS, SEEK_LARGE_MS, -SEEK_LARGE_MS] {
+            assert!(steps.contains(&ms), "no key seeks {ms} ms: {steps:?}");
+        }
+        for s in Shortcuts::list() {
+            if let Command::SeekBy(ms) = s.command {
+                let secs = format!("{}s", ms.unsigned_abs() / 1000);
+                assert!(
+                    s.action.contains(&secs),
+                    "{} says {:?} and moves {ms} ms",
+                    s.keys,
+                    s.action
+                );
+            }
+        }
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.active_tab = PlayerTab::Settings;
+        let line = format!(
+            "Left / Right: {}s | Shift+Left / Right: {}s",
+            SEEK_SMALL_MS / 1000,
+            SEEK_LARGE_MS / 1000
+        );
+        assert!(
+            drawn_texts(&app).contains(&line),
+            "the tab does not say the steps"
+        );
     }
 }

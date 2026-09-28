@@ -10,7 +10,11 @@ nothing that read them; a file opened with its own default tracks whatever
 they said.  They are rows now, and a file opens with the tracks in them.
 
 And, the same day, every setting is kept in `videoplayer.yaml`: none was, so
-each lasted exactly as long as the window it was chosen in.
+each lasted exactly as long as the window it was chosen in.  The message of
+the moment is drawn on every tab, whole.  And every row does what it says or
+says it cannot: Auto-load Subtitles loads the `.srt` beside a film, Remember
+Volume keeps the volume, the four rows that act on playback say they are not
+applied, and the seek steps have one source.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -36,6 +40,15 @@ UNKNOWN = "what_the_file_holds_that_is_not_a_setting_is_said_and_the_setting_kep
 UNSAVED = "a_setting_that_cannot_be_saved_says_so"
 EVERY_TAB = "the_message_is_drawn_on_every_tab_and_whole"
 SAID_ON_SETTINGS = "a_setting_changed_is_said_on_the_settings_tab"
+SUBS_BESIDE = "a_films_own_subtitles_are_loaded_from_beside_it_and_drawn_at_their_time"
+SUBS_LANGUAGE = "the_preferred_languages_subtitles_come_first_and_the_switch_turns_them_off"
+SUBS_UNICODE = "a_subtitle_file_is_read_as_unicode_and_one_in_a_code_page_is_refused_and_said"
+SUBS_ODD = "a_subtitle_file_too_large_or_a_folder_by_that_name_is_not_read"
+CANDIDATES = "the_candidates_are_the_languages_codes_then_the_films_own_name"
+VOLUME = "a_remembered_volume_is_the_next_windows_and_a_forgotten_one_is_not"
+VOLUME_BAD = "a_kept_volume_that_is_not_one_is_said_and_the_normal_level_kept"
+NOT_APPLIED = "a_row_that_acts_on_playback_says_it_is_not_applied"
+SEEK = "the_seek_keys_move_by_the_steps_their_labels_and_the_settings_tab_name"
 
 MUTATIONS = [
     (
@@ -112,8 +125,8 @@ MUTATIONS = [
     ),
     (
         "the kept settings are not read",
-        "        let problems = read_preferences(&settingsfile::load(CONFIG_NAME), &mut self.preferences);",
-        "        let problems: Vec<String> = Vec::new();",
+        "        let mut problems = read_preferences(&doc, &mut self.preferences);",
+        "        let mut problems: Vec<String> = Vec::new();",
         [KEPT],
     ),
     (
@@ -148,7 +161,7 @@ MUTATIONS = [
     ),
     (
         "a language back to the file's own stays in the file",
-        "            None => drop(doc.remove(&[key])),",
+        "            None => {\n                doc.remove(&[key]);\n            }",
         "            None => {}",
         [LEAVES],
     ),
@@ -181,6 +194,142 @@ MUTATIONS = [
         '                "Changed until the window closes -- it was not saved: {e}"',
         '                "{e}"',
         [UNSAVED],
+    ),
+    # -- Auto-load Subtitles ---------------------------------------------------
+    (
+        "an opened film's subtitles are not looked for",
+        "                match self.load_sibling_subtitles() {",
+        "                match None::<String> {",
+        [SUBS_BESIDE],
+    ),
+    (
+        "the switch is ignored",
+        "        if !self.preferences.subtitle_auto_load {\n            return None;\n        }",
+        "",
+        [SUBS_LANGUAGE],
+    ),
+    (
+        "a missing file stops the search",
+        "                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,",
+        "                Err(e) if e.kind() == std::io::ErrorKind::NotFound && false => continue,",
+        [SUBS_LANGUAGE],
+    ),
+    (
+        "a folder is taken for a file",
+        "            if !meta.is_file() {\n                continue;\n            }",
+        "",
+        [SUBS_ODD],
+    ),
+    (
+        "a file of any size is read",
+        "            if meta.len() > MAX_SUBTITLE_FILE {",
+        "            if meta.len() > MAX_SUBTITLE_FILE && false {",
+        [SUBS_ODD],
+    ),
+    (
+        "the cues read are not kept",
+        "            self.external_subtitles = cues;",
+        "            drop(cues);",
+        [SUBS_BESIDE, SUBS_LANGUAGE, SUBS_UNICODE],
+    ),
+    (
+        "one code is tried twice",
+        "            if !out.contains(&path) {\n                out.push(path);\n            }",
+        "            out.push(path);",
+        [CANDIDATES],
+    ),
+    (
+        "the two-letter name is not tried",
+        "        for code in [language.two_letter, language.code, language.bibliographic] {",
+        "        for code in [language.code, language.bibliographic] {",
+        [CANDIDATES, SUBS_LANGUAGE],
+    ),
+    (
+        "a UTF-8 mark is read as a character",
+        "    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {",
+        "    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF, 0xEF]) {",
+        [SUBS_UNICODE],
+    ),
+    (
+        "little-endian UTF-16 is read big-endian",
+        "        return utf16(rest, true);",
+        "        return utf16(rest, false);",
+        [SUBS_UNICODE],
+    ),
+    (
+        "a byte left over from UTF-16 is dropped",
+        "        if !pairs.remainder().is_empty() {",
+        "        if false {",
+        [SUBS_UNICODE],
+    ),
+    # -- Remember Volume ------------------------------------------------------
+    (
+        "a changed volume is not kept",
+        "        self.volume.decrease(5);\n        self.show_osd(&format!(\"Volume: {}\", self.volume.label()));\n        self.keep_volume();",
+        "        self.volume.decrease(5);\n        self.show_osd(&format!(\"Volume: {}\", self.volume.label()));",
+        [VOLUME],
+    ),
+    (
+        "a kept volume is not taken",
+        "                (Some(level), _) => self.volume.set_level(level),",
+        "                (Some(_), _) => {}",
+        [VOLUME],
+    ),
+    (
+        "a kept volume past the loudest is taken",
+        "                .filter(|level| *level <= Volume::MAX);",
+        ";",
+        [VOLUME_BAD],
+    ),
+    (
+        "the volume is not written",
+        "            doc.set_i64(&[VOLUME_KEY], i64::from(self.volume.level()));",
+        "",
+        [VOLUME],
+    ),
+    (
+        "a forgotten volume stays in the file",
+        "            doc.remove(&[VOLUME_KEY]);",
+        "",
+        [VOLUME],
+    ),
+    # -- Not applied ----------------------------------------------------------
+    (
+        "no row acts on playback",
+        "            Self::ResumePlayback | Self::HardwareDecode | Self::OnFinish | Self::Deinterlace",
+        "            Self::ResumePlayback | Self::HardwareDecode | Self::OnFinish",
+        [NOT_APPLIED],
+    ),
+    (
+        "the panel does not say a row is not applied",
+        "            if not_applied {",
+        "            if not_applied && false {",
+        [NOT_APPLIED],
+    ),
+    (
+        "a player that decodes says rows are not applied",
+        "            let not_applied = row.needs_decoding() && !self.decodes;",
+        "            let not_applied = row.needs_decoding();",
+        [NOT_APPLIED],
+    ),
+    (
+        "a change does not say it is not applied",
+        "                        if row.needs_decoding() && !self.decodes {",
+        "                        if row.needs_decoding() && !self.decodes && false {",
+        [NOT_APPLIED],
+    ),
+    # -- The seek steps -------------------------------------------------------
+    (
+        "a key seeks by other than its label says",
+        "                Command::SeekBy(SEEK_SMALL_MS),",
+        "                Command::SeekBy(5_000),",
+        [SEEK],
+    ),
+    (
+        "the settings tab names another step",
+        "                SEEK_SMALL_MS / 1000,",
+        "                5,",
+        [SEEK],
     ),
 ]
 

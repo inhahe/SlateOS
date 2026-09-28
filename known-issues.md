@@ -25703,6 +25703,8 @@ animating.
 
 ## TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES
 
+**Status:** FIXED 2026-08-16 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+
 **What.** The `GSUB` half of the table walk now selects features by the run's
 script. The `GPOS` half does not: `otl::feature_subtables` takes the union over
 every script the face registers, which is the behaviour
@@ -25929,6 +25931,8 @@ exist**, and that entry is closed in `known-issues-resolved.md` (`# Lane C`).
 
 ## TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT
 
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+
 **What.** `ScaledFont::shape` returns glyphs in logical order for every
 script. For Arabic and Hebrew the caller therefore gets the glyphs in the
 order the characters were typed, and drawing them left to right puts the
@@ -25987,6 +25991,8 @@ other than `Base::Auto` (`TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION`, fixed
 the line (`TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`, fixed 2026-08-16).
 
 ## TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS
+
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
 
 **What.** Every GSUB lookup carries a `lookupFlag`: `RightToLeft`,
 `IgnoreBaseGlyphs`, `IgnoreLigatures`, `IgnoreMarks`, `UseMarkFilteringSet`
@@ -26061,6 +26067,8 @@ is what `IgnoreMarks` would have said anyway — but it will matter for GPOS 5
 change which component a mark lands on.
 
 ## TD-FONT-CHECKS-FEATURE-MASKS-ONLY-AT-THE-APPLIED-POSITION
+
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
 
 **What.** The per-glyph feature mask added with the joining shaper is tested
 against the lookup's mask at the position the lookup is *applied* to, and
@@ -26224,6 +26232,8 @@ fix needs.
 
 ## TD-FONT-HAS-NO-FALLBACK-MARK-POSITIONING
 
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+
 **What.** A combining mark is placed on its base by the `GPOS` `mark` feature
 (lookup types 4 and 6), which `mark.rs` implements. A face that has no such
 lookups gets nothing: the mark keeps its own advance and is drawn *after* the
@@ -26285,6 +26295,8 @@ knowingly leaves behind are filed below as
 
 ## TD-FONT-IGNORES-GPOS-SINGLE-AND-CURSIVE-ADJUSTMENTS
 
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+
 **What.** Of `GPOS`'s eight lookup types we apply 2 (pair, in `kern.rs`) and
 4/6 (mark-to-base and mark-to-mark, in `mark.rs`). Type 1, single adjustment,
 and type 3, cursive attachment, are parsed past and ignored, as are 5, 7 and
@@ -26343,6 +26355,8 @@ Measured on the HarfBuzz sweep (556 host faces x 19 strings): agree
 TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING).
 
 ## TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING
+
+**Status:** FIXED 2026-08-16 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
 
 **What.** `gui/font/src/gpos.rs` dispatches `GPOS` lookup types 1, 2, 3, 4 and
 6. Three types are parsed past and ignored: 5 (mark-to-ligature), 7
@@ -26522,6 +26536,8 @@ in `device.rs` and by nothing else.
 
 ## TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS
 
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+
 **What.** Unicode gives Hebrew points the canonical combining classes 10–26
 and Arabic vowel signs 27–36. Those numbers are an *ordering*, not a place on
 the glyph, and the order they impose is not the order the marks are drawn in.
@@ -26598,6 +26614,8 @@ a different disagreement — not the order of the marks but where they are put �
 and both want their own entry once diagnosed.
 
 ## TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS
+
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
 
 **What.** `fallback::positions_marks` decides whether a run may have its marks
 placed by measurement from the OpenType tag the run's *characters* map to. In
@@ -26781,6 +26799,8 @@ run whose script passed `positions_marks`, and `thai` and `lao ` are both in
 `COMPLEX_SCRIPTS`. See TD-FONT-FALLBACK-CLASSES-SCRIPTS-IT-NEVER-PLACES.
 
 ## TD-FONT-FALLBACK-CLASSES-SCRIPTS-IT-NEVER-PLACES
+
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
 
 **What.** `fallback::attach_class` carries position classes for scripts
 `fallback::positions_marks` always refuses, so those arms can never run.
@@ -39048,6 +39068,8 @@ game. What remains in the neighbourhood is separate and separately filed:
 the 43 games' theming, which waits on C-Q16.
 
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
+
+**Status:** FIXED 2026-08-24 (`95439d0fc`, `keylayout`: one table the compositor types with and the shell draws); the layout is the user's `input.yaml` choice, and `compositor`'s tests type through Dvorak and German QWERTZ. On `main` since. Stamped 2026-09-28 by lane F, the compositor's owner since the six-lane split.
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
 scan-code-set-1 table, and there is no way to select another. Anyone using a
@@ -51485,6 +51507,8 @@ This is the tool for the remaining free-form panels, starting with
 
 ## `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`
 
+**Status:** FIXED -- `oswindow::app` (`f5b98e1f1`, 2026-08-25) is the loop every application now runs, and the boot test's own gate reports "136 program(s) open a window, 0 do not". On `main` since. Stamped 2026-09-28 by lane F, `gui/window`'s owner since the six-lane split.
+
 **In short:** none of the 140 apps in `apps/` can be used. Each one builds its
 picture correctly and has tests proving the picture is right, but no app is
 connected to the thing that delivers mouse clicks and keystrokes, so `fn main()`
@@ -56933,6 +56957,8 @@ more than any individual warning.
 ---
 
 ## `B-GUIREMOTE-READ-OVERSHOOTS-MAX-READ-PER-CALL` — `Socket::read` can return up to `CHUNK - 1` bytes past its documented cap — 2026-08-21 (lane B, found; lane C owns the fix)
+
+**Status:** FIXED 2026-08-21 by `a2fd6c6aa` (`read_budget` clamps each read to what is left of the cap; `the_read_budget_never_lets_a_chunk_cross_the_cap` checks it for every `total`), on `main` since. Stamped 2026-09-28 by lane F, whose tree `gui/remote` has been since the six-lane split.
 
 **In short:** the remote-display socket promises that one `read` call takes at
 most 256 KiB before returning, and its own test asserts it. The loop that

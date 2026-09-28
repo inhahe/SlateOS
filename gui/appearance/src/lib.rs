@@ -72,7 +72,7 @@ use core::time::Duration;
 use datetimesettings::Tz;
 pub use daywindow::{DailyWindow, TimeOfDay};
 use guitk::color::Color;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
 // ============================================================================
@@ -1564,6 +1564,24 @@ pub struct AppearanceSettings {
     /// Whether the rotation is shuffled or goes in directory order.
     pub wallpaper_shuffle: bool,
 
+    /// Pictures that take turns by the time of day: each entry is up from its
+    /// `from` time until the next entry's.
+    ///
+    /// `roadmap-detailed.md` §3.4's "dynamic wallpapers: list of images with
+    /// time-of-day triggers (e.g., day image 06:00-18:00, night image
+    /// 18:00-06:00)". Kept sorted by time. The day wraps: before the first
+    /// entry's time, the last entry is up -- a night picture from 18:00 is
+    /// still up at 03:00.
+    ///
+    /// Takes precedence over [`wallpaper_folder`](Self::wallpaper_folder) and
+    /// [`wallpaper`](Self::wallpaper), for the reason the folder takes
+    /// precedence over the picture: a schedule *is* the wallpaper, and
+    /// honouring two would leave one visible only in the file.
+    ///
+    /// Written as `wallpaper.schedule`, one `"HH:MM path"` per entry, the path
+    /// encoded as the other wallpaper paths are.
+    pub wallpaper_schedule: Vec<ScheduledWallpaper>,
+
     /// Names to leave out of a rotation, as glob patterns.
     ///
     /// `roadmap-detailed.md` §3.4 asks for "exclusion filters" alongside the
@@ -1690,6 +1708,7 @@ impl Default for AppearanceSettings {
             // on sees it work without waiting for the next day.
             wallpaper_interval_secs: 600,
             wallpaper_shuffle: true,
+            wallpaper_schedule: Vec::new(),
             wallpaper_exclusions: Vec::new(),
             login_background: LoginBackground::Theme,
             theme_mode: ThemeMode::Dark,
@@ -1841,6 +1860,53 @@ impl AppearanceSettings {
         }
         let now = local_time_of_day(utc_secs, zone);
         let minutes = self.auto_light_hours.minutes_to_next_edge(now)?;
+        Some(Duration::from_secs(
+            u64::from(minutes)
+                .saturating_mul(60)
+                .saturating_sub(utc_secs % 60)
+                .max(1),
+        ))
+    }
+
+    /// The scheduled picture that is up at `utc_secs` in `zone`, if there is a
+    /// schedule: the entry with the latest time not after now, or -- before
+    /// the day's first entry -- the last entry, still up from the evening
+    /// before.
+    #[must_use]
+    pub fn scheduled_wallpaper_at(&self, utc_secs: u64, zone: Tz) -> Option<&Path> {
+        let now = local_time_of_day(utc_secs, zone);
+        self.wallpaper_schedule
+            .iter()
+            .rev()
+            .find(|entry| entry.from <= now)
+            .or_else(|| self.wallpaper_schedule.last())
+            .map(|entry| entry.image.as_path())
+    }
+
+    /// How long until the scheduled picture next changes, if there is a
+    /// schedule with more than one time in it.
+    ///
+    /// For a process with a clock to sleep until -- the shell -- as
+    /// [`next_auto_change`](Self::next_auto_change) is. Never zero.
+    #[must_use]
+    pub fn next_wallpaper_change(&self, utc_secs: u64, zone: Tz) -> Option<Duration> {
+        let first = self.wallpaper_schedule.first()?;
+        if self.wallpaper_schedule.iter().all(|e| e.from == first.from) {
+            return None;
+        }
+        let now = local_time_of_day(utc_secs, zone).minutes();
+        let next = self
+            .wallpaper_schedule
+            .iter()
+            .map(|e| e.from.minutes())
+            .find(|&m| m > now)
+            .unwrap_or_else(|| {
+                first
+                    .from
+                    .minutes()
+                    .saturating_add(daywindow::MINUTES_PER_DAY)
+            });
+        let minutes = next.saturating_sub(now);
         Some(Duration::from_secs(
             u64::from(minutes)
                 .saturating_mul(60)
@@ -2289,6 +2355,12 @@ impl AppearanceSettings {
         if let Some(shuffle) = doc.get_i64(&["wallpaper", "shuffle"]) {
             s.wallpaper_shuffle = shuffle != 0;
         }
+        if let Some(entries) = doc.get_seq(&["wallpaper", "schedule"]) {
+            let encoded = doc
+                .get_str(&["wallpaper", "image_encoding"])
+                .is_some_and(|v| v.trim() == WALLPAPER_ENCODING);
+            s.wallpaper_schedule = read_wallpaper_schedule(&entries, encoded);
+        }
         if let Some(patterns) = doc.get_seq(&["wallpaper", "exclude"]) {
             // Empty lines dropped: a YAML list a person edited by hand grows
             // blank entries, and an empty pattern matches nothing useful but
@@ -2567,6 +2639,13 @@ impl AppearanceSettings {
             .map(String::as_str)
             .collect();
         doc.set_seq(&["wallpaper", "exclude"], &excludes);
+        let schedule: Vec<String> = self
+            .wallpaper_schedule
+            .iter()
+            .map(|entry| format!("{} {}", entry.from, pathcodec::encode_path(&entry.image)))
+            .collect();
+        let schedule: Vec<&str> = schedule.iter().map(String::as_str).collect();
+        doc.set_seq(&["wallpaper", "schedule"], &schedule);
         doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
         doc.set_str(&["login", "background"], self.login_background.yaml_name());
         match &self.login_background {
@@ -2783,6 +2862,49 @@ pub fn local_time_of_day(utc_secs: u64, zone: Tz) -> TimeOfDay {
     // `rem_euclid` of a day, over sixty: 0..1440, so both steps are exact.
     let minutes = u16::try_from(local.rem_euclid(86_400) / 60).unwrap_or(0);
     TimeOfDay::from_minutes(minutes).unwrap_or(TimeOfDay::MIDNIGHT)
+}
+
+/// One picture in a time-of-day wallpaper schedule: up from `from` until the
+/// next entry's time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduledWallpaper {
+    /// When it goes up, in the local time of day.
+    pub from: TimeOfDay,
+    /// The picture.
+    pub image: PathBuf,
+}
+
+/// Read `wallpaper.schedule`'s entries: `"HH:MM path"` each, the path encoded
+/// when `encoded` says the file encodes its paths.
+///
+/// An entry that does not start with a time, or names no picture, is left
+/// out -- the file is hand-editable, and one line typed wrong should cost
+/// that line rather than the schedule. Two entries at the same time: the later
+/// line wins, as a later setting does everywhere else in the file. The result
+/// is sorted by time.
+fn read_wallpaper_schedule(entries: &[String], encoded: bool) -> Vec<ScheduledWallpaper> {
+    let mut out: Vec<ScheduledWallpaper> = Vec::new();
+    for entry in entries {
+        let entry = entry.trim();
+        let Some((time, path)) = entry.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let (Some(from), path) = (TimeOfDay::parse(time), path.trim()) else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let image = if encoded {
+            pathcodec::decode_path(path)
+        } else {
+            PathBuf::from(path)
+        };
+        out.retain(|e| e.from != from);
+        out.push(ScheduledWallpaper { from, image });
+    }
+    out.sort_by_key(|e| e.from);
+    out
 }
 
 /// The colour theme a settings document names, decoded; `None` when it names
@@ -3264,6 +3386,18 @@ mod tests {
             wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
             // Non-default, like every other field here: the default is empty.
             wallpaper_exclusions: vec!["*.gif".to_string(), "draft-*".to_string()],
+            // Two pictures, one with a space, a non-ASCII letter and a `%` in
+            // its name, so a round trip that lost the path codec shows.
+            wallpaper_schedule: vec![
+                ScheduledWallpaper {
+                    from: TimeOfDay::new(6, 0).unwrap(),
+                    image: PathBuf::from("/home/u/Pictures/d\u{ed}a 100%.png"),
+                },
+                ScheduledWallpaper {
+                    from: TimeOfDay::new(18, 30).unwrap(),
+                    image: PathBuf::from("/home/u/Pictures/night.png"),
+                },
+            ],
             // Not `SameAsDesktop`: that one carries no value, so a round trip
             // could lose the path and still compare equal. The variant with
             // something to lose is the one worth round-tripping.
@@ -3602,6 +3736,129 @@ mod tests {
             AppearanceSettings::read_from(&one_end).auto_light_hours,
             DEFAULT_AUTO_LIGHT_HOURS,
             "a start without an end is a window nobody chose"
+        );
+    }
+
+    /// A schedule of a day picture and a night picture.
+    fn day_and_night() -> AppearanceSettings {
+        AppearanceSettings {
+            wallpaper_schedule: read_wallpaper_schedule(
+                &[
+                    "18:00 /pics/night.jpg".to_string(),
+                    "06:00 /pics/day.jpg".to_string(),
+                ],
+                false,
+            ),
+            ..AppearanceSettings::default()
+        }
+    }
+
+    /// The picture up at a time is the latest entry not after it, and before
+    /// the first entry of the day it is the last, still up from the evening.
+    #[test]
+    fn the_scheduled_picture_is_the_latest_one_started() {
+        let utc = datetimesettings::Tz::utc();
+        let s = day_and_night();
+        let at = |h: u64, m: u64| NOON - 12 * 3600 + h * 3600 + m * 60;
+        let pic = |t| s.scheduled_wallpaper_at(t, utc).map(Path::to_path_buf);
+        assert_eq!(
+            pic(at(3, 0)),
+            Some(PathBuf::from("/pics/night.jpg")),
+            "03:00 is still night"
+        );
+        assert_eq!(
+            pic(at(6, 0)),
+            Some(PathBuf::from("/pics/day.jpg")),
+            "06:00 on the dot"
+        );
+        assert_eq!(pic(at(12, 0)), Some(PathBuf::from("/pics/day.jpg")));
+        assert_eq!(pic(at(17, 59)), Some(PathBuf::from("/pics/day.jpg")));
+        assert_eq!(pic(at(18, 0)), Some(PathBuf::from("/pics/night.jpg")));
+        assert_eq!(pic(at(23, 59)), Some(PathBuf::from("/pics/night.jpg")));
+        assert_eq!(
+            AppearanceSettings::default().scheduled_wallpaper_at(NOON, utc),
+            None
+        );
+    }
+
+    /// The next change is the next entry's time, round the end of the day;
+    /// a schedule that never changes has none; the seconds already gone in
+    /// this minute come off, and it is never zero.
+    #[test]
+    fn the_schedule_says_when_it_next_changes() {
+        let utc = datetimesettings::Tz::utc();
+        let s = day_and_night();
+        assert_eq!(
+            s.next_wallpaper_change(NOON, utc),
+            Some(Duration::from_hours(6))
+        );
+        let eight_pm = NOON + 8 * 3600;
+        assert_eq!(
+            s.next_wallpaper_change(eight_pm, utc),
+            Some(Duration::from_hours(10))
+        );
+        assert_eq!(
+            s.next_wallpaper_change(NOON + 20, utc),
+            Some(Duration::from_secs(6 * 3600 - 20))
+        );
+        let one = AppearanceSettings {
+            wallpaper_schedule: read_wallpaper_schedule(&["09:00 /a.png".to_string()], false),
+            ..AppearanceSettings::default()
+        };
+        assert_eq!(
+            one.next_wallpaper_change(NOON, utc),
+            None,
+            "one picture never changes"
+        );
+        assert_eq!(
+            one.scheduled_wallpaper_at(NOON, utc),
+            Some(Path::new("/a.png")),
+            "and is up all day"
+        );
+        assert_eq!(
+            AppearanceSettings::default().next_wallpaper_change(NOON, utc),
+            None
+        );
+        // In a zone ahead of UTC the edge comes that much sooner: 12:00 UTC is
+        // 21:00 in Tokyo, night, and day again at 06:00 -- nine hours on.
+        let tokyo = datetimesettings::zone("Asia/Tokyo").unwrap().rule;
+        assert_eq!(
+            s.next_wallpaper_change(NOON, tokyo),
+            Some(Duration::from_hours(9))
+        );
+        assert_eq!(
+            s.scheduled_wallpaper_at(NOON, tokyo),
+            Some(Path::new("/pics/night.jpg"))
+        );
+    }
+
+    /// A line typed wrong costs that line; a time given twice keeps the later
+    /// line; the result is in time order.
+    #[test]
+    fn a_schedule_line_typed_wrong_costs_only_that_line() {
+        let lines: Vec<String> = [
+            "",
+            "nonsense",
+            "25:00 /late.png",
+            "07:00",
+            "07:00    ",
+            "12:00 /noon-first.png",
+            "08:15 /morning.png",
+            "12:00 /noon-second.png",
+        ]
+        .map(String::from)
+        .to_vec();
+        let read = read_wallpaper_schedule(&lines, false);
+        let got: Vec<(String, PathBuf)> = read
+            .iter()
+            .map(|e| (e.from.to_string(), e.image.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("08:15".to_string(), PathBuf::from("/morning.png")),
+                ("12:00".to_string(), PathBuf::from("/noon-second.png")),
+            ]
         );
     }
 

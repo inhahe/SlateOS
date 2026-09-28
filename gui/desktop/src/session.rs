@@ -2523,22 +2523,30 @@ impl<T: Transport> ShellSession<T> {
     /// switches between light and dark, and only one of them is a decision the
     /// user made.
     fn sync_wallpaper(&mut self) {
-        // A rotation folder wins over a fixed picture: a rotation *is* the
-        // wallpaper, and honouring both would leave the fixed picture visible
-        // in the settings file and never on the screen.
-        if let Some(folder) = self.shell.appearance.wallpaper_folder.clone() {
+        // A time-of-day schedule wins over a folder and a picture, and a
+        // rotation folder over a fixed picture: each *is* the wallpaper, and
+        // honouring two would leave one visible in the settings file and never
+        // on the screen.
+        let scheduled = self
+            .shell
+            .scheduled_wallpaper(unix_now())
+            .map(Path::to_path_buf);
+        if scheduled.is_none()
+            && let Some(folder) = self.shell.appearance.wallpaper_folder.clone()
+        {
             self.sync_rotation(&folder);
             return;
         }
         if self.rotation_loaded.take().is_some() {
-            // Rotation was switched off. Fall through to the fixed picture,
-            // which the branch below applies -- but the slideshow has to go
-            // first or `tick` would keep advancing it underneath.
+            // Rotation was switched off, or a schedule took over. Fall through
+            // to the fixed or scheduled picture, which the branch below
+            // applies -- but the slideshow has to go first or `tick` would
+            // keep advancing it underneath.
             self.wallpaper.follow_desktop_base();
             self.dirty = true;
         }
 
-        let wanted = self.shell.appearance.wallpaper.clone();
+        let wanted = scheduled.or_else(|| self.shell.appearance.wallpaper.clone());
         match wanted.as_deref() {
             Some(path) => {
                 let fit = self.shell.appearance.wallpaper_fit;
@@ -3170,6 +3178,16 @@ impl<T: Transport> ShellSession<T> {
             self.adopt_appearance_change();
             self.events.appearance_changed()?;
         }
+        // A time-of-day wallpaper's edge: the picture for the new part of the
+        // day. Compared with what is up rather than remembered, so a picture
+        // changed by hand in between is put right on the next edge too.
+        let scheduled_edge = self
+            .shell
+            .scheduled_wallpaper(unix_now())
+            .is_some_and(|wanted| self.wallpaper.current_image_path() != Some(wanted));
+        if scheduled_edge {
+            self.sync_wallpaper();
+        }
 
         if moved {
             self.dirty = true;
@@ -3206,6 +3224,9 @@ impl<T: Transport> ShellSession<T> {
             .map(|ms| Duration::from_millis(ms.max(1)));
         let schedule = self.shell.next_schedule_change(unix_now());
         let theme = self.shell.next_theme_change(unix_now());
+        // A time-of-day wallpaper's next picture, on the wall clock -- the
+        // user wrote "18:00", not "six hours after I signed in".
+        let scheduled_wallpaper = self.shell.next_wallpaper_change(unix_now());
         // The wallpaper's next picture, or a dynamic one's next shade, on the
         // clock `step_frame` ticks it with. At least a millisecond: a
         // slideshow whose timer has not started is due *now*, and a wake-up
@@ -3227,10 +3248,18 @@ impl<T: Transport> ShellSession<T> {
             .shell
             .ending_due_in()
             .map(|ms| Duration::from_millis(ms.max(1)));
-        if let Some(delay) = [widget, schedule, theme, wallpaper, tooltip, ending]
-            .into_iter()
-            .flatten()
-            .min()
+        if let Some(delay) = [
+            widget,
+            schedule,
+            theme,
+            scheduled_wallpaper,
+            wallpaper,
+            tooltip,
+            ending,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
         {
             self.events.wake_after(self.panel.window, delay);
         }

@@ -3334,6 +3334,77 @@ fn a_wallpaper_named_in_the_settings_is_adopted() {
 /// `follow_desktop_base` and a solid colour draw the same pixels today and
 /// diverge the moment the user switches between light and dark. Only one of
 /// them is a decision the user made.
+/// **A time-of-day schedule is the wallpaper**, over a fixed picture and over
+/// a rotation folder, as the settings' own docs say.
+///
+/// One entry, so it is up whatever the time and zone the test runs in.
+#[test]
+fn a_scheduled_wallpaper_wins_over_a_picture_and_a_folder() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.wallpaper_folder = Some(std::env::temp_dir());
+    session.shell_mut().appearance.wallpaper_schedule = vec![appearance::ScheduledWallpaper {
+        from: appearance::TimeOfDay::MIDNIGHT,
+        image: fixture("gray8"),
+    }];
+    session.sync_wallpaper();
+    assert_eq!(
+        session.wallpaper_mut().current_image_path(),
+        Some(fixture("gray8").as_path()),
+        "the schedule's picture is not the one up"
+    );
+
+    // Take the schedule away: the folder is the wallpaper again.
+    session.shell_mut().appearance.wallpaper_schedule.clear();
+    session.sync_wallpaper();
+    assert_ne!(
+        session.wallpaper_mut().current_image_path(),
+        Some(fixture("gray8").as_path()),
+        "the scheduled picture stayed up after the schedule went"
+    );
+}
+
+/// **A schedule with two pictures wakes the desktop at its next edge**, and
+/// no later: nothing else would change the picture at 18:00 on a desktop
+/// nobody is touching.
+#[test]
+fn a_wallpaper_schedule_arms_a_wake_up_at_its_next_edge() {
+    let (mut session, desktop, _turn) = session();
+    assert_eq!(
+        armed_in(&mut session),
+        None,
+        "the fixture starts with a timer"
+    );
+    session.shell_mut().appearance.wallpaper_schedule = vec![
+        appearance::ScheduledWallpaper {
+            from: appearance::TimeOfDay::MIDNIGHT,
+            image: fixture("rgb8"),
+        },
+        appearance::ScheduledWallpaper {
+            from: appearance::TimeOfDay::new(12, 0).expect("noon"),
+            image: fixture("gray8"),
+        },
+    ];
+    session.sync_wallpaper();
+    // A frame, which ends by arming the next wake-up -- the path every
+    // change on a running desktop takes.
+    woken_after(&mut session, &desktop, 16);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after 1970")
+        .as_secs();
+    let edge = session
+        .shell()
+        .next_wallpaper_change(now)
+        .expect("two pictures change twice a day");
+    assert!(edge <= std::time::Duration::from_hours(12), "{edge:?}");
+    let until = armed_in(&mut session).expect("the schedule armed no wake-up");
+    assert!(
+        until <= edge + std::time::Duration::from_secs(2),
+        "armed for {until:?}, past the schedule's edge in {edge:?}"
+    );
+}
+
 #[test]
 fn clearing_the_wallpaper_goes_back_to_following_the_theme() {
     let (mut session, _desktop, _turn) = session();

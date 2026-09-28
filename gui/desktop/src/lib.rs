@@ -3002,6 +3002,24 @@ impl DesktopShell {
         ))
     }
 
+    /// The picture the time-of-day wallpaper schedule has up at `utc_secs`,
+    /// in this shell's zone -- `None` when there is no schedule. See
+    /// `AppearanceSettings::scheduled_wallpaper_at`.
+    #[must_use]
+    pub fn scheduled_wallpaper(&self, utc_secs: u64) -> Option<&Path> {
+        self.appearance
+            .scheduled_wallpaper_at(utc_secs, self.local_zone())
+    }
+
+    /// How long until the scheduled wallpaper next changes, in this shell's
+    /// zone. The shell sleeps exactly this long, as it does for the
+    /// automatic light/dark mode.
+    #[must_use]
+    pub fn next_wallpaper_change(&self, utc_secs: u64) -> Option<Duration> {
+        self.appearance
+            .next_wallpaper_change(utc_secs, self.local_zone())
+    }
+
     /// How long until the automatic light/dark mode next changes, if the mode
     /// is automatic -- in this shell's zone. The shell sleeps exactly this
     /// long, for [`next_schedule_change`](Self::next_schedule_change)'s

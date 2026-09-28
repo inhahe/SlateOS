@@ -61672,6 +61672,15 @@ reason `add_file` takes a path as a string.
 
 ### TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE — 2026-09-04 — OPEN
 
+**Status 2026-09-27 (lane E):** everything in the table below is reachable now except swimlanes -- kept in
+the boards file and never drawn, which is the one row left open. The export and import had doors already;
+this adds the keys: the open card's E, D, C and L, the checklist's Tab and Space, the archive's Enter
+(restoring to the column the card came from), the board's R, Z, Shift+T and Shift+Delete, the board list's N,
+and the filter bar's Ctrl+P, Ctrl+U and Ctrl+L. **A larger hole turned up under it:** nothing in the running
+program ever chose a card -- Up and Down only scrolled, and every test that pressed Enter, P, M, B, Ctrl+D or
+Ctrl+A set `selected_card` itself first -- so every card operation worked in the tests and did nothing in the
+window. The arrows choose now. `apps/kanban/mutate.py` covers both.
+
 > **Correction, 2026-09-15.** "A complete JSON importer" below is wrong. What
 > exists is a tokeniser -- string, number and escape parsing -- and nothing that
 > reconstructs a `Board`. See `TD-C-THE-IMPORTER-THAT-WAS-NOT-THERE`.

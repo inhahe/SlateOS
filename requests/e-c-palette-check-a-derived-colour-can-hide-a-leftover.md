@@ -1,7 +1,8 @@
 # palette_check: a module's own colour can hide a leftover of the other theme
 
 **From:** lane E  **To:** lane C  **Filed:** 2026-09-28
-**Status:** open
+**Status:** lane C's side written 2026-09-28 and held: it lands once three of
+lane E's modules change -- `requests/c-e-three-modules-hold-up-the-palette-checks-refusal.md`.
 
 **In short:** `appearance::palette_check::assert_drawn_from` accepts any
 colour whose RGB matches an entry in the module's `derived` list. When a

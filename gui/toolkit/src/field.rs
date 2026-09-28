@@ -322,6 +322,42 @@ mod tests {
         ));
     }
 
+    /// **Every colour a field draws is its palette's, light and dark, in
+    /// every state**: the well `crust`, the edge `surface1` at rest, the
+    /// accent with the keyboard, red when wrong, and the mark the edge's hue.
+    ///
+    /// Asked in both modes because the other tests here ask only the dark
+    /// one, where a colour frozen to its dark value is indistinguishable
+    /// from the role: `scripts/reintro-palette.py` re-introduces exactly
+    /// that, once for each colour a field has, and this is the test that
+    /// catches all of them.
+    #[test]
+    fn every_colour_a_field_draws_is_its_palettes_in_both_modes() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let rest = paint(&p, State::default());
+            assert_eq!(
+                (rest.well, rest.edge),
+                (p.crust, p.surface1),
+                "light = {light}"
+            );
+            assert_eq!(paint(&p, FOCUSED).edge, p.accent, "light = {light}");
+            let wrong = State {
+                invalid: true,
+                ..FOCUSED
+            };
+            assert_eq!(paint(&p, wrong).edge, p.red, "light = {light}");
+            let hue = |c: Color| (c.r, c.g, c.b);
+            for (state, mark) in [(FOCUSED, p.accent), (wrong, p.red)] {
+                let cmds = drawn(&p, state);
+                let Some(RenderCommand::StrokeRect { color, .. }) = cmds.get(2) else {
+                    panic!("light = {light}: no focus mark in {cmds:?}");
+                };
+                assert_eq!(hue(*color), hue(mark), "light = {light}, {state:?}");
+            }
+        }
+    }
+
     /// **A ring is the accent, outside the field, as wide as asked** -- and
     /// the edge is not the accent then: the ring says it.
     #[test]

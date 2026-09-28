@@ -86,6 +86,10 @@ TK_PALETTE = "gui/toolkit/src/palette.rs"
 TK_COLOR = "gui/toolkit/src/color.rs"
 SEC = "gui/desktop/src/security_dialog.rs"
 RUN = "gui/desktop/src/run_dialog.rs"
+# The toolkit's field -- the well, edge and focus mark every text field is
+# drawn with since design-decisions 1435 -- where the run box's and the login
+# screen's field colours are now chosen.
+FIELD = "gui/toolkit/src/field.rs"
 ICON = "gui/desktop/src/icons.rs"
 NOTIF_PANE = "gui/desktop/src/notif_pane.rs"
 DEV = "gui/desktop/src/device_settings.rs"
@@ -430,16 +434,17 @@ DEFECTS = [
     # would only encode the hole as if it were a result.
     (
         "Y: the run box's focus border is left as this module's own Mocha blue",
-        RUN,
+        FIELD,
         [
-            ('        paint.border = Some(p.accent);\n',
-             '        paint.border = Some(guitk::color::Color::from_hex(0x89B4FA));\n'),
+            ('    } else if live && state.focused && p.widget_style.field.focus == FocusMark::Glow {\n        p.accent\n',
+             '    } else if live && state.focused && p.widget_style.field.focus == FocusMark::Glow {\n        Color::from_hex(0x89B4FA)\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            # Re-derived 2026-09-27 against the code as it now reads. The field's edge is a paint's
-            # border now; Mocha's blue is a role in the dark palette, so the light pass
-            # is the one that catches it.
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
             'every_colour_the_dialog_draws_comes_from_its_palette',
         ],
     ),
@@ -8049,15 +8054,17 @@ DEFECTS = [
     ),
     (
         'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the rejected-password border is frozen back to Mocha red',
-        LOGIN,
+        FIELD,
         [
-            ('            paint.border = Some(if self.error_message.is_some() {\n                p.red\n',
-             '            paint.border = Some(if self.error_message.is_some() {\n                Color::from_hex(0xF38BA8)\n'),
+            ('    let edge = if state.invalid {\n        p.red\n',
+             '    let edge = if state.invalid {\n        Color::from_hex(0xF38BA8)\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            # Re-derived 2026-09-27 against the code as it now reads.
-            # The password field and the power menu are surfaces now (`surface_paint`).
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
@@ -8065,46 +8072,53 @@ DEFECTS = [
     ),
     (
         'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the rejected-password border takes the accent, so a refusal is decoration',
-        LOGIN,
+        FIELD,
         [
-            ('            paint.border = Some(if self.error_message.is_some() {\n                p.red\n',
-             '            paint.border = Some(if self.error_message.is_some() {\n                p.accent\n'),
+            ('    let edge = if state.invalid {\n        p.red\n',
+             '    let edge = if state.invalid {\n        p.accent\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            # Re-derived 2026-09-27 against the code as it now reads.
-            # The password field and the power menu are surfaces now (`surface_paint`).
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
+            'a_wrong_fields_edge_is_red_whatever_else_is_true',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
     ),
     (
         'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the border at rest is frozen back to Mocha surface1',
-        LOGIN,
+        FIELD,
         [
-            ('                paint.border.unwrap_or(p.surface1)\n',
-             '                Color::from_hex(0x45475A)\n'),
+            ('    } else {\n        p.surface1\n    };\n',
+             '    } else {\n        Color::from_hex(0x45475A)\n    };\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            # Re-derived 2026-09-27 against the code as it now reads.
-            # The password field and the power menu are surfaces now (`surface_paint`).
-            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            # The login screen's field always has the keyboard, so its edge is
+            # never at rest: the toolkit's test is the one that sees it.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
         ],
     ),
     (
         'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the password field is frozen back to Mocha surface0',
-        LOGIN,
+        FIELD,
         [
-            ('            let mut paint = p.surface_paint(Surface::Card);\n',
-             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n'),
+            ('        well: fade(p.crust),\n',
+             '        well: fade(Color::from_hex(0x313244)),\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            # Re-derived 2026-09-27 against the code as it now reads.
-            # The password field and the power menu are surfaces now (`surface_paint`).
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
+            'the_built_in_field_is_the_references',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',

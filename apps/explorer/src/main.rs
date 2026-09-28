@@ -24,6 +24,7 @@
 // out the arithmetic that names the unit.
 #![allow(clippy::duration_suboptimal_units)]
 
+mod binview;
 mod columnprefs;
 mod columns;
 mod drives;
@@ -45,6 +46,7 @@ use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 use pathtext::ShowPath;
 
+use binview::{BinButton, BinHit, BinLayout, BinView};
 use columns::{ColumnId, ColumnManager, ColumnValue, SortOrder};
 use drives::DriveSet;
 use guitk::disabled::DisabledState;
@@ -272,6 +274,20 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+H", "Show or hide hidden files"),
     ("Ctrl+L", "Type a path into the address bar"),
     ("Escape", "Cancel, close the search, or drop the selection"),
+    ("F1 / ?", "This list"),
+];
+
+/// The shortcut list while the recycle bin is showing: its keys are its own,
+/// and listing the folder's -- Ctrl+V, F2 -- there would offer what it refuses.
+const BIN_SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move the choice"),
+    ("Shift+Arrows", "Choose a run of items"),
+    ("Home / End", "First / last item"),
+    ("Ctrl+A", "Choose everything"),
+    ("Enter", "Put back what is chosen"),
+    ("Delete", "Delete what is chosen, for good"),
+    ("F5", "Read the recycle bin again"),
+    ("Escape / Backspace", "Back to the folder"),
     ("F1 / ?", "This list"),
 ];
 
@@ -604,6 +620,11 @@ enum Modal {
     /// A paste, move or link stopped at a name the folder already has, under
     /// "Ask each time", waiting to be told what to do with it.
     Conflict { prompt: ConflictPrompt },
+    /// An erasure from the recycle bin the user has been asked to confirm.
+    ///
+    /// Its own variant rather than a [`PendingAction`]: that one acts on the
+    /// folder's selection, and this on entries of the bin, named by id.
+    ConfirmBin { dialog: AlertDialog, action: BinAction },
     /// A rename in progress, awaiting the new name.
     Rename {
         dialog: InputDialog,
@@ -620,6 +641,20 @@ enum Modal {
         /// change rather than a new name.
         not_text: Option<String>,
     },
+}
+
+/// What a confirmed erasure from the recycle bin erases.
+///
+/// The entries are named by id, taken when the question was asked: what the
+/// dialog counted is what is erased. An item recycled while the dialog was up
+/// -- a delete still running behind it -- was never seen by the user, and
+/// Empty does not take it with the rest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BinAction {
+    /// "Delete permanently": the chosen entries.
+    DeleteChosen(Vec<String>),
+    /// "Empty recycle bin": every entry the bin showed.
+    Empty(Vec<String>),
 }
 
 /// What a confirmation carries out if it is confirmed.
@@ -1048,6 +1083,12 @@ pub struct ExplorerState {
     pub undo: UndoStack,
     /// Recycle bin used by non-permanent delete.
     pub recycle: RecycleBin,
+    /// The recycle bin, when the pane is showing it instead of the folder.
+    ///
+    /// Over the folder rather than in place of it: the folder's listing,
+    /// selection and history stay as they were, and leaving the bin -- Back,
+    /// Escape, or going anywhere -- returns to them.
+    bin: Option<BinView>,
     /// The dialog currently taking the window's input, if any.
     ///
     /// While this is `Some`, every event goes to it and none reaches the
@@ -1205,6 +1246,7 @@ impl ExplorerState {
             sidebar_width: 200.0,
             undo: UndoStack::new(),
             recycle: RecycleBin::default_location(),
+            bin: None,
             modal: None,
             show_help: false,
             manual_order: Vec::new(),
@@ -1254,6 +1296,15 @@ impl ExplorerState {
 
     /// Navigate to a new directory.
     pub fn navigate_to(&mut self, path: &Path) {
+        // Going anywhere leaves the recycle bin. Checked before the test
+        // below: choosing the folder the bin was opened over is a way out of
+        // the bin, not a click on where you already are.
+        if self.bin.take().is_some() && path == self.current_path {
+            self.hover_hint.clear();
+            self.status_message.clear();
+            self.load_directory();
+            return;
+        }
         if path == self.current_path {
             return;
         }
@@ -1270,8 +1321,13 @@ impl ExplorerState {
         self.load_directory();
     }
 
-    /// Go back in history.
+    /// Go back in history -- or, from the recycle bin, to the folder it was
+    /// opened over, which is where the user came from.
     pub fn go_back(&mut self) {
+        if self.bin.is_some() {
+            self.leave_recycle_bin();
+            return;
+        }
         if let Some(prev) = self.history_back.pop_back() {
             self.history_forward.push_back(self.current_path.clone());
             self.current_path = prev;
@@ -1282,8 +1338,12 @@ impl ExplorerState {
         }
     }
 
-    /// Go forward in history.
+    /// Go forward in history. Not from the recycle bin, which is not a place
+    /// in it: Forward is off there.
     pub fn go_forward(&mut self) {
+        if self.bin.is_some() {
+            return;
+        }
         if let Some(next) = self.history_forward.pop_back() {
             self.history_back.push_back(self.current_path.clone());
             self.current_path = next;
@@ -2662,7 +2722,7 @@ impl ExplorerState {
     /// choose columns from a view that has none would be a control that cannot
     /// act.
     fn over_column_header(&self, x: f32, y: f32) -> bool {
-        if self.view_mode != ViewMode::Details {
+        if self.view_mode != ViewMode::Details || self.bin.is_some() {
             return false;
         }
         let pane = self.pane_rect();
@@ -2862,7 +2922,9 @@ impl ExplorerState {
     /// shows the listing rather than two unusable slivers, and the preference
     /// stays on so it comes back when the window grows.
     fn preview_panes(&self) -> Option<(Rect, Rect)> {
-        if !self.preview_open {
+        // The preview shows the selected file, and the bin's rows are not
+        // files anyone can open: the bin has the whole pane.
+        if !self.preview_open || self.bin.is_some() {
             return None;
         }
         let area = self.pane_rect();
@@ -3158,7 +3220,17 @@ impl ExplorerState {
                 self.ask_new_folder();
             }
             MENU_PASTE => self.paste(),
+            MENU_REFRESH if self.bin.is_some() => self.reload_bin(),
             MENU_REFRESH => self.load_directory(),
+            MENU_BIN_RESTORE => {
+                self.restore_chosen();
+            }
+            MENU_BIN_DELETE => {
+                self.ask_erase_chosen();
+            }
+            MENU_BIN_EMPTY => {
+                self.ask_empty_bin();
+            }
             // A row id this does not know is a row this did not put there.
             _ => {}
         }
@@ -3177,8 +3249,16 @@ impl ExplorerState {
     ///
     /// Answers whether the hint changed, which is what a caller repaints on.
     fn update_hover_hint(&mut self, x: f32, y: f32) -> bool {
+        let pane = self.pane_rect();
         let hint = Self::toolbar_button_at(x, y)
             .map(|button| self.toolbar_button_state(button))
+            .or_else(|| {
+                let bin = self.bin.as_ref()?;
+                match bin.hit(pane, x, y)? {
+                    BinHit::Button(button) => Some(bin.button_state(button)),
+                    BinHit::Row(_) | BinHit::Blank => None,
+                }
+            })
             .filter(DisabledState::is_disabled)
             .and_then(|state| state.reason().map(str::to_string))
             .unwrap_or_default();
@@ -3208,10 +3288,12 @@ impl ExplorerState {
         if !self.hover_hint.is_empty() {
             return &self.hover_hint;
         }
-        if self.status_message.is_empty() {
-            &self.dir_summary
-        } else {
-            &self.status_message
+        if !self.status_message.is_empty() {
+            return &self.status_message;
+        }
+        match &self.bin {
+            Some(bin) => bin.summary(),
+            None => &self.dir_summary,
         }
     }
 
@@ -3826,6 +3908,7 @@ impl ExplorerState {
     /// flicker off on every frame of a stationary hover.
     pub fn render(&mut self) -> RenderTree {
         self.refresh_preview_text();
+        self.fit_bin();
         let mut tree = RenderTree::new();
         let w = self.window_width as f32;
         let h = self.window_height as f32;
@@ -3890,6 +3973,7 @@ impl ExplorerState {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
             Some(Modal::Conflict { prompt }) => prompt.render(&self.palette, w, h, &mut tree),
+            Some(Modal::ConfirmBin { dialog, .. }) => dialog.render(&self.palette, w, h, &mut tree),
             None => {}
         }
 
@@ -3901,7 +3985,11 @@ impl ExplorerState {
                 &self.palette,
                 (self.window_width as f32, self.window_height as f32),
                 0.0,
-                SHORTCUTS,
+                if self.bin.is_some() {
+                    BIN_SHORTCUTS
+                } else {
+                    SHORTCUTS
+                },
                 "F1 or ? closes this",
             );
         }
@@ -3978,7 +4066,16 @@ impl ExplorerState {
     /// under the pointer between one glance and the next.
     #[must_use]
     pub fn toolbar_button_state(&self, button: ToolbarButton) -> DisabledState {
+        let in_bin = self.bin.is_some();
         let reason = match button {
+            // Back and Up both leave the recycle bin, for the folder it was
+            // opened over; the rest act on a folder, and there is none on
+            // screen.
+            ToolbarButton::Back | ToolbarButton::Up if in_bin => None,
+            ToolbarButton::Forward if in_bin => Some("Nothing to go forward to"),
+            ToolbarButton::NewFolder | ToolbarButton::Cut | ToolbarButton::Paste if in_bin => {
+                Some("Not in the recycle bin: go back to a folder first")
+            }
             ToolbarButton::Back if self.history_back.is_empty() => Some("Nothing to go back to"),
             ToolbarButton::Forward if self.history_forward.is_empty() => {
                 Some("Nothing to go forward to")
@@ -4087,6 +4184,21 @@ impl ExplorerState {
 
     fn render_address_bar(&mut self, tree: &mut RenderTree) {
         let rect = self.address_bar_rect();
+        // The bin is not a path, and showing the folder's path over it would
+        // say the pane is that folder. Its name, then, and nothing to click:
+        // Ctrl+L still types a path, and leaves the bin to do it.
+        if self.bin.is_some() {
+            tree.fill_rect(rect.x, rect.y, rect.w, rect.h, self.palette.base);
+            tree.text_in(
+                rect.x + 10.0,
+                rect.y + (rect.h - 13.0) / 2.0,
+                (rect.w - 20.0).max(0.0),
+                "Recycle Bin",
+                self.palette.text,
+                13.0,
+            );
+            return;
+        }
         // Copied out before the widget borrows `self` mutably: `Palette` is
         // `Copy`, so this costs nothing and keeps the two borrows apart.
         let palette = self.palette;
@@ -4224,9 +4336,47 @@ impl ExplorerState {
             // /tmp.
             zones.register_sidebar_item(Path::new(path), Rect::new(0.0, iy, sw, SIDEBAR_ROW_H));
         }
+
+        // The recycle bin, apart from the folders because it is not one.
+        let bin = self.sidebar_bin_rect();
+        if self.bin.is_some() {
+            tree.fill_rect(
+                bin.x,
+                bin.y,
+                (bin.w - 1.0).max(0.0),
+                bin.h,
+                with_alpha(self.palette.accent, 40),
+            );
+        }
+        tree.text(16.0, bin.y + 4.0, "Recycle Bin", self.palette.text, 12.0);
+    }
+
+    /// Where the sidebar's Recycle Bin row is: half a row below the folders.
+    ///
+    /// One function for the painter and the click, like the toolbar's.
+    fn sidebar_bin_rect(&self) -> Rect {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a handful of sidebar rows, far inside f32's exact range"
+        )]
+        let below = SIDEBAR_ITEMS.len() as f32 * SIDEBAR_ROW_H;
+        Rect::new(
+            0.0,
+            64.0 + 8.0 + below + SIDEBAR_ROW_H / 2.0,
+            self.sidebar_width,
+            SIDEBAR_ROW_H,
+        )
     }
 
     fn render_file_list(&self, tree: &mut RenderTree, zones: &mut DropZoneManager) {
+        // The bin instead of the folder. No drop zones: a file dropped on the
+        // bin's rows would otherwise be copied into the folder hidden behind
+        // them.
+        if let Some(bin) = &self.bin {
+            bin.render(tree, &self.palette, self.pane_rect());
+            self.render_scrollbar(tree);
+            return;
+        }
         // With the preview open the listing gets the left pane; without it,
         // the whole thing. Both come from one place so the drop target, the
         // rows and the divider cannot be computed against different widths --
@@ -4530,6 +4680,9 @@ impl ExplorerState {
     /// unit the viewport offset is in -- by multiplying by the column count.
     fn visible_capacity(&self) -> usize {
         let pane = self.pane_rect();
+        if self.bin.is_some() {
+            return BinLayout::for_pane(pane).capacity();
+        }
         match self.view_mode {
             ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.h),
             ViewMode::Details => scroll_window::capacity(ROW_H, (pane.h - HEADER_H).max(0.0)),
@@ -4541,16 +4694,18 @@ impl ExplorerState {
     /// The scrollbar's track, when the listing is long enough to have one.
     fn scrollbar_track(&self) -> Option<Rect> {
         let capacity = self.visible_capacity();
-        if !scrollbar::needed(self.entries.len(), capacity) {
+        if !scrollbar::needed(self.scroll_len(), capacity) {
             return None;
         }
         let pane = self.pane_rect();
         // The detail view's header is not part of the scrollable region, so the
         // track starts below it -- a thumb that ran up behind the column
-        // headings would claim rows that are never drawn there.
-        let top = match self.view_mode {
-            ViewMode::Details => pane.y + HEADER_H,
-            ViewMode::List | ViewMode::Icons => pane.y,
+        // headings would claim rows that are never drawn there. The bin's
+        // actions and headings likewise.
+        let top = match (self.bin.is_some(), self.view_mode) {
+            (true, _) => BinLayout::for_pane(pane).rows.y,
+            (false, ViewMode::Details) => pane.y + HEADER_H,
+            (false, ViewMode::List | ViewMode::Icons) => pane.y,
         };
         Some(Rect::new(
             pane.x + pane.w - scrollbar::WIDTH,
@@ -4565,10 +4720,42 @@ impl ExplorerState {
         let track = self.scrollbar_track()?;
         Some(scrollbar::thumb(
             track,
-            self.entries.len(),
+            self.scroll_len(),
             self.visible_capacity(),
-            self.viewport.first_visible(),
+            self.scroll_first(),
         ))
+    }
+
+    /// How many rows the pane scrolls through: the recycle bin's while it is
+    /// showing, the folder's otherwise. The scrollbar asks this rather than
+    /// either list, so it is the bar of whatever is on screen.
+    fn scroll_len(&self) -> usize {
+        self.bin
+            .as_ref()
+            .map_or(self.entries.len(), |bin| bin.entries().len())
+    }
+
+    /// The first row drawn, of whichever list is showing.
+    fn scroll_first(&self) -> usize {
+        self.bin
+            .as_ref()
+            .map_or_else(|| self.viewport.first_visible(), BinView::first_visible)
+    }
+
+    /// Scroll whichever list is showing by `delta` rows.
+    fn scroll_rows_by(&mut self, delta: isize) {
+        match self.bin.as_mut() {
+            Some(bin) => bin.scroll_by(delta),
+            None => self.viewport.scroll_by(delta, self.entries.len()),
+        }
+    }
+
+    /// Scroll whichever list is showing so `first` is the top row.
+    fn scroll_rows_to(&mut self, first: usize) {
+        match self.bin.as_mut() {
+            Some(bin) => bin.scroll_to(first),
+            None => self.viewport.scroll_to(first, self.entries.len()),
+        }
     }
 
     /// Take hold of the thumb, if the press landed on it. A press elsewhere on
@@ -4598,7 +4785,7 @@ impl ExplorerState {
             } else {
                 page
             };
-            self.viewport.scroll_by(delta, self.entries.len());
+            self.scroll_rows_by(delta);
         }
         true
     }
@@ -4619,15 +4806,15 @@ impl ExplorerState {
             thumb.h,
             grab,
             y,
-            self.entries.len(),
+            self.scroll_len(),
             self.visible_capacity(),
         ) else {
             return false;
         };
-        if first == self.viewport.first_visible() {
+        if first == self.scroll_first() {
             return false;
         }
-        self.viewport.scroll_to(first, self.entries.len());
+        self.scroll_rows_to(first);
         true
     }
 
@@ -4641,9 +4828,9 @@ impl ExplorerState {
         let track_gui = track;
         let thumb = scrollbar::thumb(
             track_gui,
-            self.entries.len(),
+            self.scroll_len(),
             self.visible_capacity(),
-            self.viewport.first_visible(),
+            self.scroll_first(),
         );
         tree.fill_rect(track.x, track.y, track.w, track.h, self.palette.mantle);
         tree.fill_rounded_rect(
@@ -5304,6 +5491,10 @@ const MENU_DELETE_FOREVER: u64 = 6;
 const MENU_NEW_FOLDER: u64 = 7;
 const MENU_PASTE: u64 = 8;
 const MENU_REFRESH: u64 = 9;
+/// The recycle bin's menu: put back, erase, empty.
+const MENU_BIN_RESTORE: u64 = 10;
+const MENU_BIN_DELETE: u64 = 11;
+const MENU_BIN_EMPTY: u64 = 12;
 
 /// How tall the status bar is.
 const STATUS_BAR_H: f32 = 24.0;
@@ -5356,6 +5547,9 @@ impl oswindow::app::App for ExplorerState {
     /// buttons is elided from the right, so leading with the application name
     /// would give every open folder the same visible label.
     fn title(&self) -> String {
+        if self.bin.is_some() {
+            return "Recycle Bin — Files".to_string();
+        }
         // By `pathtext`'s `shown`, not `Path::display`, which decodes lossily: two
         // folders whose names differ only in bytes that are not text would
         // have had the same title.
@@ -5537,6 +5731,9 @@ impl ExplorerState {
             // fade already said there is something to draw.
             return consumed | self.tick_work();
         }
+        // The bin's scroll must know how many rows fit before a key or the
+        // wheel moves it; the pane may have been resized since the last frame.
+        self.fit_bin();
         match event {
             Event::Mouse(m) => self.handle_mouse(m),
             Event::Key(k) => k.pressed && self.handle_key(k),
@@ -5595,6 +5792,9 @@ impl ExplorerState {
             MouseEventKind::Press(MouseButton::Left) => {
                 self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
             }
+            MouseEventKind::Press(MouseButton::Right) if self.bin.is_some() => {
+                self.open_bin_menu(m.x, m.y)
+            }
             MouseEventKind::Press(MouseButton::Right) => {
                 if self.over_column_header(m.x, m.y) {
                     self.open_column_menu(m.x, m.y);
@@ -5635,6 +5835,10 @@ impl ExplorerState {
                 let rows = self.wheel.rows(dy);
                 if rows == 0 {
                     return false;
+                }
+                if self.bin.is_some() {
+                    self.scroll_rows_by(rows);
+                    return true;
                 }
                 // In the grid a "row" is a row of icons, which is `cols`
                 // entries. Without this a notch moves three entries -- less
@@ -5692,7 +5896,21 @@ impl ExplorerState {
             });
             return self.route_to_pathbar(taken);
         }
-        if let Some(index) = self.dropzone.find_file_row(x, y) {
+        // The bin's pane before the folder's rows: the zones may still hold
+        // the rows of a frame drawn before the bin was opened, and a click on
+        // the bin must never land on a file behind it.
+        if self.bin.is_some() && self.pane_rect().contains(x, y) {
+            return self.click_bin(x, y);
+        }
+        if self.sidebar_bin_rect().contains(x, y) {
+            if self.bin.is_none() {
+                self.open_recycle_bin();
+            }
+            return true;
+        }
+        if self.bin.is_none()
+            && let Some(index) = self.dropzone.find_file_row(x, y)
+        {
             // Remembered on every row press, not only in Custom mode: dragging
             // a file is how a user *enters* Custom, so requiring the mode
             // first would make it unreachable by the gesture that is supposed
@@ -5722,7 +5940,7 @@ impl ExplorerState {
             self.navigate_to(&path);
             return true;
         }
-        if self.selected_indices.is_empty() {
+        if self.bin.is_some() || self.selected_indices.is_empty() {
             return false;
         }
         self.deselect_all();
@@ -5731,7 +5949,14 @@ impl ExplorerState {
 
     /// A double click opens whatever it landed on; a double click on empty
     /// space does nothing, rather than opening the last thing selected.
+    ///
+    /// Nothing in the recycle bin opens: its rows are not files anyone can
+    /// run, and a double click that restored one would move a file on a
+    /// gesture that means "look".
     fn open_at(&mut self, x: f32, y: f32) -> bool {
+        if self.bin.is_some() {
+            return false;
+        }
         let Some(index) = self.dropzone.find_file_row(x, y) else {
             return false;
         };
@@ -5740,7 +5965,7 @@ impl ExplorerState {
     }
 
     fn go_back_if_possible(&mut self) -> bool {
-        if self.history_back.is_empty() {
+        if self.bin.is_none() && self.history_back.is_empty() {
             return false;
         }
         self.go_back();
@@ -5748,7 +5973,7 @@ impl ExplorerState {
     }
 
     fn go_forward_if_possible(&mut self) -> bool {
-        if self.history_forward.is_empty() {
+        if self.bin.is_some() || self.history_forward.is_empty() {
             return false;
         }
         self.go_forward();
@@ -5773,6 +5998,11 @@ impl ExplorerState {
         // Not unconditional: a widget that swallowed keys whenever it was
         // merely *visible* would take the arrow keys the file list needs.
         let starts_editing = k.modifiers.ctrl && k.key == Key::L;
+        // Typing a path is going somewhere, and the bar is not drawn over
+        // the bin: leave it, and edit the folder's path.
+        if starts_editing {
+            self.leave_recycle_bin();
+        }
         if self.pathbar.is_editing() || starts_editing {
             let taken = self.pathbar.handle_key_event(k);
             if self.route_to_pathbar(taken) {
@@ -5792,6 +6022,11 @@ impl ExplorerState {
                 self.show_help = false;
                 return true;
             }
+        }
+        // The bin's keys, and none of the folder's: Ctrl+V or F2 here would
+        // act on a folder that is not on screen.
+        if self.bin.is_some() {
+            return self.handle_bin_key(k);
         }
 
         let ctrl = k.modifiers.ctrl;
@@ -5896,6 +6131,305 @@ impl ExplorerState {
             }
             _ => false,
         }
+    }
+
+    // ======================================================================
+    // The recycle bin
+    // ======================================================================
+
+    /// Show the recycle bin in the pane, over the folder.
+    pub fn open_recycle_bin(&mut self) {
+        self.bin = Some(BinView::open(&self.recycle));
+        self.fit_bin();
+        self.menu = None;
+        self.row_drag = None;
+        self.hover_hint.clear();
+        self.status_message.clear();
+    }
+
+    /// Back to the folder the bin was opened over, read again: a restore may
+    /// have put something back into it.
+    fn leave_recycle_bin(&mut self) {
+        if self.bin.take().is_none() {
+            return;
+        }
+        self.hover_hint.clear();
+        self.status_message.clear();
+        self.load_directory();
+    }
+
+    /// Read the bin again, if it is showing.
+    fn reload_bin(&mut self) {
+        if let Some(bin) = self.bin.as_mut() {
+            bin.reload(&self.recycle);
+        }
+    }
+
+    /// Tell the bin's scroll how many rows the pane holds now.
+    fn fit_bin(&mut self) {
+        let capacity = BinLayout::for_pane(self.pane_rect()).capacity();
+        if let Some(bin) = self.bin.as_mut() {
+            bin.fit(capacity);
+        }
+    }
+
+    /// A press inside the pane while the bin is showing.
+    fn click_bin(&mut self, x: f32, y: f32) -> bool {
+        let pane = self.pane_rect();
+        let Some(bin) = self.bin.as_mut() else {
+            return false;
+        };
+        match bin.hit(pane, x, y) {
+            Some(BinHit::Button(button)) => self.press_bin_button(button),
+            Some(BinHit::Row(index)) => {
+                bin.choose_only(index);
+                true
+            }
+            Some(BinHit::Blank) => {
+                bin.clear_choice();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Do what one of the bin's buttons says. A press on one that is off is
+    /// spent on it, as on the toolbar, rather than falling through.
+    fn press_bin_button(&mut self, button: BinButton) -> bool {
+        let Some(bin) = self.bin.as_ref() else {
+            return false;
+        };
+        if bin.button_state(button).is_disabled() {
+            return true;
+        }
+        match button {
+            BinButton::Restore => self.restore_chosen(),
+            BinButton::DeleteForever => self.ask_erase_chosen(),
+            BinButton::Empty => self.ask_empty_bin(),
+        }
+    }
+
+    /// The bin's keys. Answers whether anything visible changed.
+    fn handle_bin_key(&mut self, k: &KeyEvent) -> bool {
+        let (shift, ctrl, alt) = (k.modifiers.shift, k.modifiers.ctrl, k.modifiers.alt);
+        match k.key {
+            // Escape stops file work first, as it does over a folder.
+            Key::Escape if self.work_in_flight() => {
+                self.cancel_all_operations();
+                true
+            }
+            Key::Escape | Key::Backspace => {
+                self.leave_recycle_bin();
+                true
+            }
+            Key::Left if alt => {
+                self.leave_recycle_bin();
+                true
+            }
+            Key::F5 => {
+                self.reload_bin();
+                true
+            }
+            Key::Enter => self.restore_chosen(),
+            Key::Delete => self.ask_erase_chosen(),
+            _ => {
+                let page = isize::try_from(self.visible_capacity().max(1)).unwrap_or(isize::MAX);
+                let Some(bin) = self.bin.as_mut() else {
+                    return false;
+                };
+                match k.key {
+                    Key::Up => bin.step(-1, shift),
+                    Key::Down => bin.step(1, shift),
+                    Key::PageUp => bin.step(page.saturating_neg(), shift),
+                    Key::PageDown => bin.step(page, shift),
+                    Key::Home => bin.go_to(0, shift),
+                    Key::End => bin.go_to(usize::MAX, shift),
+                    Key::A if ctrl => bin.choose_all(),
+                    _ => return false,
+                }
+                true
+            }
+        }
+    }
+
+    /// The bin's right-click menu: for a row, put it back or erase it; for
+    /// the rest of the pane, empty the bin or read it again.
+    fn open_bin_menu(&mut self, x: f32, y: f32) -> bool {
+        let pane = self.pane_rect();
+        let Some(bin) = self.bin.as_mut() else {
+            return false;
+        };
+        let Some(hit) = bin.hit(pane, x, y) else {
+            return false;
+        };
+        // A right-click on a row that is not chosen chooses it, so the menu
+        // acts on what is under the pointer; on one already chosen it keeps
+        // the whole choice, so a run can be put back from the menu.
+        if let BinHit::Row(index) = hit
+            && !bin.is_chosen(index)
+        {
+            bin.choose_only(index);
+        }
+        let on = |button| bin.button_state(button).is_enabled();
+        let items = match hit {
+            BinHit::Row(_) => vec![
+                Self::menu_action(MENU_BIN_RESTORE, "Restore", on(BinButton::Restore)),
+                Self::menu_action(
+                    MENU_BIN_DELETE,
+                    "Delete permanently",
+                    on(BinButton::DeleteForever),
+                ),
+            ],
+            BinHit::Button(_) | BinHit::Blank => vec![
+                Self::menu_action(MENU_BIN_EMPTY, "Empty recycle bin", on(BinButton::Empty)),
+                Self::menu_action(MENU_REFRESH, "Refresh", true),
+            ],
+        };
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
+        self.menu = Some(menu);
+        true
+    }
+
+    /// Put everything chosen back where it was deleted from, and say where
+    /// each went.
+    fn restore_chosen(&mut self) -> bool {
+        let Some(bin) = self.bin.as_ref() else {
+            return false;
+        };
+        let chosen: Vec<recyclebin::RecycleEntry> = bin.chosen().into_iter().cloned().collect();
+        if chosen.is_empty() {
+            self.status_message = "Choose what to put back".to_string();
+            return true;
+        }
+        let mut restored = Vec::new();
+        let mut failed = Vec::new();
+        for entry in &chosen {
+            let name = entry.display_name();
+            let Some(original) = &entry.original_path else {
+                failed.push(format!(
+                    "{name}: its record is damaged, so where it came from is unknown"
+                ));
+                continue;
+            };
+            match self.recycle.restore(&entry.id) {
+                Ok(landed) => {
+                    let renamed = landed != *original;
+                    restored.push((name, landed, renamed));
+                }
+                Err(e) => failed.push(format!("{name}: {e}")),
+            }
+        }
+        self.reload_bin();
+        self.report(restore_outcome(&restored, &failed));
+        true
+    }
+
+    /// Ask before erasing the chosen entries for good.
+    fn ask_erase_chosen(&mut self) -> bool {
+        let Some(bin) = self.bin.as_ref() else {
+            return false;
+        };
+        let chosen = bin.chosen();
+        let subject = match chosen.as_slice() {
+            [] => {
+                self.status_message = "Choose what to delete".to_string();
+                return true;
+            }
+            [one] => format!("\"{}\"", one.display_name()),
+            many => binview::items(many.len()),
+        };
+        let ids: Vec<String> = chosen.iter().map(|e| e.id.clone()).collect();
+        let mut dialog = AlertDialog::destructive(
+            "Delete permanently",
+            &format!("Permanently delete {subject}?"),
+            "Delete permanently",
+        )
+        .with_detail("This cannot be undone. It leaves the recycle bin and cannot be put back.");
+        dialog.show();
+        self.modal = Some(Modal::ConfirmBin {
+            dialog,
+            action: BinAction::DeleteChosen(ids),
+        });
+        true
+    }
+
+    /// Ask before emptying the bin.
+    fn ask_empty_bin(&mut self) -> bool {
+        let Some(bin) = self.bin.as_ref() else {
+            return false;
+        };
+        let ids: Vec<String> = bin.entries().iter().map(|e| e.id.clone()).collect();
+        if ids.is_empty() {
+            self.status_message = "The recycle bin is empty".to_string();
+            return true;
+        }
+        let mut dialog = AlertDialog::destructive(
+            "Empty recycle bin",
+            &format!(
+                "Permanently delete the {} in the recycle bin?",
+                binview::items(ids.len())
+            ),
+            "Empty recycle bin",
+        )
+        .with_detail("This cannot be undone. Nothing in the bin can be put back afterwards.");
+        dialog.show();
+        self.modal = Some(Modal::ConfirmBin {
+            dialog,
+            action: BinAction::Empty(ids),
+        });
+        true
+    }
+
+    /// Erase the entries `ids` from the bin, and say what happened.
+    ///
+    /// `emptying` is only the wording: Empty erases what the bin showed when
+    /// it asked, by id, exactly as Delete permanently erases what was chosen.
+    fn erase_from_bin(&mut self, ids: &[String], emptying: bool) {
+        let name_of = |id: &String| {
+            self.bin
+                .as_ref()
+                .and_then(|bin| bin.entries().iter().find(|e| &e.id == id))
+                .map_or_else(|| id.clone(), recyclebin::RecycleEntry::display_name)
+        };
+        let mut erased = Vec::new();
+        let mut failed = Vec::new();
+        for id in ids {
+            let name = name_of(id);
+            match self.recycle.delete(id) {
+                Ok(()) => erased.push(name),
+                Err(e) => failed.push(format!("{name}: {e}")),
+            }
+        }
+        self.reload_bin();
+        // What arrived while the question was up is still there, and is said
+        // to be: "Emptied" over a bin that visibly is not would be a claim
+        // the next glance contradicts.
+        let left = self.bin.as_ref().map_or(0, |bin| bin.entries().len());
+        let done = match (erased.as_slice(), emptying) {
+            (_, true) if failed.is_empty() && left == 0 => "Emptied the recycle bin".to_string(),
+            (all, true) if failed.is_empty() => format!(
+                "Deleted {} permanently; {} put in the bin since you were asked {} kept",
+                binview::items(all.len()),
+                binview::items(left),
+                if left == 1 { "was" } else { "were" }
+            ),
+            ([one], false) => format!("Deleted {one} permanently"),
+            (all, _) => format!("Deleted {} permanently", binview::items(all.len())),
+        };
+        let outcome = if failed.is_empty() {
+            Outcome::ok(done)
+        } else {
+            let message = format!(
+                "{done}; {} could not be deleted",
+                binview::items(failed.len())
+            );
+            Outcome::failed(
+                message.clone(),
+                format!("{message}.\n\n{}", failed.join("\n")),
+            )
+        };
+        self.report(outcome);
     }
 
     /// Count and name the selection, for a dialog that has to be specific.
@@ -6015,7 +6549,9 @@ impl ExplorerState {
         };
 
         let consumed = match modal {
-            Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.handle_event(event),
+            Modal::Confirm { dialog, .. }
+            | Modal::Notice { dialog }
+            | Modal::ConfirmBin { dialog, .. } => dialog.handle_event(event),
             Modal::Rename { dialog, .. }
             | Modal::NewFolder { dialog }
             | Modal::Search { dialog } => dialog.handle_event(event),
@@ -6024,7 +6560,9 @@ impl ExplorerState {
         } == EventResult::Consumed;
 
         let answer = match modal {
-            Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.result().cloned(),
+            Modal::Confirm { dialog, .. }
+            | Modal::Notice { dialog }
+            | Modal::ConfirmBin { dialog, .. } => dialog.result().cloned(),
             Modal::Rename { dialog, .. }
             | Modal::NewFolder { dialog }
             | Modal::Search { dialog } => dialog.result().cloned(),
@@ -6068,6 +6606,16 @@ impl ExplorerState {
                     self.delete_selected(action == PendingAction::DeletePermanently);
                 } else {
                     self.status_message = "Delete cancelled".to_string();
+                }
+            }
+            Some(Modal::ConfirmBin { action, .. }) => {
+                if matches!(answer, DialogResult::Ok | DialogResult::Yes) {
+                    match action {
+                        BinAction::DeleteChosen(ids) => self.erase_from_bin(&ids, false),
+                        BinAction::Empty(ids) => self.erase_from_bin(&ids, true),
+                    }
+                } else {
+                    self.status_message = "Nothing deleted".to_string();
                 }
             }
             Some(Modal::Search { .. }) => match answer {
@@ -6154,6 +6702,11 @@ impl ExplorerState {
     }
 
     fn go_up_if_possible(&mut self) -> bool {
+        // Up from the recycle bin is out of it, to the folder beneath.
+        if self.bin.is_some() {
+            self.leave_recycle_bin();
+            return true;
+        }
         if self.current_path.parent().is_none() {
             return false;
         }
@@ -6233,6 +6786,53 @@ pub(crate) fn guarded_scratch(label: &str) -> scratchdir::ScratchDir {
     scratchdir::ScratchDir::new(label)
 }
 
+/// What putting things back from the recycle bin says: each restored item's
+/// name, where it landed, and whether it landed under another name because
+/// its own was taken; and each that could not be put back, with why.
+///
+/// A single item is named with its folder, so the user knows where to look;
+/// several are counted, with how many were renamed -- a restore that quietly
+/// called the file "report (2).docx" would leave the user looking for
+/// "report.docx" and opening the newer one.
+fn restore_outcome(restored: &[(String, PathBuf, bool)], failed: &[String]) -> Outcome {
+    let done = match restored {
+        [] => String::new(),
+        [(name, landed, renamed)] => {
+            let folder = landed
+                .parent()
+                .map_or_else(String::new, |f| f.shown().to_string());
+            if *renamed {
+                let new_name = landed
+                    .file_name()
+                    .map_or_else(String::new, |n| n.shown().to_string());
+                format!("Restored {name} to {folder} as {new_name}: the name was taken")
+            } else {
+                format!("Restored {name} to {folder}")
+            }
+        }
+        several => {
+            let renamed = several.iter().filter(|(_, _, renamed)| *renamed).count();
+            let mut done = format!("Restored {}", binview::items(several.len()));
+            if renamed > 0 {
+                done.push_str(&format!(
+                    ", {renamed} under a new name because the old one was taken"
+                ));
+            }
+            done
+        }
+    };
+    if failed.is_empty() {
+        return Outcome::ok(done);
+    }
+    let not = format!("{} could not be put back", binview::items(failed.len()));
+    let message = if done.is_empty() {
+        format!("Nothing restored: {not}")
+    } else {
+        format!("{done}; {not}")
+    };
+    Outcome::failed(message.clone(), format!("{message}.\n\n{}", failed.join("\n")))
+}
+
 fn main() -> std::process::ExitCode {
     // A path given on the command line is what makes "open containing folder"
     // possible from anywhere else in the desktop.
@@ -6265,6 +6865,21 @@ fn explorer_for(paths: &[std::ffi::OsString], home: Option<PathBuf>) -> Explorer
     let Some((first, rest)) = paths.split_first() else {
         return ExplorerState::new(&home.unwrap_or_else(|| PathBuf::from("/")));
     };
+    // `--recycle-bin` opens on the bin: what the desktop's Recycle Bin icon
+    // runs (lane C's `c-e-the-recycle-bin-icon-has-nowhere-to-open`). Over
+    // the home folder, which is where Back then goes. A folder that really is
+    // called `--recycle-bin` is still reachable, as `./--recycle-bin`.
+    if first == "--recycle-bin" {
+        let mut state = ExplorerState::new(&home.unwrap_or_else(|| PathBuf::from("/")));
+        state.open_recycle_bin();
+        if !rest.is_empty() {
+            state.status_message = format!(
+                "{} more not opened: the recycle bin was asked for",
+                rest.len()
+            );
+        }
+        return state;
+    }
     let named = PathBuf::from(first);
     // Made absolute, so the path bar and the history hold where the window
     // is rather than where it was started from. It fails only when the
@@ -12881,5 +13496,498 @@ mod tests {
         let prompt = prompt_of(&state).expect("nobody was asked");
         assert!(prompt.arriving.contains("a link to"), "{}", prompt.arriving);
         assert!(!prompt.there.contains("a link"), "{}", prompt.there);
+    }
+
+    // == The recycle bin view (lane C's request, 2026-09-27) ====================
+
+    /// A folder at `root` in which each of `names` was made and then recycled
+    /// into the state's own bin, and the state showing that folder.
+    fn state_with_recycled(root: &Path, names: &[&str]) -> ExplorerState {
+        let mut state = state_at(root);
+        for name in names {
+            let path = root.join(name);
+            write(&path, name);
+            state.recycle.recycle(&path).expect("recycle");
+        }
+        state.load_directory();
+        state
+    }
+
+    fn bin_of(state: &ExplorerState) -> &BinView {
+        state.bin.as_ref().expect("the recycle bin is not showing")
+    }
+
+    fn bin_names(state: &ExplorerState) -> Vec<String> {
+        let mut names: Vec<String> = bin_of(state)
+            .entries()
+            .iter()
+            .map(recyclebin::RecycleEntry::display_name)
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn bin_index(state: &ExplorerState, name: &str) -> usize {
+        bin_of(state)
+            .entries()
+            .iter()
+            .position(|e| e.display_name() == name)
+            .unwrap_or_else(|| panic!("{name} is not in the bin"))
+    }
+
+    fn bin_button_at(state: &ExplorerState, button: BinButton) -> (f32, f32) {
+        let layout = BinLayout::for_pane(state.pane_rect());
+        let (_, rect) = layout
+            .buttons
+            .into_iter()
+            .find(|(b, _)| *b == button)
+            .expect("every button is laid out");
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+    }
+
+    fn bin_row_at(state: &ExplorerState, index: usize) -> (f32, f32) {
+        let layout = BinLayout::for_pane(state.pane_rect());
+        let row = index.saturating_sub(bin_of(state).first_visible());
+        (
+            layout.rows.x + 40.0,
+            layout.rows.y + row as f32 * binview::ROW_H + binview::ROW_H / 2.0,
+        )
+    }
+
+    fn click_point(state: &mut ExplorerState, (x, y): (f32, f32)) {
+        send(state, &click(x, y));
+    }
+
+    #[test]
+    fn the_sidebar_opens_the_bin_and_each_item_is_listed_where_it_came_from() {
+        let scratch = temp_dir("bin_sidebar");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["report.txt"]);
+        // Wide, so the folder's whole path fits its column and is not elided.
+        state.window_width = 2400;
+        let _ = state.render();
+        let row = state.sidebar_bin_rect();
+        click_point(&mut state, (row.x + 20.0, row.y + row.h / 2.0));
+        assert!(state.bin.is_some(), "the sidebar's Recycle Bin opened nothing");
+
+        let drawn = texts(&state.render());
+        assert!(drawn.iter().any(|t| t == "report.txt"), "{drawn:?}");
+        let folder = root.shown().to_string();
+        assert!(
+            drawn.contains(&folder),
+            "the folder it was deleted from is not shown: {drawn:?}"
+        );
+        assert!(drawn.iter().any(|t| t == "Recycle Bin"));
+        assert_eq!(state.title(), "Recycle Bin — Files");
+        assert_eq!(state.status_bar_text(), "1 item in the recycle bin");
+    }
+
+    #[test]
+    fn the_command_line_can_open_on_the_recycle_bin() {
+        let home = temp_dir("bin_cli");
+        let state = {
+            let _turn = settingsfile::testing::config_turn();
+            explorer_for(&["--recycle-bin".into()], Some(home.dir().to_path_buf()))
+        };
+        assert!(state.bin.is_some(), "--recycle-bin opened a folder");
+        assert_eq!(state.current_path, home.dir(), "Back from the bin should go home");
+        assert!(state.status_message.is_empty(), "{}", state.status_message);
+    }
+
+    #[test]
+    fn restore_puts_the_chosen_item_back_and_says_where() {
+        let scratch = temp_dir("bin_restore");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt", "b.txt"]);
+        state.open_recycle_bin();
+        let _ = state.render();
+        let a = bin_index(&state, "a.txt");
+        let at = bin_row_at(&state, a);
+        click_point(&mut state, at);
+        let at = bin_button_at(&state, BinButton::Restore);
+        click_point(&mut state, at);
+
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "a.txt");
+        assert!(!root.join("b.txt").exists(), "restored what was not chosen");
+        assert_eq!(bin_names(&state), ["b.txt"]);
+        let said = state.status_bar_text().to_string();
+        assert!(said.starts_with("Restored a.txt to "), "{said}");
+        // What was put back is no longer chosen: nothing is, and the buttons
+        // that act on the choice are off again.
+        assert!(bin_of(&state).chosen().is_empty());
+        assert!(bin_of(&state).button_state(BinButton::DeleteForever).is_disabled());
+
+        // And the folder shows it once the bin is left.
+        send(&mut state, &key(Key::Escape));
+        assert!(state.bin.is_none());
+        assert!(
+            state.entries.iter().any(|e| e.name == "a.txt"),
+            "the folder was not read again"
+        );
+    }
+
+    #[test]
+    fn restoring_over_a_taken_name_lands_beside_it_and_says_so() {
+        let scratch = temp_dir("bin_restore_taken");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt"]);
+        write(&root.join("a.txt"), "the new one");
+        state.open_recycle_bin();
+        state.bin.as_mut().unwrap().choose_only(0);
+        send(&mut state, &key(Key::Enter));
+
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "the new one");
+        assert_eq!(fs::read_to_string(root.join("a (2).txt")).unwrap(), "a.txt");
+        let said = state.status_bar_text().to_string();
+        assert!(said.contains("as a (2).txt") && said.contains("taken"), "{said}");
+    }
+
+    #[test]
+    fn shift_and_the_arrows_choose_a_run_and_restore_puts_back_all_of_it() {
+        let scratch = temp_dir("bin_restore_run");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt", "b.txt", "c.txt"]);
+        state.open_recycle_bin();
+        send(&mut state, &key(Key::Down));
+        send(&mut state, &shift_key(Key::Down));
+        assert_eq!(bin_of(&state).chosen().len(), 2);
+        send(&mut state, &key(Key::Enter));
+        assert_eq!(bin_of(&state).entries().len(), 1);
+        let back = ["a.txt", "b.txt", "c.txt"]
+            .iter()
+            .filter(|n| root.join(n).exists())
+            .count();
+        assert_eq!(back, 2);
+        assert_eq!(state.status_bar_text(), "Restored 2 items");
+    }
+
+    #[test]
+    fn delete_permanently_asks_and_erases_only_what_was_chosen() {
+        let scratch = temp_dir("bin_erase");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt", "b.txt"]);
+        state.open_recycle_bin();
+        let a = bin_index(&state, "a.txt");
+        state.bin.as_mut().unwrap().choose_only(a);
+
+        // Asked, and Enter alone is the refusal.
+        send(&mut state, &key(Key::Delete));
+        match &state.modal {
+            Some(Modal::ConfirmBin {
+                dialog,
+                action: BinAction::DeleteChosen(ids),
+            }) => {
+                assert_eq!(ids.len(), 1);
+                assert!(dialog.message().contains("a.txt"), "{}", dialog.message());
+            }
+            _ => panic!("Delete in the bin did not ask"),
+        }
+        send(&mut state, &key(Key::Enter));
+        assert_eq!(bin_names(&state), ["a.txt", "b.txt"], "a refusal erased something");
+
+        send(&mut state, &key(Key::Delete));
+        confirm_modal(&mut state);
+        assert_eq!(bin_names(&state), ["b.txt"]);
+        assert!(!root.join("a.txt").exists(), "erasing it put it back");
+        assert_eq!(state.status_bar_text(), "Deleted a.txt permanently");
+    }
+
+    #[test]
+    fn empty_erases_what_the_bin_showed_when_it_asked_and_no_more() {
+        let scratch = temp_dir("bin_empty");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt", "b.txt"]);
+        state.open_recycle_bin();
+        let _ = state.render();
+        let at = bin_button_at(&state, BinButton::Empty);
+        click_point(&mut state, at);
+        assert!(
+            matches!(
+                state.modal,
+                Some(Modal::ConfirmBin {
+                    action: BinAction::Empty(_),
+                    ..
+                })
+            ),
+            "Empty did not ask"
+        );
+        // Recycled while the question is up -- a delete still running behind
+        // the dialog. It was never shown, so it is not erased.
+        write(&root.join("late.txt"), "late");
+        state.recycle.recycle(&root.join("late.txt")).unwrap();
+        confirm_modal(&mut state);
+
+        assert_eq!(bin_names(&state), ["late.txt"]);
+        let said = state.status_bar_text().to_string();
+        assert!(said.contains("Deleted 2 items permanently") && said.contains("kept"), "{said}");
+
+        // With nothing arriving, it says the bin is empty -- and it is.
+        let _ = state.render();
+        let at = bin_button_at(&state, BinButton::Empty);
+        click_point(&mut state, at);
+        confirm_modal(&mut state);
+        assert!(bin_of(&state).entries().is_empty());
+        assert_eq!(state.status_bar_text(), "Emptied the recycle bin");
+    }
+
+    #[test]
+    fn a_damaged_entry_can_be_erased_but_not_put_back() {
+        let scratch = temp_dir("bin_damaged");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt"]);
+        let id = state.recycle.list().unwrap()[0].id.clone();
+        fs::write(state.recycle.root().join(&id).join("meta.txt"), "damaged").unwrap();
+        state.open_recycle_bin();
+        state.bin.as_mut().unwrap().choose_only(0);
+        assert!(bin_of(&state).button_state(BinButton::Restore).is_disabled());
+        // The button is off, and a press on it is spent there.
+        let _ = state.render();
+        let at = bin_button_at(&state, BinButton::Restore);
+        click_point(&mut state, at);
+        assert!(state.modal.is_none(), "an off button acted");
+
+        // Enter asks anyway, and is told why not.
+        send(&mut state, &key(Key::Enter));
+        assert!(
+            state.status_bar_text().starts_with("Nothing restored"),
+            "{}",
+            state.status_bar_text()
+        );
+        assert!(matches!(state.modal, Some(Modal::Notice { .. })), "a failure goes unseen");
+        send(&mut state, &key(Key::Escape));
+
+        send(&mut state, &key(Key::Delete));
+        confirm_modal(&mut state);
+        assert!(bin_of(&state).entries().is_empty(), "the damaged entry could not be erased");
+    }
+
+    #[test]
+    fn every_bin_button_does_something_when_it_is_on() {
+        for button in BinButton::ALL {
+            let scratch = temp_dir("bin_every_button");
+            let root = scratch.dir().to_path_buf();
+            let mut state = state_with_recycled(&root, &["a.txt"]);
+            state.open_recycle_bin();
+            state.bin.as_mut().unwrap().choose_only(0);
+            let _ = state.render();
+            assert!(bin_of(&state).button_state(button).is_enabled(), "{button:?}");
+            let at = bin_button_at(&state, button);
+            click_point(&mut state, at);
+            let acted = state.modal.is_some() || root.join("a.txt").exists();
+            assert!(acted, "{button:?} did nothing");
+        }
+    }
+
+    #[test]
+    fn a_button_that_is_off_says_why_under_the_pointer() {
+        let scratch = temp_dir("bin_hover");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt"]);
+        state.open_recycle_bin();
+        let _ = state.render();
+        let (x, y) = bin_button_at(&state, BinButton::Restore);
+        send(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        assert_eq!(state.status_bar_text(), "Choose what to put back");
+        // And a press on it does nothing and is not passed on.
+        click_point(&mut state, (x, y));
+        assert!(!root.join("a.txt").exists() && state.modal.is_none());
+    }
+
+    #[test]
+    fn back_escape_and_backspace_leave_the_bin_for_the_folder() {
+        let scratch = temp_dir("bin_leave");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt"]);
+        for leave in [key(Key::Escape), key(Key::Backspace)] {
+            state.open_recycle_bin();
+            send(&mut state, &leave);
+            assert!(state.bin.is_none(), "{leave:?} did not leave the bin");
+            assert_eq!(state.current_path, root);
+        }
+
+        state.open_recycle_bin();
+        assert!(
+            state.toolbar_button_enabled(ToolbarButton::Back),
+            "Back is the way out, whether or not there is history"
+        );
+        assert!(!state.toolbar_button_enabled(ToolbarButton::Forward));
+        assert!(!state.toolbar_button_enabled(ToolbarButton::Paste));
+        assert!(!state.toolbar_button_enabled(ToolbarButton::NewFolder));
+        let (_, back) = ExplorerState::toolbar_layout()
+            .into_iter()
+            .find(|(b, _)| *b == ToolbarButton::Back)
+            .unwrap();
+        click_point(&mut state, (back.x + back.w / 2.0, back.y + back.h / 2.0));
+        assert!(state.bin.is_none());
+        assert_eq!(state.current_path, root, "Back went through history instead");
+    }
+
+    #[test]
+    fn going_to_a_folder_from_the_bin_leaves_it() {
+        let scratch = temp_dir("bin_navigate");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let mut state = state_with_recycled(&root, &["a.txt"]);
+        state.open_recycle_bin();
+        state.navigate_to(&root.join("sub"));
+        assert!(state.bin.is_none());
+        assert_eq!(state.current_path, root.join("sub"));
+
+        // The folder it was opened over is a way out too, not a no-op.
+        state.open_recycle_bin();
+        state.navigate_to(&root.join("sub"));
+        assert!(state.bin.is_none(), "choosing the current folder left the bin up");
+    }
+
+    #[test]
+    fn the_folders_keys_do_nothing_while_the_bin_is_showing() {
+        let scratch = temp_dir("bin_folder_keys");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("keep.txt"), "keep");
+        let mut state = state_with_recycled(&root, &["gone.txt"]);
+        select_named(&mut state, "keep.txt");
+        state.open_recycle_bin();
+
+        // Nothing is chosen in the bin, so Delete there has nothing to ask
+        // about -- and must not ask about the folder's keep.txt instead.
+        send(&mut state, &key(Key::Delete));
+        assert!(state.modal.is_none(), "Delete asked about a file behind the bin");
+        send(&mut state, &key(Key::F2));
+        assert!(state.modal.is_none(), "F2 renamed a file behind the bin");
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("keep.txt")]));
+        send(&mut state, &ctrl_key(Key::V));
+        settle(&mut state);
+        assert!(
+            !root.join("keep (2).txt").exists(),
+            "Ctrl+V pasted into the folder behind the bin"
+        );
+    }
+
+    #[test]
+    fn a_click_in_the_bin_never_lands_on_a_file_behind_it() {
+        let scratch = temp_dir("bin_stale_rows");
+        let root = scratch.dir().to_path_buf();
+        dir_with_files(&root, 5);
+        let mut state = state_with_recycled(&root, &["gone.txt"]);
+        let _ = state.render();
+        let row = state.dropzone.file_row_rect(2).expect("the folder's rows were drawn");
+        // The bin opens, and no frame is drawn before the click: the zones
+        // still hold the folder's rows.
+        state.open_recycle_bin();
+        click_point(&mut state, (row.x + 30.0, row.y + row.h / 2.0));
+        assert!(state.selected_indices.is_empty(), "the click chose a file behind the bin");
+        send(&mut state, &double_click(row.x + 30.0, row.y + row.h / 2.0));
+        assert_eq!(state.current_path, root, "a double click opened something behind the bin");
+    }
+
+    #[test]
+    fn the_scrollbar_and_the_wheel_move_the_bin_while_it_is_showing() {
+        let scratch = temp_dir("bin_scroll");
+        let root = scratch.dir().to_path_buf();
+        let names: Vec<String> = (0..60).map(|i| format!("f{i:02}.txt")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut state = state_with_recycled(&root, &refs);
+        assert!(state.scrollbar_track().is_none(), "an empty folder has no scrollbar");
+
+        state.open_recycle_bin();
+        let _ = state.render();
+        let track = state.scrollbar_track().expect("sixty items and no scrollbar");
+        assert!(press(&mut state, track.x + track.w / 2.0, track.y + track.h - 2.0));
+        assert!(bin_of(&state).first_visible() > 0, "the track did not page the bin");
+        assert_eq!(state.viewport.first_visible(), 0, "the folder behind scrolled");
+
+        send(&mut state, &key(Key::Home));
+        assert_eq!(bin_of(&state).first_visible(), 0, "Home did not bring the first row back");
+        for _ in 0..5 {
+            send(
+                &mut state,
+                &Event::Mouse(MouseEvent {
+                    x: track.x - 50.0,
+                    y: track.y + 20.0,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+                }),
+            );
+        }
+        assert!(bin_of(&state).first_visible() > 0, "the wheel did not scroll the bin");
+        // The keyboard brings its row back into sight.
+        send(&mut state, &key(Key::Down));
+        assert_eq!(bin_of(&state).cursor(), Some(1));
+        assert!(bin_of(&state).first_visible() <= 1, "the chosen row is out of sight");
+    }
+
+    #[test]
+    fn the_bin_has_the_whole_pane_even_with_the_preview_open() {
+        let scratch = temp_dir("bin_preview");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt"]);
+        state.preview_open = true;
+        assert!(state.preview_divider_rect().is_some(), "the preview is not open, so this checks nothing");
+        state.open_recycle_bin();
+        assert!(state.preview_divider_rect().is_none(), "the preview's divider is over the bin");
+        assert_eq!(state.list_rect(), state.pane_rect());
+    }
+
+    #[test]
+    fn the_bins_menu_acts_on_the_row_under_the_pointer() {
+        let scratch = temp_dir("bin_menu");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_with_recycled(&root, &["a.txt", "b.txt"]);
+        state.open_recycle_bin();
+        let _ = state.render();
+        let b = bin_index(&state, "b.txt");
+        let (x, y) = bin_row_at(&state, b);
+        send(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Right),
+            }),
+        );
+        assert!(state.menu.is_some(), "no menu");
+        assert_eq!(bin_of(&state).chosen().len(), 1);
+        state.menu = None;
+        state.activate_menu_item(MENU_BIN_RESTORE);
+        assert!(root.join("b.txt").exists());
+        assert!(!root.join("a.txt").exists());
+    }
+
+    #[test]
+    fn what_a_restore_says() {
+        let at = |p: &str| PathBuf::from(p);
+        let one = restore_outcome(&[("a.txt".into(), at("/home/u/a.txt"), false)], &[]);
+        assert_eq!(one.message, "Restored a.txt to /home/u");
+        assert!(one.failure.is_none());
+        let renamed = restore_outcome(&[("a.txt".into(), at("/home/u/a (2).txt"), true)], &[]);
+        assert_eq!(
+            renamed.message,
+            "Restored a.txt to /home/u as a (2).txt: the name was taken"
+        );
+        let several = restore_outcome(
+            &[
+                ("a.txt".into(), at("/x/a.txt"), false),
+                ("b.txt".into(), at("/x/b (2).txt"), true),
+            ],
+            &[],
+        );
+        assert_eq!(
+            several.message,
+            "Restored 2 items, 1 under a new name because the old one was taken"
+        );
+        let partly = restore_outcome(
+            &[("a.txt".into(), at("/x/a.txt"), false)],
+            &["b.txt: denied".to_string()],
+        );
+        assert_eq!(partly.message, "Restored a.txt to /x; 1 item could not be put back");
+        assert!(partly.failure.as_deref().is_some_and(|d| d.contains("b.txt: denied")));
+        let none = restore_outcome(&[], &["b.txt: denied".to_string()]);
+        assert_eq!(none.message, "Nothing restored: 1 item could not be put back");
     }
 }

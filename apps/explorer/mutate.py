@@ -15,6 +15,10 @@ the window asks; a file is never replaced by itself, nor a folder put inside
 itself; a link is copied, moved and deleted as the link and never followed;
 a tree too deep to be real is refused.
 
+And the recycle bin's view (`BINVIEW`, and the bin rows in `MAIN`): the pane
+shows the bin in place of the folder, and nothing done there -- a click, a
+key, the wheel, the preview's divider -- reaches the folder behind it.
+
 Rows the Windows host cannot decide are left out on purpose: it cannot make a
 symbolic link without a privilege, so a *copy* of a link always fails there,
 and "copied as a link" cannot be told from "failed" -- `copy_link` and the
@@ -34,6 +38,27 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src"
 
 OFF = "thumbnails_are_made_off_the_window"
+BIN_SIDEBAR = "the_sidebar_opens_the_bin_and_each_item_is_listed_where_it_came_from"
+BIN_CLI = "the_command_line_can_open_on_the_recycle_bin"
+BIN_RESTORE = "restore_puts_the_chosen_item_back_and_says_where"
+BIN_TAKEN = "restoring_over_a_taken_name_lands_beside_it_and_says_so"
+BIN_ERASE = "delete_permanently_asks_and_erases_only_what_was_chosen"
+BIN_EMPTY = "empty_erases_what_the_bin_showed_when_it_asked_and_no_more"
+BIN_DAMAGED = "a_damaged_entry_can_be_erased_but_not_put_back"
+BIN_LEAVE = "back_escape_and_backspace_leave_the_bin_for_the_folder"
+BIN_NAVIGATE = "going_to_a_folder_from_the_bin_leaves_it"
+BIN_KEYS = "the_folders_keys_do_nothing_while_the_bin_is_showing"
+BIN_SCROLL = "the_scrollbar_and_the_wheel_move_the_bin_while_it_is_showing"
+BIN_PREVIEW = "the_bin_has_the_whole_pane_even_with_the_preview_open"
+BIN_MENU = "the_bins_menu_acts_on_the_row_under_the_pointer"
+BIN_CHOOSE = "choosing_a_row_chooses_it_alone"
+BIN_SHIFT = "the_arrows_move_the_choice_and_shift_extends_it"
+BIN_HIT = "a_click_finds_the_row_drawn_under_it_after_a_scroll"
+BIN_FIT = "fitting_the_same_height_again_leaves_the_scroll_alone"
+BIN_BUTTONS = "the_buttons_say_why_they_are_off"
+BIN_ROW = "a_row_says_where_it_was_deleted_from_and_when"
+BIN_KINDS = "a_folder_and_a_link_say_what_they_are_instead_of_a_size"
+BIN_SUMMARY = "the_summary_counts_the_bin_and_the_choice"
 ASKS = "a_paste_onto_a_taken_name_asks_and_waits"
 ANSWERS = "each_answer_to_the_prompt_does_what_it_says"
 REST_WINDOW = "the_same_for_the_rest_is_asked_once"
@@ -63,6 +88,93 @@ EXIF = "a_photographs_exif_is_three_columns"
 LATE = "exif_past_the_head_of_a_webp_is_found"
 
 MAIN = [
+    (
+        "a click in the bin's pane is not the bin's",
+        "        if self.bin.is_some() && self.pane_rect().contains(x, y) {\n            return self.click_bin(x, y);\n        }",
+        "",
+        [BIN_RESTORE],
+    ),
+    (
+        "the sidebar's Recycle Bin opens nothing",
+        "            if self.bin.is_none() {\n                self.open_recycle_bin();\n            }",
+        "            if self.bin.is_none() {}",
+        [BIN_SIDEBAR],
+    ),
+    (
+        "--recycle-bin is taken for a folder's name",
+        '    if first == "--recycle-bin" {',
+        '    if first == "--recycle-bin-never" {',
+        [BIN_CLI],
+    ),
+    (
+        "the folder's keys work under the bin",
+        "        if self.bin.is_some() {\n            return self.handle_bin_key(k);\n        }",
+        "",
+        [BIN_KEYS],
+    ),
+    (
+        "Back from the bin goes through history",
+        "        if self.bin.is_some() {\n            self.leave_recycle_bin();\n            return;\n        }\n        if let Some(prev)",
+        "        if let Some(prev)",
+        [BIN_LEAVE],
+    ),
+    (
+        "going to the folder the bin was opened over leaves it up",
+        "        if self.bin.take().is_some() && path == self.current_path {",
+        "        if self.bin.is_some() && path == self.current_path {",
+        [BIN_NAVIGATE],
+    ),
+    (
+        "the preview shares the pane with the bin",
+        "        if !self.preview_open || self.bin.is_some() {",
+        "        if !self.preview_open {",
+        [BIN_PREVIEW],
+    ),
+    (
+        "the scrollbar measures the folder under the bin",
+        "            .map_or(self.entries.len(), |bin| bin.entries().len())",
+        "            .map_or(self.entries.len(), |_| self.entries.len())",
+        [BIN_SCROLL],
+    ),
+    (
+        "the wheel scrolls the folder under the bin",
+        "                if self.bin.is_some() {\n                    self.scroll_rows_by(rows);\n                    return true;\n                }",
+        "",
+        [BIN_SCROLL],
+    ),
+    (
+        "a right-click in the bin opens the folder's menu",
+        "            MouseEventKind::Press(MouseButton::Right) if self.bin.is_some() => {",
+        "            MouseEventKind::Press(MouseButton::Right) if self.bin.is_some() && false => {",
+        [BIN_MENU],
+    ),
+    (
+        "a press on an off button is acted on",
+        "        if bin.button_state(button).is_disabled() {\n            return true;\n        }\n        match button {",
+        "        match button {",
+        [BIN_DAMAGED],
+    ),
+    (
+        "Delete permanently erases without asking",
+        "        self.modal = Some(Modal::ConfirmBin {\n            dialog,\n            action: BinAction::DeleteChosen(ids),\n        });",
+        "        drop(dialog);\n        self.erase_from_bin(&ids, false);",
+        [BIN_ERASE],
+    ),
+    (
+        "Empty erases what arrived after it asked",
+        "                        BinAction::Empty(ids) => self.erase_from_bin(&ids, true),",
+        "                        BinAction::Empty(_) => {\n"
+        "                            let ids: Vec<String> = self.recycle.list().map(|l| l.into_iter().map(|e| e.id).collect()).unwrap_or_default();\n"
+        "                            self.erase_from_bin(&ids, true);\n"
+        "                        }",
+        [BIN_EMPTY],
+    ),
+    (
+        "a restore under a new name is not said to be one",
+        "                    let renamed = landed != *original;",
+        "                    let renamed = false;",
+        [BIN_TAKEN],
+    ),
     (
         "no waker is asked for",
         "    fn wants_waker(&self) -> bool {\n        true",
@@ -333,8 +445,78 @@ FILEOPS = [
     ),
 ]
 
+BINVIEW = [
+    (
+        "choosing a row keeps the old choice",
+        "        self.chosen.clear();\n        self.chosen.insert(entry.id.clone());",
+        "        self.chosen.insert(entry.id.clone());",
+        [BIN_CHOOSE],
+    ),
+    (
+        "Shift chooses one row",
+        "        if !extend {\n            self.choose_only(index);",
+        "        if true {\n            self.choose_only(index);",
+        [BIN_SHIFT],
+    ),
+    (
+        "a run starts wherever the keyboard is",
+        "        let anchor = *self.anchor.get_or_insert(index);",
+        "        let anchor = index;",
+        [BIN_SHIFT],
+    ),
+    (
+        "the choice keeps entries that are gone",
+        "        self.chosen.retain(|id| present.contains(id.as_str()));\n",
+        "        let _ = &present;\n",
+        [BIN_RESTORE],
+    ),
+    (
+        "the hit test ignores the scroll",
+        "        Some(match rows.start.checked_add(row) {",
+        "        Some(match Some(row) {",
+        [BIN_HIT],
+    ),
+    (
+        "below the last row is the last row",
+        "            Some(index) if index < rows.end() => BinHit::Row(index),",
+        "            Some(index) => BinHit::Row(index.min(rows.end().saturating_sub(1))),",
+        [BIN_HIT],
+    ),
+    (
+        "fitting undoes the wheel",
+        "        if self.viewport.height() != capacity {",
+        "        if self.viewport.height() == capacity || true {",
+        [BIN_FIT],
+    ),
+    (
+        "a damaged entry may be put back",
+        "            BinButton::Restore if !self.chosen().iter().any(|e| e.is_readable()) => Some(",
+        "            BinButton::Restore if false => Some(",
+        [BIN_BUTTONS],
+    ),
+    (
+        "the folder column shows the whole path",
+        "        Some(path) => path\n            .parent()",
+        "        Some(path) => Some(path.as_path())",
+        [BIN_ROW],
+    ),
+    (
+        "a folder shows its byte count",
+        "    } else if entry.is_dir {\n        \"Folder\".to_string()",
+        "    } else if false {\n        \"Folder\".to_string()",
+        [BIN_KINDS],
+    ),
+    (
+        "one item is counted as items",
+        "    if count == 1 {\n        \"1 item\".to_string()",
+        "    if count == 0 {\n        \"1 item\".to_string()",
+        [BIN_SUMMARY],
+    ),
+]
+
 TABLES = {
     "main.rs": MAIN,
+    "binview.rs": BINVIEW,
     "columns.rs": COLUMNS,
     "columnprefs.rs": COLUMNPREFS,
     "fileops.rs": FILEOPS,

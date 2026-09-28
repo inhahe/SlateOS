@@ -194,6 +194,21 @@ pub struct RecycleEntry {
     /// Whether this is a directory. `false` for an unreadable entry, which is
     /// not a claim -- see [`is_readable`](Self::is_readable).
     pub is_dir: bool,
+    /// Whether what was recycled is a link. The bin keeps a link as the link
+    /// (§1220), so this is what a restore puts back: a link, never the folder
+    /// or file it names -- which is why neither `is_dir` nor `size` describes
+    /// what it names either.
+    pub is_link: bool,
+}
+
+/// What emptying the bin did.
+#[derive(Debug, Default)]
+pub struct Emptied {
+    /// How many entries were deleted.
+    pub deleted: u32,
+    /// The entries that could not be, each with the reason. They are still in
+    /// the bin, whole or in part, and still listed.
+    pub failed: Vec<(RecycleEntry, io::Error)>,
 }
 
 impl RecycleEntry {
@@ -351,6 +366,7 @@ impl RecycleBin {
     /// old one from the bin destroyed the new one. It did not go to the bin
     /// either; there was nothing left to recover.
     pub fn restore(&self, entry_id: &str) -> io::Result<PathBuf> {
+        let entry_dir = self.entry_dir(entry_id)?;
         let entry = self.read_entry(entry_id)?;
         // An entry whose metadata would not parse has no original path, so
         // there is nowhere to put it back. `read_entry` fails for those, so
@@ -363,7 +379,7 @@ impl RecycleBin {
                 "this entry's metadata is damaged, so there is no path to restore it to",
             ));
         };
-        let data_path = self.root.join(entry_id).join("data");
+        let data_path = entry_dir.join("data");
 
         // Ensure parent directory exists.
         if let Some(parent) = original_path.parent() {
@@ -386,7 +402,6 @@ impl RecycleBin {
         // `meta.txt` that survives its `data` leaves an entry that `list` still
         // shows and `restore` can no longer satisfy, and the user's only clue
         // would be the failure of a restore they try much later.
-        let entry_dir = self.root.join(entry_id);
         for path in [entry_dir.join("meta.txt"), entry_dir.clone()] {
             let removed = if path == entry_dir {
                 fs::remove_dir(&path)
@@ -418,7 +433,12 @@ impl RecycleBin {
 
         for dir_entry in fs::read_dir(&self.root)? {
             let dir_entry = dir_entry?;
-            if !dir_entry.path().is_dir() {
+            // The entry's own type, not what it names: `path().is_dir()`
+            // followed a link, so a link planted in the bin that named a
+            // folder elsewhere was listed as an entry -- and "Delete
+            // permanently" on it was a delete aimed out of the bin. The bin
+            // makes every entry with `create_dir`, so an entry is a folder.
+            if !dir_entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
             // Every folder this bin makes is named in text (`make_id`); one
@@ -441,6 +461,7 @@ impl RecycleBin {
                     original_path: None,
                     recycled_at: None,
                     is_dir: false,
+                    is_link: false,
                 }),
             }
         }
@@ -453,17 +474,49 @@ impl RecycleBin {
         Ok(entries)
     }
 
-    /// Permanently delete all items in the recycle bin.
-    pub fn empty(&self) -> io::Result<u32> {
-        let entries = self.list()?;
-        let mut count = 0u32;
-        for entry in &entries {
-            let entry_dir = self.root.join(&entry.id);
-            if fs::remove_dir_all(&entry_dir).is_ok() {
-                count = count.saturating_add(1);
+    /// Permanently delete one entry: what was recycled and the record of it.
+    ///
+    /// For "Delete permanently" in the bin's view. Works on a damaged entry
+    /// too, since it needs only the id -- which is the one way such an entry
+    /// can be got rid of singly.
+    ///
+    /// An entry that is already gone -- another window emptied the bin a
+    /// moment ago -- is not an error: what was asked for is true.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` for an id that is not one of this bin's entry names
+    /// (see [`Self::entry_dir`]); otherwise whatever the removal met. A
+    /// removal that fails part-way leaves the entry listed, with what is
+    /// left of it.
+    pub fn delete(&self, entry_id: &str) -> io::Result<()> {
+        let dir = self.entry_dir(entry_id)?;
+        match fs::remove_dir_all(&dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+
+    /// Permanently delete everything in the recycle bin.
+    ///
+    /// Every entry is tried, and each that could not be deleted is reported
+    /// with its reason. This used to answer with the number deleted and drop
+    /// the failures, so a caller could only say "emptied" of a bin that still
+    /// held whatever a locked file or a permission kept in it.
+    ///
+    /// # Errors
+    ///
+    /// Only when the bin cannot be listed; a failure to delete one entry is
+    /// in [`Emptied::failed`], not here.
+    pub fn empty(&self) -> io::Result<Emptied> {
+        let mut outcome = Emptied::default();
+        for entry in self.list()? {
+            match self.delete(&entry.id) {
+                Ok(()) => outcome.deleted = outcome.deleted.saturating_add(1),
+                Err(e) => outcome.failed.push((entry, e)),
             }
         }
-        Ok(count)
+        Ok(outcome)
     }
 
     /// Permanently delete items older than `max_age`.
@@ -587,7 +640,32 @@ impl RecycleBin {
         ))
     }
 
-    /// Read the metadata for a recycled entry.
+    /// The folder of the entry called `id`, refusing anything that is not one
+    /// plain name.
+    ///
+    /// An id is a folder name inside the bin, and every one the bin hands out
+    /// is (`make_id`). But `restore` and `delete` take it from their caller,
+    /// and `root.join("../Documents")` is a path out of the bin: a
+    /// "Delete permanently" given one would have deleted a folder the user
+    /// never put in it. So the id is checked to be exactly one ordinary name
+    /// -- no separator, no `..`, not empty -- before it is joined to anything.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` for anything else.
+    fn entry_dir(&self, id: &str) -> io::Result<PathBuf> {
+        let mut parts = Path::new(id).components();
+        match (parts.next(), parts.next()) {
+            (Some(std::path::Component::Normal(name)), None) if name == OsStr::new(id) => {
+                Ok(self.root.join(name))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a recycle bin entry", shown(OsStr::new(id))),
+            )),
+        }
+    }
+
     /// Where this bin keeps its entries.
     ///
     /// For a caller that needs to reach an entry's directory directly -- the
@@ -603,26 +681,41 @@ impl RecycleBin {
     /// Used for an entry whose `meta.txt` will not parse: the size is the one
     /// fact still knowable about it, and it is the fact that matters, because
     /// the complaint that brings a user to the recycle bin is usually space.
-    /// Recursive, and unreadable children count as zero rather than aborting
-    /// the walk -- a partial total is more use than none.
+    /// The whole tree, and unreadable children count as zero rather than
+    /// aborting the walk -- a partial total is more use than none.
+    ///
+    /// A link counts as itself and is never walked through: what it names is
+    /// not in the bin. `path.is_dir()` used to follow one, so a link to a
+    /// folder added that folder's size, and a link to a folder above it
+    /// recursed until the stack ran out. And the walk keeps its own list of
+    /// folders still to read rather than recursing, so a tree however deep
+    /// cannot run it out either.
     fn entry_size(dir: &Path) -> u64 {
-        let Ok(read) = fs::read_dir(dir) else {
-            return 0;
-        };
         let mut total = 0u64;
-        for child in read.flatten() {
-            let path = child.path();
-            if path.is_dir() {
-                total = total.saturating_add(Self::entry_size(&path));
-            } else if let Ok(meta) = child.metadata() {
-                total = total.saturating_add(meta.len());
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            let Ok(read) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for child in read.flatten() {
+                match child.file_type() {
+                    Ok(kind) if kind.is_dir() => pending.push(child.path()),
+                    // `DirEntry::metadata` does not follow a link, so a link
+                    // is measured as the link.
+                    Ok(_) => {
+                        if let Ok(meta) = child.metadata() {
+                            total = total.saturating_add(meta.len());
+                        }
+                    }
+                    Err(_) => {}
+                }
             }
         }
         total
     }
 
     fn read_entry(&self, id: &str) -> io::Result<RecycleEntry> {
-        let entry_dir = self.root.join(id);
+        let entry_dir = self.entry_dir(id)?;
         let meta_path = entry_dir.join("meta.txt");
         let content = fs::read_to_string(&meta_path)?;
         let mut lines = content.lines();
@@ -652,12 +745,20 @@ impl RecycleBin {
             .checked_add(Duration::from_secs(ts_secs))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "timestamp out of range"))?;
 
+        // What is in the bin, not what it names: `exists` and `metadata`
+        // both followed a link, so a recycled link to a folder read as the
+        // folder -- and one whose target had gone read as nothing at all.
+        // A folder's size is 0, as the field says: its own byte count is not
+        // what a size means, and its contents are not measured here.
         let data_path = entry_dir.join("data");
-        let (size, is_dir) = if data_path.exists() {
-            let meta = fs::metadata(&data_path)?;
-            (meta.len(), meta.is_dir())
-        } else {
-            (0, false)
+        let (size, is_dir, is_link) = match fs::symlink_metadata(&data_path) {
+            Ok(meta) if meta.file_type().is_symlink() => (0, false, true),
+            Ok(meta) if meta.is_dir() => (0, true, false),
+            Ok(meta) => (meta.len(), false, false),
+            // Metadata with no data: a recycle that failed after writing it
+            // and could not clean up. Listed, so it can be deleted.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (0, false, false),
+            Err(e) => return Err(e),
         };
 
         Ok(RecycleEntry {
@@ -668,6 +769,7 @@ impl RecycleBin {
             recycled_at: Some(recycled_at),
             size,
             is_dir,
+            is_link,
         })
     }
 }
@@ -911,8 +1013,9 @@ mod tests {
 
         assert_eq!(bin.list().unwrap().len(), 2);
 
-        let removed = bin.empty().unwrap();
-        assert_eq!(removed, 2);
+        let emptied = bin.empty().unwrap();
+        assert_eq!(emptied.deleted, 2);
+        assert!(emptied.failed.is_empty(), "{:?}", emptied.failed);
         assert_eq!(bin.list().unwrap().len(), 0);
     }
 
@@ -1260,5 +1363,190 @@ mod tests {
             fs::read_to_string(root.join("outside").join("keep.txt")).unwrap(),
             "not selected"
         );
+    }
+
+    // == Deleting one entry, and ids (2026-09-27) ===============================
+
+    #[test]
+    fn deleting_one_entry_leaves_the_rest() {
+        let scratch = temp_dir("recycle_delete_one");
+        let dir = scratch.dir().to_path_buf();
+        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        write_file(&dir.join("a.txt"), "aaa");
+        write_file(&dir.join("b.txt"), "bbb");
+        let a = bin.recycle(&dir.join("a.txt")).unwrap();
+        let b = bin.recycle(&dir.join("b.txt")).unwrap();
+
+        bin.delete(&a).unwrap();
+
+        let left: Vec<String> = bin.list().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(left, [b]);
+        assert!(!bin.root().join(&a).exists(), "the entry's folder is still there");
+        assert!(!dir.join("a.txt").exists(), "deleting it put it back");
+    }
+
+    #[test]
+    fn a_damaged_entry_can_be_deleted_on_its_own() {
+        let scratch = temp_dir("recycle_delete_damaged");
+        let (bin, id) = bin_with_a_damaged_entry(scratch.dir());
+        bin.delete(&id).unwrap();
+        assert!(bin.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_an_entry_that_is_already_gone_is_not_an_error() {
+        let scratch = temp_dir("recycle_delete_gone");
+        let bin = RecycleBin::new(scratch.dir().join("bin"), Duration::from_hours(24));
+        bin.delete("nothing_0000000000000000").unwrap();
+    }
+
+    /// An id is one name inside the bin. Anything else -- above all a path
+    /// out of it -- is refused before it reaches the filesystem.
+    #[test]
+    fn an_id_that_is_not_one_name_is_refused() {
+        let scratch = temp_dir("recycle_bad_id");
+        let dir = scratch.dir().to_path_buf();
+        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        write_file(&dir.join("keep.txt"), "not in the bin");
+        fs::create_dir_all(dir.join("victim")).unwrap();
+        write_file(&dir.join("victim").join("inside.txt"), "not in the bin");
+        write_file(&dir.join("a.txt"), "aaa");
+        bin.recycle(&dir.join("a.txt")).unwrap();
+
+        for id in ["../victim", "..", ".", "", "a/b", "../keep.txt", "/tmp", "sub/../x"] {
+            let deleted = bin.delete(id);
+            assert_eq!(
+                deleted.as_ref().map_err(io::Error::kind),
+                Err(io::ErrorKind::InvalidInput),
+                "delete({id:?})"
+            );
+            let restored = bin.restore(id);
+            assert_eq!(
+                restored.as_ref().map_err(io::Error::kind),
+                Err(io::ErrorKind::InvalidInput),
+                "restore({id:?})"
+            );
+        }
+        assert_eq!(read_file(&dir.join("victim").join("inside.txt")), "not in the bin");
+        assert_eq!(read_file(&dir.join("keep.txt")), "not in the bin");
+        assert_eq!(bin.list().unwrap().len(), 1, "a refused id touched the real entry");
+    }
+
+    /// Emptying says which entries it could not delete; they stay listed.
+    #[test]
+    fn emptying_reports_what_it_could_not_delete() {
+        let scratch = temp_dir("recycle_empty_fails");
+        let dir = scratch.dir().to_path_buf();
+        let bin = RecycleBin::new(dir.join("bin"), Duration::from_hours(24));
+        write_file(&dir.join("held.txt"), "held open");
+        write_file(&dir.join("free.txt"), "free");
+        let held = bin.recycle(&dir.join("held.txt")).unwrap();
+        bin.recycle(&dir.join("free.txt")).unwrap();
+
+        // Something that stops the one entry being removed: on Windows a
+        // handle that shares nothing, on Unix a folder that may not be
+        // written. (A Unix superuser is not stopped by the second, which the
+        // assertions below allow for.)
+        #[cfg(windows)]
+        let _lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(bin.root().join(&held).join("data"))
+                .unwrap()
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(bin.root().join(&held), fs::Permissions::from_mode(0o500))
+                .unwrap();
+        }
+
+        let emptied = bin.empty().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Put back so the scratch folder can be cleared.
+            let _ = fs::set_permissions(bin.root().join(&held), fs::Permissions::from_mode(0o700));
+        }
+        let still_there = bin.root().join(&held).exists();
+        assert_eq!(emptied.deleted, if still_there { 1 } else { 2 });
+        assert_eq!(emptied.failed.len(), usize::from(still_there));
+        if let Some((entry, _)) = emptied.failed.first() {
+            assert_eq!(entry.id, held, "blamed the wrong entry");
+        }
+        #[cfg(windows)]
+        assert!(still_there, "the lock did not hold, so this checked nothing");
+    }
+
+    /// A recycled link is listed as a link, and not as what it names.
+    #[test]
+    fn a_recycled_link_is_listed_as_a_link() {
+        let scratch = temp_dir("recycle_link_listed");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("outside")).unwrap();
+        write_file(&root.join("outside").join("big.txt"), &"x".repeat(1000));
+        if folder_link(&root.join("outside"), &root.join("shortcut")).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        let bin = RecycleBin::new(root.join("bin"), Duration::from_hours(24));
+        bin.recycle(&root.join("shortcut")).unwrap();
+
+        let listed = bin.list().unwrap();
+        let entry = listed.first().expect("one entry");
+        assert!(entry.is_link, "{entry:?}");
+        assert!(!entry.is_dir, "{entry:?}");
+        assert_eq!(entry.size, 0, "{entry:?}");
+        assert_eq!(read_file(&root.join("outside").join("big.txt")).len(), 1000);
+    }
+
+    /// A link planted in the bin's folder is not an entry, so neither a
+    /// delete nor an empty can reach through it.
+    #[test]
+    fn a_link_in_the_bin_folder_is_not_an_entry() {
+        let scratch = temp_dir("recycle_planted_link");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("outside")).unwrap();
+        write_file(&root.join("outside").join("meta.txt"), "slate-recycle-v2\n/x\n5\n");
+        write_file(&root.join("outside").join("keep.txt"), "not in the bin");
+        let bin = RecycleBin::new(root.join("bin"), Duration::from_hours(24));
+        fs::create_dir_all(bin.root()).unwrap();
+        if folder_link(&root.join("outside"), &bin.root().join("planted")).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+
+        assert!(bin.list().unwrap().is_empty(), "the link was listed as an entry");
+        let emptied = bin.empty().unwrap();
+        assert_eq!(emptied.deleted, 0);
+        assert_eq!(read_file(&root.join("outside").join("keep.txt")), "not in the bin");
+    }
+
+    /// A damaged entry's size counts what is in the bin, never what a link
+    /// inside it names.
+    #[test]
+    fn a_damaged_entry_is_measured_without_following_links() {
+        let scratch = temp_dir("recycle_damaged_link_size");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("outside")).unwrap();
+        write_file(&root.join("outside").join("big.txt"), &"x".repeat(100_000));
+        fs::create_dir_all(root.join("folder")).unwrap();
+        write_file(&root.join("folder").join("small.txt"), "12345");
+        if folder_link(&root.join("outside"), &root.join("folder").join("link")).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        let bin = RecycleBin::new(root.join("bin"), Duration::from_hours(24));
+        let id = bin.recycle(&root.join("folder")).unwrap();
+        fs::write(bin.root().join(&id).join("meta.txt"), "damaged").unwrap();
+
+        let listed = bin.list().unwrap();
+        let entry = listed.first().expect("one entry");
+        assert!(!entry.is_readable());
+        assert!(entry.size < 100_000, "measured through the link: {}", entry.size);
+        assert!(entry.size >= 5, "missed the file that is in the bin: {}", entry.size);
     }
 }

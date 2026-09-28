@@ -17,6 +17,11 @@
 //! one byte into one; the next marker read then discards that byte and finds
 //! the `EOI` after it. Both reach the same marker, so which is modelled changes
 //! nothing that decoding produces.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdatasrc.c` (copyright (C) 1994-1996 Thomas G. Lane; (C) 2009-2011 Guido
+//! Vollbeding; (C) 2013, 2016, 2022 D. R. Commander), and changed for this
+//! project; used under the IJG License (`licenses/README.md` says how).
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;

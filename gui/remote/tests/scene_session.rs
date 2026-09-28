@@ -30,7 +30,8 @@
 use std::collections::BTreeMap;
 
 use guiremote::scene::{
-    SceneSession, WindowSnapshot, apply_scene_frame, decode_scene_frame, encode_scene_frame,
+    ImageSnapshot, PatchMark, SceneImage, SceneSession, SceneViewer, WindowSnapshot,
+    apply_scene_frame, decode_scene_frame, encode_scene_frame,
 };
 use guitk::color::Color;
 use guitk::render::{RenderCommand, RenderTree};
@@ -86,6 +87,7 @@ fn snapshots<'a>(
                 height: w.height,
                 opacity: w.opacity,
                 commands: &w.tree,
+                images: Vec::new(),
             })
         })
         .collect()
@@ -274,4 +276,300 @@ fn corrupt_transport_is_rejected_not_panicked() {
 
     // The intact frame still decodes.
     assert!(decode_scene_frame(&bytes).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Pictures
+// ---------------------------------------------------------------------------
+
+/// One picture as the server holds it: the pixels, a revision changed by every
+/// upload and patch, and the patch log a viewer a few patches behind is brought
+/// up to date from -- what the compositor keeps per `ImageAsset`.
+struct ServerImage {
+    width: u32,
+    height: u32,
+    pixels: Vec<u32>,
+    revision: u64,
+    patch_base: u64,
+    patches: Vec<PatchMark>,
+}
+
+/// Every window's pictures, and the revision counter they share.
+#[derive(Default)]
+struct Pictures {
+    next_revision: u64,
+    windows: BTreeMap<u64, BTreeMap<u64, ServerImage>>,
+}
+
+/// The longest patch log a picture keeps here -- short, so that a viewer
+/// several patches behind is sent the picture whole.
+const LOG: usize = 4;
+
+impl Pictures {
+    fn revision(&mut self) -> u64 {
+        self.next_revision += 1;
+        self.next_revision
+    }
+
+    fn upload(&mut self, window: u64, id: u64, width: u32, height: u32, seed: u32) {
+        let revision = self.revision();
+        let pixels = (0..width * height)
+            .map(|i| 0xFF00_0000 | ((i.wrapping_mul(2_654_435_761) ^ seed) & 0x00FF_FFFF))
+            .collect();
+        self.windows.entry(window).or_default().insert(
+            id,
+            ServerImage {
+                width,
+                height,
+                pixels,
+                revision,
+                patch_base: revision,
+                patches: Vec::new(),
+            },
+        );
+    }
+
+    fn patch(&mut self, window: u64, id: u64, rect: (u32, u32, u32, u32), colour: u32) {
+        let revision = self.revision();
+        let Some(image) = self.windows.get_mut(&window).and_then(|w| w.get_mut(&id)) else {
+            return;
+        };
+        let (x, y, w, h) = rect;
+        let (w, h) = (w.min(image.width - x), h.min(image.height - y));
+        for row in y..y + h {
+            for col in x..x + w {
+                image.pixels[(row * image.width + col) as usize] = colour;
+            }
+        }
+        image.revision = revision;
+        image.patches.push(PatchMark {
+            revision,
+            x,
+            y,
+            width: w,
+            height: h,
+        });
+        if image.patches.len() > LOG {
+            let dropped = image.patches.remove(0);
+            image.patch_base = dropped.revision;
+        }
+    }
+
+    fn drop(&mut self, window: u64, id: u64) {
+        if let Some(images) = self.windows.get_mut(&window) {
+            images.remove(&id);
+        }
+    }
+
+    fn snapshots(&self, window: u64) -> Vec<ImageSnapshot<'_>> {
+        self.windows
+            .get(&window)
+            .map(|images| {
+                images
+                    .iter()
+                    .map(|(&id, image)| ImageSnapshot {
+                        id,
+                        revision: image.revision,
+                        width: image.width,
+                        height: image.height,
+                        pixels: &image.pixels,
+                        patch_base: image.patch_base,
+                        patches: &image.patches,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// A frame for `session` over these windows and pictures, through the wire.
+fn frame_over_the_wire(
+    session: &mut SceneSession,
+    windows: &BTreeMap<u64, ServerWindow>,
+    pictures: &Pictures,
+) -> guiremote::scene::SceneFrame {
+    let snaps: Vec<WindowSnapshot<'_>> = windows
+        .iter()
+        .map(|(&id, w)| WindowSnapshot {
+            id,
+            x: w.x,
+            y: w.y,
+            width: w.width,
+            height: w.height,
+            opacity: w.opacity,
+            commands: &w.tree,
+            images: pictures.snapshots(id),
+        })
+        .collect();
+    let frame = session.build_frame(640, 480, &snaps);
+    let bytes = encode_scene_frame(&frame);
+    let (decoded, used) = decode_scene_frame(&bytes).expect("the viewer decodes the frame");
+    assert_eq!(used, bytes.len());
+    decoded
+}
+
+fn assert_pictures_match(viewer: &SceneViewer, pictures: &Pictures, step: usize) {
+    for (window, images) in &pictures.windows {
+        let held = &viewer.windows[window].images;
+        assert_eq!(
+            held.keys().collect::<Vec<_>>(),
+            images.keys().collect::<Vec<_>>(),
+            "step {step}: window {window} holds other pictures than the server"
+        );
+        for (id, image) in images {
+            assert_eq!(
+                (held[id].width, held[id].height),
+                (image.width, image.height),
+                "step {step}"
+            );
+            assert!(
+                held[id].pixels == image.pixels,
+                "step {step}: picture {id} of window {window} differs"
+            );
+        }
+    }
+}
+
+/// Uploads, patches (overlapping, several between frames, more than the log
+/// keeps) and drops across two windows, at random: after every frame the
+/// viewer holds exactly the server's pixels. A second viewer joining halfway
+/// holds them after its first frame. And a small patch travels as a patch.
+#[test]
+fn pictures_reach_the_viewer_through_uploads_patches_and_drops() {
+    let windows: BTreeMap<u64, ServerWindow> = [1u64, 2]
+        .iter()
+        .map(|&id| {
+            (
+                id,
+                ServerWindow {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 48,
+                    opacity: 1.0,
+                    tree: rect_tree(Color::rgba(1, 2, 3, 255), 64.0, 48.0),
+                },
+            )
+        })
+        .collect();
+    let mut pictures = Pictures::default();
+    let mut session = SceneSession::new();
+    let mut viewer = SceneViewer::new();
+    let mut late: Option<(SceneSession, SceneViewer)> = None;
+    let mut state: u32 = 0x2545_F491;
+    let mut rand = move |n: u32| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state % n
+    };
+    let mut patches_seen = 0;
+
+    for step in 0..400 {
+        for _ in 0..=rand(6) {
+            let window = u64::from(rand(2)) + 1;
+            let id = u64::from(rand(3));
+            match rand(10) {
+                0 => pictures.upload(window, id, 8 + rand(40), 6 + rand(30), rand(1 << 24)),
+                1 => pictures.drop(window, id),
+                _ => {
+                    let held = pictures.windows.get(&window).and_then(|w| w.get(&id));
+                    if let Some((w, h)) = held.map(|i| (i.width, i.height)) {
+                        let rect = (rand(w), rand(h), 1 + rand(6), 1 + rand(5));
+                        pictures.patch(window, id, rect, 0xFF00_0000 | rand(1 << 24));
+                    }
+                }
+            }
+        }
+        let frame = frame_over_the_wire(&mut session, &windows, &pictures);
+        patches_seen += frame
+            .windows
+            .iter()
+            .flat_map(|w| &w.images)
+            .filter(|c| matches!(c, SceneImage::Patch { .. }))
+            .count();
+        viewer
+            .apply(&frame)
+            .expect("the viewer applies every frame");
+        assert_pictures_match(&viewer, &pictures, step);
+
+        if step == 200 {
+            late = Some((SceneSession::new(), SceneViewer::new()));
+        }
+        if let Some((late_session, late_viewer)) = late.as_mut() {
+            let frame = frame_over_the_wire(late_session, &windows, &pictures);
+            late_viewer
+                .apply(&frame)
+                .expect("the late viewer applies it");
+            assert_pictures_match(late_viewer, &pictures, step);
+        }
+    }
+    assert!(
+        patches_seen > 100,
+        "only {patches_seen} patches went as patches; the log is not being used"
+    );
+
+    // One small patch, alone: exactly its rectangle crosses the wire.
+    pictures.upload(1, 9, 50, 40, 7);
+    let _ = frame_over_the_wire(&mut session, &windows, &pictures);
+    pictures.patch(1, 9, (10, 12, 3, 2), 0xFF12_3456);
+    let frame = frame_over_the_wire(&mut session, &windows, &pictures);
+    let changes: Vec<&SceneImage> = frame.windows.iter().flat_map(|w| &w.images).collect();
+    assert_eq!(
+        changes,
+        [&SceneImage::Patch {
+            id: 9,
+            x: 10,
+            y: 12,
+            width: 3,
+            height: 2,
+            pixels: vec![0xFF12_3456; 6],
+        }]
+    );
+}
+
+/// A patch to a picture the viewer does not hold is refused, and the viewer
+/// is left exactly as it was: the stream and the viewer disagree, which a
+/// reset of the session resolves.
+#[test]
+fn a_frame_the_viewer_cannot_apply_changes_nothing() {
+    let windows: BTreeMap<u64, ServerWindow> = [(
+        3u64,
+        ServerWindow {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+            opacity: 1.0,
+            tree: rect_tree(Color::rgba(9, 9, 9, 255), 10.0, 10.0),
+        },
+    )]
+    .into_iter()
+    .collect();
+    let mut pictures = Pictures::default();
+    pictures.upload(3, 1, 4, 4, 1);
+    let mut session = SceneSession::new();
+    let mut viewer = SceneViewer::new();
+    viewer
+        .apply(&frame_over_the_wire(&mut session, &windows, &pictures))
+        .unwrap();
+
+    // A viewer that missed the upload: it is sent only the patch.
+    let mut stale = SceneViewer::new();
+    pictures.patch(3, 1, (0, 0, 1, 1), 0xFFFF_FFFF);
+    let frame = frame_over_the_wire(&mut session, &windows, &pictures);
+    let before = format!("{stale:?}");
+    assert!(stale.apply(&frame).is_err());
+    assert_eq!(
+        format!("{stale:?}"),
+        before,
+        "a refused frame changed the viewer"
+    );
+    // The one that holds the picture applies it; a reset brings the stale one in.
+    viewer.apply(&frame).unwrap();
+    session.reset();
+    stale
+        .apply(&frame_over_the_wire(&mut session, &windows, &pictures))
+        .unwrap();
+    assert_pictures_match(&stale, &pictures, 0);
 }

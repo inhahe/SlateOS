@@ -26,6 +26,14 @@
 //! do. Each fill still happens when libjpeg's does and ends where it ends, so
 //! the input position -- which a source that fails when its data runs out,
 //! old-style JPEG in TIFF, makes visible -- is libjpeg's at every step.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdhuff.c` (copyright (C) 1991-1997 Thomas G. Lane; (C) 1999 Ken
+//! Murchison; (C) 2009-2011, 2016, 2018-2019, 2022 D. R. Commander; (C) 2018
+//! Matthias Räncker) and `jdphuff.c` (copyright (C) 1995-1997 Thomas G. Lane;
+//! (C) 1999 Ken Murchison; (C) 2015-2016, 2018-2022 D. R. Commander), and
+//! changed for this project; used under the IJG License (`licenses/README.md`
+//! says how).
 
 use super::coef::Coefficients;
 use super::error::{Error, jerr};

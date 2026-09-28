@@ -20,6 +20,11 @@
 //!
 //! A row is converted at a time: its chroma blended down once, then across
 //! into a row of each pixel's own chroma, then converted in one pass.
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `yuv.h`, `upsampling.c` (copyright 2010-2025 Google Inc.), and changed for
+//! this project; used under libwebp's BSD licence and patent grant
+//! (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`).
 
 use alloc::vec;
 use alloc::vec::Vec;

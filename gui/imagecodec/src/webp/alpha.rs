@@ -14,6 +14,11 @@
 //! preprocessing is only a note that the encoder quantised the plane; libwebp
 //! does nothing with it unless asked to dither, which its default -- and every
 //! browser's -- does not.
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `alpha_dec.c`, `filters.c` (copyright 2010-2025 Google Inc.), and changed
+//! for this project; used under libwebp's BSD licence and patent grant
+//! (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`).
 
 use alloc::vec::Vec;
 

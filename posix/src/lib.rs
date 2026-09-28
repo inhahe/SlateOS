@@ -349,6 +349,7 @@ pub mod alloca;
 pub mod assert;
 pub mod compiler_rt;
 pub mod complex;
+pub mod complexl;
 pub mod crt;
 pub mod crypt;
 pub mod ctype;

@@ -175470,7 +175470,7 @@ numbers there, no argument can land near it: about 16 integers deep for
 double, 20 for long double. For float, CORE-MATH's correctly rounded
 `lgammaf` (MIT) is a ready alternative.
 
-## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN**
+## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN (the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99)**
 
 **In short:** a C program that calls one of the functions below does not
 link. None is in C99; they are C23 additions, GNU extensions, or the `long
@@ -175480,7 +175480,7 @@ every name glibc 2.39's `libm.so.6` exports that `libc.a` does not, less the
 
 | Family | Names | Notes |
 |---|---|---|
-| `long double` complex | `cabsl` `cacosl` `cacoshl` `cargl` `casinl` `casinhl` `catanl` `catanhl` `ccosl` `ccoshl` `cexpl` `cimagl` `clogl` `conjl` `cpowl` `cprojl` `creall` `csinl` `csinhl` `csqrtl` `ctanl` `ctanhl` | FreeBSD msun has `ld80` versions of the ones `complex.rs` took from it (§1133); the rest are formulas over `mathl.rs` |
+| `long double` complex | `cabsl` `cacosl` `cacoshl` `cargl` `casinl` `casinhl` `catanl` `catanhl` `ccosl` `ccoshl` `cexpl` `cimagl` `clogl` `conjl` `cpowl` `cprojl` `creall` `csinl` `csinhl` `csqrtl` `ctanl` `ctanhl` | **done 2026-09-28** (`complexl.rs`): FreeBSD msun's `ld80` versions where it has them, `complex.rs`'s `double` algorithms carried to 80 bits for `ccoshl`, `csinhl`, `ctanhl` and their circular twins, glibc's `cpowl`; with `__mulxc3` and `__divxc3`, which a C compiler calls for `long double complex` `*` and `/` and which were missing too |
 | GNU complex | `clog10` `clog10f` `clog10l` | `clog`, divided by `ln 10` with glibc's care near `|z| = 1` |
 | `long double` Bessel | `j0l` `j1l` `jnl` `y0l` `y1l` `ynl` | musl has none; FreeBSD msun has no `ld80` Bessel either; glibc's are LGPL -- needs its own derivation (Cephes' `j0l` family is the usual permissive source) |
 | C23, all three precisions | `nextup` `nextdown` `llogb` `canonicalize` `fromfp` `fromfpx` `ufromfp` `ufromfpx` `getpayload` `setpayload` `setpayloadsig` `totalorder` `totalordermag` `fmaxmag` `fminmag` `fmaximum_mag` `fminimum_mag` `fmaximum_mag_num` `fminimum_mag_num` (each with `f` and `l`) | exact functions, IEEE 754-2019 section 5.3 and 9.7 -- short, and testable bit for bit against glibc |

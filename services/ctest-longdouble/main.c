@@ -39,7 +39,10 @@
  * called here, with values a double could not produce.  And the conversions
  * (85-91), which carry all 64 bits of the significand since the same day:
  * `strtold`, `strtold_l`, `wcstold`, `%Lf` both ways, on values a double
- * would round.
+ * would round.  And the `long double complex` functions (92-99), which come
+ * back on the x87 stack as a pair -- real part in %st(0), imaginary in
+ * %st(1) -- and take their arguments as 32 bytes in memory, through the
+ * compiler's own `__mulxc3` and `__divxc3` too.
  *
  * Exit code 42 == every check passed; anything else identifies the first
  * failing check (see the `return` values below, and the legend in
@@ -48,6 +51,7 @@
 
 #define _GNU_SOURCE /* sincosl, lgammal_r, signgam */
 
+#include <complex.h>
 #include <errno.h>
 #include <locale.h>
 #include <math.h>
@@ -486,6 +490,55 @@ int main(void)
     }
     if (!exact_ld(strtold("1e4000", NULL), 1e4000L)) {
         return 91;
+    }
+
+    /* ------------------------------------------------------------------
+     * 92-99: long double complex.  A thunk that swapped the two parts on
+     * the x87 stack, or read its argument from the wrong slot, gives a
+     * wrong part rather than a slightly wrong value; the values chosen
+     * are exact, or held to 2^-60 of their size, which a double's result
+     * misses.
+     * ------------------------------------------------------------------ */
+    {
+        long double complex z = opaque_ld(3.0L) + opaque_ld(4.0L) * I;
+        if (!exact_ld(cabsl(z), 5.0L)) {
+            return 92;
+        }
+        if (!exact_ld(creall(z), 3.0L) || !exact_ld(cimagl(z), 4.0L)) {
+            return 93;
+        }
+        long double complex c = conjl(z);
+        if (!exact_ld(creall(c), 3.0L) || !exact_ld(cimagl(c), -4.0L)) {
+            return 94;
+        }
+        /* sqrt(-4 + 0i) = 0 + 2i: the parts in the right registers. */
+        long double complex r = csqrtl(opaque_ld(-4.0L) + opaque_ld(0.0L) * I);
+        if (!exact_ld(creall(r), 0.0L) || !exact_ld(cimagl(r), 2.0L)) {
+            return 95;
+        }
+        /* The compiler's multiplication and division: __mulxc3, __divxc3. */
+        long double complex w = opaque_ld(2.0L) + opaque_ld(3.0L) * I;
+        long double complex p = z * w;
+        if (!exact_ld(creall(p), -6.0L) || !exact_ld(cimagl(p), 17.0L)) {
+            return 96;
+        }
+        long double complex q = p / w;
+        if (!exact_ld(creall(q), 3.0L) || !exact_ld(cimagl(q), 4.0L)) {
+            return 97;
+        }
+        /* cpowl: two complex arguments in memory.  (1 + i)^2 = 2i. */
+        long double complex e = cpowl(opaque_ld(1.0L) + opaque_ld(1.0L) * I,
+                                      opaque_ld(2.0L) + opaque_ld(0.0L) * I);
+        if (!near_ld(creall(e), 0.0L, 0x1p-60L) || !near_ld(cimagl(e), 2.0L, 0x1p-59L)) {
+            return 98;
+        }
+        /* cexpl(i pi) = -1 + i sin(pi): the imaginary part is pi's own
+         * error, -5.0165e-20 for a long double pi and 1.2246e-16 for a
+         * double's -- which only the 80-bit functions give. */
+        long double complex m = cexpl(opaque_ld(0.0L) + 3.14159265358979323846264338327950288L * I);
+        if (!exact_ld(creall(m), -1.0L) || !near_ld(cimagl(m), -5.01655761266833202355e-20L, 0x1p-120L)) {
+            return 99;
+        }
     }
 
     return 42;

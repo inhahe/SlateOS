@@ -51,6 +51,16 @@
 /// | `i_l` | `I f(L)` (or `N f(L)`) | `(*const L) -> I` |
 /// | `d_dl` | `D f(D, L)` | `(*const L, D) -> D` |
 /// | `f_fl` | `F f(F, L)` | `(*const L, F) -> F` |
+/// | `cl_cl` | `C f(C)` | `(*const C, *mut C)` |
+/// | `cl_clcl` | `C f(C, C)` | `(*const C, *const C, *mut C)` |
+/// | `cl_llll` | `C f(L, L, L, L)` | `(*const L, *const L, *const L, *const L, *mut C)` |
+///
+/// `C` is a `long double complex`, class COMPLEX_X87: 32 bytes in memory as
+/// an argument -- the real part's 16-byte slot, then the imaginary part's --
+/// and on the x87 stack as a result, the real part in `%st(0)` and the
+/// imaginary part in `%st(1)`, which is why its thunks load the imaginary
+/// part first. A function of one returning a `long double` (`cabsl`) is
+/// `l_l`: its argument starts where a `long double`'s would.
 #[macro_export]
 #[doc(hidden)]
 macro_rules! ld_c {
@@ -195,5 +205,49 @@ macro_rules! ld_c {
     };
     (f_fl $c:literal => $rust:ident) => {
         $crate::ld_c!(i_l $c => $rust);
+    };
+    // A complex result: 32 bytes of slot and 8 to realign; the argument
+    // starts at the caller's first stack slot, now at 48.
+    (cl_cl $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "sub rsp, 40",
+            "lea rdi, [rsp + 48]",
+            "mov rsi, rsp",
+            concat!("call ", stringify!($rust)),
+            "fld tbyte ptr [rsp + 16]",
+            "fld tbyte ptr [rsp]",
+            "add rsp, 40",
+            "ret",
+        );
+    };
+    // cpowl(x, y): the second complex argument 32 bytes after the first.
+    (cl_clcl $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "sub rsp, 40",
+            "lea rdi, [rsp + 48]",
+            "lea rsi, [rsp + 80]",
+            "mov rdx, rsp",
+            concat!("call ", stringify!($rust)),
+            "fld tbyte ptr [rsp + 16]",
+            "fld tbyte ptr [rsp]",
+            "add rsp, 40",
+            "ret",
+        );
+    };
+    // __mulxc3(a, b, c, d) and __divxc3: four long doubles, 16 bytes apart.
+    (cl_llll $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "sub rsp, 40",
+            "lea rdi, [rsp + 48]",
+            "lea rsi, [rsp + 64]",
+            "lea rdx, [rsp + 80]",
+            "lea rcx, [rsp + 96]",
+            "mov r8, rsp",
+            concat!("call ", stringify!($rust)),
+            "fld tbyte ptr [rsp + 16]",
+            "fld tbyte ptr [rsp]",
+            "add rsp, 40",
+            "ret",
+        );
     };
 }

@@ -73,14 +73,11 @@ NOT_FUNCTIONS = frozenset({
 })
 
 # What was missing when this gate was written (2026-09-28), less what has been
-# implemented since. Only ever removed from: a name here is a function a
-# program can call and not link.
-BASELINE_MISSING = frozenset({
-    # the long double complex functions (D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS)
-    "cabsl", "cacosl", "cacoshl", "cargl", "casinl", "casinhl", "catanl", "catanhl", "ccosl",
-    "ccoshl", "cexpl", "cimagl", "clogl", "conjl", "cpowl", "cprojl", "creall", "csinl",
-    "csinhl", "csqrtl", "ctanl", "ctanhl",
-})
+# implemented since -- which, from the same day's `long double` complex
+# functions on, is all of it: every function musl's headers declare is in
+# libc.a. Only ever removed from, and so empty for good: a name that turns
+# up missing now is a regression, not a baseline entry.
+BASELINE_MISSING: frozenset[str] = frozenset()
 
 DECL = re.compile(r"[^;{}]*\)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)*;", re.S)
 # `int (name)(...)`: a parenthesised declarator, which keeps a function-like

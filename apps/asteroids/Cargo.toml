@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# The toolkit's buttons at a game's size (C-Q16, §1422).
-gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 # The window. Without it `main` was `let _app = AsteroidsApp::new();` — it
 # built the ship, spawned the first wave and dropped the lot, so no frame ever
@@ -16,6 +14,8 @@ randrange = { path = "../../randrange" }
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.
 appearance = { path = "../../gui/appearance", features = ["testing"] }
+# `legibility`: every text reads on what is drawn under it.
+gamechrome = { path = "../gamechrome" }
 
 [lints]
 workspace = true

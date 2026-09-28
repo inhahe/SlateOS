@@ -155,18 +155,49 @@ fn fldenv(env: &FenvT) {
     };
 }
 
-/// glibc's `libc_feholdexcept_sse` (`sysdeps/x86/fpu/fenv_private.h`), for
-/// the double and float functions, which run in the SSE unit alone: clear
-/// its flags and mask its exceptions, and answer what to restore.
-pub(crate) fn hold_sse() -> u32 {
+/// `f(args)` with the SSE unit's flags held, glibc's `libc_feholdexcept_sse`
+/// and `libc_fesetenv_sse` (`sysdeps/x86/fpu/fenv_private.h`) around it, for
+/// the double and float functions, which run in that unit alone: its flags
+/// cleared and its exceptions masked while `f` runs, then `MXCSR` put back as
+/// it was -- so the flags `f` raised are dropped, and none of them trapped.
+/// `f` is pinned between the two `ldmxcsr`s as in [`in_nearest`].
+pub(crate) fn with_flags_held<A, T>(args: A, f: impl FnOnce(A) -> T) -> T {
     let old = stmxcsr();
     ldmxcsr((old | 0x1f80) & !0x3f);
-    old
+    let r = core::hint::black_box(f(core::hint::black_box(args)));
+    ldmxcsr(old);
+    r
 }
 
-/// Put back what [`hold_sse`] took: the flags raised meanwhile are dropped.
-pub(crate) fn restore_sse(old: u32) {
-    ldmxcsr(old);
+/// Whether the SSE unit -- every `double` and `float` operation -- rounds to
+/// nearest, the default. One `stmxcsr`: the math functions ask it on every
+/// call, and nearly every call answers yes.
+pub(crate) fn sse_rounds_to_nearest() -> bool {
+    stmxcsr() & MXCSR_ROUNDING == 0
+}
+
+/// `f(args)` computed with the SSE unit rounding to nearest, the caller's
+/// direction put back afterwards and the flags `f` raised kept: glibc's
+/// `SET_RESTORE_ROUND (FE_TONEAREST)`, for the double and float functions
+/// whose algorithms are only right to nearest (`math.rs` says which).
+///
+/// Rust gives floating-point arithmetic no ordering against the `ldmxcsr`s
+/// here -- LLVM treats it as free of side effects, so free to compute before
+/// the switch or after the switch back. What pins `f` between them is data:
+/// its arguments come out of a [`core::hint::black_box`] after the first
+/// `ldmxcsr` and its result goes into one before the second, and inline
+/// assembly with side effects, which `black_box` is too, keeps its order.
+pub(crate) fn in_nearest<A, T>(args: A, f: impl FnOnce(A) -> T) -> T {
+    let old = stmxcsr();
+    if old & MXCSR_ROUNDING == 0 {
+        return f(args);
+    }
+    ldmxcsr(old & !MXCSR_ROUNDING);
+    let r = core::hint::black_box(f(core::hint::black_box(args)));
+    // The flags are the six low bits; `old` has the caller's, `f` may have
+    // added to them.
+    ldmxcsr(old | (stmxcsr() & 0x3f));
+    r
 }
 
 /// Both units' current exception flags.
@@ -651,6 +682,40 @@ mod tests {
             FE_OVERFLOW | FE_INEXACT,
             "flags before it survive"
         );
+    }
+
+    /// `in_nearest` computes to nearest whatever the caller rounds in, puts
+    /// the caller's direction back and keeps the flags its computation
+    /// raised -- and to nearest already it only calls.
+    #[test]
+    fn in_nearest_rounds_to_nearest_and_puts_the_direction_back() {
+        let _r = Restore::take();
+        let third = |x: f64| x / 3.0;
+        let one = core::hint::black_box(1.0_f64);
+        for mode in [FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO, FE_TONEAREST] {
+            fesetround(mode);
+            feclearexcept(FE_ALL_EXCEPT);
+            // 1/3 to nearest is 0x3FD5555555555555, below the exact value.
+            assert_eq!(
+                in_nearest(one, third).to_bits(),
+                0x3FD5_5555_5555_5555,
+                "in {mode:#x}"
+            );
+            assert_eq!(fegetround(), mode, "the direction is put back");
+            assert_eq!(fetestexcept(FE_ALL_EXCEPT), FE_INEXACT, "and the flag kept");
+            assert_eq!(sse_rounds_to_nearest(), mode == FE_TONEAREST);
+        }
+        fesetround(FE_UPWARD);
+        assert_eq!(
+            third(one).to_bits(),
+            0x3FD5_5555_5555_5556,
+            "upward outside it"
+        );
+        // The flags the caller had survive too.
+        feclearexcept(FE_ALL_EXCEPT);
+        feraiseexcept(FE_OVERFLOW);
+        let _ = in_nearest(one, third);
+        assert_eq!(fetestexcept(FE_ALL_EXCEPT), FE_OVERFLOW | FE_INEXACT);
     }
 
     /// A flag raised stays until cleared; raising and testing agree, and

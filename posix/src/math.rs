@@ -38,18 +38,60 @@
 //! | underflow to zero | `ERANGE` | `exp(-746)`, `pow(2, -1076)` |
 //!
 //! `errno` is only ever set, never cleared: a caller that wants to know clears
-//! it first, as C requires. The crate raises the IEEE flags as musl does;
-//! reading them waits on `<fenv.h>`, which this library does not have yet
-//! (`known-issues.md` -> `D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX`).
+//! it first, as C requires. The crate raises the IEEE flags as musl does, and
+//! `fetestexcept` (`fenv.rs`) reads them.
+//!
+//! ## Every rounding direction
+//!
+//! A program may round in any of four directions (`fesetround`), and each
+//! function must still answer within its error in all four. musl writes for
+//! round-to-nearest, and replaying glibc in the three others
+//! (`math_modes_oracle.txt`) found three ways that fails:
+//!
+//! - **Argument reduction.** musl's `__rem_pio2` rounds `x / (pi/2)` to an
+//!   integer by adding and subtracting 1.5 * 2^52, which rounds in the
+//!   caller's direction instead, and hands the polynomial after it an
+//!   argument outside the interval it was fitted on: `sin(pi)` rounding
+//!   upward was 2.3e-11. Every sine, cosine and tangent, and every Bessel
+//!   function (whose asymptotic forms call them), is computed to nearest
+//!   ([`crate::fenv::in_nearest`]) and so answers in every direction what it
+//!   answers to nearest -- as glibc's own `sin`, `cos` and `tan` do.
+//! - **Overflow and underflow.** musl rounds them its own way: its `exp`
+//!   answers 0 below -745.13 in every direction, where upward rounding owes
+//!   the least subnormal, and its `sinh` rounds the magnitude and then
+//!   negates it, so downward an overflow to -inf came out -DBL_MAX.
+//!   [`ranged`] answers every overflow and underflow as IEEE 754 prescribes
+//!   for the direction: an infinity or the largest finite value, zero or the
+//!   least subnormal.
+//! - **Signed zeros.** Rounding downward, `x - x` is -0: musl's `acosh(1)`
+//!   was -0 (C's Annex F says +0) and `atanh(1)` a NaN, `2 / -0` being -inf.
+//!   Both are answered before the algorithm starts.
+//!
+//! **`errno` does not depend on the direction.** A range error is decided on
+//! the round-to-nearest result -- the one glibc's rules above were written
+//! for -- so `exp(1000)` sets `ERANGE` whether it answers `inf` (to nearest,
+//! upward) or `DBL_MAX` (downward, toward zero). glibc is not consistent
+//! here: its `exp` sets `ERANGE` for `DBL_MAX` past |x| = 1024 but not below,
+//! its `ldexp` never for `DBL_MAX`, and its `tgamma(-190.5)` rounding
+//! downward answers the least subnormal without one where to nearest the
+//! same call answers -0 with it. C leaves `errno` in the directed modes to
+//! the implementation (7.12.1 specifies overflow's only "when default
+//! rounding is in effect", and underflow's is implementation-defined
+//! throughout); one rule for all four is the choice here.
 //!
 //! ## Tested against glibc
 //!
-//! The tests replay 23,113 calls to glibc 2.39 under WSL
+//! The tests replay 23,545 calls to glibc 2.39 under WSL
 //! (`posix/tools/oracle/math_harness.py`, table `math_oracle.txt`): bit for bit, with
 //! `errno`, for everything IEEE fixes exactly (rounding, `fma`, `sqrt`,
 //! `fmod`, `ldexp`, `frexp`, `nextafter` ...), and within a stated distance in
 //! units in the last place for the rest, where glibc and musl use different
-//! approximations and neither is exact.
+//! approximations and neither is exact. They replay the same calls in each
+//! directed rounding mode too (`math_modes_harness.py`, table
+//! `math_modes_oracle.txt`: the 12,103 of 70,635 answers that differ from
+//! nearest), within one ulp more, and with the four exceptions
+//! `directed_answer` in the tests lists -- the `errno` rule above, and three
+//! places where glibc's directed answer is not IEEE's.
 
 use crate::errno;
 use core::sync::atomic::{AtomicI32, Ordering};
@@ -57,6 +99,180 @@ use core::sync::atomic::{AtomicI32, Ordering};
 #[inline]
 fn set(e: i32) {
     errno::set_errno(e);
+}
+
+// ---------------------------------------------------------------------------
+// Range errors, in every rounding direction
+// ---------------------------------------------------------------------------
+
+/// Where a function's result lies against the range of its type, judged on
+/// its round-to-nearest value ([`ranged`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Range {
+    /// In range; or exactly an infinity or a zero (a pole, `pow(0, 2)`), or
+    /// not a number. No range error.
+    Within,
+    /// Beyond the largest finite value: an infinity to nearest.
+    Overflow,
+    /// Too small for the least subnormal: a zero to nearest.
+    Underflow,
+}
+
+/// What [`ranged`] needs of `f64` and `f32`.
+trait Real: Copy {
+    /// Whether a result is where the rounding direction can decide between a
+    /// range error and none: within a factor of 2 of the largest finite
+    /// value, or below twice the least normal one (zero included). An
+    /// infinity is; a NaN is not.
+    fn at_the_edge(self) -> bool;
+    /// Whether it is a zero, of either sign.
+    fn is_zero(self) -> bool;
+    /// An overflow with `sign`'s sign, rounded in the current direction: the
+    /// largest finite value times itself -- an infinity, or the largest
+    /// finite value where the direction rounds toward zero -- with the
+    /// overflow and inexact flags the multiplication raises.
+    fn overflow(sign: Self) -> Self;
+    /// An underflow with `sign`'s sign too small for the least subnormal,
+    /// rounded in the current direction: a tiny power of two times itself --
+    /// zero, or the least subnormal where the direction rounds away from
+    /// zero -- with the underflow and inexact flags.
+    fn underflow(sign: Self) -> Self;
+}
+
+impl Real for f64 {
+    fn at_the_edge(self) -> bool {
+        let a = self.abs();
+        // 2^-1021 and 2^1023.
+        a < f64::from_bits(0x0020_0000_0000_0000) || a >= f64::from_bits(0x7FE0_0000_0000_0000)
+    }
+
+    fn is_zero(self) -> bool {
+        self == 0.0
+    }
+
+    fn overflow(sign: f64) -> f64 {
+        // `black_box` keeps the product from being folded at compile time,
+        // where it would round to nearest.
+        core::hint::black_box(f64::MAX).copysign(sign) * core::hint::black_box(f64::MAX)
+    }
+
+    fn underflow(sign: f64) -> f64 {
+        // 2^-600, whose square 2^-1200 is far below the least subnormal.
+        let tiny = core::hint::black_box(f64::from_bits(0x1A70_0000_0000_0000));
+        tiny.copysign(sign) * tiny
+    }
+}
+
+impl Real for f32 {
+    fn at_the_edge(self) -> bool {
+        let a = self.abs();
+        // 2^-125 and 2^127.
+        a < f32::from_bits(0x0100_0000) || a >= f32::from_bits(0x7F00_0000)
+    }
+
+    fn is_zero(self) -> bool {
+        self == 0.0
+    }
+
+    fn overflow(sign: f32) -> f32 {
+        core::hint::black_box(f32::MAX).copysign(sign) * core::hint::black_box(f32::MAX)
+    }
+
+    fn underflow(sign: f32) -> f32 {
+        // 2^-100, whose square 2^-200 is far below the least subnormal.
+        let tiny = core::hint::black_box(f32::from_bits(0x0D80_0000));
+        tiny.copysign(sign) * tiny
+    }
+}
+
+/// `f(args)`, with its range error reported as `ERANGE` -- the one `range`
+/// finds in its round-to-nearest value, or in the value it answers -- and an
+/// overflow or underflow answered as the rounding direction gives the exact
+/// result.
+///
+/// To nearest -- the default, and all but every call -- this is `f` and two
+/// comparisons: only a result at an end of the range ([`Real::at_the_edge`])
+/// is judged at all, and it is its own round-to-nearest value. In another
+/// direction such a result is also judged on `f(args)` computed again to
+/// nearest ([`crate::fenv::in_nearest`]) -- the module documentation says
+/// why -- and where that overflows or underflows to zero, the answer is
+/// [`Real::overflow`] or [`Real::underflow`]: an infinity or the largest
+/// finite value, zero or the least subnormal, as IEEE 754 prescribes for the
+/// direction, in place of whatever the algorithm's own arithmetic made of
+/// it.
+///
+/// `range` must answer `Underflow` only for a zero.
+fn ranged<A: Copy, R: Real>(args: A, f: impl Fn(A) -> R, range: impl Fn(R) -> Range) -> R {
+    let r = f(args);
+    if !r.at_the_edge() {
+        return r;
+    }
+    if crate::fenv::sse_rounds_to_nearest() {
+        if range(r) != Range::Within {
+            set(errno::ERANGE);
+        }
+        return r;
+    }
+    let near = crate::fenv::in_nearest(args, &f);
+    match range(near) {
+        Range::Within => {
+            // In range to nearest, but not as rounded here: DBL_MAX + 1
+            // rounded upward is an infinity, the least subnormal times 0.9
+            // rounded downward zero.
+            if range(r) != Range::Within {
+                set(errno::ERANGE);
+            }
+            r
+        }
+        Range::Overflow => {
+            set(errno::ERANGE);
+            R::overflow(near)
+        }
+        Range::Underflow => {
+            set(errno::ERANGE);
+            if near.is_zero() {
+                R::underflow(near)
+            } else {
+                r
+            }
+        }
+    }
+}
+
+/// The range of a result that overflows to an infinity and underflows to
+/// zero from finite arguments and is never exactly either: `exp`, `exp2`,
+/// `exp10` (glibc's `w_exp_template.c`, and the double implementations'
+/// `__math_oflow` and `__math_uflow`), `ldexp` and its kin (`w_scalbn`).
+fn overflow_or_underflow(args_finite: bool, r: f64) -> Range {
+    if !args_finite {
+        Range::Within
+    } else if r.is_infinite() {
+        Range::Overflow
+    } else if r == 0.0 {
+        Range::Underflow
+    } else {
+        Range::Within
+    }
+}
+
+/// The range of a result that can overflow but not underflow: an infinity
+/// from finite arguments (`expm1`, `sinh`, `cosh`, `hypot`).
+fn overflow_only(args_finite: bool, r: f64) -> Range {
+    if args_finite && r.is_infinite() {
+        Range::Overflow
+    } else {
+        Range::Within
+    }
+}
+
+/// The range of a result that can underflow but not overflow: a zero where
+/// the function is not zero (`erfc`, `atan2`, the Bessel `j`s).
+fn underflow_only(underflowed: bool) -> Range {
+    if underflowed {
+        Range::Underflow
+    } else {
+        Range::Within
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -226,10 +442,7 @@ pub extern "C" fn nearbyint(x: f64) -> f64 {
     if x.abs() >= 4_503_599_627_370_496.0 {
         return x;
     }
-    let held = crate::fenv::hold_sse();
-    let r = libm::rint(x);
-    crate::fenv::restore_sse(held);
-    r
+    crate::fenv::with_flags_held(x, libm::rint)
 }
 
 /// [`nearbyint`] (float; past 2^23 a float has no fraction).
@@ -241,10 +454,7 @@ pub extern "C" fn nearbyintf(x: f32) -> f32 {
     if x.abs() >= 8_388_608.0 {
         return x;
     }
-    let held = crate::fenv::hold_sse();
-    let r = libm::rintf(x);
-    crate::fenv::restore_sse(held);
-    r
+    crate::fenv::with_flags_held(x, libm::rintf)
 }
 
 /// An integral double as a `long`, or `LONG_MIN` -- what x86-64's conversion
@@ -379,24 +589,24 @@ pub extern "C" fn fmaxf(x: f32, y: f32) -> f32 {
 }
 
 /// `x - y` if positive, else +0 (glibc's `s_fdim_template.c`: `ERANGE` when
-/// finite arguments overflow).
+/// finite arguments overflow, [`ranged`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fdim(x: f64, y: f64) -> f64 {
-    let r = libm::fdim(x, y);
-    if r.is_infinite() && !x.is_infinite() && !y.is_infinite() {
-        set(errno::ERANGE);
-    }
-    r
+    ranged(
+        (x, y),
+        |(x, y)| libm::fdim(x, y),
+        |r| overflow_only(!x.is_infinite() && !y.is_infinite(), r),
+    )
 }
 
 /// [`fdim`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fdimf(x: f32, y: f32) -> f32 {
-    let r = libm::fdimf(x, y);
-    if r.is_infinite() && !x.is_infinite() && !y.is_infinite() {
-        set(errno::ERANGE);
-    }
-    r
+    ranged(
+        (x, y),
+        |(x, y)| libm::fdimf(x, y),
+        |r| overflow_only(!x.is_infinite() && !y.is_infinite(), f64::from(r)),
+    )
 }
 
 /// `x * y + z`, rounded once: fused, as C requires -- by the processor's
@@ -549,28 +759,31 @@ pub extern "C" fn modff(x: f32, iptr: *mut f32) -> f32 {
     frac
 }
 
-/// glibc's `s_ldexp_template.c`, which `ldexp`, `scalbn` and (through
-/// `w_scalbln_template.c`) `scalbln` all are: a zero or non-finite `x` is its
-/// own answer, and `ERANGE` when the result overflows or underflows to zero.
-fn scaled(x: f64, r: f64) -> f64 {
+/// `x * 2^n` as glibc's `s_ldexp_template.c` has it, which `ldexp`,
+/// `scalbn`, (through `w_scalbln_template.c`) `scalbln` and `scalb` all are:
+/// a zero or non-finite `x` is its own answer, and `ERANGE` when the result
+/// overflows or underflows to zero ([`ranged`]: judged to nearest).
+fn scaled(x: f64, n: i32) -> f64 {
     if !x.is_finite() || x == 0.0 {
         return x + x;
     }
-    if !r.is_finite() || r == 0.0 {
-        set(errno::ERANGE);
-    }
-    r
+    ranged(
+        (x, n),
+        |(x, n)| libm::scalbn(x, n),
+        |r| overflow_or_underflow(true, r),
+    )
 }
 
 /// [`scaled`] (float).
-fn scaled_f(x: f32, r: f32) -> f32 {
+fn scaled_f(x: f32, n: i32) -> f32 {
     if !x.is_finite() || x == 0.0 {
         return x + x;
     }
-    if !r.is_finite() || r == 0.0 {
-        set(errno::ERANGE);
-    }
-    r
+    ranged(
+        (x, n),
+        |(x, n)| libm::scalbnf(x, n),
+        |r| overflow_or_underflow(true, f64::from(r)),
+    )
 }
 
 /// A `long` exponent as an `int` one, clamped: past `±2^31` every double has
@@ -582,25 +795,25 @@ fn clamp_exp(n: i64) -> i32 {
 /// `x * 2^n`, rounded once.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ldexp(x: f64, n: i32) -> f64 {
-    scaled(x, libm::scalbn(x, n))
+    scaled(x, n)
 }
 
 /// [`ldexp`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ldexpf(x: f32, n: i32) -> f32 {
-    scaled_f(x, libm::scalbnf(x, n))
+    scaled_f(x, n)
 }
 
 /// [`ldexp`], by its C99 name.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalbn(x: f64, n: i32) -> f64 {
-    scaled(x, libm::scalbn(x, n))
+    scaled(x, n)
 }
 
 /// [`ldexpf`], by its C99 name.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalbnf(x: f32, n: i32) -> f32 {
-    scaled_f(x, libm::scalbnf(x, n))
+    scaled_f(x, n)
 }
 
 /// `x * 2^fn` for a floating `fn` (XSI; removed from POSIX in 2008, still in
@@ -612,62 +825,47 @@ pub extern "C" fn scalbnf(x: f32, n: i32) -> f32 {
 /// `fn`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalb(x: f64, fn_: f64) -> f64 {
-    let z = if x.is_nan() || fn_.is_nan() {
-        x * fn_
-    } else if !fn_.is_finite() {
-        if fn_ > 0.0 { x * fn_ } else { x / -fn_ }
-    } else if libm::rint(fn_) != fn_ {
-        domain_nan(fn_)
-    } else if fn_ > 65000.0 {
-        libm::scalbn(x, 65000)
-    } else if -fn_ > 65000.0 {
-        libm::scalbn(x, -65000)
-    } else {
-        // An integer within +-65000: exact.
-        #[allow(clippy::cast_possible_truncation)]
-        let n = fn_ as i32;
-        libm::scalbn(x, n)
-    };
-    scalb_errno(
-        x.is_nan() || fn_.is_nan(),
-        x.is_infinite(),
-        fn_.is_infinite(),
-        x == 0.0,
-        z.is_nan(),
-        z.is_infinite(),
-        z == 0.0,
-    );
-    z
+    if x.is_nan() || fn_.is_nan() {
+        return x * fn_;
+    }
+    if !fn_.is_finite() {
+        // An exact infinity or zero, or a NaN from 0 * inf or inf / inf.
+        let z = if fn_ > 0.0 { x * fn_ } else { x / -fn_ };
+        if z.is_nan() {
+            set(errno::EDOM);
+        }
+        return z;
+    }
+    if libm::rint(fn_) != fn_ {
+        set(errno::EDOM);
+        return domain_nan(fn_);
+    }
+    // An integer, clamped at +-65000 (exact within it).
+    #[allow(clippy::cast_possible_truncation)]
+    let n = fn_.clamp(-65000.0, 65000.0) as i32;
+    scaled(x, n)
 }
 
 /// [`scalb`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalbf(x: f32, fn_: f32) -> f32 {
-    let z = if x.is_nan() || fn_.is_nan() {
-        x * fn_
-    } else if !fn_.is_finite() {
-        if fn_ > 0.0 { x * fn_ } else { x / -fn_ }
-    } else if libm::rintf(fn_) != fn_ {
-        domain_nanf(fn_)
-    } else if fn_ > 65000.0 {
-        libm::scalbnf(x, 65000)
-    } else if -fn_ > 65000.0 {
-        libm::scalbnf(x, -65000)
-    } else {
-        #[allow(clippy::cast_possible_truncation)]
-        let n = fn_ as i32;
-        libm::scalbnf(x, n)
-    };
-    scalb_errno(
-        x.is_nan() || fn_.is_nan(),
-        x.is_infinite(),
-        fn_.is_infinite(),
-        x == 0.0,
-        z.is_nan(),
-        z.is_infinite(),
-        z == 0.0,
-    );
-    z
+    if x.is_nan() || fn_.is_nan() {
+        return x * fn_;
+    }
+    if !fn_.is_finite() {
+        let z = if fn_ > 0.0 { x * fn_ } else { x / -fn_ };
+        if z.is_nan() {
+            set(errno::EDOM);
+        }
+        return z;
+    }
+    if libm::rintf(fn_) != fn_ {
+        set(errno::EDOM);
+        return domain_nanf(fn_);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let n = fn_.clamp(-65000.0, 65000.0) as i32;
+    scaled_f(x, n)
 }
 
 /// 0/0 made from `x`, a finite value: the processor's default NaN with
@@ -684,40 +882,16 @@ fn domain_nanf(x: f32) -> f32 {
     (x - x) / (x - x)
 }
 
-/// glibc's `w_scalb` rules, for both precisions.
-#[allow(clippy::fn_params_excessive_bools)]
-fn scalb_errno(
-    nan_in: bool,
-    x_inf: bool,
-    fn_inf: bool,
-    x_zero: bool,
-    z_nan: bool,
-    z_inf: bool,
-    z_zero: bool,
-) {
-    if z_nan {
-        if !nan_in {
-            set(errno::EDOM);
-        }
-    } else if z_inf {
-        if !x_inf && !fn_inf {
-            set(errno::ERANGE);
-        }
-    } else if z_zero && !x_zero && !fn_inf {
-        set(errno::ERANGE);
-    }
-}
-
 /// [`scalbn`] with a `long` exponent.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalbln(x: f64, n: i64) -> f64 {
-    scaled(x, libm::scalbn(x, clamp_exp(n)))
+    scaled(x, clamp_exp(n))
 }
 
 /// [`scalbnf`] with a `long` exponent.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalblnf(x: f32, n: i64) -> f32 {
-    scaled_f(x, libm::scalbnf(x, clamp_exp(n)))
+    scaled_f(x, clamp_exp(n))
 }
 
 /// `FP_ILOGB0`: glibc's value on x86-64, `INT_MIN`.
@@ -840,56 +1014,50 @@ pub extern "C" fn nextafterf(x: f32, y: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// The rule glibc's `w_exp_template.c` (and `exp2`, `exp10`) apply: `ERANGE`
-/// when a finite argument overflows or underflows to zero.
-fn exp_errno(x: f64, r: f64) -> f64 {
-    if (!r.is_finite() || r == 0.0) && x.is_finite() {
-        set(errno::ERANGE);
-    }
-    r
+/// when a finite argument overflows or underflows to zero ([`ranged`]).
+fn exp_like(x: f64, f: fn(f64) -> f64) -> f64 {
+    ranged(x, f, |r| overflow_or_underflow(x.is_finite(), r))
 }
 
-/// [`exp_errno`] (float).
-fn exp_errno_f(x: f32, r: f32) -> f32 {
-    if (!r.is_finite() || r == 0.0) && x.is_finite() {
-        set(errno::ERANGE);
-    }
-    r
+/// [`exp_like`] (float).
+fn exp_like_f(x: f32, f: fn(f32) -> f32) -> f32 {
+    ranged(x, f, |r| overflow_or_underflow(x.is_finite(), f64::from(r)))
 }
 
 /// `e^x`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn exp(x: f64) -> f64 {
-    exp_errno(x, libm::exp(x))
+    exp_like(x, libm::exp)
 }
 
 /// [`exp`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn expf(x: f32) -> f32 {
-    exp_errno_f(x, libm::expf(x))
+    exp_like_f(x, libm::expf)
 }
 
 /// `2^x`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn exp2(x: f64) -> f64 {
-    exp_errno(x, libm::exp2(x))
+    exp_like(x, libm::exp2)
 }
 
 /// [`exp2`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn exp2f(x: f32) -> f32 {
-    exp_errno_f(x, libm::exp2f(x))
+    exp_like_f(x, libm::exp2f)
 }
 
 /// `10^x` (a GNU extension, now C23's).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn exp10(x: f64) -> f64 {
-    exp_errno(x, libm::exp10(x))
+    exp_like(x, libm::exp10)
 }
 
 /// [`exp10`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn exp10f(x: f32) -> f32 {
-    exp_errno_f(x, libm::exp10f(x))
+    exp_like_f(x, libm::exp10f)
 }
 
 /// glibc's old name for [`exp10`].
@@ -908,21 +1076,15 @@ pub extern "C" fn pow10f(x: f32) -> f32 {
 /// it cannot underflow).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn expm1(x: f64) -> f64 {
-    let r = libm::expm1(x);
-    if r.is_infinite() && x.is_finite() {
-        set(errno::ERANGE);
-    }
-    r
+    ranged(x, libm::expm1, |r| overflow_only(x.is_finite(), r))
 }
 
 /// [`expm1`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn expm1f(x: f32) -> f32 {
-    let r = libm::expm1f(x);
-    if r.is_infinite() && x.is_finite() {
-        set(errno::ERANGE);
-    }
-    r
+    ranged(x, libm::expm1f, |r| {
+        overflow_only(x.is_finite(), f64::from(r))
+    })
 }
 
 /// The rule glibc's `w_log_template.c`, `w_log2_template.c` and
@@ -1002,26 +1164,38 @@ pub extern "C" fn log1pf(x: f32) -> f32 {
 
 /// glibc's `w_pow_template.c`: a non-finite answer from finite arguments is
 /// `EDOM` if it is a NaN (a negative base to a non-integer power) and
-/// `ERANGE` otherwise (overflow, or `pow(0, y<0)`'s pole); a zero from a
-/// finite nonzero base and a finite power is an underflow, `ERANGE`.
+/// `ERANGE` otherwise -- `pow(0, y<0)`'s pole, or an overflow; a zero from a
+/// finite nonzero base and a finite power is an underflow, `ERANGE`. The
+/// pole and the NaN are the arguments' doing and are reported here; the
+/// overflow and the underflow are [`pow_range`]'s, through [`ranged`].
 fn pow_errno(x: f64, y: f64, z: f64) {
-    if !z.is_finite() {
-        if x.is_finite() && y.is_finite() {
-            set(if z.is_nan() {
-                errno::EDOM
-            } else {
-                errno::ERANGE
-            });
+    if x.is_finite() && y.is_finite() {
+        if z.is_nan() {
+            set(errno::EDOM);
+        } else if x == 0.0 && y < 0.0 {
+            set(errno::ERANGE);
         }
-    } else if z == 0.0 && x.is_finite() && x != 0.0 && y.is_finite() {
-        set(errno::ERANGE);
+    }
+}
+
+/// [`Range`] for `pow`: an infinity from a finite nonzero base and a finite
+/// power overflowed, and a zero from them underflowed.
+fn pow_range(x: f64, y: f64, z: f64) -> Range {
+    if !x.is_finite() || !y.is_finite() || x == 0.0 {
+        Range::Within
+    } else if z.is_infinite() {
+        Range::Overflow
+    } else if z == 0.0 {
+        Range::Underflow
+    } else {
+        Range::Within
     }
 }
 
 /// `x^y`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pow(x: f64, y: f64) -> f64 {
-    let z = libm::pow(x, y);
+    let z = ranged((x, y), |(x, y)| libm::pow(x, y), |z| pow_range(x, y, z));
     pow_errno(x, y, z);
     z
 }
@@ -1029,7 +1203,11 @@ pub extern "C" fn pow(x: f64, y: f64) -> f64 {
 /// [`pow`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn powf(x: f32, y: f32) -> f32 {
-    let z = libm::powf(x, y);
+    let z = ranged(
+        (x, y),
+        |(x, y)| libm::powf(x, y),
+        |z| pow_range(f64::from(x), f64::from(y), f64::from(z)),
+    );
     pow_errno(f64::from(x), f64::from(y), f64::from(z));
     z
 }
@@ -1050,21 +1228,21 @@ pub extern "C" fn cbrtf(x: f32) -> f32 {
 /// finite arguments overflow).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hypot(x: f64, y: f64) -> f64 {
-    let z = libm::hypot(x, y);
-    if !z.is_finite() && x.is_finite() && y.is_finite() {
-        set(errno::ERANGE);
-    }
-    z
+    ranged(
+        (x, y),
+        |(x, y)| libm::hypot(x, y),
+        |z| overflow_only(x.is_finite() && y.is_finite(), z),
+    )
 }
 
 /// [`hypot`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hypotf(x: f32, y: f32) -> f32 {
-    let z = libm::hypotf(x, y);
-    if !z.is_finite() && x.is_finite() && y.is_finite() {
-        set(errno::ERANGE);
-    }
-    z
+    ranged(
+        (x, y),
+        |(x, y)| libm::hypotf(x, y),
+        |z| overflow_only(x.is_finite() && y.is_finite(), f64::from(z)),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,6 +1251,14 @@ pub extern "C" fn hypotf(x: f32, y: f32) -> f32 {
 
 /// glibc's `s_sin.c`, `s_tan.c`, `s_sincos.c` (and their float twins): the
 /// sine, cosine or tangent of an infinity is a domain error.
+///
+/// Every function here is computed to nearest ([`crate::fenv::in_nearest`]):
+/// musl reduces the argument modulo pi/2 by rounding `x * 2/pi` to an integer
+/// with 1.5 * 2^52 added and taken away, which in another rounding direction
+/// rounds that way instead, and leaves the polynomials an argument up to
+/// 3pi/4 where they were fitted to pi/4 -- `sin(pi)` rounding upward was
+/// 2.3e-11, `tanf(2^23 + 1)` 3,310 ulps out. glibc's `sin`, `cos` and `tan`
+/// switch to nearest the same way (`SET_RESTORE_ROUND_53BIT`).
 fn trig_domain(x: f64) {
     if x.is_infinite() {
         set(errno::EDOM);
@@ -1083,42 +1269,42 @@ fn trig_domain(x: f64) {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sin(x: f64) -> f64 {
     trig_domain(x);
-    libm::sin(x)
+    crate::fenv::in_nearest(x, libm::sin)
 }
 
 /// [`sin`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sinf(x: f32) -> f32 {
     trig_domain(f64::from(x));
-    libm::sinf(x)
+    crate::fenv::in_nearest(x, libm::sinf)
 }
 
 /// The cosine.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn cos(x: f64) -> f64 {
     trig_domain(x);
-    libm::cos(x)
+    crate::fenv::in_nearest(x, libm::cos)
 }
 
 /// [`cos`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn cosf(x: f32) -> f32 {
     trig_domain(f64::from(x));
-    libm::cosf(x)
+    crate::fenv::in_nearest(x, libm::cosf)
 }
 
 /// The tangent.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tan(x: f64) -> f64 {
     trig_domain(x);
-    libm::tan(x)
+    crate::fenv::in_nearest(x, libm::tan)
 }
 
 /// [`tan`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tanf(x: f32) -> f32 {
     trig_domain(f64::from(x));
-    libm::tanf(x)
+    crate::fenv::in_nearest(x, libm::tanf)
 }
 
 /// The sine into `*s` and the cosine into `*c`, from one reduction. A NULL
@@ -1126,7 +1312,7 @@ pub extern "C" fn tanf(x: f32) -> f32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sincos(x: f64, s: *mut f64, c: *mut f64) {
     trig_domain(x);
-    let (sv, cv) = libm::sincos(x);
+    let (sv, cv) = crate::fenv::in_nearest(x, libm::sincos);
     if !s.is_null() {
         // SAFETY: non-null, and the caller's `double *`.
         unsafe { s.write(sv) };
@@ -1141,7 +1327,7 @@ pub extern "C" fn sincos(x: f64, s: *mut f64, c: *mut f64) {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sincosf(x: f32, s: *mut f32, c: *mut f32) {
     trig_domain(f64::from(x));
-    let (sv, cv) = libm::sincosf(x);
+    let (sv, cv) = crate::fenv::in_nearest(x, libm::sincosf);
     if !s.is_null() {
         // SAFETY: non-null, and the caller's `float *`.
         unsafe { s.write(sv) };
@@ -1201,68 +1387,57 @@ pub extern "C" fn atanf(x: f32) -> f32 {
 
 /// The angle of the point (`x`, `y`) -- note the order, `y` first. glibc's
 /// `w_atan2_template.c`: `ERANGE` when a nonzero `y` and finite `x`
-/// underflow to zero.
+/// underflow to zero ([`ranged`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atan2(y: f64, x: f64) -> f64 {
-    let z = libm::atan2(y, x);
-    if z == 0.0 && y != 0.0 && x.is_finite() {
-        set(errno::ERANGE);
-    }
-    z
+    ranged(
+        (y, x),
+        |(y, x)| libm::atan2(y, x),
+        |z| underflow_only(z == 0.0 && y != 0.0 && x.is_finite()),
+    )
 }
 
 /// [`atan2`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atan2f(y: f32, x: f32) -> f32 {
-    let z = libm::atan2f(y, x);
-    if z == 0.0 && y != 0.0 && x.is_finite() {
-        set(errno::ERANGE);
-    }
-    z
+    ranged(
+        (y, x),
+        |(y, x)| libm::atan2f(y, x),
+        |z| underflow_only(z == 0.0 && y != 0.0 && x.is_finite()),
+    )
 }
 
 // ---------------------------------------------------------------------------
 // Hyperbolic
 // ---------------------------------------------------------------------------
 
-/// `ERANGE` when a finite argument overflows: glibc's `w_sinh_template.c`
-/// and `w_cosh_template.c`.
-fn overflow_errno(x: f64, z: f64) {
-    if !z.is_finite() && x.is_finite() {
-        set(errno::ERANGE);
-    }
-}
-
-/// The hyperbolic sine.
+/// The hyperbolic sine (glibc's `w_sinh_template.c`: `ERANGE` when a finite
+/// argument overflows, [`ranged`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sinh(x: f64) -> f64 {
-    let z = libm::sinh(x);
-    overflow_errno(x, z);
-    z
+    ranged(x, libm::sinh, |z| overflow_only(x.is_finite(), z))
 }
 
 /// [`sinh`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sinhf(x: f32) -> f32 {
-    let z = libm::sinhf(x);
-    overflow_errno(f64::from(x), f64::from(z));
-    z
+    ranged(x, libm::sinhf, |z| {
+        overflow_only(x.is_finite(), f64::from(z))
+    })
 }
 
-/// The hyperbolic cosine.
+/// The hyperbolic cosine (`w_cosh_template.c`: as [`sinh`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn cosh(x: f64) -> f64 {
-    let z = libm::cosh(x);
-    overflow_errno(x, z);
-    z
+    ranged(x, libm::cosh, |z| overflow_only(x.is_finite(), z))
 }
 
 /// [`cosh`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn coshf(x: f32) -> f32 {
-    let z = libm::coshf(x);
-    overflow_errno(f64::from(x), f64::from(z));
-    z
+    ranged(x, libm::coshf, |z| {
+        overflow_only(x.is_finite(), f64::from(z))
+    })
 }
 
 /// The hyperbolic tangent.
@@ -1296,6 +1471,9 @@ pub extern "C" fn asinhf(x: f32) -> f32 {
 /// "x < 1" to the `log` it ends in, and for a large negative `x` the
 /// argument that reaches it cancels to a small positive number, so
 /// `acosh(-427000)` answered 2.65 (found by the glibc oracle below).
+///
+/// `acosh(1)` is +0 in every rounding direction (C's Annex F): musl's
+/// `log1p(x - 1 + ...)` makes it -0 rounding downward, where `1 - 1` is -0.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn acosh(x: f64) -> f64 {
     if x < 1.0 {
@@ -1306,6 +1484,9 @@ pub extern "C" fn acosh(x: f64) -> f64 {
         // does. A constant NaN would do neither.
         #[allow(clippy::eq_op)]
         return (x - x) / (x - x);
+    }
+    if x == 1.0 {
+        return 0.0;
     }
     libm::acosh(x)
 }
@@ -1318,6 +1499,9 @@ pub extern "C" fn acoshf(x: f32) -> f32 {
         // As in `acosh`.
         #[allow(clippy::eq_op)]
         return (x - x) / (x - x);
+    }
+    if x == 1.0 {
+        return 0.0;
     }
     libm::acoshf(x)
 }
@@ -1334,9 +1518,17 @@ fn atanh_errno(x: f64) {
 }
 
 /// The inverse hyperbolic tangent.
+///
+/// At +-1, the poles, `x / 0` -- an infinity of `x`'s sign, raising
+/// divide-by-zero -- as glibc's `e_atanh.c` answers: musl's `2x / (1 - x)`
+/// divides by -0 there when rounding downward, and its `log1p(-inf)` is a
+/// NaN.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atanh(x: f64) -> f64 {
     atanh_errno(x);
+    if x.abs() == 1.0 {
+        return x / core::hint::black_box(0.0);
+    }
     libm::atanh(x)
 }
 
@@ -1344,6 +1536,9 @@ pub extern "C" fn atanh(x: f64) -> f64 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atanhf(x: f32) -> f32 {
     atanh_errno(f64::from(x));
+    if x.abs() == 1.0 {
+        return x / core::hint::black_box(0.0);
+    }
     libm::atanhf(x)
 }
 
@@ -1364,24 +1559,28 @@ pub extern "C" fn erff(x: f32) -> f32 {
 }
 
 /// `1 - erf(x)`, without the cancellation (glibc's `s_erf.c`: `ERANGE` when a
-/// positive argument underflows to zero).
+/// positive argument underflows to zero, [`ranged`]).
+///
+/// +0 and 2 at the infinities, here: musl's `2 * sign + 1 / x` for them
+/// converts its unsigned `sign` to a double, which x86-64 does without an
+/// instruction for it by subtracting 2^52 from 2^52 + `sign` -- -0 rounding
+/// downward, so `erfc(inf)` was -0.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn erfc(x: f64) -> f64 {
-    let r = libm::erfc(x);
-    if r == 0.0 && x > 0.0 && x.is_finite() {
-        set(errno::ERANGE);
+    if x.is_infinite() {
+        return if x > 0.0 { 0.0 } else { 2.0 };
     }
-    r
+    ranged(x, libm::erfc, |r| {
+        underflow_only(r == 0.0 && x > 0.0 && x.is_finite())
+    })
 }
 
 /// [`erfc`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn erfcf(x: f32) -> f32 {
-    let r = libm::erfcf(x);
-    if r == 0.0 && x > 0.0 && x.is_finite() {
-        set(errno::ERANGE);
-    }
-    r
+    ranged(x, libm::erfcf, |r| {
+        underflow_only(r == 0.0 && x > 0.0 && x.is_finite())
+    })
 }
 
 /// The sign of Γ(x) the last [`lgamma`] found, as C declares it: `int
@@ -1398,29 +1597,70 @@ pub extern "C" fn erfcf(x: f32) -> f32 {
 pub static signgam: AtomicI32 = AtomicI32::new(0);
 
 /// glibc's `w_lgamma_template.c`: `ERANGE` when a finite argument gives an
-/// infinity -- the poles at 0 and the negative integers, or overflow.
-fn lgamma_errno(x: f64, y: f64) {
-    if !y.is_finite() && x.is_finite() {
+/// infinity -- a pole at 0 or a negative integer, reported here, or an
+/// overflow past 2.5e305, [`ranged`]'s.
+fn lgamma_errno(x: f64) {
+    if x.is_finite() && x <= 0.0 && libm::floor(x) == x {
         set(errno::ERANGE);
     }
+}
+
+/// [`Range`] for `lgamma`: an infinity from a finite argument that is no pole
+/// overflowed.
+fn lgamma_range(x: f64, y: f64) -> Range {
+    let pole = x <= 0.0 && libm::floor(x) == x;
+    overflow_only(x.is_finite() && !pole, y)
+}
+
+/// `(log|gamma(x)|, sign of gamma(x))` from CORE-MATH's port, with
+/// [`lgamma_errno`] and [`lgamma_range`]'s `ERANGE`. The pair is recomputed
+/// in full where [`ranged`] needs the round-to-nearest value; the sign does
+/// not depend on the rounding.
+fn lgamma_ranged(x: f64) -> (f64, i32) {
+    lgamma_errno(x);
+    let sign = core::cell::Cell::new(1);
+    let y = ranged(
+        x,
+        |x| {
+            let (y, s) = crate::lgamma::lgamma_cr(x);
+            sign.set(s);
+            y
+        },
+        |y| lgamma_range(x, y),
+    );
+    (y, sign.get())
+}
+
+/// [`lgamma_ranged`] (float).
+fn lgammaf_ranged(x: f32) -> (f32, i32) {
+    lgamma_errno(f64::from(x));
+    let sign = core::cell::Cell::new(1);
+    let y = ranged(
+        x,
+        |x| {
+            let (y, s) = crate::lgamma::lgammaf_cr(x);
+            sign.set(s);
+            y
+        },
+        |y| lgamma_range(f64::from(x), f64::from(y)),
+    );
+    (y, sign.get())
 }
 
 /// `log|Γ(x)|`, correctly rounded (CORE-MATH's: `lgamma.rs`), its sign
 /// stored in [`signgam`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgamma(x: f64) -> f64 {
-    let (y, sign) = crate::lgamma::lgamma_cr(x);
+    let (y, sign) = lgamma_ranged(x);
     signgam.store(sign, Ordering::Relaxed);
-    lgamma_errno(x, y);
     y
 }
 
 /// [`lgamma`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgammaf(x: f32) -> f32 {
-    let (y, sign) = crate::lgamma::lgammaf_cr(x);
+    let (y, sign) = lgammaf_ranged(x);
     signgam.store(sign, Ordering::Relaxed);
-    lgamma_errno(f64::from(x), f64::from(y));
     y
 }
 
@@ -1428,24 +1668,22 @@ pub extern "C" fn lgammaf(x: f32) -> f32 {
 /// not written.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgamma_r(x: f64, sign: *mut i32) -> f64 {
-    let (y, s) = crate::lgamma::lgamma_cr(x);
+    let (y, s) = lgamma_ranged(x);
     if !sign.is_null() {
         // SAFETY: non-null, and the caller's `int *`.
         unsafe { sign.write(s) };
     }
-    lgamma_errno(x, y);
     y
 }
 
 /// [`lgamma_r`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgammaf_r(x: f32, sign: *mut i32) -> f32 {
-    let (y, s) = crate::lgamma::lgammaf_cr(x);
+    let (y, s) = lgammaf_ranged(x);
     if !sign.is_null() {
         // SAFETY: non-null, and the caller's `int *`.
         unsafe { sign.write(s) };
     }
-    lgamma_errno(f64::from(x), f64::from(y));
     y
 }
 
@@ -1463,33 +1701,38 @@ pub extern "C" fn gammaf(x: f32) -> f32 {
 
 /// glibc's `w_tgamma_template.c`: a non-finite or zero answer from a finite
 /// argument (or from -inf) is `ERANGE` at 0 (a pole), `EDOM` at a negative
-/// integer, and `ERANGE` otherwise (overflow or underflow).
-fn tgamma_errno(x: f64, y: f64) {
-    if (!y.is_finite() || y == 0.0) && (x.is_finite() || x == f64::NEG_INFINITY) {
-        if x == 0.0 {
-            set(errno::ERANGE);
-        } else if libm::floor(x) == x && x < 0.0 {
-            set(errno::EDOM);
-        } else {
-            set(errno::ERANGE);
-        }
+/// integer -- both the argument's doing, reported here -- and `ERANGE`
+/// otherwise: an overflow or an underflow, [`tgamma_range`]'s.
+fn tgamma_errno(x: f64) {
+    if x == 0.0 {
+        set(errno::ERANGE);
+    } else if x < 0.0 && libm::floor(x) == x {
+        // -inf included.
+        set(errno::EDOM);
     }
+}
+
+/// [`Range`] for `tgamma`: an infinity or a zero from a finite argument that
+/// is neither 0 nor a negative integer overflowed or underflowed.
+fn tgamma_range(x: f64, y: f64) -> Range {
+    let exact = x == 0.0 || (x < 0.0 && libm::floor(x) == x);
+    overflow_or_underflow(x.is_finite() && !exact, y)
 }
 
 /// Γ(x).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tgamma(x: f64) -> f64 {
-    let y = libm::tgamma(x);
-    tgamma_errno(x, y);
-    y
+    tgamma_errno(x);
+    ranged(x, libm::tgamma, |y| tgamma_range(x, y))
 }
 
 /// [`tgamma`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tgammaf(x: f32) -> f32 {
-    let y = libm::tgammaf(x);
-    tgamma_errno(f64::from(x), f64::from(y));
-    y
+    tgamma_errno(f64::from(x));
+    ranged(x, libm::tgammaf, |y| {
+        tgamma_range(f64::from(x), f64::from(y))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1499,6 +1742,12 @@ pub extern "C" fn tgammaf(x: f32) -> f32 {
 // underflows to zero is ERANGE, one that overflows to -inf is ERANGE, and at
 // an infinity an odd order keeps the argument's sign (j1(-inf) is -0, where
 // musl answers +0).
+//
+// Each is computed to nearest ([`crate::fenv::in_nearest`]): past x = 2 their
+// asymptotic forms take the sine and cosine of x, with the sine's argument
+// reduction (see `trig_domain`), and in another rounding direction `j0(pi)`
+// was 188,000 ulps out and `j1(3.83)`, near its root, 7,000 times too large.
+// Their range errors go through [`ranged`].
 // ---------------------------------------------------------------------------
 
 /// `EDOM` below 0, `ERANGE` at 0 (the `y` templates).
@@ -1508,20 +1757,17 @@ fn bessel_y_errno(x: f64) {
     }
 }
 
-/// `ERANGE` for a zero from a nonzero finite argument: e_j1.c's
-/// `ret == 0 && x != 0` for `0.5 * x`, and e_jn.c's `ret == 0`.
-fn bessel_underflow(x: f64, r: f64) {
-    if r == 0.0 && x != 0.0 && x.is_finite() {
-        set(errno::ERANGE);
-    }
+/// A `j` function's range: a zero from a nonzero finite argument underflowed
+/// (e_j1.c's `ret == 0 && x != 0` for `0.5 * x`, and e_jn.c's `ret == 0`).
+fn bessel_underflow(x: f64, r: f64) -> Range {
+    underflow_only(r == 0.0 && x != 0.0 && x.is_finite())
 }
 
-/// `ERANGE` for an infinity from a positive finite argument: e_j1.c's
-/// `-tpi / x` for tiny `x`, and e_jn.c's "if B is +-Inf".
-fn bessel_overflow(x: f64, r: f64) {
-    if r.is_infinite() && x > 0.0 && x.is_finite() {
-        set(errno::ERANGE);
-    }
+/// A `y` function's range: an infinity from a positive finite argument
+/// overflowed (e_j1.c's `-tpi / x` for tiny `x`, and e_jn.c's "if B is
+/// +-Inf").
+fn bessel_overflow(x: f64, r: f64) -> Range {
+    overflow_only(x > 0.0 && x.is_finite(), r)
 }
 
 /// An order as glibc's jn/yn take it: its magnitude, and whether it is odd.
@@ -1533,7 +1779,7 @@ fn order(n: i32) -> (u32, bool) {
 /// Bessel function of the first kind, order 0.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn j0(x: f64) -> f64 {
-    libm::j0(x)
+    crate::fenv::in_nearest(x, libm::j0)
 }
 
 /// Bessel function of the first kind, order 1 (`1/x`, a signed zero, at an
@@ -1543,9 +1789,11 @@ pub extern "C" fn j1(x: f64) -> f64 {
     if x.is_infinite() {
         return 1.0 / x;
     }
-    let r = libm::j1(x);
-    bessel_underflow(x, r);
-    r
+    ranged(
+        x,
+        |x| crate::fenv::in_nearest(x, libm::j1),
+        |r| bessel_underflow(x, r),
+    )
 }
 
 /// Bessel function of the first kind, order `n`: e_jn.c's `J(-n, x) =
@@ -1568,9 +1816,11 @@ pub extern "C" fn jn(n: i32, x: f64) -> f64 {
                     0.0
                 };
             }
-            let r = libm::jn(n, x);
-            bessel_underflow(x, r);
-            r
+            ranged(
+                (n, x),
+                |a| crate::fenv::in_nearest(a, |(n, x)| libm::jn(n, x)),
+                |r| bessel_underflow(x, r),
+            )
         }
     }
 }
@@ -1579,16 +1829,18 @@ pub extern "C" fn jn(n: i32, x: f64) -> f64 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn y0(x: f64) -> f64 {
     bessel_y_errno(x);
-    libm::y0(x)
+    crate::fenv::in_nearest(x, libm::y0)
 }
 
 /// Bessel function of the second kind, order 1.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn y1(x: f64) -> f64 {
     bessel_y_errno(x);
-    let r = libm::y1(x);
-    bessel_overflow(x, r);
-    r
+    ranged(
+        x,
+        |x| crate::fenv::in_nearest(x, libm::y1),
+        |r| bessel_overflow(x, r),
+    )
 }
 
 /// Bessel function of the second kind, order `n` (e_jn.c: `Y(-n, x) =
@@ -1602,25 +1854,25 @@ pub extern "C" fn yn(n: i32, x: f64) -> f64 {
     let (m, odd) = order(n);
     let sign = if n < 0 && odd { -1.0 } else { 1.0 };
     match m {
-        0 => libm::y0(x),
-        1 => {
-            let r = sign * libm::y1(x);
-            bessel_overflow(x, r);
-            r
-        }
+        0 => crate::fenv::in_nearest(x, libm::y0),
+        1 => ranged(
+            x,
+            |x| sign * crate::fenv::in_nearest(x, libm::y1),
+            |r| bessel_overflow(x, r),
+        ),
         _ if x == f64::INFINITY => 0.0,
-        _ => {
-            let r = libm::yn(n, x);
-            bessel_overflow(x, r);
-            r
-        }
+        _ => ranged(
+            (n, x),
+            |a| crate::fenv::in_nearest(a, |(n, x)| libm::yn(n, x)),
+            |r| bessel_overflow(x, r),
+        ),
     }
 }
 
 /// [`j0`] (float; a GNU extension, missing until 2026-09-27).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn j0f(x: f32) -> f32 {
-    libm::j0f(x)
+    crate::fenv::in_nearest(x, libm::j0f)
 }
 
 /// [`j1`] (float).
@@ -1629,9 +1881,11 @@ pub extern "C" fn j1f(x: f32) -> f32 {
     if x.is_infinite() {
         return 1.0 / x;
     }
-    let r = libm::j1f(x);
-    bessel_underflow(f64::from(x), f64::from(r));
-    r
+    ranged(
+        x,
+        |x| crate::fenv::in_nearest(x, libm::j1f),
+        |r| bessel_underflow(f64::from(x), f64::from(r)),
+    )
 }
 
 /// [`jn`] (float).
@@ -1653,9 +1907,11 @@ pub extern "C" fn jnf(n: i32, x: f32) -> f32 {
                     0.0
                 };
             }
-            let r = libm::jnf(n, x);
-            bessel_underflow(f64::from(x), f64::from(r));
-            r
+            ranged(
+                (n, x),
+                |a| crate::fenv::in_nearest(a, |(n, x)| libm::jnf(n, x)),
+                |r| bessel_underflow(f64::from(x), f64::from(r)),
+            )
         }
     }
 }
@@ -1664,16 +1920,18 @@ pub extern "C" fn jnf(n: i32, x: f32) -> f32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn y0f(x: f32) -> f32 {
     bessel_y_errno(f64::from(x));
-    libm::y0f(x)
+    crate::fenv::in_nearest(x, libm::y0f)
 }
 
 /// [`y1`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn y1f(x: f32) -> f32 {
     bessel_y_errno(f64::from(x));
-    let r = libm::y1f(x);
-    bessel_overflow(f64::from(x), f64::from(r));
-    r
+    ranged(
+        x,
+        |x| crate::fenv::in_nearest(x, libm::y1f),
+        |r| bessel_overflow(f64::from(x), f64::from(r)),
+    )
 }
 
 /// [`yn`] (float).
@@ -1686,18 +1944,18 @@ pub extern "C" fn ynf(n: i32, x: f32) -> f32 {
     let (m, odd) = order(n);
     let sign = if n < 0 && odd { -1.0 } else { 1.0 };
     match m {
-        0 => libm::y0f(x),
-        1 => {
-            let r = sign * libm::y1f(x);
-            bessel_overflow(f64::from(x), f64::from(r));
-            r
-        }
+        0 => crate::fenv::in_nearest(x, libm::y0f),
+        1 => ranged(
+            x,
+            |x| sign * crate::fenv::in_nearest(x, libm::y1f),
+            |r| bessel_overflow(f64::from(x), f64::from(r)),
+        ),
         _ if x == f32::INFINITY => 0.0,
-        _ => {
-            let r = libm::ynf(n, x);
-            bessel_overflow(f64::from(x), f64::from(r));
-            r
-        }
+        _ => ranged(
+            (n, x),
+            |a| crate::fenv::in_nearest(a, |(n, x)| libm::ynf(n, x)),
+            |r| bessel_overflow(f64::from(x), f64::from(r)),
+        ),
     }
 }
 
@@ -4585,15 +4843,46 @@ mod tests {
     /// <outputs> <errno>`, floats as their bits in hex.
     const ORACLE: &str = include_str!("math_oracle.txt");
 
+    /// glibc's answers in the three directed rounding modes, for each call
+    /// of [`ORACLE`] that answers otherwise than to nearest: `<mode>
+    /// <function> <inputs> = <outputs> <errno>`, mode `down`, `up` or `zero`
+    /// (`posix/tools/oracle/math_modes_harness.py`).
+    const MODES_ORACLE: &str = include_str!("math_modes_oracle.txt");
+
+    std::thread_local! {
+        /// What [`ulps_allowed`] adds to an inexact function's bound: 1 while
+        /// [`every_answer_in_every_rounding_direction`] replays a directed
+        /// mode, where both libraries' roundings go the direction's way
+        /// rather than to nearest; 0 otherwise.
+        static DIRECTED_SLACK: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+        /// Whether an infinity or a zero must match exactly
+        /// ([`same_d_near`]): always to nearest, and in a directed mode where
+        /// the call answers one to nearest -- an overflow, an underflow, a
+        /// pole, an exact zero. Elsewhere a directed answer may be the least
+        /// subnormal where the other is zero, 1 ulp apart like any two
+        /// neighbours: `tanh(-5e-324)` is -0 toward zero in glibc and
+        /// -5e-324 here, both within an ulp of the exact value.
+        static EDGES_EXACT: core::cell::Cell<bool> = const { core::cell::Cell::new(true) };
+    }
+
     /// How far from glibc's answer ours may be, in units in the last place.
     ///
     /// 0 for everything IEEE 754 defines exactly -- rounding, `sqrt`, `fma`,
     /// remainders, scaling, decomposition, classification -- where any
-    /// difference is a bug. For the rest, glibc and musl use different
-    /// approximations; the bounds are the larger of the two libraries'
-    /// documented worst cases (glibc's `libm-test-ulps` for x86_64), so a
-    /// difference past one is a bug in one of them.
+    /// difference is a bug, in every rounding direction. For the rest, glibc
+    /// and musl use different approximations; the bounds are the larger of
+    /// the two libraries' documented worst cases (glibc's `libm-test-ulps`
+    /// for x86_64), so a difference past one is a bug in one of them -- and
+    /// one more in a directed mode ([`DIRECTED_SLACK`]).
     fn ulps_allowed(name: &str) -> u64 {
+        match ulps_allowed_to_nearest(name) {
+            0 => 0,
+            n => n + DIRECTED_SLACK.with(core::cell::Cell::get),
+        }
+    }
+
+    /// [`ulps_allowed`] to nearest.
+    fn ulps_allowed_to_nearest(name: &str) -> u64 {
         match double_name(name) {
             "fabs" | "floor" | "ceil" | "round" | "trunc" | "rint" | "nearbyint" | "sqrt"
             | "fmod" | "remainder" | "drem" | "remquo" | "copysign" | "fmin" | "fmax" | "fdim"
@@ -4679,6 +4968,19 @@ mod tests {
         if ours == 0.0 && glibc == 0.0 && ours.is_sign_negative() != glibc.is_sign_negative() {
             return Err(format!("{ours:?}, glibc {glibc:?}: the sign of zero"));
         }
+        // An infinity or a zero is no "ulp" from the finite value beside it:
+        // it is an overflow or an underflow, or not, which the rounding
+        // direction decides and the answer must agree with exactly.
+        if EDGES_EXACT.with(core::cell::Cell::get)
+            && (ours.is_infinite() || glibc.is_infinite() || ours == 0.0 || glibc == 0.0)
+            && ours.to_bits() != glibc.to_bits()
+        {
+            return Err(format!(
+                "{ours:e} ({:#018x}), glibc {glibc:e} ({:#018x}): an infinity or a zero is exact",
+                ours.to_bits(),
+                glibc.to_bits()
+            ));
+        }
         let d = ulp_distance(ours, glibc);
         let tol = ulps_allowed(name);
         #[allow(clippy::cast_precision_loss)]
@@ -4717,6 +5019,19 @@ mod tests {
         }
         if ours == 0.0 && glibc == 0.0 && ours.is_sign_negative() != glibc.is_sign_negative() {
             return Err(format!("{ours:?}, glibc {glibc:?}: the sign of zero"));
+        }
+        // An infinity or a zero is no "ulp" from the finite value beside it:
+        // it is an overflow or an underflow, or not, which the rounding
+        // direction decides and the answer must agree with exactly.
+        if EDGES_EXACT.with(core::cell::Cell::get)
+            && (ours.is_infinite() || glibc.is_infinite() || ours == 0.0 || glibc == 0.0)
+            && ours.to_bits() != glibc.to_bits()
+        {
+            return Err(format!(
+                "{ours:e} ({:#010x}), glibc {glibc:e} ({:#010x}): an infinity or a zero is exact",
+                ours.to_bits(),
+                glibc.to_bits()
+            ));
         }
         let d = ulp_distance_f(ours, glibc);
         let tol = ulps_allowed(name);
@@ -5098,6 +5413,462 @@ mod tests {
         assert_eq!(
             nanf(c"0x7".as_ptr().cast()).to_bits(),
             f32::NAN.to_bits() | 7
+        );
+    }
+
+    /// Rounds in `mode` until dropped, then to nearest again -- so that an
+    /// assertion failing half-way (libtest may run the next test on the same
+    /// thread) leaves no direction behind.
+    struct Rounding;
+
+    impl Rounding {
+        fn set(mode: i32) -> Self {
+            assert_eq!(crate::fenv::fesetround(mode), 0);
+            Self
+        }
+    }
+
+    impl Drop for Rounding {
+        fn drop(&mut self) {
+            crate::fenv::fesetround(crate::fenv::FE_TONEAREST);
+        }
+    }
+
+    /// The three directed modes, by name.
+    const DIRECTED: [(&str, i32); 3] = [
+        ("down", crate::fenv::FE_DOWNWARD),
+        ("up", crate::fenv::FE_UPWARD),
+        ("zero", crate::fenv::FE_TOWARDZERO),
+    ];
+
+    /// The functions computed to nearest answer in every direction exactly
+    /// what they answer to nearest: before, `sin(pi)` rounding upward was
+    /// 2.3e-11, `tanf(2^23 + 1)` 3,310 ulps out, `j0(pi)` rounding upward
+    /// 188,000.
+    #[test]
+    fn trig_and_bessel_answer_as_to_nearest_in_every_direction() {
+        use core::hint::black_box as bb;
+        let xs = [
+            core::f64::consts::PI,
+            -core::f64::consts::PI,
+            core::f64::consts::FRAC_PI_2,
+            3.832_705_970_207_512,
+            7.0,
+            1e22,
+            -9.998_172_463_489_65,
+            0.1,
+        ];
+        let doubles: [(&str, extern "C" fn(f64) -> f64); 7] = [
+            ("sin", sin),
+            ("cos", cos),
+            ("tan", tan),
+            ("j0", j0),
+            ("j1", j1),
+            ("y0", y0),
+            ("y1", y1),
+        ];
+        let floats: [(&str, extern "C" fn(f32) -> f32); 7] = [
+            ("sinf", sinf),
+            ("cosf", cosf),
+            ("tanf", tanf),
+            ("j0f", j0f),
+            ("j1f", j1f),
+            ("y0f", y0f),
+            ("y1f", y1f),
+        ];
+        for x in xs {
+            #[allow(clippy::cast_possible_truncation)]
+            let xf = x as f32;
+            let near: Vec<u64> = doubles.iter().map(|(_, g)| g(bb(x)).to_bits()).collect();
+            let near_f: Vec<u32> = floats.iter().map(|(_, g)| g(bb(xf)).to_bits()).collect();
+            let near_n = [jn(3, bb(x)).to_bits(), yn(3, bb(x.abs())).to_bits()];
+            let (mut s0, mut c0) = (0.0, 0.0);
+            sincos(bb(x), &raw mut s0, &raw mut c0);
+            for (mode_name, mode) in DIRECTED {
+                let _r = Rounding::set(mode);
+                for ((name, g), want) in doubles.iter().zip(&near) {
+                    assert_eq!(
+                        g(bb(x)).to_bits(),
+                        *want,
+                        "{name}({x}) rounding {mode_name}"
+                    );
+                }
+                for ((name, g), want) in floats.iter().zip(&near_f) {
+                    assert_eq!(
+                        g(bb(xf)).to_bits(),
+                        *want,
+                        "{name}({xf}) rounding {mode_name}"
+                    );
+                }
+                assert_eq!(jn(3, bb(x)).to_bits(), near_n[0], "jn(3, {x}) {mode_name}");
+                assert_eq!(
+                    yn(3, bb(x.abs())).to_bits(),
+                    near_n[1],
+                    "yn(3, {x}) {mode_name}"
+                );
+                let (mut s, mut c) = (0.0, 0.0);
+                sincos(bb(x), &raw mut s, &raw mut c);
+                assert_eq!(
+                    (s.to_bits(), c.to_bits()),
+                    (s0.to_bits(), c0.to_bits()),
+                    "sincos({x}) {mode_name}"
+                );
+            }
+        }
+    }
+
+    /// An overflow or an underflow answers what IEEE 754 prescribes for the
+    /// direction, and `ERANGE` either way: musl's `exp` answered 0 below
+    /// -745.13 in every direction, and its `sinh` rounded the magnitude and
+    /// then negated it.
+    #[test]
+    fn overflow_and_underflow_answer_as_the_direction_rounds() {
+        use core::hint::black_box as bb;
+        let tiny = f64::from_bits(1);
+        //                    down           up             zero
+        let cases: [(&str, extern "C" fn(f64) -> f64, f64, [f64; 3]); 8] = [
+            ("exp", exp, 1000.0, [f64::MAX, f64::INFINITY, f64::MAX]),
+            ("exp", exp, -1000.0, [0.0, tiny, 0.0]),
+            // Past the overflow threshold but under 1024, where glibc's exp
+            // answers DBL_MAX rounding downward and sets nothing.
+            ("exp", exp, 709.79, [f64::MAX, f64::INFINITY, f64::MAX]),
+            ("exp2", exp2, -1080.0, [0.0, tiny, 0.0]),
+            ("expm1", expm1, 1000.0, [f64::MAX, f64::INFINITY, f64::MAX]),
+            (
+                "sinh",
+                sinh,
+                -1000.0,
+                [f64::NEG_INFINITY, -f64::MAX, -f64::MAX],
+            ),
+            ("cosh", cosh, -1000.0, [f64::MAX, f64::INFINITY, f64::MAX]),
+            ("erfc", erfc, 30.0, [0.0, tiny, 0.0]),
+        ];
+        for (name, g, x, want) in cases {
+            for ((mode_name, mode), w) in DIRECTED.into_iter().zip(want) {
+                let _r = Rounding::set(mode);
+                errno::set_errno(0);
+                let got = g(bb(x));
+                assert_eq!(
+                    got.to_bits(),
+                    w.to_bits(),
+                    "{name}({x}) rounding {mode_name}: {got:e}"
+                );
+                assert_eq!(
+                    errno::get_errno(),
+                    errno::ERANGE,
+                    "{name}({x}) rounding {mode_name}"
+                );
+            }
+        }
+        // Two arguments, and the float side.
+        for ((mode_name, mode), (pw, ld, fd, ef)) in DIRECTED.into_iter().zip([
+            (0.0, f64::MAX, f64::MAX, f32::MAX),
+            (tiny, f64::INFINITY, f64::INFINITY, f32::INFINITY),
+            (0.0, f64::MAX, f64::MAX, f32::MAX),
+        ]) {
+            let _r = Rounding::set(mode);
+            let calls: [(&str, &dyn Fn() -> f64, f64); 3] = [
+                ("pow(2, -1100)", &|| pow(bb(2.0), bb(-1100.0)), pw),
+                ("ldexp(1, 2000)", &|| ldexp(bb(1.0), 2000), ld),
+                (
+                    "fdim(DBL_MAX, -DBL_MAX)",
+                    &|| fdim(bb(f64::MAX), bb(-f64::MAX)),
+                    fd,
+                ),
+            ];
+            for (name, call, w) in calls {
+                errno::set_errno(0);
+                let got = call();
+                assert_eq!(
+                    got.to_bits(),
+                    w.to_bits(),
+                    "{name} rounding {mode_name}: {got:e}"
+                );
+                assert_eq!(
+                    errno::get_errno(),
+                    errno::ERANGE,
+                    "{name} rounding {mode_name}"
+                );
+            }
+            errno::set_errno(0);
+            let got = expf(bb(100.0));
+            assert_eq!(
+                got.to_bits(),
+                ef.to_bits(),
+                "expf(100) rounding {mode_name}: {got:e}"
+            );
+            assert_eq!(
+                errno::get_errno(),
+                errno::ERANGE,
+                "expf(100) rounding {mode_name}"
+            );
+        }
+    }
+
+    /// A range error is reported where either the result to nearest or the
+    /// result answered is out of range: `fdim(DBL_MAX, -1)` is DBL_MAX to
+    /// nearest and an infinity rounding upward -- `ERANGE` there only -- and
+    /// `exp` of just under the least subnormal's logarithm is the least
+    /// subnormal to nearest and zero rounding downward.
+    #[test]
+    fn a_range_error_is_one_in_either_rounding() {
+        use core::hint::black_box as bb;
+        errno::set_errno(0);
+        assert_eq!(fdim(bb(f64::MAX), bb(-1.0)), f64::MAX);
+        assert_eq!(errno::get_errno(), 0, "fdim(DBL_MAX, -1) to nearest");
+        {
+            let _r = Rounding::set(crate::fenv::FE_UPWARD);
+            assert_eq!(fdim(bb(f64::MAX), bb(-1.0)), f64::INFINITY);
+            assert_eq!(
+                errno::get_errno(),
+                errno::ERANGE,
+                "fdim(DBL_MAX, -1) upward"
+            );
+        }
+        let x = -745.133_219_101_941_1;
+        errno::set_errno(0);
+        assert_eq!(exp(bb(x)).to_bits(), 1, "exp({x}) to nearest");
+        assert_eq!(errno::get_errno(), 0);
+        {
+            let _r = Rounding::set(crate::fenv::FE_DOWNWARD);
+            assert_eq!(exp(bb(x)).to_bits(), 0, "exp({x}) downward");
+            assert_eq!(errno::get_errno(), errno::ERANGE, "exp({x}) downward");
+        }
+    }
+
+    /// The exact answers made before the algorithm: `acosh(1)` is +0 (Annex
+    /// F), `atanh(+-1)` an infinity with `ERANGE`, `erfc(inf)` +0 -- in
+    /// every direction. Downward, `1 - 1` is -0: musl's `acosh(1)` was -0,
+    /// its `atanh(1)` a NaN, and its `erfc(inf)` -0 (the unsigned-to-double
+    /// conversion of 0).
+    #[test]
+    fn exact_answers_keep_their_signs_in_every_direction() {
+        use core::hint::black_box as bb;
+        for (mode_name, mode) in DIRECTED {
+            let _r = Rounding::set(mode);
+            assert_eq!(acosh(bb(1.0)).to_bits(), 0, "acosh(1) {mode_name}");
+            assert_eq!(acoshf(bb(1.0)).to_bits(), 0, "acoshf(1) {mode_name}");
+            for x in [1.0_f64, -1.0] {
+                errno::set_errno(0);
+                assert_eq!(
+                    atanh(bb(x)),
+                    f64::INFINITY.copysign(x),
+                    "atanh({x}) {mode_name}"
+                );
+                assert_eq!(errno::get_errno(), errno::ERANGE);
+                errno::set_errno(0);
+                #[allow(clippy::cast_possible_truncation)]
+                let xf = x as f32;
+                assert_eq!(
+                    atanhf(bb(xf)),
+                    f32::INFINITY.copysign(xf),
+                    "atanhf({x}) {mode_name}"
+                );
+                assert_eq!(errno::get_errno(), errno::ERANGE);
+            }
+            assert_eq!(
+                erfc(bb(f64::INFINITY)).to_bits(),
+                0,
+                "erfc(inf) {mode_name}"
+            );
+            assert_eq!(erfc(bb(f64::NEG_INFINITY)), 2.0, "erfc(-inf) {mode_name}");
+            assert_eq!(
+                erfcf(bb(f32::INFINITY)).to_bits(),
+                0,
+                "erfcf(inf) {mode_name}"
+            );
+        }
+    }
+
+    /// What a call answers rounding in `mode` ("down", "up", "zero"), given
+    /// glibc's answers to nearest (`near`) and in that mode (`glibc`, the
+    /// same where [`MODES_ORACLE`] lists none): outputs then `errno`, as
+    /// [`replay_math`] takes them.
+    ///
+    /// glibc's, but for four rules:
+    ///
+    /// - `errno` is the round-to-nearest one where that is set, and glibc's
+    ///   in `mode` where it is not: this library reports a range error where
+    ///   either the result to nearest or the result answered is out of range
+    ///   (the module documentation), and glibc's rules judge the answer.
+    /// - An underflow -- zero and `ERANGE` to nearest -- answers what IEEE
+    ///   754 prescribes: the least subnormal where `mode` rounds away from
+    ///   zero, the zero where toward it. glibc's `atan2(5e-324, 2)` rounding
+    ///   upward is 0, below the exact value. (`nextafter` rounds nothing: its
+    ///   zero is exact, and its `ERANGE` glibc's rule for a step that lands
+    ///   on a zero or a subnormal.)
+    /// - A remainder that is zero has `x`'s sign (754-2019 5.3.1), where
+    ///   glibc's `remainderf(3, 1)` rounding downward is -0.
+    /// - `pow(x, 1)` is `x`, exactly and without an error, where glibc's
+    ///   `pow(5e-324, 1)` rounding downward is 0 with `ERANGE` and its
+    ///   `powf(FLT_MAX, 1)` rounding upward an infinity.
+    fn directed_answer(
+        mode: &str,
+        name: &str,
+        ins: &[&str],
+        near: &str,
+        glibc: &str,
+    ) -> Vec<String> {
+        let mut outs: Vec<String> = glibc.split(' ').map(str::to_owned).collect();
+        let near_outs: Vec<&str> = near.split(' ').collect();
+        let near_errno = *near_outs.last().expect("an errno");
+        if near_errno != "0" {
+            *outs.last_mut().expect("an errno") = near_errno.to_owned();
+        }
+        if answers_an_int(name) {
+            return outs;
+        }
+        let wide = near_outs[0].len() == 16;
+        let value = |hex: &str| if wide { d(hex) } else { f64::from(f(hex)) };
+        let zero_hex = |negative: bool| {
+            match (wide, negative) {
+                (true, false) => "0000000000000000",
+                (true, true) => "8000000000000000",
+                (false, false) => "00000000",
+                (false, true) => "80000000",
+            }
+            .to_owned()
+        };
+        let near0 = value(near_outs[0]);
+        let rounds = !matches!(
+            name,
+            "nextafter" | "nextafterf" | "nexttoward" | "nexttowardf"
+        );
+        if near0 == 0.0 && near_errno == "34" && rounds {
+            let negative = near0.is_sign_negative();
+            let away = matches!((mode, negative), ("up", false) | ("down", true));
+            outs[0] = if away {
+                match (wide, negative) {
+                    (true, false) => "0000000000000001",
+                    (true, true) => "8000000000000001",
+                    (false, false) => "00000001",
+                    (false, true) => "80000001",
+                }
+                .to_owned()
+            } else {
+                zero_hex(negative)
+            };
+        }
+        if matches!(
+            name,
+            "remainder" | "remainderf" | "drem" | "remquo" | "remquof" | "fmod" | "fmodf"
+        ) && value(&outs[0]) == 0.0
+        {
+            let x_wide = ins[0].len() == 16;
+            let negative = if x_wide {
+                d(ins[0]).is_sign_negative()
+            } else {
+                f(ins[0]).is_sign_negative()
+            };
+            outs[0] = zero_hex(negative);
+        }
+        if matches!(name, "pow" | "powf") && value(ins[1]) == 1.0 {
+            outs[0] = ins[0].to_owned();
+            *outs.last_mut().expect("an errno") = "0".to_owned();
+        }
+        outs
+    }
+
+    /// Whether `name` answers an integer, not a float's bits.
+    fn answers_an_int(name: &str) -> bool {
+        matches!(
+            name,
+            "ilogb"
+                | "ilogbf"
+                | "lround"
+                | "llround"
+                | "lrint"
+                | "lroundf"
+                | "llroundf"
+                | "lrintf"
+                | "finite"
+                | "finitef"
+                | "isnan"
+                | "isinf"
+        )
+    }
+
+    /// Every call of [`ORACLE`] again in each directed rounding mode, against
+    /// [`directed_answer`]: within the bound to nearest and one ulp more,
+    /// bit for bit for the exact functions -- and an infinity or a zero
+    /// exactly where the call answers one to nearest ([`EDGES_EXACT`]).
+    #[test]
+    fn every_answer_in_every_rounding_direction() {
+        let _g = signgam_lock();
+        let mut directed = std::collections::HashMap::new();
+        for line in MODES_ORACLE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (mode, call) = line.split_once(' ').expect("a mode");
+            let (lhs, rhs) = call.split_once(" = ").expect("an =");
+            directed.insert((mode, lhs), rhs);
+        }
+        let mut failures = Vec::new();
+        let mut calls = 0usize;
+        let mut listed = std::collections::HashSet::new();
+        for (mode_name, mode) in DIRECTED {
+            for line in ORACLE
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.is_empty())
+            {
+                let (lhs, near) = line.split_once(" = ").expect("an =");
+                let glibc = directed.get(&(mode_name, lhs)).copied();
+                if glibc.is_some() {
+                    listed.insert((mode_name, lhs));
+                }
+                let mut words = lhs.split(' ');
+                let name = words.next().expect("a function name");
+                let ins: Vec<&str> = words.collect();
+                let outs = directed_answer(mode_name, name, &ins, near, glibc.unwrap_or(near));
+                let outs: Vec<&str> = outs.iter().map(String::as_str).collect();
+                let near0 = near.split(' ').next().expect("an output");
+                let edge = if answers_an_int(name) {
+                    false
+                } else if near0.len() == 16 {
+                    let v = d(near0);
+                    v == 0.0 || v.is_infinite()
+                } else {
+                    let v = f(near0);
+                    v == 0.0 || v.is_infinite()
+                };
+                calls += 1;
+                DIRECTED_SLACK.with(|s| s.set(1));
+                EDGES_EXACT.with(|s| s.set(edge));
+                let result = {
+                    let _r = Rounding::set(mode);
+                    replay_math(name, &ins, &outs)
+                };
+                DIRECTED_SLACK.with(|s| s.set(0));
+                EDGES_EXACT.with(|s| s.set(true));
+                if let Err(why) = result {
+                    failures.push(format!(
+                        "{mode_name} {lhs} = {}\n    to nearest: {near}; glibc {mode_name}: {}\n    ours: {why}",
+                        outs.join(" "),
+                        glibc.unwrap_or("as to nearest")
+                    ));
+                }
+            }
+        }
+        assert_eq!(
+            listed.len(),
+            directed.len(),
+            "every line of the directed table is a call of ORACLE's"
+        );
+        assert!(
+            calls > 60_000,
+            "the replay is {calls} calls; it should be the whole table three times"
+        );
+        assert!(
+            failures.is_empty(),
+            "{} of {calls} calls differ in a directed mode:\n{}",
+            failures.len(),
+            failures
+                .iter()
+                .take(80)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 

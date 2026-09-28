@@ -22,6 +22,16 @@
 //! reads on both halves of the face, and black or white where it does not --
 //! and a face on which no one ink reads is tinted further until one does.
 //!
+//! # What the theme's widget style decides
+//!
+//! The shape (`Palette::widget_style`, design-decisions 1435): how round the
+//! corners are, whether the upper half is the brighter glass or the face is
+//! one flat colour, and whether a soft shadow lifts the button off the page.
+//! The built-in theme's are the reference's -- 4-pixel corners, the gloss, no
+//! shadow. The colours and the label's legibility are the same whichever
+//! shape: a face without gloss is only its lower half, on which the ink was
+//! already checked.
+//!
 //! # What a caller decides
 //!
 //! Where the button goes and how tall it is: a dialog lays its own button row
@@ -34,6 +44,7 @@ use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
 use crate::theme::{contrast_ratio, relative_luminance};
+use crate::widget_style::ButtonStyle;
 
 /// A button's height where the caller has no layout of its own to fit: the
 /// reference's 28.
@@ -45,7 +56,8 @@ pub const PADDING_H: f32 = 14.0;
 /// The narrowest a button is, so a row of short labels -- OK, Cancel -- is a
 /// row of equal buttons, as every desktop draws them.
 pub const MIN_WIDTH: f32 = 80.0;
-/// The corners: the reference's 4.
+/// The corners in the built-in theme: the reference's 4. A theme's own are
+/// its widget style's (`ButtonStyle::radius`), which [`draw`] reads.
 pub const RADIUS: f32 = 4.0;
 /// How far a primary or destructive button's face is tinted towards its
 /// colour, from the palette's button colour.
@@ -56,8 +68,14 @@ const HOVER_TINT: f32 = 0.12;
 /// How much further a button held down is tinted.
 const PRESSED_TINT: f32 = 0.22;
 /// How much brighter the upper half of the face is: the reference's
-/// `#fbfdff` over `#e6eef6`.
+/// `#fbfdff` over `#e6eef6`. Nothing, in a style without gloss.
 const GLOSS: f32 = 0.18;
+/// The shadow a style with one puts under a button: a pixel down and three
+/// of blur, faint -- a button lifted off the page, not floating over it as a
+/// menu does.
+const SHADOW_OFFSET_Y: f32 = 1.0;
+const SHADOW_BLUR: f32 = 3.0;
+const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 80);
 /// How far the edge is tinted beyond the face, towards the accent -- or, for a
 /// primary or destructive button, towards its own colour, further.
 const EDGE_TINT: f32 = 0.45;
@@ -123,16 +141,22 @@ pub fn width(label: &str) -> f32 {
 /// colour of whatever the button sits on.
 ///
 /// Every colour is opaque, so the label's contrast against the face is known:
-/// the ink clears the text floor on both halves of the face.
+/// the ink clears the text floor on both halves of the face. Without the
+/// style's gloss the two halves are one colour.
 #[must_use]
 pub fn paint(palette: &Palette, kind: Kind, state: State, ground: Color) -> Paint {
+    let gloss = if palette.widget_style.button.gloss {
+        GLOSS
+    } else {
+        0.0
+    };
     if state.disabled {
         // The palette's disabled grey, which is what it is for: off should
         // look off. Not held to the text floor, by the palette's own rule for
         // `overlay0`.
         let lower = opaque(palette.surface0, ground);
         return Paint {
-            upper: lower.lerp(Color::WHITE, GLOSS / 2.0),
+            upper: lower.lerp(Color::WHITE, gloss / 2.0),
             lower,
             edge: opaque(palette.surface1, ground),
             ink: palette.overlay0,
@@ -163,7 +187,7 @@ pub fn paint(palette: &Palette, kind: Kind, state: State, ground: Color) -> Pain
         };
     loop {
         let lower = rest.lerp(target, tint);
-        let upper = lower.lerp(Color::WHITE, GLOSS);
+        let upper = lower.lerp(Color::WHITE, gloss);
         // One ink for both halves. A face whose two halves sit either side of
         // the point where dark text stops reading and light text starts has
         // none, and is tinted further until it has -- a theme's colours
@@ -200,7 +224,16 @@ fn opaque(colour: Color, ground: Color) -> Color {
     Color::rgb(ground.r, ground.g, ground.b).lerp(solid, alpha)
 }
 
-/// Draw a button with its label, at `(x, y)`, `w` by `h`, on `ground`.
+/// The corner radius a button `h` tall is drawn with in `style`: the style's,
+/// but never more than half the height -- a pill is the roundest a button
+/// can be, whatever a theme asks.
+#[must_use]
+pub fn radius(style: &ButtonStyle, h: f32) -> f32 {
+    f32::from(style.radius).min((h / 2.0).max(0.0))
+}
+
+/// Draw a button with its label, at `(x, y)`, `w` by `h`, on `ground`, in the
+/// palette's colours and its widget style's shape.
 ///
 /// `focus_ring` is the ring's width when the button has the keyboard -- a
 /// caller that scales its lines for accessibility passes the scaled width.
@@ -215,10 +248,29 @@ pub fn draw(
     ground: Color,
     focus_ring: f32,
 ) {
+    let style = &palette.widget_style.button;
     let colours = paint(palette, kind, state, ground);
-    let radii = CornerRadii::all(RADIUS);
+    let r = radius(style, h);
+    let radii = CornerRadii::all(r);
+    // A shadow lifts a button that can be pressed; one held down, or one that
+    // cannot be pressed at all, sits on the page.
+    if style.shadow && !state.disabled && !state.pressed {
+        sink.emit(RenderCommand::BoxShadow {
+            x,
+            y,
+            width: w,
+            height: h,
+            offset_x: 0.0,
+            offset_y: SHADOW_OFFSET_Y,
+            blur: SHADOW_BLUR,
+            spread: 0.0,
+            color: SHADOW_COLOR,
+            corner_radii: radii,
+        });
+    }
     // The face, then its brighter upper half over it: the reference's
-    // gradient, in the two steps the renderer can draw.
+    // gradient, in the two steps the renderer can draw. A face without gloss
+    // is one colour, and one fill.
     sink.emit(RenderCommand::FillRect {
         x,
         y,
@@ -227,19 +279,24 @@ pub fn draw(
         color: colours.lower,
         corner_radii: radii,
     });
-    sink.emit(RenderCommand::FillRect {
-        x,
-        y,
-        width: w,
-        height: h / 2.0,
-        color: colours.upper,
-        corner_radii: CornerRadii {
-            top_left: RADIUS,
-            top_right: RADIUS,
-            bottom_left: 0.0,
-            bottom_right: 0.0,
-        },
-    });
+    if colours.upper != colours.lower {
+        sink.emit(RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h / 2.0,
+            color: colours.upper,
+            // The upper half's lower corners are square: they sit on the
+            // lower half, not on the page. Its upper corners are the
+            // button's, which `radius` already holds to half the height.
+            corner_radii: CornerRadii {
+                top_left: r,
+                top_right: r,
+                bottom_left: 0.0,
+                bottom_right: 0.0,
+            },
+        });
+    }
     sink.emit(RenderCommand::StrokeRect {
         x,
         y,
@@ -259,7 +316,7 @@ pub fn draw(
             height: h + focus_ring * 2.0,
             color: palette.accent,
             line_width: focus_ring,
-            corner_radii: CornerRadii::all(RADIUS + focus_ring),
+            corner_radii: CornerRadii::all(r + focus_ring),
         });
     }
     let text_w = crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold);
@@ -288,6 +345,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::widget_style::WidgetStyle;
 
     const STATES: [State; 4] = [
         State {
@@ -498,6 +556,162 @@ mod tests {
             )
             .count();
         assert_eq!(rings, 1, "the keyboard's button has no ring");
+    }
+
+    /// A palette whose widget style's button is `button`.
+    fn styled(button: ButtonStyle) -> Palette {
+        let mut p = Palette::for_mode(false);
+        p.widget_style.button = button;
+        p
+    }
+
+    /// The fills and shadows a button draws, in order: `(kind, height,
+    /// corner radius)` with `kind` `'s'` for a shadow and `'f'` for a fill.
+    fn shapes(p: &Palette, state: State) -> Vec<(char, f32, f32)> {
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+        draw(
+            &mut cmds,
+            p,
+            (0.0, 0.0, 100.0, HEIGHT),
+            "OK",
+            Kind::Plain,
+            state,
+            p.base,
+            2.0,
+        );
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::BoxShadow {
+                    height,
+                    corner_radii,
+                    ..
+                } => Some(('s', *height, corner_radii.top_left)),
+                RenderCommand::FillRect {
+                    height,
+                    corner_radii,
+                    ..
+                } => Some(('f', *height, corner_radii.top_left)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The built-in theme's button is the reference's**: 4-pixel corners,
+    /// the brighter upper half, no shadow -- what it was before styles.
+    #[test]
+    fn the_built_in_style_draws_the_reference_button() {
+        let p = Palette::for_mode(false);
+        assert_eq!(
+            shapes(&p, State::default()),
+            [('f', HEIGHT, RADIUS), ('f', HEIGHT / 2.0, RADIUS)]
+        );
+    }
+
+    /// **A style's corners are drawn, but never rounder than a pill**, and
+    /// the focus ring follows them round.
+    #[test]
+    fn the_corners_are_the_styles_up_to_a_pill() {
+        let p = styled(ButtonStyle {
+            radius: 9,
+            ..WidgetStyle::AERO.button
+        });
+        assert_eq!(shapes(&p, State::default())[0], ('f', HEIGHT, 9.0));
+        assert_eq!(
+            radius(&p.widget_style.button, 10.0),
+            5.0,
+            "a pill at 10 high"
+        );
+        assert_eq!(radius(&p.widget_style.button, -3.0), 0.0);
+
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+        let focused = State {
+            focused: true,
+            ..State::default()
+        };
+        draw(
+            &mut cmds,
+            &p,
+            (0.0, 0.0, 100.0, HEIGHT),
+            "OK",
+            Kind::Plain,
+            focused,
+            p.base,
+            2.0,
+        );
+        let ring = cmds.iter().find_map(|cmd| match cmd {
+            RenderCommand::StrokeRect {
+                color,
+                corner_radii,
+                ..
+            } if *color == p.accent => Some(corner_radii.top_left),
+            _ => None,
+        });
+        assert_eq!(ring, Some(11.0), "the ring is round with the button");
+    }
+
+    /// **Without gloss the face is one flat colour**, drawn once -- and its
+    /// label still clears the floor, on every kind, state and ground.
+    #[test]
+    fn a_flat_face_is_one_colour_and_its_label_reads() {
+        for light in [false, true] {
+            let mut p = Palette::for_mode(light);
+            p.widget_style.button.gloss = false;
+            for ground in [p.base, p.mantle, p.surface0, p.crust] {
+                for kind in KINDS {
+                    for state in STATES {
+                        let c = paint(&p, kind, state, ground);
+                        assert_eq!(c.upper, c.lower, "{kind:?} {state:?}");
+                        assert!(contrast_ratio(c.ink, c.lower) >= TEXT_CONTRAST_FLOOR);
+                    }
+                }
+            }
+            let off = State {
+                disabled: true,
+                ..State::default()
+            };
+            let c = paint(&p, Kind::Plain, off, p.base);
+            assert_eq!(c.upper, c.lower, "a disabled flat face");
+            assert_eq!(shapes(&p, State::default()), [('f', HEIGHT, RADIUS)]);
+        }
+    }
+
+    /// **A style with a shadow lifts the button**, under its face and round
+    /// its corners -- but not one held down, and not one that cannot be
+    /// pressed.
+    #[test]
+    fn a_shadow_lifts_a_button_that_can_be_pressed() {
+        let p = styled(ButtonStyle {
+            shadow: true,
+            ..WidgetStyle::AERO.button
+        });
+        let rest = shapes(&p, State::default());
+        assert_eq!(
+            rest[0],
+            ('s', HEIGHT, RADIUS),
+            "the shadow first, under the face"
+        );
+        assert_eq!(rest.iter().filter(|s| s.0 == 's').count(), 1);
+        let pressed = State {
+            pressed: true,
+            hovered: true,
+            ..State::default()
+        };
+        let off = State {
+            disabled: true,
+            ..State::default()
+        };
+        for state in [pressed, off] {
+            assert!(
+                shapes(&p, state).iter().all(|s| s.0 != 's'),
+                "{state:?} has a shadow"
+            );
+        }
+        assert!(
+            shapes(&Palette::for_mode(false), State::default())
+                .iter()
+                .all(|s| s.0 != 's'),
+            "the built-in theme's button has none"
+        );
     }
 
     /// A row of short labels is a row of equal buttons; a long one is as

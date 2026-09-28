@@ -4223,6 +4223,7 @@ DEFECTS = [
             # Re-derived 2026-09-27 against the code as it now reads.
             # The system monitor draws its three meters in one loop now, each with its own role.
             'nothing_that_reports_a_measurement_follows_the_accent',
+            'the_three_meters_never_look_alike',
         ],
     ),
     (
@@ -5975,6 +5976,7 @@ DEFECTS = [
         ["desktop"],
         [
             # Re-derived 2026-09-27 against the code as it now reads. The icons are named from the theme now.
+            'an_overlays_icon_goes_up_before_the_frame_that_names_it',
             'the_fixtures_take_every_branch_the_osd_has',
             'volume_icon_levels',
         ],

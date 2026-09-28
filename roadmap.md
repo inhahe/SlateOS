@@ -2398,8 +2398,10 @@ word; text inside them that says "lane C" is history.
   words in five more games: battleship's message bar, 2048's score values,
   hangman's keys, tic-tac-toe's winning marks, wordle's keys and header
   buttons. Match-3 is laid out from the window's size now (2026-09-28),
-  its controls the toolkit's buttons. **Next:** pinball's table, which
-  still draws at one size (known-issues).
+  its controls the toolkit's buttons, and pinball's scene is fitted to its
+  window whole -- scaled by the largest factor at which all of it shows,
+  since its physics is measured in the table's own units: every game fits
+  every window.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

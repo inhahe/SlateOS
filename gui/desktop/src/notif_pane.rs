@@ -1943,18 +1943,19 @@ impl NotificationPane {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Enabled toggle.
+            // Enabled toggle: the toolkit's switch, knob and all, as the quick
+            // settings above it draw theirs. It was a bare pill -- a coloured
+            // capsule with no knob -- so "on" and "off" differed only by hue,
+            // which is exactly the difference a colour-blind reader cannot
+            // see; the knob's side says it without colour. Green rather than
+            // the accent: an app allowed to notify is a state, not a choice
+            // being marked.
             let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(y);
             let enabled = app.importance != Importance::Silent;
             let pill_bg = if enabled { p.green } else { p.surface2 };
-            cmds.push(RenderCommand::FillRect {
-                x: pill_x,
-                y: pill_y,
-                width: pill_w,
-                height: pill_h,
-                color: pill_bg,
-                corner_radii: CornerRadii::all(pill_h / 2.0),
-            });
+            cmds.extend(guitk::switch::switch(
+                pill_x, pill_y, pill_w, pill_h, enabled, pill_bg,
+            ));
 
             // Status text row.
             let mut status_parts = Vec::new();
@@ -2443,6 +2444,38 @@ mod tests {
     /// a light accent, 1.35:1 on the stock theme -- after the rest of the
     /// shell had been moved off exactly that defect. Its knob is the
     /// toolkit's now, derived from the track.
+    #[test]
+    fn an_apps_switch_says_on_or_off_by_where_its_knob_is() {
+        // **Without colour.** The per-app toggle was a bare pill whose only
+        // difference between on and off was its hue -- green or grey -- the
+        // one difference a colour-blind reader cannot see. The toolkit's
+        // switch puts its knob at the end that says which.
+        let mut pane = settings_pane(2);
+        pane.app_settings[0].importance = Importance::Silent;
+        let knob = TOGGLE_HEIGHT - 2.0 * guitk::switch::INSET;
+        let knobs: Vec<f32> = app_settings_commands(&pane)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x, width, height, ..
+                } if (*width - knob).abs() < f32::EPSILON
+                    && (*height - knob).abs() < f32::EPSILON =>
+                {
+                    Some(*x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(knobs.len(), 2, "a knob per app: {knobs:?}");
+        let (track_x, _, track_w, _) = NotificationPane::app_toggle_rect(0.0);
+        let middle = track_x + track_w / 2.0;
+        assert!(knobs[0] < middle, "a silenced app's knob is at the off end");
+        assert!(
+            knobs[1] >= middle,
+            "an app that may notify has its knob at the on end"
+        );
+    }
+
     #[test]
     fn a_quick_setting_switch_that_is_on_shows_its_knob() {
         for light in [false, true] {

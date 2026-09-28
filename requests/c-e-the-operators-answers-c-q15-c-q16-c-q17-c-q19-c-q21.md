@@ -12,7 +12,9 @@ seen on a square its own shade, and the playing cards the four card games
 share. Done by your table, as of 2026-09-28: tic-tac-toe, minesweeper, 2048,
 connect four, wordle, simon, reversi, gomoku, checkers, chess, tetris,
 solitaire, freecell, hearts, spades, mahjong, memory, match3, battleship,
-towers, breakout, pacman, yahtzee, sudoku; the rest follow one by one. From
+towers, breakout, pacman, yahtzee, sudoku, crossword, nonogram, wordsearch,
+asteroids, pong, snake, maze, nim, lights out, hangman, pinball, pipes; the
+rest (sokoban, dots, flood, sliding, klotski, rush) follow one by one. From
 sudoku on, each game also carries a legibility test
 (`gamechrome::legibility`: every text read against what is drawn under it),
 which found the toolkit's F1 card see-through under the bordered theme --

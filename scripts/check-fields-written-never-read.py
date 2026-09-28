@@ -625,7 +625,36 @@ def self_test():
     """Three fixtures: the shape this looks for, and two that must not fire."""
     import tempfile
 
+    span_failures = lanec_scan._self_test()
+    if span_failures:
+        print("check-fields-written-never-read self-test FAILED: lanec_scan.test_spans")
+        print("\n".join("  " + f for f in span_failures))
+        return 1
+
     files = {
+        # 0. A `#[cfg(test)]` on a *field* covers that field. Until 2026-09-27
+        #    the scanner took it to cover the next braced item, so the impl
+        #    after this struct -- the production read of `stamped` -- was
+        #    counted as test code and `stamped` reported as write-only
+        #    (requests/e-ac-a-cfg-test-field-hides-the-next-item-from-every-gate.md).
+        "apps/epsilon/src/main.rs": """
+            impl Points {
+                fn stamp(&mut self) { self.stamped = 5; }
+            }
+            pub struct Points {
+                pub stamped: u64,
+                #[cfg(test)]
+                sandbox: Option<u32>,
+            }
+            impl Points {
+                fn show(&self) -> u64 { self.stamped }
+            }
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn t() { let p = Points::default(); assert_eq!(p.stamped, 0); }
+            }
+            """,
         # 1. The real shape, and the one the first version could not see: the
         #    test reads through the variable it built, never through `self`.
         "apps/alpha/src/main.rs": """
@@ -789,7 +818,7 @@ def self_test():
     # and watching the self-test go red. The first version had only case 1,
     # passed, and was blind to both 4 and 5.
     expected = {"last_export", "caption", "title", "flipped"}
-    forbidden = {"shown", "counted", "scratch", "broken", "kept", "watched"}
+    forbidden = {"shown", "counted", "scratch", "broken", "kept", "watched", "stamped"}
 
     with tempfile.TemporaryDirectory(prefix="fieldscan_selftest_") as tmp:
         base = pathlib.Path(tmp)

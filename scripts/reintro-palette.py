@@ -121,7 +121,11 @@ FD = "gui/desktop/src/file_drop.rs"
 IM = "gui/desktop/src/input_method.rs"
 WP = "gui/desktop/src/wallpaper.rs"
 SWITCH = "gui/desktop/src/switch.rs"
-SLIDER = "gui/desktop/src/slider.rs"
+# The slider moved into the toolkit on 2026-09-27 (`guitk::slider`), with its
+# drawing, its reasoning and its tests; the desktop draws through it. Its
+# defects therefore build `guitk` for the module's own tests and `desktop`
+# for the panels that draw sliders.
+SLIDER = "gui/toolkit/src/slider.rs"
 MM = "gui/desktop/src/multimon.rs"
 # The toolkit, one crate *below* `appearance`. 537 moved the WCAG arithmetic
 # down here so there would be one copy of it; a defect patched into this file
@@ -17145,31 +17149,33 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a slider thumb hangs off the bottom of its own track",
         SLIDER,
         [
-            ('            y: self.y + self.height / 2.0 - self.thumb / 2.0,\n',
-             '            y: self.y + self.height / 2.0,\n'),
+            ('        Rect::new(cx - d / 2.0, cy - d / 2.0, d, d)\n',
+             '        Rect::new(cx - d / 2.0, cy, d, d)\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'the_geometry_is_the_one_every_hand_written_slider_already_used',
-            'the_thumb_overhangs_the_track_on_every_shape_the_shell_draws',
+            'the_thumb_overhangs_the_track_on_every_shape_the_desktop_draws',
         ],
     ),
     (
         "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a slider thumb shrinks to the height of its track",
         SLIDER,
         [
-            (('            width: self.thumb,\n'
-              '            height: self.thumb,\n'),
-             ('            width: self.height,\n'
-              '            height: self.height,\n')),
+            (('        width: k.w,\n'
+              '        height: k.h,\n'
+              '        color: fade(thumb, look.alpha),\n'),
+             ('        width: thickness,\n'
+              '        height: thickness,\n'
+              '        color: fade(thumb, look.alpha),\n')),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # The overhang test is the premise of the ink rule: a contained
             # thumb would be read against the track, not the card, and 'text'
             # would stop being the right answer.
             'the_geometry_is_the_one_every_hand_written_slider_already_used',
-            'the_thumb_overhangs_the_track_on_every_shape_the_shell_draws',
+            'the_thumb_overhangs_the_track_on_every_shape_the_desktop_draws',
             'every_site_draws_the_role_it_claims',
         ],
     ),
@@ -17177,10 +17183,10 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a slider thumb takes the colour of the fill it ends",
         SLIDER,
         [
-            ('            color: fade(self.p.text, self.alpha),\n',
-             '            color: fade(self.fill, self.alpha),\n'),
+            ('        color: fade(thumb, look.alpha),\n',
+             '        color: fade(look.fill, look.alpha),\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # This is the touchpad bug (1.00:1) generalised to all five sliders.
             'the_thumb_is_legible_against_every_card_it_can_sit_on',
@@ -17199,10 +17205,10 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a slider thumb takes the switch knob's rule instead of its own",
         SLIDER,
         [
-            ('            color: fade(self.p.text, self.alpha),\n',
-             '            color: fade(appearance::readable_on(self.fill), self.alpha),\n'),
+            ('        color: fade(thumb, look.alpha),\n',
+             '        color: fade(crate::palette::readable_on(look.fill), look.alpha),\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # The plausible 'fix' a future reader would reach for, having seen
             # switch.rs. On Mocha it inks the thumb #11111B -- 1.1:1 against a
@@ -17244,10 +17250,10 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a slider at its floor still emits a zero-width fill",
         SLIDER,
         [
-            ('        if fill_w > 0.0 {\n',
-             '        if fill_w >= 0.0 {\n'),
+            ('    if filled > 0.0 {\n',
+             '    if filled >= 0.0 {\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'a_slider_on_its_floor_emits_no_fill_rectangle',
         ],
@@ -17256,10 +17262,10 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a slider's fraction stops being bounded",
         SLIDER,
         [
-            ('            self.frac.clamp(0.0, 1.0)\n',
-             '            self.frac\n'),
+            ('        frac.clamp(0.0, 1.0)\n',
+             '        frac\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'an_out_of_range_fraction_cannot_push_the_thumb_off_the_track',
         ],
@@ -17268,10 +17274,10 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a fading slider's thumb stays opaque",
         SLIDER,
         [
-            ('            color: fade(self.p.text, self.alpha),\n',
-             '            color: self.p.text,\n'),
+            ('        color: fade(thumb, look.alpha),\n',
+             '        color: thumb,\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # The osd is the only caller that fades, so this is invisible
             # everywhere else -- which is exactly why the helper owns the fade
@@ -17283,8 +17289,8 @@ DEFECTS = [
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: every slider reads as fully set, so its track is drawn and immediately covered",
         TPAD,
         [
-            ('            frac: (value - min) / (max - min),\n',
-             '            frac: 1.0,\n'),
+            ('            (value - min) / (max - min),\n',
+             '            1.0,\n'),
         ],
         ["desktop"],
         [

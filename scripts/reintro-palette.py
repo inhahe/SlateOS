@@ -18243,11 +18243,13 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: adjacent start-menu rows overlap by a pixel",
         DESK,
         [
-            ('            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,\n',
-             '            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * (height - 1.0),\n'),
+            ('            left.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,\n',
+             '            left.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * (height - 1.0),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The rows are measured from the
+            # start menu's left column now.
             # The classic fencepost. Every row after the first is one pixel high
             # into its neighbour, so the boundary pixel belongs to two rows and
             # `hit_test` gives it to whichever it scans first -- which means one
@@ -18346,71 +18348,48 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: closing the start menu strands the power menu open over the desktop",
         DESK,
         [
-            ('        self.start_menu_open = false;\n        self.power_menu_open = false;\n    }\n',
-             '        self.start_menu_open = false;\n    }\n'),
+            ('        self.start_menu_open = false;\n        self.power_menu_open = false;\n        self.start_lit = None;\n',
+             '        self.start_menu_open = false;\n        self.start_lit = None;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # `the_power_menu_offers_every_system_action_and_launches_them` is gone with
+            # the old power menu (design-decisions 1405), so it is no longer declared.
             # `close_start_menu` is deliberately the single place the menu
             # closes, so that the submenu cannot outlive its parent. Removing
             # one line from it leaves a power menu floating over an empty
             # desktop, anchored to a button that is no longer drawn.
             'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
-            'the_power_menu_offers_every_system_action_and_launches_them',
         ],
     ),
-    (
-        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the start menu lists the system actions as ordinary programs",
-        DESK,
-        [
-            ('            .filter(|app| matches!(app.category, Category::Application | Category::Setting))\n',
-             '            .filter(|app| {\n                matches!(\n                    app.category,\n                    Category::Application | Category::Setting | Category::System\n                )\n            })\n'),
-        ],
-        ["desktop"],
-        [
-            # The exclusion is not tidiness: it is what keeps `Shutdown` from
-            # being one mis-click away from `Screenshot` in an alphabetical
-            # list. It also puts every system action in *both* menus at once,
-            # which is the half the partition test sees.
-            'the_two_menus_between_them_offer_every_program_exactly_once',
-            'the_start_menu_offers_only_programs_the_launcher_knows',
-        ],
-    ),
-    (
-        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the power menu offers the applications instead of the system actions",
-        DESK,
-        [
-            ('            .filter(|app| matches!(app.category, Category::System))\n',
-             '            .filter(|app| matches!(app.category, Category::Application))\n'),
-        ],
-        ["desktop"],
-        [
-            # The complement of L, and the reason the two filters are written as
-            # complements of one another: an action must be in exactly one of
-            # the two lists, and only a test that checks the *partition* can see
-            # a change that puts it in the wrong one rather than in neither.
-            'the_power_menu_offers_every_system_action_and_launches_them',
-            'the_two_menus_between_them_offer_every_program_exactly_once',
-            'a_click_on_the_list_behind_the_power_menu_only_dismisses_it',
-            'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
-        ],
-    ),
+    # RETIRED 2026-09-27: LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL (80): the start menu lists the system actions as ordinary programs
+    #   No-op now: it let System-category entries (power actions) into the start
+    #   menu, and there are none -- they left the program list when the power
+    #   menu became `PowerChoice` (design-decisions 1405). The System half of
+    #   `the_start_menu_offers_only_programs_the_launcher_knows` can no longer fire.
+    # RETIRED 2026-09-27: MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM (80): the power menu offers the applications instead of the system actions
+    #   The power menu is `PowerChoice` now (design-decisions 1405), not a filter over
+    #   the program list, and two of its four tests are gone; the other two are
+    #   declared by the re-derived close/dismiss entries above.
     (
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: dismissing the power menu takes the start menu down with it",
         DESK,
         [
-            ('            self.power_menu_open = false;\n            if !Self::keeps_start_menu_open(hit) {\n                self.start_menu_open = false;\n            }\n            return ShellAction::Consumed;\n',
-             '            self.power_menu_open = false;\n            self.start_menu_open = false;\n            return ShellAction::Consumed;\n'),
+            ('            self.power_menu_open = false;\n            if !Self::keeps_start_menu_open(hit) {\n                self.close_start_menu();\n            }\n            return ShellAction::Consumed;\n',
+             '            self.power_menu_open = false;\n            self.close_start_menu();\n            return ShellAction::Consumed;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # `the_power_button_toggles_its_menu_and_leaves_the_start_menu_open` is gone
+            # with the old power button, so it is no longer declared.
             # The submenu is dismissed first and *on its own*: a click on the
             # application list while the power menu is up should close the power
             # menu and leave the list where it was. Closing both makes one click
             # undo two things, the second of which the user did not ask for.
             'a_click_on_the_list_behind_the_power_menu_only_dismisses_it',
             'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
-            'the_power_button_toggles_its_menu_and_leaves_the_start_menu_open',
         ],
     ),
     (
@@ -18436,11 +18415,12 @@ DEFECTS = [
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a release over the shell's chrome is handed to the client underneath",
         DESK,
         [
-            ('            MouseEventKind::Release(_) => {\n                if self.hit_test(event.x, event.y).is_shell_chrome() {\n                    ShellAction::Consumed\n                } else {\n                    ShellAction::Pass\n                }\n            }\n',
-             '            MouseEventKind::Release(_) => ShellAction::Pass,\n'),
+            ('                if self.hit_test(event.x, event.y).is_shell_chrome() {\n                    ShellAction::Consumed\n                } else {\n                    ShellAction::Pass\n                }\n',
+             '                let _ = self.hit_test(event.x, event.y);\n                ShellAction::Pass\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             # A release belongs to whoever took the press. A client that saw a
             # release with no press for it reads a click on the taskbar as a
             # click on itself -- so the visible symptom is a button in an
@@ -19880,11 +19860,13 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: any key release ends the Alt-Tab switcher, not just letting go of Alt",
         DESK,
         [
-            ('            if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {\n',
+            ('            if self.alt_tab_active && self.alt_tab_anchor.released_by(key.key) {\n',
              '            if self.alt_tab_active {\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A switch ends now on the release
+            # of a key that started it (`SwitchAnchor`, design-decisions 1419).
             # Escaped, as predicted, and now closed. Only one test released a key
             # at all, and the key it released was LeftAlt -- for which the guard
             # and its removal agree. Releasing the Tab of an Alt+Tab is the
@@ -19896,11 +19878,12 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: every key release is swallowed by the shell, so no window ever sees one",
         DESK,
         [
-            ('            return HotkeyOutcome::ignored();\n        }\n\n        // The overview gets every press before the shortcut table does, and\n',
-             '            return HotkeyOutcome::consumed();\n        }\n\n        // The overview gets every press before the shortcut table does, and\n'),
+            ('                return HotkeyOutcome::ask(self.finish_alt_tab());\n            }\n            return HotkeyOutcome::ignored();\n',
+             '                return HotkeyOutcome::ask(self.finish_alt_tab());\n            }\n            return HotkeyOutcome::consumed();\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             'releasing_tab_does_not_end_the_window_switcher',
             'a_key_release_only_ends_the_window_switcher',
         ],
@@ -20021,15 +20004,16 @@ DEFECTS = [
     ),
     (
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: Escape is bound to nothing, so a popup can be opened by a click but never closed by a key",
-        DESK,
+        HOTKEYS,
         [
-            ('            (false, false, false, false, Key::Escape) => Some(Self::DismissPopup),\n',
-             '            (false, false, false, false, Key::Escape) => None,\n'),
+            ('        // dialog on the desktop.\n        (Hotkey::bare(Key::Escape), HotkeyAction::DismissPopup),\n',
+             '        // dialog on the desktop.\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The binding lives in the
+            # shortcut table's defaults now (`hotkeys.rs`).
             'closing_the_last_menu_takes_the_surface_away_again',
-            'the_chooser_closes_the_ways_a_popup_closes',
             'escape_closes_a_popup_and_is_otherwise_left_alone',
         ],
     ),
@@ -20037,11 +20021,12 @@ DEFECTS = [
         "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: Escape is claimed unconditionally, so no window can ever close a dialog with it",
         DESK,
         [
-            ('            DesktopAction::DismissPopup => {\n                if self.dismiss_popups() {\n                    HotkeyOutcome::consumed()\n                } else {\n                    HotkeyOutcome::ignored()\n                }\n            }\n',
-             '            DesktopAction::DismissPopup => {\n                self.dismiss_popups();\n                HotkeyOutcome::consumed()\n            }\n'),
+            ('            HotkeyAction::DismissPopup => {\n                if self.dismiss_popups() {\n                    HotkeyOutcome::consumed()\n                } else {\n                    HotkeyOutcome::ignored()\n                }\n            }\n',
+             '            HotkeyAction::DismissPopup => {\n                self.dismiss_popups();\n                HotkeyOutcome::consumed()\n            }\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `DesktopAction` is `HotkeyAction` now.
             'escape_closes_a_popup_and_is_otherwise_left_alone',
         ],
     ),

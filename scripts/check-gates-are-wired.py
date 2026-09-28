@@ -143,6 +143,13 @@ CALLERS = (
 # Gates known to be unwired, with the reason. Pruning this list is part of
 # using it: see the module docstring on stale exemptions.
 PINNED: dict[str, str] = {
+    "check-libc-declared.py":
+        "lane D, 2026-09-28: runs in toolchain/build-sysroot.ps1 on the archive "
+        "that script has just built, as check-libc-shape.py does -- the one "
+        "place the archive is certainly current. Wiring it into boot-test.sh "
+        "as well is lane A's to do and is asked for in "
+        "requests/d-a-run-check-libc-declared-in-the-boot-test.md; delete this "
+        "pin with that change.",
     # The other five lane-C gates filed here on 2026-09-02 were wired into
     # boot-test.sh on 2026-09-03 (check_lane_c_gui_gates) and their entries
     # deleted with the same commit, which is what this dict is for. Lane A's

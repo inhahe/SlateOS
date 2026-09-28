@@ -1873,6 +1873,144 @@ pub unsafe extern "C" fn sigismember(set: *const SigsetT, signum: i32) -> i32 {
     i32::from(val & (1u64 << bit) != 0)
 }
 
+// GNU's set operations. Like the five above they are bit-twiddling on
+// caller-owned sets, and glibc's (`signal/sigandset.c` and kin) have the same
+// single error: `EINVAL` for a NULL pointer.
+
+/// `dest = left & right` (GNU).
+///
+/// # Safety
+///
+/// Each pointer is NULL or a valid `sigset_t`; `dest` may alias either input.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn sigandset(
+    dest: *mut SigsetT,
+    left: *const SigsetT,
+    right: *const SigsetT,
+) -> i32 {
+    // SAFETY: this function's contract.
+    unsafe { combine_sets(dest, left, right, |a, b| a & b) }
+}
+
+/// `dest = left | right` (GNU).
+///
+/// # Safety
+///
+/// As for [`sigandset`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn sigorset(
+    dest: *mut SigsetT,
+    left: *const SigsetT,
+    right: *const SigsetT,
+) -> i32 {
+    // SAFETY: this function's contract.
+    unsafe { combine_sets(dest, left, right, |a, b| a | b) }
+}
+
+/// [`sigandset`] and [`sigorset`]: `op` word by word. The inputs are read
+/// whole before `dest` is written, so `dest` may be either of them.
+///
+/// # Safety
+///
+/// As for [`sigandset`].
+unsafe fn combine_sets(
+    dest: *mut SigsetT,
+    left: *const SigsetT,
+    right: *const SigsetT,
+    op: impl Fn(u64, u64) -> u64,
+) -> i32 {
+    if dest.is_null() || left.is_null() || right.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: all three non-null, valid by the caller's contract; copied out
+    // before `dest` is written.
+    let (l, r) = unsafe { (*left, *right) };
+    let mut out = SigsetT::EMPTY;
+    for ((o, a), b) in out.bits.iter_mut().zip(l.bits).zip(r.bits) {
+        *o = op(a, b);
+    }
+    // SAFETY: non-null, the caller's.
+    unsafe { *dest = out };
+    0
+}
+
+/// 1 if `set` holds no signal, 0 if it holds one (GNU).
+///
+/// # Safety
+///
+/// `set` is NULL or a valid `sigset_t`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn sigisemptyset(set: *const SigsetT) -> i32 {
+    if set.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: non-null, the caller's.
+    i32::from(unsafe { (*set).bits.iter().all(|&w| w == 0) })
+}
+
+// The XSI signal functions (obsolescent, but musl's <signal.h> declares
+// them): one signal at a time, over `sigprocmask`, `sigaction` and
+// `sigsuspend`.
+
+/// A set holding `sig` alone, or `None` -- with `EINVAL`, as `sigaddset`
+/// sets it -- for a number that is no signal.
+fn only(sig: i32) -> Option<SigsetT> {
+    let mut set = SigsetT::EMPTY;
+    // SAFETY: a local set.
+    (unsafe { sigaddset(&raw mut set, sig) } == 0).then_some(set)
+}
+
+/// Add `sig` to the calling thread's mask (XSI).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sighold(sig: i32) -> i32 {
+    match only(sig) {
+        Some(set) => sigprocmask(SIG_BLOCK, &raw const set, core::ptr::null_mut()),
+        None => -1,
+    }
+}
+
+/// Remove `sig` from the calling thread's mask (XSI).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigrelse(sig: i32) -> i32 {
+    match only(sig) {
+        Some(set) => sigprocmask(SIG_UNBLOCK, &raw const set, core::ptr::null_mut()),
+        None => -1,
+    }
+}
+
+/// Set `sig`'s disposition to `SIG_IGN` (XSI), with an empty handler mask and
+/// no flags, as glibc's `sigignore` does.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigignore(sig: i32) -> i32 {
+    let act = Sigaction {
+        sa_handler: SIG_IGN,
+        sa_mask: SigsetT::EMPTY,
+        sa_flags: 0,
+        sa_restorer: 0,
+    };
+    // SAFETY: a local action; no old action wanted.
+    unsafe { sigaction(sig, &raw const act, core::ptr::null_mut()) }
+}
+
+/// Wait for a signal with `sig` removed from the mask (XSI's `sigpause`,
+/// which musl's header declares -- not BSD's, whose argument is a mask):
+/// `sigsuspend` of the current mask less `sig`. Returns -1 with `EINTR`
+/// once a handler has run, as `sigsuspend` does.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigpause(sig: i32) -> i32 {
+    let mut mask = SigsetT::EMPTY;
+    if sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut mask) != 0 {
+        return -1;
+    }
+    // SAFETY: a local set.
+    if unsafe { sigdelset(&raw mut mask, sig) } != 0 {
+        return -1;
+    }
+    sigsuspend(&raw const mask)
+}
+
 // ---------------------------------------------------------------------------
 // sigaltstack — alternate signal stack
 // ---------------------------------------------------------------------------
@@ -2486,6 +2624,82 @@ pub unsafe extern "C" fn psiginfo(info: *const SiginfoT, msg: *const u8) {
 #[allow(clippy::field_reassign_with_default)] // Tests build SiginfoT etc. by mutating defaults; clearer than functional-update for single-field tweaks.
 mod tests {
     use super::*;
+
+    // -- GNU set operations and the XSI one-signal functions --
+
+    fn set_of(sigs: &[i32]) -> SigsetT {
+        let mut s = SigsetT::EMPTY;
+        for &sig in sigs {
+            assert_eq!(unsafe { sigaddset(&raw mut s, sig) }, 0);
+        }
+        s
+    }
+
+    #[test]
+    fn sigandset_sigorset_and_sigisemptyset() {
+        let (a, b) = (set_of(&[SIGINT, SIGTERM, 40]), set_of(&[SIGTERM, 64]));
+        let mut d = SigsetT::EMPTY;
+        unsafe {
+            assert_eq!(sigandset(&raw mut d, &raw const a, &raw const b), 0);
+            assert_eq!(d.bits, set_of(&[SIGTERM]).bits);
+            assert_eq!(sigorset(&raw mut d, &raw const a, &raw const b), 0);
+            assert_eq!(d.bits, set_of(&[SIGINT, SIGTERM, 40, 64]).bits);
+            assert_eq!(sigisemptyset(&raw const d), 0);
+            let empty = SigsetT::EMPTY;
+            assert_eq!(sigisemptyset(&raw const empty), 1);
+            // `dest` may be an input.
+            let mut c = a;
+            assert_eq!(sigandset(&raw mut c, &raw const c, &raw const b), 0);
+            assert_eq!(c.bits, set_of(&[SIGTERM]).bits);
+            errno::set_errno(0);
+            assert_eq!(
+                sigorset(core::ptr::null_mut(), &raw const a, &raw const b),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+            assert_eq!(sigisemptyset(core::ptr::null()), -1);
+        }
+    }
+
+    #[test]
+    fn sighold_and_sigrelse_move_one_signal_in_and_out_of_the_mask() {
+        let mut before = SigsetT::EMPTY;
+        assert_eq!(
+            sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut before),
+            0
+        );
+        assert_eq!(sighold(SIGUSR1), 0);
+        let mut now = SigsetT::EMPTY;
+        assert_eq!(sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut now), 0);
+        assert_eq!(unsafe { sigismember(&raw const now, SIGUSR1) }, 1);
+        assert_eq!(sigrelse(SIGUSR1), 0);
+        assert_eq!(sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut now), 0);
+        assert_eq!(unsafe { sigismember(&raw const now, SIGUSR1) }, 0);
+        errno::set_errno(0);
+        assert_eq!(sighold(0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(sigrelse(NSIG), -1);
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const before, core::ptr::null_mut()),
+            0
+        );
+    }
+
+    #[test]
+    fn sigignore_sets_sig_ign() {
+        let mut old = DEFAULT_SIGACTION;
+        unsafe {
+            assert_eq!(sigaction(SIGUSR2, core::ptr::null(), &raw mut old), 0);
+            assert_eq!(sigignore(SIGUSR2), 0);
+            let mut now = DEFAULT_SIGACTION;
+            assert_eq!(sigaction(SIGUSR2, core::ptr::null(), &raw mut now), 0);
+            assert_eq!(now.sa_handler, SIG_IGN);
+            assert_eq!(sigaction(SIGUSR2, &raw const old, core::ptr::null_mut()), 0);
+        }
+        errno::set_errno(0);
+        assert_eq!(sigignore(0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
 
     // -- sigaltstack: the stack is stored, reported and used --
 

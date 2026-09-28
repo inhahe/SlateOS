@@ -488,6 +488,7 @@ pub(crate) mod sysv_ipc;
 pub mod sysv_msg;
 pub mod sysv_sem;
 pub mod sysv_shm;
+pub mod threads;
 pub mod time;
 pub mod tls;
 pub mod types;

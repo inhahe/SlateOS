@@ -1147,6 +1147,20 @@ pub unsafe extern "C" fn wcslen(s: *const WcharT) -> usize {
     i
 }
 
+/// The length of the wide string at `s`, counting at most `maxlen`
+/// characters (POSIX.1-2008): `wcslen` for a string that may have no
+/// terminator within `maxlen`.
+///
+/// # Safety
+///
+/// `s` must be readable up to its first NUL or `maxlen` wide characters,
+/// whichever comes first.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcsnlen(s: *const WcharT, maxlen: usize) -> usize {
+    // SAFETY: this function's contract is the helper's.
+    unsafe { wcsnlen_bounded(s, maxlen) }
+}
+
 /// Compare two wide strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscmp(s1: *const WcharT, s2: *const WcharT) -> i32 {
@@ -1833,6 +1847,17 @@ pub unsafe extern "C" fn wmemmove(dst: *mut WcharT, src: *const WcharT, n: usize
         }
     }
     dst
+}
+
+/// X/Open's old name for [`wcsstr`], which musl's `<wchar.h>` still declares.
+///
+/// # Safety
+///
+/// As for [`wcsstr`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcswcs(haystack: *const WcharT, needle: *const WcharT) -> *const WcharT {
+    // SAFETY: this function's contract.
+    unsafe { wcsstr(haystack, needle) }
 }
 
 /// Find a wide substring in a wide string.
@@ -3412,8 +3437,11 @@ pub unsafe extern "C" fn wcsftime(
 // this tree. `newlocale` already returns a single tag for every request
 // (`locale.rs`), so there is no second locale a caller could have obtained and
 // no distinction being discarded. If a real locale ever lands, these become
-// the fourteen places that must learn about it, which is why they are together
-// and why this comment names them as a set.
+// the twenty-one places that must learn about it, which is why they are
+// together and why this comment names them as a set. (Fourteen until
+// 2026-09-28, when `wctype_l`, `iswctype_l`, `wctrans_l`, `towctrans_l`,
+// `wcscasecmp_l`, `wcsncasecmp_l` and `wcsftime_l` joined them: musl's headers
+// declare all seven, and a program calling one did not link.)
 //
 // Measured need: upstream CMake 4.4.3 links against our libc with exactly
 // twenty undefined symbols and these are fourteen of them — the single largest
@@ -3501,6 +3529,89 @@ pub extern "C" fn towlower_l(wc: WcharT, _loc: crate::locale::LocaleT) -> WcharT
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn towupper_l(wc: WcharT, _loc: crate::locale::LocaleT) -> WcharT {
     towupper(wc)
+}
+
+/// `wctype` in an explicit locale.
+///
+/// # Safety
+///
+/// As for [`wctype`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wctype_l(name: *const u8, _loc: crate::locale::LocaleT) -> WctypeT {
+    // SAFETY: this function's contract.
+    unsafe { wctype(name) }
+}
+
+/// `iswctype` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswctype_l(wc: WcharT, ct: WctypeT, _loc: crate::locale::LocaleT) -> i32 {
+    iswctype(wc, ct)
+}
+
+/// `wctrans` in an explicit locale.
+///
+/// # Safety
+///
+/// As for [`wctrans`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wctrans_l(name: *const u8, _loc: crate::locale::LocaleT) -> WctransT {
+    // SAFETY: this function's contract.
+    unsafe { wctrans(name) }
+}
+
+/// `towctrans` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn towctrans_l(wc: WcharT, tr: WctransT, _loc: crate::locale::LocaleT) -> WcharT {
+    towctrans(wc, tr)
+}
+
+/// `wcscasecmp` in an explicit locale.
+///
+/// # Safety
+///
+/// As for [`wcscasecmp`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcscasecmp_l(
+    s1: *const WcharT,
+    s2: *const WcharT,
+    _loc: crate::locale::LocaleT,
+) -> i32 {
+    // SAFETY: this function's contract.
+    unsafe { wcscasecmp(s1, s2) }
+}
+
+/// `wcsncasecmp` in an explicit locale.
+///
+/// # Safety
+///
+/// As for [`wcsncasecmp`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcsncasecmp_l(
+    s1: *const WcharT,
+    s2: *const WcharT,
+    n: usize,
+    _loc: crate::locale::LocaleT,
+) -> i32 {
+    // SAFETY: this function's contract.
+    unsafe { wcsncasecmp(s1, s2, n) }
+}
+
+/// `wcsftime` in an explicit locale: the one locale's names and formats,
+/// which `crate::time::strftime_l` uses too.
+///
+/// # Safety
+///
+/// As for [`wcsftime`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcsftime_l(
+    wcs: *mut WcharT,
+    maxsize: usize,
+    format: *const WcharT,
+    tm: *const crate::time::Tm,
+    _loc: crate::locale::LocaleT,
+) -> usize {
+    // SAFETY: this function's contract.
+    unsafe { wcsftime(wcs, maxsize, format, tm) }
 }
 
 // ---------------------------------------------------------------------------
@@ -4439,6 +4550,47 @@ mod tests {
         let mut v: Vec<WcharT> = text.bytes().map(WcharT::from).collect();
         v.push(0);
         v
+    }
+
+    #[test]
+    fn wcsnlen_stops_at_the_bound_or_the_terminator() {
+        let s = wide("hello");
+        // SAFETY: a terminated wide string.
+        unsafe {
+            assert_eq!(wcsnlen(s.as_ptr(), 10), 5);
+            assert_eq!(wcsnlen(s.as_ptr(), 3), 3);
+            assert_eq!(wcsnlen(s.as_ptr(), 0), 0);
+        }
+        // No terminator within the bound: nothing past it is read.
+        let unterminated: [WcharT; 3] = [0x61, 0x62, 0x63];
+        // SAFETY: three readable characters.
+        assert_eq!(unsafe { wcsnlen(unterminated.as_ptr(), 3) }, 3);
+    }
+
+    #[test]
+    fn wcswcs_is_wcsstr() {
+        let (h, n, none) = (wide("abcabd"), wide("abd"), wide("xyz"));
+        // SAFETY: terminated wide strings; the offset stays inside `h`.
+        unsafe {
+            assert_eq!(wcswcs(h.as_ptr(), n.as_ptr()), h.as_ptr().add(3));
+            assert!(wcswcs(h.as_ptr(), none.as_ptr()).is_null());
+        }
+    }
+
+    #[test]
+    fn the_new_l_forms_are_the_one_locales_functions() {
+        let (a, b) = (wide("HeLLo"), wide("hello!"));
+        // SAFETY: terminated strings and names.
+        unsafe {
+            let alpha = wctype_l(b"alpha\0".as_ptr(), 1);
+            assert_eq!(alpha, wctype(b"alpha\0".as_ptr()));
+            assert_ne!(iswctype_l(0x41, alpha, 1), 0);
+            assert_eq!(iswctype_l(0x31, alpha, 1), 0);
+            let up = wctrans_l(b"toupper\0".as_ptr(), 1);
+            assert_eq!(towctrans_l(0x61, up, 1), 0x41);
+            assert!(wcscasecmp_l(a.as_ptr(), b.as_ptr(), 1) < 0);
+            assert_eq!(wcsncasecmp_l(a.as_ptr(), b.as_ptr(), 5, 1), 0);
+        }
     }
 
     fn parse_wide(text: &str) -> f64 {

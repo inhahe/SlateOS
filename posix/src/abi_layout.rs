@@ -169,6 +169,10 @@ pub(crate) fn abi_asserts() -> String {
         ss_size
     );
 
+    // --- threads: the cleanup record musl's pthread_cleanup_push declares --
+    abi!(out, hdrs, crate::pthread::Ptcb, "struct __ptcb", "pthread.h",
+         f as "__f", x as "__x", next as "__next");
+
     // --- terminals ---------------------------------------------------------
     abi!(out, hdrs, crate::ioctl::Termios, "struct termios", "termios.h",
          c_iflag, c_oflag, c_cflag, c_lflag, c_line, c_cc,
@@ -350,6 +354,23 @@ pub(crate) fn abi_asserts() -> String {
         crate::pthread::PthreadCondT,
         "pthread_cond_t",
         "pthread.h"
+    );
+    // C11's `mtx_t` and `cnd_t` are musl's `pthread_mutex_t` and
+    // `pthread_cond_t` under other names (`threads.rs` passes them straight
+    // to the pthread functions), so their sizes must agree too.
+    abi!(
+        out,
+        hdrs,
+        crate::pthread::PthreadMutexT,
+        "mtx_t",
+        "threads.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::pthread::PthreadCondT,
+        "cnd_t",
+        "threads.h"
     );
     abi!(
         out,

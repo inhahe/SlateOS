@@ -175415,7 +175415,7 @@ nonzero is dropped, toward -inf a negative one's, toward zero never. Due with
 the 80-bit conversions (TD-POSIX-LONG-DOUBLE-PRECISION), which go through the
 same code.
 
-## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: OPEN**
+## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: OPEN (58 of the 104 done 2026-09-28: C11 `<threads.h>` (posix/src/threads.rs), the pthread cleanup helpers, scheduling attributes, `pthread_setschedprio`, the concurrency hint and default attributes, the nine `_l` functions, `wcsnlen`, `wcswcs` and the seven signal functions; the other 46 are `scripts/check-libc-declared.py`'s baseline, which refuses a new one)**
 
 **In short:** C programs here are compiled against musl's headers (`zig cc`)
 and linked against our `libc.a`. The headers declare 126 functions the library

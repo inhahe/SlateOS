@@ -1018,6 +1018,40 @@ pub unsafe extern "C" fn strncasecmp(s1: *const u8, s2: *const u8, n: usize) -> 
     0
 }
 
+/// [`strcasecmp`] in an explicit locale (POSIX.1-2008). The library has one
+/// locale (`crate::locale`: every `newlocale` returns the same tag), so the
+/// argument is accepted and unused, as by the `ctype` and `wctype` `_l`
+/// functions -- and by musl's, for the same reason.
+///
+/// # Safety
+///
+/// As for [`strcasecmp`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strcasecmp_l(
+    s1: *const u8,
+    s2: *const u8,
+    _loc: crate::locale::LocaleT,
+) -> i32 {
+    // SAFETY: this function's contract.
+    unsafe { strcasecmp(s1, s2) }
+}
+
+/// [`strncasecmp`] in an explicit locale; see [`strcasecmp_l`].
+///
+/// # Safety
+///
+/// As for [`strncasecmp`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strncasecmp_l(
+    s1: *const u8,
+    s2: *const u8,
+    n: usize,
+    _loc: crate::locale::LocaleT,
+) -> i32 {
+    // SAFETY: this function's contract.
+    unsafe { strncasecmp(s1, s2, n) }
+}
+
 // ---------------------------------------------------------------------------
 // Additional string functions
 // ---------------------------------------------------------------------------
@@ -1983,6 +2017,18 @@ pub static sys_errlist: [SyncPtr; 132] = {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn strcasecmp_l_and_strncasecmp_l_are_the_one_locales_comparisons() {
+        let (a, b) = (b"HeLLo\0", b"hello, world\0");
+        // SAFETY: NUL-terminated literals.
+        unsafe {
+            assert_eq!(super::strcasecmp_l(a.as_ptr(), b"hello\0".as_ptr(), 1), 0);
+            assert!(super::strcasecmp_l(a.as_ptr(), b.as_ptr(), 1) < 0);
+            assert_eq!(super::strncasecmp_l(a.as_ptr(), b.as_ptr(), 5, 1), 0);
+            assert!(super::strncasecmp_l(a.as_ptr(), b.as_ptr(), 6, 1) < 0);
+        }
+    }
+
     use super::*;
 
     // Helper: call strverscmp on two byte-string literals.

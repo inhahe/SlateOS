@@ -760,6 +760,15 @@ pub extern "C" fn pthread_create(
     arg: *mut u8,
 ) -> i32 {
     let want = CreateAttr::read(attr);
+    // Every thread here runs as `SCHED_OTHER` at priority 0 (see
+    // `pthread_getschedparam`): an explicit request for anything else is one
+    // this system cannot carry out, refused as Linux refuses an unprivileged
+    // real-time request, before anything is allocated.
+    if let Some((policy, priority)) = want.explicit_sched
+        && (policy != crate::sched::SCHED_OTHER || priority != 0)
+    {
+        return errno::EPERM;
+    }
     let Some(slot) = claim_slot() else {
         return errno::EAGAIN;
     };
@@ -796,21 +805,31 @@ struct CreateAttr {
     stack_addr: Option<usize>,
     /// Start detached.
     detached: bool,
+    /// The policy and priority asked for with `PTHREAD_EXPLICIT_SCHED`;
+    /// `None` to inherit the creator's.
+    explicit_sched: Option<(i32, i32)>,
 }
 
 impl CreateAttr {
-    /// What a NULL attribute stands for -- the values `pthread_attr_init`
-    /// records.
+    /// What `pthread_attr_init`'s values read as -- and so what a NULL
+    /// attribute stands for until `pthread_setattr_default_np` changes the
+    /// defaults. Only the tests name it: `read` takes a NULL attribute from
+    /// the current defaults.
+    #[cfg(test)]
     const DEFAULT: Self = Self {
         stack_size: DEFAULT_THREAD_STACK_SIZE,
         guard_size: DEFAULT_GUARD_SIZE,
         stack_addr: None,
         detached: false,
+        explicit_sched: None,
     };
 
+    /// What `attr` asks for; NULL stands for the process's default
+    /// attributes (`pthread_setattr_default_np`).
     fn read(attr: *const PthreadAttrT) -> Self {
         if attr.is_null() {
-            return Self::DEFAULT;
+            let default = default_attr_copy();
+            return Self::read(&raw const default);
         }
         // SAFETY: non-null, and by the caller's contract an initialised
         // attribute object.
@@ -826,6 +845,14 @@ impl CreateAttr {
             guard_size: attr_read_guardsize(buf),
             stack_addr: (addr != 0).then_some(addr),
             detached: attr_read_detachstate(buf) == PTHREAD_CREATE_DETACHED,
+            explicit_sched: (attr_read_i32(buf, ATTR_OFF_INHERIT) == PTHREAD_EXPLICIT_SCHED).then(
+                || {
+                    (
+                        attr_read_i32(buf, ATTR_OFF_POLICY),
+                        attr_read_i32(buf, ATTR_OFF_PRIORITY),
+                    )
+                },
+            ),
         }
     }
 }
@@ -1383,7 +1410,11 @@ pub(crate) fn reset_live_threads_after_fork() {
 /// ([`LIVE_THREADS`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
-    // C++ `thread_local` destructors first, as glibc's `start_thread` calls
+    // The cleanup handlers still pushed, innermost first, before anything
+    // else: POSIX runs them, then the thread-specific-data destructors.
+    run_cleanup_handlers();
+
+    // C++ `thread_local` destructors, as glibc's `start_thread` calls
     // `__call_tls_dtors` before it deallocates the TSD: a destructor may
     // still use a key.
     crate::exit_list::run_thread_dtors();
@@ -2529,13 +2560,48 @@ pub extern "C" fn sched_yield() -> i32 {
 //   [ 8..12)  detach state (i32: 0 = joinable, 1 = detached)
 //   [16..24)  stack address — lowest address of the stack region (usize)
 //   [24..32)  guard size    (usize)
+//   [32..36)  inherit-scheduler (i32: PTHREAD_INHERIT_SCHED or _EXPLICIT_)
+//   [36..40)  scheduling policy (i32: SCHED_*)
+//   [40..44)  scheduling priority (i32)
+//   [44..48)  contention scope (i32: PTHREAD_SCOPE_SYSTEM)
 //
-// Offsets 12..16 and 32..56 are reserved/unused.  These offsets are an
-// internal contract only — C callers treat the type as opaque.
+// Offsets 12..16 and 48..56 are reserved/unused.  These offsets are an
+// internal contract only — C callers treat the type as opaque.  All-zero
+// fields 32..48 are the defaults: inherit, `SCHED_OTHER`, priority 0, system
+// scope -- so `pthread_attr_init`'s zeroing, and `encode_attr`'s, set them.
 const ATTR_OFF_STACKSIZE: usize = 0;
 const ATTR_OFF_DETACH: usize = 8;
 const ATTR_OFF_STACKADDR: usize = 16;
 const ATTR_OFF_GUARDSIZE: usize = 24;
+const ATTR_OFF_INHERIT: usize = 32;
+const ATTR_OFF_POLICY: usize = 36;
+const ATTR_OFF_PRIORITY: usize = 40;
+const ATTR_OFF_SCOPE: usize = 44;
+
+/// Take the scheduling attributes from the creating thread (the default).
+pub const PTHREAD_INHERIT_SCHED: i32 = 0;
+/// Take them from the attribute object.
+pub const PTHREAD_EXPLICIT_SCHED: i32 = 1;
+/// Compete for the processor with every thread on the system (the only
+/// scope Linux, and this system, has).
+pub const PTHREAD_SCOPE_SYSTEM: i32 = 0;
+/// Compete only within the process: not supported, as on Linux.
+pub const PTHREAD_SCOPE_PROCESS: i32 = 1;
+
+/// The `i32` field at `off` of an attribute object.
+fn attr_read_i32(buf: &PthreadAttrT, off: usize) -> i32 {
+    let bytes = buf
+        .get(off..off.wrapping_add(4))
+        .and_then(|b| <[u8; 4]>::try_from(b).ok());
+    bytes.map_or(0, i32::from_ne_bytes)
+}
+
+/// Store `v` in the `i32` field at `off` of an attribute object.
+fn attr_write_i32(buf: &mut PthreadAttrT, off: usize, v: i32) {
+    if let Some(slot) = buf.get_mut(off..off.wrapping_add(4)) {
+        slot.copy_from_slice(&v.to_ne_bytes());
+    }
+}
 
 /// Default thread guard size: one page, as in glibc and musl.
 ///
@@ -4455,6 +4521,356 @@ pub extern "C" fn pthread_setschedparam(
     0
 }
 
+/// Set a thread's priority within its policy: 0, the one priority
+/// `SCHED_OTHER` has, and `EINVAL` for any other -- what glibc answers for a
+/// `SCHED_OTHER` thread, which every thread here is.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_setschedprio(_thread: PthreadT, prio: i32) -> i32 {
+    if prio == 0 { 0 } else { errno::EINVAL }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling attributes
+// ---------------------------------------------------------------------------
+//
+// Stored in the attribute object and validated as glibc validates them;
+// honoured by `pthread_create` as far as the scheduler can -- which is
+// `SCHED_OTHER` at priority 0, so an explicit request for anything else makes
+// `pthread_create` fail with `EPERM` rather than start a thread without it.
+
+/// The priority range glibc's `check_sched_priority_attr` allows `policy`:
+/// `sched_get_priority_min`'s to `_max`'s.
+fn priority_in_range(policy: i32, priority: i32) -> bool {
+    let (lo, hi) = (
+        crate::sched::sched_get_priority_min(policy),
+        crate::sched::sched_get_priority_max(policy),
+    );
+    lo >= 0 && hi >= 0 && (lo..=hi).contains(&priority)
+}
+
+/// The policies an attribute may name: glibc's `check_sched_policy_attr`.
+fn policy_allowed(policy: i32) -> bool {
+    matches!(
+        policy,
+        crate::sched::SCHED_OTHER | crate::sched::SCHED_FIFO | crate::sched::SCHED_RR
+    )
+}
+
+/// Whether `attr` takes its scheduling from itself or from the creator.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setinheritsched(attr: *mut PthreadAttrT, inherit: i32) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    if inherit != PTHREAD_INHERIT_SCHED && inherit != PTHREAD_EXPLICIT_SCHED {
+        return errno::EINVAL;
+    }
+    attr_write_i32(buf, ATTR_OFF_INHERIT, inherit);
+    0
+}
+
+/// See [`pthread_attr_setinheritsched`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getinheritsched(
+    attr: *const PthreadAttrT,
+    inherit: *mut i32,
+) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(out)) = (unsafe { attr.as_ref() }, unsafe { inherit.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = attr_read_i32(buf, ATTR_OFF_INHERIT);
+    0
+}
+
+/// The scheduling policy an explicit-scheduling attribute asks for:
+/// `SCHED_OTHER`, `SCHED_FIFO` or `SCHED_RR`, else `EINVAL`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setschedpolicy(attr: *mut PthreadAttrT, policy: i32) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    if !policy_allowed(policy) {
+        return errno::EINVAL;
+    }
+    attr_write_i32(buf, ATTR_OFF_POLICY, policy);
+    0
+}
+
+/// See [`pthread_attr_setschedpolicy`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getschedpolicy(attr: *const PthreadAttrT, policy: *mut i32) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(out)) = (unsafe { attr.as_ref() }, unsafe { policy.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = attr_read_i32(buf, ATTR_OFF_POLICY);
+    0
+}
+
+/// The priority an explicit-scheduling attribute asks for, which must lie in
+/// the range of the attribute's policy (`EINVAL` otherwise, as glibc).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setschedparam(
+    attr: *mut PthreadAttrT,
+    param: *const crate::sched::SchedParam,
+) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(p)) = (unsafe { attr.as_mut() }, unsafe { param.as_ref() }) else {
+        return errno::EFAULT;
+    };
+    if !priority_in_range(attr_read_i32(buf, ATTR_OFF_POLICY), p.sched_priority) {
+        return errno::EINVAL;
+    }
+    attr_write_i32(buf, ATTR_OFF_PRIORITY, p.sched_priority);
+    0
+}
+
+/// See [`pthread_attr_setschedparam`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getschedparam(
+    attr: *const PthreadAttrT,
+    param: *mut crate::sched::SchedParam,
+) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(out)) = (unsafe { attr.as_ref() }, unsafe { param.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = crate::sched::SchedParam::default();
+    out.sched_priority = attr_read_i32(buf, ATTR_OFF_PRIORITY);
+    0
+}
+
+/// The contention scope: `PTHREAD_SCOPE_SYSTEM`; `PTHREAD_SCOPE_PROCESS` is
+/// `ENOTSUP`, and anything else `EINVAL`, as on Linux.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setscope(attr: *mut PthreadAttrT, scope: i32) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    match scope {
+        PTHREAD_SCOPE_SYSTEM => {
+            attr_write_i32(buf, ATTR_OFF_SCOPE, scope);
+            0
+        }
+        PTHREAD_SCOPE_PROCESS => errno::ENOTSUP,
+        _ => errno::EINVAL,
+    }
+}
+
+/// See [`pthread_attr_setscope`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getscope(attr: *const PthreadAttrT, scope: *mut i32) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(buf), Some(out)) = (unsafe { attr.as_ref() }, unsafe { scope.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = attr_read_i32(buf, ATTR_OFF_SCOPE);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// The concurrency hint and the default attributes
+// ---------------------------------------------------------------------------
+
+crate::perprocess::process_global! {
+    /// `pthread_setconcurrency`'s level: a hint no implementation with one
+    /// kernel thread per pthread uses, kept only to be read back, as glibc
+    /// and musl keep it.
+    fn concurrency_level() -> core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+    /// The attributes `pthread_create` uses for a NULL attribute --
+    /// `pthread_attr_init`'s until `pthread_setattr_default_np` changes
+    /// them. Guarded by [`DEFAULT_ATTR_LOCK`].
+    fn default_attr() -> PthreadAttrT = initial_default_attr();
+}
+
+/// Guards [`default_attr`], which any thread may set while another creates.
+static DEFAULT_ATTR_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// What `pthread_attr_init` writes: the default stack and guard sizes, and
+/// zero -- the default -- everywhere else.
+// A `const fn`, for `process_global!`'s constant initialiser, where `get_mut`
+// and checked arithmetic are not available: the indices are the two field
+// offsets plus 0..8, all below 32 in a 56-byte array.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+const fn initial_default_attr() -> PthreadAttrT {
+    let mut a = [0u8; 56];
+    let stack = DEFAULT_THREAD_STACK_SIZE.to_ne_bytes();
+    let guard = DEFAULT_GUARD_SIZE.to_ne_bytes();
+    let mut i = 0;
+    while i < 8 {
+        a[ATTR_OFF_STACKSIZE + i] = stack[i];
+        a[ATTR_OFF_GUARDSIZE + i] = guard[i];
+        i += 1;
+    }
+    a
+}
+
+/// Run `f` on the default attributes, holding [`DEFAULT_ATTR_LOCK`].
+fn with_default_attr<R>(f: impl FnOnce(&mut PthreadAttrT) -> R) -> R {
+    while DEFAULT_ATTR_LOCK
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: `default_attr()` is this process's storage, and the lock gives
+    // this thread the only reference for the duration of `f`.
+    let r = f(unsafe { &mut *default_attr() });
+    DEFAULT_ATTR_LOCK.store(false, Ordering::Release);
+    r
+}
+
+/// A copy of the default attributes.
+fn default_attr_copy() -> PthreadAttrT {
+    with_default_attr(|a| *a)
+}
+
+/// The concurrency level last set, 0 until then.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_getconcurrency() -> i32 {
+    // SAFETY: this process's storage; an atomic.
+    unsafe { (*concurrency_level()).load(Ordering::Relaxed) }
+}
+
+/// Record a concurrency level (a hint, unused); `EINVAL` if negative.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_setconcurrency(level: i32) -> i32 {
+    if level < 0 {
+        return errno::EINVAL;
+    }
+    // SAFETY: as in `pthread_getconcurrency`.
+    unsafe { (*concurrency_level()).store(level, Ordering::Relaxed) };
+    0
+}
+
+/// The attributes a NULL-attribute `pthread_create` uses, into `attr` (GNU).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_getattr_default_np(attr: *mut PthreadAttrT) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(out) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = default_attr_copy();
+    0
+}
+
+/// Make `attr` the attributes a NULL-attribute `pthread_create` uses (GNU),
+/// checked as glibc checks them: a policy `pthread_attr_setschedpolicy`
+/// would take, a positive priority in its range, a stack size of 0 (keep
+/// the current one) or at least `PTHREAD_STACK_MIN`, and no stack address --
+/// a default stack would be every thread's stack. `EINVAL` otherwise.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_setattr_default_np(attr: *const PthreadAttrT) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(new) = (unsafe { attr.as_ref() }) else {
+        return errno::EFAULT;
+    };
+    let policy = attr_read_i32(new, ATTR_OFF_POLICY);
+    let priority = attr_read_i32(new, ATTR_OFF_PRIORITY);
+    let size = attr_read_stacksize(new);
+    if !policy_allowed(policy)
+        || (priority > 0 && !priority_in_range(policy, priority))
+        || (size != 0 && size < PTHREAD_STACK_MIN as usize)
+        || attr_read_stackaddr(new) != 0
+    {
+        return errno::EINVAL;
+    }
+    with_default_attr(|d| {
+        let keep = attr_read_stacksize(d);
+        *d = *new;
+        if size == 0 {
+            if let Some(slot) = d.get_mut(ATTR_OFF_STACKSIZE..ATTR_OFF_STACKSIZE + 8) {
+                slot.copy_from_slice(&keep.to_ne_bytes());
+            }
+        }
+    });
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup handlers
+// ---------------------------------------------------------------------------
+
+/// musl's `struct __ptcb`: one cleanup handler. `pthread_cleanup_push(f, x)`
+/// is a macro that declares one on the pushing function's stack and calls
+/// [`_pthread_cleanup_push`]; `pthread_cleanup_pop(run)` calls
+/// [`_pthread_cleanup_pop`] with the same record. Until 2026-09-28 neither
+/// function existed, so every C program using cleanup handlers failed to
+/// link.
+#[repr(C)]
+pub struct Ptcb {
+    /// The handler.
+    pub f: Option<unsafe extern "C" fn(*mut u8)>,
+    /// Its argument.
+    pub x: *mut u8,
+    /// The next handler out, pushed before this one.
+    pub next: *mut Ptcb,
+}
+
+/// Push `cb` -- `f(x)` -- onto the calling thread's cleanup handlers.
+///
+/// # Safety
+///
+/// `cb` is the caller's record, live until the matching
+/// [`_pthread_cleanup_pop`], which the macro pair guarantees by scope.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn _pthread_cleanup_push(
+    cb: *mut Ptcb,
+    f: Option<unsafe extern "C" fn(*mut u8)>,
+    x: *mut u8,
+) {
+    // SAFETY: `cb` is the caller's record (this function's contract);
+    // `current()` is this thread's block.
+    unsafe {
+        let head = &raw mut (*crate::perthread::current()).cleanup;
+        cb.write(Ptcb { f, x, next: *head });
+        *head = cb;
+    }
+}
+
+/// Pop `cb`, the innermost handler, and run it if `run` is nonzero.
+///
+/// # Safety
+///
+/// `cb` is the record the matching [`_pthread_cleanup_push`] pushed.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn _pthread_cleanup_pop(cb: *mut Ptcb, run: i32) {
+    // SAFETY: as in `_pthread_cleanup_push`; the handler is the caller's.
+    unsafe {
+        (*crate::perthread::current()).cleanup = (*cb).next;
+        if run != 0
+            && let Some(f) = (*cb).f
+        {
+            f((*cb).x);
+        }
+    }
+}
+
+/// Run the calling thread's remaining cleanup handlers, innermost first,
+/// each popped before it runs so a handler that exits the thread cannot run
+/// again (`pthread_exit`).
+fn run_cleanup_handlers() {
+    loop {
+        // SAFETY: this thread's block; each record is live, on the stack of
+        // a frame that has not returned (its pop has not run).
+        unsafe {
+            let head = (*crate::perthread::current()).cleanup;
+            if head.is_null() {
+                return;
+            }
+            (*crate::perthread::current()).cleanup = (*head).next;
+            if let Some(f) = (*head).f {
+                f((*head).x);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -4487,6 +4903,238 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     use super::*;
+
+    // -- the functions musl's <pthread.h> declares (2026-09-28) --
+
+    /// What the cleanup handlers below record: the order they ran in.
+    static CLEANUP_RAN: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+    /// Serialises the tests that use [`CLEANUP_RAN`].
+    static CLEANUP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    unsafe extern "C" fn record(x: *mut u8) {
+        CLEANUP_RAN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(x as usize);
+    }
+
+    fn ran() -> Vec<usize> {
+        core::mem::take(
+            &mut *CLEANUP_RAN
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn blank() -> Ptcb {
+        Ptcb {
+            f: None,
+            x: core::ptr::null_mut(),
+            next: core::ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::used_underscore_items)] // the C names are the API
+    fn cleanup_pop_runs_the_handler_only_when_asked_and_in_lifo_order() {
+        let _g = CLEANUP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = ran();
+        let (mut a, mut b, mut c) = (blank(), blank(), blank());
+        // SAFETY: each record outlives its pop, as the C macros guarantee.
+        unsafe {
+            _pthread_cleanup_push(&raw mut a, Some(record), 1 as *mut u8);
+            _pthread_cleanup_push(&raw mut b, Some(record), 2 as *mut u8);
+            _pthread_cleanup_push(&raw mut c, Some(record), 3 as *mut u8);
+            _pthread_cleanup_pop(&raw mut c, 1);
+            _pthread_cleanup_pop(&raw mut b, 0);
+            _pthread_cleanup_pop(&raw mut a, 7);
+            assert!((*crate::perthread::current()).cleanup.is_null());
+        }
+        assert_eq!(ran(), [3, 1]);
+    }
+
+    #[test]
+    #[allow(clippy::used_underscore_items)]
+    fn pthread_exit_runs_what_is_still_pushed_innermost_first() {
+        let _g = CLEANUP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = ran();
+        let (mut a, mut b) = (blank(), blank());
+        // SAFETY: as above; `run_cleanup_handlers` is `pthread_exit`'s first
+        // step, which a test thread cannot take whole.
+        unsafe {
+            _pthread_cleanup_push(&raw mut a, Some(record), 10 as *mut u8);
+            _pthread_cleanup_push(&raw mut b, Some(record), 20 as *mut u8);
+        }
+        run_cleanup_handlers();
+        // SAFETY: this thread's block.
+        assert!(unsafe { (*crate::perthread::current()).cleanup.is_null() });
+        assert_eq!(ran(), [20, 10]);
+    }
+
+    fn fresh_attr() -> PthreadAttrT {
+        let mut a: PthreadAttrT = [0xAA; 56];
+        assert_eq!(pthread_attr_init(&raw mut a), 0);
+        a
+    }
+
+    #[test]
+    fn scheduling_attributes_default_to_inherit_other_zero_system() {
+        let a = fresh_attr();
+        let (mut v, mut p) = (-1, crate::sched::SchedParam::default());
+        assert_eq!(pthread_attr_getinheritsched(&raw const a, &raw mut v), 0);
+        assert_eq!(v, PTHREAD_INHERIT_SCHED);
+        assert_eq!(pthread_attr_getschedpolicy(&raw const a, &raw mut v), 0);
+        assert_eq!(v, crate::sched::SCHED_OTHER);
+        p.sched_priority = 9;
+        assert_eq!(pthread_attr_getschedparam(&raw const a, &raw mut p), 0);
+        assert_eq!(p.sched_priority, 0);
+        assert_eq!(pthread_attr_getscope(&raw const a, &raw mut v), 0);
+        assert_eq!(v, PTHREAD_SCOPE_SYSTEM);
+    }
+
+    #[test]
+    fn scheduling_attributes_are_checked_as_glibc_checks_them() {
+        let mut a = fresh_attr();
+        let mut v = -1;
+        assert_eq!(
+            pthread_attr_setinheritsched(&raw mut a, PTHREAD_EXPLICIT_SCHED),
+            0
+        );
+        assert_eq!(pthread_attr_getinheritsched(&raw const a, &raw mut v), 0);
+        assert_eq!(v, PTHREAD_EXPLICIT_SCHED);
+        assert_eq!(pthread_attr_setinheritsched(&raw mut a, 2), errno::EINVAL);
+
+        assert_eq!(
+            pthread_attr_setschedpolicy(&raw mut a, crate::sched::SCHED_FIFO),
+            0
+        );
+        assert_eq!(
+            pthread_attr_setschedpolicy(&raw mut a, crate::sched::SCHED_BATCH),
+            errno::EINVAL
+        );
+        let prio = |sched_priority| crate::sched::SchedParam {
+            sched_priority,
+            ..Default::default()
+        };
+        assert_eq!(pthread_attr_setschedparam(&raw mut a, &prio(50)), 0);
+        assert_eq!(
+            pthread_attr_setschedparam(&raw mut a, &prio(100)),
+            errno::EINVAL
+        );
+        // SCHED_OTHER's range is 0..=0.
+        assert_eq!(
+            pthread_attr_setschedpolicy(&raw mut a, crate::sched::SCHED_OTHER),
+            0
+        );
+        assert_eq!(
+            pthread_attr_setschedparam(&raw mut a, &prio(1)),
+            errno::EINVAL
+        );
+
+        assert_eq!(pthread_attr_setscope(&raw mut a, PTHREAD_SCOPE_SYSTEM), 0);
+        assert_eq!(
+            pthread_attr_setscope(&raw mut a, PTHREAD_SCOPE_PROCESS),
+            errno::ENOTSUP
+        );
+        assert_eq!(pthread_attr_setscope(&raw mut a, 7), errno::EINVAL);
+        assert_eq!(
+            pthread_attr_setscope(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_attr_getscope(&raw const a, core::ptr::null_mut()),
+            errno::EFAULT
+        );
+    }
+
+    #[test]
+    fn an_explicit_schedule_the_scheduler_cannot_give_is_eperm() {
+        let mut a = fresh_attr();
+        assert_eq!(
+            pthread_attr_setinheritsched(&raw mut a, PTHREAD_EXPLICIT_SCHED),
+            0
+        );
+        assert_eq!(
+            pthread_attr_setschedpolicy(&raw mut a, crate::sched::SCHED_RR),
+            0
+        );
+        let p = crate::sched::SchedParam {
+            sched_priority: 10,
+            ..Default::default()
+        };
+        assert_eq!(pthread_attr_setschedparam(&raw mut a, &raw const p), 0);
+        assert_eq!(
+            CreateAttr::read(&raw const a).explicit_sched,
+            Some((crate::sched::SCHED_RR, 10))
+        );
+        let mut t: PthreadT = 0;
+        // Refused before anything is allocated or any thread started.
+        assert_eq!(
+            pthread_create(&raw mut t, &raw const a, None, core::ptr::null_mut()),
+            errno::EPERM
+        );
+        // Inheriting again, the same numbers are only stored.
+        assert_eq!(
+            pthread_attr_setinheritsched(&raw mut a, PTHREAD_INHERIT_SCHED),
+            0
+        );
+        assert_eq!(CreateAttr::read(&raw const a).explicit_sched, None);
+    }
+
+    #[test]
+    fn pthread_setschedprio_takes_other_s_one_priority() {
+        assert_eq!(pthread_setschedprio(pthread_self(), 0), 0);
+        assert_eq!(pthread_setschedprio(pthread_self(), 1), errno::EINVAL);
+    }
+
+    #[test]
+    fn the_concurrency_level_is_kept_and_read_back() {
+        assert_eq!(pthread_getconcurrency(), 0);
+        assert_eq!(pthread_setconcurrency(4), 0);
+        assert_eq!(pthread_getconcurrency(), 4);
+        assert_eq!(pthread_setconcurrency(-1), errno::EINVAL);
+        assert_eq!(pthread_getconcurrency(), 4);
+    }
+
+    #[test]
+    fn default_attributes_are_what_null_attr_threads_get() {
+        let mut d: PthreadAttrT = [0; 56];
+        assert_eq!(pthread_getattr_default_np(&raw mut d), 0);
+        assert_eq!(d, fresh_attr());
+        assert_eq!(CreateAttr::read(core::ptr::null()), CreateAttr::DEFAULT);
+
+        let mut want = fresh_attr();
+        assert_eq!(pthread_attr_setstacksize(&raw mut want, 256 * 1024), 0);
+        assert_eq!(pthread_setattr_default_np(&raw const want), 0);
+        assert_eq!(CreateAttr::read(core::ptr::null()).stack_size, 256 * 1024);
+
+        // Stack size 0 keeps the current one.
+        let mut keep = fresh_attr();
+        if let Some(slot) = keep.get_mut(ATTR_OFF_STACKSIZE..ATTR_OFF_STACKSIZE + 8) {
+            slot.copy_from_slice(&0usize.to_ne_bytes());
+        }
+        assert_eq!(pthread_setattr_default_np(&raw const keep), 0);
+        assert_eq!(CreateAttr::read(core::ptr::null()).stack_size, 256 * 1024);
+
+        // A default stack address is refused, and so is a small stack.
+        let mut bad = fresh_attr();
+        let mut stack = vec![0u8; 256 * 1024];
+        assert_eq!(
+            pthread_attr_setstack(&raw mut bad, stack.as_mut_ptr().cast(), stack.len()),
+            0
+        );
+        assert_eq!(pthread_setattr_default_np(&raw const bad), errno::EINVAL);
+        let mut small = fresh_attr();
+        if let Some(slot) = small.get_mut(ATTR_OFF_STACKSIZE..ATTR_OFF_STACKSIZE + 8) {
+            slot.copy_from_slice(&16usize.to_ne_bytes());
+        }
+        assert_eq!(pthread_setattr_default_np(&raw const small), errno::EINVAL);
+        assert_eq!(pthread_setattr_default_np(core::ptr::null()), errno::EFAULT);
+    }
 
     #[test]
     fn getschedparam_reports_the_scheduler_we_have() {
@@ -7116,6 +7764,7 @@ mod tests {
                 guard_size: 0,
                 stack_addr: None,
                 detached: true,
+                explicit_sched: None,
             }
         );
         assert_eq!(
@@ -7146,6 +7795,7 @@ mod tests {
             guard_size: 1,
             stack_addr: None,
             detached: false,
+            explicit_sched: None,
         };
         let plan = plan_thread(&want, &TEST_TLS).expect("fits");
         assert_eq!(plan.guard, page, "the guard rounds up to a page");
@@ -7183,6 +7833,7 @@ mod tests {
             guard_size: 0x4000,
             stack_addr: Some(0x7000_0008),
             detached: false,
+            explicit_sched: None,
         };
         let plan = plan_thread(&want, &TEST_TLS).expect("fits");
         assert_eq!(plan.guard, 0);

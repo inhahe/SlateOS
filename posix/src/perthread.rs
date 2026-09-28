@@ -170,6 +170,12 @@ pub struct PerThread {
     /// ends and, for the thread calling it, by `exit` -- glibc's
     /// `tls_dtor_list`.
     pub tls_dtors: *mut u8,
+
+    /// This thread's cleanup handlers, innermost first: NULL, or the newest
+    /// of the `struct __ptcb`s that musl's `pthread_cleanup_push` macro
+    /// declares on the pushing function's own stack
+    /// ([`crate::pthread::Ptcb`]). `pthread_exit` runs what is left of it.
+    pub cleanup: *mut crate::pthread::Ptcb,
 }
 
 /// Blocks of thread-specific data a thread can have: with `pthread`'s 32
@@ -198,6 +204,7 @@ impl PerThread {
         tsd: [core::ptr::null_mut(); TSD_BLOCKS],
         tsd_used: false,
         tls_dtors: core::ptr::null_mut(),
+        cleanup: core::ptr::null_mut(),
     };
 }
 
@@ -324,6 +331,8 @@ mod tests {
         assert_eq!(zeroed.thread_slot, PerThread::ZERO.thread_slot);
         assert_eq!(zeroed.tsd, PerThread::ZERO.tsd);
         assert_eq!(zeroed.tsd_used, PerThread::ZERO.tsd_used);
+        assert_eq!(zeroed.tls_dtors, PerThread::ZERO.tls_dtors);
+        assert_eq!(zeroed.cleanup, PerThread::ZERO.cleanup);
     }
 
     /// A fresh thread must start cancellable and deferred, which POSIX

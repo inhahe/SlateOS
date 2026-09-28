@@ -162,6 +162,24 @@ if ($pyShape) {
     Write-Host "  Run scripts/check-libc-shape.py by hand before trusting this sysroot." -ForegroundColor Yellow
 }
 
+# Every function musl's headers declare must be in libc.a. C here is compiled
+# against those headers, so a declared function the library lacks compiles and
+# then fails to link -- 126 did on 2026-09-28, among them all of C11's
+# <threads.h> and the helpers every pthread_cleanup_push expands to
+# (known-issues.md -> D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE). The
+# gate is a ratchet: its baseline lists what is still missing and may only
+# shrink. Exit 3 is "no zig to read the headers with": loud, not fatal, since
+# the archive itself is fine; 1 and 2 are fatal like the shape check's.
+Write-Host "=== Checking libc.a defines what musl's headers declare ===" -ForegroundColor Cyan
+if ($pyShape) {
+    & $pyShape.Source (Join-Path $root "scripts\check-libc-declared.py") (Join-Path $sysroot "libc.a")
+    if ($LASTEXITCODE -eq 3) {
+        Write-Host "  WARNING: no zig (FASTPY_ZIG or PATH) - declared functions NOT checked." -ForegroundColor Yellow
+    } elseif ($LASTEXITCODE -ne 0) {
+        throw "libc.a lacks a function musl's headers declare (see above) - a C program calling it would not link"
+    }
+}
+
 Write-Host ""
 # Record what this sysroot was built from, by content.
 #

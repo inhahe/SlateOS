@@ -66,6 +66,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gitenv  # noqa: E402,F401  (imported for its side effect; see gittree)
+from safewrite import write_text  # noqa: E402
 import gittree  # noqa: E402
 
 BASELINE = Path(__file__).resolve().parent / "argv-ignored-baseline.txt"
@@ -170,7 +171,7 @@ HEADER = """# coreutils bins that never read `argv`, and so silently ignore ever
 def write_baseline(names: list[str]) -> int:
     lines = [HEADER, ""]
     lines.extend(sorted(names))
-    BASELINE.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="")
+    write_text(BASELINE, "\n".join(lines) + "\n", newline="")
     return len(names)
 
 

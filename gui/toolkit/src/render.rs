@@ -97,7 +97,12 @@ impl TextSpan {
 }
 
 /// A render command — one drawing primitive.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` so a caller can tell whether a frame it is about to send is
+/// the one it sent last -- the desktop's background, which covers the whole
+/// screen, is sent again only when it differs. Two commands with a `NaN`
+/// coordinate compare unequal, which costs a redundant frame and nothing else.
+#[derive(Clone, Debug, PartialEq)]
 pub enum RenderCommand {
     /// Fill a rectangle.
     FillRect {
@@ -284,7 +289,7 @@ pub enum FontFamily {
 }
 
 /// Collected render output from a frame.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderTree {
     pub commands: Vec<RenderCommand>,
 }

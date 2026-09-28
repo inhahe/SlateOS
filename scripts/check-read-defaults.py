@@ -83,6 +83,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gittree  # noqa: E402
 import rustlex  # noqa: E402
 from rustlex import live_code, strip_noise  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # Repo-relative and `/`-separated: the only spelling `gittree.Tree` accepts.
@@ -738,13 +739,7 @@ def main() -> int:
         return 2
 
     if args.update:
-        BASELINE.write_text(
-            HEADER + "".join(f"{f}{notes.get(f, '')}\n" for f in found),
-            encoding="utf-8",
-            # newline="" so Python does not translate to CRLF on Windows, which
-            # would leave the file dirty against the repo's `eol=lf` attribute.
-            newline="",
-        )
+        write_text(BASELINE, HEADER + "".join(f"{f}{notes.get(f, '')}\n" for f in found), newline="")
         print(f"wrote {BASELINE.relative_to(ROOT)} with {len(found)} entries")
         return 0
 

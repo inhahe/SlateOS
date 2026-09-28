@@ -23,6 +23,7 @@
 //! Backend (compositor syscalls, framebuffer, etc.)
 //! ```
 
+pub mod button;
 pub mod canvas;
 pub mod color;
 pub mod colorpicker;
@@ -30,6 +31,7 @@ pub mod context_ext;
 pub mod date;
 pub mod datetime;
 pub mod dialog;
+pub mod dirtree;
 pub mod disabled;
 pub mod dnd;
 pub mod event;
@@ -73,10 +75,13 @@ pub mod svg;
 pub mod table;
 pub mod tabs;
 pub mod text;
+pub mod textarea;
 pub mod textedit;
 pub mod textinput;
 pub mod textview;
 pub mod theme;
+pub mod treeview;
+pub mod undo;
 pub mod wheel;
 pub mod widget;
 

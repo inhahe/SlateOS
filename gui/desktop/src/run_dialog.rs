@@ -28,7 +28,7 @@
 //! // Drain events to act on:
 //! for event in run_dialog.drain_events() {
 //!     match event {
-//!         RunDialogEvent::Execute(cmd) => { /* spawn process */ }
+//!         RunDialogEvent::Execute(request) => { /* open or run it */ }
 //!         RunDialogEvent::Browse => { /* open file picker */ }
 //!         RunDialogEvent::Cancel => { /* dismiss */ }
 //!         RunDialogEvent::Closed => { /* cleanup */ }
@@ -111,15 +111,9 @@ const MAX_HISTORY: usize = 50;
 /// Events produced by the Run dialog for the shell to act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunDialogEvent {
-    /// User pressed OK or Enter — start the program at this path.
-    ///
-    /// A `PathBuf`, not a `String`. Most of the time it is simply the typed
-    /// text turned into a path, but a command the user chose through
-    /// **Browse** may name a file with no UTF-8 spelling — our filenames
-    /// admit every byte but `/` and NUL — and the text field can only *show*
-    /// a lossy rendering of such a name. Carrying the path keeps the program
-    /// that starts the one the user pointed at.
-    Execute(PathBuf),
+    /// User pressed OK or Enter — run or open what was asked for. See
+    /// [`RunRequest`] for what it carries and why both halves.
+    Execute(RunRequest),
     /// User clicked Browse — open a file picker.
     Browse,
     /// User pressed Cancel or Escape.
@@ -127,6 +121,113 @@ pub enum RunDialogEvent {
     /// Dialog was dismissed (after Cancel or Execute).
     Closed,
 }
+
+/// What the Run box was asked for: the whole line, and the same line as a
+/// program and its arguments.
+///
+/// Both, because a line means one of two things and only the shell can tell
+/// which: `/home/u/My Documents` is a folder to open, whole, spaces and all;
+/// `editor /home/u/notes.txt` is a program to run with an argument. Windows'
+/// Run box -- which `design.txt` asks this one to be like -- takes both, and
+/// tries the whole line as a path first. So does the shell
+/// (`DesktopShell::run_request`), and that order is what lets a path with a
+/// space in it through without quotes.
+///
+/// Until 2026-09-25 the event carried the whole line as one program path, so
+/// `editor notes.txt` asked for a program called "editor notes.txt" and a
+/// folder asked to be executed. `design-decisions.md` §870 records the
+/// quoting rule and why it is the shell's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunRequest {
+    /// Everything that was asked for, exactly: the typed line, or the bytes
+    /// **Browse** chose while the field still shows them. An `OsString`
+    /// because a chosen file may have no UTF-8 spelling -- the field can only
+    /// *show* a lossy rendering of such a name, and carrying the bytes keeps
+    /// what opens the file the user pointed at.
+    pub whole: OsString,
+    /// The line as words: a program, then its arguments. A path chosen
+    /// through Browse is one word, never split.
+    pub words: Vec<OsString>,
+}
+
+/// Split a typed line into words the way a POSIX shell splits them, which is
+/// the rule the rest of this system's command lines follow.
+///
+/// - Whitespace separates words; any run of it is one separator.
+/// - `'...'` keeps everything inside literally.
+/// - `"..."` keeps everything inside, except that `\"` is a quote and `\\`
+///   a backslash.
+/// - Outside quotes, a backslash makes the next character ordinary.
+/// - Quotes join to what touches them: `a"b c"d` is the one word `ab cd`, and
+///   `""` is an empty word.
+///
+/// An unclosed quote is an error rather than a guess: running `editor "my
+/// file` as though the quote were closed would open a file the user may not
+/// have finished naming.
+pub fn split_words(line: &str) -> Result<Vec<String>, UnclosedQuote> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    // Whether a word has started, which is not the same as being non-empty:
+    // `""` is a word with nothing in it.
+    let mut in_word = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(core::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(c) => word.push(c),
+                        None => return Err(UnclosedQuote('\'')),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(c @ ('"' | '\\')) => word.push(c),
+                            Some(c) => {
+                                word.push('\\');
+                                word.push(c);
+                            }
+                            None => return Err(UnclosedQuote('"')),
+                        },
+                        Some(c) => word.push(c),
+                        None => return Err(UnclosedQuote('"')),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                // A trailing backslash escapes nothing and is kept, rather than
+                // silently dropped.
+                word.push(chars.next().unwrap_or('\\'));
+            }
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    Ok(words)
+}
+
+/// A line whose quote was opened and never closed -- which quote it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnclosedQuote(pub char);
 
 // ============================================================================
 // Button identifiers
@@ -188,8 +289,9 @@ pub struct RunDialog {
     ///
     /// `OsString` rather than `String` because an entry can be a path the user
     /// chose with Browse, and such a path may have no UTF-8 spelling. Held as
-    /// text, re-running it from history would ask for the `U+FFFD` rendering —
-    /// a file that does not exist — and start nothing, without saying why.
+    /// text, re-running it from history would ask for its rendering — the
+    /// octal escapes spelled out as characters, a file that does not exist —
+    /// and start nothing, without saying why.
     history: Vec<OsString>,
     /// Current position in history when cycling (-1 = not browsing history).
     history_index: Option<usize>,
@@ -282,7 +384,7 @@ impl RunDialog {
     /// autocomplete — because each of them can be carrying a name with no UTF-8
     /// spelling, and each of them was a separate opportunity to drop it.
     fn fill_exact(&mut self, exact: &OsStr) {
-        self.input.set_text(&exact.to_string_lossy());
+        self.input.set_text(&pathcodec::display_os(exact));
         self.command_exact = Some(PathBuf::from(exact));
     }
 
@@ -314,7 +416,7 @@ impl RunDialog {
         let shown = self
             .command_exact
             .as_ref()
-            .filter(|p| p.as_os_str().to_string_lossy().trim() == text)
+            .filter(|p| pathcodec::display_path(p).trim() == text)
             .map_or_else(|| PathBuf::from(text), Clone::clone);
         guitk::dialog::parent_of(&shown)
     }
@@ -389,6 +491,15 @@ impl RunDialog {
         // freshly-shown box holding a path from the last time it was open is a
         // thing a reader has to reason about rather than read.
         self.command_exact = None;
+    }
+
+    /// Show the dialog again on a line that could not be started: the line in
+    /// the field, exactly as it was typed, and `message` under it -- so a
+    /// typo is corrected rather than typed again.
+    pub fn show_failed(&mut self, line: &OsStr, message: String) {
+        self.show();
+        self.fill_exact(line);
+        self.error_message = Some(message);
     }
 
     /// Hide the dialog.
@@ -520,6 +631,19 @@ impl RunDialog {
             Key::Right => {
                 self.input
                     .move_cursor_right(shift, INPUT_FONT_SIZE, FontWeightHint::Regular);
+            }
+
+            // The page keys are the list's: the suggestions while they show,
+            // else the history. Ctrl+Home and Ctrl+End are the suggestions'
+            // while they show; plain Home and End, the text's -- the rule for
+            // every field over a list in the shell (`design-decisions.md`
+            // §1416).
+            Key::PageUp | Key::PageDown if !ctrl => {
+                self.page_list(event.key == Key::PageDown);
+            }
+
+            Key::Home | Key::End if ctrl && self.browsing_suggestions() => {
+                self.page_list(event.key == Key::End);
             }
 
             Key::Home => {
@@ -910,44 +1034,27 @@ impl RunDialog {
         id: ButtonId,
         primary: bool,
     ) {
-        let hovered = self.hovered_button == Some(id);
-        let bg = if primary {
-            p.accent
-        } else if hovered {
-            p.surface2
+        // The toolkit's button, the reference's Aero button: OK the box's own
+        // action, tinted with the accent. It used to be the only button the
+        // pointer did not light.
+        let kind = if primary {
+            guitk::button::Kind::Primary
         } else {
-            p.surface1
+            guitk::button::Kind::Plain
         };
-        let fg = if primary { p.on_accent() } else { p.text };
-
-        cmds.push(RenderCommand::FillRect {
-            x: bx,
-            y: by,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: bg,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: text::center_x(
-                label,
-                bx + BUTTON_WIDTH / 2.0,
-                BODY_FONT_SIZE,
-                FontWeightHint::Regular,
-            ),
-            y: by + 7.0,
-            text: label.to_string(),
-            color: fg,
-            font_size: BODY_FONT_SIZE,
-            font_weight: if primary {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
+        guitk::button::draw(
+            cmds,
+            p,
+            (bx, by, BUTTON_WIDTH, BUTTON_HEIGHT),
+            label,
+            kind,
+            guitk::button::State {
+                hovered: self.hovered_button == Some(id),
+                ..guitk::button::State::default()
             },
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+            p.base,
+            0.0,
+        );
     }
 
     fn execute_current(&mut self) {
@@ -969,19 +1076,51 @@ impl RunDialog {
         let exact = self
             .command_exact
             .as_ref()
-            .filter(|p| p.as_os_str().to_string_lossy().trim() == command)
+            .filter(|p| pathcodec::display_path(p).trim() == command)
             .map_or_else(
                 || OsString::from(&command),
                 |p| p.as_os_str().to_os_string(),
             );
 
-        // Resolve the command.
-        if self.resolve_command(&command) {
+        // The line as a program and its arguments. A path Browse chose is one
+        // word whatever is in it: it is a name, not a command line, and a
+        // name with a space in it split into two would be two things that do
+        // not exist.
+        let chose_browse = self
+            .command_exact
+            .as_ref()
+            .is_some_and(|p| p.as_os_str() == exact.as_os_str());
+        let words: Vec<OsString> = if chose_browse {
+            vec![exact.clone()]
+        } else {
+            match split_words(&command) {
+                Ok(words) => words.into_iter().map(OsString::from).collect(),
+                Err(UnclosedQuote(quote)) => {
+                    self.error_message = Some(format!(
+                        "A {} quote is not closed.",
+                        if quote == '"' { "double" } else { "single" }
+                    ));
+                    return;
+                }
+            }
+        };
+
+        // Resolved by the program -- the first word -- unless the whole line
+        // is an absolute path, which the shell will try as a thing to open
+        // before it splits anything. `is_absolute` rather than a leading `/`:
+        // the same question, asked the way the platform spells it.
+        let program = words
+            .first()
+            .and_then(|w| w.to_str())
+            .unwrap_or(command.as_str());
+        if Path::new(&command).is_absolute() || self.resolve_command(program) {
             // The history gets the bytes, not the rendering, so that pressing
             // Up and Enter re-runs the file that ran — see `add_to_history`.
             self.add_to_history(&exact);
-            self.events
-                .push(RunDialogEvent::Execute(PathBuf::from(exact)));
+            self.events.push(RunDialogEvent::Execute(RunRequest {
+                whole: exact,
+                words,
+            }));
             self.hide();
         } else {
             self.error_message = Some(format!(
@@ -1052,7 +1191,7 @@ impl RunDialog {
         }
         self.history_index = target;
         self.fill_exact(&entry);
-        self.update_suggestions();
+        self.hide_suggestions();
     }
 
     /// Step one entry towards the *newer* end, leaving browse mode and
@@ -1083,7 +1222,63 @@ impl RunDialog {
                 }
             }
         }
-        self.update_suggestions();
+        if self.history_index.is_some() {
+            self.hide_suggestions();
+        } else {
+            self.update_suggestions();
+        }
+    }
+
+    /// Page Up or Page Down: to the end of whichever list the arrows steer.
+    ///
+    /// The suggestions all fit on the screen (there are at most
+    /// `MAX_AUTOCOMPLETE`), so a page of them is all of them. The history is
+    /// not drawn at all, so a page of it is its end: Page Up the oldest entry,
+    /// Page Down back past the newest to what was typed before browsing --
+    /// where the arrows would take it one step at a time.
+    fn page_list(&mut self, down: bool) {
+        if self.browsing_suggestions() {
+            let last = self.suggestions.len().saturating_sub(1);
+            self.suggestion_index = Some(if down { last } else { 0 });
+        } else if down {
+            // Bounded by the history's length: each step moves one entry
+            // newer, and the last leaves browsing.
+            for _ in 0..=self.history.len() {
+                if self.history_index.is_none() {
+                    break;
+                }
+                self.history_next();
+            }
+        } else {
+            self.history_oldest();
+        }
+    }
+
+    /// Go straight to the oldest history entry, entering browse mode as
+    /// [`history_prev`](Self::history_prev) does.
+    fn history_oldest(&mut self) {
+        let Some(entry) = self.history.first().cloned() else {
+            return;
+        };
+        if self.history_index.is_none() {
+            self.pre_history_text = self.input.text().to_string();
+        }
+        self.history_index = Some(0);
+        self.fill_exact(&entry);
+        self.hide_suggestions();
+    }
+
+    /// Put the suggestions away while the history is being browsed.
+    ///
+    /// A recalled entry matches itself, so refreshing the suggestions for it
+    /// opened the popup with its first row picked -- and from then on the
+    /// arrows steered the popup, not the history: Up recalled one entry and
+    /// then stopped. The popup comes back when the user types, or steps past
+    /// the newest entry to their own text again.
+    fn hide_suggestions(&mut self) {
+        self.suggestions.clear();
+        self.show_autocomplete = false;
+        self.suggestion_index = None;
     }
 
     /// Whether the arrow keys are steering the autocomplete popup rather than
@@ -1153,12 +1348,12 @@ impl RunDialog {
         // nothing they could have typed — but the entry's own bytes travel with
         // it so that accepting the suggestion fills in the file it named.
         for cmd in &self.history {
-            let shown = cmd.to_string_lossy();
+            let shown = pathcodec::display_os(cmd);
             if let Some(score) = fuzzy_score(query, &shown) {
                 // Avoid duplicates.
                 if !results.iter().any(|s| s.exact == *cmd) {
                     results.push(Suggestion {
-                        text: shown.into_owned(),
+                        text: shown,
                         exact: cmd.clone(),
                         score: score.saturating_add(5), // slight history bonus
                     });
@@ -1450,6 +1645,60 @@ mod tests {
         assert_eq!(dialog.input.text(), "");
     }
 
+    /// Up recalls one entry after another through the keys, and Down steps
+    /// back. Through the keys is the point: the methods alone always worked,
+    /// but a recalled entry opened the suggestions popup, which then took the
+    /// arrows, so Up recalled the newest entry and nothing further.
+    #[test]
+    fn the_arrows_walk_the_whole_history_through_the_keys() {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.add_to_history(OsStr::new("ls"));
+        dialog.add_to_history(OsStr::new("pwd"));
+        dialog.add_to_history(OsStr::new("cat file.txt"));
+        let key = |k| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        dialog.handle_key_event(&key(Key::Up));
+        assert_eq!(dialog.input.text(), "cat file.txt");
+        dialog.handle_key_event(&key(Key::Up));
+        assert_eq!(
+            dialog.input.text(),
+            "pwd",
+            "the second Up went to the popup"
+        );
+        dialog.handle_key_event(&key(Key::Up));
+        assert_eq!(dialog.input.text(), "ls");
+        dialog.handle_key_event(&key(Key::Down));
+        assert_eq!(dialog.input.text(), "pwd");
+    }
+
+    /// Page Up goes to the oldest entry, and Page Down back past the newest
+    /// to what was typed -- the ends of the history the arrows step through.
+    #[test]
+    fn the_page_keys_go_to_the_ends_of_the_history() {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.add_to_history(OsStr::new("ls"));
+        dialog.add_to_history(OsStr::new("pwd"));
+        dialog.add_to_history(OsStr::new("cat file.txt"));
+        dialog.input.set_text("draft");
+        let key = |k| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        dialog.handle_key_event(&key(Key::PageUp));
+        assert_eq!(dialog.input.text(), "ls", "not the oldest entry");
+        dialog.handle_key_event(&key(Key::PageDown));
+        assert_eq!(dialog.input.text(), "draft", "not back to what was typed");
+        assert!(dialog.history_index.is_none());
+    }
+
     #[test]
     fn test_history_preserves_current_text() {
         let mut dialog = RunDialog::new();
@@ -1643,11 +1892,15 @@ mod tests {
             "the completion entered the rendering rather than the file"
         );
 
-        // And it survives all the way out as a launch.
+        // And it survives all the way out as a launch -- as one word, since a
+        // chosen file is a name and not a command line.
         dialog.execute_current();
         assert_eq!(
             dialog.drain_events().first(),
-            Some(&RunDialogEvent::Execute(PathBuf::from(&chosen)))
+            Some(&RunDialogEvent::Execute(RunRequest {
+                whole: chosen.clone(),
+                words: vec![chosen.clone()],
+            }))
         );
     }
 
@@ -1665,7 +1918,10 @@ mod tests {
         dialog.handle_key_event(&event);
 
         let events = dialog.drain_events();
-        assert!(events.contains(&RunDialogEvent::Execute(PathBuf::from("terminal"))));
+        assert!(events.contains(&RunDialogEvent::Execute(RunRequest {
+            whole: OsString::from("terminal"),
+            words: vec![OsString::from("terminal")],
+        })));
         assert!(events.contains(&RunDialogEvent::Closed));
     }
 
@@ -1723,9 +1979,113 @@ mod tests {
         dialog.handle_key_event(&event);
 
         let events = dialog.drain_events();
-        assert!(events.contains(&RunDialogEvent::Execute(PathBuf::from(
-            "/usr/bin/something"
-        ))));
+        assert!(events.contains(&RunDialogEvent::Execute(RunRequest {
+            whole: OsString::from("/usr/bin/something"),
+            words: vec![OsString::from("/usr/bin/something")],
+        })));
+    }
+
+    // ====================================================================
+    // A program and its arguments
+    // ====================================================================
+
+    fn words(line: &str) -> Vec<String> {
+        split_words(line).expect("the line splits")
+    }
+
+    #[test]
+    fn words_are_split_on_whitespace_of_any_length() {
+        assert_eq!(
+            words("editor  notes.txt\t--new "),
+            ["editor", "notes.txt", "--new"]
+        );
+        assert!(words("   ").is_empty());
+        assert!(words("").is_empty());
+    }
+
+    /// Quotes keep a space inside one word, which is how a path with a space
+    /// in it is written when it is an argument rather than the whole line.
+    #[test]
+    fn quotes_keep_a_word_together() {
+        assert_eq!(
+            words("editor \"/home/u/My Notes/a b.txt\""),
+            ["editor", "/home/u/My Notes/a b.txt"]
+        );
+        assert_eq!(words("echo 'it''s'"), ["echo", "its"]);
+        assert_eq!(
+            words("a\"b c\"d"),
+            ["ab cd"],
+            "quotes join what touches them"
+        );
+        assert_eq!(
+            words("run \"\""),
+            ["run", ""],
+            "an empty quote is an empty word"
+        );
+    }
+
+    /// Inside double quotes only `\"` and `\\` are escapes; inside single
+    /// quotes nothing is; outside quotes a backslash makes the next character
+    /// ordinary.
+    #[test]
+    fn backslashes_follow_the_shell() {
+        assert_eq!(words("\"say \\\"hi\\\"\""), ["say \"hi\""]);
+        assert_eq!(words("\"a\\\\b\""), ["a\\b"]);
+        assert_eq!(words("\"keep \\n\""), ["keep \\n"], "not an escape here");
+        assert_eq!(words("'\\n'"), ["\\n"]);
+        assert_eq!(words("My\\ Documents"), ["My Documents"]);
+        assert_eq!(words("trailing\\"), ["trailing\\"], "kept, not dropped");
+    }
+
+    /// An unclosed quote is refused, with a message, and runs nothing.
+    #[test]
+    fn an_unclosed_quote_is_refused() {
+        assert_eq!(split_words("editor \"my file"), Err(UnclosedQuote('"')));
+        assert_eq!(split_words("editor 'my file"), Err(UnclosedQuote('\'')));
+
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.input.set_text("editor \"my file");
+        dialog.execute_current();
+        assert!(
+            !dialog
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, RunDialogEvent::Execute(_))),
+            "a half-quoted line ran"
+        );
+        assert!(dialog.is_visible(), "the box stays up to be corrected");
+        assert!(
+            dialog
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("double quote")),
+            "{:?}",
+            dialog.error_message
+        );
+    }
+
+    /// **A program with arguments reaches the shell as a program and its
+    /// arguments** -- it used to arrive as one program named by the whole
+    /// line.
+    #[test]
+    fn a_command_with_arguments_is_a_program_and_its_arguments() {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog
+            .input
+            .set_text("terminal --working-directory \"/home/u/My Stuff\"");
+        dialog.execute_current();
+        assert_eq!(
+            dialog.drain_events().first(),
+            Some(&RunDialogEvent::Execute(RunRequest {
+                whole: OsString::from("terminal --working-directory \"/home/u/My Stuff\""),
+                words: ["terminal", "--working-directory", "/home/u/My Stuff"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+            }))
+        );
     }
 
     #[test]
@@ -1814,7 +2174,27 @@ mod tests {
                                 dialog.hovered_button = hovered;
                                 let cmds = dialog.render(&p);
                                 assert!(!cmds.is_empty());
-                                palette_check::assert_drawn_from(&p, &cmds, &[], "run_dialog");
+                                // The buttons' faces are blended from the
+                                // palette by the toolkit's button, against the
+                                // box's ground: declared as what they are.
+                                let mut derived = Vec::new();
+                                for kind in
+                                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary]
+                                {
+                                    for hovered in [false, true] {
+                                        let c = guitk::button::paint(
+                                            &p,
+                                            kind,
+                                            guitk::button::State {
+                                                hovered,
+                                                ..guitk::button::State::default()
+                                            },
+                                            p.base,
+                                        );
+                                        derived.extend([c.upper, c.lower, c.edge, c.ink]);
+                                    }
+                                }
+                                palette_check::assert_drawn_from(&p, &cmds, &derived, "run_dialog");
                             }
                         }
                     }

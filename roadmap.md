@@ -1615,6 +1615,526 @@ live.
   `gui/appearance/tests/resolve_cost.rs` holding the bound. Do not put a
   `powf` back.
 
+- `[C]` **A treeview, and the tristate checkbox treeview** — done 2026-09-24
+  (`design.txt`: "treeview", "tristate checkbox treeview … have function to
+  populate it with a directory"). `guitk::treeview` is the widget and
+  `guitk::dirtree` the directory function; `design-decisions.md` §868 records
+  what a tick on a folder means and why a click that leaves every child alike
+  folds into the parent. **Open, and lane E's:** five applications hand-roll a
+  tree and none has moved onto it yet —
+  `requests/c-e-the-toolkit-has-a-treeview-now-and-five-apps-draw-their-own.md`.
+  Until one does, this is one more toolkit module with tests and no user.
+
+- `[C]` **Hotkeys: choose what a chord does** — done 2026-09-24. The shortcut
+  card could re-record and delete; it could not point keys at a different
+  action or at a command, so `LaunchApp` was reachable only by hand-editing
+  the file. F2 changes a row's action, Insert adds a shortcut, both through a
+  searchable action list that shows each action's keys; "Run a program…"
+  binds any program; taken keys are offered for moving rather than
+  refused. `gui/desktop/src/shortcut_editor.rs`; the text fields use the new
+  `guitk::textinput::TextInput::edit_key`. What stays open is C-Q24 (how few
+  shortcuts to ship) and the emoji/Unicode hotkey action.
+
+- `[C]` **Desktop icons: snap to grid or place freely, as a user option** —
+  done 2026-09-25 (`design.txt`: "two options for desktop icon placement:
+  snap to grid, or place freely"). §3.4 below had ticked "free placement"
+  since the icon layer was written; it had no free placement — the mode named
+  `FreeWithSnap` snapped every drop — and nothing let the user choose. The
+  desktop's right-click menu now has View (Small/Medium/Large/Extra large
+  icons, Auto arrange icons, Align icons to grid) and Sort by name. On the grid
+  a drop never hides another icon; auto-arrange keeps the order the user drags
+  icons into (`design-decisions.md` §869); the layout file records its grid,
+  so an icon-size change no longer scrambles saved positions; and a layout
+  save that fails is reported instead of dropped.
+  `gui/desktop/src/icons.rs`, `DesktopShell::desktop_menu_items`.
+
+- `[C]` **Desktop icons and the Run box open what they name; the desktop
+  answers the keyboard; shortcuts can be added and removed** -- done
+  2026-09-25. A double-click or Enter on a folder opens it in the file
+  manager, a document in the program File Associations chose for its kind,
+  a program runs, and anything else says why in a notification -- a folder
+  icon used to ask for the folder to be executed, and This PC and the Recycle
+  Bin did nothing (This PC now opens `/`; the Recycle Bin explains itself,
+  `requests/c-e-the-recycle-bin-icon-has-nowhere-to-open.md`). The Run box
+  takes arguments and opens paths by the same rules (`design-decisions.md`
+  §870); it used to take the whole line as one program's name. Enter,
+  Ctrl+A, Escape, the arrow keys and Delete work on the desktop -- nothing
+  called the icon layer's key handler before. "Add to desktop" on a
+  start-menu row or a pinned button puts a program shortcut there, saved
+  with the layout; a right-click on an icon opens its own menu (Open, Pin
+  to taskbar, Remove from desktop). F2 (or "Rename" on that menu) renames
+  an icon in place -- Enter keeps the name, Escape the old one, a click away
+  or the keyboard leaving for another program keeps it -- and a renamed
+  default is saved as `labels` in the layout file, only if renamed, so a
+  later build's own names still reach everyone else.
+
+- `[C]` **Programs carried between the start menu, the taskbar and the
+  desktop** -- done 2026-09-25 (`design.txt` line 712: "anywhere between
+  pinned apps, desktop, and start menu entries"). Drag a start-menu row, a
+  pinned taskbar button or a program's desktop icon and let go on the
+  taskbar (pinned at the gap it was let go in), on the desktop (a shortcut
+  where it was let go), or on the start button or the start menu's pinned
+  rows (pinned to the top of the start menu -- a section new with this,
+  saved in `startmenu.yaml`, with "Pin to Start menu" on a row's and a
+  program icon's right-click menu). A drag copies; a drop over another
+  program's window does nothing; a label following the pointer says what
+  letting go will do (`design-decisions.md` §871). A start-menu row now
+  starts its program on the release, since the press cannot know it is not
+  a drag. **Open:** while the pointer is over another program's window the
+  label stops following it, because the compositor tells that window about
+  the motion instead
+  (`requests/c-f-a-drag-that-leaves-its-window-stops-being-told-where-the-pointer-is.md`);
+  the drop itself still lands, since the release goes to the shell surface
+  the press focused.
+
+- `[C]` **Running programs' taskbar buttons stay where they are, and can be
+  dragged** -- done 2026-09-25 (`design.txt` line 713: "can drag and reorder
+  icons in pinned section and currently running apps section"). The bar was
+  drawn in stacking order, so every click on a window's button moved it to
+  the end; the shell now keeps an order of its own -- a window joins the end
+  when it opens and keeps its place when raised, and one on another desktop
+  keeps its place while this desktop's are rearranged -- and a window's button
+  can be dragged along its row. A button acts on the release, as the pins do,
+  so that a press can become a drag. The pins and the windows are set apart
+  by a small space and a divider (`design.txt` line 708). The drop rule the two
+  rows now share also fixed a pin dragged rightwards swapping with its
+  neighbour a few pixels into the drag.
+
+- `[C]` **The start menu has a search field** -- done 2026-09-25
+  (`design.txt` line 721: "input field for finding and running apps"). The
+  menu took no keys at all; now typing with it open searches it -- the list
+  becomes the programs found, best first by the launcher's own ranking, each
+  once -- the arrows walk the rows, Enter starts the one the keyboard is on
+  (or the best match), and Escape empties the search before it closes the
+  menu. When nothing is found, Enter runs what was typed the way the Run box
+  would (a whole-line path opened, otherwise the words split POSIX-style),
+  which is the "and running" half. Super chords, and keys the field does not
+  use, still reach their shortcuts with the menu up. The field sits where the
+  "Applications" title was.
+
+- `[C]` **A file name that is not text is drawn so it can be told apart** --
+  done 2026-09-25 (`design-decisions.md` §873, proposed by lane E). The file
+  dialog, the path bar, the folder tree and the Run box drew each byte of a
+  name that is not text as `�`, so `café.txt` and `cafè.txt` looked
+  identical; they now draw it as an octal escape, exactly as the command-line
+  tools do (`pathcodec::display_os`, which is `quoting::escape_unprintable`).
+  Nothing is derived from the drawing: opening and navigating still use the
+  exact bytes kept beside it. The applications' own labels are lane E's to
+  move onto the same function.
+
+- `[C]` **The start menu's footer has Settings and Terminal beside Power** --
+  done 2026-09-25 (`design.txt` line 721: the start menu contains a "settings
+  icon" and a "terminal"). Two buttons share the footer's room to the right of
+  Power, shrinking before they overlap at large scales; each starts its
+  program and closes the menu. Their program paths are now `launcher`
+  constants, shared with the database and the Settings shortcut.
+
+- `[C]` **Colour themes** -- done 2026-09-25 (`design-decisions.md` §874;
+  `design.txt` lines 1249-1250, "light, dark, anything else" and "make your own
+  theme"). A theme is a YAML file in a folder named for it, under
+  `/usr/share/slateos/themes` or the user's `~/.local/share/slateos/themes`,
+  setting any of the palette's colours for dark mode (`colors`), light mode
+  (`colors-light`) or both; `theme.colors` in `appearance.yaml` chooses one,
+  and every program picks it up with the rest of the settings
+  (`appearance::themes`). A theme cannot set the accent or make text
+  unreadable, and one that cannot be used leaves the built-in colours and a
+  notice. The built-in theme ships as a complete file to copy
+  (`gui/appearance/themes/aero/theme.yaml`). The Settings picker is lane E's,
+  installing the file lane D's; an in-place edit of the chosen theme is not
+  yet noticed (`TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`).
+
+- `[C]` **The clock's settings have a file, and the zone is the machine's** --
+  done 2026-09-25 (`design-decisions.md` §875). The taskbar clock's zone, its
+  seconds/weekday/date switches and the calendar's world clocks were saved
+  nowhere, so every desktop showed New York time. They are now
+  `datetime.yaml`, modelled by `gui/datetimesettings` for the shell and the
+  Settings app; with no zone chosen the clock reads the machine's, exactly as
+  `date` does (`tzrules::tz_source`, one statement of glibc's `TZ` order,
+  added for the libc and `osh` to share). **Found on the way:** the `desktop`
+  binary never read the user's appearance at startup -- default theme, no
+  wallpaper, no widgets until something sent `ReloadAppearance`; it now starts
+  through `ShellSession::start_for_user`
+  (`TD-C-THE-DESKTOP-STARTED-WITHOUT-THE-USERS-APPEARANCE`). Waiting on others:
+  the Settings page (lane E), the relay that makes a change reach a running
+  shell (lane F), and the libc and `osh` adopting `tz_source` (lanes D, B).
+
+- `[C]` **"System (Auto)" switches between light and dark by the clock** --
+  done 2026-09-25 (`design-decisions.md` §876). It had always meant dark. It is
+  now light from 07:00 until 19:00 unless the user sets other hours, in the
+  clock's time zone, and says so to everything drawn -- the palette and the
+  accent follow one answer, `AppearanceSettings::is_light`. The phase is
+  resolved when the settings are read and is part of the appearance watcher's
+  fingerprint, so the file need not change at the edge; the shell sleeps until
+  it, re-reads, and sends `ReloadAppearance`. The desktop's wall clock is one
+  function a test can fix (`datetimesettings::clock`). Waiting on others: the
+  hours in Settings (lane E), and applications switching at the edge rather
+  than at the next change, once `ThemeWatch` watches through
+  `appearance::watcher()` (lane F).
+
+- `[C]` **The power menu turns the machine off** -- done 2026-09-25
+  (`design-decisions.md` §877). Its five entries started `/sbin/shutdown`,
+  `/sbin/reboot`, `/sbin/suspend` and `/usr/bin/logout`, none of which SlateOS
+  has, and the login screen's power buttons made the desktop quit. Both now
+  run `powerctl` (shut down, restart, sleep and a new hibernate) through the
+  launch queue every program leaves by; Lock starts the lock screen, and Log
+  out brings back the login screen the session started with. The list is the
+  shell's own (`power::PowerChoice`), no longer database entries. Waiting on
+  others: `powerctl` in the image (lane D) and the separate launcher's copy of
+  the old entries (lane E). Logging out leaves the user's programs running
+  until there is a session manager
+  (`TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`).
+
+- `[C]` **A multi-line text field in the toolkit, and notes on the desktop
+  written with it** -- done 2026-09-25 (`design-decisions.md` §878).
+  `guitk::textarea::TextArea` is the multi-line half of `roadmap-detailed.md`
+  §3.5's "single-line and multiline": a caret and selection over wrapped
+  lines (right-to-left lines included), Up and Down that hold their column,
+  Page Up and Down, click, drag and double click, a view the wheel scrolls,
+  undo and redo a word at a time, and word wrap that can be turned off. Its
+  lines come from `text::wrap_ranges`, `wrap_hard`'s breaks as byte ranges.
+  The desktop's first use: "Add widget > Note" -- the note widget was defined
+  and drawn but never offered and never editable -- written in where it sits,
+  moved by its title bar, and saved with the layout at every change. The apps
+  that edit text (`apps/notes`, whose body can only be typed at the end,
+  `apps/stickynotes`, `apps/email`) are lane E's to move onto it.
+
+- `[C]` **The start menu in two columns, as the Aero reference has it** --
+  phase one done 2026-09-26 (`design-decisions.md` §879). The single 300 by
+  400 list with a footer became the reference's 524 by 566: the programs on
+  the left with the search field at their foot, and a places column on the
+  right -- who is signed in (the account's display name, from the login),
+  Home, Documents, Pictures, Music, Downloads, Settings, a terminal, and the
+  power button at the foot. Next: the pinned programs as tiles, jump lists,
+  and a Shut down button with the rest behind a caret.
+
+- `[C]` **Icon themes, and the start menu drawn with them** -- done
+  2026-09-26 (`design-decisions.md` §880). `appearance::icons` finds an icon
+  by its freedesktop name in the chosen theme's `icons` folder (the user's
+  copy first), falls back to shorter names and then to a built-in set
+  compiled in -- thirteen outline pictograms drawn for this desktop -- and
+  tints `currentColor` icons to the colour around them. `theme.icons`
+  chooses the icons apart from the colours; a folder of icons alone is an
+  icon pack. The shell names an icon by a deterministic image id and the
+  session uploads each once before the frame that names it. The start
+  menu's places and power button are drawn with them, and the desktop's
+  icons -- each type its own picture in its own hue, where they were emoji.
+  The toolkit's SVG renderer learned to inherit the root element's style,
+  which is how most icon sets are written.
+
+- `[C]` **The shell's pictures are icons, not emoji** -- done 2026-09-26
+  (`design-decisions.md` §881). No font the desktop has draws emoji, so every
+  picture the shell drew as a character was a box: the taskbar's start
+  button, bell and chevron, every on-screen overlay (volume, brightness,
+  media, lock keys, devices, network, battery), the login screen's account
+  picture, eye and buttons, and every widget's title. All are icons from the
+  theme now, forty-five more of them in the built-in set, and every surface
+  uploads the icons its frame names first. Found on the way and fixed: the
+  SVG renderer drew strokes two pixels wide at every size and curves at half
+  strength, and filled a shape's parts one by one (holes filled in); it now
+  fills a shape and its stroke each in one coverage pass, with joins, caps
+  and fill rules, scaled to the size drawn. Programs' tray icons are still
+  characters (a wire change, lane F's).
+
+- `[C]` **The desktop no longer stops while a wallpaper decodes** -- done
+  2026-09-26 (`design-decisions.md` §882). The shell read and decoded the
+  wallpaper and the login screen's picture on the thread that draws, so at
+  login, whenever a wallpaper was chosen and at every step of a slideshow the
+  desktop drew nothing and took no clicks for as long as a photograph takes
+  -- about a second. A thread of the shell's own decodes them now
+  (`gui/desktop/src/pictures.rs`) and wakes the loop when one is ready. The
+  picture on screen stays up until the next replaces it; of several asked
+  for in a row only the newest is decoded; and a login screen showing the
+  desktop's picture shares its decode.
+
+- `[C]` **The start menu is the applications tree, read from what is
+  installed** -- done 2026-09-26 (`design-decisions.md` §884). The menu's
+  programs were ten typed into the shell's source. It now lists the programs
+  installed on the machine as their freedesktop desktop entries describe them
+  (`gui/desktopentry`: the specification's parser, command lines, locales,
+  and the XDG directories in precedence order), read at login and again when
+  the menu opens if an entry changed; in folders by kind, open until clicked,
+  each program with its picture from the icon theme; started with the
+  arguments its entry gives; its right-click menu starts with its jump list
+  (the entry's actions). The shell's own ten remain for programs no entry
+  names. Waiting on others: entries shipped with the programs (lane E), the
+  image installing them (lane D), and the terminal taking `-e` (lane E).
+
+- `[C]` **The default shortcuts become the operator's set** -- done 2026-09-27
+  (C-Q24, `design-decisions.md` §1416). `register_defaults` keeps Alt+F4,
+  Alt+Tab/Alt+Shift+Tab, Super, Super+R, Escape, the volume keys and four Print
+  Screens (the screen; Alt+ the window; Ctrl+ and Ctrl+Alt+ the same two saved
+  to a file) -- fourteen bindings, down from thirty-one; every other action is
+  unbound and one binding away on the shortcut card, which the start menu now
+  opens (a Keyboard Shortcuts place). Waiting on others: Alt+Print Screen's
+  scancode (lane A), `--save` in the screenshot tool (lane E).
+
+- `[C]` **Page Up, Page Down, Home, End, Ctrl+Home and Ctrl+End wherever
+  there is something to move through** -- done 2026-09-27 (§1416, the
+  operator's addition). One reading of them in the toolkit
+  (`guitk::listview::ListKey`, `ListViewport::go`), used by the menus, the menu
+  bar, the path bar, the text views and every list of the shell's; programs
+  that use the toolkit's widgets have them, and lane E is asked to make its
+  hand-rolled lists read the same keys.
+
+- `[C]` **Alt+Tab can show the overview instead of the switcher** -- done
+  2026-09-27 (§1416, §1419). "Cycle Windows in the Overview" is a second
+  window-switching action; binding Alt+Tab to it on the shortcut card makes
+  Alt+Tab show the overview, with Alt+Tab's manners -- hold Alt, Tab and
+  Shift+Tab step, most recent first; the arrows and the pointer choose; letting
+  go picks. Fixed with it: the switcher stepped the wrong way after the first
+  Tab, a switch on any chord but Alt+Tab never ended, and the overview's arrows
+  could light a card on a desktop not shown.
+
+- `[C]` **A shortcut that puts the monitor to sleep** -- blocked by lane F
+  (`requests/c-f-a-way-for-the-shell-to-put-the-display-to-sleep.md`: no
+  compositor verb exists). `design.txt` line 1321 names it; §1416 makes it
+  available, unbound by default. Then "Sleep the display" in the power menu too.
+
+- `[C]` **A redo tree in the toolkit** -- done 2026-09-27 (§1416, §1420).
+  `guitk::undo::UndoHistory<E>` keeps every step as a tree: typing after undoing
+  starts a branch beside what was undone instead of discarding it. Ctrl+Z and
+  Ctrl+Shift+Z go along the branch the user is on; Alt+Z and Alt+Shift+Z walk
+  every state in the order it was first reached, across branches. The toolkit's
+  text area is its first user. Offered to the programs that keep their own
+  straight-line undo (lane E adopts; `requests/c-e-the-operators-answers-to-c-q24-c-q25-c-q26.md`).
+
+- `[C]` **Each look keeps its own colours** -- **lane C's half done
+  2026-09-27** (C-Q15, §1421). `appearance::LookColours`; `accent_color` and
+  `custom_accent` are the look in use's, `other_look_colours` the other's, and
+  `set_surface_style` trades them over; `theme.cards` holds the filled look's in
+  `appearance.yaml`, and a one-accent file reads as that accent for both.
+  **Lane E:** Settings changes the look through `set_surface_style` rather than
+  assigning the field (`requests/c-e-the-operators-answers-c-q15-c-q16-c-q17-c-q19-c-q21.md` §5).
+
+- `[C]` **One list of the installed programs, in userspace** -- open (C-Q20,
+  §1425). First an inventory of all four lists -- the kernel's
+  `fs::appregistry`, the shell's database, `apps/fileassoc`, and the per-role
+  defaults of the deleted `default_apps.rs` (git history) -- into one table,
+  nothing dropped; then a library under `gui/` holding all of it, read by the
+  shell; then Settings, the file manager and file associations (lane E); only
+  then does lane A remove the kernel's registry.
+
+- `[C]` **Automatic sign-in, with a key held at start-up to choose** --
+  **lane C's half done 2026-09-27** (C-Q22, §1427). `gui/desktop/src/autologin.rs`:
+  the one account `loginusers::automatic_account` names (marked, not locked,
+  the only one marked) signs in before the desktop's first frame, with no
+  password and no pause; Shift held at start, or `recovery`/`single` on the
+  kernel command line, shows the login screen instead; only at start, never
+  after logging out. **Waiting on others:** the key cannot be read until lane F
+  seeds the held keys at open and answers a query
+  (`requests/c-f-which-keys-are-held-when-the-desktop-starts.md`); a start for
+  repair is not visible until lane A publishes the real `/proc/cmdline` and
+  adds a repair boot entry, and lane A shows the hint on the screens before the
+  desktop (`requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md`).
+  When lane F's query lands: hand its answer to `StartConditions` in
+  `ShellSession::start`.
+
+- `[C]` **"Too close to see one on the other", one test for the two colour
+  warnings** -- **done 2026-09-27** (C-Q19, §1424):
+  `appearance::hard_to_tell_apart`, with `perceptual_difference` (CIE76) beside
+  `contrast_ratio`. The two warnings that ask it are lane E's (the calendar's
+  event colour, Settings' accent).
+
+- `[C]` **A claim every lane sees when it starts a task outside its obvious
+  territory** -- open (the operator's C-Q20 suggestion, §1425). A shared record
+  in the git common directory, like the halts, so another lane can see at once
+  that a feature is being built; the `CLAUDE.md` wording that would make it a
+  rule goes to the operator.
+
+- `[C]` **A program may ask the password manager for a password -- with a key
+  for it, and the user's consent** -- open (C-Q25, §1417). In the credential
+  service (`gui/credentials`): the request over the service's IPC, refused
+  without a capability granted for it, and a prompt naming the asking program
+  to allow or refuse. The capability's shape may need lane A.
+
+- `[C]` **A settings service that tells open windows when a setting
+  changes** -- open (C-Q26, §1418). Beside `gui/settingsfile`, never in front
+  of it: saving stays a program writing its own file.
+
+- `[C]` **C-Q11: measure the whole-workspace check under the machine's normal
+  load, then decide the gate** -- open, waiting for the lanes to be running
+  again (`todo.txt`, lane C). The earlier figures (15 s to 49 s) were taken
+  with fewer lanes and fewer projects running.
+
+- `[C]` **One push button, the reference's** -- done 2026-09-27
+  (`design-decisions.md` §1414). `guitk::button` draws the Aero reference's
+  button in the theme's colours -- a face brighter above, an edge, the label
+  bold; the dialog's own action tinted with the accent, a destructive one
+  red -- with every label held to the text floor on both halves of its
+  face. The toolkit's alert, input and progress dialogs, the Open and Save
+  window's footer and the Run box use it; each drew its own before.
+
+- `[C]` **Alt+Tab is the reference's glass** -- done 2026-09-27
+  (`design-decisions.md` §1413). The switcher showed the first twelve
+  characters of every title in one row, cut unmarked, and ran off the screen
+  past a dozen windows. Now: the start menu's glass (its two halves shared),
+  each window's program picture in a cell, the chosen window marked and its
+  title across the top whole or cut with a mark, rows that wrap and pages
+  that turn so the choice is always on screen.
+
+- `[C]` **A path can be typed into every Open and Save window** -- done
+  2026-09-27 (`design-decisions.md` §1412). The toolkit's dialog showed its
+  folder as text nobody could edit; its address bar is now `guitk::pathbar`:
+  crumbs to click, or a path to type (Ctrl+L, a click past the crumbs, or `/`
+  outside a Save name) with the folder's names offered as you type, narrowed
+  in any case. The host still reads the disk -- `FilePicker` answers the
+  bar's requests and refuses a typed folder that is not there, which leaves
+  everything where it was. Found on the way and fixed: the bar's completions
+  ignored what was typed, and could not be clicked. The explorer draws them
+  under its listing -- lane E's
+  (`requests/c-e-the-explorers-address-completions-are-drawn-under-its-listing.md`).
+
+- `[C]` **The address bar is the reference's crumbs** -- done 2026-09-27
+  (`design-decisions.md` §1411). `guitk::pathbar`, which the explorer and
+  the file-types program use, draws the path as plain names in an input's
+  well with drawn chevrons between them and the current folder bold, and
+  keeps the folder you are in on screen however narrow the bar. Fixed with
+  it: a crumb after the "..." of a long path went to the wrong folder, and a
+  click in the typed path put the caret half a character off.
+
+- `[C]` **A theme dresses the terminal too** -- done 2026-09-27
+  (`design-decisions.md` §1410). The palette every program is handed carries a
+  terminal's colours -- background, foreground, cursor and the sixteen by
+  number -- the theme's own hues in the slots every terminal gives them unless
+  the theme's `terminal` section says otherwise. The terminal application
+  moving onto them is lane E's.
+
+- `[C]` **A program that cannot start is said, not swallowed** -- done
+  2026-09-27. A launch that failed was printed to the desktop's standard
+  error and nowhere else, so a mistyped Run box line, a pin to a program
+  since removed, or a start menu row naming nothing closed on nothing
+  having happened. Now the Run box comes back on the line with why, and
+  anything else says so in a notification (`known-issues.md`
+  `TD-C-THE-RUN-BOX-ACCEPTS-ANY-ABSOLUTE-PATH-WITHOUT-CHECKING-IT`, fixed).
+
+- `[C]` **The start menu glows, as the reference's glass** -- done
+  2026-09-26. With shadows on, the menu casts the reference's glow in the
+  accent (`aero-start-menu`'s `0 0 38px 4px`) as well as the shadow every
+  panel casts, and has a line of light just inside its edge. Its outline stays
+  the window frame's, so a menu and a window side by side are edged alike.
+
+- `[C]` **The tray lights what the pointer is over** -- done 2026-09-26. A
+  program's icon, the chevron, the bell and the clock each light under the
+  pointer, as the reference's `aero-trayico:hover`, `aero-tray-arrow:hover`
+  and `aero-clock:hover` do: a rounded wash of white, one thing at a time.
+
+- `[C]` **The bar is the reference's glass, and the tray names its parts** --
+  done 2026-09-26. The bar was one flat colour; it has the reference's
+  `aero-taskbar` glass now -- a line of light along its top edge and another
+  under it, a soft light below them and a shade over its lower half, in
+  translucent white and black over the theme's colour. (Not the shadow the
+  reference casts above the bar: the bar's surface ends at its edge.) The
+  tray's chevron names itself "Show hidden icons", as the reference's
+  `title`, and the clock names the whole date -- except over the calendar it
+  has opened, which shows it already.
+
+- `[C]` **The start button is the reference's orb** -- done 2026-09-26
+  (`design-decisions.md` §1408). Round and glossy, in the accent with the
+  start picture on it, a ring of light round it and a shadow under it, glowing
+  under the pointer and while its menu is open, and named "Start" when the
+  pointer rests on it. Kept inside the bar, whose surface ends at its edge; the
+  system's logo takes the picture's place when there is one (C-Q28).
+
+- `[C]` **The start menu's search field is the reference's** -- done
+  2026-09-26. It was an accent-coloured ring with "Type to search" in it; it
+  is the reference's `aero-sm-search` now: a well (the palette's `crust`, where
+  the toolkit sinks every text input) with a quiet line round it, a magnifier
+  at its start, and a hint saying what it searches -- "Search programs", not
+  the reference's "programs, settings, and files", since programs are all it
+  finds. The caret, not a coloured ring, says the typing goes there.
+
+- `[C]` **The power choices are the reference's flyout** -- done 2026-09-26
+  (`design-decisions.md` §1407). Each choice with its picture, in the
+  reference's order -- log out, lock, sleep, hibernate, restart, shut down --
+  rising above the caret with its right edge on the power button's.
+
+- `[C]` **The start menu lights what the pointer is over** -- done
+  2026-09-26 (`design-decisions.md` §1406). Nothing in the start menu changed
+  under the pointer until a click; now a program's row, a place, "Shut down",
+  the caret and each power choice light as the reference's `:hover` rules
+  light them, apart from the keyboard's row. The caret names itself, "Power
+  options".
+
+- `[C]` **"Shut down" in one click, the rest behind a caret** -- done
+  2026-09-26 (`design-decisions.md` §1405). The start menu's power button was
+  "Power", and opened a menu; it is the reference's now: "Shut down", which
+  asks every window to close and then shuts down, and a caret at its right end
+  that opens restart, sleep, hibernate, lock and log out.
+
+- `[C]` **Shutting down asks the programs first** -- done 2026-09-26
+  (`design-decisions.md` §1405). "Shut down" switched the machine off at once,
+  and a document with unsaved changes went with it. Shut down, restart and log
+  out now ask every window to close -- the request its close button makes, so
+  a program can ask about unsaved work -- and happen once they have; after
+  five seconds the ones still open are listed, with "... anyway" and "Cancel".
+
+- `[C]` **The clock is the time over the date** -- done 2026-09-26
+  (`design-decisions.md` §1404). Two lines, as the reference's: the time,
+  bold, over the weekday and date, smaller and dimmer, each centred; the slot
+  takes the width of the wider line. One line when neither the weekday nor the
+  date is shown, or when the bar is too short for two.
+
+- `[C]` **"Show desktop" at the bar's end** -- done 2026-09-26
+  (`design-decisions.md` §1403). The reference's strip, right of the clock:
+  a press puts away every window on this desktop, the next brings the same
+  ones back as they were stacked, and a window shown in between resets it.
+  The Show Desktop shortcut is the same switch. It lights under the pointer
+  and its tooltip says what it does.
+
+- `[C]` **The start menu is in sections, with "Recently used"** -- done
+  2026-09-26 (`design-decisions.md` §1402). "Pinned", "Recently used" and
+  "All apps", each under a heading, as the Aero reference lists them. The
+  eight programs most recently started -- by any part of the desktop, not only
+  the menu -- newest first, remembered in `startmenu.yaml` across logins. The
+  keyboard passes the headings over.
+
+- `[C]` **The tile under the pointer lights up** -- done 2026-09-26
+  (`design-decisions.md` §1400). The reference's `aero-task:hover`: the
+  accent's glass with a glow of it, drawn over whatever state the tile was in.
+  A pinned tile is otherwise only its picture, so this is what says it is a
+  button; the bar is redrawn when the light moves, through the path tooltips
+  now take (`take_hover_changed`).
+
+- `[C]` **A window's tile offers its program's menu** -- done 2026-09-26. A
+  right-click on a window's tile offered nothing: pinning needs a program, and
+  nothing knew which program a window was. Now that a window is known as its
+  program's (§885), its menu is the program's -- jump list, the program's name
+  to start another copy, Pin to taskbar, Pin to Start menu, Add to desktop --
+  and then "Close window", which asks the window rather than destroying it. A
+  window whose program the desktop cannot name offers only to close it.
+
+- `[C]` **Windows' titles on the taskbar are an option** -- done 2026-09-26
+  (`design-decisions.md` §1401). `appearance.yaml`'s `taskbar.labels`, on by
+  default; off, a window's tile is its picture alone. Switched from the bar's
+  own right-click menu -- the first thing that right-click has offered -- and
+  asked of lane E for the Settings app
+  (`requests/c-e-a-show-window-titles-switch-beside-auto-hide.md`).
+
+- `[C]` **The taskbar's tiles are the Aero reference's** -- done 2026-09-26
+  (`design-decisions.md` §1400). A pinned program is its picture on a
+  36-pixel square; a window is its picture and title on a glass tile as wide
+  as the title needs, up to 160, the widest giving way first when the bar is
+  full; the divider sits where the reference's does. Resting on any tile names
+  it. Fixed in passing: tooltips -- the tray's included -- never appeared on a
+  desktop nobody was otherwise touching, because nothing woke the desktop when
+  their delay ran out or redrew it when they came and went.
+
+- `[C]` **Every taskbar button draws its program's picture** -- done
+  2026-09-26 (`design-decisions.md` §885). A window's declared name is matched
+  against the installed programs' desktop entries, so a window's button draws
+  its program's icon, a pinned button its program's, and a window that names
+  no program the generic one. A pinned program's open window keeps a button of
+  its own, right of the pins, as `design.txt` and the Aero reference specify.
+
+- `[C]` **Text falls back to other fonts, and the UI font is Open Sans** --
+  done 2026-09-26 (`design-decisions.md` §883). A character the UI font
+  lacked was a box. The toolkit now draws it from the first of a chosen list
+  of installed fonts -- broad coverage (Noto Sans), emoji, symbols and
+  mathematics, then one font per writing system -- through lane F's face
+  fallback, and the default UI family is the Aero theme's Open Sans. Waiting
+  on others: the fonts in the image (lane D) and the compositor installing
+  the same list (lane F); `requests/f-cd-the-os-image-ships-no-fonts-...`.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's
@@ -7592,14 +8112,14 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Theme system (Catppuccin Mocha default palette)
 - [x] Z-order stacking and window focus tracking
 - [x] Desktop with draggable icons (snap-to-grid or free placement)
-  - [x] Grid snapping (configurable 80x90 cells), free placement + auto-arrange modes
-  - [x] Rubber-band selection, Ctrl+Click toggle, Ctrl+A select all
+  - [x] Grid snapping (cells sized by the icon-size setting), free placement + auto-arrange modes, chosen from the desktop menu's View submenu and saved in `deskicons.yaml` — **really done 2026-09-25**: this line was ticked from the start while the only modes were a snap and an always-sorted arrange, with no way to choose; see lane C's entry above and `design-decisions.md` §869
+  - [-] Rubber-band selection (done), Ctrl+A select all (done), Ctrl+Click toggle (**not reachable yet**: the icon layer implements it, but the desktop is never told that Ctrl is held -- `known-issues.md` → `TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION`. Corrected 2026-09-25)
   - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
   - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
-  - [x] Double-click activate, right-click context menu, F2 rename, Delete
+  - [x] Double-click activate, right-click context menu, F2 rename, Delete -- **really done 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Rename, Pin to taskbar, Remove from desktop), Delete and F2 rename in place are all real now.
 - [x] Taskbar enhancements:
   - [x] Pinned apps on left, running apps on right, divider between sections
-  - [x] Drag to reorder, drag to/from desktop and start menu
+  - [x] Drag to reorder, drag to/from desktop and start menu -- **really done 2026-09-25** (it had been ticked in error: a pinned button only reordered within the pinned run). A start-menu row, a pinned button or a program's desktop icon can be carried to the taskbar, the desktop or the start menu's pinned rows; a drag copies. `design-decisions.md` §871.
   - [x] Optional app name alongside icon
   - [x] Aero-style blurry transparency (blur.rs: 3-pass box blur, 5 presets, BlurManager with dirty cache, rounded corners)
 - [x] System tray:
@@ -7714,7 +8234,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
     - [x] DragDropManager state machine (Idle→Dragging→OverTarget)
     - [x] Drop target registration, hit testing, format compatibility, effect negotiation
     - [x] Drag threshold, cancel support, DragEvent lifecycle events
-  - [x] File picker / save dialog (reuses file explorer component)
+  - [-] File picker / save dialog (reuses file explorer component) -- *corrected 2026-09-27: the dialog works, but it does not reuse the explorer; `guitk::dialog` is its own, plainer implementation. Decided 2026-09-27 (`design-decisions.md` §1415): the explorer will show the window for every program and hand back only the file chosen.*
     - [x] Open/Save/SelectFolder modes with builder API
     - [x] Directory navigation (back/forward/up), quick-access sidebar
     - [x] Sortable file list, extension filters, auto-extension append

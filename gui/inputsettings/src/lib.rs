@@ -298,8 +298,6 @@ pub struct MouseConfig {
     pub scroll_speed: f32,
     /// Whether to reverse (natural) scrolling direction.
     pub natural_scroll: bool,
-    /// Cursor size in pixels (16–128).
-    pub cursor_size: u32,
     /// Show a locate animation when Ctrl is pressed.
     pub locate_on_ctrl: bool,
     /// Hide the cursor while typing.
@@ -323,7 +321,6 @@ impl Default for MouseConfig {
             scroll_lines: 3,
             scroll_speed: 1.0,
             natural_scroll: false,
-            cursor_size: 24,
             locate_on_ctrl: false,
             hide_while_typing: false,
             show_trail: false,
@@ -354,11 +351,6 @@ impl MouseConfig {
         self.scroll_speed = speed.clamp(0.1, 5.0);
     }
 
-    /// Set the cursor size in pixels, clamped to 16–128.
-    pub fn set_cursor_size(&mut self, size: u32) {
-        self.cursor_size = size.clamp(16, 128);
-    }
-
     /// Set the cursor trail length, clamped to 1–10.
     pub fn set_trail_length(&mut self, len: u32) {
         self.trail_length = len.clamp(1, 10);
@@ -386,7 +378,6 @@ impl MouseConfig {
         this.set_speed(this.speed);
         this.set_double_click_ms(this.double_click_ms);
         this.set_scroll_lines(this.scroll_lines);
-        this.set_cursor_size(this.cursor_size);
         this.set_trail_length(this.trail_length);
         this.set_accel_threshold(this.accel_threshold);
         if this.scroll_speed.is_nan() {
@@ -717,11 +708,6 @@ impl InputSettings {
         );
 
         read_into!(
-            s.mouse.cursor_size,
-            doc.get_i64(&["cursor", "size"])
-                .and_then(|v| u32::try_from(v).ok())
-        );
-        read_into!(
             s.mouse.locate_on_ctrl,
             doc.get_bool(&["cursor", "locate_on_ctrl"])
         );
@@ -872,7 +858,11 @@ impl InputSettings {
         doc.set_f64(&["scrolling", "speed"], f64::from(self.mouse.scroll_speed));
         doc.set_bool(&["scrolling", "natural"], self.mouse.natural_scroll);
 
-        doc.set_i64(&["cursor", "size"], i64::from(self.mouse.cursor_size));
+        // The pointer's size is `appearance.yaml`'s `cursors.size` -- the one
+        // pointer-size setting (design-decisions §872). This file carried a
+        // second one, written on every save and read by nothing; it goes on
+        // the next save, so that nobody edits it expecting it to do something.
+        doc.remove(&["cursor", "size"]);
         doc.set_bool(&["cursor", "locate_on_ctrl"], self.mouse.locate_on_ctrl);
         doc.set_bool(
             &["cursor", "hide_while_typing"],
@@ -1081,8 +1071,6 @@ mod tests {
         assert_eq!(m.scroll_lines, 1);
         m.set_scroll_speed(0.0);
         assert_eq!(m.scroll_speed, 0.1);
-        m.set_cursor_size(0);
-        assert_eq!(m.cursor_size, 16);
         m.set_trail_length(0);
         assert_eq!(m.trail_length, 1);
         m.set_accel_gain(0.0);
@@ -1110,7 +1098,6 @@ mod tests {
         settings.mouse.scroll_lines = 9;
         settings.mouse.scroll_speed = 2.0;
         settings.mouse.natural_scroll = true;
-        settings.mouse.cursor_size = 48;
         settings.mouse.locate_on_ctrl = true;
         settings.mouse.hide_while_typing = true;
         settings.mouse.show_trail = true;
@@ -1142,6 +1129,24 @@ mod tests {
         let mut doc = Document::new();
         settings.write_into(&mut doc);
         assert_eq!(InputSettings::read_from(&doc), settings);
+    }
+
+    /// The pointer's size lives in `appearance.yaml`. A `cursor.size` an
+    /// older version wrote here -- every save wrote one -- is taken out on
+    /// the next save rather than left looking like a setting; the rest of
+    /// the section stays.
+    #[test]
+    fn a_saved_file_no_longer_holds_a_pointer_size() {
+        let mut doc = Document::parse(
+            "cursor:
+  size: 48
+  trail: true
+",
+        );
+        InputSettings::default().write_into(&mut doc);
+        let reread = Document::parse(&doc.to_text());
+        assert_eq!(reread.get_i64(&["cursor", "size"]), None);
+        assert_eq!(reread.get_bool(&["cursor", "trail"]), Some(false));
     }
 
     // -- Keyboard accessibility -----------------------------------------------

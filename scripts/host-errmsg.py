@@ -109,6 +109,7 @@ BASELINE = Path(__file__).resolve().parent / "host-errmsg-baseline.txt"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gittree  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 # The two inputs again, relative and `/`-separated, which is the only spelling
 # the `Tree` seam accepts. `BASELINE` above survives alongside `BASELINE_REL`
@@ -766,7 +767,7 @@ def _run(tree: gittree.Tree, check: bool, write: bool, listing: bool) -> int:
             "",
         ]
         body += sorted(gated)
-        BASELINE.write_text("\n".join(body) + "\n", encoding="utf-8", newline="")
+        write_text(BASELINE, "\n".join(body) + "\n", newline="")
         print(f"wrote {_relpath(BASELINE)} with {len(gated)} entries")
         return 0
 

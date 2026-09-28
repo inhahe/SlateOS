@@ -59,6 +59,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitenv  # noqa: E402
+import suite_pool  # noqa: E402
 
 _REMOVED = gitenv.scrub_environ()
 
@@ -68,12 +69,25 @@ REPO_ROOT = os.path.dirname(HERE)
 failures: list[str] = []
 
 
-def check(label: str, got: object, want: object) -> None:
+def check(label: str, got: object, want: object, evidence: str = "") -> None:
+    """Record `label` as passed when `got` is `want`.
+
+    `evidence` is what the thing under test said -- a push's output -- and is
+    printed only on a failure. A verdict of `refused` where `allowed` was
+    expected says *that* something refused, and a suite run once in a boot
+    test cannot be asked again which gate it was or what it said: lane C's
+    boot of cd2cffc65 was refused on 2026-09-26 with gate 5's clean commit
+    "refused" and nothing else to go on, and the same suite passed standalone.
+    """
     if got == want:
         print(f"PASS  {label}")
     else:
         print(f"FAIL  {label}\n        got : {got!r}\n        want: {want!r}",
               file=sys.stderr)
+        if evidence:
+            tail = evidence.strip().splitlines()[-40:]
+            print("        said:\n" + "\n".join(f"          | {line}" for line in tail),
+                  file=sys.stderr)
         failures.append(label)
 
 
@@ -1363,6 +1377,58 @@ def case_gate5_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
           "nosuchrev" in proc.stderr, True)
 
 
+def _run_checker_with_no_wsl(root: str, script: str, *args: str) -> subprocess.CompletedProcess:
+    """`run_checker`, with every directory holding `wsl` taken off PATH.
+
+    What a host in the middle of a WSL outage looks like to the checker --
+    "no GNU userland" -- on demand, rather than only when WSL happens to be
+    down.
+    """
+    env = gitenv.clean_env()
+    hidden = set()
+    while True:
+        found = shutil.which("wsl", path=env.get("PATH", ""))
+        if not found:
+            break
+        hidden.add(os.path.normcase(os.path.dirname(found)).rstrip("\\/"))
+        env["PATH"] = os.pathsep.join(
+            d for d in env.get("PATH", "").split(os.pathsep)
+            if os.path.normcase(d).rstrip("\\/") not in hidden
+        )
+    return subprocess.run(
+        [sys.executable, os.path.join(root, "scripts", script), *args],
+        cwd=root, env=env, capture_output=True, text=True, check=False,
+    )
+
+
+def case_gate5_an_unopenable_revision_is_exit_2_while_gnu_is_unreachable(tmp: str) -> None:
+    """Exit 2 however WSL is: the revision is read before WSL is asked for.
+
+    Asking WSL first answered 3 -- run-checker.sh's "skipped, could not run"
+    -- for a revision that will not open, whenever WSL was down: the caller's
+    mistake reported as the weather. It failed the case above, and a boot
+    test with it, on 2026-09-26, and only because WSL happened to be refusing
+    sessions; with WSL hidden it is shown on every run.
+    """
+    if sys.platform.startswith("linux"):
+        print("  SKIP gate 5 with GNU unreachable: on Linux the GNU side is the host itself")
+        return
+    root = _getopt_repo(tmp, "g5e")
+    write(root, "userspace/coreutils/src/bin/yes.rs", _YES_OK)
+    commit(root)
+
+    # The fixture's own witness: with WSL hidden, the working tree cannot be
+    # judged -- or this case would prove nothing about the order.
+    disk = _run_checker_with_no_wsl(root, "getopt-ambiguity-check.py", "yes")
+    check("gate 5 with GNU unreachable: the working tree is declined, exit 3",
+          disk.returncode, 3)
+    proc = _run_checker_with_no_wsl(root, "getopt-ambiguity-check.py", "--head", "nosuchrev")
+    check("gate 5 with GNU unreachable: an unopenable revision still exits 2",
+          proc.returncode, 2)
+    check("gate 5 with GNU unreachable: ...naming the revision it could not read",
+          "nosuchrev" in proc.stderr, True)
+
+
 # --------------------------------------------------------------------------
 # Gate 6 -- host-errmsg.py
 #
@@ -2442,7 +2508,7 @@ def case_gate2_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) 
     write(work, "userspace/real/src/main.rs", "fn main() {}\n")
 
     verdict, blob = _push(work)
-    check("gate 2 end to end: the push is refused", verdict, "refused")
+    check("gate 2 end to end: the push is refused", verdict, "refused", evidence=blob)
     check("gate 2 end to end: ...naming the alias only the commit has",
           "ghosttool" in blob, True)
 
@@ -2463,7 +2529,7 @@ def case_gate2_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -
 
     verdict, blob = _push(work)
     check("gate 2 end to end: an uncommitted personality does not block",
-          verdict, "allowed")
+          verdict, "allowed", evidence=blob)
     # That it was *allowed* is not enough on its own: a gate that skipped
     # itself would also allow it, and would allow the case above too. The
     # hook's own tally is what distinguishes the two.
@@ -2498,7 +2564,7 @@ def case_gate2_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
 
     verdict, blob = _push(work, "feature")
     check("gate 2 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 2 end to end: ...naming the alias on that other branch",
           "offbranch" in blob, True)
 
@@ -2528,7 +2594,7 @@ def case_gate3_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) 
     write(work, "posix/src/race.rs", _UNRACED)
 
     verdict, blob = _push(work, marker=_G3_REFUSAL)
-    check("gate 3 end to end: the push is refused", verdict, "refused")
+    check("gate 3 end to end: the push is refused", verdict, "refused", evidence=blob)
     check("gate 3 end to end: ...naming the global only the commit races",
           "COUNTER" in blob, True)
 
@@ -2552,7 +2618,7 @@ def case_gate3_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -
 
     verdict, blob = _push(work, marker=_G3_REFUSAL)
     check("gate 3 end to end: an uncommitted race does not block", verdict,
-          "allowed")
+          "allowed", evidence=blob)
     check("gate 3 end to end: ...and the gate actually ran",
           "raced-global" in _tally(blob)[0], True)
 
@@ -2580,7 +2646,7 @@ def case_gate3_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
 
     verdict, blob = _push(work, "feature", marker=_G3_REFUSAL)
     check("gate 3 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 3 end to end: ...naming the global on that other branch",
           "COUNTER" in blob, True)
 
@@ -2623,7 +2689,7 @@ def case_gate3_the_hook_treats_a_deletion_as_nothing_to_judge(tmp: str) -> None:
     write(work, "posix/src/race.rs", _RACED)
     verdict, blob = _push(work, ":doomed", marker=_G3_REFUSAL)
     check("gate 3 end to end: deleting a branch is not refused", verdict,
-          "allowed")
+          "allowed", evidence=blob)
     check("gate 3 end to end: ...and no gate claims to have judged it",
           "raced-global" in _tally(blob)[1], True)
 
@@ -2658,7 +2724,7 @@ def case_gate4_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) 
     write(work, "userspace/coreutils/src/bin/tool.rs", _ARGV_OK)
 
     verdict, blob = _push(work, marker=_G4_REFUSAL)
-    check("gate 4 end to end: the push is refused", verdict, "refused")
+    check("gate 4 end to end: the push is refused", verdict, "refused", evidence=blob)
     check("gate 4 end to end: ...naming the bin only the commit breaks",
           "tool.rs" in blob, True)
 
@@ -2680,7 +2746,7 @@ def case_gate4_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -
 
     verdict, blob = _push(work, marker=_G4_REFUSAL)
     check("gate 4 end to end: an uncommitted panic does not block", verdict,
-          "allowed")
+          "allowed", evidence=blob)
     check("gate 4 end to end: ...and the gate actually ran",
           "argv-utf8" in _tally(blob)[0], True)
 
@@ -2703,7 +2769,7 @@ def case_gate4_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
 
     verdict, blob = _push(work, "feature", marker=_G4_REFUSAL)
     check("gate 4 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 4 end to end: ...naming the bin on that other branch",
           "tool.rs" in blob, True)
 
@@ -2737,7 +2803,7 @@ def case_gate6_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) 
     write(work, "userspace/coreutils/src/bin/tool.rs", _HE_OK)
 
     verdict, blob = _push(work, marker=_G6_REFUSAL)
-    check("gate 6 end to end: the push is refused", verdict, "refused")
+    check("gate 6 end to end: the push is refused", verdict, "refused", evidence=blob)
     check("gate 6 end to end: ...naming the bin only the commit breaks",
           "tool.rs" in blob, True)
 
@@ -2759,7 +2825,7 @@ def case_gate6_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -
 
     verdict, blob = _push(work, marker=_G6_REFUSAL)
     check("gate 6 end to end: an uncommitted host message does not block",
-          verdict, "allowed")
+          verdict, "allowed", evidence=blob)
     check("gate 6 end to end: ...and the gate actually ran",
           "host-errmsg" in _tally(blob)[0], True)
 
@@ -2782,7 +2848,7 @@ def case_gate6_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
 
     verdict, blob = _push(work, "feature", marker=_G6_REFUSAL)
     check("gate 6 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 6 end to end: ...naming the bin on that other branch",
           "tool.rs" in blob, True)
 
@@ -2823,7 +2889,7 @@ def case_gate8_the_hook_refuses_a_commit_the_worktree_no_longer_shows(
     write(work, _QN_FILE, _QN_OK)
 
     verdict, blob = _push(work, marker=_G8_REFUSAL)
-    check("gate 8 end to end: the push is refused", verdict, "refused")
+    check("gate 8 end to end: the push is refused", verdict, "refused", evidence=blob)
     check("gate 8 end to end: ...naming the file only the commit breaks",
           "tool.rs" in blob, True)
 
@@ -2847,7 +2913,7 @@ def case_gate8_the_hook_allows_a_clean_commit_under_a_dirty_worktree(
 
     verdict, blob = _push(work, marker=_G8_REFUSAL)
     check("gate 8 end to end: an uncommitted leak does not block",
-          verdict, "allowed")
+          verdict, "allowed", evidence=blob)
     check("gate 8 end to end: ...and the gate actually ran",
           "quote-names" in _tally(blob)[0], True)
 
@@ -2871,7 +2937,7 @@ def case_gate8_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
 
     verdict, blob = _push(work, "feature", marker=_G8_REFUSAL)
     check("gate 8 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 8 end to end: ...naming the file on that other branch",
           "tool.rs" in blob, True)
 
@@ -2918,7 +2984,7 @@ def case_gate9_the_hook_refuses_a_commit_the_worktree_no_longer_shows(
     git(work, "add", _G9_REQ)
 
     verdict, blob = _push(work, marker=_G9_REFUSAL)
-    check("gate 9 end to end: the push is refused", verdict, "refused")
+    check("gate 9 end to end: the push is refused", verdict, "refused", evidence=blob)
     check("gate 9 end to end: ...naming the request only the commit removes",
           "a-b-one.md" in blob, True)
 
@@ -2941,7 +3007,7 @@ def case_gate9_the_hook_allows_a_clean_commit_under_a_dirty_worktree(
 
     verdict, blob = _push(work, marker=_G9_REFUSAL)
     check("gate 9 end to end: an uncommitted deletion does not block",
-          verdict, "allowed")
+          verdict, "allowed", evidence=blob)
     check("gate 9 end to end: ...and the gate actually ran",
           "request-deletion" in _tally(blob)[0], True)
 
@@ -2965,7 +3031,7 @@ def case_gate9_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
 
     verdict, blob = _push(work, "feature", marker=_G9_REFUSAL)
     check("gate 9 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 9 end to end: ...naming the request on that other branch",
           "a-b-one.md" in blob, True)
 
@@ -3006,7 +3072,7 @@ def case_gate5_the_hook_refuses_a_commit_the_worktree_no_longer_shows(
     verdict, blob = _push(work, marker=_G5_REFUSAL)
     if _g5_hook_declined(verdict, blob):
         return
-    check("gate 5 end to end: the push is refused", verdict, "refused")
+    check("gate 5 end to end: the push is refused", verdict, "refused", evidence=blob)
     check("gate 5 end to end: ...naming the option only the commit drops",
           "version" in blob, True)
 
@@ -3034,7 +3100,7 @@ def case_gate5_the_hook_allows_a_clean_commit_under_a_dirty_worktree(
     if _g5_hook_declined(verdict, blob):
         return
     check("gate 5 end to end: an uncommitted table edit does not block",
-          verdict, "allowed")
+          verdict, "allowed", evidence=blob)
     check("gate 5 end to end: ...and the gate actually ran",
           "getopt-table" in _tally(blob)[0], True)
 
@@ -3061,7 +3127,7 @@ def case_gate5_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
     if _g5_hook_declined(verdict, blob):
         return
     check("gate 5 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 5 end to end: ...naming the option on that other branch",
           "version" in blob, True)
 
@@ -3370,7 +3436,7 @@ def case_gate11_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str)
     write(work, "userspace/real/src/bin/tool.rs", _DL_OK)
 
     verdict, blob = _push(work, marker=_G11_REFUSAL)
-    check("gate 11 end to end: the push is refused", verdict, "refused")
+    check("gate 11 end to end: the push is refused", verdict, "refused", evidence=blob)
     check("gate 11 end to end: ...naming the target only the commit has",
           "ghost_link_target" in blob, True)
 
@@ -3391,7 +3457,7 @@ def case_gate11_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) 
 
     verdict, blob = _push(work, marker=_G11_REFUSAL)
     check("gate 11 end to end: an uncommitted dead link does not block",
-          verdict, "allowed")
+          verdict, "allowed", evidence=blob)
     check("gate 11 end to end: ...and the gate actually ran",
           "doc-links" in _tally(blob)[0], True)
 
@@ -3414,7 +3480,7 @@ def case_gate11_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None
 
     verdict, blob = _push(work, "feature", marker=_G11_REFUSAL)
     check("gate 11 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 11 end to end: ...naming the target on that other branch",
           "ghost_link_target" in blob, True)
 
@@ -3714,7 +3780,7 @@ def case_gate13_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str)
                                      _dd_section(601, "A")))
 
     verdict, blob = _push(work, marker=_G13_REFUSAL)
-    check("gate 13 end to end: the push is refused", verdict, "refused")
+    check("gate 13 end to end: the push is refused", verdict, "refused", evidence=blob)
     # `601`, not `Lane`: the hook's refusal heredoc says "Lane" itself, so that
     # probe is satisfied by boilerplate on any refusal. The section number comes
     # only from the checker's finding, and only the commit contains it.
@@ -3740,7 +3806,7 @@ def case_gate13_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) 
 
     verdict, blob = _push(work, marker=_G13_REFUSAL)
     check("gate 13 end to end: an uncommitted violation does not block",
-          verdict, "allowed")
+          verdict, "allowed", evidence=blob)
     check("gate 13 end to end: ...and the gate actually ran",
           "bands" in _tally(blob)[0], True)
 
@@ -3762,7 +3828,7 @@ def case_gate13_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None
 
     verdict, blob = _push(work, "feature", marker=_G13_REFUSAL)
     check("gate 13 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     # Not `_tally` here, unlike the allowed-push case above: a refusing gate
     # calls `exit 1` before the tally is printed, so on a refusal there is no
     # `ran:` line to parse and the probe would be vacuously false. The finding
@@ -4081,7 +4147,7 @@ def case_gate14_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str)
     write(work, "doc.md", _AH_GOOD)
 
     verdict, blob = _push(work, marker=_G14_REFUSAL)
-    check("gate 14 end to end: the push is refused", verdict, "refused")
+    check("gate 14 end to end: the push is refused", verdict, "refused", evidence=blob)
     # `doc.md`, not the word "heading": the refusal heredoc says "heading" in
     # four places, so that probe is satisfied by boilerplate. The file name
     # comes only from the checker's finding.
@@ -4106,7 +4172,7 @@ def case_gate14_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) 
 
     verdict, blob = _push(work, marker=_G14_REFUSAL)
     check("gate 14 end to end: an uncommitted heading does not block",
-          verdict, "allowed")
+          verdict, "allowed", evidence=blob)
     check("gate 14 end to end: ...and the gate actually ran",
           "headings" in _tally(blob)[0], True)
 
@@ -4122,7 +4188,7 @@ def case_gate14_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None
 
     verdict, blob = _push(work, "feature", marker=_G14_REFUSAL)
     check("gate 14 end to end: a branch other than HEAD is still judged",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 14 end to end: ...naming the document on that other branch",
           "doc.md" in blob, True)
 
@@ -4159,7 +4225,7 @@ def case_gate14_the_hook_judges_a_second_ref_in_the_same_push(tmp: str) -> None:
     verdict, blob = _push(work, "clean", marker=_G14_REFUSAL,
                           extra_refs=("dirty",))
     check("gate 14 end to end: a clean first ref does not clear a second",
-          verdict, "refused")
+          verdict, "refused", evidence=blob)
     check("gate 14 end to end: ...naming the document the second ref carries",
           "doc.md" in blob, True)
 
@@ -4393,6 +4459,7 @@ CASES = (
     case_gate5_an_uncommitted_edit_does_not_block_a_clean_push,
     case_gate5_a_bin_absent_from_the_disk_is_still_judged,
     case_gate5_an_unopenable_revision_is_not_a_finding,
+    case_gate5_an_unopenable_revision_is_exit_2_while_gnu_is_unreachable,
     case_gate5_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
     case_gate5_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate5_the_hook_judges_a_branch_it_is_not_standing_on,
@@ -4540,9 +4607,10 @@ def main() -> int:
                   f"{len(hooked)} end-to-end; it has at least {floor} and "
                   f"{e2e_floor}. The list is broken, not the code.")
             return 1
-    with tempfile.TemporaryDirectory() as tmp:
-        for case in CASES:
-            case(tmp)
+    # A few at a time, each in a directory of its own, the output in list
+    # order: the cases share nothing, and one at a time this suite was the
+    # largest single item in a boot test's gate phase (`scripts/suite_pool.py`).
+    suite_pool.run([(None, case) for case in CASES])
     print()
     if failures:
         print(f"{len(failures)} FAILED: {', '.join(failures)}", file=sys.stderr)

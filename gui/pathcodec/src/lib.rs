@@ -49,7 +49,40 @@
 
 #![deny(clippy::all, clippy::pedantic)]
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+
+/// A name as a person can read it and tell apart from every other name:
+/// each printable character as itself, and every byte that is not text --
+/// or is text nobody can see, a control character or an invisible
+/// separator -- as a three-digit octal escape: `caf\351.txt`.
+///
+/// For *drawing* a name, never for naming a file again: anything that opens
+/// or navigates keeps the exact bytes beside the label and uses those. What
+/// this replaced, `to_string_lossy`, drew every undecodable byte as U+FFFD,
+/// so `caf\351.txt` and `caf\350.txt` looked identical and neither looked
+/// like its name (`design-decisions.md` §873).
+///
+/// Exactly `quoting::escape_unprintable` over the name's bytes, so the
+/// desktop's labels and the terminal's diagnostics (§369) spell a name the
+/// same way. On the Windows host the bytes are `OsStr::as_encoded_bytes`,
+/// which keeps an unpaired surrogate as three bytes that are escaped rather
+/// than replaced.
+///
+/// A name that really contains a backslash followed by three digits reads
+/// the same as one with that byte; §369 accepted the same ambiguity for the
+/// terminal. The rendering is for reading, not for parsing back.
+#[must_use]
+pub fn display_os(name: &OsStr) -> String {
+    quoting::escape_unprintable(name.as_encoded_bytes())
+}
+
+/// [`display_os`] for a whole path. `/` is printable, so the components
+/// stay visibly separate.
+#[must_use]
+pub fn display_path(path: &Path) -> String {
+    display_os(path.as_os_str())
+}
 
 /// Escape a path into a single line of printable ASCII, losslessly.
 ///
@@ -173,6 +206,79 @@ pub fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
 )]
 mod tests {
     use super::*;
+
+    // ---- display_os: how a name is drawn ----
+
+    /// A name that is text is drawn as itself, accents and spaces included.
+    #[test]
+    fn a_name_that_is_text_is_drawn_as_itself() {
+        assert_eq!(
+            super::display_os(std::ffi::OsStr::new("notes.txt")),
+            "notes.txt"
+        );
+        assert_eq!(
+            super::display_os(std::ffi::OsStr::new("café au lait")),
+            "café au lait"
+        );
+    }
+
+    /// A byte that is not text is an octal escape -- so two names that differ
+    /// only in that byte no longer look the same, which is what U+FFFD did.
+    #[cfg(unix)]
+    #[test]
+    fn a_byte_that_is_not_text_is_an_octal_escape() {
+        use std::os::unix::ffi::OsStrExt;
+        let e9 = std::ffi::OsStr::from_bytes(b"caf\xE9.txt");
+        let e8 = std::ffi::OsStr::from_bytes(b"caf\xE8.txt");
+        assert_eq!(super::display_os(e9), r"caf\351.txt");
+        assert_ne!(super::display_os(e9), super::display_os(e8));
+    }
+
+    /// The host's own kind of name that is not text -- an unpaired
+    /// surrogate -- is escaped byte by byte rather than replaced.
+    #[cfg(windows)]
+    #[test]
+    fn an_unpaired_surrogate_is_escaped_not_replaced() {
+        use std::os::windows::ffi::OsStringExt;
+        let wide: Vec<u16> = "caf"
+            .encode_utf16()
+            .chain([0xD800])
+            .chain(".txt".encode_utf16())
+            .collect();
+        let name = std::ffi::OsString::from_wide(&wide);
+        assert_eq!(super::display_os(&name), r"caf\355\240\200.txt");
+    }
+
+    /// Text nobody can see is escaped too: a newline would break a one-line
+    /// label, and a line separator is invisible.
+    #[test]
+    fn an_invisible_character_is_escaped() {
+        assert_eq!(super::display_os(std::ffi::OsStr::new("a\nb")), r"a\012b");
+        assert_eq!(
+            super::display_os(std::ffi::OsStr::new("x\u{2028}y")),
+            r"x\342\200\250y"
+        );
+    }
+
+    /// The terminal's rendering, byte for byte -- the point of reusing it.
+    #[test]
+    fn the_desktop_spells_a_name_as_the_terminal_does() {
+        for name in ["plain", "tab\there", "\u{7f}del", "ünïcödé"] {
+            assert_eq!(
+                super::display_os(std::ffi::OsStr::new(name)),
+                quoting::escape_unprintable(name.as_bytes())
+            );
+        }
+    }
+
+    /// A path keeps its separators: `/` is printable.
+    #[test]
+    fn a_path_keeps_its_slashes() {
+        assert_eq!(
+            super::display_path(std::path::Path::new("/home/u/my notes/a.txt")),
+            "/home/u/my notes/a.txt"
+        );
+    }
 
     /// An ordinary path encodes to itself, which is the whole point of the
     /// choice §426 made over base64.

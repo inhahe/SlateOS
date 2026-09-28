@@ -1183,11 +1183,13 @@ impl SimpleTextView {
                 self.scroll_by(page);
                 return (EventResult::Consumed, None);
             }
-            Key::Home if event.modifiers.ctrl => {
+            // With or without Ctrl: a view with no caret has no line for plain
+            // Home to be the start of, so both mean the top (§1416).
+            Key::Home => {
                 self.scroll_to_top();
                 return (EventResult::Consumed, None);
             }
-            Key::End if event.modifiers.ctrl => {
+            Key::End => {
                 self.scroll_to_bottom();
                 return (EventResult::Consumed, None);
             }
@@ -2506,11 +2508,12 @@ impl RichTextView {
                 self.scroll_by_px(self.height);
                 (EventResult::Consumed, None)
             }
-            Key::Home if event.modifiers.ctrl => {
+            // With or without Ctrl, as in the plain view above (§1416).
+            Key::Home => {
                 self.scroll_to_top();
                 (EventResult::Consumed, None)
             }
-            Key::End if event.modifiers.ctrl => {
+            Key::End => {
                 self.scroll_to_bottom();
                 (EventResult::Consumed, None)
             }
@@ -3192,6 +3195,74 @@ mod tests {
     /// Its handler said `-dy * 3.0` under a comment reading "Scroll 3 lines per
     /// notch" — three *pixels*, about a sixth of a line, so a detent moved the
     /// text by less than the height of the glyphs on it.
+    /// A key press, with Ctrl held or not.
+    fn key_event(key: Key, ctrl: bool) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers {
+                ctrl,
+                ..crate::event::Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// Home and End, with or without Ctrl, take a view with no caret to its
+    /// top and bottom (`design-decisions.md` §1416). Plain Home and End used to
+    /// do nothing here: only the Ctrl spellings were read.
+    #[test]
+    fn home_and_end_take_the_plain_view_to_its_ends() {
+        let mut view = simple_view(400.0, 160.0);
+        let text: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        view.set_text(&text.join(
+            "
+",
+        ));
+        view.scroll_to_top();
+        for ctrl in [false, true] {
+            view.handle_event(&key_event(Key::End, ctrl));
+            assert!(
+                view.is_at_bottom(),
+                "End (Ctrl: {ctrl}) did not reach the bottom"
+            );
+            view.handle_event(&key_event(Key::Home, ctrl));
+            assert_eq!(
+                view.scroll_offset, 0,
+                "Home (Ctrl: {ctrl}) did not reach the top"
+            );
+        }
+    }
+
+    /// The same for the rich view.
+    #[test]
+    fn home_and_end_take_the_rich_view_to_its_ends() {
+        let mut view = rich_view(400.0, 160.0);
+        view.set_blocks(vec![RichBlock::Paragraph {
+            spans: vec![RichSpan::plain("word ".repeat(400).trim_end())],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        }]);
+        for ctrl in [false, true] {
+            view.handle_event(&key_event(Key::End, ctrl));
+            assert!(
+                view.scroll_offset_px > 0.0,
+                "End (Ctrl: {ctrl}) did not move the view"
+            );
+            let bottom = view.scroll_offset_px;
+            view.scroll_to_bottom();
+            assert_eq!(
+                view.scroll_offset_px, bottom,
+                "End stopped short of the bottom"
+            );
+            view.handle_event(&key_event(Key::Home, ctrl));
+            assert_eq!(
+                view.scroll_offset_px, 0.0,
+                "Home (Ctrl: {ctrl}) did not reach the top"
+            );
+        }
+    }
+
     #[test]
     fn one_wheel_notch_moves_three_lines_of_rich_text() {
         let mut view = rich_view(400.0, 160.0);

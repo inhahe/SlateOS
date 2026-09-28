@@ -29,6 +29,48 @@ impl Color {
         }
     }
 
+    /// The colour as text: `#rrggbb`, or `#rrggbbaa` when it is not opaque --
+    /// every bit, so [`from_hex_text`](Self::from_hex_text) reads it back as
+    /// the same colour.
+    ///
+    /// Lowercase, as the desktop's settings and themes write their colours,
+    /// and the alpha byte only when it says something, so the common case
+    /// stays the six digits a person editing a file by hand already knows.
+    #[must_use]
+    pub fn hex_text(self) -> String {
+        if self.a == 255 {
+            format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+        } else {
+            format!("#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, self.a)
+        }
+    }
+
+    /// A colour written `#rrggbb` or `#rrggbbaa`, in either case -- or `None`
+    /// for anything else: no `#`, another number of digits, a character that
+    /// is not a hex digit. A sign is one such character, and worth naming:
+    /// the standard library's radix parsing takes a leading `+`, so a reader
+    /// built on it alone reads `+9b4fa` as a colour.
+    ///
+    /// `None` rather than a guess, so a mistyped colour falls back to its
+    /// caller's default instead of to some other colour.
+    #[must_use]
+    pub fn from_hex_text(text: &str) -> Option<Self> {
+        let digits = text.strip_prefix('#')?;
+        // Every byte a hex digit, first: that makes the length a count of
+        // digits and every offset below a character boundary.
+        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let byte = |i: usize| -> Option<u8> {
+            u8::from_str_radix(digits.get(i..i.checked_add(2)?)?, 16).ok()
+        };
+        match digits.len() {
+            6 => Some(Self::rgb(byte(0)?, byte(2)?, byte(4)?)),
+            8 => Some(Self::rgba(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
+            _ => None,
+        }
+    }
+
     /// Blend this color over `below` using alpha compositing.
     pub fn over(self, below: Color) -> Color {
         if self.a == 255 {
@@ -96,38 +138,66 @@ impl Color {
         )
     }
 
-    /// The component-wise mean of a sequence of colours, or `None` if there
-    /// were none.
+    /// The mean of a region of pixels, or `None` if there were none: its
+    /// alpha is the plain mean of their alphas, and its colour the mean of
+    /// their colours **each weighted by its alpha** -- by how much of it
+    /// shows. A region nothing in which shows comes out clear.
     ///
-    /// This is what a box filter needs — the average of a source region — and
-    /// the `None` is why it lives here rather than at the call site. "Divide by
-    /// the number of samples" is only meaningful when there was at least one,
-    /// and a caller that writes `if n > 0 { .. sum / n .. }` has put that
-    /// condition in a different statement from the division it licenses. Here
-    /// the count is a `NonZeroU64` by the time it is divided by, so the
-    /// condition and the division are the same expression.
+    /// This is what a box filter needs -- the average of a source region --
+    /// and both halves of the rule are why it lives here rather than at the
+    /// call site.
     ///
-    /// The channels are summed as `u64`: an image cannot hold more than
-    /// `usize::MAX` pixels and each contributes at most 255, so on a 64-bit
-    /// machine the sums are within range for any canvas that could be
-    /// allocated. The `saturating_add`s state that bound rather than leaving it
-    /// to this comment.
+    /// **Weighted, because a hidden colour is not a colour.** A fully
+    /// transparent pixel's colour is never seen and is usually black. A plain
+    /// per-channel mean counted it anyway, so half a cell of opaque red over
+    /// transparent black became *dark* red at half opacity, and every
+    /// see-through edge of a shrunken icon, PNG or GIF came out with a dark
+    /// rim. For an opaque region the two rules are the same arithmetic and
+    /// give the same bytes. `imagecodec`'s scaled decode applies the same
+    /// rule with the same rounding (lane F, 2026-09-25), and must: a
+    /// thumbnail is a scaled decode followed by this, and the two would
+    /// otherwise disagree about the same picture.
+    ///
+    /// **`None` for nothing.** "Divide by the number of samples" is only
+    /// meaningful when there was at least one, and a caller that writes
+    /// `if n > 0 { .. sum / n .. }` has put that condition in a different
+    /// statement from the division it licenses. Here the count is a
+    /// `NonZeroU64` by the time it is divided by, so the condition and the
+    /// division are the same expression -- and the same holds for the alpha
+    /// sum the colours are divided by.
+    ///
+    /// The sums are `u64`: a pixel contributes at most 255 to the alpha sum
+    /// and 255 x 255 to each weighted colour sum, so on a 64-bit machine they
+    /// are within range for any canvas that could be allocated. The
+    /// saturating operations state that bound rather than leaving it to this
+    /// comment.
     pub fn mean(colors: impl IntoIterator<Item = Color>) -> Option<Color> {
         let (mut r, mut g, mut b, mut a) = (0_u64, 0_u64, 0_u64, 0_u64);
         let mut count = 0_u64;
         for c in colors {
-            r = r.saturating_add(u64::from(c.r));
-            g = g.saturating_add(u64::from(c.g));
-            b = b.saturating_add(u64::from(c.b));
-            a = a.saturating_add(u64::from(c.a));
+            let alpha = u64::from(c.a);
+            r = r.saturating_add(u64::from(c.r).saturating_mul(alpha));
+            g = g.saturating_add(u64::from(c.g).saturating_mul(alpha));
+            b = b.saturating_add(u64::from(c.b).saturating_mul(alpha));
+            a = a.saturating_add(alpha);
             count = count.saturating_add(1);
         }
         let count = NonZeroU64::new(count)?;
-        // Each sum is at most `count * 255`, so each quotient is at most 255
-        // and the `unwrap_or` is unreachable — it is here so the ceiling is
-        // stated in the operation rather than in this sentence.
-        let average = |sum: u64| u8::try_from(sum / count).unwrap_or(u8::MAX);
-        Some(Color::rgba(average(r), average(g), average(b), average(a)))
+        // Nothing in the region shows, so it has no colour to average.
+        let Some(shown) = NonZeroU64::new(a) else {
+            return Some(Color::TRANSPARENT);
+        };
+        // The alpha sum is at most `count * 255` and each weighted sum at most
+        // `shown * 255`, so every quotient is at most 255 and the `unwrap_or`s
+        // are unreachable -- here so the ceiling is stated in the operation
+        // rather than in this sentence.
+        let byte = |sum: u64, over: NonZeroU64| u8::try_from(sum / over).unwrap_or(u8::MAX);
+        Some(Color::rgba(
+            byte(r, shown),
+            byte(g, shown),
+            byte(b, shown),
+            byte(a, count),
+        ))
     }
 
     // Common color constants
@@ -163,6 +233,54 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **A colour's text reads back as the same colour**, every bit of it --
+    /// opaque as six digits, anything else as eight -- over the channel
+    /// values at every edge a formatter or a parser gets wrong.
+    #[test]
+    fn a_colours_hex_text_reads_back_as_the_same_colour() {
+        for v in [0u8, 1, 0x0f, 0x10, 0x7f, 0x80, 0xfe, 0xff] {
+            for a in [0u8, 1, 0x80, 0xfe, 0xff] {
+                let c = Color::rgba(v, v.wrapping_add(0x33), v ^ 0xa5, a);
+                let text = c.hex_text();
+                assert_eq!(text.len(), if a == 255 { 7 } else { 9 }, "{text}");
+                assert_eq!(Color::from_hex_text(&text), Some(c), "{text}");
+            }
+        }
+        assert_eq!(Color::rgb(0x1e, 0x1e, 0x2e).hex_text(), "#1e1e2e");
+        assert_eq!(Color::rgba(0x1e, 0x1e, 0x2e, 0x80).hex_text(), "#1e1e2e80");
+    }
+
+    /// **Either case reads, and anything else is refused**: no `#`, the wrong
+    /// number of digits, a sign, a letter past `f`, a space, a multi-byte
+    /// character whose bytes make the count come out right, and the
+    /// three-digit shorthand, which is not this format.
+    #[test]
+    fn hex_text_reads_either_case_and_refuses_anything_else() {
+        let blue = Some(Color::rgb(0x89, 0xb4, 0xfa));
+        assert_eq!(Color::from_hex_text("#89B4FA"), blue);
+        assert_eq!(Color::from_hex_text("#89b4fa"), blue);
+        assert_eq!(
+            Color::from_hex_text("#89b4fa80"),
+            Some(Color::rgba(0x89, 0xb4, 0xfa, 0x80))
+        );
+        for bad in [
+            "",
+            "#",
+            "89b4fa",
+            "#89b4f",
+            "#89b4fa8",
+            "#89b4fa800",
+            "#+9b4fa",
+            "#89b4fg",
+            " #89b4fa",
+            "#89b4fa ",
+            "#\u{e9}9b4f",
+            "#fff",
+        ] {
+            assert_eq!(Color::from_hex_text(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn an_opaque_or_transparent_source_needs_no_blending() {
@@ -252,15 +370,56 @@ mod tests {
         assert_eq!(Color::mean([lone]), Some(lone));
     }
 
+    /// The colour is weighted by alpha; the alpha is a plain mean. This test
+    /// used to assert the old rule -- `(100, 100, 40, 8)`, the transparent
+    /// black counted as a third of the colour.
     #[test]
-    fn the_mean_averages_each_channel_independently() {
+    fn the_mean_weighs_each_colour_by_how_much_of_it_shows() {
         let mean = Color::mean([
             Color::rgba(0, 0, 0, 0),
             Color::rgba(100, 200, 40, 8),
             Color::rgba(200, 100, 80, 16),
         ])
         .unwrap();
-        assert_eq!(mean, Color::rgba(100, 100, 40, 8));
+        // Colour: (100*8 + 200*16) / 24, and so on; alpha: 24 / 3.
+        assert_eq!(mean, Color::rgba(166, 133, 66, 8));
+    }
+
+    /// The case the rule exists for: an opaque edge over transparency keeps
+    /// its colour and loses only opacity.
+    #[test]
+    fn an_edge_over_transparency_keeps_its_colour() {
+        let red = Color::rgba(200, 30, 40, 255);
+        let mean = Color::mean([red, Color::TRANSPARENT]).unwrap();
+        assert_eq!(mean, Color::rgba(200, 30, 40, 127));
+        // Whatever colour the clear pixel happens to hold.
+        let mean = Color::mean([red, Color::rgba(255, 255, 255, 0)]).unwrap();
+        assert_eq!(mean, Color::rgba(200, 30, 40, 127));
+    }
+
+    /// For an opaque region the weighted rule is the plain per-channel mean,
+    /// byte for byte -- so no opaque picture changes.
+    #[test]
+    fn an_opaque_region_averages_exactly_as_the_channels_do() {
+        let pixels = [
+            Color::rgba(0, 10, 255, 255),
+            Color::rgba(13, 200, 7, 255),
+            Color::rgba(254, 1, 99, 255),
+        ];
+        let plain = |f: fn(&Color) -> u8| {
+            u8::try_from(pixels.iter().map(|c| u32::from(f(c))).sum::<u32>() / 3).unwrap()
+        };
+        assert_eq!(
+            Color::mean(pixels).unwrap(),
+            Color::rgba(plain(|c| c.r), plain(|c| c.g), plain(|c| c.b), 255)
+        );
+    }
+
+    /// A region nothing in which shows is clear, whatever colours it hides.
+    #[test]
+    fn a_region_nothing_shows_in_is_clear() {
+        let hidden = [Color::rgba(255, 0, 0, 0), Color::rgba(0, 255, 0, 0)];
+        assert_eq!(Color::mean(hidden), Some(Color::TRANSPARENT));
     }
 
     /// The extremes cannot overflow the accumulator or the cast back down, and

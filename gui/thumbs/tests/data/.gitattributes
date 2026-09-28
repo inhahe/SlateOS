@@ -1,0 +1,11 @@
+# Pictures, named binary rather than left to git's NUL-byte guess, as the root
+# `.gitattributes` asks of every binary in the tree. A translated byte in one of
+# these is a fixture that decodes to a different picture, or none -- a test that
+# fails for a reason no diff shows. Copied from gui/imagecodec/tests/data, whose
+# `.txt` files beside each say what the decoder makes of it.
+*.jpg  binary
+*.gif  binary
+*.webp binary
+*.bmp  binary
+*.ico  binary
+*.tif  binary

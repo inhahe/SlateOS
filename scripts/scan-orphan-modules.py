@@ -126,6 +126,60 @@ PUB_ITEM = re.compile(
 # A line that only widens visibility.  `pub use x::Y;` and `pub(crate) use`.
 REEXPORT = re.compile(r"^\s*pub(?:\([^)]*\))?\s+use\b")
 
+# A crate root's re-export of a module's items: `pub use locale::Locale;`,
+# `pub use scan::{Found, Scan as Listing};`.  The group may span lines; the
+# module segment is captured, and the names are split out by `root_exports`.
+REEXPORT_ITEMS = re.compile(
+    r"^\s*pub(?:\([^)]*\))?\s+use\s+(?:self::|crate::)?([a-z_][a-z0-9_]*)::"
+    r"(\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?)\s*;",
+    re.M,
+)
+
+
+def root_exports(text):
+    """`{visible name: module stem}` for every item a crate root re-exports
+    from one of its modules -- the name another crate writes as
+    `crate::Name`.  `Name as Alias` is visible as `Alias`; a glob, `self` and a
+    deeper path (`m::inner::Name`) are not attributed, because they are not a
+    name *this* module declares."""
+    out = {}
+    for m in REEXPORT_ITEMS.finditer(text):
+        stem, group = m.group(1), m.group(2)
+        for part in group.strip("{}").split(","):
+            part = " ".join(part.split())
+            if not part or "::" in part or part in ("*", "self"):
+                continue
+            out[part.split(" as ")[-1]] = stem
+    return out
+
+
+def braced_groups(text, opener):
+    """`(crate, first segment, offset)` for each top-level entry of every
+    `crate::{...}` group `opener` finds in `text`, however many lines the
+    group spans -- which is most of them, since rustfmt breaks a long `use`
+    list one entry to a line.  Nested groups count by their first segment:
+    `guitk::{table::{Column, Table}, text}` yields `table` and `text`."""
+    for m in opener.finditer(text):
+        depth, i, start = 1, m.end(), m.end()
+        entries = []
+        while i < len(text) and depth:
+            c = text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    entries.append(text[start:i])
+            elif c == "," and depth == 1:
+                entries.append(text[start:i])
+                start = i + 1
+            i += 1
+        for entry in entries:
+            first = IDENT.search(entry)
+            if first:
+                yield m.group(1), first.group(0), m.start()
+
+
 # Every identifier on a line, in source order.  Deliberately not anchored to
 # `::` or `<`: a type is named plenty of ways -- `use m::T;`, `T::new()`,
 # `Vec<T>`, `-> T`, `let x: T` -- and the point is only to know whether the
@@ -449,8 +503,8 @@ BASELINE_HEADER = """\
 # mechanism over the instruction: the comment saying prose lives in the
 # script has been read, written and then disobeyed by the same person.
 #
-# ONE ENTRY ON THIS LIST IS NOT A DEBT, and it costs a reader several minutes
-# to find that out, so it is written down here instead.
+# ONE ENTRY ON THIS LIST WAS NOT A DEBT -- RESOLVED 2026-09-26, see the end
+# of this note. Kept because the mechanism is still the scan's.
 #
 # `gui/compositor/src/server.rs` is the live display server. `Server::bind` is
 # called by `gui/compositor/src/main.rs:273`, the compositor binds a socket
@@ -469,9 +523,18 @@ BASELINE_HEADER = """\
 #
 # That conservatism is still right -- a false island costs a reader minutes, a
 # false clearance hides a whole subsystem -- but it is not free, and this is
-# what the bill looks like. Do not try to "pay off" this line: there is
-# nothing to wire, and deleting it would make `--check` report a new island
-# and red the boot.
+# what the bill looks like.
+#
+# RESOLVED 2026-09-26, lane C, by adding the edges the scan was missing
+# rather than by relaxing that conservatism: a crate root's re-export
+# (`compositor::Server` names `server.rs` through `pub use
+# server::{{Disconnect, Server, ServerStats}};`) and a braced group
+# (`use compositor::{{Compositor, Server}};`, which is how `main.rs` names
+# it). Both are crate-qualified, so neither can clear a module on a common
+# noun the way the item edge could. The same fix took `netproto/src/arp.rs`
+# off the list -- `services/netstack` imports `netproto::{{arp, ...}}` -- and
+# kept `gui/desktopentry/src/locale.rs` off it, whose one caller writes
+# `desktopentry::Locale`: the case that refused lane C's boot and found this.
 #
 #
 # FIFTH BATCH, 2026-09-15, lane C: gui/desktop/src/notification_settings.rs,
@@ -550,6 +613,23 @@ BASELINE_HEADER = """\
 # `Transceiver` trait and a mock radio — and it lives in this crate precisely
 # so that the loop is not duplicated once per driver.  Writing the caller is
 # what paid the line off; pinning it was what let it sit unwritten.
+#
+# A second line was ADDED on 2026-09-24, by lane C: gui/toolkit/src/dirtree.rs,
+# the "function to populate [a tristate checkbox treeview] with a directory"
+# that design.txt asks for, landed with gui/toolkit/src/treeview.rs (which
+# dirtree reaches, so it is not listed).  Before adding it, the note above was
+# taken at its word and a caller was looked for in lane C's own tree, and there
+# is not one to write: the file dialog is deliberately free of I/O -- its host
+# reads directories and hands it the listing -- so a disk-reading tree inside it
+# would undo that design, and nothing else under gui/ chooses folders.  The
+# callers are applications -- the five that hand-roll a tree, and whichever one
+# chooses a set of folders -- and since the six-lane split of 2026-09-22 apps/**
+# is lane E's.  So this is the benign case "the caller is the next commit" with
+# the commit in another lane, and it is tracked where lane E will see it:
+# requests/c-e-the-toolkit-has-a-treeview-now-and-five-apps-draw-their-own.md.
+# The same commit pruned three stale lines (backup_settings.rs, default_apps.rs
+# and textview.rs), so the count still fell.  Delete the line when an
+# application opens a DirectoryTree.
 #
 # THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
 # rewrites this file from that constant, so anything added directly to the
@@ -829,6 +909,41 @@ def main():
         r"\s*::\s*([a-z_][a-z0-9_]*)\b"
     ) if crate_names else None
 
+    # The third edge: the crate root's re-export.  `desktopentry::Locale`
+    # names `gui/desktopentry/src/locale.rs` as surely as
+    # `desktopentry::locale::Locale` would -- it is crate-qualified, and
+    # `lib.rs` says `pub use locale::Locale;` -- but it has no module segment
+    # for the edge above, and `Locale` is a name four other modules declare, so
+    # the ambiguity filter drops it from the item edge too.  Reported as an
+    # island, with `desktop::session` calling `desktopentry::Locale::from_env`,
+    # the module refused lane C's boot on 2026-09-26.  The item edge's own
+    # comment above said a cross-crate user "must write the item's name too
+    # ..., which the item edge already counts" -- true only of a name that
+    # survives the ambiguity filter.
+    reexported = {}
+    for f, lines in tree:
+        if f.name == "lib.rs" and crate_of(f) in crate_names:
+            names = root_exports("\n".join(lines))
+            if names:
+                reexported[crate_names[crate_of(f)]] = names
+    qualified_any = re.compile(
+        r"\b(" + "|".join(sorted(map(re.escape, set(crate_names.values())))) + r")"
+        r"\s*::\s*([A-Za-z_][A-Za-z0-9_]*)\b"
+    ) if crate_names else None
+    # And a braced group, `use desktopentry::{Locale, scan};`, which neither
+    # qualified pattern sees: nothing follows the `::` but a brace.
+    braced = re.compile(
+        r"\b(" + "|".join(sorted(map(re.escape, set(crate_names.values())))) + r")"
+        r"\s*::\s*\{"
+    ) if crate_names else None
+
+    def via_crate(crate, seg):
+        """The module stem `crate::seg` names: `seg` itself when it is a
+        module stem, or the module the crate root re-exports `seg` from."""
+        if seg in stems:
+            return seg
+        return reexported.get(crate, {}).get(seg)
+
     # `{name -> {file}}` and `{stem -> {file}}`, split by whether the mention
     # was inside a `#[cfg(test)]` item.  The split matters: a module named
     # only by other files' tests is a *test helper*, which is a benign and
@@ -862,6 +977,23 @@ def main():
                 for crate, seg in qualified.findall(line):
                     if seg in stems:
                         hits[where].setdefault(("qual", crate, seg), set()).add(f)
+            if qualified_any:
+                for crate, seg in qualified_any.findall(line):
+                    stem = reexported.get(crate, {}).get(seg)
+                    if stem is not None:
+                        hits[where].setdefault(("qual", crate, stem), set()).add(f)
+        if braced:
+            text = "\n".join(lines)
+            if "{" in text:
+                for crate, seg, offset in braced_groups(text, braced):
+                    stem = via_crate(crate, seg)
+                    if stem is None:
+                        continue
+                    line_no = text.count("\n", 0, offset)
+                    if REEXPORT.match(lines[line_no]):
+                        continue
+                    where = "test" if in_spans(line_no, spans) else "prod"
+                    hits[where].setdefault(("qual", crate, stem), set()).add(f)
 
     def plausible(f, mentioners):
         """`mentioners`, minus files that cannot be naming *this* module's item.

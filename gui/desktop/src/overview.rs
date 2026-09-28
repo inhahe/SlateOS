@@ -188,6 +188,13 @@ pub struct OverviewState {
     /// [`OverviewState::begin_fade`], advance it with
     /// [`OverviewState::tick_fade`].
     fade: Option<Animation>,
+    /// The order to draw the cards in, by window id, while a window switch is
+    /// shown here -- most recently used first, so that each Tab moves the
+    /// highlight one card on, left to right, as the switcher's strip does.
+    /// `None` is the window list's own order. Set by
+    /// [`set_order`](Self::set_order); forgotten by [`show`](Self::show) and
+    /// [`hide`](Self::hide), because it belongs to one switch.
+    order: Option<Vec<u64>>,
 }
 
 impl OverviewState {
@@ -202,6 +209,7 @@ impl OverviewState {
             search_query: String::new(),
             search_results: Vec::new(),
             fade: None,
+            order: None,
         }
     }
 
@@ -223,11 +231,20 @@ impl OverviewState {
         self.search_results.clear();
         self.hovered_window = None;
         self.fade = None;
+        self.order = None;
+    }
+
+    /// Draw the cards in this order, by window id, until the overview next
+    /// opens or closes; ids it does not name keep the window list's order,
+    /// after the ones it does. See the `order` field.
+    pub fn set_order(&mut self, order: Vec<u64>) {
+        self.order = Some(order);
     }
 
     /// Hide the overview.
     pub fn hide(&mut self) {
         self.visible = false;
+        self.order = None;
         // Dropped rather than left part-way: the next `show` must not inherit a
         // fade from the last one, and an overview that is not on screen has no
         // business keeping the shell's frame clock awake.
@@ -980,13 +997,14 @@ fn render_thumbnail_card(
         corner_radii: CornerRadii::all(6.0),
     });
 
-    // Title inside card.
-    let title_display: String = layout.title.chars().take(30).collect();
+    // Title inside card, cut at the card's edge with a mark when it does not
+    // fit. It was cut at thirty characters first, unmarked -- so a title of
+    // forty on a card with room for all of it read as a title of thirty.
     let title_color = if is_dimmed { p.overlay0 } else { p.text };
     cmds.push(RenderCommand::Text {
         x: x + dx + 8.0,
         y: y + dy + 8.0,
-        text: title_display,
+        text: layout.title.clone(),
         color: title_color,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
@@ -1134,7 +1152,9 @@ pub fn on_key(state: &mut OverviewState, key: OverviewKey) -> OverviewAction {
         OverviewKey::ArrowUp
         | OverviewKey::ArrowDown
         | OverviewKey::ArrowLeft
-        | OverviewKey::ArrowRight => {
+        | OverviewKey::ArrowRight
+        | OverviewKey::First
+        | OverviewKey::Last => {
             navigate_selection(state, key);
             OverviewAction::NavigateSelection
         }
@@ -1299,11 +1319,21 @@ pub enum OverviewKey {
     Text(String),
     Backspace,
     Tab,
+    /// Home, and Page Up: the first card. The cards all fit on the screen, so
+    /// a page of them is all of them (`design-decisions.md` §1416).
+    First,
+    /// End, and Page Down: the last card.
+    Last,
 }
 
-/// Arrow-key navigation over a flat list of thumbnails.
+/// Arrow-key navigation over the cards as they are drawn.
+///
+/// The drawn cards, in their drawn order -- not every window on every desktop.
+/// It walked `all_thumbnails` until 2026-09-27, which in the one-desktop modes
+/// includes the other desktops' windows: an arrow could light a card that is
+/// not on the screen, and Enter then switched to a window the user never saw.
 fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
-    let all = state.all_thumbnails();
+    let all = drawn_thumbnails(state);
     if all.is_empty() {
         return;
     }
@@ -1315,6 +1345,8 @@ fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
     // Clamped, matching the scroll gesture above: arrowing off the edge of
     // the grid holds still rather than teleporting to the opposite edge.
     let new_idx = match (current_idx, key) {
+        (_, OverviewKey::First) => Some(0),
+        (_, OverviewKey::Last) => all.len().checked_sub(1),
         (None, _) => Some(0),
         (Some(i), OverviewKey::ArrowRight | OverviewKey::ArrowDown) => {
             Some(step::clamped_after(all.len(), i))
@@ -1332,8 +1364,38 @@ fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
     }
 }
 
-/// Collect the thumbnails relevant to the current mode.
+/// Every card the overview draws, in the order it draws them: the grid's
+/// cards, or each desktop's lane in turn.
+fn drawn_thumbnails(state: &OverviewState) -> Vec<WindowThumbnail> {
+    match state.mode {
+        OverviewMode::AllDesktops => state
+            .lanes
+            .iter()
+            .flat_map(|l| l.thumbnails.iter().cloned())
+            .collect(),
+        OverviewMode::AllWindows | OverviewMode::RecentApps => collect_thumbs_for_mode(state),
+    }
+}
+
+/// Collect the thumbnails relevant to the current mode, in the order a window
+/// switch shown here asked for, if one did.
 fn collect_thumbs_for_mode(state: &OverviewState) -> Vec<WindowThumbnail> {
+    let mut thumbs = thumbs_for_mode(state);
+    if let Some(order) = &state.order {
+        // Stable, so the windows the order does not name keep the list's order
+        // among themselves, after the ones it does.
+        thumbs.sort_by_key(|t| {
+            order
+                .iter()
+                .position(|id| *id == t.window_id)
+                .unwrap_or(usize::MAX)
+        });
+    }
+    thumbs
+}
+
+/// The thumbnails relevant to the current mode, in the window list's order.
+fn thumbs_for_mode(state: &OverviewState) -> Vec<WindowThumbnail> {
     match state.mode {
         OverviewMode::AllWindows => {
             // Current desktop only.
@@ -1420,6 +1482,91 @@ mod tests {
 
     fn default_config() -> OverviewConfig {
         OverviewConfig::default()
+    }
+
+    /// Home and End light the first and last cards drawn, from anywhere and
+    /// from nothing lit.
+    #[test]
+    fn first_and_last_light_the_ends_of_what_is_drawn() {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllWindows);
+        on_key(&mut s, OverviewKey::Last);
+        assert_eq!(s.hovered_window, Some(2), "the last card on this desktop");
+        on_key(&mut s, OverviewKey::First);
+        assert_eq!(s.hovered_window, Some(1));
+        s.show(OverviewMode::AllDesktops);
+        on_key(&mut s, OverviewKey::Last);
+        assert_eq!(s.hovered_window, Some(3), "the last card of the last lane");
+    }
+
+    // -- The order a window switch asks for ----------------------------------
+
+    /// A switch shown here draws the cards in its order -- most recent first
+    /// -- and the overview forgets it on closing, so the next time it opens by
+    /// itself it is in the window list's order again.
+    #[test]
+    fn a_switch_draws_the_cards_in_its_order_until_the_overview_closes() {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllWindows);
+        let drawn = |s: &OverviewState| -> Vec<u64> {
+            overview_layout(s, &default_config(), 1920.0, 1080.0)
+                .iter()
+                .map(|card| card.window_id)
+                .collect()
+        };
+        assert_eq!(drawn(&s), vec![1, 2], "the list's own order");
+
+        s.set_order(vec![2, 1]);
+        assert_eq!(drawn(&s), vec![2, 1]);
+
+        // An order that names only some cards puts those first and keeps the
+        // rest in the list's order after them.
+        s.set_order(vec![2]);
+        assert_eq!(drawn(&s), vec![2, 1]);
+
+        s.set_order(vec![2, 1]);
+        s.hide();
+        s.show(OverviewMode::AllWindows);
+        assert_eq!(drawn(&s), vec![1, 2], "the order outlived the switch");
+    }
+
+    /// The arrows light only cards that are drawn.
+    ///
+    /// They walked every window on every desktop, so in the one-desktop view an
+    /// arrow could light the other desktop's window -- a card nobody could see
+    /// -- and Enter then went to it.
+    #[test]
+    fn the_arrows_light_only_cards_that_are_drawn() {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllWindows);
+        for _ in 0..5 {
+            on_key(&mut s, OverviewKey::ArrowRight);
+            assert_ne!(
+                s.hovered_window,
+                Some(3),
+                "lit the window on the desktop not shown"
+            );
+        }
+        assert_eq!(s.hovered_window, Some(2), "held at the last drawn card");
+
+        // In the drawn order, too: a switch's order walks the cards as they
+        // stand on the screen.
+        s.set_order(vec![2, 1]);
+        s.hovered_window = None;
+        on_key(&mut s, OverviewKey::ArrowRight);
+        assert_eq!(s.hovered_window, Some(2), "the first card drawn");
+        on_key(&mut s, OverviewKey::ArrowRight);
+        assert_eq!(s.hovered_window, Some(1), "the next card drawn");
+
+        // The view of every desktop does draw the other desktop's window.
+        s.show(OverviewMode::AllDesktops);
+        for _ in 0..5 {
+            on_key(&mut s, OverviewKey::ArrowRight);
+        }
+        assert_eq!(s.hovered_window, Some(3));
     }
 
     // -- OverviewState basics ------------------------------------------------
@@ -1967,6 +2114,44 @@ mod tests {
         let mut s = OverviewState::new();
         let action = on_key(&mut s, OverviewKey::Escape);
         assert_eq!(action, OverviewAction::None);
+    }
+
+    /// **A card's title is cut at the card's edge, with a mark -- not at a
+    /// count.** It was cut to thirty characters first, unmarked, so a longer
+    /// title on a card with room for all of it lost its end and read whole.
+    #[test]
+    fn a_cards_title_is_cut_at_its_edge_not_at_thirty_characters() {
+        let title = "Quarterly report, final draft.odt - Writer";
+        let layout = ThumbnailLayout {
+            window_id: 1,
+            desktop_id: 0,
+            title: title.to_string(),
+            is_focused: false,
+            is_minimized: false,
+            render_x: 0.0,
+            render_y: 0.0,
+            render_width: 600.0,
+            render_height: 300.0,
+        };
+        let mut cmds = Vec::new();
+        render_thumbnail_card(&mut cmds, &layout, &Palette::for_mode(false), false, false);
+        let drawn = cmds.iter().find_map(|cmd| match cmd {
+            RenderCommand::Text {
+                text,
+                max_width,
+                overflow,
+                ..
+            } => Some((text.clone(), *max_width, *overflow)),
+            _ => None,
+        });
+        let (text, max_width, overflow) = drawn.expect("the card drew no title");
+        assert_eq!(text, title, "the title was cut before the card's edge");
+        assert!(max_width.is_some());
+        assert_eq!(
+            overflow,
+            TextOverflow::Ellipsis,
+            "a cut would not be marked"
+        );
     }
 
     #[test]

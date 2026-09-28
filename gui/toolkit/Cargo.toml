@@ -6,6 +6,9 @@ description = "SlateOS GUI toolkit — widget library with Flexbox/Grid layout e
 
 [dependencies]
 osfont = { path = "../font" }
+# How a file name that is not text is drawn (`display_os`): one rendering for
+# every widget that shows a name, and the terminal's. No widgets of its own.
+pathcodec = { path = "../pathcodec" }
 textfmt = { path = "../../textfmt" }
 textfind = { path = "../../textfind" }
 

@@ -1,0 +1,15 @@
+# SlateOS's own Settings, as a desktop entry (gui/programs, design-decisions.md 1425).
+# Built into the programs library; the same file installs as
+# /usr/share/applications/org.slateos.Settings.desktop. What each field carries,
+# and where it came from, is gui/programs/INVENTORY.md.
+
+[Desktop Entry]
+Type=Application
+Name=Settings
+GenericName=System Settings
+Comment=System preferences and configuration
+Exec=/usr/bin/settings
+TryExec=/usr/bin/settings
+Icon=preferences-system
+Categories=Settings;
+Keywords=preferences;config;control;options;display;monitor;resolution;dpi;network;wifi;ethernet;vpn;internet;sound;audio;volume;speaker;microphone;

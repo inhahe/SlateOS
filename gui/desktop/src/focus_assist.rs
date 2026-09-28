@@ -116,6 +116,19 @@ impl FocusMode {
         }
     }
 
+    /// The icon this mode is drawn as on the taskbar, by its name in the icon
+    /// theme: the same four pictures as [`icon`](Self::icon)'s emoji, which
+    /// no font the desktop has can draw (design-decisions.md §881).
+    #[must_use]
+    pub const fn icon_name(&self) -> &'static str {
+        match self {
+            Self::Off => "notifications",
+            Self::PriorityOnly => "notifications-disabled",
+            Self::AlarmsOnly => "alarm",
+            Self::TotalSilence => "action-unavailable",
+        }
+    }
+
     pub fn description(&self) -> &str {
         match self {
             Self::Off => "All notifications are shown",

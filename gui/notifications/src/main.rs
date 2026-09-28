@@ -89,6 +89,9 @@ const ACTION_BTN_PADDING: f32 = 12.0;
 const BADGE_HEIGHT: f32 = 22.0;
 
 const CENTER_WIDTH: f32 = 400.0;
+/// How wide a notification's body may run in the notification center: the
+/// row, less its margins.
+const CENTER_BODY_WIDTH: f32 = CENTER_WIDTH - 40.0;
 const CENTER_HEADER_HEIGHT: f32 = 48.0;
 const CENTER_ITEM_HEIGHT: f32 = 72.0;
 const CENTER_GROUP_HEADER_HEIGHT: f32 = 36.0;
@@ -1572,13 +1575,18 @@ impl NotificationDaemon {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Body (truncated).
-        let body_display = if notif.body.len() > 60 {
-            let truncated: String = notif.body.chars().take(57).collect();
-            format!("{truncated}...")
-        } else {
-            notif.body.clone()
-        };
+        // Body: one line, cut to the row's width with a mark when it does
+        // not fit. It was cut at 57 characters whenever it ran past 60
+        // *bytes*, so a short message in any script but ASCII -- forty
+        // accented letters -- gained a "..." for a cut that never happened,
+        // and a long one was cut at a count rather than at the row's edge.
+        let body_display = text::elide(
+            &notif.body,
+            CENTER_BODY_WIDTH,
+            "\u{2026}",
+            11.0,
+            FontWeightHint::Regular,
+        );
         cmds.push(RenderCommand::Text {
             x: center_x + 20.0,
             y: y + 28.0,
@@ -1586,7 +1594,7 @@ impl NotificationDaemon {
             color: SUBTEXT0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(CENTER_WIDTH - 40.0),
+            max_width: Some(CENTER_BODY_WIDTH),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -2184,6 +2192,45 @@ mod tests {
         notif.body = String::from(body);
         daemon.handle_request(NotificationRequest::Send(notif));
         daemon
+    }
+
+    /// The body a notification-center row drew for `body`.
+    fn center_body(body: &str) -> String {
+        let mut daemon = daemon_with_body(body);
+        daemon.toggle_center();
+        daemon
+            .render_center()
+            .into_iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, .. }
+                    if text.starts_with(body.get(..3).unwrap_or(body)) =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("the center drew no body")
+    }
+
+    /// **A body that fits is drawn whole, and one that does not is cut at the
+    /// row's edge with a mark.** It was cut by counting: a body over 60 bytes
+    /// lost everything past its 57th character and gained "...", so forty
+    /// accented letters -- 80 bytes, well inside the row -- read as cut.
+    #[test]
+    fn a_center_row_cuts_a_body_at_its_edge_not_at_a_count() {
+        let accented = "é".repeat(40);
+        assert_eq!(center_body(&accented), accented);
+
+        let long = "word ".repeat(80);
+        let drawn = center_body(&long);
+        assert!(
+            drawn.ends_with('\u{2026}'),
+            "{drawn:?} does not show it was cut"
+        );
+        assert!(
+            text::measure(&drawn, 11.0, FontWeightHint::Regular) <= CENTER_BODY_WIDTH + 0.5,
+            "{drawn:?} runs past the row"
+        );
     }
 
     /// Every body line the toast drew, as (y, text), in draw order.

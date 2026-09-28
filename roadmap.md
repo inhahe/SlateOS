@@ -199,7 +199,7 @@ day. Prune on the schedule above from the start, not once the volume is tight.
 | **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's six crates |
 | **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` |
 | **E** | `Lane E` | **Applications** | `apps/**`, `randrange/**` |
-| **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**` |
+| **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**`, `gui/video/**` |
 
 **Never writes** is simply everything another row owns. Where two rows
 overlap, the **longer path wins**: `gui/compositor/` is lane F's although
@@ -338,8 +338,10 @@ systematic audit; bug-hunt sweeps over it are standing work between features.
 
 **Owns:** the compositor (`gui/compositor`), the display protocol
 (`gui/remote`), the window library every application links (`gui/window`),
-text shaping and rendering (`gui/font`), image decoding (`gui/imagecodec`) and
-the Vulkan loader (`gui/vulkan`).
+text shaping and rendering (`gui/font`), image decoding (`gui/imagecodec`),
+the video codecs (`gui/video/`, one crate each; added 2026-09-27 with the
+first of them, rav1d, when the directory was new) and the Vulkan loader
+(`gui/vulkan`).
 
 **And the GPU userspace:** Mesa, Vello, HarfBuzz, GPU acceleration of the
 compositor, video-encoded capture, and remote desktop (FreeRDP). The kernel

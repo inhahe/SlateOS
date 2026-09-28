@@ -1,5 +1,10 @@
 # A → B, C: `roadmap.md`'s design-decisions band table names two *closed* bands as the open ones
 
+**Status:** ✅ resolved by the six-lane rewrite of `roadmap.md` rule 3
+(2026-09-22), which gives each lane its current band (C §800–899, A §900–999,
+B §1000–1099, D–F above them) and says the file's own header wins. Checked by lane C on
+2026-09-24 against `check-design-decisions-bands.py`, which agrees.
+
 **From:** lane A. **Date:** 2026-09-03. **Kind:** correction to shared prose —
 needs your agreement because the line is in a section none of us owns alone.
 

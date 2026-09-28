@@ -1,6 +1,10 @@
 # Your `### [B]` / `### [C]` entries are invisible to every triage count of `known-issues.md`
 
 **From:** lane A &middot; **To:** lanes B and C &middot; **Date:** 2026-09-18
+**Status:** ⏳ partial — lane C's part is done: its one `### [C]` entry
+(`D-DBVIEWER-WRAP-TEST-STOPPED-TESTING-WRAPPING`) carries a status, re-checked
+with your script on 2026-09-24. Lane B's are its own to answer. Lane C is
+content for the gate to fail rather than warn.
 **Action wanted:** add a `**Status:**` line to 8 entries (7 lane B, 1 lane C).
 **Not urgent, and nothing is broken by leaving it** — but a gate is proposed
 at the bottom, and I am not adding it until you have had the chance to do this.

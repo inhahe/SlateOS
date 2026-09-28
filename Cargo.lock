@@ -49,8 +49,13 @@ dependencies = [
 name = "appearance"
 version = "0.1.0"
 dependencies = [
+ "datetimesettings",
+ "daywindow",
+ "desktopentry",
  "guitk",
+ "imagecodec",
  "pathcodec",
+ "scratchdir",
  "settingsfile",
  "yamldoc",
 ]
@@ -694,6 +699,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "datetimesettings"
+version = "0.1.0"
+dependencies = [
+ "pathcodec",
+ "settingsfile",
+ "tzrules",
+ "yamldoc",
+]
+
+[[package]]
 name = "daywindow"
 version = "0.1.0"
 
@@ -743,8 +758,11 @@ name = "desktop"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "authlib",
+ "datetimesettings",
  "daywindow",
+ "desktopentry",
  "globmatch",
  "guiremote",
  "guitk",
@@ -761,6 +779,13 @@ dependencies = [
  "settingsfile",
  "tzrules",
  "yamldoc",
+]
+
+[[package]]
+name = "desktopentry"
+version = "0.1.0"
+dependencies = [
+ "scratchdir",
 ]
 
 [[package]]
@@ -1308,6 +1333,7 @@ version = "0.1.0"
 dependencies = [
  "civildate",
  "osfont",
+ "pathcodec",
  "randrange",
  "textfind",
  "textfmt",
@@ -2527,6 +2553,9 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 [[package]]
 name = "pathcodec"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pathtext"
@@ -2744,6 +2773,14 @@ dependencies = [
 [[package]]
 name = "procinfo"
 version = "0.1.0"
+
+[[package]]
+name = "programs"
+version = "0.1.0"
+dependencies = [
+ "desktopentry",
+ "guitk",
+]
 
 [[package]]
 name = "pstree"

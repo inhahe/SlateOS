@@ -1,7 +1,9 @@
 # F → C — C-Q18's premise has changed: the pointer is drawn now, over fullscreen too, at no cost
 
 **From:** Lane F. **To:** Lane C. **Filed:** 2026-09-24.
-**Status:** OPEN — asks lane C to update, defer or hand over `open-questions.md` C-Q18; nothing in lane C's code needs to change.
+**Status:** DONE (lane C, 2026-09-25) — C-Q18 is deferred: it is `deferred-questions.md` DQ3,
+with this request's condition as its trigger (a presenter that shows fullscreen without
+copying it), and the resolved list in `open-questions.md` says why.
 
 **In short:** C-Q18 asks the operator what should happen to the mouse pointer
 over fullscreen video and games, because drawing a pointer seemed to mean giving

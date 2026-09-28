@@ -23854,6 +23854,23 @@ wire; expect blocked more often than not.**
 ## TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER
 **Status:** OPEN — 2026-09-24 (lane F): the pointer is drawn now (design-decisions §1301), so `cursor_size` and `cursor_scheme` have a reader waiting — and it reads the defaults, per this entry's proper fix, until the models are one. Of the four this entry counts, the two in `gui/desktop` have since been deleted (`9dde7ab85`, `9ddb46bae`), and `apps/settings` holds one more it never saves. Asked which survives: `requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`.
 
+**Status:** OPEN for the two cursor rows only, and no longer blocked on lane C.
+**2026-09-25:** the cursor-size models are one (`design-decisions.md` §872):
+`appearance`'s `cursor_size` and `cursor_scheme` survive, `inputsettings`'
+copy is gone, and the Settings application's own enum is lane E's to point at
+the survivor. Lane F's compositor draws a pointer now (on `lane-f` as of this
+date), so what remains is lane F reading the setting in
+`pointer_preferences` and lane E's control writing it --
+`requests/c-ef-the-pointer-size-is-appearances-cursors-size.md`. The rows
+close when both land. `icon_size` is FIXED 2026-09-24: the correction below -- "blocked
+on C-Q17" because the icon layer was never constructed -- stopped being true
+on 2026-09-14 when the shell began constructing and drawing it, and nobody
+came back to this row. The layer now takes the size from `set_appearance`,
+grows its grid to fit, keeps every icon in its row and column across a
+change, and moves one that no longer fits to a free cell rather than off the
+screen (`DesktopIconLayer::set_icon_size`). Its labels are centred, too: the
+comment always said so and the code drew them from the cell's left edge.
+
 **In short:** Open Settings, choose "Slow" animations, and the setting is
 saved, survives a restart, and changes nothing — because nothing in the system
 reads it. The same is true of desktop icon size and cursor scheme.
@@ -23892,7 +23909,7 @@ read by the panel that edits it is not a consumer.
 | `scaling_percent` | `guitk::scaling` via `set_appearance` | **works** |
 | `fonts` | — | out of scope here; see §400 and C-Q1 |
 | ~~`animation_speed`~~ | `AnimationManager`, via `ShellSession` | **fixed 2026-09-06** |
-| **`icon_size`** | **none** | **dead** |
+| ~~`icon_size`~~ | `DesktopIconLayer::set_icon_size`, via `set_appearance` | **fixed 2026-09-24** |
 | **`cursor_scheme`** | **none** | **dead** |
 | **`cursor_size`** | **none** — and three rival copies | **dead, four ways** |
 
@@ -23932,6 +23949,15 @@ which was not clear from the table above and is the sort of thing that gets a
 reader to spend an afternoon before noticing.
 
 ### The cursor-size tangle
+
+**Collapsed 2026-09-25 to one model** -- `appearance`'s -- which gained 64 and
+96 px sizes so nothing `inputsettings`' 16-128 range allowed was lost
+(`design-decisions.md` §872). The two `gui/desktop` rows below were deleted
+earlier (`9dde7ab85`, `9ddb46bae`); `inputsettings`' field went with §872 (its
+next save removes the `cursor.size` key it used to write); the Settings
+application's own `CursorSize` (`apps/settings/src/main.rs`, never saved --
+not in the table below, which predates it) is lane E's to replace. The table
+is the state as found:
 
 One user-facing setting, four independent models, no reader:
 
@@ -23983,7 +24009,11 @@ pointer cannot be painted onto a frame that is never painted. Software cursor
 always (fullscreen loses the shortcut), software except over fullscreen (the
 pointer vanishes there), or a hardware cursor plane (most work, gives nothing
 up) is an architectural fork with a measured performance feature on one side,
-so it is the operator's. See `open-questions.md` → **C-Q18**.
+so it is the operator's. See `open-questions.md` → **C-Q18**. *(2026-09-25:
+answered by construction and deferred. Lane F drew the pointer as a layer over
+the picture as it is shown, which costs fullscreen nothing on every presenter
+that exists, since each copies the fullscreen picture anyway; the question is
+now `deferred-questions.md` DQ3, waiting for a presenter that does not copy.)*
 
 **Which makes the order of work clear, and it is not this entry.** Four models
 disagreeing about a size matters only once something draws a pointer. The
@@ -24079,6 +24109,391 @@ setting whose consumer exists. For these three the honest sequence is the
 other way round: decide whether the consumer lives, and only then wire the
 preference to it. Doing it in the prescribed order produces a green audit and
 an unchanged desktop.
+
+## TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION
+
+**Status:** OPEN — 2026-09-25. Waits on lane F for one field:
+`requests/c-f-a-pointer-event-cannot-say-ctrl-is-held.md`.
+
+**In short:** On the desktop, Ctrl+click replaces the icon selection instead
+of adding to it, and so does a rubber band dragged with Ctrl held. The only
+way to select several icons is to drag a rubber band around them. Nothing that
+worked has stopped working; a standard gesture is missing.
+
+**Where:** `DesktopIconLayer::handle_mouse_down` and `handle_mouse_move`
+(`gui/desktop/src/icons.rs`) take `ctrl_held` and implement both gestures;
+`DesktopShell` passes `false` at both call sites in `gui/desktop/src/lib.rs`
+(`handle_press`'s `Hit::Desktop` arm, and the motion arm of `handle_mouse`).
+
+**Why not fixed here:** a pointer event carries no modifier state —
+`guitk::event::MouseEvent` is `{x, y, kind}` — and the shell cannot recover it
+from key events the way `apps/editor` does for Shift+click, because the
+desktop's surface is rarely focused: a Ctrl pressed while another window has
+focus goes to that window, and the click that follows reaches the desktop
+with the shell never having seen a key. Only the compositor knows the
+keyboard state at the moment of the click.
+
+**The fix:** the compositor stamps its modifier state on every pointer event,
+on the input envelope (`guiremote::input::InputEvent`) rather than on
+`MouseEvent`, for the reason `InputEvent::scancode` is on the envelope:
+`MouseEvent` is built by struct literal at 499 places across `gui/` and
+`apps/`. Then `ShellSession` hands `ctrl` to the shell and the shell to the
+layer, with a session test that drives Ctrl+click through `TestDesktop`.
+
+## TD-C-THE-REEXEC-CHECK-COUNTED-ANOTHER-LANES-BOOT-TEST-AS-ITS-OWN-LEAK (lane C, 2026-09-25) -- FIXED the same day
+
+**In short:** every boot test first checks that its own start-up trick -- run
+from a copy of the script, so an edit made mid-run cannot corrupt it -- still
+works, and that the copy is deleted afterwards. The "deleted afterwards" half
+counted the copies in the machine's shared temporary folder before and after,
+and blamed any extra one on itself. Six lanes run boot tests, so when another
+one started during those few seconds, its copy was counted, and the boot test
+refused to build: lane C's boot of `02bc887ba` stopped at 7 minutes with "1
+snapshot(s) left behind; the trap did not fire". The copy belonged to a boot
+test another session had started at 22:41:15, while the check ran.
+
+**Where:** `scripts/check-boot-test-reexec.sh`, the leak check at its end.
+
+**Fixed:** the check's trial run gets a temporary folder of its own
+(`TMPDIR`, which the preamble's `mktemp -t` honours), and only that folder is
+counted -- nothing else writes there, so no other run can be miscounted. To
+keep the check from passing for a preamble that ignored `TMPDIR`, it also
+records that the copy *was* made there while the trial ran. Checked three
+ways: clean; with a snapshot made in the shared folder mid-check (the race,
+now passes); and with each half broken -- no `TMPDIR`, and a copy left behind
+-- both refused.
+
+**The general shape**, since it will recur: a check that measures shared state
+before and after an action attributes to the action whatever else changed
+that state in between. With six lanes on one machine that is not rare; the
+fix is to give the action state no one else touches, not to compare harder.
+
+## TD-C-THE-POWER-MENU-LAUNCHED-PROGRAMS-SLATEOS-HAS-NEVER-HAD (lane C, 2026-09-25) -- FIXED the same day
+
+**In short:** the start menu's power menu listed Shutdown, Restart, Sleep, Lock
+and Logout, and pressing the first three -- and the last -- launched
+`/sbin/shutdown`, `/sbin/reboot`, `/sbin/suspend` and `/usr/bin/logout`.
+SlateOS has none of them. The power utility it does have is `powerctl`
+(`userspace/powerctl`: `shutdown`, `reboot`, `suspend`, `hibernate`, through
+the service manager). Meanwhile the login screen's own power buttons made the
+desktop *exit*, logging "no power service to ask".
+
+**Why it lasted:** the power actions were application-database entries, and a
+database entry is a path; the menu test asserted that each row launched *its
+entry's* path, which it did. Nothing asked whether the path named anything.
+
+**Fixed:** the power menu is the shell's own list, `power::PowerChoice` --
+shut down, restart, sleep, hibernate (new), lock, log out. The four power
+actions run `/bin/powerctl <subcommand>`; lock runs the lock screen as the
+shortcut does; log out returns to the shell's own login screen. The login
+screen's buttons run the same commands (`LoginPowerAction::command`) and the
+desktop stays up. The five entries left the application database.
+
+**Still needed from other lanes:** `powerctl` in the image
+(`requests/c-d-ship-powerctl-in-the-image.md`); `apps/launcher` carries its
+own copy of the same five wrong paths (`requests/c-e-the-launchers-power-entries-name-programs-that-do-not-exist.md`).
+And logging out does not end the user's programs:
+`TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`.
+
+## TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING (lane C, 2026-09-25)
+
+**In short:** "Log out" in the start menu's power menu brings back the login
+screen, and the next person to sign in finds the previous user's windows still
+open underneath. Nothing ends the programs the user started, because nothing on
+the desktop knows which they are: that is a session manager's job, and there is
+no session manager yet.
+
+**Where:** `gui/desktop/src/session.rs`, `ShellSession::log_out`, which puts
+the greeter back and does nothing else.
+
+**The fix:** the session manager -- `userspace/logind` is the start of one --
+owns the session's processes; logging out asks it to end them
+(`loginctl terminate-session` with the session's id), and the desktop, which
+is one of them, is started afresh for the next user. What lane C needs from it
+is a way to ask, and the session id to ask about.
+
+**Until then:** the returning screen is the right screen and it does let the
+right people in; what it cannot do is clear the desk. A single-user machine --
+the common case -- is unaffected in practice.
+
+**Narrowed 2026-09-26 (design-decisions §1405):** log out now asks every
+window to close first, as shut down and restart do, and returns to the login
+screen once they have -- or when the user says to go ahead without the ones
+that did not. What is left is a program with no window: a background process,
+or one that closed its window and kept running. That still needs the session
+manager.
+
+## TD-C-THE-DESKTOP-STARTED-WITHOUT-THE-USERS-APPEARANCE (lane C, 2026-09-25) -- FIXED the same day
+
+**In short:** the real desktop ignored the user's saved appearance when it
+started. Theme, accent, wallpaper, fonts, scale, animation speed, auto-hide
+and the desktop widgets all came up at their defaults, and changed to the
+user's choices only when something sent the compositor `ReloadAppearance` --
+in practice, the first time the user saved something in Settings. Found while
+wiring the date and time settings (design-decisions 875), which load through
+the same call.
+
+**Where:** `gui/desktop/src/main.rs` started the session with
+`ShellSession::start`. `start`'s documentation says it "does **not** read the
+user's appearance settings from disk ... The caller does it", and the caller
+did not: the binary went straight to pumping. The shell re-reads
+`appearance.yaml` only on a `SettingsChanged { Appearance }` announcement, and
+the compositor announces only when asked.
+
+**Why nothing caught it:** it is the "door that does not exist" shape again
+(`load_pinned`, `load_shortcuts`, `apps/fileassoc` before it), and the check
+built for that shape, `scripts/check-tested-but-uncalled.py`, could not see
+this one for three separate reasons -- worth listing, because each is a way
+the next one will hide too:
+
+1. The name is shared. `DesktopShell::load_appearance` and
+   `ShellSession::load_appearance` are two functions, and the checker skips a
+   name it cannot attribute to one definition.
+2. There is no `save_appearance` in the shell to pair it with; the file is
+   written by the Settings app, in another crate, and the checker pairs halves
+   within one program only.
+3. `ShellSession::load_appearance` does have a non-test caller:
+   `gui/desktop/src/bin/demo.rs`, the scripted demo, stood in for the binary
+   that runs.
+
+**The fix:** `ShellSession::start_for_user` -- `start`, then
+`load_appearance` (appearance, widgets, and now the date and time), then a
+repaint -- is what the binary calls. `start` keeps its contract, which every
+session test relies on so that none depends on the developer's configuration
+directory. Tests: `a_session_started_for_a_user_starts_in_their_settings`
+(an accent and a time zone on disk reach a session started through the
+binary's door) and `a_bare_session_does_not_read_the_users_appearance_or_clock`.
+The test is the guard here, not the checker: what it checks is the door the
+binary actually uses.
+
+## TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE (lane C, 2026-09-25) -- PARTLY FIXED the same day
+
+**Status:** the fix below exists: `settingsfile::Watcher::with_dependencies`,
+and `appearance::watcher()`, which compares the chosen theme's file as well as
+`appearance.yaml`. The shell watches with it. **Open:** applications, whose
+watcher is `oswindow`'s -- lane F's one-line change,
+`requests/c-f-watch-appearance-through-appearance-watcher.md`. And a watcher
+still only looks when a `SettingsChanged` announcement tells it to, so whatever
+edits a theme in place must then send `ReloadAppearance`, as the Settings app
+does after any save -- a theme editor, when there is one, included.
+
+The entry as it was first written:
+
+**In short:** if you edit the colours in the theme you are using, the desktop
+does not show the change until you choose a different theme and back. Choosing
+a theme, or changing any other appearance setting, is noticed at once; editing
+the theme's own file in place is not. Nobody does that yet except by hand --
+there is no theme editor -- which is why this is written down rather than
+fixed.
+
+**Where:** `gui/settingsfile/src/lib.rs` -- `Watcher::poll` compares the exact
+contents of `appearance.yaml` with the last look and reports nothing when they
+match. The shell (`gui/desktop/src/lib.rs`, `appearance_watch`) and every
+application (`gui/window/src/app.rs`, `ThemeWatch`) re-read the settings only
+when that reports a change, and the theme is read as part of the settings
+(`appearance::themes`, design-decisions 874). The compositor does not use a
+watcher -- `reload_appearance` reads the file afresh -- so after an in-place
+edit and a `ReloadAppearance`, window frames change and the shell and the
+applications do not.
+
+**To reproduce:** choose a theme (`theme.colors: nord` with
+`~/.local/share/slateos/themes/nord/theme.yaml` installed), change a colour in
+that file, then save the appearance settings unchanged. The watchers see the
+same `appearance.yaml` and report nothing.
+
+**The fix:** the watcher's idea of "what the file held" has to include the
+files the document names. `settingsfile::Watcher` gains a list of dependent
+paths derived from each document it reads (a function the settings group
+supplies -- for appearance, the chosen theme's `theme.yaml` in whichever
+directory `ThemeDirs::find` resolves it to), and compares their contents too.
+`appearance` exports the one constructor that wires it; the shell's watcher
+(lane C) and `oswindow`'s `ThemeWatch` (lane F) switch to it. **Trigger:** the
+Settings app's theme editor (`roadmap-detailed.md` §4.6 Theme Editor), the first
+thing that will write a theme file while it is the chosen one.
+
+## TD-C-TWO-TOOLING-SUITES-TAKE-EIGHTY-MINUTES-OF-EVERY-BOOT (lane C, 2026-09-25) -- FIXED the same day
+
+**Status:** FIXED 2026-09-25 -- both suites run their cases a few at a time
+through `scripts/suite_pool.py`. One further step is possible and not taken;
+see the end.
+
+**In short:** every boot test runs the tooling's own test suites before it
+builds anything, and two of them took 83 minutes of lane C's 3.2-hour gate
+phase on 2026-09-25: `test-checkers-honour-head.py` 3127 s and
+`test-pre-push-fmt-gate.py` 1894 s. A boot test is the only road to `main` for
+every lane, so that was paid six times over.
+
+**What they spent it on.** Neither walks the real tree (that was
+`check-cfg-unix.py`'s problem -- Lesson 405). Both are process-bound fixture
+work that ran strictly one case after another: `test-checkers-honour-head.py`
+builds a throwaway git repository per case and runs a checker twice against it
+(124 cases); `test-pre-push-fmt-gate.py` runs the whole pre-push hook per case,
+in two mirror modes. The cases share nothing -- no working directory, no
+environment, a fixture each.
+
+**The fix.** `scripts/suite_pool.py` runs a suite's cases on a small thread pool
+(a third of the logical cores, at most four; `SUITE_JOBS` overrides, and `1`
+restores the plain loop exactly), each case in a temporary directory of its
+own, with each case's output buffered and printed in the list's order -- so the
+log reads as a one-at-a-time run's does. The fmt suite's per-mode label suffix
+moved from a module global to the pool's per-case context, since a global set
+by one mode would have been read by a case of the other.
+
+Measured on the same loaded machine (other lanes building):
+
+| Suite | one at a time (boot test, 2026-09-25) | pool of 4 |
+|---|---|---|
+| `test-checkers-honour-head.py` | 3127 s | 861 s -- all 124 cases pass |
+| `test-pre-push-fmt-gate.py` | 1894 s | 564 s -- all pass, labels per mode |
+
+**Follow-up, 2026-09-26: a case's clean-up failed a boot.** A case's temporary
+directory could not be deleted -- on Windows a `git` the case had run still held
+a file in it (WinError 32) -- and `TemporaryDirectory`'s exception failed the
+suite, and so the gate phase, over a case that had passed. `suite_pool` now
+removes each case's directory with retries and a growing pause, making `git`'s
+read-only objects writable as `tempfile` does, and leaves a directory it still
+cannot remove with a line on stderr rather than failing anything. Its
+self-test covers the read-only file, three failures then success, and a
+removal that never works.
+
+**Not taken: running one gate of the hook.** The fmt suite still runs the
+whole hook for each case to exercise gate 7. A switch the hook honours only for
+the gates it names would cut that further, but it is a change to
+`scripts/hooks/pre-push`, which every lane edits; worth doing if the suite is
+still near the top of the gate-phase table.
+
+## TD-C-THE-DESKTOP-BACKGROUND-WAS-PAINTED-ONCE-AND-NEVER-AGAIN (lane C, 2026-09-26) -- FIXED the same day
+
+**Status:** FIXED 2026-09-26 -- `ShellSession::refresh_background` sends the
+background whenever its frame differs from the one last sent.
+
+**In short:** the desktop's background surface -- the wallpaper, the icons on
+it and the widgets over them -- was drawn when the shell started and when the
+display changed size, and at no other time. An icon clicked was selected where
+nobody could see it; an icon or widget dragged stayed drawn where it had been;
+a clock widget showed the minute it was added; a wallpaper, a fit or a theme
+chosen in Settings appeared only after a restart or a change of resolution; a
+slideshow never showed its next picture.
+
+**Why it lasted.** Each of those is a change to the shell's model, and each
+test of it read the model -- `selected_ids()`, `render_widgets()`,
+`current_image_path()`, the clock's wake-up -- one step short of the screen.
+The session's own test was named for the design,
+`the_background_is_painted_once_and_the_chrome_on_every_change`, and
+`paint_background` gave the reason: "the one surface whose picture does not
+depend on anything an input event changes". That was true while the
+background was only the wallpaper. The widgets and then the icons (2026-09-14)
+joined it without anything telling the pump, which repainted the chrome alone.
+It is `TD-C-A-PURE-FUNCTIONS-TESTS-SAY-NOTHING-ABOUT-ITS-CALLER` one level up:
+the parts were right and the door to the screen was shut.
+
+**The fix.** Every dirty pump builds the background's frame and sends it only
+if it differs from the last one sent (`RenderCommand` and `RenderTree` are now
+`PartialEq`). Compared rather than flagged per cause, because the causes are
+spread over the icon layer, the widget manager and the wallpaper, and a flag is
+one more place each new cause must be taught about -- the first one forgotten
+is this bug again, with every test green. `paint_background` stays the paint
+that always sends. The tests drive the real input path and assert on the frame
+sent: an icon clicked, a widget dragged, a wallpaper chosen in Settings; and a
+taskbar click and an idle pump send nothing.
+
+## TD-C-A-ROTATING-WALLPAPER-NEVER-TURNED-ON-A-DESKTOP-NOBODY-TOUCHED (lane C, 2026-09-26) -- FIXED the same day
+
+**Status:** FIXED 2026-09-26 -- `WallpaperManager::next_change_in` is one of
+the times `ShellSession::arm_next_frame` sleeps until.
+
+**In short:** a wallpaper rotation (a folder of pictures, changing every so
+often) moved only when something else happened to wake the desktop -- an
+animation, a clock widget, the pointer over the taskbar. On a desktop nobody
+was touching, which is when a rotation is looked at, it showed its first
+picture for ever. A dynamic (time-of-day) wallpaper likewise.
+
+**Why.** The shell's loop sleeps with no bound when nothing is due -- the
+property `design-decisions.md` 812 defends -- and wakes at the soonest of the
+moments it knows about: an animation frame, a widget clock, quiet hours, the
+automatic light/dark edge. The wallpaper's next picture was not one of them;
+its `tick` ran in `step_frame`, on frames armed for other reasons.
+
+**Three smaller faults on the same path, fixed with it:**
+- The wallpaper was ticked with the clock from *before* the frame's time was
+  added, so the frame the loop was woken for, at the moment the picture was
+  due, saw the moment before it: a wake-up late.
+- The slideshow timer used 0 for "not started", and the shell's clock starts
+  at 0: a picture put up in the first second had its interval started again.
+  It is an `Option` now.
+- A folder of one picture "advanced" to itself each interval, issuing a new
+  image id -- so the shell read and decoded the same file every time.
+
+**And the live path.** A rotation chosen in Settings while the desktop is up
+arrives as a settings announcement, which re-read the settings but armed
+nothing: with the user in some application window, no pointer event reaches
+the shell to re-arm it. `adopt_appearance_change` now re-arms when nothing is
+animating -- which also covers switching to the automatic light/dark mode
+live, whose first edge had the same gap.
+
+**Tests:** `an_idle_desktop_is_woken_for_the_slideshows_next_picture` goes
+through the wake-up: one frame, the armed delay, one frame of that length, the
+next picture uploaded and drawn. With the dynamic wallpaper's minute, the
+rotation chosen live, and the manager's `next_change_in` cases.
+
+## TD-C-THE-SVG-RENDERER-DREW-STROKES-AT-THE-WRONG-WIDTH-AND-CURVES-AT-HALF-STRENGTH (lane C, 2026-09-26) -- FIXED the same day
+
+**Status:** FIXED 2026-09-26 -- `gui/toolkit/src/svg.rs`: a fill, and a stroke,
+is one coverage pass; strokes are outlined with joins and caps and scale with
+the drawing.
+
+**In short:** the toolkit's SVG renderer, which draws the desktop's icons and
+the thumbnails of SVG files, drew every line as many screen pixels wide as the
+file said in its own units -- two pixels at every size, heavy at 16 and a
+hairline at 64 -- and drew curves as dozens of small pieces, each blended on
+its own, so a circle's outline came out at half strength and a see-through line
+darkened at every joint. It also filled each part of a shape separately (the
+hole of an "O" was filled in), cut arcs into eight pieces a turn whatever their
+size, read `rx` without `ry` as square corners, and dropped the first segment
+drawn after a closepath.
+
+**How it was found:** drawing the shell's pictograms (design-decisions §881),
+a sun at 16 pixels had no pixel even three-quarters covered.
+
+**The fix.** Fills and strokes go through one scanline pass per shape with a
+winding count over every edge of every subpath (nonzero or even-odd, as
+`fill-rule` says), blending each pixel once. A stroke is the union of a quad per
+segment, a join per corner (`stroke-linejoin`, with `stroke-miterlimit`) and a
+cap per open end (`stroke-linecap`), all wound alike and filled nonzero. Its
+width is scaled by the transform. Circles and arcs are cut to a tenth of a pixel
+at the size they are drawn. Twelve tests, fourteen mutations, all killed.
+
+**Also gone:** `SvgDocument::render_commands`, which approximated every path
+fill by its bounding box and which nothing called.
+
+## TD-C-THE-SHELL-DREW-ITS-PICTURES-AS-EMOJI-NO-FONT-IT-HAS-CAN-DRAW (lane C, 2026-09-26) -- FIXED the same day
+
+**Status:** FIXED 2026-09-26 -- the taskbar's start button, bell and tray
+chevron are icons (design-decisions §881), and so is every overlay's picture
+(volume, brightness, media, lock keys, devices, screenshots, microphone,
+network, battery, and the ten generic ones), the login screen's (an account's
+default picture, the password eye, the bar's power, accessibility and keyboard
+buttons, the power menu), and the widgets' (each kind's title icon, the
+picker's rows, the battery by state, a placeholder).
+
+**In short:** the shell drew its small pictures as characters -- a bell, a
+speaker, a sun, a padlock, a person, a power symbol, the start button's `≡` --
+and no font it has can draw most of them. The built-in font covers Basic Latin,
+box drawing and block elements; Inter and DejaVu Sans, the UI faces it looks
+for, have no emoji. So each was drawn as the replacement box: on the taskbar,
+in every volume change, on the login screen, in every widget's title bar.
+
+**Where:** `gui/desktop/src/lib.rs` (`render_taskbar`), `osd.rs`,
+`login_screen.rs`, `widgets.rs`, `focus_assist.rs`.
+
+**The fix:** each picture is a named icon from the icon theme (§880), with the
+built-in set drawing every one (`appearance::icons`), and every surface uploads
+the icons its frame names before sending it (`ShellSession::send_frame`).
+
+**Not in reach here:** the icons *programs* put in the tray are characters they
+send (`guiremote::tray::TrayIcon::glyph`); naming a theme icon there is a wire
+change, lane F's -- requested in
+`requests/c-f-let-a-tray-icon-name-a-theme-icon.md`.
 
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
@@ -63292,7 +63707,9 @@ survives, not what went.
 
 ---
 
-## TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING
+## TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING -- FIXED (found so on 2026-09-25)
+
+**Status:** resolved by the input settings work, and the heading never said so. `gui/desktop/src/mouse_settings.rs` is gone; the model is `gui/inputsettings` (`input.yaml`), and the compositor applies its double-click time through `Compositor::reload_input` -> `set_input_settings` -> `set_double_click_ms` on a `ReloadInput` request -- the second verb this entry leaned toward. Found while triaging open lane C entries; the body below is the entry as written.
 
 **In short:** Settings has a mouse panel with sliders for double-click speed,
 pointer speed and so on. Moving them changes a number in a file and nothing
@@ -95958,8 +96375,8 @@ is the generic file glyph. Neither reports an error.
 
 ---
 
-## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26) -- **halved 2026-09-07; still open for the other half**
-**Status:** ✅ FIXED 2026-09-24 (lane F), both halves — `imagecodec` now streams a PNG's rows out of the decompressor (`deflate::zlib_inflate_stream`, which had landed in the meantime), so neither `decode` nor `decode_scaled` holds the decompressed stream, and `decode_scaled` box-filters interlaced files too. 2000x1500 PNG: thumbnail peak 24.6 MB → 0.65 MB, full decode 36.0 MB → 12.1 MB (`gui/imagecodec/tests/decode_memory.rs`). `gui/thumbs`' 24-megapixel cap no longer protects anything: `requests/f-c-a-thumbnail-no-longer-decodes-the-picture-whole-so-the-source-cap-can-go.md`.
+## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26) -- FIXED 2026-09-24 for PNG and JPEG; the cap follows 2026-09-25
+**Status:** ✅ FIXED 2026-09-24 (lane F), both halves — `imagecodec` now streams a PNG's rows out of the decompressor (`deflate::zlib_inflate_stream`, which had landed in the meantime), so neither `decode` nor `decode_scaled` holds the decompressed stream, and `decode_scaled` box-filters interlaced files too. 2000x1500 PNG: thumbnail peak 24.6 MB → 0.65 MB, full decode 36.0 MB → 12.1 MB (`gui/imagecodec/tests/decode_memory.rs`). `gui/thumbs`' 24-megapixel cap no longer protects anything: `requests/f-c-a-thumbnail-no-longer-decodes-the-picture-whole-so-the-source-cap-can-go.md`. — **2026-09-25 (lane C): the cap now follows the decoder.** It still protects the formats whose decoder holds the whole picture before shrinking it -- GIF, WebP, BMP, ICO and TIFF, which arrived since and do not stream -- so it stays at 24 megapixels for those (`ThumbConfig::max_source_pixels`, a memory bound). PNG and JPEG are bound instead by `max_streamed_pixels`, 250 megapixels, a bound on time; and every format by `max_source_bytes`, 256 MiB, since the file is still read whole. `streams_while_decoding` in `gui/thumbs` is the list a newly streaming format joins.
 
 **Update 2026-09-07: the peak is halved, and the remaining half is not
 reachable from this lane.** `imagecodec::decode_scaled` box-filters during
@@ -97154,7 +97571,21 @@ either round.
 
 ---
 
-### TD-C-THE-RUN-BOX-ACCEPTS-ANY-ABSOLUTE-PATH-WITHOUT-CHECKING-IT — 2026-09-03 — OPEN
+### TD-C-THE-RUN-BOX-ACCEPTS-ANY-ABSOLUTE-PATH-WITHOUT-CHECKING-IT — 2026-09-03 — FIXED 2026-09-27
+
+**Fixed 2026-09-27, by the proper fix below's "cheaper alternative", which
+turned out to be the better one:** whoever starts the programs the shell
+names reports a launch that could not start (`ShellSession::report_failed_launch`,
+called by `gui/desktop/src/main.rs` beside the error it already printed), and
+the shell answers it (`DesktopShell::launch_failed`). A launch the Run box
+asked for brings the box back on the line as it was typed, with why under
+it -- `"/usr/bin/fierfox" could not be started: there is no such program.` --
+and anything else, a pin or a start menu row or an icon, says so in a
+notification. The box still passes an absolute path through unchecked, and
+should: the launcher is what knows whether it runs, and asking the disk
+first would answer a different question (whether it exists, not whether it
+starts).
+
 
 **In short:** type a path into the Run box that starts with `/` and press Enter
 and the box always closes, whether or not anything is there. Mistype
@@ -97989,6 +98420,14 @@ placed after test 8 so the exact `count == 4` that test asserts stays meaningful
 ---
 
 ## `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` (lane C, 2026-08-26) — **RESOLVED 2026-08-26**
+
+**2026-09-27: the door moved.** The operator turned the card's chord off by
+default (`design-decisions.md` §1416, answering C-Q24), which would have
+reopened this entry: a card only a shortcut opens is one nobody can reach to
+bind the shortcut. The start menu's places column has a **Keyboard Shortcuts**
+place now (`StartShortcut::KeyboardShortcuts`), which opens the card; Super+/
+still works for a user who binds it. What follows is the record as of
+2026-08-26.
 
 **Resolution.** Piece 1 below is done. `HotkeyAction::ToggleShortcutCard` exists,
 `Super+/` is its default binding (and is listed on the card, so the card teaches
@@ -126024,7 +126463,12 @@ grep -v -e 'missing `\[lints\]`' -e 'missing_lints_inheritance' \
 ```
 ---
 
-### Lesson 110: a control that is drawn from live state looks more wired than one that is not (lane C, 2026-09-04)
+### Lesson 400: a control that is drawn from live state looks more wired than one that is not (lane C, 2026-09-04)
+
+*(Lessons 400–403 were numbered 110–113 until 2026-09-24. Lane B had
+written a different 110–113 a day earlier, so the second writer moved, into
+lane C's band. See
+`requests/b-ac-lesson-numbers-have-the-disease-the-section-numbers-were-cured-of.md`.)*
 
 `apps/spreadsheet` drew a toolbar of twelve buttons. The bold button was filled
 in when the selected cell was bold; the alignment buttons showed which of the
@@ -126066,7 +126510,7 @@ The corollary for reviewing: to check whether a control is wired, do not look at
 what it draws. Search for its *action* and count callers outside the test
 module. Fifteen functions in this file had none.
 
-### Lesson 111: two copies of a rule agree on whichever one was written second (lane C, 2026-09-04)
+### Lesson 401: two copies of a rule agree on whichever one was written second (lane C, 2026-09-04)
 
 `Sheet::set_cell_input` and `Sheet::set_cell` each ended with the same four
 lines: if the cell has no value and no raw input, remove it from the map,
@@ -126080,7 +126524,7 @@ with a format and no text, which both copies dropped. The format vanished with
 no error, nothing on screen, and no test noticing, because the two callers
 agreed with each other perfectly.
 
-It stayed invisible for as long as the toolbar was unclickable (lesson 110):
+It stayed invisible for as long as the toolbar was unclickable (lesson 400):
 there was no way to ask for the thing that did not work. Wiring the toolbar made
 it a bug you could hit in the first ten seconds. Two defects that each conceal
 the other are not twice the work to find; they are indefinitely hidden until one
@@ -126092,7 +126536,7 @@ why formatting counts. The same invariant was broken at the other end --
 contents -- so Delete now clears what is in a cell and not how it is drawn,
 which is what every spreadsheet does.
 
-### Lesson 112: a getter the harness calls once is a getter the app cannot use to report anything (lane C, 2026-09-04)
+### Lesson 402: a getter the harness calls once is a getter the app cannot use to report anything (lane C, 2026-09-04)
 
 `oswindow::app::App::title` was read exactly once, when the window was created.
 The trait said so, with a reason: making it live "would mean re-reading it on
@@ -126120,7 +126564,7 @@ the call* and the implementor does not make the call. Look for these by grepping
 the harness for the call site, not the implementors for correctness.
 
 
-### Lesson 113: when the feature *is* the timer, "no clock" is not a stale display but a missing program (lane C, 2026-09-04)
+### Lesson 403: when the feature *is* the timer, "no clock" is not a stale display but a missing program (lane C, 2026-09-04)
 
 `apps/systemrestore` is a snapshot manager. Its headline feature, named in the
 first line of its own module doc, is "scheduled automatic snapshots with
@@ -126151,6 +126595,46 @@ no caller outside `#[cfg(test)]` and read the *names*. Here the list was
 restore, create, import, unlock. Seven verbs, and they are the seven things the
 program is for. A dead-code list that reads like a feature list is not dead
 code; it is a missing caller at the top.
+
+### Lesson 405: a walk that drops build directories from its results has already walked them (lane C, 2026-09-25)
+
+A push from lane C sat in its pre-push hook for twenty minutes, in
+`scripts/check-cfg-unix.py`, with no child process -- a gate whose docstring
+says the whole check takes "about 7 seconds warm". The cargo half was never
+reached. `candidate_crates` found manifests with `REPO.rglob("Cargo.toml")`
+and then skipped any whose path contained `target` -- a filter on the
+*results*, so the walk still descended every `target/` first. That lane's
+`target/` had just gained a `-Zbuild-std` userland, and the function ran three
+times per push (once for the list, twice more for the summary's count).
+`scripts/check-crate-names.py`, also in the hook, had the identical loop.
+Both now walk through `gittree.WorkTree.files_under`, which prunes while
+walking: 0.3 s for the same 421 manifests git tracks.
+
+The comment in `gittree.WorkTree.files_under` already said this ("descending
+into `target/` to throw the results away is minutes of stat() on this tree");
+the two scripts predated or bypassed it. **To enumerate the repository, use
+the `gittree` seam, never `rglob` from the root: a filter after the walk
+decides what you keep, not what you pay for.** How long it takes depends on
+the size of an untracked, per-lane directory, so the same gate can be quick
+on one lane and stuck on another.
+
+### Lesson 404: a variant's name is not its behaviour, and a tick that trusts the name ticks nothing (lane C, 2026-09-25)
+
+`design.txt` asks for "two options for desktop icon placement: snap to grid,
+or place freely". `roadmap.md` §3.4 ticked "free placement + auto-arrange
+modes" from the day `gui/desktop/src/icons.rs` was written, and the code
+seemed to agree: `ArrangementMode` had a variant called `FreeWithSnap`. It
+snapped every drop — "free" only meant the icon went to whichever cell it was
+dropped nearest. There was no free placement at all; the other mode re-sorted
+by name after every drop, so a drag in it did nothing; and no control let a
+user choose either. Three claims — the tick, the variant's name, the list of
+modes — and each was true only of its words. Fixed 2026-09-25
+(`design-decisions.md` §869).
+
+The tell was one `grep`: every arm that handled the `Free…` variant called
+`snap`. **Before trusting a done-mark, find the code path that would behave
+differently if the feature were missing — here, a drop in the free mode — and
+read that, not the type that names it.**
 
 ### Lesson 114: a constant used as a size is a window that ignores its window (lane C, 2026-09-04)
 
@@ -132273,7 +132757,7 @@ no other crate depends on it), so nothing outside the corpus could reach them.
 
 | module | what it holds | what is missing |
 |---|---|---|
-| `login_screen.rs` | ~~`LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig`~~ | **Done, 2026-09-08.** `ShellSession` constructs one when the account database names anybody (`design-decisions.md` §824), draws it on a fifth full-screen surface created last within `Layer::Overlay` so nothing the shell owns is over it, routes every key and click to it while it is up, and answers with `authlib`. What it still lacks is the *session hand-off* — a successful login unmaps the screen and reveals the desktop, but nothing starts a session as that user, because there is nowhere to send that (the shell has no channel to the process server; same gap as `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`). Autologin is read and not acted on; see `todo.txt`. Originally: Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
+| `login_screen.rs` | ~~`LoginScreen`, `LoginPhase`, `LoginUser`, `LoginBackground`, `LoginPowerAction`, `LoginConfig`~~ | **Done, 2026-09-08.** `ShellSession` constructs one when the account database names anybody (`design-decisions.md` §824), draws it on a fifth full-screen surface created last within `Layer::Overlay` so nothing the shell owns is over it, routes every key and click to it while it is up, and answers with `authlib`. What it still lacks is the *session hand-off* — a successful login unmaps the screen and reveals the desktop, but nothing starts a session as that user, because there is nowhere to send that (the shell has no channel to the process server; same gap as `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`). Autologin is acted on since 2026-09-27 (`design-decisions.md` §1427, `gui/desktop/src/autologin.rs`): the marked account signs in before the first frame. Originally: Construction and a session hand-off. §815 says wire it up. *(Correction, 2026-09-08: an earlier version of this row said §818 has to take effect here. It does not — §818 is about the **lock** screen, `apps/lockscreen`, which is a separate program. See `TD-C-DESIGN-DECISION-818-HAS-NOWHERE-TO-BE-IMPLEMENTED`.)* |
 | `blur.rs` | ~~`BlurEffect`, `BlurRegion`, `BlurRenderer`, `BlurManager`~~ | **Done, 2026-09-08: moved to `gui/compositor` and wired.** A surface asks with `WindowSpec::blur_behind` (a *role*, so the compositor resolves the parameters from its own palette), and `Compositor::blur_behind_window` runs the pass over the region immediately before that window is drawn — the one moment the framebuffer holds everything behind it and nothing in front. Software targets only; see `TD-C-BLUR-IS-SOFTWARE-ONLY`. Originally it could not be wired in the shell at all: It works on a *framebuffer* (`BlurManager::update_all(&mut [u32], w, h)`) and the shell has no framebuffer: it submits render trees and never sees a pixel of what is behind its surfaces. `blur.rs` was the only file in the whole `gui/desktop` crate to mention `[u32]`. The pixels behind a window are the compositor's, so the pass now lives where it can run; what remains is a protocol way for a surface to ask for it, and a call in the compositor's paint path. Originally: A caller in the compositing path. Note the `TransparencyLevel` appearance setting already exists and has somewhere to be read *from*, so this may be a shorter connection than its size suggests. |
 | `input_method.rs` | ~~`InputMethodManager`, `SwitchShortcut`~~ | **Wired 2026-09-08, as the *switcher* it is.** `DesktopShell` owns an `InputMethodManager`; `HotkeyAction::SwitchInputLayout` (Super+Space) advances it and writes `input.yaml`, which the compositor already watches — so the keys actually move, and the choice survives a restart. Two of the three offered shortcuts remain unbound and cannot be bound yet: see `TD-C-TWO-OF-THREE-LAYOUT-SHORTCUTS-NEED-RELEASE-SEMANTICS`. **This is still not an IME** and the note below stands in full. Originally: A caller, **and an actual engine.** This is a *switcher*, not an IME: zero mentions of pinyin, kana, hangul or candidate lists. Wiring it would not by itself make CJK text typable — that needs an engine behind it, and `gui/compositor` only has the `InputEvent::TextInput` hook and a comment saying "a full IME system would handle this separately". Do not record this as "CJK input is one wiring job away". |
 | `tray_dnd.rs` | `TrayDragSource`, `TrayDropTarget`, `TrayIconSlot`, `TrayIconArrangement`, `TraySlotConfig`, `TrayArrangementConfig`, `StartInTrayConfig` | A caller in the tray's event path. |
@@ -145956,7 +146440,17 @@ sweep polishing the wrong one.
 
 ## TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS
 
-**Date:** 2026-09-14. **Lane:** C.
+**Date:** 2026-09-14. **Lane:** C. **FIXED 2026-09-26**, by the first of the
+three options below rather than the recommended third: the installed programs'
+desktop entries now exist (`gui/desktopentry`), and a window's `app_id` is
+matched against an entry's file name, its `StartupWMClass` or its program's
+file name (`DesktopShell::program_for_app_id`); a window's button draws its
+program's picture from it. **The merge this entry calls "the ordinary behaviour
+of every desktop" is not this desktop's**: `design.txt` puts every launched
+program to the right of the pins, and the Aero reference's pinned button starts
+a new copy there, so a pinned program and its open window keep two buttons by
+design (design-decisions §885). The compositor route stays open for programs
+that declare nothing.
 
 **In short:** the desktop cannot tell that the window in front of you belongs to
 the program you started. It knows the program by the file it ran, and it knows
@@ -146151,6 +146645,20 @@ worth more than one feature:
   under-reported the viewport by two lines). Five tests were hardcoding `y =
   10.0` to mean "inside the tab strip" and broke the moment it moved, which is
   the same defect in the tests.
+
+**Addition, 2026-09-24: `treeview` and `dirtree` join the list on the day they
+were written, and the reason is the six-lane split rather than an oversight.**
+They are the toolkit's treeview and `design.txt`'s tristate checkbox treeview
+with its populate-from-a-directory function. Five applications hand-roll a tree
+and are the obvious first consumers -- `archivemanager`, `jsonviewer`,
+`devicemanager`, `dbviewer`, `diskanalyzer` -- but since 2026-09-22 `apps/**` is
+lane E's, so lane C can build the widget and cannot wire it, which is exactly
+how the modules above came to exist without users. Handed over, with a mapping
+per application, in
+`requests/c-e-the-toolkit-has-a-treeview-now-and-five-apps-draw-their-own.md`.
+Nothing in lane C's own tree draws a tree today; the start menu's
+"Applications tree" (roadmap-detailed §3.4) would, once C-Q20 settles which
+list of installed programs is the real one.
 
 ## TD-C-THE-DESKTOP-ICONS-ARE-DRAWN-AND-NOTHING-CAN-CLICK-THEM -- FIXED 2026-09-14
 
@@ -146756,9 +147264,106 @@ The first changes shipped behaviour to suit a test. The second turns a red into
 a silence, and the race this test guards is real -- somebody did the work to
 find it, and the test is the only thing standing over it.
 
+## TD-C-A-PROGRAMS-OWN-ICON-FILE-IS-NOT-READ
+
+**Date:** 2026-09-26. **Lane:** C. **FIXED 2026-09-26**, the same day:
+`IconTheme::render` draws an icon file named by its path (SVG, or PNG scaled
+by area to the size asked), and a name no theme draws from `hicolor` --
+scalable first, then the best-sized PNG, in each standard context -- and then
+`pixmaps`; the exact name in the built-in set and `hicolor` before any shorter
+one. Kept below as it was written.
+
+**In short:** a program's desktop entry may name its picture as a file
+(`Icon=/opt/app/icon.png`) or ship it into the standard `hicolor` icon
+directory; the start menu draws neither, only names its own icon theme draws,
+and falls back to the generic program picture. Nothing is broken -- every
+program still has a picture -- but a program's own is not shown.
+
+**Where.** `appearance::icons::IconTheme::source` looks in the chosen theme's
+`icons` folders and the built-in set, by name. `desktop::launcher::AppEntry::icon`
+carries whatever the entry says; `DesktopShell::program_icon` asks for it with
+`GENERIC_PROGRAM_ICON` as the fallback.
+
+**The proper fix.** Two lookups, in the order the Icon Theme Specification
+gives: (1) an absolute `Icon` path -- read the file, SVG through the existing
+renderer and PNG through `imagecodec`, scaled to the size asked; (2) a name not
+in the chosen theme -- look in `$XDG_DATA_DIRS/icons/hicolor/<size>/apps/` and
+`scalable/apps/`, the fallback theme every program installs into. Both belong
+in `appearance::icons` so every program that draws icons gets them, and the
+request type already carries owned names for exactly this.
+
+**Why it has not bitten.** No program ships an entry yet
+(`requests/c-e-ship-a-desktop-entry-with-each-program.md`).
+
+## TD-C-THE-NETWORK-INDICATOR-HAS-A-SOURCE-AND-NOTHING-TO-WAKE-IT
+
+**Date:** 2026-09-26. **Lane:** C. **OPEN.**
+
+**In short:** the taskbar has no network icon, though the Aero reference's
+tray has one and `design.txt` lists it. The code for one exists --
+`gui/desktop/src/network_indicator.rs`, 1,347 lines, on
+`scripts/orphan-modules-baseline.txt` -- and so, now, does a place to read the
+state from: the kernel serves `/sys/devices/net/{up,mac,ip,subnet_mask,
+gateway,dns}` (absent with no network adapter). What is missing is a way for
+the desktop to learn that the state *changed* without polling.
+
+**Why not poll.** design-decisions §812: an idle desktop parks with no
+wake-up registered at all, and a timer that reads a file which almost never
+changes ends that for good. Reading on the wake-ups the desktop has anyway (a
+pointer move, a key) keeps an active desktop current, but an idle one shows a
+cable pulled an hour ago as connected.
+
+**What the proper fix needs.**
+
+- **An event when the link changes** -- up, down, a new address -- that the
+  desktop's loop can wait on beside its compositor connection. The kernel's
+  device-event registry (`fs::dmevent`) is the natural carrier; waiting on it
+  from `oswindow::EventLoop` is lane F's side of the same change.
+- **Pictures, not emoji**: the module draws `🔌`, `📶` and `✕`, which the
+  default face lacks; the icon theme has `network-wired`, `network-offline`
+  and the wireless ladder (§881 moved every other shell glyph to icons).
+- **A flyout for a wired link**: the module's flyout is a Wi-Fi network list,
+  and the kernel models one wired interface and no Wi-Fi.
+
+**Where:** `gui/desktop/src/network_indicator.rs` (the indicator, unreached);
+`kernel/src/fs/sysfs.rs` `gen_net_file` (the source); `gui/desktop/src/lib.rs`
+`render_taskbar` (where the icon would go, left of the bell).
+
+## TD-C-EVERY-PROCESS-PARSES-EVERY-FALLBACK-FACE
+
+**Date:** 2026-09-26. **Lane:** C. **OPEN.**
+
+**In short:** every program that draws text reads and keeps its own copy of
+each fallback font -- about 7 MB on SlateOS as shipped (Noto Sans and Noto
+Color Emoji), and tens of megabytes more for each writing system installed
+(a CJK font is 15-20 MB). Twenty programs open is twenty copies. Nothing is
+wrong on screen; it is memory.
+
+**Where.** `guitk::text::install_fallback_faces` loads each family with
+`FontDb::load`, which is `fs::read` then `osfont::Face::parse` -- a `Face`
+owns its bytes. The process-wide cache calls it once, on first use of text
+(`text::cache`). The UI and fixed-pitch faces have always worked this way
+too; fallback faces are simply bigger and more of them.
+
+**The proper fix.** A face backed by shared memory rather than a private
+buffer: map the font file read-only (`Face::parse` over a mapping), so every
+process's copy is the same physical pages -- which is what every other
+desktop does. That is an `osfont` change (lane F: `Face` holding a borrowed
+or mapped slice, not a `Vec<u8>`) plus a mapping primitive on SlateOS. The
+alternative -- parsing a fallback face only when a character first needs it
+-- saves the memory in a process that never draws an emoji, but moves a
+multi-megabyte read into the middle of a frame, and needs `osfont` to take
+faces lazily.
+
+**Why it has not bitten.** The OS image carries no fonts yet
+(`requests/f-cd-the-os-image-ships-no-fonts-...`), so today nothing is
+loaded there at all.
+
 ## TD-C-THE-PANE-CLOSE-ANIMATION-TEST-IS-FLAKY-UNDER-LOAD
 
-**Date:** 2026-09-14. **Lane:** C. **OPEN.**
+**Date:** 2026-09-14. **Lane:** C. **FIXED 2026-09-26** -- a real-time tick
+inside the same pump, which the "ruled out" list below wrongly excluded; see
+**Found, 2026-09-26** at the end.
 
 **In short:** one test in the desktop suite fails occasionally and passes on a
 re-run, which is the worst kind of failure: it teaches whoever sees it to run
@@ -146817,7 +147422,9 @@ animation timing, and it means the "obvious" fix below would not have helped.
 **Ruled out, by reading rather than by guessing:**
 
 * *Frames advancing inside `pump`* -- it dispatches events and reconciles
-  revisions; it never calls `step_frame`.
+  revisions; it never calls `step_frame`. **Wrong, and the whole cause** --
+  see "Found, 2026-09-26" below: `pump` dispatches the ticks the loop
+  synthesises, and `dispatch` answers a tick with `step_frame`.
 * *An animation that raced ahead* -- `is_visible()` is true throughout
   `SlideOut`, so only `Hidden` fails the assertion.
 * *`reduced_motion`* -- this was the most promising lead, because
@@ -146861,6 +147468,32 @@ cases covering the message itself.
 **Priority, revised:** worth fixing properly the next time it is seen, rather
 than deferring indefinitely. The fix is described above; the tempting wrong one
 is still wrong.
+
+**Found, 2026-09-26.** `pump` does not call `step_frame` itself, but it hands
+`dispatch` every event `EventLoop::poll` returns, and `poll` *synthesises* an
+`Event::Tick` for any wake-up that has come due -- which `dispatch` answers with
+`step_frame(elapsed_ms)`, the elapsed time being real. The close key arms a
+wake-up 16 ms out (`begin_notifications_slide` -> `arm_next_frame`) *inside the
+same pump*, so a test thread descheduled for longer than 16 ms before the pump's
+next `poll` is handed a tick in that pump, and one descheduled for longer than
+200 ms -- the pane's whole slide, `anim_speed` 5.0 -- finds the slide finished:
+`Hidden`, exactly the state observed. The "drain" pump added to the test before
+did not help, because the wake-up that fires is the one the close itself arms.
+Nothing was wrong with the desktop: the time really passed, and a late frame
+*should* finish a slide (`a_late_pump_moves_an_animation_on_by_the_time_that_passed`
+pins that, by sleeping past the slide).
+
+Fixed in the tests: `pump` is now its two halves -- reading and dispatching, then
+`finish_batch` (the repaint, the grabs) -- and a test that looks at an animation
+part-way through hands its key over with `deliver` (dispatch, then
+`finish_batch`; no poll, so no clock). `frame` delivers its tick the same way.
+Eight more tests had the same exposure and use it too: the pane's opening slide,
+the overview's fade after Super+Tab (six) and the volume overlay's first frame --
+and every user of `frame`,
+whose own re-armed wake-up could ride along behind the tick it sent. The
+assertion was not loosened: the close is now checked to land on exactly
+`SlideOut(0.0)`, one frame to be part of the way out, and the rest to reach
+`Hidden`.
 
 ## TD-C-CREATING-A-FILE-THAT-ALREADY-EXISTS-DESTROYS-IT-SILENTLY
 
@@ -147059,6 +147692,11 @@ features.
 
 **Date:** 2026-09-14. **Lane:** C. **OPEN.**
 
+**2026-09-26: the way through is put to the operator** as `open-questions.md`
+C-Q29 -- carry copy, paste and drag on the connection every program already
+has to the window system, which does not wait on A-Q15 (point 2 below), or on
+a second connection to the clipboard program, which does.
+
 **In short:** copying something in one program and pasting it into another does
 not work anywhere in this system, and the reason is not a bug in the copying.
 **Fifteen** programs each keep a private clipboard of their own, and the one
@@ -147140,7 +147778,14 @@ still cannot do the thing.
 the second socket is a window-killer; then a client library beside the service
 (`gui/clipboard` gains a `lib.rs`, the binary keeps `main.rs`); then the four
 consumers move onto it and `clipboard_viewer`'s claim about integrating becomes
-true. The emoji picker is the smallest possible first consumer and a good
+true.
+
+**A route that needs neither, proposed 2026-09-26:** carry the clipboard over
+the compositor connection every window already has -- `SetClipboard` and
+`GetClipboard` requests beside the window verbs, the compositor holding the
+selection and handing it to the `gui/clipboard` service for history -- as
+Wayland and X do. No second socket, so A-Q15 stops being in the way. It is
+lane F's protocol: `requests/c-f-carry-the-clipboard-over-the-compositor-connection.md`. The emoji picker is the smallest possible first consumer and a good
 acceptance test: one string, one direction, and you can see whether it worked
 by pasting.
 
@@ -156414,7 +157059,14 @@ because it had no other option at the time, and each has its own call sites.
 One crate per change keeps a rename that breaks something attributable to the
 crate it broke.
 
-## TD-C-THE-WALLPAPER-SUBSYSTEM-CARRIES-PATHS-AS-TEXT-THROUGHOUT -- 2026-09-16
+## TD-C-THE-WALLPAPER-SUBSYSTEM-CARRIES-PATHS-AS-TEXT-THROUGHOUT -- 2026-09-16 -- FIXED 2026-09-16
+
+**Status:** FIXED 2026-09-16 (`9ce32d61f`) for the live chain -- the setting,
+the shell and the settings app all carry a `PathBuf`, percent-encoded on disk
+behind a version marker -- and the slideshow playlist followed on 2026-09-17
+when rotation gained a consumer. Stamped 2026-09-24 by lane C, which found the
+entry still reading as open a week later, and a comment in `wallpaper.rs`
+still describing the playlist as text.
 
 **In short:** choose a wallpaper whose filename is not text and the setting
 that gets saved names a different file: the wallpaper silently does not appear
@@ -157738,7 +158390,40 @@ direction: a consumer did exist, and was reached, and still made the displayed
 claim false, because it was fed an argument that erased the difference.
 
 
-## TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST -- 2026-09-17
+## TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST -- 2026-09-17; the live half FIXED 2026-09-25, the page half OPEN
+
+**Status, 2026-09-25.** This entry was wrong about one thing that mattered:
+the three rows *were* live. The start menu has listed the database's
+`Category::Setting` entries beside its applications since 2026-08-21
+(`DesktopShell::start_menu_entries`), so "Display Settings", "Network
+Settings" and "Sound Settings" were start-menu rows -- and search results --
+that started nothing at every press, not inert launcher data. Found again
+while fixing the power menu's `/sbin/shutdown`
+(`TD-C-THE-POWER-MENU-LAUNCHED-PROGRAMS-SLATEOS-HAS-NEVER-HAD`), by checking
+every path the database names against the binaries the workspace builds.
+
+*Fixed:* the three entries are gone and their search words are Settings'
+own, so "wifi" or "volume" finds Settings, which opens. That respects the
+reasoning below -- no row claims a page it cannot open, since there is one
+row and it claims only Settings. And
+`launcher::tests::every_program_the_menus_start_is_one_this_workspace_builds`
+now holds every program the start and power menus start to a binary this
+workspace builds, by a path with no space in it: the check that would have
+caught this, the power menu's paths, and the screenshot shortcut's flags.
+
+*Still open:* rows that land on their page, in the order below. A second
+reason for step 1's design: the flag cannot be `--display`, which is the
+compositor address every SlateOS program takes (`oswindow::app::Args`). Step
+1 is filed as `requests/c-e-settings-opens-on-the-page-it-is-asked-for.md`,
+which is the caller design-decisions 856 asks for. Step 2 has grown since
+this was written: four entries would share the program `/usr/bin/settings`,
+so everything that identifies an entry by `executable_path` -- pins and
+`startmenu.yaml`, the search's de-duplication, drag payloads, desktop
+shortcuts -- must identify it by the whole command line instead (about
+twenty sites in `gui/desktop/src/lib.rs` and `launcher.rs`).
+
+The entry as first written:
+
 
 **In short:** the search launcher's built-in app list has three entries
 — "Display settings", "Network settings", "Sound settings" — whose
@@ -158980,8 +159665,8 @@ gives a crate a capability, re-read its module doc in the *same* change. Every
 one of these was introduced by an edit that added something and left the
 header alone.
 
-## `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` (lane C, 2026-09-17)
-**Status:** OPEN — 2026-09-24 (lane F): the stall is about 3.5x shorter, not gone. `imagecodec`'s JPEG decoder is now about 3.3x faster with bit-identical output (4000x5333: whole picture 3.65 s → ~1.1 s, 128-px thumbnail 1.25 s → ~0.34 s, release, this machine), but the decode still runs on the thread that draws; moving it off that thread is still the fix. — 2026-09-25 (lane F): **the missing piece this entry names, the wake, now exists.** An application that returns `true` from `App::wants_waker` is handed a `std::task::Waker` in `App::attach_waker` before its first frame; a worker that calls `wake()` gets the application an `App::on_wake` on the loop's thread, then a frame (`EventLoop::waker`, `Dispatch::Woken`; design-decisions §1303). What remains is lane E's: moving the two decodes onto a worker — `requests/f-ce-a-finished-decode-can-now-wake-the-window-that-asked-for-it.md`. — 2026-09-26 (lane E): **both decodes are off the thread that draws.** `apps/imageviewer` (`display_image` → `request`) and `apps/photomanager` (`sync_picture`) ask for the waker and decode on a worker from the new `apps/offloop` (`Latest`: a request supersedes those waiting behind it, and only the newest request's result is handed back, so paging past photographs decodes the one the user stops on and a slow one can never land on top of the next). The viewer keeps the last picture up and says which is coming; the photo manager shows the card until the pixels arrive. With no waker (before the window exists, in tests) each decodes in place as before. Closing this entry is lane C's. Still on the drawing thread: the grids' **thumbnails** (`thumbs::ThumbnailGenerator::process_batch`, a bounded batch per frame, in `apps/explorer` and `apps/photomanager`) -- lane E's to move, a queue of every visible card rather than newest-wins; tracked in `[E] Thumbnails are still generated on the thread that draws`.
+## `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` (lane C, 2026-09-17) — FIXED 2026-09-26
+**Status:** FIXED 2026-09-26 (closed by lane C, whose entry it was). Every decode this entry names is off the thread that draws: the shell's wallpaper and login picture (lane C, `gui/desktop/src/pictures.rs`, design-decisions §882), and the applications' -- `apps/imageviewer`'s picture, `apps/photomanager`'s photograph and thumbnails, and `apps/explorer`'s thumbnails (lane E, through `apps/offloop`; `requests/f-ce-a-finished-decode-can-now-wake-the-window-that-asked-for-it.md`). How it got there: — 2026-09-24 (lane F): the stall is about 3.5x shorter, not gone. `imagecodec`'s JPEG decoder is now about 3.3x faster with bit-identical output (4000x5333: whole picture 3.65 s → ~1.1 s, 128-px thumbnail 1.25 s → ~0.34 s, release, this machine), but the decode still runs on the thread that draws; moving it off that thread is still the fix. — 2026-09-25 (lane F): **the missing piece this entry names, the wake, now exists.** An application that returns `true` from `App::wants_waker` is handed a `std::task::Waker` in `App::attach_waker` before its first frame; a worker that calls `wake()` gets the application an `App::on_wake` on the loop's thread, then a frame (`EventLoop::waker`, `Dispatch::Woken`; design-decisions §1303). What remains is lane E's: moving the two decodes onto a worker — `requests/f-ce-a-finished-decode-can-now-wake-the-window-that-asked-for-it.md`. — 2026-09-26 (lane C): the desktop shell had the same stall, never listed here, for its wallpaper and the login screen's picture -- at login, on every wallpaper chosen and at every slideshow step. Fixed: they decode on a thread of the shell's own, woken through `EventLoop::waker` (`gui/desktop/src/pictures.rs`, design-decisions §882). The entry stays open for the two applications. — 2026-09-26 (lane E): **both decodes are off the thread that draws.** `apps/imageviewer` (`display_image` → `request`) and `apps/photomanager` (`sync_picture`) ask for the waker and decode on a worker from the new `apps/offloop` (`Latest`: a request supersedes those waiting behind it, and only the newest request's result is handed back, so paging past photographs decodes the one the user stops on and a slow one can never land on top of the next). The viewer keeps the last picture up and says which is coming; the photo manager shows the card until the pixels arrive. With no waker (before the window exists, in tests) each decodes in place as before. Closing this entry is lane C's. Still on the drawing thread: the grids' **thumbnails** (`thumbs::ThumbnailGenerator::process_batch`, a bounded batch per frame, in `apps/explorer` and `apps/photomanager`) -- lane E's to move, a queue of every visible card rather than newest-wins; tracked in `[E] Thumbnails are still generated on the thread that draws`.
 
 **In short:** click a photograph and the window stops responding until the
 picture has been decoded -- about two thirds of a second for a photograph from
@@ -159534,7 +160219,63 @@ combination least likely to end well, so it is filed as a suggestion and
 nothing more. Recorded because two instances in one day is a pattern, and
 because the cost asymmetry -- 2022s against 60s for the same class of
 mistake -- is the argument for caring where a gate runs at all.
-## `TD-C-A-BAD-ARGUMENT-TO-OPEN-EMPTIES-THE-FILE-BEFORE-IT-COMPLAINS` (lane C, 2026-09-17)
+## `TD-C-A-BAD-ARGUMENT-TO-OPEN-EMPTIES-THE-FILE-BEFORE-IT-COMPLAINS` (lane C, 2026-09-17) -- **REMEDY ADOPTED 2026-09-22**
+
+> **Remedy moved into the tree and adopted, 2026-09-22.** `safewrite.py` now
+> lives at `scripts/safewrite.py`, 20 truncating writes aimed at tree files
+> have been converted, and `scripts/check-destructive-writes.py` refuses new
+> ones. The sub-entry below, addressed to lane A, is unrelated and stays open.
+>
+> **The remedy was not in the repository.** This entry told the reader to use
+> `build/safewrite.py`, and `.gitignore` line 88 is `/build/`. So the fix for a
+> data-loss defect existed in exactly one working tree: a fresh clone had no
+> such file, the other two lanes never had it, and the hundred-odd scripts
+> already importing it were themselves ignored scratch. Adoption inside
+> `scripts/` -- the durable gates every lane runs, several of which rewrite
+> tracked files in place -- was **zero**, and the number of users made it look
+> broad.
+>
+> The shape is worth keeping: **a fix filed in a directory the repository does
+> not track is a fix nobody but its author has**, and citing it by path in a
+> tracked document makes it look present. What made it visible was trying to
+> `git mv` the file and being told it was not under version control.
+>
+> **What was converted.** The dangerous class is a write whose target is a
+> module-level constant built from `__file__`, because that names a file the
+> tree already has: the baselines four gates use to remember what they have
+> seen, and the documents the `--apply` tools rewrite.
+> `check-collapsed-messages.py` was the worst of them -- it rewrites arbitrary
+> `.rs` files and is run tree-wide. Also converted: `argv-utf8`,
+> `check-argv-ignored`, `check-control-bytes`, `check-design-decisions-bands`,
+> `backfill-lane-fields`, `check-env-identity`, `check-read-defaults`,
+> `check-roadmap-done`, `check-workspace-lints`, `dup-differential`,
+> `host-errmsg`, `multicall-aliases`, `quote-names`, `raced-globals`, and nine
+> `reintro-*.py` that rewrite source under `ROOT`.
+>
+> **The new gate is deliberately narrow.** It ignores writes into a fresh
+> temporary directory, which cannot destroy anything that existed a moment
+> ago. Flagging them would make the output mostly non-defects, and a gate like
+> that is one people learn to skim -- the same reason the variant-list checker
+> was first scoped by name. Narrow is affordable here because the wide version
+> already exists, for a different property.
+>
+> **The two gates had to be taught to compose.** `check-text-mode-writes.py`
+> requires every text-mode write to pass `newline=`, and converting a site to
+> `safewrite.write_text(path, text)` made it red: it reads the name
+> `write_text`, sees a `pathlib` call with no newline, and says so. It now
+> exempts the *bare* call in a file that imports it from `safewrite`, while
+> still grading `p.write_text(...)` -- so the exemption cannot be borrowed by
+> adding an unused import. Three self-test cases hold that line, 50 in total.
+>
+> That interaction is the most useful thing here, because it is causal rather
+> than coincidental: **the older gate is what put a hand-typed escape at every
+> write site in the tree, and a mistyped escape is what emptied the hook.** A
+> gate that demands an argument raises the odds of a bad argument; a
+> destructive default turns a bad argument into data loss. Passing the newline
+> once, inside `safewrite`, is what makes the first rule safe to keep.
+> Requiring callers to spell it again would have restored the exposure while
+> appearing to tighten it.
+
 
 **In short:** `io.open(path, "w", ...)` truncates the file and *then* validates
 its arguments. A typo in one of them destroys the target and raises afterwards,
@@ -159567,8 +160308,10 @@ generator script in `build/` and `scripts/` carries this.
 
 **What to do instead.** Build the text, write it beside the target, rename over
 it. A rename within a directory is atomic, so a failure anywhere before it
-leaves the original untouched. `build/safewrite.py` is that, and its check
-shows the same typo leaving the file as it was.
+leaves the original untouched. `scripts/safewrite.py` is that, and its
+self-test shows the same typo leaving the file as it was. It was written in
+`build/`, which is gitignored, so for five days the remedy existed only in the
+one working tree that wrote it -- see the note at the top of this entry.
 
 **Why the fix is not "be careful".** I typed this exact escape three times in
 one session -- twice caught before running, once not. A habit that fails one
@@ -168280,6 +169023,55 @@ table, `F1`, and `guitk::shortcut::render_card` -- plus:
 The card check sits above the find panel's branch, which returns before
 everything below it. This is the third app where that placement was the
 difference between a list and a modal with no exit.
+
+## `TD-C-THE-DESKTOP-CRATE-CARRIES-A-SECOND-LAUNCHER-NOTHING-USES` (lane C, 2026-09-27) -- **FIXED 2026-09-27**
+
+**Status:** FIXED 2026-09-27, the same day: `LauncherState`, its frecency,
+`LauncherAction`, the dialog's constants and the category colour helpers are
+deleted, with their tests -- 2,510 lines to 608. What the shell uses stays:
+the program database, the three program paths, `search_score` and
+`program_started`. `scripts/reintro-palette.py` lost its 60 entries for the
+dialog (see the entry below for the rest of that harness).
+
+**In short:** `gui/desktop/src/launcher.rs` holds `LauncherState`, a
+search-as-you-type program launcher with its own key handling, fuzzy ranking
+and drawing -- and nothing constructs it. The shell's start menu has its own
+search, and the standalone launcher program (`apps/launcher`, lane E) keeps a
+separate copy of the same state. Found while giving every list the Page and
+Home/End keys (§1416): this one was left out rather than taught keys it will
+never receive.
+
+**Where:** `gui/desktop/src/launcher.rs`, `LauncherState` and what only it
+uses. The same module's `builtin_app_database`, `FILE_MANAGER` and the other
+program constants *are* used, by the start menu and the hotkeys, and stay.
+
+**Proper fix:** delete `LauncherState` and its private helpers and tests, after
+checking with a grep and `scripts/check-tested-but-uncalled.py` that nothing outside
+the module names them; or, if the shell should have a launcher dialog after
+all, wire this one and delete lane E's copy -- a question for the operator, not
+a cleanup. Deleting is the default, since the start menu's search does the job.
+
+## `TD-C-THE-PALETTE-REINTRODUCTION-HARNESS-HAS-ROTTED` (lane C, 2026-09-27)
+
+**Status:** OPEN.
+
+**In short:** `scripts/reintro-palette.py` proves the palette-conversion tests
+are real by putting each old colour back and checking a test fails. No gate
+runs it, and it has rotted unseen: its `--check` mode stopped on a file that no
+longer exists. Found while deleting the dead launcher. Nine files it named are
+gone (settings pages moved to the Settings program, `blur.rs`, `a11y.rs`, the
+launcher's dialog), and their 400 entries were removed on 2026-09-27, since
+they can never apply. What is left: **1,459 defects, of which 308 no longer
+match the code they break and 3 match it ambiguously** (`--check`, 2026-09-27).
+
+**Where:** `scripts/reintro-palette.py`; the stale entries are listed by
+`python scripts/reintro-palette.py --check`.
+
+**Proper fix:** repair each stale entry to the code as it now reads -- each is
+the proof that a named test catches a named regression, so dropping them
+wholesale loses that proof -- or retire those whose test is gone; then wire
+`--check` (seconds, no build) into the boot test's tooling suites, so the next
+rename that strands an entry fails a gate rather than going unnoticed for weeks.
 
 ## `TD-C-THIRTY-EIGHT-CARD-TESTS-ASK-A-WEAKER-QUESTION-THAN-THEY-READ` (lane C, 2026-09-22)
 

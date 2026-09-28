@@ -55030,14 +55030,9 @@ cleared -- so the risk is a future edit, not the present state.
     touches, and `procexplorer` sending a signal is filed under network. The
     label is not part of the finding and should not be read as one.
 
-- Autologin is read but not acted on. `LoginUser::autologin` comes from the
-  account database and `LoginScreen::autologin_user` finds it, but an account
-  marked for autologin still gets a password prompt. Skipping the prompt needs
-  two things this change deliberately did not decide: how a user *escapes* an
-  autologin to reach a different account (holding a key at boot? a "switch
-  user" affordance on the way past?), and how the machine holds the autologin
-  when it is being recovered. Both are user-visible policy. See
-  `design-decisions.md` §824, "What this does not decide".
+- Autologin: done 2026-09-27, as the operator decided it (§1427). What is
+  left waits on lanes F and A -- see "Lane C — automatic sign-in: the chooser
+  key and the start for repair" at the end of this file.
 
 ## ############################################################################
 (no lane-C-specific entries yet; see the pre-split entries above)
@@ -59031,3 +59026,83 @@ is already waiting, not whether the setter exists.
   refresh, measured from the last frame shown (`Server::next_wake`,
   design-decisions §1302). A fixed vblank-aligned grid would not drift, but the
   kernel sends no flip event to align to; revisit when it does.
+
+## Lane C — the toolkit's font cache follows the hinting setting (2026-09-26)
+
+- **Wire `FontSettings::hinting` into the toolkit's own `FontCache`.** Lane F
+  made hinting live in the compositor (lane-f 98dff3b7b, a port of FreeType's
+  light auto-hinter, on by default through the compositor's settings mapping).
+  Text the toolkit rasterizes itself -- into an application's own buffers --
+  is still drawn unhinted, so at small sizes it looks slightly different from
+  the same text drawn by the compositor. The fix: a
+  `guitk::text::set_rendering(hinting)` that calls
+  `FontCache::set_rendering(Rendering { hinting, .. })` on the process cache,
+  called from `appearance::FontSettings::apply` beside `set_font_family`, with
+  a test that the setting reaches the cache. **Trigger:** 98dff3b7b (the
+  `Rendering` type and `FontCache::set_rendering`) is on origin/main -- it
+  cannot be referenced before then. Told by lane F, 2026-09-26.
+
+## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
+
+- **Done 2026-09-26.** The power button reads "Shut down" and shuts down in
+  one click, asking every window to close first; the caret at its right end
+  (`DesktopShell::power_caret_rect`) opens the other choices. Nothing below is
+  outstanding; kept for the reasoning.
+
+- **The trigger below was met the same day** (design-decisions §1405): shut
+  down, restart and log out ask every window to close first, and list the
+  ones that do not. The button is next.
+
+- **Deferred: a one-click "Shut down" with the other power actions behind a
+  caret**, as the Aero reference draws it (`.aero-sm-power-main` beside
+  `.aero-sm-power-caret` in `Aero Desktop (offline).html`) and
+  `roadmap-detailed.md`'s start menu line lists. Today the start menu's
+  "Power" button opens the power menu, and shutting down is a second,
+  deliberate choice. Nothing yet asks a running program to save before the
+  machine goes down (`known-issues.md`
+  `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING` -- there is no session
+  manager), so a one-click shutdown would make losing unsaved work one slip
+  of the pointer away. **Trigger:** programs are asked to close, and can
+  object, before a shutdown or log out. Then: split `power_button_rect` into
+  the main part (runs `PowerChoice::ShutDown`) and a caret (opens the power
+  menu), with the menu's own list unchanged.
+
+## Lane C — C-Q11's measurement, under the machine's normal load (2026-09-27)
+
+- **Open.** The operator left C-Q11 (whether to check that every crate still
+  builds before a merge) to lane C, asking that the check's cost be measured
+  **while the machine carries its normal load** -- today that means all six
+  lanes and the operator's other projects running, which is heavier than when
+  the earlier figures (15-49 s) were taken -- and set against the time the
+  check has saved, or would have. A first attempt on 2026-09-27 was stopped
+  because the other lanes were down at the time, so it would have measured the
+  light case.
+  **Trigger:** the lanes are running again. **Then:** in `os-lane-c` (its own
+  target directory), time a warm-up `cargo check --workspace --target
+  x86_64-pc-windows-gnu` (not the gate's cost -- a gate runs warm), a no-op
+  check, a check after touching `gui/toolkit/src/lib.rs` (`guitk`, 144
+  dependents) and one after touching `quoting`'s (773 dependents, the widest
+  crate), sampling the CPU load alongside each; repeat at two or three times of
+  day; count, from `git log` and `known-issues.md`, the compile breaks
+  that reached `main` and what each cost the lanes that inherited it (a boot is
+  now about 2.5 hours); decide, and write the decision up as a
+  `design-decisions.md` entry (Decided by: Claude, operator-approved scope).
+
+## Lane C — automatic sign-in: the chooser key and the start for repair (2026-09-27)
+
+- **Open, waiting on lane F.** Automatic sign-in (§1427) cannot read the
+  chooser key: `StartConditions::of_this_start` (`gui/desktop/src/autologin.rs`)
+  is handed `Modifiers::NONE`, because the compositor neither knows about a key
+  held before it opened the keyboard nor answers "what is held?".
+  **Trigger:** lane F lands `requests/c-f-which-keys-are-held-when-the-desktop-starts.md`
+  (a held-modifiers query on `EventLoop`). **Then:** in `ShellSession::start`,
+  ask it before building the session and hand the answer to
+  `StartConditions::new`; delete the comment in `of_this_start`; boot with an
+  account marked `auto_login: true` and confirm Shift held from power-on shows
+  the login screen.
+- **Open, waiting on lane A.** A start for repair is read from `/proc/cmdline`,
+  which the kernel makes up today, and no boot entry starts for repair.
+  **Trigger:** lane A's answer to
+  `requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md` item 3.
+  **Then:** nothing to change here -- boot the repair entry with an account
+  marked to sign in by itself and confirm the login screen shows.

@@ -1,0 +1,58 @@
+# What opens what on SlateOS until a person chooses otherwise (gui/programs,
+# design-decisions.md 1425). The freedesktop mimeapps.list format, so the same
+# file installs as /usr/share/applications/mimeapps.list. Each line names the
+# built-in program whose entry lists the type; gui/programs/INVENTORY.md
+# section 4 says where each came from, and which the sources named that are
+# not here and why.
+
+[Default Applications]
+inode/directory=org.slateos.Explorer.desktop
+text/css=org.slateos.Editor.desktop
+text/csv=org.slateos.Editor.desktop
+text/html=org.slateos.Editor.desktop
+text/javascript=org.slateos.Editor.desktop
+text/markdown=org.slateos.Editor.desktop
+text/plain=org.slateos.Editor.desktop
+text/typescript=org.slateos.Editor.desktop
+text/x-c=org.slateos.Editor.desktop
+text/x-c++=org.slateos.Editor.desktop
+text/x-python=org.slateos.Editor.desktop
+text/x-rust=org.slateos.Editor.desktop
+application/gzip=org.slateos.ArchiveManager.desktop
+application/json=org.slateos.Editor.desktop
+application/pdf=org.slateos.PdfViewer.desktop
+application/rtf=org.slateos.Editor.desktop
+application/sql=org.slateos.Editor.desktop
+application/toml=org.slateos.Editor.desktop
+application/vnd.rar=org.slateos.ArchiveManager.desktop
+application/x-7z-compressed=org.slateos.ArchiveManager.desktop
+application/x-bzip2=org.slateos.ArchiveManager.desktop
+application/x-shellscript=org.slateos.Editor.desktop
+application/x-tar=org.slateos.ArchiveManager.desktop
+application/x-xz=org.slateos.ArchiveManager.desktop
+application/x-yaml=org.slateos.Editor.desktop
+application/xml=org.slateos.Editor.desktop
+application/zip=org.slateos.ArchiveManager.desktop
+application/zstd=org.slateos.ArchiveManager.desktop
+image/bmp=org.slateos.ImageViewer.desktop
+image/gif=org.slateos.ImageViewer.desktop
+image/jpeg=org.slateos.ImageViewer.desktop
+image/png=org.slateos.ImageViewer.desktop
+image/svg+xml=org.slateos.ImageViewer.desktop
+image/tiff=org.slateos.ImageViewer.desktop
+image/webp=org.slateos.ImageViewer.desktop
+image/x-icon=org.slateos.ImageViewer.desktop
+audio/aac=org.slateos.MusicPlayer.desktop
+audio/flac=org.slateos.MusicPlayer.desktop
+audio/mp4=org.slateos.MusicPlayer.desktop
+audio/mpeg=org.slateos.MusicPlayer.desktop
+audio/ogg=org.slateos.MusicPlayer.desktop
+audio/opus=org.slateos.MusicPlayer.desktop
+audio/wav=org.slateos.MusicPlayer.desktop
+video/mp4=org.slateos.VideoPlayer.desktop
+video/quicktime=org.slateos.VideoPlayer.desktop
+video/webm=org.slateos.VideoPlayer.desktop
+video/x-flv=org.slateos.VideoPlayer.desktop
+video/x-matroska=org.slateos.VideoPlayer.desktop
+video/x-ms-wmv=org.slateos.VideoPlayer.desktop
+video/x-msvideo=org.slateos.VideoPlayer.desktop

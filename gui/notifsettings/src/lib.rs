@@ -384,9 +384,9 @@ impl NotifSettings {
         // default end is 07:00.
         if let (Some(start), Some(end)) = (
             doc.get_str(&["quiet_hours", "start"])
-                .and_then(|v| parse_hm(&v)),
+                .and_then(|v| TimeOfDay::parse(&v)),
             doc.get_str(&["quiet_hours", "end"])
-                .and_then(|v| parse_hm(&v)),
+                .and_then(|v| TimeOfDay::parse(&v)),
         ) {
             quiet_hours.window = DailyWindow::new(start, end);
         }
@@ -489,20 +489,17 @@ fn weekday_index(name: &str) -> Option<usize> {
     WEEKDAYS.iter().position(|d| lower.starts_with(d))
 }
 
-/// `HH:MM` to a time of day, or `None` for anything else.
-fn parse_hm(text: &str) -> Option<TimeOfDay> {
-    let (h, m) = text.trim().split_once(':')?;
-    TimeOfDay::new(h.trim().parse().ok()?, m.trim().parse().ok()?)
-}
-
-/// A time of day as `HH:MM`, zero-padded.
+/// A time of day as `HH:MM`, zero-padded: `TimeOfDay`'s own spelling, which
+/// the file uses and `TimeOfDay::parse` reads.
 ///
 /// Public because the Settings page shows the same spelling the file uses. A
 /// page that formatted its own would be a second opinion about what 22:00
-/// looks like, and the two would drift the first time either gained a case.
+/// looks like, and the two would drift the first time either gained a case --
+/// which is also why the spelling itself now lives in `daywindow`, where the
+/// appearance settings' automatic hours read it too.
 #[must_use]
 pub fn format_hm(t: TimeOfDay) -> String {
-    format!("{:02}:{:02}", t.hour(), t.minute())
+    t.to_string()
 }
 
 // ============================================================================

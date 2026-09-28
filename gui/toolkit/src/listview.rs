@@ -25,9 +25,126 @@
 //! step, and the lists this serves are recomputed on demand — a filtered
 //! clipboard history, a search result — so the length it cached would routinely
 //! be the wrong one.
+//!
+//! # The keys
+//!
+//! [`ListKey`] is how every list reads the keyboard: the arrows a row at a
+//! time, Page Up and Page Down a windowful, Home and End (with or without
+//! Ctrl) the first and last row. The operator put Page Up, Page Down, Home,
+//! End, Ctrl+Home and Ctrl+End on in every program where they mean something
+//! (`design-decisions.md` §1416). Before there was one reading of them the
+//! menus, the menu bar, the start menu, the login screen's users and several
+//! other lists answered only the arrows, each list reading keys its own way.
 
+use crate::event::{Key, KeyEvent};
 use crate::scroll_window;
+use crate::step;
 use core::ops::Range;
+
+/// A key that moves through a list, as every list reads it.
+///
+/// See the module's `# The keys`. [`ListKey::of`] reads one from a key press;
+/// [`ListKey::target`] says where it lands in a list of a given length, for a
+/// list that keeps its own selection; [`ListViewport::go`] carries it out on a
+/// viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListKey {
+    /// Up: the row before.
+    Previous,
+    /// Down: the row after.
+    Next,
+    /// Page Up: a windowful towards the top.
+    PageUp,
+    /// Page Down: a windowful towards the bottom.
+    PageDown,
+    /// Home, or Ctrl+Home: the first row.
+    First,
+    /// End, or Ctrl+End: the last row.
+    Last,
+}
+
+impl ListKey {
+    /// The movement `key` asks of a list, if it asks one.
+    ///
+    /// - **Home and End, with or without Ctrl**, are the ends. A list has no
+    ///   line for plain Home to be the start of, so the two spellings -- the
+    ///   one a text habit reaches for and the one a document habit does --
+    ///   mean the same thing here.
+    /// - **Page Up and Page Down without Ctrl.** Ctrl+Page Up and Ctrl+Page
+    ///   Down are how a program with tabs changes tab; a list inside one must
+    ///   leave them to it.
+    /// - **Nothing with Alt or Super**: those chords are shortcuts.
+    /// - **Shift is let through**, for a list that extends a selection with it.
+    ///
+    /// A release is not a movement.
+    #[must_use]
+    pub fn of(key: &KeyEvent) -> Option<Self> {
+        if !key.pressed || key.modifiers.alt || key.modifiers.super_key {
+            return None;
+        }
+        let ctrl = key.modifiers.ctrl;
+        match key.key {
+            Key::Up => Some(Self::Previous),
+            Key::Down => Some(Self::Next),
+            Key::PageUp if !ctrl => Some(Self::PageUp),
+            Key::PageDown if !ctrl => Some(Self::PageDown),
+            Key::Home => Some(Self::First),
+            Key::End => Some(Self::Last),
+            _ => None,
+        }
+    }
+
+    /// Where this movement lands in a list of `len` rows, from row `from` --
+    /// `None` when nothing is picked -- with `page` rows to a windowful.
+    ///
+    /// Clamped at both ends and never wrapping, like every list in the shell:
+    /// Page Down near the bottom lands on the last row, not past it or back at
+    /// the top. A `from` left over from a longer list is brought into range
+    /// first (as [`step::clamped_before`] does), so it steps to a real row.
+    /// With nothing picked, every movement but [`Last`](Self::Last) lands on
+    /// the first row. `None` only for an empty list; a `page` of 0 counts as
+    /// 1.
+    #[must_use]
+    pub fn target(self, from: Option<usize>, len: usize, page: usize) -> Option<usize> {
+        let last = len.checked_sub(1)?;
+        let page = page.max(1);
+        let Some(from) = from.map(|i| i.min(last)) else {
+            return Some(if self == Self::Last { last } else { 0 });
+        };
+        Some(match self {
+            Self::First => 0,
+            Self::Last => last,
+            Self::Previous => step::clamped_before(len, from),
+            Self::Next => step::clamped_after(len, from),
+            Self::PageUp => from.saturating_sub(page),
+            Self::PageDown => from.saturating_add(page).min(last),
+        })
+    }
+
+    /// [`target`](Self::target), for a list some of whose rows cannot be
+    /// chosen -- a menu's separators and greyed-out rows: the nearest row that
+    /// can be, looking first the way the key moves and then back the other
+    /// way. Home looks down from the top and End up from the bottom, so both
+    /// land on the first and last rows that can be chosen. `None` when no row
+    /// can be.
+    #[must_use]
+    pub fn target_where(
+        self,
+        from: Option<usize>,
+        len: usize,
+        page: usize,
+        choosable: impl Fn(usize) -> bool,
+    ) -> Option<usize> {
+        let target = self.target(from, len, page)?;
+        let ahead = |at: usize| (at..len).find(|&i| choosable(i));
+        let behind = |at: usize| (0..=at).rev().find(|&i| choosable(i));
+        if matches!(self, Self::Next | Self::PageDown | Self::First) {
+            ahead(target).or_else(|| behind(target))
+        } else {
+            behind(target).or_else(|| ahead(target))
+        }
+    }
+}
 
 /// Where a scrolling list is looking, and which of its rows is picked.
 ///
@@ -185,6 +302,19 @@ impl ListViewport {
         self.reveal(len);
     }
 
+    /// Carry out a list key: the arrows, the page keys, and the ends. See
+    /// [`ListKey`].
+    pub fn go(&mut self, key: ListKey, len: usize) {
+        match key {
+            ListKey::Previous => self.select_prev(len),
+            ListKey::Next => self.select_next(len),
+            ListKey::PageUp => self.page_up(len),
+            ListKey::PageDown => self.page_down(len),
+            ListKey::First => self.select(Some(0), len),
+            ListKey::Last => self.select(len.checked_sub(1), len),
+        }
+    }
+
     /// Scrolls one windowful towards the bottom, carrying the selection.
     pub fn page_down(&mut self, len: usize) {
         let step = self.height.max(1);
@@ -250,9 +380,151 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::ListViewport;
+    use super::{ListKey, ListViewport};
+    use crate::event::{Key, KeyEvent, Modifiers};
     use crate::scroll_window;
     use randrange::{RandomSource, SeededRng};
+
+    fn press(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// The operator's six (§1416), and the arrows, read the same by every list.
+    #[test]
+    fn the_list_keys_are_read_one_way() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        };
+        let cases = [
+            (Key::Up, Modifiers::NONE, Some(ListKey::Previous)),
+            (Key::Down, Modifiers::NONE, Some(ListKey::Next)),
+            (Key::PageUp, Modifiers::NONE, Some(ListKey::PageUp)),
+            (Key::PageDown, Modifiers::NONE, Some(ListKey::PageDown)),
+            (Key::Home, Modifiers::NONE, Some(ListKey::First)),
+            (Key::End, Modifiers::NONE, Some(ListKey::Last)),
+            (Key::Home, ctrl, Some(ListKey::First)),
+            (Key::End, ctrl, Some(ListKey::Last)),
+            (Key::PageDown, shift, Some(ListKey::PageDown)),
+            // Ctrl+Page Up/Down change tab in a program that has tabs.
+            (Key::PageUp, ctrl, None),
+            (Key::PageDown, ctrl, None),
+            // Alt and Super chords are shortcuts.
+            (Key::Home, Modifiers::alt(), None),
+            (Key::End, Modifiers::super_key(), None),
+            (Key::Left, Modifiers::NONE, None),
+        ];
+        for (key, modifiers, want) in cases {
+            assert_eq!(
+                ListKey::of(&press(key, modifiers)),
+                want,
+                "{key:?} with {modifiers:?}"
+            );
+        }
+        let mut released = press(Key::Home, Modifiers::NONE);
+        released.pressed = false;
+        assert_eq!(ListKey::of(&released), None, "a release moved the list");
+    }
+
+    /// Where each key lands: clamped, never wrapping, a stale row brought into
+    /// range first, nothing picked landing on the first row.
+    #[test]
+    fn each_list_key_lands_where_it_should() {
+        use ListKey::{First, Last, Next, PageDown, PageUp, Previous};
+        let len = 20;
+        let page = 5;
+        let cases = [
+            (Previous, Some(0), 0),
+            (Previous, Some(7), 6),
+            (Next, Some(7), 8),
+            (Next, Some(19), 19),
+            (PageUp, Some(7), 2),
+            (PageUp, Some(3), 0),
+            (PageDown, Some(7), 12),
+            (PageDown, Some(17), 19),
+            (First, Some(7), 0),
+            (Last, Some(7), 19),
+            (First, None, 0),
+            (Last, None, 19),
+            (Next, None, 0),
+            (PageDown, None, 0),
+            (Previous, Some(50), 18),
+            (PageDown, Some(50), 19),
+        ];
+        for (key, from, want) in cases {
+            assert_eq!(
+                key.target(from, len, page),
+                Some(want),
+                "{key:?} from {from:?}"
+            );
+        }
+        assert_eq!(Last.target(Some(3), 0, page), None, "an empty list");
+        assert_eq!(
+            PageDown.target(Some(3), len, 0),
+            Some(4),
+            "a page of 0 is 1"
+        );
+    }
+
+    /// Where some rows cannot be chosen, each key takes the nearest that can,
+    /// the way it moves first: Home the first choosable row, End the last, a
+    /// page that lands on a separator the next row on.
+    #[test]
+    fn keys_skip_the_rows_that_cannot_be_chosen() {
+        use ListKey::{First, Last, PageDown, PageUp};
+        // Rows 0, 1, 8 and 9 cannot be chosen.
+        let choosable = |i: usize| (2..8).contains(&i);
+        assert_eq!(First.target_where(Some(5), 10, 3, choosable), Some(2));
+        assert_eq!(Last.target_where(Some(5), 10, 3, choosable), Some(7));
+        assert_eq!(PageDown.target_where(Some(5), 10, 3, choosable), Some(7));
+        assert_eq!(PageUp.target_where(Some(3), 10, 3, choosable), Some(2));
+        assert_eq!(
+            Last.target_where(None, 10, 3, |_| false),
+            None,
+            "nothing to choose"
+        );
+        // A page landing on a row that cannot be chosen, with rows that can on
+        // both sides of it: onward first, not back.
+        let gap = |i: usize| i != 5;
+        assert_eq!(PageDown.target_where(Some(2), 10, 3, gap), Some(6));
+        assert_eq!(PageUp.target_where(Some(8), 10, 3, gap), Some(4));
+    }
+
+    /// The viewport carries out every key and keeps the row it lands on in
+    /// view.
+    #[test]
+    fn the_viewport_goes_where_each_key_says() {
+        let len = 30;
+        let mut view = ListViewport::default();
+        view.set_height(10, len);
+        view.go(ListKey::Last, len);
+        assert_eq!(view.selected(), Some(29));
+        assert!(view.visible_range(len).contains(&29));
+        view.go(ListKey::PageUp, len);
+        assert_eq!(view.selected(), Some(19));
+        view.go(ListKey::First, len);
+        assert_eq!(view.selected(), Some(0));
+        assert_eq!(view.visible_range(len).start, 0);
+        view.go(ListKey::PageDown, len);
+        assert_eq!(view.selected(), Some(10));
+        view.go(ListKey::Next, len);
+        view.go(ListKey::Previous, len);
+        assert_eq!(view.selected(), Some(10));
+        assert_consistent(&view, len);
+
+        let mut empty = ListViewport::default();
+        empty.go(ListKey::Last, 0);
+        assert_eq!(empty.selected(), None);
+    }
 
     /// Both invariants, checked after every operation in every test below.
     fn assert_consistent(view: &ListViewport, len: usize) {

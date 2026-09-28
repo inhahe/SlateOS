@@ -40,6 +40,13 @@ globmatch = { path = "../globmatch" }
 
 # design-decisions 426's path escape, for the wallpaper's own config format.
 pathcodec = { path = "../pathcodec" }
+
+# Which program opens which kind of file. A document on the desktop opens in
+# the program File Associations chose for it -- the same lookup the file
+# manager makes on every open, so the two cannot disagree about what a file
+# opens in. What it depends on -- guitk, yamldoc, settingsfile -- this crate
+# already does.
+associations = { path = "../associations" }
 # The session group, for the screen-lock delay. One integer with two
 # readers -- `apps/settings` writes it -- which is the `fileassoc` shape
 # rather than a typed crate like `appearance`. See src/idle_lock.rs.
@@ -77,6 +84,11 @@ oswindow = { path = "../window" }
 # tzrules/src/lib.rs's "Why this is a crate and not a module".
 tzrules = { path = "../../tzrules" }
 
+# How the desktop tells the time -- the clock's zone, the taskbar clock's
+# switches, the world clocks -- shared with the Settings application, which
+# edits what the shell obeys. See gui/datetimesettings/src/lib.rs.
+datetimesettings = { path = "../datetimesettings" }
+
 # Format-preserving YAML, for settings that are written back to disk.
 # design.txt requires configuration to be "processed with a library that
 # preserves comments and formatting": a user who annotates their config file
@@ -88,6 +100,9 @@ yamldoc = { path = "../../yamldoc" }
 # two processes cannot disagree about what the user chose. The shell paints
 # from it (DesktopTheme::from_settings) and hosts the panel that edits it.
 appearance = { path = "../appearance" }
+# The installed programs' desktop entries: what the start menu lists, under
+# which folder, with which picture, and how each starts.
+desktopentry = { path = "../desktopentry" }
 
 # The input settings model, on the same terms as `appearance` above: the
 # compositor applies these values, the Settings application edits them, and the
@@ -142,6 +157,9 @@ workspace = true
 # `store`/`Watcher` pair without touching the developer's own
 # `~/.config/slateos`.
 [dev-dependencies]
+# `datetimesettings::clock::with_time`, which fixes the time of day for a test
+# of anything scheduled by it -- the automatic light/dark mode first.
+datetimesettings = { path = "../datetimesettings", features = ["testing"] }
 # `appearance::palette_check`, the sweep that proves a module draws from the
 # palette rather than from colours of its own. Cargo unifies this with the
 # ordinary dependency when building tests.

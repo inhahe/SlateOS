@@ -93,6 +93,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gittree  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 TARGET = "x86_64-unknown-linux-gnu"
 
@@ -192,7 +195,7 @@ def package_specs(crates: list[tuple[str, Path]]) -> tuple[list[str], list[str],
     return specs_from_metadata(crates, json.loads(proc.stdout))
 
 
-def candidate_crates() -> list[tuple[str, pathlib.Path]]:
+def candidate_crates() -> list[tuple[str, Path]]:
     """Every crate this gate *could* check: (name, src dir), workspace-wide.
 
     Exists to supply the DENOMINATOR. The gate checks the subset holding a unix-gated
@@ -208,11 +211,19 @@ def candidate_crates() -> list[tuple[str, pathlib.Path]]:
     run that reads as a complete audit was the one run that said nothing about its own
     gaps.*
 """
-    out: list[tuple[str, pathlib.Path]] = []
-    for tom in REPO.rglob("Cargo.toml"):
-        parts = tom.parts
-        if "target" in parts or ".git" in parts:
+    out: list[tuple[str, Path]] = []
+    # Walked through `gittree.WorkTree`, which prunes `target*/` and `.git`
+    # *while walking*. This was `REPO.rglob("Cargo.toml")` with the build
+    # directories filtered out of the results afterwards -- which descends
+    # into every one of them first. On a lane whose `target/` holds a
+    # `-Zbuild-std` userland that is minutes of stat() per walk, inside the
+    # push hook: measured on lane C 2026-09-25, the pruned walk takes 0.3 s
+    # and finds the same 421 manifests git tracks; the unpruned one was still
+    # going after eighteen minutes.
+    for rel in gittree.WorkTree(str(REPO)).files_under(""):
+        if rel != "Cargo.toml" and not rel.endswith("/Cargo.toml"):
             continue
+        tom = REPO / rel
         src = tom.parent / "src"
         if not src.is_dir():
             continue
@@ -435,6 +446,7 @@ def main() -> int:
 
     found = unix_crates()
     crates = [name for name, _ in found]
+    candidates = len(candidate_crates())
     if args.list:
         for c in crates:
             print(c)
@@ -475,10 +487,10 @@ def main() -> int:
     # checking this population and skipping the half of it that lives in
     # `#[cfg(test)]` modules, and a summary that does not name it reads the
     # same either way -- which is how the gap went unnoticed.
-    print(f"check-cfg-unix: OK ({len(crates)} of {len(candidate_crates())} workspace "
+    print(f"check-cfg-unix: OK ({len(crates)} of {candidates} workspace "
           f"crate(s) hold unix-gated code and pass clippy for {TARGET} with "
           f"--all-targets; the other "
-          f"{len(candidate_crates()) - len(crates)} are NOT checked here -- boot-test.sh covers the workspace)")
+          f"{candidates - len(crates)} are NOT checked here -- boot-test.sh covers the workspace)")
     return 0
 
 

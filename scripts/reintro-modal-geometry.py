@@ -68,6 +68,12 @@ import pathlib
 import subprocess
 import sys
 
+# `safewrite` lives beside this file. The path is derived from `__file__`
+# rather than spelled "scripts", because a tool that rewrites source files
+# is the wrong place to discover it was not started from the repo root.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from safewrite import write_text  # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TARGET = "x86_64-pc-windows-gnu"
 
@@ -394,7 +400,7 @@ def main():
                 verdicts.append((name, "PATTERN NOT FOUND"))
                 print(f"{name}\n    PATTERN NOT FOUND\n", flush=True)
                 continue
-            (ROOT / path).write_text(text, encoding="utf-8", newline="")
+            write_text(ROOT / path, text, newline="")
 
             all_failed, note, broke = set(), "", False
             for pkg in pkgs:

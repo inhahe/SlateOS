@@ -21,7 +21,8 @@
 //! spelling at 458 call sites without this crate knowing what a setting is.
 
 use crate::color::Color;
-use crate::theme::{contrast_ratio, relative_luminance, with_alpha};
+use crate::theme::{contrast_ratio, perceptual_difference, relative_luminance, with_alpha};
+use std::collections::BTreeMap;
 
 pub const BASE: Color = Color::from_hex(0x1E1E2E);
 pub const MANTLE: Color = Color::from_hex(0x181825);
@@ -295,6 +296,44 @@ pub fn emphasized(color: Color) -> Color {
 /// The contrast a body-text ink owes its background: WCAG SC 1.4.3, level AA.
 pub const TEXT_CONTRAST_FLOOR: f32 = 4.5;
 
+/// The contrast a mark that is not text owes what it sits on -- a dot, an
+/// icon, a focus ring: WCAG SC 1.4.11, 3:1.
+pub const NON_TEXT_CONTRAST_FLOOR: f32 = 3.0;
+
+/// How far apart two colours must be, as a [`perceptual_difference`], to be
+/// told apart by colour alone when their lightness does not separate them.
+///
+/// A judgment, recorded in `design-decisions.md` §1424. It is set *above* the
+/// roughly thirty lightness units that [`NON_TEXT_CONTRAST_FLOOR`]'s 3:1 takes,
+/// so that each half of [`hard_to_tell_apart`] decides something: a pair far
+/// enough apart in light is seen however alike its hues, and a pair of one
+/// lightness must be this far apart in colour -- a clearly different hue, not a
+/// neighbouring shade -- to be seen at a glance on a six-pixel dot. At 25 the
+/// light half could never decide anything, since 25 units of colour cannot
+/// hold 30 of lightness. A warning that errs this way costs a glance; one that
+/// errs the other way leaves an invisible dot unexplained.
+pub const DISTINCT_COLOUR_DIFFERENCE: f32 = 40.0;
+
+/// Whether a mark in one of these colours, drawn on the other, is too close to
+/// see.
+///
+/// Both halves have to fail: too little light between them for a mark that is
+/// not text (under [`NON_TEXT_CONTRAST_FLOOR`]) *and* too little colour between
+/// them (a [`perceptual_difference`] under [`DISTINCT_COLOUR_DIFFERENCE`]). A red
+/// dot on a blue disc of the same lightness is plainly visible by its hue, and
+/// is not flagged; a teal a shade off the accent's teal fails both, and is what
+/// the calendar's and Settings' warnings exist for (`design-decisions.md`
+/// §1424, the operator's answer to C-Q19). Symmetric: which colour is the mark
+/// does not change the answer.
+///
+/// A test, never a correction: nothing here moves either colour. The two
+/// warnings that ask it leave the user's colours exactly as chosen.
+#[must_use]
+pub fn hard_to_tell_apart(a: Color, b: Color) -> bool {
+    contrast_ratio(a, b) < NON_TEXT_CONTRAST_FLOOR
+        && perceptual_difference(a, b) < DISTINCT_COLOUR_DIFFERENCE
+}
+
 /// `ink`, moved away from `bg` only as far as the contrast floor requires.
 ///
 /// Returns `ink` unchanged when it already clears the floor, so it is a no-op
@@ -395,7 +434,8 @@ thread_local! {
 /// How many palettes this thread has resolved so far.
 ///
 /// Cumulative, so a caller asking "did that operation resolve one?" takes a
-/// difference rather than an absolute. See [`PALETTE_RESOLUTIONS`].
+/// difference rather than an absolute. See `PALETTE_RESOLUTIONS` in this
+/// module's source, which is private and so cannot be linked from here.
 #[must_use]
 pub fn palette_resolutions() -> u64 {
     PALETTE_RESOLUTIONS.with(core::cell::Cell::get)
@@ -561,7 +601,273 @@ pub struct Palette {
     /// with a light and a dark artwork, say — can ask, instead of guessing
     /// from the luma of a field it happens to have.
     pub light: bool,
+    /// The text inks this palette was built from, before the contrast floor:
+    /// `text`, `subtext0`, `subtext1` and `link` as the mode -- or the theme
+    /// -- states them.
+    ///
+    /// [`apply_text_floor`](Self::apply_text_floor) re-derives the four from
+    /// these rather than from their current values, so re-resolving after a
+    /// style change cannot compound; and from these rather than from the
+    /// built-in constants, so a theme's inks survive the style setters.
+    /// Private for the reason `surface_style` is.
+    ink_sources: [Color; 4],
+    /// Whether a theme's colours are laid over the built-in ones -- and so
+    /// whether `text` has to be held to the floor too. The built-in `text` is
+    /// left exactly as stated, being what every existing screen was checked
+    /// against; a theme's grounds and inks are colours nobody here has
+    /// measured, and a theme that changed only the page could otherwise leave
+    /// the built-in text unreadable on it.
+    themed: bool,
+    /// What a terminal emulator draws in: see [`TerminalColors`]. The
+    /// palette's own hues in the slots every terminal gives them, unless the
+    /// theme's `terminal` section says otherwise.
+    pub terminal: TerminalColors,
 }
+
+/// The colours a terminal emulator draws in: its own background and
+/// foreground, its cursor, and the sixteen colours programs name by number --
+/// 0 to 7, then 8 to 15 the bright ones. A theme's `terminal` section, so one
+/// theme dresses the whole desktop, terminals included.
+///
+/// **A theme chooses the shades; the numbers keep their meanings.** Colour 1
+/// is red on every terminal there is, and a program that prints red expects
+/// red. The built-in sixteen are the palette's own hues in the slots every
+/// terminal gives them -- red in red's, green in green's, pink as magenta and
+/// teal as cyan, as Catppuccin's terminal themes place them -- so a theme that
+/// retints its hues retints its terminal to match, and a `terminal` section can
+/// set any slot outright.
+///
+/// **Held to the floor: the foreground, not the sixteen.** The foreground is
+/// what the terminal writes when nothing says otherwise, so it is made legible
+/// on the background as every text ink is ([`legible_on`]). The sixteen are
+/// the program's choice -- black on a black background is something a program
+/// may mean -- and are left as the theme states them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalColors {
+    /// What the terminal writes in when a program names no colour.
+    pub foreground: Color,
+    /// What it writes on.
+    pub background: Color,
+    /// The cursor.
+    pub cursor: Color,
+    /// Colours 0 to 15: black, red, green, yellow, blue, magenta, cyan and
+    /// white, then the bright eight in the same order.
+    pub ansi: [Color; 16],
+}
+
+/// What a theme's `terminal` section may set, in [`TerminalColors`]' order:
+/// the three the terminal draws itself, then the sixteen by number.
+pub const TERMINAL_ROLES: [&str; 19] = [
+    "foreground",
+    "background",
+    "cursor",
+    "black",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "white",
+    "bright-black",
+    "bright-red",
+    "bright-green",
+    "bright-yellow",
+    "bright-blue",
+    "bright-magenta",
+    "bright-cyan",
+    "bright-white",
+];
+
+impl TerminalColors {
+    /// Nothing yet: what a palette holds for the instant between being built
+    /// and having its terminal derived from it ([`of`](Self::of)).
+    const UNSET: Self = Self {
+        foreground: Color::rgb(0, 0, 0),
+        background: Color::rgb(0, 0, 0),
+        cursor: Color::rgb(0, 0, 0),
+        ansi: [Color::rgb(0, 0, 0); 16],
+    };
+
+    /// The built-in terminal colours for `palette`: its page and its text,
+    /// its rosewater for the cursor, and its hues in the slots every terminal
+    /// gives them.
+    ///
+    /// The four greys -- black, white and their bright pairs -- are the
+    /// mode's greys, black the darker mark and white the paler on both. In
+    /// the dark they are Mocha's: the raised surfaces and the subtexts. In
+    /// the light they cannot be Latte's the same way, because this palette's
+    /// light subtexts are a deepened blue ink, not greys (`#00688b`): black is
+    /// the text, white and bright white the raised surfaces, and bright black
+    /// -- the "dim" that programs print comments in -- the faintest mark made
+    /// legible on the page, a grey that can still be read.
+    #[must_use]
+    pub fn of(palette: &Palette) -> Self {
+        let p = palette;
+        let (black, white, bright_black, bright_white) = if p.light {
+            (
+                p.text,
+                p.surface2,
+                legible_on(p.overlay0, p.base),
+                p.surface1,
+            )
+        } else {
+            (p.surface1, p.subtext1, p.surface2, p.subtext0)
+        };
+        let mut colors = Self {
+            foreground: p.text,
+            background: p.base,
+            cursor: p.rosewater,
+            ansi: [
+                black,
+                p.red,
+                p.green,
+                p.yellow,
+                p.blue,
+                p.pink,
+                p.teal,
+                white,
+                bright_black,
+                p.red,
+                p.green,
+                p.yellow,
+                p.blue,
+                p.pink,
+                p.teal,
+                bright_white,
+            ],
+        };
+        colors.hold_the_foreground();
+        colors
+    }
+
+    /// Set the colour a theme's `terminal` section names `name` -- one of
+    /// [`TERMINAL_ROLES`]. Any other name is not a slot and is ignored: the
+    /// theme's reader reports it, because the palette has nowhere to.
+    pub fn set(&mut self, name: &str, color: Color) {
+        let slot = match name {
+            "foreground" => &mut self.foreground,
+            "background" => &mut self.background,
+            "cursor" => &mut self.cursor,
+            number => {
+                let Some(index) = TERMINAL_ROLES
+                    .iter()
+                    .skip(3)
+                    .position(|role| *role == number)
+                else {
+                    return;
+                };
+                let Some(slot) = self.ansi.get_mut(index) else {
+                    return;
+                };
+                slot
+            }
+        };
+        *slot = color;
+    }
+
+    /// The foreground, made legible on the background ([`legible_on`]).
+    fn hold_the_foreground(&mut self) {
+        self.foreground = legible_on(self.foreground, self.background);
+    }
+}
+
+/// The colours a theme sets, by role name, for each mode -- what
+/// [`Palette::for_theme`] lays over the built-in palette.
+///
+/// A role a theme leaves out of a mode keeps the built-in value for that
+/// mode, so a theme that changes only the page and the text is a whole theme.
+/// The names are [`THEME_ROLES`]; the accent is not among them, because it is
+/// the user's own choice and not the theme's.
+///
+/// Parsed by `gui/appearance` (the toolkit reads no files); declared here
+/// because the palette is what consumes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThemeColors {
+    /// The roles set for dark mode.
+    pub dark: BTreeMap<String, Color>,
+    /// The roles set for light mode.
+    pub light: BTreeMap<String, Color>,
+    /// The terminal colours set for dark mode, by [`TERMINAL_ROLES`] name --
+    /// the theme's `terminal` section.
+    pub terminal_dark: BTreeMap<String, Color>,
+    /// The terminal colours set for light mode: `terminal-light`.
+    pub terminal_light: BTreeMap<String, Color>,
+}
+
+impl ThemeColors {
+    /// The roles set for one mode.
+    #[must_use]
+    pub fn roles(&self, light: bool) -> &BTreeMap<String, Color> {
+        if light { &self.light } else { &self.dark }
+    }
+
+    /// The terminal colours set for one mode. Asked for the mode the palette
+    /// is built in, which [`variant`](Self::variant) has already settled: a
+    /// theme's terminal section goes with its colours.
+    #[must_use]
+    pub fn terminal_roles(&self, light: bool) -> &BTreeMap<String, Color> {
+        if light {
+            &self.terminal_light
+        } else {
+            &self.terminal_dark
+        }
+    }
+
+    /// The roles to draw with when `light` is asked for, and the mode they
+    /// belong to.
+    ///
+    /// A theme that sets colours for only one of the two modes answers with
+    /// that one either way. Its colours were chosen against one set of
+    /// grounds: laying a dark theme's inks over the light palette's pages
+    /// would give neither the theme nor the light mode, and falling back to
+    /// the built-in light palette would make choosing the theme appear to do
+    /// nothing. The mode that comes back is the one the palette is then built
+    /// in, so [`Palette::light`] still tells the truth about what is drawn.
+    #[must_use]
+    pub fn variant(&self, light: bool) -> (bool, &BTreeMap<String, Color>) {
+        let asked = self.roles(light);
+        let other = self.roles(!light);
+        if asked.is_empty() && !other.is_empty() {
+            (!light, other)
+        } else {
+            (light, asked)
+        }
+    }
+}
+
+/// Every role a theme may set: every colour of a [`Palette`] but the accent.
+///
+/// Held to [`Palette::roles`] by a test, so a role added to the palette is a
+/// role a theme can set, or a decision on the record that it is not.
+pub const THEME_ROLES: [&str; 26] = [
+    "crust",
+    "mantle",
+    "base",
+    "surface0",
+    "surface1",
+    "surface2",
+    "overlay0",
+    "subtext0",
+    "subtext1",
+    "text",
+    "link",
+    "border",
+    "red",
+    "green",
+    "yellow",
+    "peach",
+    "blue",
+    "lavender",
+    "mauve",
+    "sapphire",
+    "teal",
+    "sky",
+    "pink",
+    "rosewater",
+    "flamingo",
+    "maroon",
+];
 
 /// Fixed alphas for the washes derived from [`Palette::accent`].
 ///
@@ -627,6 +933,9 @@ impl Palette {
                 accent: LIGHT_BLUE,
                 panel_alpha: 255,
                 light: true,
+                ink_sources: [LIGHT_TEXT, LIGHT_SUBTEXT0, LIGHT_SUBTEXT1, LIGHT_LINK],
+                themed: false,
+                terminal: TerminalColors::UNSET,
             }
         } else {
             Self {
@@ -661,9 +970,13 @@ impl Palette {
                 accent: BLUE,
                 panel_alpha: 255,
                 light: false,
+                ink_sources: [TEXT, SUBTEXT0, SUBTEXT1, LINK],
+                themed: false,
+                terminal: TerminalColors::UNSET,
             }
         };
         chosen.apply_text_floor();
+        chosen.terminal = TerminalColors::of(&chosen);
         chosen
     }
 
@@ -754,21 +1067,92 @@ impl Palette {
     /// which must be the same colour as the text above it. Moving them
     /// together is the point, not an exception.)
     ///
-    /// # Why it starts from the constants
+    /// # Why it starts from the sources
     ///
     /// So that it is idempotent under a change of theme. Resolving from the
     /// current field would compound: a palette settled for filled strips and
     /// then switched to separated ones would keep the deeper ink it no longer
     /// needs, and a palette re-resolved every frame would drift.
     fn apply_text_floor(&mut self) {
-        let (sub0, sub1, link) = if self.light {
-            (LIGHT_SUBTEXT0, LIGHT_SUBTEXT1, LIGHT_LINK)
-        } else {
-            (SUBTEXT0, SUBTEXT1, LINK)
-        };
+        let [text, sub0, sub1, link] = self.ink_sources;
+        // The primary ink too, under a theme -- see `themed`.
+        self.text = if self.themed { self.ink(text) } else { text };
         self.subtext0 = self.ink(sub0);
         self.subtext1 = self.ink(sub1);
         self.link = self.ink(link);
+    }
+
+    /// The palette for a mode with a theme's colours laid over the built-in
+    /// ones: each role the theme sets for that mode replaces the built-in
+    /// value, each it leaves out keeps it, and the text inks are then held to
+    /// the same contrast floor as ever. A theme chooses where the text starts;
+    /// it cannot make it unreadable.
+    ///
+    /// A theme that sets colours for only one mode is built in that mode
+    /// whichever is asked for; see [`ThemeColors::variant`].
+    ///
+    /// A name that is not in [`THEME_ROLES`] is ignored here -- the theme's
+    /// reader reports it, because the palette has nowhere to.
+    #[must_use]
+    pub fn for_theme(light: bool, theme: &ThemeColors) -> Self {
+        let (light, roles) = theme.variant(light);
+        let mut palette = Self::for_mode(light);
+        let mut sources = palette.ink_sources;
+        for (name, color) in roles {
+            match name.as_str() {
+                "text" => sources[0] = *color,
+                "subtext0" => sources[1] = *color,
+                "subtext1" => sources[2] = *color,
+                "link" => sources[3] = *color,
+                other => palette.set_role(other, *color),
+            }
+        }
+        palette.ink_sources = sources;
+        palette.themed = true;
+        palette.apply_text_floor();
+        // The terminal from the theme's hues, then its own section for the
+        // mode the palette was built in, then the floor again for whatever
+        // foreground and background that section chose.
+        let mut terminal = TerminalColors::of(&palette);
+        for (name, color) in theme.terminal_roles(light) {
+            terminal.set(name, *color);
+        }
+        terminal.hold_the_foreground();
+        palette.terminal = terminal;
+        palette
+    }
+
+    /// Set the colour of the role named `name`, if it is a ground or a hue.
+    /// The four text inks go through `ink_sources`, which
+    /// [`for_theme`](Self::for_theme) handles; any other name is not a role
+    /// and is ignored, for `for_theme`'s reason.
+    fn set_role(&mut self, name: &str, color: Color) {
+        let slot = match name {
+            "crust" => &mut self.crust,
+            "mantle" => &mut self.mantle,
+            "base" => &mut self.base,
+            "surface0" => &mut self.surface0,
+            "surface1" => &mut self.surface1,
+            "surface2" => &mut self.surface2,
+            "overlay0" => &mut self.overlay0,
+            "border" => &mut self.border,
+            "red" => &mut self.red,
+            "green" => &mut self.green,
+            "yellow" => &mut self.yellow,
+            "peach" => &mut self.peach,
+            "blue" => &mut self.blue,
+            "lavender" => &mut self.lavender,
+            "mauve" => &mut self.mauve,
+            "sapphire" => &mut self.sapphire,
+            "teal" => &mut self.teal,
+            "sky" => &mut self.sky,
+            "pink" => &mut self.pink,
+            "rosewater" => &mut self.rosewater,
+            "flamingo" => &mut self.flamingo,
+            "maroon" => &mut self.maroon,
+            _ => return,
+        };
+        *slot = color;
     }
 
     /// As [`ink`](Self::ink), for a caller that knows which ground its text
@@ -825,7 +1209,8 @@ impl Palette {
     /// render loop it sat in is still a render loop, and the next colour rule
     /// added here is free only by luck.
     ///
-    /// [`PALETTE_RESOLUTIONS`] counts the calls so that structure can be
+    /// `PALETTE_RESOLUTIONS` (private; read through [`palette_resolutions`])
+    /// counts the calls so that structure can be
     /// asserted rather than hoped for;
     /// `compositor::tests::the_palette_is_resolved_when_it_changes_not_per_frame`
     /// is the assertion.
@@ -846,18 +1231,22 @@ impl Palette {
             // not about that. Someone who chose outlined boxes and then turned
             // on high contrast has not asked for filled ones.
             //
-            // Assigned rather than set, because the setters re-derive the
-            // text-only inks from the *mode's* constants -- and a high-contrast
-            // palette's inks are the scheme's, at 7:1 or better by
-            // construction. Re-deriving them put `subtext1` back to a value
-            // that reads at 6.26:1, which
+            // Assigned rather than set. The setters re-run the contrast floor,
+            // which is harmless now -- a high-contrast palette's ink sources
+            // are the scheme's own (see `high_contrast`) -- but was not while
+            // they were re-derived from the *mode's* constants: that put
+            // `subtext1` back to a value that reads at 6.26:1, which
             // `every_text_role_clears_seven_to_one_on_every_surface` caught
-            // within the minute.
+            // within the minute. Assigning keeps this path from depending on
+            // the fix.
             palette.surface_style = settings.surface_style();
             palette.strip_style = settings.strip_style();
             return palette;
         }
-        let mut palette = Self::for_mode(settings.is_light());
+        let mut palette = match settings.theme() {
+            Some(theme) => Self::for_theme(settings.is_light(), theme),
+            None => Self::for_mode(settings.is_light()),
+        };
         palette.accent = settings.accent();
         palette.panel_alpha = settings.panel_alpha();
         // The setters re-resolve the text-only inks, which is the whole
@@ -912,6 +1301,8 @@ impl Palette {
         // does not model preferences (838). `PaletteSource::accent_on` is the
         // half that moved out.
         let light = relative_luminance(bg) > 0.5;
+        let ordinary = Self::for_mode(light);
+        let [_, _, _, link_source] = ordinary.ink_sources;
 
         Self {
             crust: bg,
@@ -930,9 +1321,24 @@ impl Palette {
             // contrast does not get to be see-through.
             panel_alpha: 255,
             light,
+            // The scheme's inks are where the floor starts, so a setter called
+            // on this palette keeps them instead of putting the mode's back.
+            // The link is still the mode's: the scheme has no link colour.
+            ink_sources: [fg, fg, fg, link_source],
+            // Rebuilt below from this palette's own page and ink: the
+            // ordinary palette's terminal is drawn on the ordinary page.
+            terminal: TerminalColors::UNSET,
             // The categorical hues, from the mode that suits this background.
-            ..Self::for_mode(light)
+            ..ordinary
         }
+        .with_its_terminal()
+    }
+
+    /// This palette with its [`terminal`](Self::terminal) derived from it.
+    #[must_use]
+    fn with_its_terminal(mut self) -> Self {
+        self.terminal = TerminalColors::of(&self);
+        self
     }
 
     /// Every field of this palette, paired with its name.
@@ -1005,6 +1411,15 @@ impl Palette {
             surface_style: _,
             // Not a colour either. Same terms as the three above it.
             strip_style: _,
+            // Colours, but not roles: where four roles' values came from
+            // before the contrast floor. Same terms again.
+            ink_sources: _,
+            // Not a colour: whether a theme was laid over the palette.
+            themed: _,
+            // Colours, but a terminal's table rather than roles: by default
+            // they are the roles above in a terminal's slots, and a theme's
+            // `terminal` section sets them apart from its `colors`.
+            terminal: _,
         } = *self;
         [
             ("crust", crust),
@@ -1254,4 +1669,13 @@ pub trait PaletteSource {
     /// Resolved colours rather than the scheme itself, because the scheme is a
     /// user preference and this crate does not model preferences.
     fn high_contrast(&self) -> Option<(Color, Color)>;
+
+    /// The colours of the theme the user chose, if it is not the built-in
+    /// one. Already read and parsed -- this is asked on every palette
+    /// resolution, which the compositor does per frame, so it must not touch
+    /// a file. Defaulted, so a source that knows nothing of themes (a test's)
+    /// need not say so.
+    fn theme(&self) -> Option<&ThemeColors> {
+        None
+    }
 }

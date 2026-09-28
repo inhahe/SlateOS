@@ -485,7 +485,7 @@ pub enum PasswordStrength {
 /// purpose — one pattern, so the next reviewer recognises it.
 ///
 /// The variants stay in this crate rather than moving to `randrange` beside
-/// [`SecretSource`] because [`Self::Seeded`] is `#[cfg(test)]`, and `cfg(test)`
+/// [`SecretSource`] because `Self::Seeded` is `#[cfg(test)]`, and `cfg(test)`
 /// does not cross a crate boundary: a seeded variant defined in `randrange`
 /// would be reachable from production code here, which is the one thing this
 /// type exists to prevent.

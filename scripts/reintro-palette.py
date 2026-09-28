@@ -551,36 +551,45 @@ DEFECTS = [
         # constant would ship.
         "HH: the dismiss button, which only exists on hover, keeps Mocha surface2",
         NOTIF_PANE,
-        [("                height: DISMISS_BTN_SIZE,\n                color: p.surface2,",
-          "                height: DISMISS_BTN_SIZE,\n"
-          "                color: Color::from_hex(0x585B70),")],
+        [
+            ('            p.push_surface(\n                cmds,\n                btn_x,\n                btn_y,\n                DISMISS_BTN_SIZE,\n                DISMISS_BTN_SIZE,\n                DISMISS_BTN_SIZE / 2.0,\n                Surface::Selected,\n            );\n',
+             '            let mut paint = p.surface_paint(Surface::Selected);\n            paint.fill = Some(Color::from_hex(0x585B70));\n            p.push_paint_radii(\n                cmds,\n                btn_x,\n                btn_y,\n                DISMISS_BTN_SIZE,\n                DISMISS_BTN_SIZE,\n                CornerRadii::all(DISMISS_BTN_SIZE / 2.0),\n                paint,\n            );\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_pane_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The button is `Surface::Selected` now; this gives it a frozen fill.
+            'every_colour_the_pane_draws_comes_from_its_palette',
+        ],
     ),
     (
         # Only drawn on the per-app settings page, behind the "Settings" link.
         "II: the per-app enabled pill, behind the settings view, keeps Mocha green",
         NOTIF_PANE,
-        [("            let pill_bg = if app.enabled { p.green } else { p.surface2 };",
-          "            let pill_bg = if app.enabled {\n"
-          "                Color::from_hex(0xA6E3A1)\n"
-          "            } else {\n"
-          "                p.surface2\n"
-          "            };")],
+        [
+            ('            let pill_bg = if enabled { p.green } else { p.surface2 };\n',
+             '            let pill_bg = if enabled { Color::from_hex(0xA6E3A1) } else { p.surface2 };\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_pane_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. An app is on unless it is silenced now.
+            'every_colour_the_pane_draws_comes_from_its_palette',
+        ],
     ),
     (
         # Only drawn when there is nothing to draw. A state matrix that only
         # ever renders a populated pane never reaches this line at all.
         "JJ: the empty-list caption, drawn only when there are no notifications",
         NOTIF_PANE,
-        [('                text: "No notifications".to_string(),\n'
-          "                color: p.overlay0,",
-          '                text: "No notifications".to_string(),\n'
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No notifications".to_string(),\n                color: p.subtext0,\n',
+             '                text: "No notifications".to_string(),\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_pane_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The caption is subtext0 now -- overlay0 is not a text role -- so this
+            # freezes that.
+            'every_colour_the_pane_draws_comes_from_its_palette',
+        ],
     ),
     (
         # The part-2 lesson from defect EE, applied to this module. A priority
@@ -816,10 +825,16 @@ DEFECTS = [
     (
         "HHH: the status banner's background goes back to Mocha mantle",
         UPD,
-        [("            height: 36.0,\n            color: p.mantle,",
-          "            height: 36.0,\n            color: Color::from_hex(0x181825),")],
+        [
+            ('        p.push_surface(&mut cmds, x + pad, cy, inner, 36.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x181825));\n        p.push_paint_radii(&mut cmds, x + pad, cy, inner, 36.0, CornerRadii::all(6.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "III: the restart warning goes back to Mocha peach",
@@ -831,20 +846,28 @@ DEFECTS = [
     (
         "JJJ: the schedule heading goes back to Mocha lavender",
         UPD,
-        [("            text: \"Update schedule\".into(),\n"
-          "            font_size: 14.0,\n            color: p.lavender,",
-          "            text: \"Update schedule\".into(),\n"
-          "            font_size: 14.0,\n            color: Color::from_hex(0xB4BEFE),")],
+        [
+            ('            text: "Update schedule".into(),\n            font_size: 14.0,\n            color: p.ink(p.lavender),\n',
+             '            text: "Update schedule".into(),\n            font_size: 14.0,\n            color: Color::from_hex(0xB4BEFE),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The heading is inked now.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "KKK: a failed install's row goes back to Mocha red",
         UPD,
-        [("            let color = if entry.success { p.green } else { p.red };",
-          "            let color = if entry.success { p.green } else { Color::from_hex(0xF38BA8) };")],
+        [
+            ('            } else {\n                p.ink(p.red)\n            };\n            p.push_surface(cmds, x, y, width, 32.0, 4.0, Surface::Card);\n',
+             '            } else {\n                Color::from_hex(0xF38BA8)\n            };\n            p.push_surface(cmds, x, y, width, 32.0, 4.0, Surface::Card);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The row's text is inked now; the entry is named by the card after it.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "LLL: the error status is made to follow the accent",
@@ -3447,11 +3470,13 @@ DEFECTS = [
         "DDDDDDDDDDDDDDD: a hovered built-in row keeps Mocha's surface0",
         CTX,
         [
-            ('                        height: item_height,\n                        color: p.surface0,\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.',
-             '                        height: item_height,\n                        color: guitk::color::Color::from_hex(0x313244),\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.'),
+            ('                    p.push_surface(\n                        &mut commands,\n                        x + 4.0,\n                        cy,\n                        width - 8.0,\n                        item_height,\n                        4.0,\n                        Surface::Selected,\n                    );\n                }\n\n                // Icon.\n',
+             '                    let mut paint = p.surface_paint(Surface::Selected);\n                    paint.fill = Some(guitk::color::Color::from_hex(0x313244));\n                    p.push_paint_radii(\n                        &mut commands,\n                        x + 4.0,\n                        cy,\n                        width - 8.0,\n                        item_height,\n                        CornerRadii::all(4.0),\n                        paint,\n                    );\n                }\n\n                // Icon.\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The hover is `Surface::Selected` now -- outlined in the accent under the default theme -- and the built-in row's call is told from the extension row's by the icon comment after it.
             'every_colour_the_context_menu_draws_comes_from_its_palette',
             'the_menus_own_surfaces_come_from_the_palette',
         ],
@@ -3545,11 +3570,13 @@ DEFECTS = [
         "LLLLLLLLLLLLLLL: the settings search bar keeps Mocha's surface0",
         CTX,
         [
-            ('            height: 28.0,\n            color: p.surface0,',
-             '            height: 28.0,\n            color: guitk::color::Color::from_hex(0x313244),'),
+            ('        p.push_surface(\n            &mut commands,\n            x + padding,\n            cy,\n            width - padding * 2.0,\n            28.0,\n            6.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(guitk::color::Color::from_hex(0x313244));\n        p.push_paint_radii(\n            &mut commands,\n            x + padding,\n            cy,\n            width - padding * 2.0,\n            28.0,\n            CornerRadii::all(6.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_the_context_menu_draws_comes_from_its_palette',
         ],
     ),
@@ -3723,11 +3750,14 @@ DEFECTS = [
         'ZZZZZZZZZZZZZZZ: the hovered row is the same colour as the menu under it',
         CTX,
         [
-            ('                        height: item_height,\n                        color: p.surface0,\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.',
-             '                        height: item_height,\n                        color: p.base,\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.'),
+            ('                    p.push_surface(\n                        &mut commands,\n                        x + 4.0,\n                        cy,\n                        width - 8.0,\n                        item_height,\n                        4.0,\n                        Surface::Selected,\n                    );\n                }\n\n                // Icon.\n',
+             '                    let mut paint = p.surface_paint(Surface::Selected);\n                    paint.fill = Some(p.base);\n                    paint.border = None;\n                    p.push_paint_radii(\n                        &mut commands,\n                        x + 4.0,\n                        cy,\n                        width - 8.0,\n                        item_height,\n                        CornerRadii::all(4.0),\n                        paint,\n                    );\n                }\n\n                // Icon.\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The hover is `Surface::Selected` now -- outlined in the accent under the default theme -- and the built-in row's call is told from the extension row's by the icon comment after it.
+            # The same colour as the menu is a base fill and no outline: no mark at all.
             'the_menus_own_surfaces_come_from_the_palette',
         ],
     ),
@@ -11950,14 +11980,16 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: MOCHA_SURFACE0 survives at a thumbnail's background",
         SNAP,
         [
-            ('                height: THUMB_SIZE,\n                color: p.surface0,',
-             '                height: THUMB_SIZE,\n                color: guitk::color::Color::from_hex(0x313244),'),
+            ('            p.push_surface(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                4.0,\n                Surface::ControlTrack,\n            );\n',
+             '            let mut paint = p.surface_paint(Surface::ControlTrack);\n            paint.fill = Some(guitk::color::Color::from_hex(0x313244));\n            p.push_paint_radii(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                CornerRadii::all(4.0),\n                paint,\n            );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A thumbnail's ground is `Surface::ControlTrack` now: surface2 in both themes.
             'every_colour_all_three_renderers_draw_comes_from_their_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
             'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
         ],
     ),
     (
@@ -12215,13 +12247,15 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the thumbnail background and the picker's title trade colours",
         SNAP,
         [
-            ('                height: THUMB_SIZE,\n                color: p.surface0,',
-             '                height: THUMB_SIZE,\n                color: p.lavender,'),
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
-             '            // the accented thumbnail below it that actually means something.\n            color: p.surface0,'),
+            ('            p.push_surface(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                4.0,\n                Surface::ControlTrack,\n            );\n',
+             '            let mut paint = p.surface_paint(Surface::ControlTrack);\n            paint.fill = Some(p.ink(p.lavender));\n            p.push_paint_radii(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                CornerRadii::all(4.0),\n                paint,\n            );\n'),
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),\n',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.surface2,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A thumbnail's ground is `Surface::ControlTrack` now: surface2 in both themes.
             'every_site_draws_the_role_it_claims',
         ],
     ),
@@ -12586,11 +12620,13 @@ DEFECTS = [
         "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a thumbnail's background drops a rung",
         SNAP,
         [
-            ('                height: THUMB_SIZE,\n                color: p.surface0,',
-             '                height: THUMB_SIZE,\n                color: p.mantle,'),
+            ('            p.push_surface(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                4.0,\n                Surface::ControlTrack,\n            );\n',
+             '            let mut paint = p.surface_paint(Surface::ControlTrack);\n            paint.fill = Some(p.surface1);\n            p.push_paint_radii(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                CornerRadii::all(4.0),\n                paint,\n            );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A thumbnail's ground is `Surface::ControlTrack` now: surface2 in both themes.
             'every_site_draws_the_role_it_claims',
         ],
     ),

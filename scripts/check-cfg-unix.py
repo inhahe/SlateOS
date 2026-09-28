@@ -84,6 +84,8 @@ full, both call sites at once". True of boot-test.sh, false here: this script ne
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -105,20 +107,89 @@ GATED = re.compile(
 CRATE_NAME = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
 
 
-def crates_with_unix_code() -> list[str]:
-    """Every crate in the workspace holding a unix-gated block.
+def unix_crates() -> list[tuple[str, Path]]:
+    """Every crate in the workspace holding a unix-gated block: (name, manifest).
 
     Derived by reading, so a crate joins by growing its first one. Skips
     `target/` and `.git/`, and skips a `Cargo.toml` with no `src/` -- a
     workspace root is not a crate to check.
     """
-    found: set[str] = set()
+    found: dict[str, Path] = {}
     for name, src in candidate_crates():
         for f in src.rglob("*.rs"):
             if GATED.search(f.read_text(encoding="utf-8", errors="surrogateescape")):
-                found.add(name)
+                found.setdefault(name, src.parent / "Cargo.toml")
                 break
-    return sorted(found)
+    return sorted(found.items())
+
+
+def crates_with_unix_code() -> list[str]:
+    """The names of `unix_crates()`."""
+    return [name for name, _ in unix_crates()]
+
+
+def _same_file(a: str | Path, b: str | Path) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def specs_from_metadata(
+    crates: list[tuple[str, Path]], metadata: dict
+) -> tuple[list[str], list[str], list[str]]:
+    """How to name each crate to `cargo -p`: (specs, disambiguated, problems).
+
+    A crate found on disk is named by its bare package name, which is what cargo
+    prints and what a reader expects -- unless another package in the resolved
+    graph has the same name, when the bare name is ambiguous and cargo refuses
+    the whole run. That is not hypothetical: lane E vendored `cfg-if` into
+    `rustcrypto/` on 2026-09-27, the same day lane F's rav1d brought crates.io's
+    `cfg-if` 1.0.5 into the graph, and the two together made every push that
+    reached this gate fail with "specification `cfg-if` is ambiguous" -- a
+    failure of the gate, not of anybody's code. Such a crate is named instead by
+    its package ID (`path+file:///...#1.0.5`), the one found at *its* manifest.
+
+    A shared name with no package at the crate's own manifest means the crate is
+    not in the graph at all, so no spec reaches it; the bare name would check the
+    wrong package or none. That is reported as a problem, not guessed around.
+    """
+    by_name: dict[str, list[dict]] = {}
+    for pkg in metadata.get("packages", []):
+        by_name.setdefault(pkg.get("name", ""), []).append(pkg)
+    specs: list[str] = []
+    disambiguated: list[str] = []
+    problems: list[str] = []
+    for name, manifest in crates:
+        same = by_name.get(name, [])
+        if len(same) <= 1:
+            specs.append(name)
+            continue
+        mine = [p for p in same if _same_file(p.get("manifest_path", ""), manifest)]
+        if len(mine) != 1:
+            problems.append(
+                f"`{name}` ({manifest}) shares its name with {len(same)} packages in "
+                f"the graph and is not one of them, so no `-p` can reach it"
+            )
+            continue
+        specs.append(mine[0]["id"])
+        disambiguated.append(name)
+    return specs, disambiguated, problems
+
+
+def package_specs(crates: list[tuple[str, Path]]) -> tuple[list[str], list[str], list[str]]:
+    """`specs_from_metadata` over this tree's `cargo metadata`.
+
+    If cargo cannot produce the metadata, this says so and returns the bare
+    names: the run that follows then behaves exactly as it did before this
+    function existed -- it passes, or fails with cargo's own message.
+    """
+    proc = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1"],
+        cwd=REPO, capture_output=True, text=True, timeout=600, check=False,
+    )
+    if proc.returncode != 0:
+        print("check-cfg-unix: `cargo metadata` failed, so crates are named by bare "
+              f"name, unresolved:\n{proc.stderr[-2000:]}")
+        return [name for name, _ in crates], [], []
+    return specs_from_metadata(crates, json.loads(proc.stdout))
 
 
 def candidate_crates() -> list[tuple[str, pathlib.Path]]:
@@ -213,6 +284,30 @@ def self_test() -> int:
             failures.append(f"the derivation missed `{expect}`, which has unix-gated code")
     if len(derived) < 20:
         failures.append(f"the derivation found only {len(derived)} crates; it is probably broken")
+
+    # NAMING, against a made-up graph: the 2026-09-27 shape, an in-tree `cfg-if`
+    # beside crates.io's of the same version.
+    ours = REPO / "rustcrypto" / "cfg-if" / "Cargo.toml"
+    lone = REPO / "userspace" / "su" / "Cargo.toml"
+    stray = REPO / "nowhere" / "cfg-if" / "Cargo.toml"
+    graph = {"packages": [
+        {"name": "cfg-if", "id": "path+file:///ours#1.0.5", "manifest_path": str(ours)},
+        {"name": "cfg-if", "id": "registry+https://x#cfg-if@1.0.5",
+         "manifest_path": "/registry/cfg-if-1.0.5/Cargo.toml"},
+        {"name": "su", "id": "path+file:///su#0.1.0", "manifest_path": str(lone)},
+    ]}
+    specs, shared, problems = specs_from_metadata([("cfg-if", ours), ("su", lone)], graph)
+    if specs != ["path+file:///ours#1.0.5", "su"] or shared != ["cfg-if"] or problems:
+        failures.append(
+            "a name shared in the graph must become the package ID found at the crate's "
+            f"own manifest, and a unique one stay bare; got {specs}, {shared}, {problems}"
+        )
+    _, _, problems = specs_from_metadata([("cfg-if", stray)], graph)
+    if len(problems) != 1:
+        failures.append(
+            "a crate whose name is shared but which is not itself in the graph must be "
+            f"reported, not named by a bare name that reaches another package; got {problems}"
+        )
 
     if not target_installed():
         print(f"check-cfg-unix --self-test: {TARGET} not installed; compile fixtures skipped")
@@ -338,7 +433,8 @@ def main() -> int:
     if args.selftest:
         return self_test()
 
-    crates = crates_with_unix_code()
+    found = unix_crates()
+    crates = [name for name, _ in found]
     if args.list:
         for c in crates:
             print(c)
@@ -360,7 +456,17 @@ def main() -> int:
         # See the "Exit 3" section of scripts/run-checker.sh.
         return 3
 
-    code, output = check(crates)
+    specs, disambiguated, problems = package_specs(found)
+    if problems:
+        print("check-cfg-unix: cannot name every crate to cargo:")
+        for p in problems:
+            print(f"  {p}")
+        return 2
+    if disambiguated:
+        print("check-cfg-unix: named by package ID, their names being shared in the "
+              f"dependency graph: {', '.join(disambiguated)}")
+
+    code, output = check(specs)
     if code != 0:
         print(f"check-cfg-unix: {len(crates)} crate(s) checked against {TARGET}; it failed:\n")
         print(output[-8000:])

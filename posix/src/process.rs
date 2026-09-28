@@ -931,24 +931,9 @@ pub extern "C" fn fork() -> PidT {
     // the child does not have, would deadlock the child's first `malloc`.
     crate::malloc::lock_for_fork();
 
-    // SYS_PROCESS_FORK is frame-handled in the kernel: it reads the
-    // caller's saved register frame to build the child's resume state.
-    // The parent returns here with the child PID (> 0); the child
-    // returns here with 0 (the kernel forces RAX=0 on the child's
-    // resume path), so a single syscall site yields both views.
-    let ret = syscall0(SYS_PROCESS_FORK);
-    // `translate` returns the PID/0 unchanged on success, or sets errno
-    // and returns -1 on a negative kernel error code.
-    let pid = errno::translate(ret) as PidT;
+    let pid = fork_raw();
 
     if pid == 0 {
-        // The child is a new thread with the parent's per-thread block: its
-        // cached task id is the parent's, so drop it for the next
-        // `current_tid` to fetch.
-        // SAFETY: `current()` is this (now single) thread's block.
-        unsafe { (*crate::perthread::current()).tid = 0 };
-        // One thread: this one.  Its `pthread_exit` is the last.
-        crate::pthread::reset_live_threads_after_fork();
         crate::malloc::unlock_after_fork_child();
         crate::stdio::unlock_after_fork_child();
     } else {
@@ -971,6 +956,57 @@ pub extern "C" fn fork() -> PidT {
         crate::pthread::atfork_run_parent();
     }
     pid
+}
+
+/// The fork itself, which `fork` wraps in its handlers and locks and
+/// `_Fork` does not: the system call, and in the child the two facts the
+/// copied state gets wrong -- its task id is the parent's, and its thread
+/// count counts threads it does not have.
+fn fork_raw() -> PidT {
+    // SYS_PROCESS_FORK is frame-handled in the kernel: it reads the
+    // caller's saved register frame to build the child's resume state.
+    // The parent returns here with the child PID (> 0); the child
+    // returns here with 0 (the kernel forces RAX=0 on the child's
+    // resume path), so a single syscall site yields both views.
+    let ret = syscall0(SYS_PROCESS_FORK);
+    // `translate` returns the PID/0 unchanged on success, or sets errno
+    // and returns -1 on a negative kernel error code.
+    let pid = errno::translate(ret) as PidT;
+    if pid == 0 {
+        // The child is a new thread with the parent's per-thread block: its
+        // cached task id is the parent's, so drop it for the next
+        // `current_tid` to fetch.
+        // SAFETY: `current()` is this (now single) thread's block.
+        unsafe { (*crate::perthread::current()).tid = 0 };
+        // One thread: this one.  Its `pthread_exit` is the last.
+        crate::pthread::reset_live_threads_after_fork();
+    }
+    pid
+}
+
+/// `fork` without the `pthread_atfork` handlers, and async-signal-safe
+/// (POSIX.1-2024): no handler runs and no lock of this library's is taken,
+/// so a signal handler may call it. In a child of a multithreaded parent only
+/// async-signal-safe functions may then be called, as POSIX says -- another
+/// thread may have held the heap's lock at the instant of the copy. The
+/// child's `arc4random` pool is still invalidated: that is a flag, not a
+/// lock, and a copy of the parent's pool would replay the parent's stream.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn _Fork() -> PidT {
+    let pid = fork_raw();
+    if pid == 0 {
+        crate::random::reseed_after_fork();
+    }
+    pid
+}
+
+/// Turn process accounting on or off (Linux). The kernel here keeps no
+/// accounting records, so `ENOSYS`, as a Linux kernel built without
+/// `CONFIG_BSD_PROCESS_ACCT` answers.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn acct(_filename: *const u8) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
 }
 
 // execve is implemented in spawn.rs with real ELF loading.
@@ -3952,6 +3988,13 @@ pub extern "C" fn kcmp(pid1: i32, pid2: i32, type_: i32, idx1: u64, idx2: u64) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn acct_is_enosys() {
+        errno::set_errno(0);
+        assert_eq!(super::acct(core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
     use super::*;
 
     // -- Wait flag constants match Linux --

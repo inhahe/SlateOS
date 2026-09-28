@@ -3304,9 +3304,125 @@ pub extern "C" fn getitimer(which: i32, curr_value: *mut Itimerval) -> i32 {
 // Unit tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The old time interfaces musl's headers still declare
+// ---------------------------------------------------------------------------
+
+/// `struct timeb`, `ftime`'s result: seconds, milliseconds, and two fields
+/// every implementation now leaves 0.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Timeb {
+    /// Seconds since the Epoch.
+    pub time: TimeT,
+    /// Milliseconds past `time`.
+    pub millitm: u16,
+    /// Minutes west of Greenwich: always 0, as in glibc and musl.
+    pub timezone: i16,
+    /// Daylight-saving flag: always 0, as in glibc and musl.
+    pub dstflag: i16,
+}
+
+/// The time now, to the millisecond (removed from POSIX in 2008; glibc and
+/// musl still answer it from `CLOCK_REALTIME`, with no zone).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ftime(tp: *mut Timeb) -> i32 {
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if clock_gettime(CLOCK_REALTIME, &raw mut ts) != 0 {
+        return -1;
+    }
+    // SAFETY: NULL or the caller's `struct timeb`.
+    let Some(out) = (unsafe { tp.as_mut() }) else {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    };
+    *out = Timeb {
+        time: ts.tv_sec,
+        // Below 1000: `tv_nsec` is below 10^9.
+        millitm: u16::try_from(ts.tv_nsec / 1_000_000).unwrap_or(0),
+        timezone: 0,
+        dstflag: 0,
+    };
+    0
+}
+
+/// Set the system time to `*t` seconds (SVID; glibc keeps it for old
+/// binaries): `settimeofday` with no microseconds, so `EPERM` without the
+/// privilege. A NULL `t` is `EINVAL`, as glibc's compatibility `stime`
+/// checks.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn stime(t: *const TimeT) -> i32 {
+    // SAFETY: NULL or the caller's `time_t`.
+    let Some(&secs) = (unsafe { t.as_ref() }) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+    let tv = Timeval {
+        tv_sec: secs,
+        tv_usec: 0,
+    };
+    settimeofday(&raw const tv, core::ptr::null())
+}
+
+/// The CPU-time clock of process `pid`, into `*clock_id`; the error number
+/// on failure, as POSIX has it return. The calling process's own clock is
+/// `CLOCK_PROCESS_CPUTIME_ID`. Another process's CPU time is not something
+/// this system can read -- `clock_gettime` has no clock for it -- so an
+/// existing other process is `EPERM` (the error POSIX gives for "may not
+/// access that clock") rather than a clock id every later call would refuse,
+/// and one that does not exist is `ESRCH`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn clock_getcpuclockid(pid: PidT, clock_id: *mut ClockidT) -> i32 {
+    if pid == 0 || pid == crate::process::getpid() {
+        // SAFETY: NULL or the caller's `clockid_t`.
+        let Some(out) = (unsafe { clock_id.as_mut() }) else {
+            return errno::EFAULT;
+        };
+        *out = CLOCK_PROCESS_CPUTIME_ID;
+        return 0;
+    }
+    let saved = errno::get_errno();
+    let exists = crate::signal::kill(pid, 0) == 0 || errno::get_errno() == errno::EPERM;
+    errno::set_errno(saved);
+    if exists { errno::EPERM } else { errno::ESRCH }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stime_of_null_is_einval() {
+        errno::set_errno(0);
+        assert_eq!(stime(core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn ftime_of_null_is_efault_and_zone_fields_are_zero() {
+        errno::set_errno(0);
+        let mut tb = Timeb {
+            time: 7,
+            millitm: 9,
+            timezone: 5,
+            dstflag: 1,
+        };
+        if ftime(&raw mut tb) == 0 {
+            assert!(tb.millitm < 1000);
+            assert_eq!((tb.timezone, tb.dstflag), (0, 0));
+        }
+    }
+
+    #[test]
+    fn clock_getcpuclockid_of_self_is_the_process_clock() {
+        let mut id: ClockidT = -1;
+        assert_eq!(clock_getcpuclockid(0, &raw mut id), 0);
+        assert_eq!(id, CLOCK_PROCESS_CPUTIME_ID);
+        assert_eq!(clock_getcpuclockid(0, core::ptr::null_mut()), errno::EFAULT);
+    }
 
     /// Create a zeroed Tm.
     fn zero_tm() -> Tm {

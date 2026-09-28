@@ -85,20 +85,12 @@ BASELINE_MISSING = frozenset({
     # accounts
     "fgetpwent", "putpwent", "fgetgrent", "putgrent", "fgetspent", "sgetspent", "putspent",
     "lckpwdf", "ulckpwdf", "getusershell", "setusershell", "endusershell", "cuserid", "getpass",
-    # numbers
-    "ecvt", "fcvt", "gcvt", "lcong48", "scalb", "scalbf",
-    # search
-    "hcreate_r", "hsearch_r", "hdestroy_r",
     # time
-    "getdate", "stime", "ftime", "clock_getcpuclockid",
+    "getdate",
     # DNS messages
     "ns_initparse", "ns_parserr", "ns_skiprr", "ns_name_uncompress",
     # contexts (musl declares and does not define these either)
     "getcontext", "setcontext", "makecontext", "swapcontext",
-    # terminals
-    "tcgetwinsize", "tcsetwinsize", "vhangup",
-    # processes, files, IPC
-    "_Fork", "posix_close", "acct", "remap_file_pages", "dlinfo", "ftok",
 })
 
 DECL = re.compile(r"[^;{}]*\)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)*;", re.S)

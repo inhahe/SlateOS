@@ -554,6 +554,111 @@ pub extern "C" fn scalbnf(x: f32, n: i32) -> f32 {
     scaled_f(x, libm::scalbnf(x, n))
 }
 
+/// `x * 2^fn` for a floating `fn` (XSI; removed from POSIX in 2008, still in
+/// glibc and declared by musl): fdlibm's `e_scalb.c`, as musl has it -- a NaN
+/// for an `fn` that is no integer, the exponent clamped at +-65000, beyond
+/// which every double has overflowed or underflowed -- under glibc's
+/// `w_scalb` `errno`: `EDOM` for a NaN made from non-NaN arguments, `ERANGE`
+/// for an infinity from finite ones or a zero from a nonzero `x` and finite
+/// `fn`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scalb(x: f64, fn_: f64) -> f64 {
+    let z = if x.is_nan() || fn_.is_nan() {
+        x * fn_
+    } else if !fn_.is_finite() {
+        if fn_ > 0.0 { x * fn_ } else { x / -fn_ }
+    } else if libm::rint(fn_) != fn_ {
+        domain_nan(fn_)
+    } else if fn_ > 65000.0 {
+        libm::scalbn(x, 65000)
+    } else if -fn_ > 65000.0 {
+        libm::scalbn(x, -65000)
+    } else {
+        // An integer within +-65000: exact.
+        #[allow(clippy::cast_possible_truncation)]
+        let n = fn_ as i32;
+        libm::scalbn(x, n)
+    };
+    scalb_errno(
+        x.is_nan() || fn_.is_nan(),
+        x.is_infinite(),
+        fn_.is_infinite(),
+        x == 0.0,
+        z.is_nan(),
+        z.is_infinite(),
+        z == 0.0,
+    );
+    z
+}
+
+/// [`scalb`] (float).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scalbf(x: f32, fn_: f32) -> f32 {
+    let z = if x.is_nan() || fn_.is_nan() {
+        x * fn_
+    } else if !fn_.is_finite() {
+        if fn_ > 0.0 { x * fn_ } else { x / -fn_ }
+    } else if libm::rintf(fn_) != fn_ {
+        domain_nanf(fn_)
+    } else if fn_ > 65000.0 {
+        libm::scalbnf(x, 65000)
+    } else if -fn_ > 65000.0 {
+        libm::scalbnf(x, -65000)
+    } else {
+        #[allow(clippy::cast_possible_truncation)]
+        let n = fn_ as i32;
+        libm::scalbnf(x, n)
+    };
+    scalb_errno(
+        x.is_nan() || fn_.is_nan(),
+        x.is_infinite(),
+        fn_.is_infinite(),
+        x == 0.0,
+        z.is_nan(),
+        z.is_infinite(),
+        z == 0.0,
+    );
+    z
+}
+
+/// 0/0 made from `x`, a finite value: the processor's default NaN with
+/// "invalid" raised -- IEEE's domain error as fdlibm makes it, which a
+/// constant NaN would not raise.
+#[allow(clippy::eq_op)]
+fn domain_nan(x: f64) -> f64 {
+    (x - x) / (x - x)
+}
+
+/// [`domain_nan`] (float).
+#[allow(clippy::eq_op)]
+fn domain_nanf(x: f32) -> f32 {
+    (x - x) / (x - x)
+}
+
+/// glibc's `w_scalb` rules, for both precisions.
+#[allow(clippy::fn_params_excessive_bools)]
+fn scalb_errno(
+    nan_in: bool,
+    x_inf: bool,
+    fn_inf: bool,
+    x_zero: bool,
+    z_nan: bool,
+    z_inf: bool,
+    z_zero: bool,
+) {
+    if z_nan {
+        if !nan_in {
+            set(errno::EDOM);
+        }
+    } else if z_inf {
+        if !x_inf && !fn_inf {
+            set(errno::ERANGE);
+        }
+    } else if z_zero && !x_zero && !fn_inf {
+        set(errno::ERANGE);
+    }
+}
+
 /// [`scalbn`] with a `long` exponent.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalbln(x: f64, n: i64) -> f64 {
@@ -4442,9 +4547,9 @@ mod tests {
         match double_name(name) {
             "fabs" | "floor" | "ceil" | "round" | "trunc" | "rint" | "nearbyint" | "sqrt"
             | "fmod" | "remainder" | "drem" | "remquo" | "copysign" | "fmin" | "fmax" | "fdim"
-            | "fma" | "frexp" | "ldexp" | "scalbn" | "scalbln" | "modf" | "ilogb" | "logb"
-            | "nextafter" | "lround" | "llround" | "lrint" | "significand" | "finite" | "isnan"
-            | "isinf" => 0,
+            | "fma" | "frexp" | "ldexp" | "scalbn" | "scalbln" | "scalb" | "modf" | "ilogb"
+            | "logb" | "nextafter" | "lround" | "llround" | "lrint" | "significand" | "finite"
+            | "isnan" | "isinf" => 0,
             "exp" | "exp2" | "exp10" | "log" | "log2" | "log10" | "cbrt" | "hypot" | "atan"
             | "asin" | "acos" | "atan2" | "sin" | "cos" | "tan" | "sincos" | "tanh" | "asinh"
             | "acosh" | "atanh" | "sinh" | "cosh" | "pow" | "expm1" | "log1p" | "erf" => 2,
@@ -4736,6 +4841,8 @@ mod tests {
             "remainder" => d2(remainder),
             "remainderf" => f2(remainderf),
             "drem" => d2(drem),
+            "scalb" => d2(scalb),
+            "scalbf" => f2(scalbf),
             "fma" => same_d(name, fma(d(ins[0]), d(ins[1]), d(ins[2])), d(outs[0])),
             "fmaf" => same_f(name, fmaf(f(ins[0]), f(ins[1]), f(ins[2])), f(outs[0])),
             "ilogb" => exact_int(i64::from(ilogb(d(ins[0])))),

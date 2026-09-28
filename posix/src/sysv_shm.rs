@@ -496,6 +496,27 @@ impl Locked {
 }
 
 // ---------------------------------------------------------------------------
+// ftok
+// ---------------------------------------------------------------------------
+
+/// The System V IPC key for file `path` and project `id` -- shared by
+/// message queues, semaphores and shared memory -- as glibc and musl make it:
+/// the low 16 bits of the file's inode number, the low 8 of its device
+/// number above them, and the low 8 of `id` on top. -1, with `stat`'s
+/// `errno`, if the file cannot be examined.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ftok(path: *const u8, id: i32) -> i32 {
+    // SAFETY: an all-zero `struct stat` is a valid value to be overwritten.
+    let mut st: crate::stat::Stat = unsafe { core::mem::zeroed() };
+    if crate::file::stat(path, &raw mut st) != 0 {
+        return -1;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let key = ((st.st_ino & 0xFFFF) | ((st.st_dev & 0xFF) << 16)) as i32 | ((id & 0xFF) << 24);
+    key
+}
+
+// ---------------------------------------------------------------------------
 // shmget
 // ---------------------------------------------------------------------------
 
@@ -918,6 +939,14 @@ mod tests {
             rm(id);
         }
         rm(big);
+    }
+
+    #[test]
+    fn ftok_of_a_missing_file_is_minus_one() {
+        assert_eq!(
+            super::ftok(c"/no/such/file/for/ftok".as_ptr().cast(), 1),
+            -1
+        );
     }
 
     #[test]

@@ -667,17 +667,115 @@ struct HashNode {
     next: *mut HashNode,
 }
 
-/// Global hash table state.
-struct HashTable {
+/// A hash table: an array of bucket chains. The global one `hcreate` makes,
+/// and each `struct hsearch_data`'s, are this.
+pub(crate) struct HashTable {
     buckets: *mut *mut HashNode,
     size: usize,
 }
 
-/// Global hash table (POSIX only defines one table at a time).
-static mut HTAB: HashTable = HashTable {
-    buckets: core::ptr::null_mut(),
-    size: 0,
-};
+impl HashTable {
+    /// No table.
+    const EMPTY: Self = Self {
+        buckets: core::ptr::null_mut(),
+        size: 0,
+    };
+
+    /// Give the table at least `nel` buckets (a power of two, 16 or more),
+    /// freeing any it had. `false` with `ENOMEM` when they cannot be had.
+    fn create(&mut self, nel: usize) -> bool {
+        self.destroy();
+        let mut size = 16_usize;
+        while size < nel {
+            let Some(s) = size.checked_mul(2) else {
+                errno::set_errno(errno::ENOMEM);
+                return false;
+            };
+            size = s;
+        }
+        let Some(bytes) = size.checked_mul(core::mem::size_of::<*mut HashNode>()) else {
+            errno::set_errno(errno::ENOMEM);
+            return false;
+        };
+        let ptr = crate::malloc::calloc(1, bytes);
+        if ptr.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return false;
+        }
+        self.buckets = ptr.cast::<*mut HashNode>();
+        self.size = size;
+        true
+    }
+
+    /// Free every chain and the bucket array. The keys and data are the
+    /// caller's, and are not freed (POSIX does not ask it).
+    fn destroy(&mut self) {
+        if self.buckets.is_null() {
+            return;
+        }
+        for i in 0..self.size {
+            // SAFETY: `i < size`, the bucket array's length; each chain's
+            // nodes came from `malloc` in `search` and are freed once.
+            unsafe {
+                let mut node = *self.buckets.add(i);
+                while !node.is_null() {
+                    let next = (*node).next;
+                    crate::malloc::free(node.cast::<u8>());
+                    node = next;
+                }
+            }
+        }
+        // SAFETY: the array came from `calloc` in `create`.
+        unsafe { crate::malloc::free(self.buckets.cast::<u8>()) };
+        *self = Self::EMPTY;
+    }
+
+    /// Find `item.key`, or with `ENTER` add `item` if it is absent: the
+    /// entry, or NULL -- `ESRCH` for a key `FIND` did not find (or no
+    /// table), `ENOMEM` for an entry that could not be added.
+    ///
+    /// # Safety
+    ///
+    /// `item.key` is a NUL-terminated string, as is every key in the table.
+    unsafe fn search(&mut self, item: Entry, action: i32) -> *mut Entry {
+        if self.buckets.is_null() || self.size == 0 {
+            errno::set_errno(errno::ESRCH);
+            return core::ptr::null_mut();
+        }
+        #[allow(clippy::cast_possible_truncation)] // the low bits select a bucket
+        let idx = (fnv1a_hash(item.key) as usize) & (self.size.wrapping_sub(1));
+        // SAFETY: `idx < size`; the chain's nodes are this table's.
+        unsafe {
+            let bucket = self.buckets.add(idx);
+            let mut node = *bucket;
+            while !node.is_null() {
+                if c_str_eq((*node).entry.key, item.key) {
+                    return &raw mut (*node).entry;
+                }
+                node = (*node).next;
+            }
+            if action == FIND {
+                errno::set_errno(errno::ESRCH);
+                return core::ptr::null_mut();
+            }
+            let new_node =
+                crate::malloc::malloc(core::mem::size_of::<HashNode>()).cast::<HashNode>();
+            if new_node.is_null() {
+                errno::set_errno(errno::ENOMEM);
+                return core::ptr::null_mut();
+            }
+            new_node.write(HashNode {
+                entry: item,
+                next: *bucket,
+            });
+            *bucket = new_node;
+            &raw mut (*new_node).entry
+        }
+    }
+}
+
+/// The table `hcreate` makes (POSIX has one at a time).
+static mut HTAB: HashTable = HashTable::EMPTY;
 
 /// FNV-1a hash for NUL-terminated strings.
 fn fnv1a_hash(key: *const u8) -> u64 {
@@ -743,44 +841,7 @@ pub extern "C" fn hcreate(nel: usize) -> i32 {
     // the sole accessor here is the calling thread.  This crate's own
     // tests are such a caller: see `HTAB_TEST_LOCK` in the test module,
     // added after unsynchronised tests segfaulted the test binary.
-    // NOTE: this used to read "single-threaded access", which asserted a
-    // fact rather than naming an obligation, and was false in the tests.
-    unsafe {
-        // Destroy any existing table.
-        if !HTAB.buckets.is_null() {
-            hdestroy();
-        }
-
-        // Allocate at least `nel` buckets (use next power of two for
-        // good distribution, minimum 16).
-        let mut size = 16_usize;
-        while size < nel {
-            size = if let Some(s) = size.checked_mul(2) {
-                s
-            } else {
-                errno::set_errno(errno::ENOMEM);
-                return 0;
-            };
-        }
-
-        let Some(alloc_bytes) = size.checked_mul(core::mem::size_of::<*mut HashNode>()) else {
-            errno::set_errno(errno::ENOMEM);
-            return 0;
-        };
-
-        let ptr = crate::malloc::malloc(alloc_bytes);
-        if ptr.is_null() {
-            errno::set_errno(errno::ENOMEM);
-            return 0;
-        }
-
-        // Zero all bucket pointers.
-        core::ptr::write_bytes(ptr, 0, alloc_bytes);
-
-        HTAB.buckets = ptr.cast::<*mut HashNode>();
-        HTAB.size = size;
-    }
-    1 // success
+    i32::from(unsafe { (*core::ptr::addr_of_mut!(HTAB)).create(nel) })
 }
 
 /// `hdestroy` — destroy the global hash table.
@@ -789,36 +850,8 @@ pub extern "C" fn hcreate(nel: usize) -> i32 {
 /// the key or data pointers in each entry (POSIX does not require it).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hdestroy() {
-    // SAFETY: `HTAB` is the single process-global table the POSIX
-    // `hsearch` family is defined around, and that family is explicitly
-    // not thread-safe -- serialising calls is the caller's obligation
-    // (`hsearch_r` is the reentrant form for callers who need one).  So
-    // the sole accessor here is the calling thread.  This crate's own
-    // tests are such a caller: see `HTAB_TEST_LOCK` in the test module,
-    // added after unsynchronised tests segfaulted the test binary.
-    // NOTE: this used to read "single-threaded access", which asserted a
-    // fact rather than naming an obligation, and was false in the tests.
-    unsafe {
-        if HTAB.buckets.is_null() {
-            return;
-        }
-
-        // Free all chains.
-        let mut i: usize = 0;
-        while i < HTAB.size {
-            let mut node = *HTAB.buckets.add(i);
-            while !node.is_null() {
-                let next = (*node).next;
-                crate::malloc::free(node.cast::<u8>());
-                node = next;
-            }
-            i = i.wrapping_add(1);
-        }
-
-        crate::malloc::free(HTAB.buckets.cast::<u8>());
-        HTAB.buckets = core::ptr::null_mut();
-        HTAB.size = 0;
-    }
+    // SAFETY: as in `hcreate`.
+    unsafe { (*core::ptr::addr_of_mut!(HTAB)).destroy() };
 }
 
 /// `hsearch` — search or enter an item in the hash table.
@@ -831,54 +864,111 @@ pub extern "C" fn hdestroy() {
 /// not-found, ENOMEM on allocation failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hsearch(item: Entry, action: i32) -> *mut Entry {
-    // SAFETY: `HTAB` is the single process-global table the POSIX
-    // `hsearch` family is defined around, and that family is explicitly
-    // not thread-safe -- serialising calls is the caller's obligation
-    // (`hsearch_r` is the reentrant form for callers who need one).  So
-    // the sole accessor here is the calling thread.  This crate's own
-    // tests are such a caller: see `HTAB_TEST_LOCK` in the test module,
-    // added after unsynchronised tests segfaulted the test binary.
-    // NOTE: this used to read "single-threaded access", which asserted a
-    // fact rather than naming an obligation, and was false in the tests.
-    unsafe {
-        if HTAB.buckets.is_null() || HTAB.size == 0 {
-            errno::set_errno(errno::ESRCH);
-            return core::ptr::null_mut();
-        }
+    // SAFETY: as in `hcreate`; the keys are C strings, POSIX's contract.
+    unsafe { (*core::ptr::addr_of_mut!(HTAB)).search(item, action) }
+}
 
-        let hash = fnv1a_hash(item.key);
-        let idx = (hash as usize) & (HTAB.size.wrapping_sub(1));
-        let bucket = HTAB.buckets.add(idx);
+/// musl's `struct hsearch_data`: a table of the caller's own, for the `_r`
+/// functions (GNU). Its first word is ours to point at the table; the caller
+/// zeroes the whole of it before `hcreate_r`, as glibc requires.
+#[repr(C)]
+pub struct HsearchData {
+    /// The table, or NULL before `hcreate_r` and after `hdestroy_r`.
+    pub(crate) tab: *mut HashTable,
+    /// Unused (musl's `__unused1`).
+    pub(crate) unused1: u32,
+    /// Unused (musl's `__unused2`).
+    pub(crate) unused2: u32,
+}
 
-        // Search the chain.
-        let mut node = *bucket;
-        while !node.is_null() {
-            if c_str_eq((*node).entry.key, item.key) {
-                return &raw mut (*node).entry;
-            }
-            node = (*node).next;
-        }
-
-        // Not found.
-        if action == FIND {
-            errno::set_errno(errno::ESRCH);
-            return core::ptr::null_mut();
-        }
-
-        // ENTER: allocate a new node and prepend to bucket.
-        let new_node = crate::malloc::malloc(core::mem::size_of::<HashNode>());
-        if new_node.is_null() {
-            errno::set_errno(errno::ENOMEM);
-            return core::ptr::null_mut();
-        }
-        let new_node = new_node.cast::<HashNode>();
-        (*new_node).entry.key = item.key;
-        (*new_node).entry.data = item.data;
-        (*new_node).next = *bucket;
-        *bucket = new_node;
-
-        &raw mut (*new_node).entry
+/// [`hcreate`] for the caller's `*htab`: nonzero on success. 0 with `EINVAL`
+/// for a NULL `htab`, 0 with nothing set if `*htab` already has a table
+/// (glibc's answers), 0 with `ENOMEM` if the table cannot be had.
+///
+/// # Safety
+///
+/// `htab` is NULL or a `struct hsearch_data` the caller zeroed or destroyed.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn hcreate_r(nel: usize, htab: *mut HsearchData) -> i32 {
+    // SAFETY: NULL or the caller's object.
+    let Some(h) = (unsafe { htab.as_mut() }) else {
+        errno::set_errno(errno::EINVAL);
+        return 0;
+    };
+    if !h.tab.is_null() {
+        return 0;
     }
+    let t = crate::malloc::malloc(core::mem::size_of::<HashTable>()).cast::<HashTable>();
+    if t.is_null() {
+        errno::set_errno(errno::ENOMEM);
+        return 0;
+    }
+    // SAFETY: a fresh block of the right size, malloc-aligned.
+    unsafe {
+        t.write(HashTable::EMPTY);
+        if !(*t).create(nel) {
+            crate::malloc::free(t.cast());
+            return 0;
+        }
+    }
+    h.tab = t;
+    1
+}
+
+/// [`hdestroy`] for the caller's `*htab`, which may then be created again.
+/// `EINVAL` for a NULL `htab`.
+///
+/// # Safety
+///
+/// As for [`hcreate_r`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn hdestroy_r(htab: *mut HsearchData) {
+    // SAFETY: NULL or the caller's object.
+    let Some(h) = (unsafe { htab.as_mut() }) else {
+        errno::set_errno(errno::EINVAL);
+        return;
+    };
+    if h.tab.is_null() {
+        return;
+    }
+    // SAFETY: the table `hcreate_r` made, freed once.
+    unsafe {
+        (*h.tab).destroy();
+        crate::malloc::free(h.tab.cast());
+    }
+    h.tab = core::ptr::null_mut();
+}
+
+/// [`hsearch`] in the caller's `*htab`: 1 with the entry in `*retval`, or 0
+/// with `*retval` NULL and `errno` -- `ESRCH` not found (or no table),
+/// `ENOMEM` not added, `EINVAL` for a NULL `htab`.
+///
+/// # Safety
+///
+/// As for [`hcreate_r`]; `retval` is a valid `ENTRY **`; the keys are C
+/// strings.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn hsearch_r(
+    item: Entry,
+    action: i32,
+    retval: *mut *mut Entry,
+    htab: *mut HsearchData,
+) -> i32 {
+    // SAFETY: NULL or the caller's objects.
+    let (Some(h), Some(out)) = (unsafe { htab.as_mut() }, unsafe { retval.as_mut() }) else {
+        errno::set_errno(errno::EINVAL);
+        return 0;
+    };
+    // SAFETY: the table `hcreate_r` made, if any; the keys are C strings.
+    let e = match unsafe { h.tab.as_mut() } {
+        Some(t) => unsafe { t.search(item, action) },
+        None => {
+            errno::set_errno(errno::ESRCH);
+            core::ptr::null_mut()
+        }
+    };
+    *out = e;
+    i32::from(!e.is_null())
 }
 
 // ===========================================================================
@@ -1083,6 +1173,73 @@ mod tests {
     /// Hold it for the *whole* test body, from before `hcreate` to past
     /// `hdestroy`, so no test can observe a half-built or half-freed table.
     static HTAB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_r_tables_are_the_callers_own() {
+        let mut a = HsearchData {
+            tab: core::ptr::null_mut(),
+            unused1: 0,
+            unused2: 0,
+        };
+        let mut b = HsearchData {
+            tab: core::ptr::null_mut(),
+            unused1: 0,
+            unused2: 0,
+        };
+        let mut out: *mut Entry = core::ptr::null_mut();
+        let (k1, k2) = (
+            c"one".as_ptr().cast_mut().cast::<u8>(),
+            c"two".as_ptr().cast_mut().cast::<u8>(),
+        );
+        // SAFETY: local tables and C-string keys.
+        unsafe {
+            assert_eq!(hcreate_r(10, &raw mut a), 1);
+            assert_eq!(
+                hcreate_r(10, &raw mut a),
+                0,
+                "a second create of a live table"
+            );
+            assert_eq!(hcreate_r(10, &raw mut b), 1);
+            let e = Entry {
+                key: k1,
+                data: 7 as *mut u8,
+            };
+            assert_eq!(hsearch_r(e, ENTER, &raw mut out, &raw mut a), 1);
+            assert_eq!((*out).data as usize, 7);
+            // `b` does not have it.
+            errno::set_errno(0);
+            let f = Entry {
+                key: k1,
+                data: core::ptr::null_mut(),
+            };
+            assert_eq!(hsearch_r(f, FIND, &raw mut out, &raw mut b), 0);
+            assert!(out.is_null());
+            assert_eq!(errno::get_errno(), errno::ESRCH);
+            let g = Entry {
+                key: k1,
+                data: core::ptr::null_mut(),
+            };
+            assert_eq!(hsearch_r(g, FIND, &raw mut out, &raw mut a), 1);
+            assert_eq!((*out).data as usize, 7);
+            let h = Entry {
+                key: k2,
+                data: core::ptr::null_mut(),
+            };
+            assert_eq!(hsearch_r(h, FIND, &raw mut out, &raw mut a), 0);
+            hdestroy_r(&raw mut a);
+            hdestroy_r(&raw mut b);
+            assert!(a.tab.is_null() && b.tab.is_null());
+            assert_eq!(
+                hcreate_r(4, &raw mut a),
+                1,
+                "a destroyed table can be made again"
+            );
+            hdestroy_r(&raw mut a);
+            errno::set_errno(0);
+            assert_eq!(hcreate_r(4, core::ptr::null_mut()), 0);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+    }
 
     /// Acquire the `HTAB` lock, recovering from poison.
     ///

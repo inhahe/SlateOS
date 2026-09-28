@@ -1732,6 +1732,30 @@ pub extern "C" fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32 {
     ioctl(fd, TCGETS, termios_p.cast::<u8>())
 }
 
+/// The terminal's size, into `*ws` (POSIX.1-2024): `TIOCGWINSZ`, as musl's
+/// is. `ENOTTY` for a descriptor that is no terminal.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tcgetwinsize(fd: i32, ws: *mut Winsize) -> i32 {
+    ioctl(fd, TIOCGWINSZ, ws.cast::<u8>())
+}
+
+/// Set the terminal's size from `*ws` (POSIX.1-2024): `TIOCSWINSZ`. The
+/// buffer is only read -- `ioctl` takes one pointer type for both directions.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tcsetwinsize(fd: i32, ws: *const Winsize) -> i32 {
+    ioctl(fd, TIOCSWINSZ, ws.cast_mut().cast::<u8>())
+}
+
+/// Hang up the controlling terminal (Linux). The kernel here has no way to
+/// simulate a hangup on a terminal -- the job `vhangup` exists for, which
+/// Linux reserves to `CAP_SYS_TTY_CONFIG` -- so this answers `ENOSYS`, as a
+/// Linux kernel does whose terminal layer lacks the call.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn vhangup() -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}
+
 /// Set terminal attributes.
 ///
 /// `optional_actions` specifies when the change takes effect:
@@ -2048,6 +2072,25 @@ pub extern "C" fn tcgetsid(fd: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vhangup_is_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(super::vhangup(), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn tcgetwinsize_of_no_terminal_fails() {
+        let mut ws = super::Winsize {
+            ws_row: 1,
+            ws_col: 2,
+            ws_xpixel: 3,
+            ws_ypixel: 4,
+        };
+        assert_eq!(super::tcgetwinsize(-1, &raw mut ws), -1);
+        assert_eq!(super::tcsetwinsize(-1, &raw const ws), -1);
+    }
+
     use super::*;
 
     // -- Structure size tests --

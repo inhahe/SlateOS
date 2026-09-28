@@ -1988,6 +1988,358 @@ const RAND48_C: u64 = 0xB;
 /// 48-bit mask.
 const RAND48_MASK: u64 = (1_u64 << 48) - 1;
 
+/// The multiplier and addend in use: POSIX's, until [`lcong48`] changes
+/// them, and again after [`srand48`] or [`seed48`], which restore them, as
+/// POSIX requires. Serialised like [`RAND48_STATE`], by the caller.
+static mut RAND48_MUL: u64 = RAND48_A;
+/// See [`RAND48_MUL`].
+static mut RAND48_ADD: u64 = RAND48_C;
+
+/// One step of the generator from `state`: `(a * state + c) mod 2^48`, with
+/// the multiplier and addend in use -- which [`lcong48`] sets for every
+/// function of the family, those with their own state included.
+fn rand48_next(state: u64) -> u64 {
+    // SAFETY: plain reads through `addr_of!`, no reference formed; see
+    // `RAND48_STATE` on why the family is not locked.
+    let (a, c) = unsafe {
+        (
+            core::ptr::addr_of!(RAND48_MUL).read(),
+            core::ptr::addr_of!(RAND48_ADD).read(),
+        )
+    };
+    (state.wrapping_mul(a).wrapping_add(c)) & RAND48_MASK
+}
+
+/// Put POSIX's multiplier and addend back ([`srand48`], [`seed48`]).
+fn rand48_standard_parameters() {
+    // SAFETY: plain writes through `addr_of_mut!`; see `RAND48_STATE`.
+    unsafe {
+        core::ptr::addr_of_mut!(RAND48_MUL).write(RAND48_A);
+        core::ptr::addr_of_mut!(RAND48_ADD).write(RAND48_C);
+    }
+}
+
+/// Set the generator's state, multiplier and addend at once (XSI):
+/// `param[0..3]` the state, `param[3..6]` the multiplier, low 16 bits first,
+/// and `param[6]` the addend. A NULL `param` changes nothing.
+///
+/// # Safety
+///
+/// `param` is NULL or points to seven `unsigned short`s.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn lcong48(param: *const u16) {
+    if param.is_null() {
+        return;
+    }
+    // SAFETY: seven readable values, by this function's contract.
+    let p = |i: usize| u64::from(unsafe { param.add(i).read() });
+    let x = (p(2) << 32) | (p(1) << 16) | p(0);
+    let a = (p(5) << 32) | (p(4) << 16) | p(3);
+    // SAFETY: plain writes through `addr_of_mut!`; see `RAND48_STATE`.
+    unsafe {
+        core::ptr::addr_of_mut!(RAND48_STATE).write(x);
+        core::ptr::addr_of_mut!(RAND48_MUL).write(a);
+        core::ptr::addr_of_mut!(RAND48_ADD).write(p(6));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ecvt, fcvt, gcvt
+// ---------------------------------------------------------------------------
+//
+// The legacy digit-string conversions (removed from POSIX in 2008; musl's
+// <stdlib.h> declares the three, glibc also has the `_r` forms), with
+// glibc's conventions -- how many digits, where `decpt` points, what zero,
+// the infinities and a rounding carry look like -- and exact digits: the
+// value's own, correctly rounded, which is what `printf` gives. glibc's
+// `ecvt` scales the value into [1, 10) by repeated multiplication by ten, in
+// floating point, and gets the last digits wrong about one call in six;
+// that is not copied (design-decisions §1135).
+
+/// The most digits `ecvt` produces and the most fraction digits `fcvt` does,
+/// glibc's `NDIGIT_MAX` for a double: 17, enough to tell every double apart.
+const NDIGIT_MAX: i32 = 17;
+/// glibc's static buffer sizes: `NDIGIT_MAX + 3`, and for `fcvt` room for
+/// `DBL_MAX`'s 309 integer digits as well.
+const ECVT_BUF: usize = 20;
+/// See [`ECVT_BUF`].
+const FCVT_BUF: usize = 308 + 20;
+
+/// Append `b` to `out` at `*len`; `None` when it does not fit.
+fn put_digit(out: &mut [u8], len: &mut usize, b: u8) -> Option<()> {
+    *out.get_mut(*len)? = b;
+    *len = len.checked_add(1)?;
+    Some(())
+}
+
+/// What `printf("%.*f")` writes for a non-finite value: `inf`, `-inf`,
+/// `nan` or `-nan` -- which `fcvt` hands back as its "digits", with
+/// `decpt` 0 and `sign` 0, as glibc does.
+fn non_finite_text(value: f64) -> &'static [u8] {
+    match (value.is_nan(), value.is_sign_negative()) {
+        (true, false) => b"nan",
+        (true, true) => b"-nan",
+        (false, false) => b"inf",
+        (false, true) => b"-inf",
+    }
+}
+
+/// `fcvt_r`'s digits for `value` into `out` (unterminated): `(len, decpt,
+/// sign)`, or `None` when `out` is too small.
+///
+/// glibc's recipe, computed exactly: `printf("%.*f", min(ndigit, 17))` of
+/// `|value|`; the integer digits, then the fraction's, with the point
+/// dropped; `decpt` the number of integer digits -- and a value below 1 that
+/// is not zero has its `0.` and the zeros after it stripped, each lowering
+/// `decpt`, so 0.00123 is "123" with `decpt` -2. A negative `ndigit` rounds
+/// to the left of the point, to `10^-ndigit` -- but, glibc's loop, never so
+/// far that the value would drop below 1: 5 with `ndigit` -2 stays "5".
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn fcvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, bool)> {
+    let mut len = 0usize;
+    if !value.is_finite() {
+        for &b in non_finite_text(value) {
+            put_digit(out, &mut len, b)?;
+        }
+        return Some((len, 0, false));
+    }
+    let sign = value.is_sign_negative();
+    let v = value.abs();
+    let mut dec = crate::decfloat::Decimal::new(v);
+    // The place to round at, and the fraction digits written.
+    let precision = if ndigit < 0 {
+        // Integer digits, 0 below 1; the scaling stops at one.
+        let int_digits = if dec.is_zero() { 0 } else { dec.decpt().max(0) };
+        let k = if int_digits >= 2 {
+            ndigit.saturating_neg().min(int_digits.saturating_sub(1))
+        } else {
+            0
+        };
+        dec.round_to_place(k.saturating_neg());
+        0
+    } else {
+        let p = ndigit.min(NDIGIT_MAX);
+        dec.round_to_place(p);
+        p
+    };
+    let decpt = dec.decpt();
+    // The integer digits `%f` writes: at least one.
+    let int_len = if dec.is_zero() || decpt <= 0 {
+        1
+    } else {
+        decpt
+    };
+    let strip = precision > 0 && v != 0.0 && (dec.is_zero() || decpt <= 0);
+    if !strip {
+        for i in 0..int_len {
+            let d = if dec.is_zero() || decpt <= 0 {
+                b'0'
+            } else {
+                dec.digit(i)
+            };
+            put_digit(out, &mut len, d)?;
+        }
+        for j in 0..precision {
+            put_digit(out, &mut len, dec.digit(decpt.saturating_add(j)))?;
+        }
+        return Some((len, int_len, sign));
+    }
+    // A nonzero value below 1: the `0.` goes, and each zero after it.
+    let mut dp = 0i32;
+    let mut leading = true;
+    for j in 0..precision {
+        let d = if dec.is_zero() {
+            b'0'
+        } else {
+            dec.digit(decpt.saturating_add(j))
+        };
+        if leading && d == b'0' {
+            dp = dp.saturating_sub(1);
+            continue;
+        }
+        leading = false;
+        put_digit(out, &mut len, d)?;
+    }
+    Some((len, dp, sign))
+}
+
+/// `ecvt_r`'s digits for `value` into `out` (unterminated): `(len, decpt,
+/// sign)`, or `None` when `out` is too small.
+///
+/// `min(ndigit, 17)` significant digits, correctly rounded, `decpt` where
+/// the point goes. glibc's conventions: an `ndigit` of 0 or less is no
+/// digits, `decpt` still the value's; zero is that many zeros with `decpt` 1; the
+/// infinities and NaNs are `fcvt`'s text; and a rounding that carries into a
+/// new leading digit is written with one digit more -- 9.9999 to one digit
+/// is "10", `decpt` 2 -- as glibc's scaled `fcvt` writes it.
+fn ecvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, bool)> {
+    if ndigit <= 0 {
+        // No digits -- but `decpt` still says where the point is, as glibc's
+        // adds the value's exponent after its early branch: 1 for zero and
+        // the non-finite, else the value's own.
+        let decpt = if value.is_finite() && value != 0.0 {
+            crate::decfloat::Decimal::new(value.abs()).decpt()
+        } else {
+            1
+        };
+        return Some((0, decpt, value.is_finite() && value.is_sign_negative()));
+    }
+    if !value.is_finite() {
+        return fcvt_digits(value, 0, out);
+    }
+    let n = ndigit.min(NDIGIT_MAX);
+    let mut len = 0usize;
+    if value == 0.0 {
+        for _ in 0..n {
+            put_digit(out, &mut len, b'0')?;
+        }
+        return Some((len, 1, value.is_sign_negative()));
+    }
+    let mut dec = crate::decfloat::Decimal::new(value.abs());
+    let before = dec.decpt();
+    dec.round_to_significant(n);
+    let carried = dec.decpt() > before;
+    let digits = if carried { n.saturating_add(1) } else { n };
+    for i in 0..digits {
+        put_digit(out, &mut len, dec.digit(i))?;
+    }
+    Some((len, dec.decpt(), value.is_sign_negative()))
+}
+
+/// Write `(digits, decpt, sign)` out through the C pointers; `buf` gets the
+/// terminator after `len`. `-1` for a result that did not fit.
+///
+/// # Safety
+///
+/// `decpt` and `sign` are NULL or valid `int *`s; `buf` holds `buflen` bytes.
+unsafe fn cvt_finish(
+    r: Option<(usize, i32, bool)>,
+    buf: *mut u8,
+    buflen: usize,
+    decpt: *mut i32,
+    sign: *mut i32,
+) -> i32 {
+    let Some((len, dp, sg)) = r else {
+        return -1;
+    };
+    if len >= buflen {
+        return -1;
+    }
+    // SAFETY: this function's contract; `len < buflen`.
+    unsafe {
+        buf.add(len).write(0);
+        if let Some(d) = decpt.as_mut() {
+            *d = dp;
+        }
+        if let Some(s) = sign.as_mut() {
+            *s = i32::from(sg);
+        }
+    }
+    0
+}
+
+/// [`fcvt`] into the caller's buffer (GNU): 0, or -1 when it does not fit,
+/// or `EINVAL` for a NULL `buf`.
+///
+/// # Safety
+///
+/// `buf` is NULL or holds `len` bytes; `decpt` and `sign` valid `int *`s.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fcvt_r(
+    value: f64,
+    ndigit: i32,
+    decpt: *mut i32,
+    sign: *mut i32,
+    buf: *mut u8,
+    len: usize,
+) -> i32 {
+    if buf.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: `len` bytes at `buf`, the caller's.
+    let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    let r = fcvt_digits(value, ndigit, out);
+    // SAFETY: this function's contract.
+    unsafe { cvt_finish(r, buf, len, decpt, sign) }
+}
+
+/// [`ecvt`] into the caller's buffer (GNU); as [`fcvt_r`].
+///
+/// # Safety
+///
+/// As for [`fcvt_r`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ecvt_r(
+    value: f64,
+    ndigit: i32,
+    decpt: *mut i32,
+    sign: *mut i32,
+    buf: *mut u8,
+    len: usize,
+) -> i32 {
+    if buf.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: `len` bytes at `buf`, the caller's.
+    let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    let r = ecvt_digits(value, ndigit, out);
+    // SAFETY: this function's contract.
+    unsafe { cvt_finish(r, buf, len, decpt, sign) }
+}
+
+/// `value`'s first `ndigit` significant digits (at most 17), as a string in
+/// storage the next call reuses, with the point's position in `*decpt` and
+/// the sign in `*sign`. See [`ecvt_digits`] for the conventions.
+///
+/// # Safety
+///
+/// `decpt` and `sign` are valid `int *`s. Not thread-safe (one buffer), as
+/// in every C library.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ecvt(value: f64, ndigit: i32, decpt: *mut i32, sign: *mut i32) -> *mut u8 {
+    static mut BUF: [u8; ECVT_BUF] = [0; ECVT_BUF];
+    let buf = core::ptr::addr_of_mut!(BUF).cast::<u8>();
+    // SAFETY: the static buffer's own size; the caller's pointers. A result
+    // always fits: 18 digits, a terminator.
+    unsafe {
+        let _ = ecvt_r(value, ndigit, decpt, sign, buf, ECVT_BUF);
+    }
+    buf
+}
+
+/// `value` with `ndigit` fraction digits (at most 17; a negative `ndigit`
+/// rounds left of the point), as a string of digits without the point, in
+/// storage the next call reuses. See [`fcvt_digits`] for the conventions.
+///
+/// # Safety
+///
+/// As for [`ecvt`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn fcvt(value: f64, ndigit: i32, decpt: *mut i32, sign: *mut i32) -> *mut u8 {
+    static mut BUF: [u8; FCVT_BUF] = [0; FCVT_BUF];
+    let buf = core::ptr::addr_of_mut!(BUF).cast::<u8>();
+    // SAFETY: as in `ecvt`; `DBL_MAX` with 17 fraction digits fits.
+    unsafe {
+        let _ = fcvt_r(value, ndigit, decpt, sign, buf, FCVT_BUF);
+    }
+    buf
+}
+
+/// `sprintf(buf, "%.*g", min(ndigit, 17), value)`: glibc's `gcvt`.
+///
+/// # Safety
+///
+/// `buf` has room for the result: 25 bytes always do.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn gcvt(value: f64, ndigit: i32, buf: *mut u8) -> *mut u8 {
+    let p = usize::try_from(ndigit.clamp(0, NDIGIT_MAX)).unwrap_or(0);
+    // SAFETY: this function's contract.
+    unsafe { crate::printf::format_g_into(buf, value, p) };
+    buf
+}
+
 /// Advance the 48-bit LCG state.
 #[inline]
 fn rand48_step() -> u64 {
@@ -1997,7 +2349,7 @@ fn rand48_step() -> u64 {
     // here would slow every caller to fix a problem only unserialised ones
     // have. See `RAND48_STATE`.
     let state = unsafe { core::ptr::addr_of_mut!(RAND48_STATE).read() };
-    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
+    let next = rand48_next(state);
     unsafe {
         core::ptr::addr_of_mut!(RAND48_STATE).write(next);
     }
@@ -2041,6 +2393,7 @@ pub extern "C" fn srand48(seedval: i64) {
     unsafe {
         core::ptr::addr_of_mut!(RAND48_STATE).write(state);
     }
+    rand48_standard_parameters();
 }
 
 /// Seed the 48-bit PRNG with a full 48-bit value.
@@ -2086,6 +2439,7 @@ pub extern "C" fn seed48(seed16v: *const u16) -> *const u16 {
     unsafe {
         core::ptr::addr_of_mut!(RAND48_STATE).write(state & RAND48_MASK);
     }
+    rand48_standard_parameters();
 
     old_seed_ptr.cast::<u16>()
 }
@@ -2110,7 +2464,7 @@ pub extern "C" fn nrand48(xsubi: *mut u16) -> i64 {
     let state = (s2 << 32) | (s1 << 16) | s0;
 
     // Step.
-    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
+    let next = rand48_next(state);
 
     // Write back.
     unsafe {
@@ -2139,7 +2493,7 @@ pub extern "C" fn erand48(xsubi: *mut u16) -> f64 {
     let s2 = u64::from(unsafe { *xsubi.add(2) });
     let state = (s2 << 32) | (s1 << 16) | s0;
 
-    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
+    let next = rand48_next(state);
 
     unsafe {
         *xsubi = (next & 0xFFFF) as u16;
@@ -2168,7 +2522,7 @@ pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
     let s2 = u64::from(unsafe { *xsubi.add(2) });
     let state = (s2 << 32) | (s1 << 16) | s0;
 
-    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
+    let next = rand48_next(state);
 
     unsafe {
         *xsubi = (next & 0xFFFF) as u16;
@@ -2432,6 +2786,186 @@ pub extern "C" fn l64a(n: i64) -> *const u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- ecvt / fcvt / gcvt against glibc 2.39 --
+
+    /// glibc's answers (`posix/tools/oracle/cvt_harness.py`): one call a
+    /// line, `<fn> <bits> <ndigit> = <digits>|<decpt>|<sign> <exact>` for
+    /// ecvt and fcvt, `gcvt <bits> <ndigit> = <text>`.
+    const CVT_ORACLE: &str = include_str!("cvt_oracle.txt");
+
+    fn cvt(f: &str, x: f64, n: i32) -> (String, i32, i32) {
+        let (mut dp, mut sg) = (i32::MIN, i32::MIN);
+        // SAFETY: valid out-pointers; the result is the function's buffer,
+        // NUL-terminated.
+        let s = unsafe {
+            let r = if f == "ecvt" {
+                ecvt(x, n, &raw mut dp, &raw mut sg)
+            } else {
+                fcvt(x, n, &raw mut dp, &raw mut sg)
+            };
+            core::ffi::CStr::from_ptr(r.cast())
+                .to_string_lossy()
+                .into_owned()
+        };
+        (s, dp, sg)
+    }
+
+    /// What `ecvt` should answer when glibc's own digits are wrong: the
+    /// value's first `n` digits, correctly rounded, from Rust's formatter --
+    /// an implementation independent of this library's -- written with
+    /// glibc's conventions (one digit more when rounding carried).
+    fn exact_ecvt(x: f64, n: i32) -> (String, i32) {
+        // The value's own decpt, from its exact expansion: 800 digits never
+        // round a double, which has at most 767 significant ones.
+        let own = if x.is_finite() && x != 0.0 {
+            let t = format!("{:.800e}", x.abs());
+            t.split_once('e').unwrap().1.parse::<i32>().unwrap() + 1
+        } else {
+            1
+        };
+        if n <= 0 {
+            return (String::new(), own);
+        }
+        let n = n.min(17);
+        let t = format!("{:.*e}", usize::try_from(n - 1).unwrap(), x.abs());
+        let (m, e) = t.split_once('e').unwrap();
+        let mut digits: String = m.chars().filter(char::is_ascii_digit).collect();
+        let dp = e.parse::<i32>().unwrap() + 1;
+        if x != 0.0 && dp > own {
+            digits.push('0');
+        }
+        (digits, dp)
+    }
+
+    /// What `fcvt` with a negative `ndigit` should answer when glibc's digits
+    /// are wrong (it divides by ten in floating point): |x| rounded, ties to
+    /// even, at 10^k -- k = -ndigit, but at most one less than the integer
+    /// digits, and 0 below 10, where glibc's loop stops -- from Rust's exact
+    /// expansion of the value, then the k zeros.
+    fn exact_fcvt(x: f64, n: i32) -> (String, i32) {
+        assert!(n < 0, "glibc's fcvt is exact for ndigit >= 0");
+        let t = format!("{:.1100}", x.abs());
+        let (int, frac) = t.split_once('.').unwrap();
+        let k = if x.abs() >= 10.0 {
+            usize::try_from(-n).unwrap().min(int.len() - 1)
+        } else {
+            0
+        };
+        let (kept, dropped) = int.split_at(int.len() - k);
+        let rest = format!("{dropped}{frac}");
+        let last_odd = kept.bytes().last().is_some_and(|d| (d - b'0') % 2 == 1);
+        let up = match rest.as_bytes().first() {
+            Some(b'6'..=b'9') => true,
+            Some(b'5') => rest[1..].bytes().any(|d| d != b'0') || last_odd,
+            _ => false,
+        };
+        let mut r = kept.as_bytes().to_vec();
+        if up {
+            let mut i = r.len();
+            loop {
+                if i == 0 {
+                    r.insert(0, b'1');
+                    break;
+                }
+                i -= 1;
+                if r[i] == b'9' {
+                    r[i] = b'0';
+                } else {
+                    r[i] += 1;
+                    break;
+                }
+            }
+        }
+        let digits = String::from_utf8(r).unwrap() + &"0".repeat(k);
+        let dp = i32::try_from(digits.len()).unwrap();
+        (digits, dp)
+    }
+
+    #[test]
+    fn ecvt_fcvt_and_gcvt_answer_as_glibc_does_but_exactly() {
+        let mut bad = Vec::new();
+        let mut n_rows = 0;
+        for line in CVT_ORACLE.lines().filter(|l| !l.is_empty()) {
+            n_rows += 1;
+            let (lhs, rhs) = line.split_once(" = ").unwrap();
+            let mut w = lhs.split(' ');
+            let (f, bits, n) = (w.next().unwrap(), w.next().unwrap(), w.next().unwrap());
+            let x = f64::from_bits(u64::from_str_radix(bits, 16).unwrap());
+            let n: i32 = n.parse().unwrap();
+            if f == "gcvt" {
+                let mut buf = [0u8; 64];
+                // SAFETY: 64 bytes hold any `%.17g`.
+                let got = unsafe {
+                    gcvt(x, n, buf.as_mut_ptr());
+                    core::ffi::CStr::from_ptr(buf.as_ptr().cast())
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                if got != rhs {
+                    bad.push(format!("{line}\n    ours {got}"));
+                }
+                continue;
+            }
+            let (want, exact) = rhs.rsplit_once(' ').unwrap();
+            let mut parts = want.split('|');
+            let (wd, wdp, wsg) = (
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+            );
+            let (gd, gdp, gsg) = cvt(f, x, n);
+            let ok = if exact == "1" {
+                gd == wd && gdp.to_string() == wdp && gsg.to_string() == wsg
+            } else {
+                let (ed, edp) = if f == "ecvt" {
+                    exact_ecvt(x, n)
+                } else {
+                    exact_fcvt(x, n)
+                };
+                // Not glibc's length or decpt either: its inexact scaling can
+                // carry where the value does not (1e23 to the hundreds is
+                // 99999999999999991611400, not "1" and 23 zeros).
+                gd == ed && gdp == edp && gsg.to_string() == wsg
+            };
+            if !ok {
+                bad.push(format!("{line}\n    ours {gd}|{gdp}|{gsg}"));
+            }
+        }
+        assert!(n_rows > 5000, "only {n_rows} rows");
+        assert!(
+            bad.is_empty(),
+            "{} of {n_rows} differ:\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
+
+    #[test]
+    fn the_r_forms_refuse_a_null_or_small_buffer() {
+        let (mut dp, mut sg) = (0, 0);
+        crate::errno::set_errno(0);
+        // SAFETY: a NULL buffer is checked; the others are local.
+        unsafe {
+            assert_eq!(
+                fcvt_r(1.5, 2, &raw mut dp, &raw mut sg, core::ptr::null_mut(), 10),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            let mut small = [0u8; 3];
+            assert_eq!(
+                ecvt_r(1.5, 5, &raw mut dp, &raw mut sg, small.as_mut_ptr(), 3),
+                -1
+            );
+            let mut ok = [0u8; 8];
+            assert_eq!(
+                ecvt_r(1.5, 5, &raw mut dp, &raw mut sg, ok.as_mut_ptr(), 8),
+                0
+            );
+            assert_eq!(&ok[..6], b"15000\0");
+            assert_eq!((dp, sg), (1, 0));
+        }
+    }
 
     // -- Serialising the process-wide state these tests drive -------------
     //
@@ -3880,6 +4414,38 @@ mod tests {
         assert!(v < (1_i64 << 31), "nrand48 returned {v} >= 2^31");
         // State should have been updated.
         assert_ne!(state, original, "nrand48 should update state");
+    }
+
+    #[test]
+    fn lcong48_sets_multiplier_and_addend_until_srand48() {
+        let _g = lock_rand48_for_test();
+        // x = 3, a = 2, c = 1: the next state is 7, for every function of the
+        // family -- the caller-state ones too.
+        let p: [u16; 7] = [3, 0, 0, 2, 0, 0, 1];
+        unsafe { lcong48(p.as_ptr()) };
+        let mut xs: [u16; 3] = [3, 0, 0];
+        let _ = nrand48(xs.as_mut_ptr());
+        assert_eq!(xs, [7, 0, 0]);
+        // The process's own state stepped from 3 as well.
+        let _ = lrand48();
+        let seen: [u16; 3] = [0; 3];
+        let old = seed48(seen.as_ptr());
+        // SAFETY: `seed48` returns its three-value buffer.
+        let prev = unsafe { core::slice::from_raw_parts(old, 3) };
+        assert_eq!(prev, [7, 0, 0]);
+        // seed48 put the standard parameters back.
+        let mut ys: [u16; 3] = [3, 0, 0];
+        let _ = nrand48(ys.as_mut_ptr());
+        let want = (3u64.wrapping_mul(0x0005_DEEC_E66D).wrapping_add(0xB)) & ((1 << 48) - 1);
+        assert_eq!(
+            ys,
+            [
+                (want & 0xFFFF) as u16,
+                ((want >> 16) & 0xFFFF) as u16,
+                (want >> 32) as u16
+            ]
+        );
+        srand48(0);
     }
 
     #[test]

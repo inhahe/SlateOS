@@ -1903,6 +1903,25 @@ fn format_float_general(
     emit_float_padded(dst, &buf, text, negative, flags, width);
 }
 
+/// `sprintf(buf, "%.*g", precision, val)` for this library's own callers
+/// (`gcvt`), which have a value rather than a `va_list`: the `%g` conversion
+/// of `val` into `buf`, terminated. Returns the length, less the terminator.
+///
+/// # Safety
+///
+/// `buf` has room for the conversion and its terminator -- at most 25 bytes
+/// for a precision of 17 or less.
+pub(crate) unsafe fn format_g_into(buf: *mut u8, val: f64, precision: usize) -> usize {
+    let mut out = FmtOutput::new(buf, usize::MAX);
+    // `%.0g` is `%.1g`, as the dispatcher treats it.
+    let prec = if precision == 0 { 1 } else { precision };
+    format_float_general(&mut out, val, false, &FormatFlags::new(), 0, prec);
+    let n = out.pos;
+    // SAFETY: the caller's buffer has room for the terminator after `n`.
+    unsafe { buf.add(n).write(0) };
+    n
+}
+
 /// Format a floating-point value as a C99 hexadecimal float (`%a`/`%A`).
 ///
 /// The form is `0xh.hhhhp±d`: a hex significand scaled by a power of two.

@@ -20,6 +20,7 @@ and gcc in it. The sandboxed ones (`gai`, `hosts`, `netdb`, `ifaddrs`) use
 | `mathl_harness.py` | `posix/src/mathl_oracle.txt` | `mathl.rs`, `include_str!` |
 | `ldclass.c` | its output, pasted as `CLASS_ORACLE` | `mathl.rs` |
 | `complex_harness.py` | `posix/src/complex_oracle.txt` | `complex.rs`, `include_str!` |
+| `cvt_harness.py` | `posix/src/cvt_oracle.txt` | `stdlib.rs`, `include_str!` (`ecvt`, `fcvt`, `gcvt`) |
 | `strtod_nan_harness.py` | a table, pasted as `GLIBC_NAN` | `stdlib.rs` |
 | `cp125x_harness.py` | a table, pasted as `GLIBC_CP125X` | `iconv.rs` |
 | `tcvn_harness.py` (cases: `tcvn_cases.py`) | a table, pasted as `GLIBC_TCVN` | `iconv.rs` |

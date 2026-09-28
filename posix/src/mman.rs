@@ -3916,6 +3916,22 @@ pub extern "C" fn mmap64(
     mmap(addr, length, prot, flags, fd, offset)
 }
 
+/// Rearrange the pages of a shared file mapping (Linux, deprecated since
+/// 3.16, where the kernel emulates it with separate mappings). The memory
+/// manager here has no non-linear mappings to make, so `ENOSYS`; a caller
+/// gets the same effect by mapping each range with `mmap(MAP_FIXED)`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn remap_file_pages(
+    _addr: *mut core::ffi::c_void,
+    _size: SizeT,
+    _prot: i32,
+    _pgoff: SizeT,
+    _flags: i32,
+) -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}
+
 /// Remap a virtual memory region.
 ///
 /// Stub: validates arguments per Linux `mm/mremap.c`, then returns

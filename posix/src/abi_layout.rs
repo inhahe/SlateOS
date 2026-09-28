@@ -173,6 +173,23 @@ pub(crate) fn abi_asserts() -> String {
     abi!(out, hdrs, crate::pthread::Ptcb, "struct __ptcb", "pthread.h",
          f as "__f", x as "__x", next as "__next");
 
+    // --- search: the table of hsearch_r's own ------------------------------
+    abi!(out, hdrs, crate::search::HsearchData, "struct hsearch_data", "search.h",
+         tab as "__tab", unused1 as "__unused1", unused2 as "__unused2");
+
+    // --- time: ftime's result -------------------------------------------------
+    abi!(
+        out,
+        hdrs,
+        crate::time::Timeb,
+        "struct timeb",
+        "sys/timeb.h",
+        time,
+        millitm,
+        timezone,
+        dstflag
+    );
+
     // --- terminals ---------------------------------------------------------
     abi!(out, hdrs, crate::ioctl::Termios, "struct termios", "termios.h",
          c_iflag, c_oflag, c_cflag, c_lflag, c_line, c_cc,

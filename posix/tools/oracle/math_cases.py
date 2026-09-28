@@ -279,6 +279,13 @@ def cases():
     out.append(("remquof", "f_ffpi", binary_inputs("remainder", True)))
     out.append(("sincos", "v_dpdpd", [(x,) for x in unary_inputs("sin", False)]))
     out.append(("sincosf", "v_fpfpf", [(x,) for x in unary_inputs("sin", True)]))
+    # scalb and scalbf come last and draw nothing from the generator, so every
+    # line above them is unchanged by their arrival (2026-09-28).
+    xs = [0.0, -0.0, 1.0, -1.0, 0.3, 1e300, 1e-300, DSUB, INF, -INF, NAN, 7.0]
+    fns = [0.0, -0.0, 1.0, -1.0, 2.5, 10.0, -10.0, 1024.0, -1075.0, 1e5, -1e5, 65000.0,
+           65001.0, -65001.0, 2.0**31, INF, -INF, NAN]
+    out.append(("scalb", "d_dd", [(x, n) for x in xs for n in fns]))
+    out.append(("scalbf", "f_ff", [(f32(x), f32(n)) for x in xs for n in fns]))
     return out
 
 

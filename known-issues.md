@@ -175373,7 +175373,7 @@ every name glibc 2.39's `libm.so.6` exports that `libc.a` does not, less the
 | C23, all three precisions | `nextup` `nextdown` `llogb` `canonicalize` `fromfp` `fromfpx` `ufromfp` `ufromfpx` `getpayload` `setpayload` `setpayloadsig` `totalorder` `totalordermag` `fmaxmag` `fminmag` `fmaximum_mag` `fminimum_mag` `fmaximum_mag_num` `fminimum_mag_num` (each with `f` and `l`) | exact functions, IEEE 754-2019 section 5.3 and 9.7 -- short, and testable bit for bit against glibc |
 | C23, `long double` only | `fmaximuml` `fminimuml` `fmaximum_numl` `fminimum_numl` | the `double` and `float` ones exist -- but as **compiler_builtins' weak exports**, never checked against glibc; this work should define all twelve in `math.rs`/`mathl.rs`, with oracle rows |
 | C23 narrowing | `fadd` `faddl` `fsub` `fsubl` `fmul` `fmull` `fdiv` `fdivl` `fsqrt` `fsqrtl` `ffma` `ffmal` `daddl` `dsubl` `dmull` `ddivl` `dsqrtl` `dfmal` | one rounding into the narrower type: round-to-odd in the wider one, then round |
-| XSI, obsolete | `scalb` `scalbf` `scalbl` | removed from POSIX in 2008; glibc keeps them |
+| XSI, obsolete | `scalbl` | removed from POSIX in 2008; glibc keeps them (`scalb` and `scalbf`, which musl declares, done 2026-09-28) |
 | fenv | `fegetmode` `fesetmode` | waits on musl's headers (D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX) |
 
 `matherr` (an SVID hook glibc keeps only for old binaries) is deliberately
@@ -175415,7 +175415,7 @@ nonzero is dropped, toward -inf a negative one's, toward zero never. Due with
 the 80-bit conversions (TD-POSIX-LONG-DOUBLE-PRECISION), which go through the
 same code.
 
-## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: OPEN (58 of the 104 done 2026-09-28: C11 `<threads.h>` (posix/src/threads.rs), the pthread cleanup helpers, scheduling attributes, `pthread_setschedprio`, the concurrency hint and default attributes, the nine `_l` functions, `wcsnlen`, `wcswcs` and the seven signal functions; the other 46 are `scripts/check-libc-declared.py`'s baseline, which refuses a new one)**
+## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: OPEN (79 of the 104 done 2026-09-28: C11 `<threads.h>` (posix/src/threads.rs), the pthread cleanup helpers, scheduling attributes, `pthread_setschedprio`, the concurrency hint and default attributes, the nine `_l` functions, `wcsnlen`, `wcswcs`, the seven signal functions; then `ecvt`/`fcvt`/`gcvt` (exact digits, design-decisions §1135), `hcreate_r`/`hsearch_r`/`hdestroy_r`, `tcgetwinsize`/`tcsetwinsize`, `posix_close`, `_Fork`, `ftime`, `stime`, `clock_getcpuclockid`, `ftok`, `lcong48`, `scalb`/`scalbf`, `dlinfo`, and `vhangup`/`acct`/`remap_file_pages` as `ENOSYS` -- the kernel has no such facility. The other 25 -- the accounts functions, `getdate`, the `ns_*` DNS parsers, the `ucontext` four, the two `_np` joins -- are `scripts/check-libc-declared.py`'s baseline, which refuses a new one)**
 
 **In short:** C programs here are compiled against musl's headers (`zig cc`)
 and linked against our `libc.a`. The headers declare 126 functions the library

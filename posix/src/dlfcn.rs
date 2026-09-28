@@ -26,6 +26,8 @@ pub const RTLD_GLOBAL: i32 = 0x100;
 pub const RTLD_LOCAL: i32 = 0;
 /// Return handle for the main program.
 pub const RTLD_DEFAULT: *mut u8 = core::ptr::null_mut();
+/// `dlinfo`'s one request in musl's header: the object's `struct link_map`.
+pub const RTLD_DI_LINKMAP: i32 = 2;
 
 // ---------------------------------------------------------------------------
 // Error state
@@ -103,6 +105,19 @@ pub extern "C" fn dlerror() -> *const u8 {
     err
 }
 
+/// Information about a loaded object (glibc, and declared by musl). There
+/// are no loaded objects -- `dlopen` returns no handle -- so every handle is
+/// an invalid one: -1, with `dlerror` saying why.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn dlinfo(_handle: *mut u8, _request: i32, _info: *mut u8) -> i32 {
+    // SAFETY: as in `dlopen`.
+    unsafe {
+        core::ptr::addr_of_mut!(DL_ERROR)
+            .write(c"dynamic linking not supported".as_ptr().cast::<u8>());
+    }
+    -1
+}
+
 /// Information about a dynamically loaded symbol.
 #[repr(C)]
 pub struct DlInfo {
@@ -166,6 +181,21 @@ pub extern "C" fn __tls_get_addr(_ti: *mut u8) -> *mut u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dlinfo_has_no_object_to_describe() {
+        let _g = lock_dl_error_for_test();
+        let mut out: *mut u8 = core::ptr::null_mut();
+        assert_eq!(
+            super::dlinfo(
+                core::ptr::null_mut(),
+                super::RTLD_DI_LINKMAP,
+                (&raw mut out).cast()
+            ),
+            -1
+        );
+        assert!(!super::dlerror().is_null());
+    }
+
     use super::*;
 
     // -- Constants match Linux/glibc --

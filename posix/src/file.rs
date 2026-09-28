@@ -184,6 +184,23 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     }
 }
 
+/// `posix_close`'s flag asking it to restart an interrupted close. Zero, as in
+/// musl's `<unistd.h>`: `close` here is never interrupted part-way, so there
+/// is nothing to restart and the only flag is no flag.
+pub const POSIX_CLOSE_RESTART: i32 = 0;
+
+/// Close `fd` (POSIX.1-2024): [`close`], whose descriptor is always released,
+/// even on failure. `flag` must be 0 -- which is also `POSIX_CLOSE_RESTART`
+/// -- and anything else is `EINVAL`, with `fd` left open.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_close(fd: Fd, flag: i32) -> i32 {
+    if flag != 0 && flag != POSIX_CLOSE_RESTART {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    close(fd)
+}
+
 /// Close a file descriptor.
 ///
 /// Dispatches to the appropriate kernel close syscall based on
@@ -8029,6 +8046,16 @@ pub extern "C" fn statx(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn posix_close_takes_no_flag_but_zero() {
+        errno::set_errno(0);
+        assert_eq!(super::posix_close(-1, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Flag 0 is `close`: a bad descriptor is `EBADF`.
+        assert_eq!(super::posix_close(-1, super::POSIX_CLOSE_RESTART), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
     // -- RWF_ policy (shared by preadv2/pwritev2 and kernel AIO) --
     use super::{
         PostWriteSync, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT, RWF_SYNC, RwPlan,

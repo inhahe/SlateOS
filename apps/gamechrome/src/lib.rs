@@ -19,7 +19,9 @@
 //!   window;
 //! - [`apart_from_accent`], the second of two sides' colours, for a game whose
 //!   pieces follow the theme: a palette hue that cannot be mistaken for the
-//!   accent, the first side's.
+//!   accent, the first side's;
+//! - [`legibility`], for a game's tests: every text a frame draws, read
+//!   against what is drawn under it and held to WCAG's floor for its size.
 //!
 //! A game's own colours -- the seven tetrominoes, the four ghosts, a card's
 //! red suits -- stay in the game, named, and its palette test lists them as
@@ -308,9 +310,27 @@ pub fn button_colours(p: &Palette, kind: Kind, ground: Color) -> Vec<Color> {
     .collect()
 }
 
+/// The width [`button`] needs to show `label` whole at `font_size` in a
+/// button `h` high: the label, and the room the button keeps either side of
+/// it. A game that lays its buttons out by their labels asks this rather than
+/// adding a padding of its own, which is a second copy of the button's and
+/// cuts the label the day the two disagree.
+#[must_use]
+pub fn button_width(label: &str, font_size: f32, h: f32) -> f32 {
+    text::measure(label, font_size, FontWeightHint::Bold) + label_pad(h) * 2.0
+}
+
+/// The room [`button`] keeps either side of its label, in a button `h` high:
+/// the toolkit's padding, or less in a button too short to afford it.
+fn label_pad(h: f32) -> f32 {
+    (h * 0.3).min(tk_button::PADDING_H)
+}
+
 /// A push button in the reference's look -- the toolkit's colours for its
 /// kind and state, on `ground` -- with its label at `font_size` in bold,
-/// centred and cut with an ellipsis if the button is too narrow.
+/// centred and cut with an ellipsis if the button is too narrow. A label
+/// taller than the button, or with no room across it, is left out rather
+/// than drawn over the button's edges: the face is still the control.
 ///
 /// The toolkit's own `guitk::button::draw` draws the label at a fixed 13
 /// pixels, which a game that scales with its window cannot use; the colours
@@ -373,10 +393,12 @@ pub fn button(
             corner_radii: CornerRadii::all(radius + 2.0),
         });
     }
-    let pad = (h * 0.3).min(tk_button::PADDING_H);
-    let room = (w - pad * 2.0).max(0.0);
-    let text_w = text::measure(label, font_size, FontWeightHint::Bold).min(room);
+    let room = (w - label_pad(h) * 2.0).max(0.0);
     let line = text::line_height(font_size, FontWeightHint::Bold);
+    if line > h || room <= 0.0 {
+        return;
+    }
+    let text_w = text::measure(label, font_size, FontWeightHint::Bold).min(room);
     sink.emit(RenderCommand::Text {
         x: x + (w - text_w) / 2.0,
         y: y + (h - line) / 2.0,
@@ -388,6 +410,8 @@ pub fn button(
         overflow: TextOverflow::Ellipsis,
     });
 }
+
+pub mod legibility;
 
 #[cfg(test)]
 mod tests;

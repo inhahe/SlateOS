@@ -191,6 +191,93 @@ fn a_read_colour_takes_the_shade_that_reads_on_its_tile() {
     );
 }
 
+/// A button as wide as [`button_width`] says shows its label whole: the
+/// label's room is at least the label.
+#[test]
+fn a_button_as_wide_as_it_asks_shows_its_label_whole() {
+    let p = Palette::for_mode(false);
+    for (label, size, h) in [
+        ("New game", 18.0, 30.0),
+        ("Undo", 11.0, 16.0),
+        ("W", 30.0, 44.0),
+    ] {
+        let w = button_width(label, size, h);
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+        button(
+            &mut cmds,
+            &p,
+            (0.0, 0.0, w, h),
+            label,
+            size,
+            Kind::Plain,
+            State::default(),
+            p.base,
+        );
+        let room = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { max_width, .. } => *max_width,
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label:?} is not drawn"));
+        let needs = text::measure(label, size, FontWeightHint::Bold);
+        assert!(
+            room >= needs - 0.01,
+            "{label:?} needs {needs} and has {room}"
+        );
+        // A pixel narrower and it is cut: the width is what it needs, not more.
+        let mut narrow: Vec<RenderCommand> = Vec::new();
+        button(
+            &mut narrow,
+            &p,
+            (0.0, 0.0, w - 1.0, h),
+            label,
+            size,
+            Kind::Plain,
+            State::default(),
+            p.base,
+        );
+        let cut = narrow
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { max_width, .. } => *max_width,
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        assert!(
+            cut < needs,
+            "{label:?}: a narrower button still has room for it all"
+        );
+    }
+}
+
+/// A label taller than its button is left out, not drawn over the button's
+/// edges; the face is still drawn, because it is still the control.
+#[test]
+fn a_label_taller_than_its_button_is_left_out() {
+    let p = Palette::for_mode(false);
+    let mut cmds: Vec<RenderCommand> = Vec::new();
+    button(
+        &mut cmds,
+        &p,
+        (0.0, 0.0, 120.0, 8.0),
+        "Check",
+        13.0,
+        Kind::Plain,
+        State::default(),
+        p.base,
+    );
+    assert!(
+        !cmds.iter().any(|c| matches!(c, RenderCommand::Text { .. })),
+        "a 13px label was drawn in an 8px button"
+    );
+    assert!(
+        cmds.iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { .. })),
+        "the face went with the label"
+    );
+}
+
 /// Nothing is drawn for a button with no room.
 #[test]
 fn a_button_with_no_room_draws_nothing() {

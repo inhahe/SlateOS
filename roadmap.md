@@ -1963,9 +1963,10 @@ live.
   sends it, and `settingsfile` refuses names that could not be announced.
 
 - `[C]` **C-Q11: measure the whole-workspace check under the machine's normal
-  load, then decide the gate** -- open, waiting for the lanes to be running
-  again (`todo.txt`, lane C). The earlier figures (15 s to 49 s) were taken
-  with fewer lanes and fewer projects running.
+  load, then decide the gate** -- **done 2026-09-27** (`design-decisions.md`
+  §1430). Every boot test already compiles and lints the whole workspace for
+  Linux (90-181 s, about 2.4% of a boot test, under load), and it has caught
+  real cross-crate breaks; option A is in force, and nothing is added.
 
 - `[C]` **One push button, the reference's** -- done 2026-09-27
   (`design-decisions.md` §1414). `guitk::button` draws the Aero reference's

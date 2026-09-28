@@ -2438,9 +2438,10 @@ answered question left in the body is pure cost — and, being older, it sorts
 - **Should something build every crate before a merge?** (C-Q11) — answered
   2026-09-27 by delegation: the operator left it to Claude, asking that the
   check's cost be measured while the machine carries its normal load and set
-  against the time it has saved. The measurement waits for the lanes to be
-  running again (`todo.txt`, lane C, "C-Q11's measurement"); the decision will
-  be written up as a `design-decisions.md` entry when it is taken. The
+  against the time it has saved. Measured and decided 2026-09-27
+  (`design-decisions.md` §1430): the boot test already builds and lints every
+  crate before a merge, at about 2.4% of its time, and has caught real breaks;
+  nothing is added. The
   operator's two testing ideas that came with the answer went to lane A:
   `requests/c-a-two-ways-to-test-a-change-without-a-full-boot.md`.
 

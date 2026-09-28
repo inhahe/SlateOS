@@ -13,36 +13,49 @@
 //! coordinates, and the click handler re-derived the hand's geometry from its
 //! own copies of those numbers.
 
+use gamechrome::{Chrome, cards};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use randrange::{RandomSource, SeededRng, seed_from_system};
 use std::process::ExitCode;
 
-// ── Palette ─────────────────────────────────────────────────────────
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// The cards are white with red and black suits in every theme, their backs
+// the accent (`gamechrome::cards`); the table, the seats, the scores and the
+// bands follow the user's palette (the operator's answer to C-Q16, §1422, and
+// lane C's call for the card games). It was all a copy of Catppuccin Mocha
+// round a green felt that stayed green in any theme.
 
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const FELT: Color = Color::from_hex(0x1B3D2F);
-const CARD_FACE: Color = Color::from_hex(0xEFF1F5);
-const CARD_BACK: Color = Color::from_hex(0x3B4261);
-const CARD_INK: Color = Color::from_hex(0x1E1E2E);
-const CARD_INK_RED: Color = Color::from_hex(0xD20F39);
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    table: cards::Table,
+    /// Washed over a card the rules will not allow: the page, most of the way.
+    /// A dimmed card is still a white card with its own suit on it; it is the
+    /// wash that says it cannot be played, darkening it in a dark theme and
+    /// fading it in a light one.
+    veil: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            table: cards::Table::of(p),
+            veil: with_alpha(p.base, 150),
+        }
+    }
+}
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -117,8 +130,8 @@ impl Suit {
     /// The colour the pips are printed in on a card face.
     const fn ink(self) -> Color {
         match self {
-            Suit::Clubs | Suit::Spades => CARD_INK,
-            Suit::Diamonds | Suit::Hearts => CARD_INK_RED,
+            Suit::Clubs | Suit::Spades => cards::BLACK,
+            Suit::Diamonds | Suit::Hearts => cards::RED,
         }
     }
 }
@@ -682,6 +695,10 @@ struct Hearts {
     sweep_ms: u32,
     /// Who took the trick lying on the table, once it is complete.
     taker: Option<usize>,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame. A new game deals into this same state, so they carry over.
+    palette: Palette,
 }
 
 impl Hearts {
@@ -720,6 +737,7 @@ impl Hearts {
             think_ms: 0,
             sweep_ms: 0,
             taker: None,
+            palette: Palette::for_mode(false),
         };
         game.start_round();
         game
@@ -1383,21 +1401,22 @@ impl Hearts {
     fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let mut f = Frame::new(width, height);
         let l = Layout::solve(width, height);
-        fill(&mut f, l.window, BASE, 0.0);
-        self.draw_header(&mut f, &l);
-        self.draw_table(&mut f, &l);
-        self.draw_hand(&mut f, &l);
-        self.draw_footer(&mut f, &l);
-        self.draw_status(&mut f, &l);
+        let c = Colours::of(&self.palette);
+        fill(&mut f, l.window, c.chrome.page, 0.0);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_table(&mut f, &l, &c);
+        self.draw_hand(&mut f, &l, &c);
+        self.draw_footer(&mut f, &l, &c);
+        self.draw_status(&mut f, &l, &c);
         if self.show_help {
-            self.draw_help(&mut f, &l);
+            self.draw_help(&mut f, &l, &c);
         }
         f
     }
 
     /// The title bar: the game's name, and which round is being played.
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, 0.0);
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.header, c.chrome.band, 0.0);
         if l.header.is_empty() {
             return;
         }
@@ -1406,7 +1425,7 @@ impl Hearts {
             l.pad,
             l.header.y + (l.header.h - l.title) / 2.0,
             TITLE,
-            TEXT_COLOR,
+            c.chrome.text,
             l.title,
             FontWeightHint::Bold,
         );
@@ -1426,7 +1445,7 @@ impl Hearts {
                 x,
                 l.header.y + (l.header.h - l.small) / 2.0,
                 &right,
-                SUBTEXT0,
+                c.chrome.dim,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1434,11 +1453,11 @@ impl Hearts {
     }
 
     /// The felt, and everything on it.
-    fn draw_table(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.table, FELT, l.pad * 0.6);
-        self.draw_trick(f, l);
-        self.draw_seats(f, l);
-        self.draw_scores(f, l);
+    fn draw_table(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.table, c.table.felt, l.pad * 0.6);
+        self.draw_trick(f, l, c);
+        self.draw_seats(f, l, c);
+        self.draw_scores(f, l, c);
     }
 
     /// The cards in play, and a ring round the one that took them.
@@ -1448,12 +1467,12 @@ impl Hearts {
     /// completed it and drew four blank grey rectangles in its place -- four
     /// `FillRect`s with no rank and no suit on them -- so the player never saw
     /// the trick they had just played into.
-    fn draw_trick(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_trick(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         for tc in &self.trick.cards {
             let r = l.trick_card(tc.player);
-            draw_card_face(f, r, tc.card, false);
+            draw_card_face(f, r, tc.card, false, c);
             if self.taker == Some(tc.player) {
-                outline(f, r, GREEN, (l.card.0 * 0.07).clamp(1.0, 4.0));
+                outline(f, r, c.chrome.good, (l.card.0 * 0.07).clamp(1.0, 4.0));
             }
         }
         if self.trick.cards.is_empty()
@@ -1466,7 +1485,7 @@ impl Hearts {
                 l.table.w,
                 cy - l.font / 2.0,
                 &message,
-                LAVENDER,
+                c.chrome.title,
                 l.font,
                 FontWeightHint::Bold,
             );
@@ -1502,7 +1521,7 @@ impl Hearts {
     /// where a 900x620 window put them and nowhere else. They said how many
     /// cards a seat held but not what it had taken, and the seat to play was
     /// marked only by the colour of its own text.
-    fn draw_seats(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_seats(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         for seat in 1..SEATS {
             let label = l.seat_label(seat);
             if label.is_empty() {
@@ -1512,7 +1531,7 @@ impl Hearts {
             fill(
                 f,
                 label,
-                if live { SURFACE1 } else { SURFACE0 },
+                if live { c.chrome.lit } else { c.chrome.raised },
                 l.pad * 0.4,
             );
             let inset = l.pad * 0.4;
@@ -1521,7 +1540,7 @@ impl Hearts {
                 label.x + inset,
                 label.y + l.small * 0.2,
                 name(seat),
-                if live { YELLOW } else { TEXT_COLOR },
+                if live { c.chrome.even } else { c.chrome.text },
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -1533,12 +1552,12 @@ impl Hearts {
                 y: label.y + l.small * 1.3,
                 text: line,
                 font_size: l.small * 0.9,
-                color: SUBTEXT0,
+                color: c.chrome.dim,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((label.w - inset * 2.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-            self.draw_backs(f, l, seat, label);
+            self.draw_backs(f, l, seat, label, c);
         }
     }
 
@@ -1547,7 +1566,7 @@ impl Hearts {
     /// Decoration, and so carries no hit box: there is nothing a player can do
     /// to somebody else's hand. It is left out entirely rather than drawn over
     /// the trick when the felt is too short to hold it.
-    fn draw_backs(&self, f: &mut Frame<Target>, l: &Layout, seat: usize, label: Rect) {
+    fn draw_backs(&self, f: &mut Frame<Target>, l: &Layout, seat: usize, label: Rect, c: &Colours) {
         let held = self.hands.get(seat).map_or(0, Vec::len);
         if held == 0 || label.is_empty() {
             return;
@@ -1573,7 +1592,7 @@ impl Hearts {
                 reason = "a hand is at most thirteen cards; exact in f32"
             )]
             let fi = i as f32;
-            draw_card_back(f, Rect::new(step.mul_add(fi, x0), y, cw, ch));
+            draw_card_back(f, Rect::new(step.mul_add(fi, x0), y, cw, ch), c);
         }
     }
 
@@ -1584,11 +1603,11 @@ impl Hearts {
     /// window narrower than 860 and floated in the middle of the felt in a
     /// wider one. It is now in the top-right of the table, or left out when
     /// the window cannot pay for one.
-    fn draw_scores(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_scores(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.scores.is_empty() {
             return;
         }
-        fill(f, l.scores, MANTLE, l.pad * 0.5);
+        fill(f, l.scores, c.chrome.band, l.pad * 0.5);
         let inset = l.pad * 0.6;
         let mut y = l.scores.y + inset;
         text_at(
@@ -1596,7 +1615,7 @@ impl Hearts {
             l.scores.x + inset,
             y,
             "Scores",
-            SUBTEXT0,
+            c.chrome.dim,
             l.small,
             FontWeightHint::Bold,
         );
@@ -1615,7 +1634,11 @@ impl Hearts {
                 l.scores.x + inset,
                 y,
                 name(seat),
-                if seat == 0 { BLUE } else { TEXT_COLOR },
+                if seat == 0 {
+                    c.chrome.key
+                } else {
+                    c.chrome.text
+                },
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1625,9 +1648,9 @@ impl Hearts {
                 y,
                 &value,
                 if total >= GAME_OVER_SCORE {
-                    RED
+                    c.chrome.bad
                 } else {
-                    SUBTEXT0
+                    c.chrome.dim
                 },
                 l.small,
                 FontWeightHint::Regular,
@@ -1643,7 +1666,7 @@ impl Hearts {
     /// pass raised a chosen card sixteen pixels (`HAND_Y - 16.0`) and the click
     /// handler, which re-derived the row from its own copies of `HAND_Y`,
     /// `HAND_X_START`, `CARD_OVERLAP` and `CARD_WIDTH`, did not know.
-    fn draw_hand(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_hand(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let hand = &self.hands[0];
         let n = hand.len();
         // Only asked for when the answer means something: outside the human's
@@ -1664,11 +1687,11 @@ impl Hearts {
                 r = Rect::new(r.x, r.y - lift, r.w, r.h);
             }
             let dim = legal.as_ref().is_some_and(|valid| !valid.contains(&i));
-            draw_card_face(f, r, card, dim);
+            draw_card_face(f, r, card, dim, c);
             if i == self.selected {
-                outline(f, r, YELLOW, ring);
+                outline(f, r, c.table.focus, ring);
             } else if chosen {
-                outline(f, r, BLUE, ring);
+                outline(f, r, c.table.picked, ring);
             }
             // Recorded after the card is painted and in the order the cards are
             // painted, so where two overlap the hit map resolves to the one
@@ -1682,8 +1705,8 @@ impl Hearts {
     /// The old program had no buttons at all: the only clickable thing in the
     /// window was the hand, and every other verb was a key you had to already
     /// know about.
-    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.footer, MANTLE, 0.0);
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.footer, c.chrome.band, 0.0);
         if l.footer.is_empty() {
             return;
         }
@@ -1702,16 +1725,20 @@ impl Hearts {
             }
             let r = Rect::new(x, y, w, h);
             let on = button == Button::Help && self.show_help;
-            fill(f, r, if on { SURFACE1 } else { SURFACE0 }, h * 0.25);
-            let (cx, cy) = r.centre();
-            text_at(
+            // The toolkit's push button; Help is held down while its card is
+            // up.
+            gamechrome::button(
                 f,
-                cx - text::measure(label, size, FontWeightHint::Bold) / 2.0,
-                cy - size / 2.0,
+                &self.palette,
+                (r.x, r.y, r.w, r.h),
                 label,
-                if on { TEXT_COLOR } else { SUBTEXT0 },
                 size,
-                FontWeightHint::Bold,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    pressed: on,
+                    ..guitk::button::State::default()
+                },
+                c.chrome.band,
             );
             f.hit(Target::Button(button), r);
             x += w + gap;
@@ -1723,8 +1750,8 @@ impl Hearts {
     /// The old program drew the status at `height - 18.0` and a controls hint
     /// at `height - 14.0`, four pixels apart in the same font: the hint was
     /// painted through the status line it overlapped.
-    fn draw_status(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.status, MANTLE, 0.0);
+    fn draw_status(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.status, c.chrome.band, 0.0);
         if l.status.is_empty() {
             return;
         }
@@ -1745,7 +1772,7 @@ impl Hearts {
                     l.status.right() - l.pad - w,
                     l.status.y + (l.status.h - l.small) / 2.0,
                     &counter,
-                    SUBTEXT0,
+                    c.chrome.dim,
                     l.small,
                     FontWeightHint::Regular,
                 );
@@ -1760,7 +1787,7 @@ impl Hearts {
             y,
             text: self.status.clone(),
             font_size: l.font,
-            color: TEXT_COLOR,
+            color: c.chrome.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(budget),
             overflow: TextOverflow::Ellipsis,
@@ -1773,8 +1800,8 @@ impl Hearts {
     /// `button_label` -- the same two functions the footer draws from, so a
     /// button whose label changes cannot leave the help card describing the
     /// old one.
-    fn draw_help(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.window, Color::rgba(0, 0, 0, 180), 0.0);
+    fn draw_help(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.window, c.chrome.scrim, 0.0);
 
         let mut rows: Vec<(String, String)> = vec![
             (
@@ -1812,14 +1839,14 @@ impl Hearts {
             card_w,
             card_h,
         );
-        fill(f, card, MANTLE, l.pad * 0.6);
+        fill(f, card, c.chrome.band, l.pad * 0.6);
         centred(
             f,
             card.x,
             card.w,
             card.y + l.pad,
             heading,
-            TEXT_COLOR,
+            c.chrome.text,
             l.title,
             FontWeightHint::Bold,
         );
@@ -1834,7 +1861,7 @@ impl Hearts {
                 card.x + l.pad,
                 y,
                 key,
-                BLUE,
+                c.chrome.key,
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -1843,7 +1870,7 @@ impl Hearts {
                 card.x + l.pad + key_w + l.pad,
                 y,
                 desc,
-                SUBTEXT0,
+                c.chrome.dim,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1957,12 +1984,27 @@ fn centred(
 /// `dim` is a card the rules will not allow. The old program drew every card in
 /// the hand identically, so the only way to find out that a card could not be
 /// played was to play it and read the complaint.
-fn draw_card_face(f: &mut Frame<Target>, r: Rect, card: Card, dim: bool) {
+fn draw_card_face(f: &mut Frame<Target>, r: Rect, card: Card, dim: bool, c: &Colours) {
     if r.is_empty() {
         return;
     }
-    fill(f, r, if dim { SUBTEXT0 } else { CARD_FACE }, r.w * 0.12);
-    let ink = if dim { OVERLAY0 } else { card.suit.ink() };
+    fill(f, r, cards::FACE, r.w * 0.12);
+    // Its edge: white on a light theme's table is a card seen by nothing but
+    // its shadow, so there it is ringed.
+    outline(f, r, c.table.face_edge(), 1.0);
+    if dim {
+        // The wash goes over the finished card, below, whether or not it was
+        // lettered.
+        draw_card_letters(f, r, card);
+        fill(f, r, c.veil, r.w * 0.12);
+        return;
+    }
+    draw_card_letters(f, r, card);
+}
+
+/// A card's rank and suit, in its corner and in the middle.
+fn draw_card_letters(f: &mut Frame<Target>, r: Rect, card: Card) {
+    let ink = card.suit.ink();
     let corner = (r.w * 0.30).max(6.0);
     // A card too small to letter is left blank rather than scribbled over:
     // below about twenty pixels the smallest legible rank is wider than the
@@ -2001,12 +2043,13 @@ fn draw_card_face(f: &mut Frame<Target>, r: Rect, card: Card, dim: bool) {
     );
 }
 
-/// A card, face down.
-fn draw_card_back(f: &mut Frame<Target>, r: Rect) {
+/// A card, face down: the accent, crossed by a faint inner line.
+fn draw_card_back(f: &mut Frame<Target>, r: Rect, c: &Colours) {
     if r.is_empty() {
         return;
     }
-    fill(f, r, CARD_BACK, r.w * 0.16);
+    fill(f, r, c.table.back, r.w * 0.16);
+    outline(f, r, c.table.back_edge(), 1.0);
     let inset = r.w * 0.18;
     let inner = Rect::new(
         r.x + inset,
@@ -2014,12 +2057,16 @@ fn draw_card_back(f: &mut Frame<Target>, r: Rect) {
         (r.w - inset * 2.0).max(0.0),
         (r.h - inset * 2.0).max(0.0),
     );
-    outline(f, inner, LAVENDER, (r.w * 0.05).clamp(0.5, 2.0));
+    outline(f, inner, c.table.pattern, (r.w * 0.05).clamp(0.5, 2.0));
 }
 
 // ── The window ──────────────────────────────────────────────────────
 
 impl App for Hearts {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from(TITLE)
     }
@@ -2100,6 +2147,60 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- the
+    /// pass, a trick in play with a dimmed card and a taker, the help card --
+    /// with only the cards' white, red and black and the rim a card is ringed
+    /// in not the palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut derived = vec![
+                cards::FACE,
+                cards::RED,
+                cards::BLACK,
+                gamechrome::RIMS.0,
+                gamechrome::RIMS.1,
+            ];
+            for pressed in [false, true] {
+                derived.extend(gamechrome::button_colours(
+                    &p,
+                    guitk::button::Kind::Plain,
+                    c.chrome.band,
+                ));
+                let paint = guitk::button::paint(
+                    &p,
+                    guitk::button::Kind::Plain,
+                    guitk::button::State {
+                        pressed,
+                        ..guitk::button::State::default()
+                    },
+                    c.chrome.band,
+                );
+                derived.extend([paint.upper, paint.lower, paint.edge, paint.ink]);
+            }
+            let mut passing = game();
+            passing.theme_changed(&p);
+            passing.chosen = vec![0, 1];
+            let mut trick = playing();
+            trick.theme_changed(&p);
+            fill_a_trick(&mut trick);
+            let mut help = game();
+            help.theme_changed(&p);
+            help.show_help = true;
+            for (what, g) in [("passing", &passing), ("trick", &trick), ("help", &help)] {
+                let f = g.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("hearts, {what}, light: {light}"),
+                );
+            }
+        }
+    }
     use guitk::probe::{click_sized, ctrl, is_visible_sized, press, rect_of_sized};
 
     // ── Fixtures ───────────────────────────────────────────────────
@@ -3424,7 +3525,7 @@ mod tests {
         let boxes = card_boxes(&g, Hearts::SIZE);
         assert_eq!(boxes.len(), 1);
         assert!(
-            ringed(&g, Hearts::SIZE, boxes[0].1, YELLOW),
+            ringed(&g, Hearts::SIZE, boxes[0].1, colours().table.focus),
             "the hand it left behind has no card ringed"
         );
 
@@ -3489,6 +3590,36 @@ mod tests {
     }
 
     /// The colour of the rectangle filled at exactly `r`, if one was.
+    /// The colours of every fill drawn exactly over `r`, in the order drawn.
+    fn fills_at(g: &Hearts, size: (f32, f32), r: Rect) -> Vec<Color> {
+        g.frame(size.0, size.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (x - r.x).abs() < 0.01
+                    && (y - r.y).abs() < 0.01
+                    && (width - r.w).abs() < 0.01
+                    && (height - r.h).abs() < 0.01 =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
     fn fill_color_at(g: &Hearts, size: (f32, f32), r: Rect) -> Option<Color> {
         g.frame(size.0, size.1)
             .commands()
@@ -3559,13 +3690,13 @@ mod tests {
         let taker = g.taker.expect("a full trick named nobody");
         let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert!(
-            ringed(&g, Hearts::SIZE, l.trick_card(taker), GREEN),
+            ringed(&g, Hearts::SIZE, l.trick_card(taker), colours().chrome.good),
             "the trick was taken and the table did not say by whom"
         );
         for seat in 0..SEATS {
             if seat != taker {
                 assert!(
-                    !ringed(&g, Hearts::SIZE, l.trick_card(seat), GREEN),
+                    !ringed(&g, Hearts::SIZE, l.trick_card(seat), colours().chrome.good),
                     "seat {seat} was ringed as well as the taker"
                 );
             }
@@ -3589,14 +3720,12 @@ mod tests {
         assert_eq!(g.valid_plays(0), vec![0]);
 
         let boxes = card_boxes(&g, Hearts::SIZE);
-        assert_eq!(
-            fill_color_at(&g, Hearts::SIZE, boxes[0].1),
-            Some(CARD_FACE),
+        assert!(
+            !fills_at(&g, Hearts::SIZE, boxes[0].1).contains(&colours().veil),
             "the legal card was dimmed"
         );
-        assert_eq!(
-            fill_color_at(&g, Hearts::SIZE, boxes[1].1),
-            Some(SUBTEXT0),
+        assert!(
+            fills_at(&g, Hearts::SIZE, boxes[1].1).contains(&colours().veil),
             "the illegal card was drawn as though it could be played"
         );
     }
@@ -3610,7 +3739,8 @@ mod tests {
         g.trick_number = 3;
         g.trick = Trick::new();
         for (_, r) in card_boxes(&g, Hearts::SIZE) {
-            assert_eq!(fill_color_at(&g, Hearts::SIZE, r), Some(CARD_FACE));
+            assert_eq!(fill_color_at(&g, Hearts::SIZE, r), Some(cards::FACE));
+            assert!(!fills_at(&g, Hearts::SIZE, r).contains(&colours().veil));
         }
     }
 
@@ -3621,7 +3751,7 @@ mod tests {
         let boxes = card_boxes(&g, Hearts::SIZE);
         for (i, r) in boxes {
             assert_eq!(
-                ringed(&g, Hearts::SIZE, r, YELLOW),
+                ringed(&g, Hearts::SIZE, r, colours().table.focus),
                 i == 5,
                 "card {i} is ringed and should not be, or is not and should be"
             );
@@ -3729,12 +3859,12 @@ mod tests {
         let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert_eq!(
             fill_color_at(&g, Hearts::SIZE, l.seat_label(2)),
-            Some(SURFACE1),
+            Some(colours().chrome.lit),
             "the seat to play is not marked"
         );
         assert_eq!(
             fill_color_at(&g, Hearts::SIZE, l.seat_label(1)),
-            Some(SURFACE0),
+            Some(colours().chrome.raised),
             "a seat that is not to play is marked as though it were"
         );
     }

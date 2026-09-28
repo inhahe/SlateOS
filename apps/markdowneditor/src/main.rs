@@ -64,7 +64,7 @@ use diffcore::{
     normalize_content,
 };
 
-use std::collections::VecDeque;
+use guitk::undo::{Travel, UndoHistory};
 use std::fs;
 use std::path::PathBuf;
 
@@ -158,8 +158,9 @@ fn col_x(line: &str, col: usize, text_x: f32) -> f32 {
 }
 /// Minimum width for the find/replace panel.
 const FIND_PANEL_HEIGHT: f32 = 64.0;
-/// Maximum number of undo steps.
-const MAX_UNDO_HISTORY: usize = 500;
+/// Maximum number of undo steps: past it the oldest go, branches the
+/// document is not on first.
+const MAX_UNDO_HISTORY: core::num::NonZeroUsize = core::num::NonZeroUsize::MIN.saturating_add(499);
 /// Words per minute for reading time estimate.
 const READING_WPM: f32 = 238.0;
 /// Auto-save interval in seconds (default).
@@ -410,10 +411,12 @@ pub struct Document {
     pub scroll_col: usize,
     /// Preview scroll offset in pixels.
     pub preview_scroll: f32,
-    /// Undo history stack.
-    pub undo_stack: VecDeque<EditAction>,
-    /// Redo history stack.
-    pub redo_stack: VecDeque<EditAction>,
+    /// The edits, kept as a tree: an edit made after undoing starts a branch
+    /// beside what was undone, rather than throwing it away (C-Q24,
+    /// `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go back and forth
+    /// along the branch the document is on; Alt+Z and Alt+Shift+Z walk every
+    /// version it has been in, in the order each was made.
+    pub history: UndoHistory<EditAction>,
     /// Seconds since the last save (for auto-save tracking).
     pub seconds_since_save: u64,
     /// External-change tracker: records the last loaded/saved content and mtime
@@ -481,8 +484,7 @@ impl Document {
             scroll_line: 0,
             scroll_col: 0,
             preview_scroll: 0.0,
-            undo_stack: VecDeque::new(),
-            redo_stack: VecDeque::new(),
+            history: UndoHistory::new(MAX_UNDO_HISTORY),
             seconds_since_save: 0,
             sync: FileSync::new(),
         }
@@ -507,8 +509,7 @@ impl Document {
             scroll_line: 0,
             scroll_col: 0,
             preview_scroll: 0.0,
-            undo_stack: VecDeque::new(),
-            redo_stack: VecDeque::new(),
+            history: UndoHistory::new(MAX_UNDO_HISTORY),
             seconds_since_save: 0,
             sync: FileSync::new(),
         }
@@ -539,8 +540,7 @@ impl Document {
             scroll_line: 0,
             scroll_col: 0,
             preview_scroll: 0.0,
-            undo_stack: VecDeque::new(),
-            redo_stack: VecDeque::new(),
+            history: UndoHistory::new(MAX_UNDO_HISTORY),
             seconds_since_save: 0,
             sync,
         })
@@ -619,8 +619,7 @@ impl Document {
         } else {
             self.sync.base = Some(disk.to_string());
         }
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        self.history.clear();
     }
 
     /// Compute the three-way merge of the current buffer against `disk`.
@@ -707,13 +706,10 @@ impl Document {
         words / READING_WPM
     }
 
-    /// Push an edit action onto the undo stack and clear the redo stack.
+    /// Record an edit as the next step. One made after undoing starts a
+    /// branch, and what was undone stays in the history.
     pub fn push_undo(&mut self, action: EditAction) {
-        if self.undo_stack.len() >= MAX_UNDO_HISTORY {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(action);
-        self.redo_stack.clear();
+        self.history.record(action);
         self.modified = true;
     }
 
@@ -901,20 +897,48 @@ impl Document {
 
     /// Undo the most recent edit action.
     pub fn undo(&mut self) {
-        if let Some(action) = self.undo_stack.pop_back() {
+        if let Some(action) = self.history.undo() {
             self.apply_undo(&action);
-            self.redo_stack.push_back(action);
             self.modified = true;
         }
     }
 
-    /// Redo the most recently undone action.
+    /// Redo the most recently undone action on the branch the document is
+    /// on -- the one undone out of, or the one made since.
     pub fn redo(&mut self) {
-        if let Some(action) = self.redo_stack.pop_back() {
+        if let Some(action) = self.history.redo() {
             self.apply_redo(&action);
-            self.undo_stack.push_back(action);
             self.modified = true;
         }
+    }
+
+    /// Go to the version the document was in before this one was first
+    /// reached, on whichever branch -- Alt+Z. Answers whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version first reached after this one, on whichever branch --
+    /// Alt+Shift+Z. Answers whether there was one.
+    pub fn later(&mut self) -> bool {
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<EditAction>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(action) => self.apply_undo(&action),
+                Travel::Redo(action) => self.apply_redo(&action),
+            }
+        }
+        if moved {
+            self.modified = true;
+        }
+        moved
     }
 
     /// Remove `text` from the document at `(line, col)`, and put the cursor
@@ -7259,7 +7283,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+S", "Save"),
     ("Ctrl+Shift+S", "Save under a new name"),
     ("Ctrl+Shift+E", "Export as HTML"),
-    ("Ctrl+W", "Close the document"),
+    ("Ctrl+W", "Close the document; Ctrl+F4 too"),
     ("Ctrl+Tab", "Next document"),
     ("Ctrl+Shift+Tab", "Previous document"),
     ("Ctrl+E", "Editor, split or preview"),
@@ -7281,6 +7305,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Y", "Redo"),
     ("Ctrl+Shift+Z", "Redo"),
+    ("Alt+Z", "The version before this one, on any branch"),
+    ("Alt+Shift+Z", "The version after this one, on any branch"),
     ("Ctrl+F", "Find"),
     ("Ctrl+H", "Find and replace"),
     ("Tab", "Indent; switch boxes in the find panel"),
@@ -7420,7 +7446,9 @@ fn handle_ctrl_key(app: &mut App, key: Key, modifiers: Modifiers) -> Option<bool
         }
         Key::Char('e' | 'E') if shift => app.handle_toolbar_action(&ToolbarAction::ExportHtml),
         Key::Char('e' | 'E') => app.view_mode = app.view_mode.next(),
-        Key::Char('w' | 'W') => app.request_close_tab(app.active_doc()),
+        // Ctrl+F4 as well (C-Q24, §1416): the key programs with documents
+        // closed one with before Ctrl+W.
+        Key::Char('w' | 'W') | Key::Function(4) => app.request_close_tab(app.active_doc()),
         Key::Tab => cycle_tab(app, !shift),
         Key::PageDown => cycle_tab(app, true),
         Key::PageUp => cycle_tab(app, false),
@@ -7547,6 +7575,28 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
 
     // The find panel takes the keyboard while it is open.
     if app.find_state.visible && handle_find_key(app, key, modifiers) {
+        return true;
+    }
+
+    // Alt+Z and Alt+Shift+Z: every version the document has been in, in the
+    // order each was made -- the way back to a branch undone out of.
+    if modifiers.alt && !modifiers.ctrl && matches!(key, Key::Char('z' | 'Z')) {
+        let doc = app.active_document_mut();
+        let moved = if modifiers.shift {
+            doc.later()
+        } else {
+            doc.earlier()
+        };
+        if moved {
+            app.refresh_cache();
+        } else {
+            app.file_status = Some(FileNote::Done(String::from(if modifiers.shift {
+                "This is the newest version"
+            } else {
+                "This is the first version"
+            })));
+        }
+        app.sync_scroll();
         return true;
     }
 
@@ -7729,12 +7779,18 @@ fn translate_key(ev: &guitk::event::KeyEvent) -> Option<(Key, Modifiers)> {
         GKey::F12 => Key::Function(12),
         _ => Key::Char(printable(ev)?),
     };
+    // AltGr arrives as Ctrl+Alt. When it typed something, what it typed is
+    // text, not a chord: AltGr+Z is Polish's ż, AltGr+E is € on most European
+    // layouts. Both were lost -- the typing arm refuses a character with Ctrl
+    // held -- and AltGr+Z undid instead. A Ctrl+Alt chord that typed nothing
+    // stays a chord.
+    let altgr = ev.modifiers.ctrl && ev.modifiers.alt && ev.types_text();
     Some((
         key,
         Modifiers {
-            ctrl: ev.modifiers.ctrl,
+            ctrl: ev.modifiers.ctrl && !altgr,
             shift: ev.modifiers.shift,
-            alt: ev.modifiers.alt,
+            alt: ev.modifiers.alt && !altgr,
         },
     ))
 }
@@ -12392,5 +12448,148 @@ mod tests {
                 "a window that does not keep settings wrote them"
             );
         });
+    }
+
+    // ---- the history as a tree, and the keys (C-Q24, §1416) ------------------
+
+    fn alt(shift: bool) -> Modifiers {
+        Modifiers {
+            ctrl: false,
+            shift,
+            alt: true,
+        }
+    }
+
+    /// Type `text` at the caret.
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            handle_key(app, Key::Char(c), Modifiers::default());
+        }
+    }
+
+    fn first_line(app: &App) -> String {
+        app.active_document().lines[0].clone()
+    }
+
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept** -- reachable with Alt+Z, in the order the versions were made,
+    /// and Alt+Shift+Z comes forward again.
+    #[test]
+    fn an_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one() {
+        let mut app = App::new(1280.0, 800.0);
+        type_text(&mut app, "a");
+        handle_key(&mut app, Key::Char('z'), ctrl(false));
+        assert_eq!(first_line(&app), "");
+        type_text(&mut app, "b");
+        assert_eq!(first_line(&app), "b");
+        handle_key(&mut app, Key::Char('y'), ctrl(false));
+        assert_eq!(first_line(&app), "b", "redo went onto the branch left");
+
+        handle_key(&mut app, Key::Char('z'), alt(false));
+        assert_eq!(first_line(&app), "a", "the undone branch was lost");
+        handle_key(&mut app, Key::Char('z'), alt(false));
+        assert_eq!(first_line(&app), "");
+        handle_key(&mut app, Key::Char('z'), alt(true));
+        handle_key(&mut app, Key::Char('z'), alt(true));
+        assert_eq!(first_line(&app), "b");
+        assert!(app.active_document().modified);
+    }
+
+    /// At either end of time, Alt+Z and Alt+Shift+Z say so.
+    #[test]
+    fn the_ends_of_the_history_are_said() {
+        let mut app = App::new(1280.0, 800.0);
+        handle_key(&mut app, Key::Char('z'), alt(false));
+        assert!(
+            matches!(&app.file_status, Some(FileNote::Done(m)) if m == "This is the first version"),
+            "{:?}",
+            app.file_status
+        );
+        type_text(&mut app, "a");
+        handle_key(&mut app, Key::Char('z'), alt(true));
+        assert!(
+            matches!(&app.file_status, Some(FileNote::Done(m)) if m == "This is the newest version"),
+            "{:?}",
+            app.file_status
+        );
+        assert_eq!(first_line(&app), "a");
+    }
+
+    /// A reload starts the history again: the old buffer's edits describe
+    /// lines that are not there any more.
+    #[test]
+    fn a_reload_starts_the_history_again() {
+        let mut app = App::new(1280.0, 800.0);
+        type_text(&mut app, "a");
+        app.active_document_mut().reload_from_disk("from disk");
+        handle_key(&mut app, Key::Char('z'), alt(false));
+        handle_key(&mut app, Key::Char('z'), ctrl(false));
+        assert_eq!(first_line(&app), "from disk");
+    }
+
+    /// **Ctrl+F4 closes the document**, as Ctrl+W does.
+    #[test]
+    fn ctrl_f4_closes_the_document() {
+        let mut app = App::new(1280.0, 800.0);
+        app.new_document();
+        assert_eq!(app.documents.count(), 2);
+        handle_key(&mut app, Key::Function(4), ctrl(false));
+        assert_eq!(app.documents.count(), 1, "Ctrl+F4 did not close it");
+    }
+
+    /// A key event as the window hands one over.
+    fn window_key(
+        key: guitk::event::Key,
+        ctrl: bool,
+        alt: bool,
+        text: &str,
+    ) -> guitk::event::KeyEvent {
+        guitk::event::KeyEvent {
+            key,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                ctrl,
+                alt,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: text.to_string(),
+        }
+    }
+
+    /// **AltGr types its letter.** AltGr arrives as Ctrl+Alt: AltGr+Z is
+    /// Polish's ż and undid instead, and AltGr+E is € on most European
+    /// layouts and typed nothing -- the typing arm refuses a character with
+    /// Ctrl held. A Ctrl+Alt chord that types nothing stays a chord.
+    #[test]
+    fn an_altgr_letter_is_typed() {
+        let mut app = App::new(1280.0, 800.0);
+        type_text(&mut app, "a");
+        for (key, letter) in [(guitk::event::Key::Z, "ż"), (guitk::event::Key::E, "€")] {
+            let (key, modifiers) = translate_key(&window_key(key, true, true, letter)).unwrap();
+            handle_key(&mut app, key, modifiers);
+        }
+        assert_eq!(first_line(&app), "aż€");
+        let (key, modifiers) =
+            translate_key(&window_key(guitk::event::Key::Z, true, true, "")).unwrap();
+        assert_eq!(key, Key::Char('z'));
+        assert!(
+            modifiers.ctrl && modifiers.alt,
+            "a chord lost its modifiers"
+        );
+    }
+
+    /// The help card names the new keys.
+    #[test]
+    fn the_help_card_names_the_history_keys() {
+        for key in ["Alt+Z", "Alt+Shift+Z"] {
+            assert!(
+                SHORTCUTS.iter().any(|(k, _)| *k == key),
+                "{key} is not listed"
+            );
+        }
+        assert!(
+            SHORTCUTS.iter().any(|(_, what)| what.contains("Ctrl+F4")),
+            "Ctrl+F4 is not listed"
+        );
     }
 }

@@ -158,6 +158,7 @@ widget-style:
   # The shapes of the controls. Sizes are whole pixels.
   button:
     radius: 4          # the corners: 0 (square) to 14 (a pill)
+    padding: 14        # room either side of the label: 4 to 24
     gloss: true        # the upper half of the face a shade brighter
     shadow: false      # a soft shadow under the button
   field:

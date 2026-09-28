@@ -2008,10 +2008,10 @@ live.
   controls draw from it: the button, every toolkit text field (one drawer,
   `guitk::field`), the check box, the switch (a box in the pill's room under
   `toggle: checkbox`, in the shell's settings too) and the scrollbars
-  (`guitk::scrollbar::draw`, in a column every theme shares). **Next:** the
-  shell's own text fields, then button padding through the dialog layout; lane
-  E's Settings picker for the axis and its applications' own fields and
-  scrollbars.
+  (`guitk::scrollbar::draw`, in a column every theme shares), and the shell's
+  own text fields; button padding through the alert dialog's layout. **Lane
+  E:** the Settings picker for the axis and its applications' own fields and
+  scrollbars (`requests/c-e-a-theme-can-shape-the-controls.md`).
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

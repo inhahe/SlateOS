@@ -25,9 +25,10 @@
 //! # What the theme's widget style decides
 //!
 //! The shape (`Palette::widget_style`, design-decisions 1435): how round the
-//! corners are, whether the upper half is the brighter glass or the face is
-//! one flat colour, and whether a soft shadow lifts the button off the page.
-//! The built-in theme's are the reference's -- 4-pixel corners, the gloss, no
+//! corners are, how much room the label has either side, whether the upper
+//! half is the brighter glass or the face is one flat colour, and whether a
+//! soft shadow lifts the button off the page. The built-in theme's are the
+//! reference's -- 4-pixel corners, 14 pixels either side, the gloss, no
 //! shadow. The colours and the label's legibility are the same whichever
 //! shape: a face without gloss is only its lower half, on which the ink was
 //! already checked.
@@ -51,7 +52,9 @@ use crate::widget_style::ButtonStyle;
 pub const HEIGHT: f32 = 28.0;
 /// The label's size.
 pub const FONT_SIZE: f32 = 13.0;
-/// Room either side of the label: the reference's `padding: 0 14px`.
+/// Room either side of the label in the built-in theme: the reference's
+/// `padding: 0 14px`. A theme's own is its widget style's
+/// (`ButtonStyle::padding`), which [`width`] and [`draw`] read.
 pub const PADDING_H: f32 = 14.0;
 /// The narrowest a button is, so a row of short labels -- OK, Cancel -- is a
 /// row of equal buttons, as every desktop draws them.
@@ -130,11 +133,26 @@ pub struct Paint {
     pub ink: Color,
 }
 
-/// The width a button needs for `label`: the label in bold at [`FONT_SIZE`],
-/// with [`PADDING_H`] either side, and never narrower than [`MIN_WIDTH`].
+/// The width a button needs for `label` in `style`: the label in bold at
+/// [`FONT_SIZE`], with the style's padding either side, and never narrower
+/// than [`MIN_WIDTH`].
+///
+/// A row that lays its buttons out from this must draw them with the same
+/// style, and test a click against the rectangles it drew -- the padding moves
+/// every button after the first.
 #[must_use]
-pub fn width(label: &str) -> f32 {
-    (crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold) + PADDING_H * 2.0).max(MIN_WIDTH)
+pub fn width(style: &ButtonStyle, label: &str) -> f32 {
+    (crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold) + padding(style) * 2.0)
+        .max(MIN_WIDTH)
+}
+
+/// The room either side of a label in `style`, held to the style's bounds.
+fn padding(style: &ButtonStyle) -> f32 {
+    f32::from(
+        style
+            .padding
+            .clamp(ButtonStyle::MIN_PADDING, ButtonStyle::MAX_PADDING),
+    )
 }
 
 /// The colours a button of `kind` in `state` is drawn in, on `ground` -- the
@@ -320,9 +338,10 @@ pub fn draw(
         });
     }
     let text_w = crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold);
-    let room = (w - PADDING_H).max(0.0);
+    let pad = padding(style);
+    let room = (w - pad).max(0.0);
     sink.emit(RenderCommand::Text {
-        x: x + ((w - text_w) / 2.0).max(PADDING_H / 2.0),
+        x: x + ((w - text_w) / 2.0).max(pad / 2.0),
         y: y + (h - FONT_SIZE) / 2.0,
         text: label.to_string(),
         color: colours.ink,
@@ -718,13 +737,57 @@ mod tests {
     /// wide as its label needs.
     #[test]
     fn short_labels_share_the_least_width() {
-        assert_eq!(width("OK"), MIN_WIDTH);
-        assert_eq!(width("Cancel"), MIN_WIDTH);
+        let aero = WidgetStyle::AERO.button;
+        assert_eq!(width(&aero, "OK"), MIN_WIDTH);
+        assert_eq!(width(&aero, "Cancel"), MIN_WIDTH);
         let long = "Overwrite the existing file";
-        assert!(width(long) > MIN_WIDTH);
+        assert!(width(&aero, long) > MIN_WIDTH);
         assert!(
-            width(long)
+            width(&aero, long)
                 >= crate::text::measure(long, FONT_SIZE, FontWeightHint::Bold) + PADDING_H * 2.0
         );
+    }
+
+    /// **A theme's padding is the room either side of the label** -- in the
+    /// width a row lays out, and in where the label is drawn -- held to its
+    /// bounds.
+    #[test]
+    fn the_padding_is_the_themes() {
+        let long = "Overwrite the existing file";
+        let text = crate::text::measure(long, FONT_SIZE, FontWeightHint::Bold);
+        let with = |padding: u8| ButtonStyle {
+            padding,
+            ..WidgetStyle::AERO.button
+        };
+        assert!((width(&with(20), long) - (text + 40.0)).abs() < 0.01);
+        assert!((width(&with(6), long) - (text + 12.0)).abs() < 0.01);
+        assert!(
+            (width(&with(0), long) - (text + f32::from(ButtonStyle::MIN_PADDING) * 2.0)).abs()
+                < 0.01,
+            "no padding at all"
+        );
+        assert!(
+            (width(&with(200), long) - (text + f32::from(ButtonStyle::MAX_PADDING) * 2.0)).abs()
+                < 0.01
+        );
+
+        // The label's room is the button less its padding.
+        let p = styled(with(20));
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+        draw(
+            &mut cmds,
+            &p,
+            (0.0, 0.0, 100.0, HEIGHT),
+            "OK",
+            Kind::Plain,
+            State::default(),
+            p.base,
+            2.0,
+        );
+        let room = cmds.iter().find_map(|c| match c {
+            RenderCommand::Text { max_width, .. } => *max_width,
+            _ => None,
+        });
+        assert_eq!(room, Some(80.0));
     }
 }

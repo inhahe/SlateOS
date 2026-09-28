@@ -11,6 +11,7 @@
 //! widget-style:
 //!   button:
 //!     radius: 4          # 0 to 14 pixels; 14 is a pill
+//!     padding: 14        # room either side of the label: 4 to 24 pixels
 //!     gloss: true        # the upper half of the face a shade brighter
 //!     shadow: false      # a soft shadow under the button
 //!   field:
@@ -124,13 +125,16 @@ fn read_button(doc: &Document, button: &mut ButtonStyle, warnings: &mut Warnings
     read_part(
         doc,
         "button",
-        "radius, gloss and shadow",
+        "radius, padding, gloss and shadow",
         warnings,
         |key, w| {
             let path = [SECTION, "button", key];
             Some(match key {
                 "radius" => read_radius(doc, &path, ButtonStyle::MAX_RADIUS, "a pill", w)
                     .map(|r| button.radius = r)
+                    .is_some(),
+                "padding" => read_padding(doc, &path, w)
+                    .map(|p| button.padding = p)
                     .is_some(),
                 "gloss" => read_flag(doc, &path, w).map(|g| button.gloss = g).is_some(),
                 "shadow" => read_flag(doc, &path, w)
@@ -277,6 +281,32 @@ fn read_radius(
             Some(max)
         }
     }
+}
+
+/// A button's padding in whole pixels, held to
+/// `ButtonStyle::MIN_PADDING..=MAX_PADDING` with a note when it is not in it.
+fn read_padding(doc: &Document, path: &[&str], warnings: &mut Warnings) -> Option<u8> {
+    let raw = value_of(doc, path, "a number of pixels, like 14", warnings)?;
+    let Ok(pixels) = raw.parse::<i64>() else {
+        warnings.push(format!(
+            "`{}` is ignored: `{}` is not a whole number of pixels",
+            at(path),
+            quoted(&raw)
+        ));
+        return None;
+    };
+    let (min, max) = (
+        i64::from(ButtonStyle::MIN_PADDING),
+        i64::from(ButtonStyle::MAX_PADDING),
+    );
+    let held = pixels.clamp(min, max);
+    if held != pixels {
+        warnings.push(format!(
+            "`{}` is drawn as {held}: a button's padding is {min} to {max} pixels",
+            at(path)
+        ));
+    }
+    u8::try_from(held).ok()
 }
 
 /// `true` or `false`.
@@ -527,6 +557,7 @@ mod tests {
 widget-style:
   button:
     radius: 9
+    padding: 20
     gloss: false
     shadow: true
   field:
@@ -545,6 +576,7 @@ widget-style:
         WidgetStyle {
             button: ButtonStyle {
                 radius: 9,
+                padding: 20,
                 gloss: false,
                 shadow: true,
             },
@@ -604,6 +636,7 @@ widget-style:
 widget-style:
   button:
     radius: big
+    padding: 99
     gloss: maybe
     shadow:
     colour: red
@@ -621,6 +654,7 @@ widget-style:
         );
         let style = file.widget_style.expect("the good values are used");
         let mut expected = WidgetStyle::AERO;
+        expected.button.padding = ButtonStyle::MAX_PADDING;
         expected.field.focus = FocusMark::Ring;
         expected.check.radius = CheckStyle::MAX_RADIUS;
         assert_eq!(style, expected);
@@ -633,11 +667,12 @@ widget-style:
             );
         };
         said("`widget-style.button.radius` is ignored: `big` is not a whole number of pixels");
+        said("`widget-style.button.padding` is drawn as 24: a button's padding is 4 to 24 pixels");
         said("`widget-style.button.gloss` is ignored: `maybe` is not true or false");
         said("`widget-style.button.shadow` has no value: write true or false");
         said(
             "`widget-style.button.colour` is ignored: a button has no setting called `colour` \
-             (it has radius, gloss and shadow)",
+             (it has radius, padding, gloss and shadow)",
         );
         said("`widget-style.field.radius` is ignored: a radius cannot be less than 0");
         said("`widget-style.field.border` is ignored: `dotted` is not box or underline");
@@ -648,7 +683,7 @@ widget-style:
              not a value like `flat`",
         );
         said("`widget-style.menu` is ignored: a widget style has no part called `menu`");
-        assert_eq!(file.warnings.len(), 10, "{:#?}", file.warnings);
+        assert_eq!(file.warnings.len(), 11, "{:#?}", file.warnings);
     }
 
     /// **The shipped built-in theme writes out the built-in controls**, every
@@ -666,6 +701,7 @@ widget-style:
             button:
                 ButtonStyle {
                     radius: _,
+                    padding: _,
                     gloss: _,
                     shadow: _,
                 },
@@ -689,7 +725,7 @@ widget-style:
             ["button", "field", "check", "toggle", "scrollbar"]
         );
         for (part, keys) in [
-            ("button", &["radius", "gloss", "shadow"][..]),
+            ("button", &["radius", "padding", "gloss", "shadow"][..]),
             ("field", &["radius", "border", "focus"]),
             ("check", &["radius"]),
             ("scrollbar", &["width", "visibility"]),

@@ -227,10 +227,11 @@ impl DialogButton {
     /// function, via [`DialogLayout::button_rects`]. They used to be two copies
     /// of the constant, which was harmless only while every button was exactly
     /// as wide as every other.
-    fn width(&self) -> f32 {
-        // The toolkit button's own measure, so the rectangle laid out is the
-        // one the label was measured for when it is drawn.
-        crate::button::width(&self.label).max(BUTTON_MIN_WIDTH)
+    fn width(&self, style: &crate::widget_style::ButtonStyle) -> f32 {
+        // The toolkit button's own measure, in the style it is drawn in, so
+        // the rectangle laid out is the one the label was measured for when
+        // it is drawn.
+        crate::button::width(style, &self.label).max(BUTTON_MIN_WIDTH)
     }
 }
 
@@ -616,6 +617,15 @@ pub struct AlertDialog {
     /// [`with_focus_ring_width`](Self::with_focus_ring_width), exactly as
     /// `InputDialog` takes a caret width.
     focus_ring_width: f32,
+    /// The shape of the buttons, as the dialog was last drawn: the palette's
+    /// (`widget_style.button`), adopted at the start of each `render`.
+    ///
+    /// Kept because a button's padding decides its width, and so where every
+    /// button after the first begins and how wide the dialog must be. The
+    /// layout is measured with the style the buttons are drawn in, and the
+    /// placement `render` records from it is what a click is tested against
+    /// -- so a click lands on the button drawn under it, in any theme.
+    button_style: crate::widget_style::ButtonStyle,
 }
 
 impl AlertDialog {
@@ -917,6 +927,9 @@ impl AlertDialog {
         // Render overlay scrim.
         self.overlay.render(parent_width, parent_height, tree);
 
+        // The buttons' shape, before anything is measured: their padding is
+        // part of the layout the click is tested against.
+        self.button_style = palette.widget_style.button;
         let layout = self.compute_layout(parent_width, parent_height);
         self.overlay
             .set_content_rect(layout.x, layout.y, layout.width, layout.height);
@@ -1097,7 +1110,7 @@ impl AlertDialog {
         self.buttons
             .buttons
             .iter()
-            .map(DialogButton::width)
+            .map(|button| button.width(&self.button_style))
             .sum::<f32>()
             + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING
     }
@@ -1207,7 +1220,7 @@ impl AlertDialog {
             .buttons
             .buttons
             .iter()
-            .map(DialogButton::width)
+            .map(|button| button.width(&self.button_style))
             .collect();
         let total_btn_width: f32 = widths.iter().sum::<f32>()
             + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING;
@@ -1268,6 +1281,7 @@ impl AlertDialog {
         let focused_button = buttons.default_index();
         Self {
             focus_ring_width: crate::style::FOCUS_RING_WIDTH,
+            button_style: crate::widget_style::WidgetStyle::AERO.button,
             title: title.to_string(),
             message: message.to_string(),
             detail: None,
@@ -3181,24 +3195,83 @@ mod tests {
 
     #[test]
     fn a_button_is_at_least_as_wide_as_its_own_label() {
+        let aero = crate::widget_style::WidgetStyle::AERO.button;
         // The four built-in labels fit the minimum; a verb need not.
-        assert!((DialogButton::ok().width() - BUTTON_MIN_WIDTH).abs() < 0.01);
+        assert!((DialogButton::ok().width(&aero) - BUTTON_MIN_WIDTH).abs() < 0.01);
         let long = DialogButton::destructive("Overwrite Every Existing File");
         assert!(
-            long.width() > BUTTON_MIN_WIDTH,
+            long.width(&aero) > BUTTON_MIN_WIDTH,
             "a long label must widen its button, got {}",
-            long.width()
+            long.width(&aero)
         );
         // Measured as the toolkit's button draws it (`crate::button`), which
         // is what the rectangle is laid out for.
         assert!(
-            long.width()
+            long.width(&aero)
                 >= crate::text::measure(
                     long.label(),
                     crate::button::FONT_SIZE,
                     FontWeightHint::Bold
                 ) + crate::button::PADDING_H * 2.0
         );
+    }
+
+    /// **A theme's padding widens the buttons it is drawn with, and the click
+    /// follows**: the row is laid out with the style the dialog is drawn in,
+    /// so a widened button pushes the ones after it along -- and a press on
+    /// the centre of each button as *drawn* is answered by that button, in the
+    /// padded theme as in the built-in one.
+    #[test]
+    fn a_themes_padding_moves_the_buttons_and_the_clicks_with_them() {
+        let mut padded = Palette::for_mode(false);
+        padded.widget_style.button.padding = 24;
+        let row = || {
+            AlertDialog::confirm("T", "M").with_buttons(ButtonSet::custom(vec![
+                DialogButton::destructive("Overwrite Every Existing File"),
+                DialogButton::cancel(),
+            ]))
+        };
+        let faces = |palette: &Palette| -> Vec<(f32, f32, f32, f32)> {
+            let mut dialog = row();
+            dialog.show();
+            let mut tree = RenderTree::new();
+            dialog.render(palette, 1600.0, 900.0, &mut tree);
+            tree.commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } if (*height - BUTTON_HEIGHT).abs() < 0.01 => Some((*x, *y, *width, *height)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let before = faces(&Palette::for_mode(false));
+        let after = faces(&padded);
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(
+            after[0].2 > before[0].2,
+            "the long button did not widen: {} then {}",
+            before[0].2,
+            after[0].2
+        );
+        for (i, expect) in [DialogResult::Ok, DialogResult::Cancel].iter().enumerate() {
+            let (x, y, w, h) = after[i];
+            let mut d = row();
+            d.show();
+            let mut t = RenderTree::new();
+            d.render(&padded, 1600.0, 900.0, &mut t);
+            d.handle_event(&mouse_at(
+                x + w / 2.0,
+                y + h / 2.0,
+                MouseEventKind::Press(MouseButton::Left),
+            ));
+            assert_eq!(d.result(), Some(expect), "button {i} drawn at {x},{y}");
+        }
     }
 
     #[test]

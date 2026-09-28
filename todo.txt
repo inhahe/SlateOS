@@ -59070,21 +59070,3 @@ is already waiting, not whether the setter exists.
   `requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md` item 3.
   **Then:** nothing to change here -- boot the repair entry with an account
   marked to sign in by itself and confirm the login screen shows.
-
-## Lane C — the widget-style axis: what it leaves out (2026-09-28)
-
-- **Judgment call: button padding is not a widget-style setting yet**
-  (design-decisions §1435). `roadmap-detailed.md` → *Tier 2 — Widget Styling*
-  lists "Button shape: border radius, padding, shadow"; radius and shadow are
-  in `guitk::widget_style::ButtonStyle`, padding is not. A button's padding
-  decides its width, and the toolkit's dialog (`gui/toolkit/src/modal.rs`,
-  `compute_layout`, `DialogButton::width`) lays its button row out -- and
-  hit-tests clicks against it -- without a palette, so a padding the drawing
-  honoured and the click did not would put a click on the wrong button.
-  **Proper fix:** `compute_layout` takes the `ButtonStyle` from the palette
-  it renders with, and the click is tested against the rectangles `render`
-  stored (as `set_content_rect` already is), never against a second layout
-  computed without one; then `button::width` takes the style, and
-  `ButtonStyle` gains `padding` with the reference's 14 as the built-in
-  value, read from `widget-style.button.padding`. **Trigger:** any other
-  reason to touch the dialog layout, or a theme that needs it.

@@ -31,10 +31,12 @@
 //!   click by laying itself out again with any palette to hand ("where things
 //!   land does not depend on colour"), so a style that moved a hit region
 //!   would put the click somewhere other than the drawing. That is why a
-//!   button's padding is not here yet (it decides where the next button in a
-//!   row begins; `todo.txt` → *Judgment Calls*), and why a scrollbar's style
-//!   draws it *inside* the column every theme gives it rather than widening
-//!   the column.
+//!   scrollbar's style draws it *inside* the column every theme gives it
+//!   rather than widening the column. A button's padding does decide its
+//!   width -- and so where the next button in a row begins -- which is why
+//!   the one row that measures its buttons, the toolkit's dialog, lays them
+//!   out with the style it draws them in and tests a click against the
+//!   rectangles it drew.
 //!
 //! # Whole pixels
 //!
@@ -71,6 +73,8 @@ impl WidgetStyle {
         button: ButtonStyle {
             // `.aero-srch-btn { border-radius: 4px }`.
             radius: 4,
+            // Its `padding: 0 14px`.
+            padding: 14,
             // Its `linear-gradient(to bottom, #fbfdff, #e6eef6)`.
             gloss: true,
             // It has no `box-shadow`.
@@ -147,6 +151,10 @@ pub struct ButtonStyle {
     /// never rounder than a pill: a radius past half its height is drawn as
     /// half its height.
     pub radius: u8,
+    /// Room either side of the label, from [`ButtonStyle::MIN_PADDING`] to
+    /// [`ButtonStyle::MAX_PADDING`]: with the label, what a button's width is
+    /// measured from (`crate::button::width`).
+    pub padding: u8,
     /// Whether the upper half of the face is a shade brighter -- the glass of
     /// the built-in theme. Without it a face is one flat colour.
     pub gloss: bool,
@@ -158,6 +166,12 @@ impl ButtonStyle {
     /// The roundest a theme may ask a button to be: half the height of the
     /// toolkit's button, which is a pill.
     pub const MAX_RADIUS: u8 = 14;
+    /// The least room either side of a label: a button whose label touched
+    /// its edge would read as a label with a box drawn over it.
+    pub const MIN_PADDING: u8 = 4;
+    /// The most: past this a short label floats in a button several times
+    /// its width.
+    pub const MAX_PADDING: u8 = 24;
 }
 
 /// How a text field is shaped.
@@ -286,6 +300,14 @@ mod tests {
     fn the_built_in_style_is_the_default() {
         assert_eq!(WidgetStyle::default(), WidgetStyle::AERO);
         assert_eq!(WidgetStyle::AERO.button.radius, 4);
+        #[allow(clippy::float_cmp, reason = "a small whole number, exactly")]
+        {
+            assert_eq!(
+                f32::from(WidgetStyle::AERO.button.padding),
+                crate::button::PADDING_H,
+                "the built-in padding is the one buttons always had"
+            );
+        }
         assert_eq!(WidgetStyle::AERO.field.radius, 3);
         assert_eq!(WidgetStyle::AERO.field.focus, FocusMark::Glow);
         assert_eq!(WidgetStyle::AERO.toggle, ToggleStyle::Pill);
@@ -300,6 +322,7 @@ mod tests {
         let chosen = WidgetStyle {
             button: ButtonStyle {
                 radius: 9,
+                padding: 20,
                 gloss: true,
                 shadow: true,
             },
@@ -317,6 +340,7 @@ mod tests {
         };
         let hc = chosen.for_high_contrast();
         assert!(!hc.button.gloss && !hc.button.shadow);
+        assert_eq!(hc.button.padding, 20, "padding is a shape, and kept");
         assert_eq!(hc.field.focus, FocusMark::Ring);
         assert_eq!(hc.scrollbar.visibility, ScrollbarVisibility::Always);
         // Kept.

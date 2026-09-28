@@ -53,6 +53,11 @@ const TOOLBAR_HEIGHT: f32 = 48.0;
 const STATUS_BAR_HEIGHT: f32 = 30.0;
 
 /// Why no recording can be made.
+/// Where the sidebar's first view row starts, below its title.
+const SIDEBAR_NAV_TOP: f32 = 52.0;
+/// Height of one sidebar view row.
+const SIDEBAR_ITEM_H: f32 = 36.0;
+
 const CANNOT_RECORD: &str = "No frame source: nothing here can capture the screen or write a file";
 
 /// What the window says instead of a recording indicator.
@@ -2138,8 +2143,51 @@ impl ScreenRecorderApp {
         }
     }
 
+    /// The sidebar view under `(x, y)`, by its place in [`ActiveView::all`].
+    ///
+    /// The painter lays the rows out from [`SIDEBAR_NAV_TOP`] and
+    /// [`SIDEBAR_ITEM_H`] too, so a row drawn is the row clicked.
+    fn sidebar_item_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !(0.0..SIDEBAR_WIDTH).contains(&x) || y < SIDEBAR_NAV_TOP {
+            return None;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a non-negative offset over a row height: a small row index"
+        )]
+        let row = ((y - SIDEBAR_NAV_TOP) / SIDEBAR_ITEM_H) as usize;
+        (row < ActiveView::all().len()).then_some(row)
+    }
+
     /// Handle a mouse event.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The sidebar: a click opens the view, and the pointer over one
+        // lights it. It was drawn with an active row and a hover state and
+        // answered neither -- the views were reachable only by their keys,
+        // and `hovered_sidebar` was set by nothing. Not while a region is
+        // being chosen: then the whole window is the selector's.
+        if !self.region_selector.active && !self.region_selector.dragging {
+            match mouse.kind {
+                MouseEventKind::Press(MouseButton::Left) => {
+                    if let Some(view) = self
+                        .sidebar_item_at(mouse.x, mouse.y)
+                        .and_then(|i| ActiveView::all().get(i).copied())
+                    {
+                        self.active_view = view;
+                        return EventResult::Consumed;
+                    }
+                }
+                MouseEventKind::Move => {
+                    let hovered = self.sidebar_item_at(mouse.x, mouse.y);
+                    if hovered != self.hovered_sidebar {
+                        self.hovered_sidebar = hovered;
+                        return EventResult::Consumed;
+                    }
+                }
+                _ => {}
+            }
+        }
         // The region selector, which is the only thing in this program that
         // wants the pointer: `begin_drag`, `update_drag` and `end_drag` were
         // written, tested, and called by nothing, so "custom region (drag to
@@ -2520,8 +2568,8 @@ impl ScreenRecorderApp {
 
         // Navigation items
         let views = ActiveView::all();
-        let nav_start_y: f32 = 52.0;
-        let item_height: f32 = 36.0;
+        let nav_start_y = SIDEBAR_NAV_TOP;
+        let item_height = SIDEBAR_ITEM_H;
 
         for (i, view) in views.iter().enumerate() {
             let y = nav_start_y + (i as f32) * item_height;
@@ -6065,5 +6113,30 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // == The sidebar (2026-09-27) ================================================
+
+    #[test]
+    fn a_sidebar_row_is_opened_by_a_click_and_lit_under_the_pointer() {
+        let mut app = ScreenRecorderApp::new();
+        let views = ActiveView::all();
+        let (i, &view) = views
+            .iter()
+            .enumerate()
+            .find(|(_, v)| **v != app.active_view)
+            .expect("another view");
+        #[allow(clippy::cast_precision_loss)]
+        let y = SIDEBAR_NAV_TOP + i as f32 * SIDEBAR_ITEM_H + SIDEBAR_ITEM_H / 2.0;
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Move, 40.0, y)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.hovered_sidebar, Some(i));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), 40.0, y));
+        assert_eq!(app.active_view, view, "the click did not open the view");
+        // Off the sidebar, nothing is lit.
+        app.handle_event(&mouse(MouseEventKind::Move, SIDEBAR_WIDTH + 50.0, y));
+        assert_eq!(app.hovered_sidebar, None);
     }
 }

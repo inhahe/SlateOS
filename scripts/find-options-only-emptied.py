@@ -178,6 +178,11 @@ KNOWN = {
     "connected to reconnect to; Reconnect says so",
     ("apps/magnifier", "picked"): "nothing can capture the screen, so picking refuses and says "
     "so rather than name a colour it never read; the swatch is tested with one set by hand",
+    ("apps/screenrecorder", "active_annotation_tool"): "the annotation toolbar is drawn only "
+    "while recording, and recording refuses (no frame source) and says so; this is the slot "
+    "a working recorder's toolbar fills",
+    ("apps/screenrecorder", "current_annotation"): "as active_annotation_tool: an annotation "
+    "is drawn over a take, and there is no take",
     ("apps/videoplayer", "album"): "mediaprobe reads no tags yet; the rows show only when present",
     ("apps/videoplayer", "artist"): "as album",
     ("apps/videoplayer", "encoder"): "as album",

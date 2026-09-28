@@ -1325,6 +1325,12 @@ pub struct SpeedTestUI {
     /// not fill. Dropping it -- probing once per frame that crosses the
     /// interval and discarding the remainder -- would tie the probe rate to
     /// the frame rate, so the same test would take longer on a slower machine.
+    ///
+    /// `#[cfg(test)]` since 2026-09-27, with the simulated run that is its
+    /// only reader: a network run's probes are timed by the thread that sends
+    /// them (`net::PROBE_GAP`). `start_test` went on zeroing it for a run
+    /// that never read it -- lane C's field scan found the write.
+    #[cfg(test)]
     probe_timer_secs: f32,
     /// Index of the history item being hovered.
     history_hover: Option<usize>,
@@ -1389,6 +1395,7 @@ impl SpeedTestUI {
             selected_server: 0,
             server_dropdown_open: false,
             graph_points: Vec::with_capacity(MAX_GRAPH_POINTS),
+            #[cfg(test)]
             probe_timer_secs: 0.0,
             history_hover: None,
             history_scroll: 0.0,
@@ -1422,8 +1429,6 @@ impl SpeedTestUI {
         self.graph_points.clear();
         self.current_speed_mbps = 0.0;
         self.current_latency_ms = 0.0;
-        self.probe_timer_secs = 0.0;
-
         self.upload_skipped = false;
         let Some(server) = self.servers.get(self.selected_server) else {
             self.phase = SpeedTestPhase::Error(String::from("No server is selected"));

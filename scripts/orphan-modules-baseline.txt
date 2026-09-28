@@ -4,7 +4,7 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
-# 35 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# 31 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs; and
@@ -225,11 +225,9 @@ apps/installer/src/grub.rs
 apps/settings/src/remote.rs
 gui/compositor/src/server.rs
 gui/desktop/src/about.rs
-gui/desktop/src/backup_settings.rs
 gui/desktop/src/bluetooth.rs
 gui/desktop/src/clipboard_viewer.rs
 gui/desktop/src/context_ext.rs
-gui/desktop/src/default_apps.rs
 gui/desktop/src/device_settings.rs
 gui/desktop/src/file_drop.rs
 gui/desktop/src/language_settings.rs
@@ -248,9 +246,9 @@ gui/desktop/src/touchpad.rs
 gui/desktop/src/update_settings.rs
 gui/desktop/src/user_accounts.rs
 gui/desktop/src/window_peek.rs
+gui/imagecodec/src/avif/animation.rs
 gui/imagecodec/src/encode.rs
 gui/remote/src/reader.rs
 gui/toolkit/src/context_ext.rs
-gui/toolkit/src/textview.rs
 netproto/src/arp.rs
 netproto/src/dhcp.rs

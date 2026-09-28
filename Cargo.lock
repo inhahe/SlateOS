@@ -965,7 +965,6 @@ dependencies = [
  "pathtext",
  "safeio",
  "settingsfile",
- "textarea",
  "textline",
 ]
 

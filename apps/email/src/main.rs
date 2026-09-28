@@ -1843,15 +1843,15 @@ use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textarea::{self, TextArea};
 use guitk::textedit;
-use guitk::textinput::TextInput;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use textarea::TextArea;
 
 /// What the window says above the mail, before anything is pressed.
 ///
@@ -2069,9 +2069,9 @@ pub struct Compose {
     saved: String,
     /// Escape was pressed once over unsaved work: a second press discards.
     pub confirm_close: bool,
-    /// How far the body is scrolled, in lines, and across, in pixels.
-    pub body_scroll: usize,
-    pub body_hscroll: f32,
+    /// Whether the left button went down on the body and has not come up:
+    /// moving the pointer meanwhile extends the selection.
+    pub body_drag: bool,
 }
 
 /// A text field holding `text`, with the caret at its end.
@@ -2079,6 +2079,27 @@ fn field_with(text: &str) -> TextInput {
     let mut input = TextInput::new();
     input.set_text(text);
     input
+}
+
+/// What a key would put into the body, for its cap: the typed characters,
+/// or the clipboard for a paste.
+fn would_insert(key: &KeyEvent, clipboard: &str) -> Option<String> {
+    let mods = key.modifiers;
+    if mods.ctrl && !mods.alt {
+        return (key.key == Key::V).then(|| clipboard.to_owned());
+    }
+    key.types_text().then(|| key.typed().collect())
+}
+
+/// Whether `inserted`, put in place of the body's selection or at its caret,
+/// leaves it within [`BODY_CAPACITY`].
+fn body_fits(body: &TextArea, inserted: &str) -> bool {
+    let selected = body.selected_text().len();
+    body.text()
+        .len()
+        .saturating_sub(selected)
+        .saturating_add(inserted.len())
+        <= BODY_CAPACITY
 }
 
 /// Split an address list at the commas outside quotes and angle brackets.
@@ -2117,7 +2138,7 @@ impl Compose {
             to: TextInput::new(),
             cc: TextInput::new(),
             subject: TextInput::new(),
-            body: TextArea::new(BODY_TEXT),
+            body: TextArea::new(),
             attachments: Vec::new(),
             in_reply_to: None,
             references: Vec::new(),
@@ -2125,8 +2146,7 @@ impl Compose {
             saved_as: None,
             saved: String::new(),
             confirm_close: false,
-            body_scroll: 0,
-            body_hscroll: 0.0,
+            body_drag: false,
         };
         compose.saved = compose.fingerprint();
         compose
@@ -2140,7 +2160,7 @@ impl Compose {
         compose.cc = field_with(&draft.cc.join(", "));
         compose.subject = field_with(&draft.subject);
         compose.body.set_text(&draft.body);
-        compose.body.move_to(0, false);
+        compose.body.move_text_start(false);
         compose.in_reply_to.clone_from(&draft.in_reply_to);
         compose.references.clone_from(&draft.references);
         compose.attachments.clone_from(&draft.attachments);
@@ -2365,6 +2385,8 @@ pub struct EmailApp {
     pub picker_for: PickerFor,
     /// What a copy or a cut in a field took, for a paste.
     clipboard: String,
+    /// How wide carets are drawn: the user's `caret_width_scale` applied.
+    caret_width: f32,
     /// How far the list is scrolled, in rows, and the message read, in lines.
     pub list_scroll: usize,
     pub read_scroll: usize,
@@ -2433,6 +2455,7 @@ impl EmailApp {
             picker: FilePicker::default(),
             picker_for: PickerFor::Open,
             clipboard: String::new(),
+            caret_width: textedit::CARET_WIDTH,
             list_scroll: 0,
             read_scroll: 0,
             hover: None,
@@ -3190,17 +3213,27 @@ impl EmailApp {
                 }
             }
             _ => {
-                let page = self.body_rows().saturating_sub(1).max(1);
+                let m = self.body_metrics();
                 let clipboard = self.clipboard.clone();
                 let Some(compose) = self.compose.as_mut() else {
                     return EventResult::Ignored;
                 };
                 let copied = if compose.field == ComposeField::Body {
-                    let edited = compose.body.apply_key(key, BODY_CAPACITY, &clipboard, page);
-                    if !edited.handled {
+                    // Past what a message holds, nothing more goes in.
+                    if let Some(inserted) = would_insert(key, &clipboard)
+                        && !body_fits(&compose.body, &inserted)
+                    {
+                        return EventResult::Consumed;
+                    }
+                    // One clipboard for the window: the lines' and the
+                    // body's are the same, so a copy in one pastes in the
+                    // other.
+                    compose.body.set_clipboard(clipboard.clone());
+                    if compose.body.edit_key(key, &m) == KeyEdit::Unhandled {
                         return EventResult::Ignored;
                     }
-                    edited.copied
+                    (compose.body.clipboard() != clipboard)
+                        .then(|| compose.body.clipboard().to_owned())
                 } else {
                     let field = compose.field;
                     let Some(input) = compose.line_mut(field) else {
@@ -3212,7 +3245,6 @@ impl EmailApp {
                 if let Some(text) = copied {
                     self.clipboard = text;
                 }
-                self.keep_body_caret_visible();
             }
         }
         EventResult::Consumed
@@ -3710,36 +3742,20 @@ impl EmailApp {
         }
     }
 
-    /// How many lines of the body being written show.
-    fn body_rows(&self) -> usize {
-        let body = self.field_rect(ComposeField::Body);
-        ((body.h - 8.0) / BODY_LINE_H).floor().max(1.0) as usize
+    /// Where the body's text starts: inside its border.
+    fn body_origin(&self) -> (f32, f32) {
+        let rect = self.field_rect(ComposeField::Body);
+        (rect.x + 8.0, rect.y + 4.0)
     }
 
-    /// Scroll the body being written so its caret shows, down and across.
-    fn keep_body_caret_visible(&mut self) {
-        let rows = self.body_rows();
-        let width = (self.field_rect(ComposeField::Body).w - 16.0).max(1.0);
-        let Some(compose) = self.compose.as_mut() else {
-            return;
-        };
-        let caret = compose.body.caret();
-        let line = compose.body.line_index(caret);
-        if line < compose.body_scroll {
-            compose.body_scroll = line;
-        } else if line >= compose.body_scroll.saturating_add(rows) {
-            compose.body_scroll = line.saturating_add(1).saturating_sub(rows);
-        }
-        let start = compose.body.line_start(caret);
-        let x = text::measure(
-            compose.body.text().get(start..caret).unwrap_or(""),
-            BODY_TEXT,
-            FontWeightHint::Regular,
-        );
-        if x < compose.body_hscroll {
-            compose.body_hscroll = (x - 40.0).max(0.0);
-        } else if x > compose.body_hscroll + width - 8.0 {
-            compose.body_hscroll = x - width + 40.0;
+    /// The box the body's text is laid out in, and its font.
+    fn body_metrics(&self) -> textarea::Metrics {
+        let rect = self.field_rect(ComposeField::Body);
+        textarea::Metrics {
+            width: (rect.w - 16.0).max(0.0),
+            height: (rect.h - 8.0).max(0.0),
+            font_size: BODY_TEXT,
+            weight: FontWeightHint::Regular,
         }
     }
 
@@ -4589,7 +4605,7 @@ impl EmailApp {
                     color: self.palette.text,
                     selection_bg: self.palette.blue,
                     selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
+                    caret_width: self.caret_width,
                 },
             );
             f.extend(tree.commands);
@@ -4597,8 +4613,9 @@ impl EmailApp {
         f.hit(Target::Field(field), rect);
     }
 
-    /// The body being written: its lines from the scroll, its selection and
-    /// its caret, clipped to its box.
+    /// The body being written, through the toolkit's multi-line field: its
+    /// lines wrapped to the box -- they ran off its right edge and scrolled
+    /// sideways -- its selection and its caret, clipped to the box.
     fn render_body(&self, f: &mut Frame<Target>, compose: &Compose) {
         let rect = self.field_rect(ComposeField::Body);
         let focused = compose.field == ComposeField::Body;
@@ -4624,63 +4641,24 @@ impl EmailApp {
             (rect.w - 16.0).max(0.0),
             (rect.h - 8.0).max(0.0),
         );
-        let origin = area.x - compose.body_hscroll;
-        let body = &compose.body;
-        let selection = if focused { body.selection() } else { None };
-        let rows = self.body_rows();
-        f.clip(area);
-        let mut start = 0_usize;
-        for (i, line) in body.text().split('\n').enumerate() {
-            let end = start.saturating_add(line.len());
-            if i >= compose.body_scroll && i < compose.body_scroll.saturating_add(rows) {
-                let y = area.y + i.saturating_sub(compose.body_scroll) as f32 * BODY_LINE_H;
-                if let Some((from, to)) = selection {
-                    let a = from.clamp(start, end).saturating_sub(start);
-                    let b = to.clamp(start, end).saturating_sub(start);
-                    if a < b {
-                        for (left, w) in
-                            text::selection_boxes(line, a, b, BODY_TEXT, FontWeightHint::Regular)
-                        {
-                            f.push(RenderCommand::FillRect {
-                                x: origin + left,
-                                y,
-                                width: w,
-                                height: BODY_LINE_H,
-                                color: self.palette.surface2,
-                                corner_radii: CornerRadii::ZERO,
-                            });
-                        }
-                    }
-                }
-                f.push(RenderCommand::Text {
-                    x: origin,
-                    y: y + 2.0,
-                    text: line.to_owned(),
-                    font_size: BODY_TEXT,
-                    color: self.palette.text,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                if focused && (start..=end).contains(&body.caret()) {
-                    let x = text::measure(
-                        line.get(..body.caret().saturating_sub(start)).unwrap_or(""),
-                        BODY_TEXT,
-                        FontWeightHint::Regular,
-                    );
-                    f.push(RenderCommand::FillRect {
-                        x: origin + x,
-                        y,
-                        width: textedit::CARET_WIDTH,
-                        height: BODY_LINE_H,
-                        color: self.palette.text,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
-            }
-            start = end.saturating_add(1);
-        }
-        f.unclip();
+        let mut tree = RenderTree::default();
+        textarea::draw(
+            &mut tree,
+            &textarea::MultiLine {
+                area: &compose.body,
+                x: area.x,
+                y: area.y,
+                metrics: self.body_metrics(),
+                color: self.palette.text,
+                // As the lines above it select.
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                focused,
+                caret_width: self.caret_width,
+                placeholder: None,
+            },
+        );
+        f.extend(tree.commands);
     }
 
     fn render_status(&self, f: &mut Frame<Target>) {
@@ -4730,6 +4708,15 @@ impl EmailApp {
                 result
             }
             MouseEventKind::Move => {
+                // A drag from a press on the body selects.
+                if self.compose.as_ref().is_some_and(|c| c.body_drag) {
+                    let (left, top) = self.body_origin();
+                    let m = self.body_metrics();
+                    if let Some(compose) = self.compose.as_mut() {
+                        compose.body.drag_to(event.x - left, event.y - top, &m);
+                    }
+                    return EventResult::Consumed;
+                }
                 let over = self.target_at(event.x, event.y);
                 if over == self.hover {
                     return EventResult::Ignored;
@@ -4745,6 +4732,28 @@ impl EmailApp {
                 }
             }
             MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            MouseEventKind::Release(MouseButton::Left) => match self.compose.as_mut() {
+                Some(compose) if compose.body_drag => {
+                    compose.body_drag = false;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            },
+            // A double click on the body selects the word under it.
+            MouseEventKind::DoubleClick(MouseButton::Left)
+                if self.target_at(event.x, event.y) == Some(Target::Field(ComposeField::Body)) =>
+            {
+                let (left, top) = self.body_origin();
+                let m = self.body_metrics();
+                let Some(compose) = self.compose.as_mut() else {
+                    return EventResult::Ignored;
+                };
+                compose.field = ComposeField::Body;
+                compose
+                    .body
+                    .press(event.x - left, event.y - top, 2, false, &m);
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -4836,18 +4845,16 @@ impl EmailApp {
             Target::SaveAttachment(i) => self.ask(PickerFor::SaveAttachment(i)),
             Target::Field(field) => {
                 let rect = self.field_rect(field);
+                let (left, top) = self.body_origin();
+                let m = self.body_metrics();
                 let Some(compose) = self.compose.as_mut() else {
                     return EventResult::Ignored;
                 };
                 let was_focused = compose.field == field;
                 compose.field = field;
                 if field == ComposeField::Body {
-                    let line = compose.body_scroll.saturating_add(
-                        ((y - rect.y - 4.0) / BODY_LINE_H).floor().max(0.0) as usize,
-                    );
-                    compose
-                        .body
-                        .click(line, x - rect.x - 8.0 + compose.body_hscroll, false);
+                    compose.body.press(x - left, y - top, 1, false, &m);
+                    compose.body_drag = true;
                 } else if let Some(input) = compose.line_mut(field) {
                     // Measured against the field as it was drawn: from its
                     // start unfocused, scrolled to its caret focused.
@@ -4888,6 +4895,23 @@ impl EmailApp {
 
     /// The wheel over the list, or over the message being read or written.
     fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        // The body scrolls by the pixel, as a text field does, and keeps its
+        // own offset: the rows below are for the lists.
+        if self.target_at(x, y) == Some(Target::Field(ComposeField::Body)) {
+            let m = self.body_metrics();
+            let Some(compose) = self.compose.as_mut() else {
+                return EventResult::Ignored;
+            };
+            let before = compose.body.scroll_y(&m);
+            compose
+                .body
+                .scroll_by(wheel::pixels(dy, m.line_height()), &m);
+            return if (compose.body.scroll_y(&m) - before).abs() < 0.5 {
+                EventResult::Ignored
+            } else {
+                EventResult::Consumed
+            };
+        }
         let rows = self.wheel.rows(dy);
         if rows == 0 {
             return EventResult::Ignored;
@@ -4918,18 +4942,6 @@ impl EmailApp {
                     return EventResult::Ignored;
                 }
                 self.read_scroll = next;
-            }
-            Some(Target::Field(ComposeField::Body)) => {
-                let rows_shown = self.body_rows();
-                let Some(compose) = self.compose.as_mut() else {
-                    return EventResult::Ignored;
-                };
-                let max = compose.body.line_count().saturating_sub(rows_shown);
-                let next = step(compose.body_scroll, max);
-                if next == compose.body_scroll {
-                    return EventResult::Ignored;
-                }
-                compose.body_scroll = next;
             }
             _ => return EventResult::Ignored,
         }
@@ -5030,6 +5042,12 @@ fn mime_for(name: &str) -> &'static str {
 // ─── Main ────────────────────────────────────────────────────────────
 
 impl App for EmailApp {
+    /// The carets' width, the one appearance setting this window reads that
+    /// is not a colour.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.caret_width = settings.caret_width();
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
     }
@@ -6972,6 +6990,193 @@ mod tests {
         for c in text.chars() {
             app.handle_event(&types(c));
         }
+    }
+
+    /// A new message with the caret in its body.
+    fn writing_a_body() -> EmailApp {
+        let mut app = EmailApp::new();
+        app.handle_event(&key_ev(Key::N, true));
+        if let Some(compose) = app.compose.as_mut() {
+            compose.field = ComposeField::Body;
+        }
+        app
+    }
+
+    fn body_text(app: &EmailApp) -> String {
+        app.compose
+            .as_ref()
+            .map(|c| c.body.text().to_owned())
+            .expect("a message being written")
+    }
+
+    fn mouse_at(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// **The body wraps, undoes a word at a time, and shares the window's
+    /// clipboard.** Its lines ran off the right of the box and scrolled
+    /// sideways, it had no undo, and it was lane E's interim field.
+    #[test]
+    fn the_body_wraps_undoes_a_word_and_shares_the_clipboard() {
+        let mut app = writing_a_body();
+        // Several times the box's width: a wide window's box holds a
+        // hundred and fifty characters on a line.
+        type_into(&mut app, &"words and more words ".repeat(40));
+        let (left, top) = app.body_origin();
+        let rows: Vec<f32> = app
+            .frame()
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::RichText { x, y, .. } if (*x - left).abs() < 0.5 && *y >= top => {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect();
+        let mut lines = rows.clone();
+        lines.dedup();
+        assert!(lines.len() > 1, "the body did not wrap: {rows:?}");
+
+        type_into(&mut app, "last");
+        app.handle_event(&key_ev(Key::Z, true));
+        assert!(body_text(&app).ends_with("words "), "{:?}", body_text(&app));
+
+        app.handle_event(&key_ev(Key::A, true));
+        app.handle_event(&key_ev(Key::C, true));
+        if let Some(compose) = app.compose.as_mut() {
+            compose.field = ComposeField::Subject;
+        }
+        app.handle_event(&key_ev(Key::V, true));
+        let subject = app.compose.as_ref().map(|c| c.subject.text().to_owned());
+        assert_eq!(subject.as_deref(), Some(body_text(&app).as_str()));
+    }
+
+    /// A copy made in a line pastes into the body: the window has one
+    /// clipboard, and the body's own is filled from it before every key.
+    #[test]
+    fn a_copy_in_a_line_pastes_into_the_body() {
+        let mut app = writing_a_body();
+        if let Some(compose) = app.compose.as_mut() {
+            compose.field = ComposeField::Subject;
+        }
+        type_into(&mut app, "Quarterly figures");
+        app.handle_event(&key_ev(Key::A, true));
+        app.handle_event(&key_ev(Key::C, true));
+        if let Some(compose) = app.compose.as_mut() {
+            compose.field = ComposeField::Body;
+        }
+        type_into(&mut app, "Re: ");
+        app.handle_event(&key_ev(Key::V, true));
+        assert_eq!(body_text(&app), "Re: Quarterly figures");
+    }
+
+    /// A drag across the body selects what it passes over, and a double
+    /// click selects a word.
+    #[test]
+    fn a_drag_and_a_double_click_select_in_the_body() {
+        let mut app = writing_a_body();
+        type_into(&mut app, "abcdef ghi");
+        let (left, top) = app.body_origin();
+        let x_of = |s: &str| left + text::measure(s, BODY_TEXT, FontWeightHint::Regular);
+        let y = top + 3.0;
+        app.handle_event(&mouse_at(
+            x_of("a"),
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        app.handle_event(&mouse_at(x_of("abcd"), y, MouseEventKind::Move));
+        app.handle_event(&mouse_at(
+            x_of("abcd"),
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        ));
+        app.handle_event(&mouse_at(x_of("abcdef"), y, MouseEventKind::Move));
+        let selected = app
+            .compose
+            .as_ref()
+            .map(|c| c.body.selected_text().to_owned());
+        assert_eq!(selected.as_deref(), Some("bcd"));
+
+        app.handle_event(&mouse_at(
+            x_of("abcdef g"),
+            y,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        ));
+        type_into(&mut app, "X");
+        assert_eq!(body_text(&app), "abcdef X");
+    }
+
+    /// The wheel scrolls a long body.
+    #[test]
+    fn the_wheel_scrolls_the_body() {
+        let mut app = writing_a_body();
+        if let Some(compose) = app.compose.as_mut() {
+            let long: Vec<String> = (0..80).map(|n| format!("line {n}")).collect();
+            compose.body.set_text(&long.join("\n"));
+            compose.body.move_text_start(false);
+        }
+        let (left, top) = app.body_origin();
+        let first = |app: &EmailApp| {
+            app.frame().commands().iter().find_map(|c| match c {
+                RenderCommand::RichText { text, .. } if text.starts_with("line ") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(first(&app).as_deref(), Some("line 0"));
+        let scrolled = app.handle_event(&mouse_at(
+            left + 20.0,
+            top + 20.0,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        ));
+        assert_eq!(scrolled, EventResult::Consumed);
+        assert_ne!(
+            first(&app).as_deref(),
+            Some("line 0"),
+            "the wheel moved nothing"
+        );
+    }
+
+    /// The body stops at what a message holds, typed or pasted.
+    #[test]
+    fn the_body_stops_at_its_capacity() {
+        let mut app = writing_a_body();
+        if let Some(compose) = app.compose.as_mut() {
+            compose.body.set_text(&"x".repeat(BODY_CAPACITY - 1));
+        }
+        type_into(&mut app, "ab");
+        assert_eq!(
+            body_text(&app).len(),
+            BODY_CAPACITY,
+            "a letter went past the cap"
+        );
+        app.clipboard = String::from("more");
+        app.handle_event(&key_ev(Key::V, true));
+        assert_eq!(
+            body_text(&app).len(),
+            BODY_CAPACITY,
+            "a paste went past the cap"
+        );
+    }
+
+    /// The carets are as wide as the user asked for.
+    #[test]
+    fn the_caret_is_as_wide_as_the_setting_says() {
+        let mut app = writing_a_body();
+        app.appearance_changed(&appearance::AppearanceSettings {
+            caret_width_scale: 3.0,
+            ..appearance::AppearanceSettings::default()
+        });
+        let wide = textedit::CARET_WIDTH * 3.0;
+        assert!(
+            app.frame().commands().iter().any(|c| matches!(
+                c,
+                RenderCommand::Line { width, .. } if (*width - wide).abs() < 1e-3
+            )),
+            "no caret {wide} wide"
+        );
     }
 
     /// A draft is saved into Drafts, listed there, opened to go on writing,

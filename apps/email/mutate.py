@@ -147,6 +147,62 @@ MUTATIONS = [
         "    \"An empty folder here is empty. It reads mail kept in files",
         ["the_window_says_it_cannot_fetch_mail"],
     ),
+    # The body is the toolkit's multi-line field
+    # (requests/c-e-a-multi-line-text-field-for-the-apps-that-edit-text.md).
+    (
+        "a copy in the body is kept from the lines",
+        "                    (compose.body.clipboard() != clipboard)\n                        .then(|| compose.body.clipboard().to_owned())",
+        "                    None::<String>",
+        ["the_body_wraps_undoes_a_word_and_shares_the_clipboard"],
+    ),
+    (
+        "the body pastes its own clipboard, not the window's",
+        "                    compose.body.set_clipboard(clipboard.clone());",
+        "",
+        ["a_copy_in_a_line_pastes_into_the_body"],
+    ),
+    (
+        "the body grows past its capacity",
+        "        <= BODY_CAPACITY\n}",
+        "        <= usize::MAX\n}",
+        ["the_body_stops_at_its_capacity"],
+    ),
+    (
+        "a paste is not capped",
+        "        return (key.key == Key::V).then(|| clipboard.to_owned());",
+        "        return None;",
+        ["the_body_stops_at_its_capacity"],
+    ),
+    (
+        "a drag does not select",
+        "                        compose.body.drag_to(event.x - left, event.y - top, &m);",
+        "                        let _ = (left, top, &m);",
+        ["a_drag_and_a_double_click_select_in_the_body"],
+    ),
+    (
+        "a release goes on dragging",
+        "                Some(compose) if compose.body_drag => {\n                    compose.body_drag = false;",
+        "                Some(compose) if compose.body_drag => {\n                    compose.body_drag = true;",
+        ["a_drag_and_a_double_click_select_in_the_body"],
+    ),
+    (
+        "a double click is one click",
+        "                    .press(event.x - left, event.y - top, 2, false, &m);",
+        "                    .press(event.x - left, event.y - top, 1, false, &m);",
+        ["a_drag_and_a_double_click_select_in_the_body"],
+    ),
+    (
+        "the wheel does not scroll the body",
+        "            compose\n                .body\n                .scroll_by(wheel::pixels(dy, m.line_height()), &m);",
+        "            let _ = (dy, &m);",
+        ["the_wheel_scrolls_the_body"],
+    ),
+    (
+        "the caret's width setting is ignored",
+        "        self.caret_width = settings.caret_width();",
+        "        let _ = settings;",
+        ["the_caret_is_as_wide_as_the_setting_says"],
+    ),
 ]
 
 DECODE_MUTATIONS = [

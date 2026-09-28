@@ -339,16 +339,11 @@ apps/sysmonitor/src/main.rs:running_count
 # 2026-09-25): `TerminalState::paste` fences a paste when a program asked for
 # bracketed paste, and text marked blinking blinks on a clock of its own.
 
-# apps/speedtest --
-# Surfaced 2026-09-27, when a `#[cfg(test)]` on a field stopped hiding the next
-# item from this gate (requests/e-ac-a-cfg-test-field-hides-the-next-item-from-every-gate.md):
-# the test-only `rng` field of `SpeedTestUI` had made the whole `impl` after it
-# read as test code, production writes included. `probe_timer_secs` is reset
-# in production and advanced and read only by `tick_latency`, which is
-# `#[cfg(test)]` -- the simulated latency phase, kept under test until a real
-# producer drives it. Lane E's to settle when that producer lands (told
-# 2026-09-27).
-apps/speedtest/src/main.rs:probe_timer_secs
+# apps/speedtest -- PAID OFF 2026-09-27 (lane E, 6a49720f0). `probe_timer_secs`
+# surfaced when a `#[cfg(test)]` on a field stopped hiding the next item from
+# this gate: it was reset in production and read only by the test-only
+# `tick_latency`. The field, its initialiser and its only reader are
+# `#[cfg(test)]` together now, and a network run no longer writes it.
 
 # apps/torrent --
 # Not yet triaged individually. Each is a value computed and discarded, and

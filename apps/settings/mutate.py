@@ -171,6 +171,72 @@ MUTATIONS = [
         "                    .show_day_of_week",
         [CLICKED],
     ),
+    (
+        "the Colors page does not read the calendar",
+        "        if page == SettingsPage::Colors {\n            self.refresh_calendar_events();\n        }",
+        "",
+        ["an_accent_that_hides_an_event_names_it_with_a_way_to_its_colour"],
+    ),
+    (
+        "every event is named, hidden or not",
+        "        self.calendar_events\n            .iter()\n            .filter(|e| appearance::hard_to_tell_apart(e.effective_color(&pal), pal.accent))",
+        "        self.calendar_events\n            .iter()\n            .filter(|_| true)",
+        ["an_accent_that_hides_an_event_names_it_with_a_way_to_its_colour", "an_accent_apart_from_every_event_warns_of_none"],
+    ),
+    (
+        "the warning is not the calendar's own test",
+        "        self.calendar_events\n            .iter()\n            .filter(|e| appearance::hard_to_tell_apart(e.effective_color(&pal), pal.accent))",
+        "        self.calendar_events\n            .iter()\n            .filter(|e| e.effective_color(&pal) == pal.accent)",
+        ["the_events_named_are_the_ones_the_calendars_test_hides"],
+    ),
+    (
+        "a hidden event has no button",
+        "                    Some(RowHit::Press(ButtonId::EventColour(event.id))),",
+        "                    None,",
+        ["an_accent_that_hides_an_event_names_it_with_a_way_to_its_colour"],
+    ),
+    (
+        "the button opens the calendar at no event",
+        "                self.start_calendar(&[\"--event-colour\", &id], &what);",
+        "                self.start_calendar(&[], &what);",
+        ["an_accent_that_hides_an_event_names_it_with_a_way_to_its_colour"],
+    ),
+    (
+        "every hidden event is listed",
+        "            for event in hidden.iter().take(CLASHES_LISTED) {",
+        "            for event in hidden.iter() {",
+        ["more_hidden_events_than_are_listed_open_the_calendar"],
+    ),
+    (
+        "more hidden events than listed are not offered the calendar",
+        "            if hidden.len() > CLASHES_LISTED {",
+        "            if false {",
+        ["more_hidden_events_than_are_listed_open_the_calendar"],
+    ),
+    (
+        "Look again does not look",
+        "            RowHit::Press(ButtonId::LookAgain) => self.refresh_calendar_events(),",
+        "            RowHit::Press(ButtonId::LookAgain) => {}",
+        ["look_again_reads_the_calendar_again"],
+    ),
+    (
+        "a calendar that cannot be read is not said",
+        "                self.calendar_note = Some(format!(\n                    \"The calendar's events could not be read",
+        "                let _ = Some(format!(\n                    \"The calendar's events could not be read",
+        ["a_calendar_that_cannot_be_read_or_started_is_said"],
+    ),
+    (
+        "a start that failed is said as one that worked",
+        "            Err(e) => format!(\"Could not start the calendar ({CALENDAR}): {e}\"),",
+        "            Err(_) => format!(\"Opening {what} in the calendar.\"),",
+        ["a_calendar_that_cannot_be_read_or_started_is_said"],
+    ),
+    (
+        "a long title is not cut",
+        "    if text.chars().count() <= max {",
+        "    if true {",
+        ["a_long_title_is_cut_with_an_ellipsis"],
+    ),
 ]
 
 if __name__ == "__main__":

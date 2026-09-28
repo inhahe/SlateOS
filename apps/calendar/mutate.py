@@ -456,6 +456,84 @@ MUTATIONS = [
         "        if false {",
         [SAID],
     ),
+    (
+        "the colours leave out the category's own",
+        "        let mut out = vec![None];",
+        "        let mut out = Vec::new();",
+        ["the_colour_field_offers_the_category_then_every_hue"],
+    ),
+    (
+        "an event's own colour is not offered",
+        "        if let Some(own) = self.other_colour",
+        "        if let Some(own) = None::<Color>",
+        ["an_events_own_colour_is_offered_beside_the_hues"],
+    ),
+    (
+        "editing forgets the event's own colour",
+        "            other_colour: e.color_override,",
+        "            other_colour: None,",
+        ["an_events_own_colour_is_offered_beside_the_hues"],
+    ),
+    (
+        "a colour step goes nowhere",
+        "                    self.color_override = *next;",
+        "                    let _ = next;",
+        ["the_colour_field_offers_the_category_then_every_hue"],
+    ),
+    (
+        "a hue is named for another",
+        "                    .find(|(_, hue)| *hue == c)",
+        "                    .find(|(_, hue)| *hue != c)",
+        ["the_colour_field_offers_the_category_then_every_hue"],
+    ),
+    (
+        "the colour's warning never shows",
+        "            if field == FormField::Colour && self.colour_clashes(form) {",
+        "            if false {",
+        ["a_colour_too_close_to_the_accent_is_warned_of", "a_colour_close_to_the_accent_is_kept_as_chosen", "the_colour_warning_has_a_row_of_its_own"],
+    ),
+    (
+        "the warning is not the one test Settings asks",
+        "        appearance::hard_to_tell_apart(form.effective_colour(&self.palette), self.palette.accent)",
+        "        form.effective_colour(&self.palette) == self.palette.accent",
+        ["a_colour_too_close_to_the_accent_is_warned_of"],
+    ),
+    (
+        "the warning covers the field under it",
+        "                }\n                y += FORM_ROW_H;\n            }\n        }",
+        "                }\n            }\n        }",
+        ["the_colour_warning_has_a_row_of_its_own"],
+    ),
+    (
+        "the field does not show the colour",
+        "            fill(frame, swatch, form.effective_colour(&self.palette), 3.0);",
+        "",
+        ["the_colour_field_shows_the_colour"],
+    ),
+    (
+        "--event-colour opens the form at its title",
+        "            self.form_field = FormField::Colour;",
+        "            self.form_field = FormField::Title;",
+        ["the_argument_opens_an_events_colour"],
+    ),
+    (
+        "an event --event-colour cannot find is not said",
+        "            lines.push((note.clone(), true));",
+        "            let _ = note;",
+        ["the_argument_opens_an_events_colour"],
+    ),
+    (
+        "--event-colour's number is not read",
+        "                .map(Self::EventColour)",
+        "                .map(|_| Self::Calendar)",
+        ["the_argument_opens_an_events_colour"],
+    ),
+    (
+        "an argument the calendar does not take is ignored",
+        "            [other, ..] => Err(format!(\n                \"no such argument '{}' (the calendar takes --event-colour ID)\",\n                other.as_os_str().shown()\n            )),",
+        "            [_, ..] => Ok(Self::Calendar),",
+        ["the_argument_opens_an_events_colour"],
+    ),
 ]
 
 # The model, the events file and iCalendar moved to apps/calendarstore on

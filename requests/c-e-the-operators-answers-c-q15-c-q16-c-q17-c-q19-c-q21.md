@@ -33,9 +33,14 @@ wait on lanes A, D and F
 remote page waits on the dynamic-DNS service
 (`requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`)
 and has no remote-desktop server to configure (todo.txt, "C-Q17: what is
-left"). 3 (C-Q19, the two warnings -- the calendar has no event-colour
-picker to warn in yet, so it gets one) and 4 (C-Q21, the backup schedule's
-format with lane D) are open.
+left"). 3 (C-Q19, the two warnings) DONE 2026-09-28: the calendar's event
+form chooses a colour -- the category's, any hue of the palette by name, or
+the event's own as imported -- and says under it when the colour is too close
+to the accent to see, keeping it as chosen; Settings' Colors page names the
+events an accent hides, each with a button that opens the calendar at its
+colour (`calendar --event-colour ID`). Both ask your
+`hard_to_tell_apart`. 4 (C-Q21, the backup schedule's format with lane D) is
+open.
 
 **In short:** the operator answered five of lane C's questions whose work is
 mostly in your programs. Each is written up in `design-decisions.md`
@@ -108,11 +113,6 @@ own copy of the built-in database, where the start menu reads the desktop
 entries (`gui/desktopentry`). Reading those would make it find what is actually
 installed.
 
-## 3. An event colour close to the accent: a warning, both ways (C-Q19, §1424)
-
-The operator: "warn rather than don't allow, and in the warning, tell how to
-change the offending event color(s) and/or have a link right there to changing
-the event color(s)."
 **Done 2026-09-28 (lane E):** `apps/launcher` reads them as the start menu
 does -- `scan`, `shows_in_menu`, `TryExec` on `PATH`, no entry without `Exec`
 -- and keeps your merge rule: an entry takes its program's row, in place, and
@@ -122,6 +122,11 @@ program with arguments (Settings' pages) are not replaced by an entry for the
 program, and an entry's `Path` is the directory its program starts in (the
 shell's `Launch` has nowhere to carry one).
 
+## 3. An event colour close to the accent: a warning, both ways (C-Q19, §1424)
+
+The operator: "warn rather than don't allow, and in the warning, tell how to
+change the offending event color(s) and/or have a link right there to changing
+the event color(s)."
 
 - **`apps/calendar`:** picking an event colour too close to the accent shows a
   warning (the dot would vanish into today's circle); the colour is kept as
@@ -131,6 +136,13 @@ shell's `Launch` has nowhere to carry one).
 - **Lane C** adds one test of "too close to see one on the other" to
   `appearance`, so the two warnings cannot disagree; its name will be in this
   request's reply when it lands.
+
+**Done 2026-09-28 (lane E)**, both pickers on `hard_to_tell_apart`. In the
+calendar the warning is two lines under the colour, in a row of its own: what
+happens ("its dot can vanish into today's circle") and how to change it (here,
+or the accent in Settings). In Settings it lists up to five events by title
+and category, each with "Change colour", then "And N more" with "Open
+calendar", and "Look again" to read the calendar anew after changing some.
 
 ## 4. The backup program's schedule is a service's input (C-Q21, §1426)
 

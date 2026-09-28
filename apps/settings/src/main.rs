@@ -710,6 +710,15 @@ pub struct SettingsState {
     /// is the same moment `apps/explorer` re-reads it: neither program caches
     /// an association across the action that uses it.
     default_apps: Vec<associations::Association>,
+    /// The calendar's events, as read on entering the Colors page or when
+    /// asked to look again: what the accent's warning checks (§1424).
+    calendar_events: Vec<calendarstore::CalendarEvent>,
+    /// Why the calendar's events could not be read, or what came of the
+    /// last press that started the calendar.
+    calendar_note: Option<String>,
+    /// Starts another program -- the calendar, at an event's colour. The
+    /// tests stand in for it, so none of them starts a program.
+    starter: fn(&str, &[&str]) -> std::io::Result<()>,
     /// What each offered category resolves to, alongside the raw list.
     ///
     /// Computed when the associations are, from the same document, so the two
@@ -1163,6 +1172,41 @@ impl SettingsState {
             .collect();
     }
 
+    /// Read the calendar's events again, for the accent's warning.
+    fn refresh_calendar_events(&mut self) {
+        self.calendar_note = None;
+        match read_calendar_events() {
+            Ok(events) => self.calendar_events = events,
+            Err(why) => {
+                self.calendar_events.clear();
+                self.calendar_note = Some(format!(
+                    "The calendar's events could not be read ({why}), so none is checked \
+                     against the accent."
+                ));
+            }
+        }
+    }
+
+    /// The calendar's events whose dots the accent in force hides: the one
+    /// test the calendar's own colour warning asks (`hard_to_tell_apart`,
+    /// design-decisions §1424), in the palette the calendar draws in.
+    fn events_the_accent_hides(&self) -> Vec<&calendarstore::CalendarEvent> {
+        let pal = self.palette();
+        self.calendar_events
+            .iter()
+            .filter(|e| appearance::hard_to_tell_apart(e.effective_color(&pal), pal.accent))
+            .collect()
+    }
+
+    /// Start the calendar with `args`, saying under the warning what came
+    /// of it -- as the file manager does when it opens a file.
+    fn start_calendar(&mut self, args: &[&str], what: &str) {
+        self.calendar_note = Some(match (self.starter)(CALENDAR, args) {
+            Ok(()) => format!("Opening {what} in the calendar."),
+            Err(e) => format!("Could not start the calendar ({CALENDAR}): {e}"),
+        });
+    }
+
     /// Move to `page`, doing whatever entering a page requires.
     ///
     /// Every navigation goes through here rather than assigning
@@ -1175,6 +1219,11 @@ impl SettingsState {
         self.current_page = page;
         if page == SettingsPage::DefaultApps {
             self.refresh_default_apps();
+        }
+        // The calendar's events, which another program keeps: read on
+        // entry, so the accent's warning names the events there are now.
+        if page == SettingsPage::Colors {
+            self.refresh_calendar_events();
         }
         if page == SettingsPage::Themes {
             self.refresh_themes();
@@ -1662,6 +1711,9 @@ impl SettingsState {
             // filled by `refresh_default_apps`, from `main` and on entry to
             // the page.
             default_apps: Vec::new(),
+            calendar_events: Vec::new(),
+            calendar_note: None,
+            starter: start_program,
             default_app_categories: Vec::new(),
             // Empty for the same reason as `default_apps`: enumerating
             // installed fonts is I/O, and this constructor does none.
@@ -1994,6 +2046,54 @@ fn button_width(label: &str) -> f32 {
 fn render_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, label: &str, color: Color) {
     fill_rounded(tree, x, y, button_width(label), BUTTON_HEIGHT, color, 6.0);
     tree.text(x + 12.0, y + 8.0, label, pal.crust, 13.0);
+}
+
+/// Where the calendar is: the desktop starts programs by their path under
+/// `/usr/bin` (`gui/desktop/src/launcher.rs`).
+const CALENDAR: &str = "/usr/bin/calendar";
+
+/// How many of the events an accent hides are named, each with its button;
+/// past that, one button opens the calendar.
+const CLASHES_LISTED: usize = 5;
+
+/// Start `program` with `args` and leave it running -- what a press that
+/// opens another program does.
+fn start_program(program: &str, args: &[&str]) -> std::io::Result<()> {
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(drop)
+}
+
+/// The calendar's events, for the accent's warning: none when there is no
+/// calendar yet.
+///
+/// # Errors
+///
+/// Why the calendar could not be read -- `calendarstore::load`'s reason.
+fn read_calendar_events() -> Result<Vec<calendarstore::CalendarEvent>, String> {
+    let Some(path) = calendarstore::events_path() else {
+        return Ok(Vec::new());
+    };
+    // A test reads only a scratch calendar. One outside the temporary
+    // directory is the developer's own, and what it holds would change what
+    // the Colors page draws from one machine to the next.
+    #[cfg(test)]
+    if !path.starts_with(std::env::temp_dir()) {
+        return Ok(Vec::new());
+    }
+    calendarstore::load(&path)
+}
+
+/// `text` cut to `max` characters, the cut marked with an ellipsis.
+fn elided(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_owned()
+    } else {
+        let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+        out.push('\u{2026}');
+        out
+    }
 }
 
 /// Draw a push button that has nothing behind it: dimmed fill, muted label.
@@ -2692,6 +2792,12 @@ enum ButtonId {
     ClearRotation,
     /// Remove the `n`-th world clock.
     RemoveClock(usize),
+    /// Open the calendar at event `id`'s colour, which the accent hides.
+    EventColour(u64),
+    /// Open the calendar, when more events clash than are listed.
+    OpenCalendar,
+    /// Read the calendar's events again.
+    LookAgain,
 }
 
 /// How long a rotation leaves each picture up, in seconds.
@@ -4369,6 +4475,51 @@ impl SettingsState {
         #[allow(clippy::cast_precision_loss)]
         let grid_rows = presets.len().saturating_add(1).div_ceil(SWATCH_COLS) as f32;
         s.advance(grid_rows * (SWATCH_SIZE + SWATCH_SPACING));
+
+        // An accent that hides events' dots, said with the events it hides
+        // and a way straight to each (§1424, the operator's answer to C-Q19
+        // -- warn, never refuse): the accent is kept as chosen.
+        let hidden = self.events_the_accent_hides();
+        if !hidden.is_empty() {
+            let warn = pal.ink(pal.peach);
+            let head = match hidden.len() {
+                1 => String::from("This accent is close to an event's colour in your calendar."),
+                n => format!("This accent is close to {n} events' colours in your calendar."),
+            };
+            s.draw(move |tree, x, y| tree.text(x, y + 4.0, &head, warn, 13.0));
+            s.advance(22.0);
+            s.note(
+                "Their dots can vanish into today's circle. Change an event's colour, or choose another accent.",
+                26.0,
+            );
+            for event in hidden.iter().take(CLASHES_LISTED) {
+                let name = format!("{} ({})", elided(&event.title, 36), event.category.label());
+                s.button_row(
+                    &name,
+                    "Change colour",
+                    pal.accent,
+                    Some(RowHit::Press(ButtonId::EventColour(event.id))),
+                );
+            }
+            if hidden.len() > CLASHES_LISTED {
+                let more = format!("And {} more", hidden.len().saturating_sub(CLASHES_LISTED));
+                s.button_row(
+                    &more,
+                    "Open calendar",
+                    pal.accent,
+                    Some(RowHit::Press(ButtonId::OpenCalendar)),
+                );
+            }
+            s.button_row(
+                "Changed any?",
+                "Look again",
+                pal.accent,
+                Some(RowHit::Press(ButtonId::LookAgain)),
+            );
+        }
+        if let Some(note) = &self.calendar_note {
+            s.note(note, 26.0);
+        }
         s.gap();
 
         s.section("Preview");
@@ -6379,6 +6530,20 @@ impl SettingsState {
             RowHit::Press(ButtonId::ClearRotation) => {
                 self.appearance.settings.wallpaper_folder = None;
             }
+            RowHit::Press(ButtonId::EventColour(id)) => {
+                let what = self
+                    .calendar_events
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map_or_else(
+                        || format!("event {id}"),
+                        |e| format!("\u{201c}{}\u{201d}", e.title),
+                    );
+                let id = id.to_string();
+                self.start_calendar(&["--event-colour", &id], &what);
+            }
+            RowHit::Press(ButtonId::OpenCalendar) => self.start_calendar(&[], "your events"),
+            RowHit::Press(ButtonId::LookAgain) => self.refresh_calendar_events(),
         }
     }
 
@@ -11993,6 +12158,324 @@ mod tests {
         state.open_on(SettingsPage::WiFi);
         assert_eq!(state.current_page, SettingsPage::WiFi);
         assert_eq!(state.current_category, SettingsCategory::Network);
+    }
+
+    // ── An accent that hides calendar events (C-Q19, §1424) ─────────────
+
+    thread_local! {
+        /// The programs the tests' stand-in starter was asked to start.
+        static STARTED: std::cell::RefCell<Vec<(String, Vec<String>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Record a start instead of making one.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the starter's signature: a real start can fail"
+    )]
+    fn record_start(program: &str, args: &[&str]) -> std::io::Result<()> {
+        STARTED.with(|s| {
+            s.borrow_mut().push((
+                program.to_owned(),
+                args.iter().map(|a| (*a).to_owned()).collect(),
+            ));
+        });
+        Ok(())
+    }
+
+    /// A start that fails, as one whose program is not there does.
+    fn refuse_start(_: &str, _: &[&str]) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    }
+
+    /// An event on the first of October, in `colour` or its category's.
+    fn calendar_event(
+        id: u64,
+        title: &str,
+        category: calendarstore::EventCategory,
+        colour: Option<Color>,
+    ) -> calendarstore::CalendarEvent {
+        let day = calendarstore::Date::new(2026, 10, 1).unwrap();
+        calendarstore::CalendarEvent {
+            id,
+            title: title.to_owned(),
+            description: String::new(),
+            category,
+            start: calendarstore::DateTime::new(day, calendarstore::Time { hour: 9, minute: 0 }),
+            end: calendarstore::DateTime::new(
+                day,
+                calendarstore::Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: calendarstore::RecurrenceRule::None,
+            reminder: calendarstore::Reminder::None,
+            location: None,
+            color_override: colour,
+        }
+    }
+
+    /// `events`, kept where the calendar keeps them -- in the scratch
+    /// configuration the test runs in.
+    fn keep_events(events: &[calendarstore::CalendarEvent]) {
+        let path = calendarstore::events_path().expect("a scratch configuration");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, calendarstore::calendar_text(events)).unwrap();
+    }
+
+    /// Settings with a blue accent, starting nothing but recording it.
+    fn blue_settings() -> SettingsState {
+        let mut state = SettingsState::new();
+        state.starter = record_start;
+        state.appearance.settings.accent_color = AccentColor::Blue;
+        state
+    }
+
+    /// A colour of the palette a mark can be told apart from `accent` by.
+    fn apart_from(pal: &Palette, accent: Color) -> Color {
+        [pal.red, pal.green, pal.yellow, pal.peach]
+            .into_iter()
+            .find(|c| !appearance::hard_to_tell_apart(*c, accent))
+            .expect("some hue stands apart from the accent")
+    }
+
+    /// **An accent that hides an event's dot is warned of, the event named,
+    /// with a way straight to its colour** -- the calendar at that event --
+    /// and the accent is kept as chosen.
+    #[test]
+    fn an_accent_that_hides_an_event_names_it_with_a_way_to_its_colour() {
+        appearance::config::testing::with_scratch_config("settings-accent-event", |_| {
+            let mut state = blue_settings();
+            let pal = state.palette();
+            let apart = apart_from(&pal, pal.accent);
+            keep_events(&[
+                calendar_event(
+                    7,
+                    "Dentist",
+                    calendarstore::EventCategory::Health,
+                    Some(pal.accent),
+                ),
+                calendar_event(
+                    8,
+                    "Lunch",
+                    calendarstore::EventCategory::Personal,
+                    Some(apart),
+                ),
+            ]);
+            state.go_to_page(SettingsPage::Colors);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(
+                texts.contains("This accent is close to an event's colour in your calendar."),
+                "{texts}"
+            );
+            assert!(texts.contains("Dentist (Health)"), "{texts}");
+            assert!(
+                !texts.contains("Lunch"),
+                "an event apart from the accent was named"
+            );
+            let (x, y) = center_of(&state, RowHit::Press(ButtonId::EventColour(7)))
+                .expect("the event has a button");
+            state.handle_click(x, y);
+            STARTED.with(|s| {
+                assert_eq!(
+                    *s.borrow(),
+                    vec![(
+                        CALENDAR.to_owned(),
+                        vec!["--event-colour".to_owned(), "7".to_owned()]
+                    )]
+                );
+            });
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(
+                texts.contains("Opening \u{201c}Dentist\u{201d} in the calendar."),
+                "{texts}"
+            );
+            assert_eq!(state.appearance.settings.accent_color, AccentColor::Blue);
+        });
+    }
+
+    /// **An accent apart from every event's colour warns of none.**
+    #[test]
+    fn an_accent_apart_from_every_event_warns_of_none() {
+        appearance::config::testing::with_scratch_config("settings-accent-none", |_| {
+            let mut state = blue_settings();
+            let pal = state.palette();
+            let apart = apart_from(&pal, pal.accent);
+            keep_events(&[calendar_event(
+                8,
+                "Lunch",
+                calendarstore::EventCategory::Personal,
+                Some(apart),
+            )]);
+            state.go_to_page(SettingsPage::Colors);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(!texts.contains("close to"), "{texts}");
+            assert!(center_of(&state, RowHit::Press(ButtonId::LookAgain)).is_none());
+        });
+    }
+
+    /// **The events named are exactly those the calendar's own test calls
+    /// hidden**, for every accent the user can pick: one event in each of
+    /// the palette's hues and one in each category's colour.
+    #[test]
+    fn the_events_named_are_the_ones_the_calendars_test_hides() {
+        appearance::config::testing::with_scratch_config("settings-accent-test", |_| {
+            for accent in AccentColor::presets() {
+                let mut state = blue_settings();
+                state.appearance.settings.accent_color = *accent;
+                let pal = state.palette();
+                let hues = [
+                    pal.blue,
+                    pal.sapphire,
+                    pal.sky,
+                    pal.teal,
+                    pal.green,
+                    pal.yellow,
+                    pal.peach,
+                    pal.maroon,
+                    pal.red,
+                    pal.pink,
+                    pal.mauve,
+                    pal.lavender,
+                    pal.flamingo,
+                    pal.rosewater,
+                ];
+                let mut events: Vec<_> = hues
+                    .iter()
+                    .zip(1..)
+                    .map(|(hue, id)| {
+                        calendar_event(id, "hue", calendarstore::EventCategory::Work, Some(*hue))
+                    })
+                    .collect();
+                events.push(calendar_event(
+                    90,
+                    "work",
+                    calendarstore::EventCategory::Work,
+                    None,
+                ));
+                events.push(calendar_event(
+                    91,
+                    "trip",
+                    calendarstore::EventCategory::Travel,
+                    None,
+                ));
+                keep_events(&events);
+                state.go_to_page(SettingsPage::Colors);
+                let named: Vec<u64> = state
+                    .events_the_accent_hides()
+                    .iter()
+                    .map(|e| e.id)
+                    .collect();
+                let hidden: Vec<u64> = events
+                    .iter()
+                    .filter(|e| appearance::hard_to_tell_apart(e.effective_color(&pal), pal.accent))
+                    .map(|e| e.id)
+                    .collect();
+                assert_eq!(named, hidden, "{accent:?}");
+            }
+        });
+    }
+
+    /// **More hidden events than are listed offer the calendar itself.**
+    #[test]
+    fn more_hidden_events_than_are_listed_open_the_calendar() {
+        appearance::config::testing::with_scratch_config("settings-accent-many", |_| {
+            let mut state = blue_settings();
+            let pal = state.palette();
+            let events: Vec<_> = (1..=7)
+                .map(|id| {
+                    calendar_event(
+                        id,
+                        "Standup",
+                        calendarstore::EventCategory::Work,
+                        Some(pal.accent),
+                    )
+                })
+                .collect();
+            keep_events(&events);
+            state.go_to_page(SettingsPage::Colors);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(texts.contains("close to 7 events' colours"), "{texts}");
+            assert!(texts.contains("And 2 more"), "{texts}");
+            let buttons = (1..=7)
+                .filter(|id| center_of(&state, RowHit::Press(ButtonId::EventColour(*id))).is_some())
+                .count();
+            assert_eq!(buttons, CLASHES_LISTED);
+            let (x, y) = center_of(&state, RowHit::Press(ButtonId::OpenCalendar)).unwrap();
+            state.handle_click(x, y);
+            STARTED.with(|s| assert_eq!(*s.borrow(), vec![(CALENDAR.to_owned(), vec![])]));
+        });
+    }
+
+    /// **Look again reads the calendar again**: an event whose colour was
+    /// changed there drops out of the warning.
+    #[test]
+    fn look_again_reads_the_calendar_again() {
+        appearance::config::testing::with_scratch_config("settings-accent-again", |_| {
+            let mut state = blue_settings();
+            let pal = state.palette();
+            let event = |colour| {
+                calendar_event(
+                    7,
+                    "Dentist",
+                    calendarstore::EventCategory::Health,
+                    Some(colour),
+                )
+            };
+            keep_events(&[event(pal.accent)]);
+            state.go_to_page(SettingsPage::Colors);
+            assert_eq!(state.events_the_accent_hides().len(), 1);
+            keep_events(&[event(apart_from(&pal, pal.accent))]);
+            let (x, y) = center_of(&state, RowHit::Press(ButtonId::LookAgain)).unwrap();
+            state.handle_click(x, y);
+            assert!(state.events_the_accent_hides().is_empty());
+        });
+    }
+
+    /// **A calendar that cannot be read, or will not start, is said so.**
+    #[test]
+    fn a_calendar_that_cannot_be_read_or_started_is_said() {
+        appearance::config::testing::with_scratch_config("settings-accent-broken", |_| {
+            let path = calendarstore::events_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "this is not a calendar\n").unwrap();
+            let mut state = blue_settings();
+            state.go_to_page(SettingsPage::Colors);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(
+                texts.contains("The calendar's events could not be read"),
+                "{texts}"
+            );
+
+            let pal = state.palette();
+            keep_events(&[calendar_event(
+                7,
+                "Dentist",
+                calendarstore::EventCategory::Health,
+                Some(pal.accent),
+            )]);
+            state.starter = refuse_start;
+            state.go_to_page(SettingsPage::Colors);
+            let (x, y) = center_of(&state, RowHit::Press(ButtonId::EventColour(7))).unwrap();
+            state.handle_click(x, y);
+            let texts = drawn_texts(&state).join(" | ");
+            assert!(
+                texts.contains("Could not start the calendar (/usr/bin/calendar)"),
+                "{texts}"
+            );
+        });
+    }
+
+    /// **A long title is cut, the cut marked**, so a button stays beside it.
+    #[test]
+    fn a_long_title_is_cut_with_an_ellipsis() {
+        assert_eq!(elided("Dentist", 36), "Dentist");
+        let long = "a".repeat(40);
+        let cut = elided(&long, 36);
+        assert_eq!(cut.chars().count(), 36);
+        assert!(cut.ends_with('\u{2026}'));
     }
 }
 

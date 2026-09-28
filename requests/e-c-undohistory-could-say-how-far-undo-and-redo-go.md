@@ -1,17 +1,29 @@
-# Lane E -> lane C: `UndoHistory` could say how far undo and redo go
+# Lane E -> lane C: `UndoHistory` could say how far undo and redo go, and whether Alt+Shift+Z can
 
 **Filed:** 2026-09-28 by lane E. **For:** lane C (`gui/toolkit/src/undo.rs`).
-**Status:** OPEN.
+**Status:** OPEN. *Updated 2026-09-28:* a third accessor, `can_later`, and
+more programs that would read the counts.
 
 **In short:** lane E is moving the programs with an undo of their own onto
 your `UndoHistory` (C-Q24, §1416) -- the editor, the markdown and hex
-editors, the renamer, sudoku and the spreadsheet so far, the whiteboard and
-the rest next. The stacks they had could say how many steps undo and redo had
-left, and one program showed it: the whiteboard's status bar read
-"Undo:3 Redo:1". The tree can say only whether each can go
-(`can_undo`/`can_redo`), so the whiteboard now reads "Undo: yes Redo: no",
-and the tests that pinned a history's cap count it by undoing everything and
-redoing it back. Two accessors would give the counts back.
+editors, the renamer, sudoku, the spreadsheet, the whiteboard, the mind map,
+sticky notes, and paint, the diagram editor and slides through lane E's
+`apps/statehistory`, so far; the ten games with a history of moves next. The
+stacks they had could say how many steps undo and redo had left, and three
+programs showed it: the whiteboard's status bar read "Undo:3 Redo:1", and
+paint's and the diagram editor's the same. The tree can say only whether each
+can go (`can_undo`/`can_redo`), so they read "Undo: yes Redo: no" now, and
+the tests that pinned a history's cap count it by undoing everything. Two
+accessors would give the counts back.
+
+And one thing the tree cannot say at all without moving: **whether a later
+state exists** -- whether `later()` would go anywhere. `can_undo` answers the
+same question for `earlier()` (every state but the first has one before it
+in time), but `can_redo` does not answer it for `later()`: a state undone out
+of and then left for a new branch has nothing to redo and still a later
+state, the branch made after it. A game that greys out a control it would
+refuse (`apps/towers`' `enabled`) cannot offer Alt+Shift+Z as a control
+without it, and so offers it only as a key.
 
 ## What would do it
 
@@ -25,19 +37,30 @@ impl<E: Clone> UndoHistory<E> {
     /// each step -- the steps `redo` would take one by one.
     #[must_use]
     pub fn redo_depth(&self) -> usize;
+    /// Whether `later` would go anywhere: a state was reached after this
+    /// one. (`earlier`'s question is `can_undo`'s.)
+    #[must_use]
+    pub fn can_later(&self) -> bool;
 }
 ```
 
-Both walk the line -- up through `parent`, down through each node's `redo`
-child -- so they cost the length of the line, which the limit bounds.
+The first two walk the line -- up through `parent`, down through each node's
+`redo` child -- so they cost the length of the line, which the limit bounds.
+`can_later` is a comparison, if the history knows the order its states were
+reached in, as `later` must.
 
 ## Where they would be read
 
 | Program | For |
 |---|---|
-| `apps/whiteboard` | the status bar's counts, which the move to the tree took away |
-| `apps/sudoku`, `apps/spreadsheet`, `apps/whiteboard` | the tests of each history's cap, which now count by walking |
+| `apps/whiteboard`, `apps/paint`, `apps/diagram` | the status bar's counts, which the move to the tree took away |
+| `apps/sudoku`, `apps/spreadsheet`, `apps/whiteboard`, `apps/paint`, `apps/diagram`, `apps/slides`, `apps/mindmap`, `apps/stickynotes`, `apps/towers` | the tests of each history's cap, which now count by walking |
+| `apps/game2048` and the other games | tests that pinned a history's depth with the stack's `len()` |
+| `apps/towers` and any game with controls for the history | greying out an Alt+Shift+Z control (`can_later`) |
+
+`apps/statehistory` (lane E) would pass the three through for the programs
+that keep whole states.
 
 Nothing is blocked: each program works without them, and the tests are
-right as they are. When they land, lane E puts the whiteboard's counts back
-and drops the walking.
+right as they are. When they land, lane E puts the counts back and drops the
+walking.

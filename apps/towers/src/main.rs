@@ -66,7 +66,7 @@
 //! `3^n` positions, for every disk count the game offers — computed
 //! independently of the code under test.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, HistoryKey};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -76,6 +76,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::surface::Surface;
 use guitk::text;
+use guitk::undo::{Travel, UndoHistory};
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -139,6 +140,14 @@ const WINDOW_HEIGHT: f32 = 620.0;
 /// see the recursion, and a solve that finishes in one frame teaches nothing.
 const SOLVE_STEP_MS: u64 = 320;
 
+/// How many moves the history keeps. The stack it replaced kept every one;
+/// eight disks' shortest solve is 255 moves, and a game this long is one
+/// wandering far past any of them.
+const HISTORY_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(10_000) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
+
 /// The tick the solver is paced with, asked for only while it is running.
 const TICK_MS: u64 = 16;
 
@@ -175,7 +184,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Lift the top disk, or drop the one you hold",
     ),
     ("Esc", "Put the disk you are holding back"),
-    ("Z", "Take back a move"),
+    ("Z / Ctrl+Z", "Take back a move"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The position before / after this, on any branch",
+    ),
     ("N", "Start a new game"),
     ("A / S", "One best move / solve it and watch"),
     ("Up / Down", "More or fewer disks, before you start"),
@@ -524,7 +538,6 @@ const NO_DISKS: &[u8] = &[];
 
 /// The whole puzzle: three stacks, the disk in your hand, the running record,
 /// and the size of the window it was last drawn in.
-#[derive(Clone)]
 pub struct Towers {
     /// Disk sizes on each peg, bottom to top; 1 is the smallest.
     pegs: [Vec<u8>; PEGS],
@@ -546,8 +559,10 @@ pub struct Towers {
     solving: bool,
     /// Milliseconds until the solver's next move; zero when it is not running.
     step_ms: u64,
-    /// Every move made, so `Undo` can walk back up them.
-    undo_stack: Vec<(usize, usize)>,
+    /// Every move made, each a peg to a peg, as a tree: a move made after an
+    /// undo starts a branch and keeps the moves undone, reached with Alt+Z
+    /// (C-Q24, `design-decisions.md` §1416).
+    history: UndoHistory<(usize, usize)>,
     show_help: bool,
     width: f32,
     height: f32,
@@ -578,7 +593,7 @@ impl Towers {
             assisted: false,
             solving: false,
             step_ms: 0,
-            undo_stack: Vec::new(),
+            history: UndoHistory::new(HISTORY_LIMIT),
             show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
@@ -602,7 +617,7 @@ impl Towers {
         self.assisted = false;
         self.solving = false;
         self.step_ms = 0;
-        self.undo_stack.clear();
+        self.history.clear();
         self.cursor = 0;
     }
 
@@ -669,8 +684,8 @@ impl Towers {
         self.state == GameState::Playing
     }
     #[must_use]
-    pub fn undo_depth(&self) -> usize {
-        self.undo_stack.len()
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
     }
 
     /// The row of the best-score table this disk count belongs in.
@@ -873,7 +888,7 @@ impl Towers {
             stack.push(disk);
         }
         self.moves = self.moves.saturating_add(1);
-        self.undo_stack.push((from, to));
+        self.history.record((from, to));
         self.check_solved();
     }
 
@@ -883,22 +898,94 @@ impl Towers {
     /// "undo" with a disk in mid-air — and refused once the puzzle is done,
     /// which is a finished record rather than a position.
     pub fn undo(&mut self) -> bool {
-        if !self.playing() || self.held.is_some() {
+        if !self.at_a_position() {
             return false;
         }
-        let Some(&(from, to)) = self.undo_stack.last() else {
+        let Some((from, to)) = self.history.undo() else {
             return false;
         };
-        let Some(disk) = self.pegs.get_mut(to).and_then(Vec::pop) else {
+        self.take_back(from, to);
+        true
+    }
+
+    /// Make again the move last taken back, on the branch the game is on --
+    /// Ctrl+Y or Ctrl+Shift+Z. Refused when [`undo`](Self::undo) is.
+    pub fn redo(&mut self) -> bool {
+        if !self.at_a_position() {
+            return false;
+        }
+        let Some((from, to)) = self.history.redo() else {
             return false;
         };
-        if let Some(stack) = self.pegs.get_mut(from) {
+        self.make_again(from, to);
+        true
+    }
+
+    /// Go to the position reached just before this one, on whichever branch
+    /// -- Alt+Z: the way back to moves undone and then played over. Refused
+    /// when [`undo`](Self::undo) is.
+    pub fn earlier(&mut self) -> bool {
+        if !self.at_a_position() {
+            return false;
+        }
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the position reached just after this one -- Alt+Shift+Z.
+    /// Refused when [`undo`](Self::undo) is.
+    pub fn later(&mut self) -> bool {
+        if !self.at_a_position() {
+            return false;
+        }
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Whether the board is a position the history can move from: a game
+    /// in play, with no disk in the air.
+    fn at_a_position(&self) -> bool {
+        self.playing() && self.held.is_none()
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<(usize, usize)>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo((from, to)) => self.take_back(from, to),
+                Travel::Redo((from, to)) => self.make_again(from, to),
+            }
+        }
+        moved
+    }
+
+    /// Put the disk the move `from` → `to` carried back on `from`.
+    fn take_back(&mut self, from: usize, to: usize) {
+        if let Some(disk) = self.pegs.get_mut(to).and_then(Vec::pop)
+            && let Some(stack) = self.pegs.get_mut(from)
+        {
             stack.push(disk);
         }
-        self.undo_stack.pop();
         self.moves = self.moves.saturating_sub(1);
         self.cursor = from;
-        true
+    }
+
+    /// Carry the top disk of `from` to `to` again, counting the move.
+    ///
+    /// No check for a finished puzzle, as [`land`](Self::land) makes: the
+    /// history never reaches one. The move that finishes is always the last
+    /// made -- nothing moves after it, not even an undo, and a new game
+    /// starts the history again -- so no position after it was ever reached
+    /// for a redo or a journey to arrive at.
+    fn make_again(&mut self, from: usize, to: usize) {
+        if let Some(disk) = self.pegs.get_mut(from).and_then(Vec::pop)
+            && let Some(stack) = self.pegs.get_mut(to)
+        {
+            stack.push(disk);
+        }
+        self.moves = self.moves.saturating_add(1);
+        self.cursor = to;
     }
 
     fn check_solved(&mut self) {
@@ -1012,7 +1099,7 @@ impl Towers {
                     }
             }
             Action::Cancel => self.held.is_some(),
-            Action::Undo => self.playing() && self.held.is_none() && !self.undo_stack.is_empty(),
+            Action::Undo => self.playing() && self.held.is_none() && self.history.can_undo(),
             Action::NewGame => {
                 self.moves > 0 || self.held.is_some() || !self.playing() || self.solving
             }
@@ -1098,7 +1185,7 @@ impl Towers {
             }
         }
         self.state = GameState::Playing;
-        self.undo_stack.clear();
+        self.history.clear();
     }
 
     /// Mark this attempt unassisted again, for a test that scripts a solve.
@@ -1712,6 +1799,20 @@ fn draw_help(f: &mut Frame, l: &Layout, c: &Colours, palette: &Palette) {
 // ── Input ──────────────────────────────────────────────────────────────────
 
 impl Towers {
+    /// What a history key does: the solver stops first, as it does for `Z`
+    /// -- two players must not share one board. Returns whether anything
+    /// changed.
+    fn history_key(&mut self, key: HistoryKey) -> bool {
+        let stopped = self.interrupt();
+        let moved = match key {
+            HistoryKey::Undo => self.undo(),
+            HistoryKey::Redo => self.redo(),
+            HistoryKey::Earlier => self.earlier(),
+            HistoryKey::Later => self.later(),
+        };
+        moved || stopped
+    }
+
     fn handle_key(&mut self, ev: &KeyEvent) -> EventResult {
         // The fault that broke every key in this file, in one line. A release
         // is not a second press. Acting on both moved the cursor two pegs at a
@@ -1722,6 +1823,17 @@ impl Towers {
             return EventResult::Ignored;
         }
         let m = ev.modifiers;
+        // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
+        // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z. Above the guard
+        // below, which they would not pass; consumed even when the puzzle
+        // refuses them, like every key here, and while the sheet is up,
+        // which is modal.
+        if let Some(key) = HistoryKey::of(ev) {
+            if !self.show_help {
+                self.history_key(key);
+            }
+            return EventResult::Consumed;
+        }
         if m.ctrl || m.alt || m.super_key {
             return EventResult::Ignored;
         }
@@ -2765,7 +2877,7 @@ mod tests {
         assert_eq!(g.held(), None);
         assert_eq!(g.peg(0), [4, 3, 2, 1]);
         assert_eq!(g.moves(), 0);
-        assert_eq!(g.undo_depth(), 0);
+        assert!(!g.can_undo());
     }
 
     #[test]
@@ -3182,7 +3294,160 @@ mod tests {
         let mut g = game();
         g.apply(Action::Touch(0));
         g.apply(Action::Touch(0));
-        assert_eq!(g.undo_depth(), 0);
+        assert!(!g.can_undo());
+    }
+
+    // ── The history: a tree, walked with Alt+Z (C-Q24) ────────────────────
+
+    fn held_with(key: Key, ctrl: bool, alt: bool, shift: bool) -> KeyEvent {
+        probe::press_with(
+            key,
+            Modifiers {
+                ctrl,
+                alt,
+                shift,
+                super_key: false,
+            },
+        )
+    }
+
+    /// Carry the top disk of `from` to `to`, as two clicks do.
+    fn carry(g: &mut Towers, from: usize, to: usize) {
+        g.apply(Action::Touch(from));
+        g.apply(Action::Touch(to));
+    }
+
+    /// **A move made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every position there has been, in the order each was reached;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut g = game();
+        carry(&mut g, 0, 1);
+        assert!(g.undo());
+        carry(&mut g, 0, 2);
+        assert!(!g.redo(), "redo went onto the branch left");
+        probe::key(&mut g, &held_with(Key::Z, false, true, false));
+        assert_eq!(g.top(1), Some(1), "the move undone was lost");
+        assert_eq!(g.moves(), 1);
+        probe::key(&mut g, &held_with(Key::Z, false, true, false));
+        assert_eq!(g.peg(0), [4, 3, 2, 1]);
+        assert_eq!(g.moves(), 0);
+        probe::key(&mut g, &held_with(Key::Z, false, true, true));
+        probe::key(&mut g, &held_with(Key::Z, false, true, true));
+        assert_eq!(g.top(2), Some(1));
+        assert_eq!(g.moves(), 1);
+        assert!(!g.later(), "past the newest position");
+    }
+
+    /// **Ctrl+Z undoes, and Ctrl+Y and Ctrl+Shift+Z redo.** The game had a
+    /// bare `Z` and no redo at all.
+    #[test]
+    fn ctrl_z_undoes_and_ctrl_y_and_ctrl_shift_z_redo() {
+        let mut g = game();
+        carry(&mut g, 0, 1);
+        probe::key(&mut g, &held_with(Key::Z, true, false, false));
+        assert_eq!(g.moves(), 0, "Ctrl+Z did not undo");
+        probe::key(&mut g, &held_with(Key::Y, true, false, false));
+        assert_eq!((g.moves(), g.top(1)), (1, Some(1)), "Ctrl+Y did not redo");
+        probe::key(&mut g, &held_with(Key::Z, true, false, false));
+        probe::key(&mut g, &held_with(Key::Z, true, false, true));
+        assert_eq!(
+            (g.moves(), g.top(1)),
+            (1, Some(1)),
+            "Ctrl+Shift+Z did not redo"
+        );
+    }
+
+    /// **AltGr+Z and Windows+Alt+Z move nothing.** AltGr arrives as
+    /// Ctrl+Alt and types a letter; a key held with the Windows key is the
+    /// desktop's.
+    #[test]
+    fn altgr_z_and_windows_alt_z_move_nothing() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                shift: false,
+                super_key: false,
+            },
+            Modifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+                super_key: true,
+            },
+        ] {
+            let mut g = game();
+            carry(&mut g, 0, 1);
+            probe::key(&mut g, &probe::press_with(Key::Z, modifiers));
+            assert_eq!(g.moves(), 1, "{modifiers:?}+Z moved");
+        }
+    }
+
+    /// **The history waits while a disk is in the air**, as undo does, and
+    /// **stops the solver**, as undo does: two players must not share one
+    /// board.
+    #[test]
+    fn the_history_waits_for_a_held_disk_and_stops_the_solver() {
+        let mut g = game();
+        carry(&mut g, 0, 1);
+        assert!(g.undo());
+        g.apply(Action::Touch(0));
+        assert!(g.held().is_some());
+        probe::key(&mut g, &held_with(Key::Y, true, false, false));
+        assert_eq!(g.moves(), 0, "a redo with a disk in the air");
+        probe::key(&mut g, &held_with(Key::Z, false, true, true));
+        assert_eq!(g.moves(), 0, "a journey with a disk in the air");
+
+        let mut g = game();
+        g.apply(Action::ToggleSolve);
+        handle_event(&mut g, &Event::Tick { elapsed_ms: 16 });
+        assert_eq!(g.moves(), 1);
+        probe::key(&mut g, &held_with(Key::Z, false, true, false));
+        assert!(!g.solving(), "Alt+Z left the solver playing");
+        assert_eq!(g.moves(), 0);
+    }
+
+    /// **The help sheet keeps the history's keys too**: it is modal, and a
+    /// Ctrl+Z behind it would take back a move nobody can see.
+    #[test]
+    fn the_help_sheet_keeps_the_history_keys_too() {
+        let mut g = game();
+        carry(&mut g, 0, 1);
+        probe::key(&mut g, &probe::press(Key::F1));
+        assert!(g.show_help());
+        assert_eq!(
+            probe::key(&mut g, &held_with(Key::Z, true, false, false)),
+            EventResult::Consumed
+        );
+        assert_eq!(g.moves(), 1, "Ctrl+Z reached the board behind the sheet");
+        assert!(g.show_help());
+    }
+
+    /// **The history keeps its last [`HISTORY_LIMIT`] moves** and drops the
+    /// oldest.
+    #[test]
+    fn the_history_keeps_its_last_moves() {
+        let mut g = game();
+        // Written out, not read from `HISTORY_LIMIT`: a test that counts to
+        // the constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        let limit = 10_000;
+        for i in 0..limit + 20 {
+            if i % 2 == 0 {
+                carry(&mut g, 0, 1);
+            } else {
+                carry(&mut g, 1, 0);
+            }
+        }
+        let mut undone = 0;
+        while undone <= limit && g.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, limit);
+        assert_eq!(g.moves(), 20);
     }
 
     // ── The record ────────────────────────────────────────────────────────

@@ -1802,38 +1802,113 @@ mod tests {
     /// Mocha, dark on a light desktop (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let derived = [CORRECT, PRESENT, ABSENT, ANSWER_INKS.0, ANSWER_INKS.1];
-            let mut playing = game();
-            playing.theme_changed(&p);
-            guess(&mut playing, "stone");
-            guess(&mut playing, "trace");
-            // Not a word: refused, so the message line is up and the five
-            // letters stay in the row, typed but unanswered.
-            guess(&mut playing, "zzzzz");
-            let mut help = game();
-            help.theme_changed(&p);
-            help.show_help = true;
-            let mut over = [won(), lost()];
-            for g in &mut over {
-                g.theme_changed(&p);
-            }
-            for (what, g) in [
-                ("playing", &playing),
-                ("help", &help),
-                ("won", &over[0]),
-                ("lost", &over[1]),
-            ] {
-                let f = g.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("wordle, {what}, light: {light}"),
+                    &format!("wordle, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: a game with
+    /// every kind of tile and key on it and a message up, the shortcut card,
+    /// a win, a loss, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut playing = game();
+        playing.theme_changed(p);
+        guess(&mut playing, "stone");
+        guess(&mut playing, "trace");
+        // Not a word: refused, so the message line is up and the five
+        // letters stay in the row, typed but unanswered.
+        guess(&mut playing, "zzzzz");
+        let mut help = game();
+        help.theme_changed(p);
+        help.show_help = true;
+        let mut over = [won(), lost()];
+        for g in &mut over {
+            g.theme_changed(p);
+        }
+        vec![
+            ("playing", playing.frame(WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("help", help.frame(WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("won", over[0].frame(WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("lost", over[1].frame(WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("cramped", playing.frame(320.0, 420.0)),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it) -- every
+    /// answered letter on its tile and every key on the keyboard among them.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            // A switched-off button's label is exempt, as WCAG exempts an
+            // inactive control: Hard mode, once the first guess is in.
+            let c = Colours::of(&p);
+            let off: Vec<_> = [c.chrome.band, c.chrome.page]
+                .into_iter()
+                .map(|ground| {
+                    guitk::button::paint(
+                        &p,
+                        guitk::button::Kind::Plain,
+                        guitk::button::State {
+                            disabled: true,
+                            ..guitk::button::State::default()
+                        },
+                        ground,
+                    )
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                // Not the shortcut card: the toolkit paints it as a card, and
+                // under the default bordered theme a card has no fill, so its
+                // words land on the keyboard under it -- 3.6:1 in the light
+                // theme. Lane C's to fix, once, for every app that raises one
+                // (requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md);
+                // the help frame joins this test when it is.
+                if what == "help" {
+                    continue;
+                }
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "wordle: {bad:#?}");
     }
 
     /// **Every answered letter reads on its tile** -- a grey tile's letter

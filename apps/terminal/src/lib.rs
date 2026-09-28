@@ -3965,7 +3965,7 @@ mod tests {
 
         // An OSC broken off by an ESC that begins no ST is abandoned, its
         // bytes still held; a DCS after it must not finish it.
-        t.feed(b"]2;abandonedxPq\\");
+        t.feed(b"\x1B]2;abandoned\x1Bx\x1BPq\x1B\\");
         assert_ne!(t.title, "abandoned", "a DCS's ST finished an abandoned OSC");
     }
 
@@ -3975,7 +3975,7 @@ mod tests {
     #[test]
     fn the_other_c0_controls_draw_nothing() {
         let mut t = TerminalState::new(TerminalConfig::default());
-        t.feed(b"abcd");
+        t.feed(b"a\x0Eb\x0Fc\x01\x1Cd");
         let drawn: String = t.screen[0].cells[..4].iter().map(|c| c.ch).collect();
         assert_eq!(drawn, "abcd");
         assert_eq!(t.cursor_col, 4);

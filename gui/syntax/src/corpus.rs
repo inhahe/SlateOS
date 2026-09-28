@@ -32,22 +32,25 @@ struct Example {
     skip: bool,
 }
 
-/// Whether `line` is a header's `===` line.
+/// Whether `line` is a header's `===` line -- in a file with CRLF endings,
+/// its CR aside.
 fn is_equals(line: &str) -> bool {
+    let line = line.strip_suffix('\r').unwrap_or(line);
     line.len() >= 3 && line.bytes().all(|b| b == b'=')
 }
 
-/// Whether `line` is a divider's `---` line.
+/// Whether `line` is a divider's `---` line, its CR aside.
 fn is_dashes(line: &str) -> bool {
+    let line = line.strip_suffix('\r').unwrap_or(line);
     line.len() >= 3 && line.bytes().all(|b| b == b'-')
 }
 
 /// The examples in one corpus file.
 fn examples(text: &str) -> Vec<Example> {
-    let lines: Vec<&str> = text
-        .split('\n')
-        .map(|l| l.strip_suffix('\r').unwrap_or(l))
-        .collect();
+    // Lines keep their CRs: in a corpus of CRLF input (`crlf.txt`) the CRs
+    // are the test, and `tree-sitter test` hands the parser the bytes as
+    // they are.
+    let lines: Vec<&str> = text.split('\n').collect();
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {

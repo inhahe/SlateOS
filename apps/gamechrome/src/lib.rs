@@ -191,6 +191,87 @@ pub fn edge_on(own: Color, piece: Color, ground: Color) -> Color {
     }
 }
 
+/// Playing cards, alike in every card game and every theme.
+///
+/// A card's face is white with red and black suits in any theme -- that is
+/// what a card is, and lane C's call for the card games under §1422 -- while
+/// the table and the backs follow the theme, the backs in the accent. The
+/// four card games each drew their own: two with pale-pink hearts on a
+/// lavender face (1.6:1), two on a green felt that stayed green in any theme.
+pub mod cards {
+    use super::{Palette, apart_from_accent, edge_on};
+    use guitk::color::Color;
+    use guitk::theme::with_alpha;
+
+    /// A card's face: white.
+    pub const FACE: Color = Color::from_hex(0xFAFAF7);
+    /// The red suits' ink: hearts and diamonds.
+    pub const RED: Color = Color::from_hex(0xD20F39);
+    /// The black suits' ink: spades and clubs.
+    pub const BLACK: Color = Color::from_hex(0x1E1E2E);
+
+    /// A suit's ink on a card's face.
+    #[must_use]
+    pub const fn suit_ink(red: bool) -> Color {
+        if red { RED } else { BLACK }
+    }
+
+    /// The colours a card table is drawn in, from the palette.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Table {
+        /// The felt: the page. A card table is the window a card game is
+        /// played in, and the text written on it -- scores, counts, names --
+        /// is inked for the page.
+        pub felt: Color,
+        /// A card's back: the accent.
+        pub back: Color,
+        /// The lines crossing a back: the page's colour, faint.
+        pub pattern: Color,
+        /// The keyboard's ring round a card: a hue apart from the accent
+        /// ([`apart_from_accent`]), because a back *is* the accent and a ring
+        /// the colour of the card it rings is no ring at all -- and not a grey,
+        /// which a light theme's rim round every card already is.
+        pub focus: Color,
+        /// The ring round the cards picked up: the accent. Only a face-up
+        /// card is ever picked up, so it never rings a back.
+        pub picked: Color,
+        /// Where a pile goes when it has no cards, and that place's outline.
+        pub empty: Color,
+        pub empty_edge: Color,
+    }
+
+    impl Table {
+        /// The table for palette `p`.
+        #[must_use]
+        pub fn of(p: &Palette) -> Self {
+            Self {
+                felt: p.base,
+                back: p.accent,
+                pattern: with_alpha(p.base, 110),
+                focus: apart_from_accent(p),
+                picked: p.accent,
+                empty: p.surface0,
+                empty_edge: p.overlay0,
+            }
+        }
+
+        /// A face's outline on this felt: the face's own colour where it
+        /// stands off the felt, and a rim where it does not -- a light
+        /// theme's felt is nearly white itself.
+        #[must_use]
+        pub fn face_edge(&self) -> Color {
+            edge_on(FACE, FACE, self.felt)
+        }
+
+        /// A back's outline on this felt, the same way: an accent close to
+        /// the felt's shade gets a rim.
+        #[must_use]
+        pub fn back_edge(&self) -> Color {
+            edge_on(self.back, self.back, self.felt)
+        }
+    }
+}
+
 /// Every colour [`button`] can draw a button of `kind` on `ground` in: at
 /// rest, pointed at, held down and switched off, face, gloss, edge and label.
 ///

@@ -271,3 +271,70 @@ fn a_piece_is_seen_on_every_square_in_either_theme() {
     let (light_square, _) = squares(&Palette::for_mode(true));
     assert_eq!(edge_on(white.1, white.0, light_square), RIMS.1);
 }
+
+/// A card's suits read on its face: the pale pink the red suits were drawn in
+/// was 1.6:1 on a lavender face.
+#[test]
+fn a_cards_suits_read_on_its_face() {
+    for red in [false, true] {
+        let ratio = contrast_ratio(cards::suit_ink(red), cards::FACE);
+        assert!(
+            ratio >= 4.5,
+            "red: {red}: the suit is {ratio:.2}:1 on the face"
+        );
+    }
+}
+
+/// **A card table is the palette's in either theme**, and a card is seen on
+/// its felt face up or face down, and ringed so it can be seen where it is not;
+/// the keyboard's ring stands off the felt and is not the back's colour.
+#[test]
+fn a_card_table_follows_the_theme_and_every_card_is_seen_on_it() {
+    for light in [false, true] {
+        for accent in [AccentColor::Blue, AccentColor::Yellow, AccentColor::Red] {
+            let p = palette(accent, light);
+            let t = cards::Table::of(&p);
+            appearance::palette_check::assert_colours_from(
+                &p,
+                &[
+                    ("felt", t.felt),
+                    ("back", t.back),
+                    ("pattern", t.pattern),
+                    ("focus", t.focus),
+                    ("picked", t.picked),
+                    ("empty", t.empty),
+                    ("empty edge", t.empty_edge),
+                ],
+                &[],
+                "gamechrome cards",
+            );
+            for (what, body, edge) in [
+                ("face", cards::FACE, t.face_edge()),
+                ("back", t.back, t.back_edge()),
+            ] {
+                let seen = contrast_ratio(body, t.felt).max(contrast_ratio(edge, t.felt));
+                assert!(
+                    seen >= 3.0,
+                    "a card's {what} is seen at {seen:.2}:1 ({accent:?}, light: {light})"
+                );
+            }
+            for (what, ring) in [("focus", t.focus), ("picked", t.picked)] {
+                let ratio = contrast_ratio(ring, t.felt);
+                assert!(
+                    ratio >= 3.0,
+                    "the {what} ring is {ratio:.2}:1 on the felt ({accent:?}, light: {light})"
+                );
+            }
+            // The keyboard's ring is told apart from a back, and from a card's
+            // rim: neither the accent nor a grey.
+            assert!(
+                !hard_to_tell_apart(t.focus, t.back),
+                "the focus ring is the back's colour ({accent:?}, light: {light})"
+            );
+            assert!(
+                !hard_to_tell_apart(t.focus, t.face_edge()),
+                "the focus ring is the rim's colour ({accent:?}, light: {light})"
+            );
+        }
+    }
+}

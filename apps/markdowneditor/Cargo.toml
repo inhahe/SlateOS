@@ -18,6 +18,9 @@ diffcore = { path = "../diffcore" }
 safeio = { path = "../safeio" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
+# Where its preferences are kept: `markdowneditor.yaml` in the settings folder,
+# one file per program (C-Q26).
+settingsfile = { path = "../../gui/settingsfile" }
 
 # The same crate again with its `audit` counters on, so the tests can prove a
 # save really went through `safeio` and did not quietly regress to
@@ -26,6 +29,7 @@ unsaved = { path = "../unsaved" }
 [dev-dependencies]
 safeio = { path = "../safeio", features = ["audit"] }
 scratchdir = { path = "../../userspace/scratchdir" }
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

@@ -360,6 +360,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-ki-dupes.py` | Regression tests for `scripts/ki_dupes.py` and its entry/subsection split. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
 | `scripts/test-msysbash.py` | Tests for `msysbash.py`, the one place that decides which bash runs our scripts. |
+| `scripts/test-mutation_harness.py` | Tests for mutation_harness.check_the_table: where a table's tests are found. |
 | `scripts/test-open-requests.py` | Regression tests for `scripts/open-requests.py`. |
 | `scripts/test-pre-push-doclinks-gate.py` | Tests for pre-push gate 11 -- the dead-intra-doc-link gate. |
 | `scripts/test-pre-push-fmt-gate.py` | Behavioural tests for pre-push gate 7 (rustfmt drift), and specifically for |
@@ -403,4 +404,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_393 scripts._
+_394 scripts._

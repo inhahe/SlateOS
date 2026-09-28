@@ -15,6 +15,10 @@ guitk = { path = "../../gui/toolkit" }
 # The window and its event loop. Without this the whole program was
 # unreachable: `fn main` was empty.
 oswindow = { path = "../../gui/window" }
+# What the clock shows, as the Settings program's Screen Lock page wrote it
+# (`lockscreen.yaml`, C-Q26).
+settingsfile = { path = "../../gui/settingsfile" }
+yamldoc = { path = "../../yamldoc" }
 # The zone the clock is rendered through. UTC today, explicitly and
 # greppably -- see `set_time_from_utc`.
 tzrules = { path = "../../tzrules" }

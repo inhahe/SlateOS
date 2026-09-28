@@ -1,0 +1,28 @@
+[package]
+name = "seal"
+version = "0.1.0"
+edition = "2024"
+description = "Authenticated encryption and password-key derivation for SlateOS, on the vendored RustCrypto crates beside it (design-decisions.md §539)"
+publish = false
+
+[dependencies]
+# XChaCha20-Poly1305: the one authenticated cipher. `alloc` for the
+# `Vec`-returning encrypt/decrypt; no `getrandom` -- this crate draws no
+# randomness, the caller passes the nonce (it runs in the kernel too).
+chacha20poly1305 = { path = "../chacha20poly1305", default-features = false, features = ["alloc"] }
+# Argon2id (RFC 9106). `alloc` so the memory the parameters ask for is
+# allocated -- fallibly: too much is `Error::OutOfMemory`, not an abort.
+argon2 = { path = "../argon2", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# The published vectors, read the way upstream's own tests read them: the
+# Wycheproof AEAD files through aead's `dev` module (blobby), the RFC
+# vectors through hex-literal.
+aead = { path = "../aead", default-features = false, features = ["dev", "alloc"] }
+hex-literal = { path = "../hex-literal" }
+chacha20 = { path = "../chacha20", default-features = false, features = ["cipher"] }
+poly1305 = { path = "../poly1305" }
+blake2 = { path = "../blake2", default-features = false }
+
+[lints]
+workspace = true

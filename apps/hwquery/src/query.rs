@@ -1,13 +1,17 @@
 //! Live Hardware Query Module
 //!
-//! Provides a trait-based abstraction for querying hardware information.
-//! Two implementations:
-//! - `SyscallProvider`: reads from OS info files (e.g. /sys/hardware/cpu,
-//!   /sys/hardware/memory, etc.) using CPUID and sysfs-like interfaces.
-//! - `StubProvider`: returns representative hardcoded data for development.
+//! A trait, [`HardwareProvider`], with one query per category, and the one
+//! implementation that reads a real machine: [`SyscallProvider`], which reads
+//! `/sys/devices` and `/proc` as the kernel publishes them. A test-only
+//! `StubProvider` answers every query with fixed values.
 //!
-//! The `RefreshManager` wraps any provider and caches results with a
-//! configurable TTL, automatically refreshing stale data on access.
+//! Every query returns a `Result`, and nothing here turns an `Err` into a
+//! value. A reader that cannot tell "could not read" from "read, and found
+//! nothing" draws the one as the other. That is why `RefreshManager` -- a
+//! TTL cache in front of a provider whose accessors answered a failed read
+//! with "Unknown", zeros and empty lists -- was deleted on 2026-09-27 rather
+//! than fixed: no program used it, and a caching layer that keeps the errors
+//! is a different design, not a repair of this one.
 
 use crate::{
     Address, CpuInfo, DiskInfo, DisplayInfo, DmaInfo, DriverInfo, IoPortInfo, IrqInfo, MemoryInfo,
@@ -21,7 +25,6 @@ use crate::{
 #[cfg(test)]
 use crate::{MemorySlot, PartitionInfo};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Error type
@@ -213,6 +216,15 @@ pub trait HardwareProvider {
     /// only one that knows how much room it has to draw it in -- and because a
     /// provider that returned "4h 23m 17s" is exactly what this replaced.
     fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError>;
+    /// The kernel's release, as `uname -r` gives it, from `/proc/version`.
+    ///
+    /// A default that says "not available", so a provider that has no kernel
+    /// to ask need not invent one.
+    fn query_kernel_release(&self) -> Result<String, HwQueryError> {
+        Err(HwQueryError::NotAvailable {
+            path: String::from("/proc/version"),
+        })
+    }
     /// Query startup programs.
     fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError>;
     /// Human-readable name of this provider.
@@ -229,14 +241,12 @@ pub trait HardwareProvider {
 // Syscall-based provider
 // ============================================================================
 
-/// Provider that queries live hardware via sysfs-like files and CPUID.
-///
-/// Reads from `/sys/hardware/*` files exposed by the kernel. Falls back
-/// to CPUID for CPU feature detection. Returns `NotAvailable` for any
-/// info that isn't exposed yet.
+/// Provider that reads the machine as the kernel publishes it: `/sys/devices`
+/// for the processor, memory, block devices and PCI functions
+/// (design-decisions.md §850 retired the `/sys/hardware` tree this once read),
+/// and `/proc` for the rest. Returns `NotAvailable`, naming the path, for any
+/// category nothing publishes.
 pub struct SyscallProvider {
-    /// Cache of file contents from sysfs reads.
-    file_cache: HashMap<String, String>,
     /// Prefixed to every path read, empty in a shipping build.
     ///
     /// The same seam `procinfo::ProcFs::at` provides, and for the same reason:
@@ -261,7 +271,6 @@ impl SyscallProvider {
     #[cfg(any(test, feature = "testing"))]
     pub fn at(root: &str) -> Self {
         Self {
-            file_cache: HashMap::new(),
             root: root.to_string(),
         }
     }
@@ -284,7 +293,6 @@ impl SyscallProvider {
     /// Create a new syscall-based provider.
     pub fn new() -> Self {
         Self {
-            file_cache: HashMap::new(),
             root: String::new(),
         }
     }
@@ -300,12 +308,16 @@ impl SyscallProvider {
     }
 
     /// A scalar file parsed as a number.
+    ///
+    /// A file that is there and holds no number is a `ParseError`, naming the
+    /// file and what it held. It was `NotAvailable`, so System Information
+    /// said "nothing on this system provides" a file it had just read -- and
+    /// named it by its unrooted path, not the one opened.
     fn read_num<T: core::str::FromStr>(&self, path: &str) -> Result<T, HwQueryError> {
-        self.read_scalar(path)?
-            .parse()
-            .map_err(|_| HwQueryError::NotAvailable {
-                path: path.to_string(),
-            })
+        let text = self.read_scalar(path)?;
+        text.parse().map_err(|_| HwQueryError::ParseError {
+            detail: format!("{}: expected a number, got {text:?}", self.rooted(path)),
+        })
     }
 
     /// How many CPUs a Linux-style range names: `"0-7"` is 8, `"0,2-3"` is 3.
@@ -338,15 +350,11 @@ impl SyscallProvider {
     }
 
     fn read_sysfs(&self, path: &str) -> Result<String, HwQueryError> {
-        // On the actual OS, this would use SYS_READ to read from the sysfs VFS.
-        // For now, check the file cache (populated by refresh) or try a real read.
-        if let Some(cached) = self.file_cache.get(path) {
-            return Ok(cached.clone());
-        }
-
-        // Attempt a real filesystem read. The error names the path actually
-        // opened rather than the logical one, so a reader can go and look at
-        // it.
+        // A plain read: sysfs is a filesystem on SlateOS as on Linux. The
+        // error names the path actually opened rather than the logical one,
+        // so a reader can go and look at it. (A `file_cache` sat in front of
+        // this until 2026-09-27, said to be "populated by refresh"; nothing
+        // ever put anything in it.)
         let opened = self.rooted(path);
         match std::fs::read_to_string(&opened) {
             Ok(content) => Ok(content),
@@ -420,10 +428,10 @@ impl SyscallProvider {
             logical_processors,
             base_clock_mhz: None,
             max_turbo_mhz: None,
-            l1_data_kb: self.cache_kb(1, "Data").unwrap_or(0),
-            l1_inst_kb: self.cache_kb(1, "Instruction").unwrap_or(0),
-            l2_kb: self.cache_kb(2, "Unified").unwrap_or(0),
-            l3_kb: self.cache_kb(3, "Unified").unwrap_or(0),
+            l1_data_kb: self.cache_kb(1, "Data"),
+            l1_inst_kb: self.cache_kb(1, "Instruction"),
+            l2_kb: self.cache_kb(2, "Unified"),
+            l3_kb: self.cache_kb(3, "Unified"),
             features: Vec::new(),
         })
     }
@@ -743,9 +751,9 @@ impl HardwareProvider for SyscallProvider {
             available_mb: available_kb / 1024,
             // The kind and speed of the memory are SMBIOS facts too.
             mem_type: String::new(),
-            speed_mhz: 0,
-            slots_used: 0,
-            slots_total: 0,
+            speed_mhz: None,
+            slots_used: None,
+            slots_total: None,
             slots: Vec::new(),
         })
     }
@@ -890,10 +898,10 @@ impl HardwareProvider for SyscallProvider {
         Ok(DisplayInfo {
             gpu_name: String::new(),
             vendor: String::new(),
-            vram_mb: 0,
+            vram_mb: None,
             resolution: primary
                 .map_or_else(String::new, |mon| format!("{}x{}", mon.width, mon.height)),
-            refresh_rate_hz: primary.map_or(0, |mon| mon.refresh_hz),
+            refresh_rate_hz: primary.map(|mon| mon.refresh_hz),
             // `enabled` defaults to true in the parser because the kernel
             // writes only a ` [disabled]` marker and never an ` [enabled]`
             // one, so a disabled output is still listed and still reports the
@@ -1113,6 +1121,27 @@ impl HardwareProvider for SyscallProvider {
     /// repeating here is that **0.0 is also what an invented value would look
     /// like if nobody had thought about it.**
     /// Read `/proc/uptime`.
+    /// `/proc/version` is `<name> version <release> ...`; the release is the
+    /// third word. SlateOS names itself Linux there, for the software that
+    /// checks, and its release says `-slateos`.
+    fn query_kernel_release(&self) -> Result<String, HwQueryError> {
+        let line =
+            self.procfs()
+                .version()
+                .ok()
+                .flatten()
+                .ok_or_else(|| HwQueryError::NotAvailable {
+                    path: self.rooted("/proc/version"),
+                })?;
+        line.split(|b| b.is_ascii_whitespace())
+            .filter(|w| !w.is_empty())
+            .nth(2)
+            .map(shown)
+            .ok_or_else(|| HwQueryError::ParseError {
+                detail: String::from("/proc/version names no release"),
+            })
+    }
+
     fn query_uptime(&self) -> Result<std::time::Duration, HwQueryError> {
         self.procfs()
             .uptime()
@@ -1224,8 +1253,6 @@ impl HardwareProvider for SyscallProvider {
 // Stub provider (existing hardcoded data, as fallback)
 // ============================================================================
 
-/// Provider that returns representative stub data.
-/// Used for development, testing, and as a fallback when live queries fail.
 /// Representative hardcoded values, for tests only.
 ///
 /// `#[cfg(test)]` since 2026-09-15. It was reachable from production and
@@ -1270,10 +1297,10 @@ impl HardwareProvider for StubProvider {
             logical_processors: 16,
             base_clock_mhz: Some(3600),
             max_turbo_mhz: Some(5100),
-            l1_data_kb: 32,
-            l1_inst_kb: 32,
-            l2_kb: 256,
-            l3_kb: 16384,
+            l1_data_kb: Some(32),
+            l1_inst_kb: Some(32),
+            l2_kb: Some(256),
+            l3_kb: Some(16384),
             features: vec![
                 ("SSE".to_string(), true),
                 ("SSE2".to_string(), true),
@@ -1296,9 +1323,9 @@ impl HardwareProvider for StubProvider {
             total_mb: 32768,
             available_mb: 18432,
             mem_type: "DDR5".to_string(),
-            speed_mhz: 5600,
-            slots_used: 2,
-            slots_total: 4,
+            speed_mhz: Some(5600),
+            slots_used: Some(2),
+            slots_total: Some(4),
             slots: vec![
                 MemorySlot {
                     slot_name: "DIMM A1".to_string(),
@@ -1372,9 +1399,9 @@ impl HardwareProvider for StubProvider {
         Ok(DisplayInfo {
             gpu_name: "AMD Radeon RX 7900 XTX".to_string(),
             vendor: "AMD".to_string(),
-            vram_mb: 24576,
+            vram_mb: Some(24576),
             resolution: "3840x2160".to_string(),
-            refresh_rate_hz: 144,
+            refresh_rate_hz: Some(144),
             outputs: vec![
                 ("DisplayPort 1".to_string(), true),
                 ("HDMI 1".to_string(), true),
@@ -1573,627 +1600,6 @@ impl HardwareProvider for StubProvider {
 }
 
 // ============================================================================
-// Fallback provider — tries live, falls back to stub
-// ============================================================================
-
-// ============================================================================
-// Refresh Manager — cached queries with configurable TTL
-// ============================================================================
-
-/// Cache entry with a timestamp and TTL.
-#[derive(Debug, Clone)]
-struct CacheEntry<T> {
-    data: T,
-    timestamp: u64,
-    ttl_secs: u64,
-}
-
-impl<T> CacheEntry<T> {
-    fn is_stale(&self, now: u64) -> bool {
-        now.saturating_sub(self.timestamp) >= self.ttl_secs
-    }
-}
-
-/// Manages cached hardware queries with configurable TTL per category.
-///
-/// On first access for each category, queries the provider and caches
-/// the result. Subsequent accesses return the cached data until the TTL
-/// expires, at which point the provider is re-queried.
-pub struct RefreshManager {
-    provider: Box<dyn HardwareProvider>,
-
-    /// TTL in seconds for each data category.
-    cpu_ttl: u64,
-    memory_ttl: u64,
-    storage_ttl: u64,
-    network_ttl: u64,
-    display_ttl: u64,
-    pci_ttl: u64,
-    usb_ttl: u64,
-    sound_ttl: u64,
-    irq_ttl: u64,
-    ioport_ttl: u64,
-    memmap_ttl: u64,
-    dma_ttl: u64,
-    service_ttl: u64,
-    process_ttl: u64,
-    driver_ttl: u64,
-    env_ttl: u64,
-    startup_ttl: u64,
-
-    // Cached data
-    cpu_cache: Option<CacheEntry<CpuInfo>>,
-    memory_cache: Option<CacheEntry<MemoryInfo>>,
-    storage_cache: Option<CacheEntry<Vec<DiskInfo>>>,
-    network_cache: Option<CacheEntry<Vec<NetworkAdapterInfo>>>,
-    display_cache: Option<CacheEntry<DisplayInfo>>,
-    pci_cache: Option<CacheEntry<Vec<PciDeviceInfo>>>,
-    usb_cache: Option<CacheEntry<Vec<UsbDeviceInfo>>>,
-    sound_cache: Option<CacheEntry<Vec<SoundInfo>>>,
-    irq_cache: Option<CacheEntry<Vec<IrqInfo>>>,
-    ioport_cache: Option<CacheEntry<Vec<IoPortInfo>>>,
-    memmap_cache: Option<CacheEntry<Vec<MemoryMapEntry>>>,
-    dma_cache: Option<CacheEntry<Vec<DmaInfo>>>,
-    service_cache: Option<CacheEntry<Vec<ServiceInfo>>>,
-    process_cache: Option<CacheEntry<Vec<ProcessEntry>>>,
-    driver_cache: Option<CacheEntry<Vec<DriverInfo>>>,
-    env_cache: Option<CacheEntry<Vec<(String, String)>>>,
-    startup_cache: Option<CacheEntry<Vec<StartupEntry>>>,
-
-    /// Total refresh count for metrics.
-    refresh_count: u64,
-}
-
-/// Default TTL values for different categories.
-const TTL_STATIC_SECS: u64 = 300; // CPU, display, PCI: rarely change
-const TTL_DYNAMIC_SECS: u64 = 5; // Processes, memory usage: change constantly
-const TTL_MODERATE_SECS: u64 = 30; // Network stats, services: change occasionally
-
-impl RefreshManager {
-    /// Create a new refresh manager with a specific provider.
-    pub fn new(provider: Box<dyn HardwareProvider>) -> Self {
-        Self {
-            provider,
-            cpu_ttl: TTL_STATIC_SECS,
-            memory_ttl: TTL_DYNAMIC_SECS,
-            storage_ttl: TTL_MODERATE_SECS,
-            network_ttl: TTL_MODERATE_SECS,
-            display_ttl: TTL_STATIC_SECS,
-            pci_ttl: TTL_STATIC_SECS,
-            usb_ttl: TTL_MODERATE_SECS,
-            sound_ttl: TTL_MODERATE_SECS,
-            irq_ttl: TTL_STATIC_SECS,
-            ioport_ttl: TTL_STATIC_SECS,
-            memmap_ttl: TTL_STATIC_SECS,
-            dma_ttl: TTL_STATIC_SECS,
-            service_ttl: TTL_MODERATE_SECS,
-            process_ttl: TTL_DYNAMIC_SECS,
-            driver_ttl: TTL_MODERATE_SECS,
-            env_ttl: TTL_MODERATE_SECS,
-            startup_ttl: TTL_STATIC_SECS,
-            cpu_cache: None,
-            memory_cache: None,
-            storage_cache: None,
-            network_cache: None,
-            display_cache: None,
-            pci_cache: None,
-            usb_cache: None,
-            sound_cache: None,
-            irq_cache: None,
-            ioport_cache: None,
-            memmap_cache: None,
-            dma_cache: None,
-            service_cache: None,
-            process_cache: None,
-            driver_cache: None,
-            env_cache: None,
-            startup_cache: None,
-            refresh_count: 0,
-        }
-    }
-
-    /// Get current timestamp.
-    fn now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    }
-
-    /// Force refresh all cached data.
-    pub fn refresh_all(&mut self) {
-        self.cpu_cache = None;
-        self.memory_cache = None;
-        self.storage_cache = None;
-        self.network_cache = None;
-        self.display_cache = None;
-        self.pci_cache = None;
-        self.usb_cache = None;
-        self.sound_cache = None;
-        self.irq_cache = None;
-        self.ioport_cache = None;
-        self.memmap_cache = None;
-        self.dma_cache = None;
-        self.service_cache = None;
-        self.process_cache = None;
-        self.driver_cache = None;
-        self.env_cache = None;
-        self.startup_cache = None;
-    }
-
-    /// Get the number of refreshes performed.
-    pub fn refresh_count(&self) -> u64 {
-        self.refresh_count
-    }
-
-    /// Get the provider name.
-    pub fn provider_name(&self) -> &'static str {
-        self.provider.provider_name()
-    }
-
-    /// The cached processor, or `None` if it has never been read.
-    ///
-    /// `Option` rather than a zero-filled `CpuInfo`. The last-resort branch
-    /// here used to build one with brand "Unknown", zero cores and zero
-    /// caches, which draws as a description of a very poor machine rather than
-    /// as an absence, and which a caller cannot tell from a real reading. The
-    /// stale-cache branch above it stays: a value read thirty seconds ago is a
-    /// real value, and serving it is different in kind from inventing one.
-    pub fn cpu(&mut self) -> Option<CpuInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.cpu_cache
-            && !entry.is_stale(now)
-        {
-            return Some(entry.data.clone());
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_cpu() {
-            Ok(info) => {
-                self.cpu_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.cpu_ttl,
-                });
-                Some(info)
-            }
-            Err(_) => self.cpu_cache.as_ref().map(|e| e.data.clone()),
-        }
-    }
-
-    /// Get memory info (cached with TTL).
-    pub fn memory(&mut self) -> MemoryInfo {
-        let now = Self::now();
-        if let Some(ref entry) = self.memory_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_memory() {
-            Ok(info) => {
-                self.memory_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.memory_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .memory_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_else(|| MemoryInfo {
-                    total_mb: 0,
-                    available_mb: 0,
-                    mem_type: "Unknown".to_string(),
-                    speed_mhz: 0,
-                    slots_used: 0,
-                    slots_total: 0,
-                    slots: Vec::new(),
-                }),
-        }
-    }
-
-    /// Get storage info (cached with TTL).
-    pub fn storage(&mut self) -> Vec<DiskInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.storage_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_storage() {
-            Ok(info) => {
-                self.storage_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.storage_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .storage_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get network adapter info (cached with TTL).
-    pub fn network(&mut self) -> Vec<NetworkAdapterInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.network_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_network() {
-            Ok(info) => {
-                self.network_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.network_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .network_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get display info (cached with TTL).
-    pub fn display(&mut self) -> DisplayInfo {
-        let now = Self::now();
-        if let Some(ref entry) = self.display_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_display() {
-            Ok(info) => {
-                self.display_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.display_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .display_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_else(|| DisplayInfo {
-                    gpu_name: "Unknown".to_string(),
-                    vendor: "Unknown".to_string(),
-                    vram_mb: 0,
-                    resolution: "Unknown".to_string(),
-                    refresh_rate_hz: 0,
-                    outputs: Vec::new(),
-                    driver_version: "Unknown".to_string(),
-                }),
-        }
-    }
-
-    /// Get PCI devices (cached with TTL).
-    pub fn pci(&mut self) -> Vec<PciDeviceInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.pci_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_pci() {
-            Ok(info) => {
-                self.pci_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.pci_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .pci_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get USB devices (cached with TTL).
-    pub fn usb(&mut self) -> Vec<UsbDeviceInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.usb_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_usb() {
-            Ok(info) => {
-                self.usb_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.usb_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .usb_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get sound devices (cached with TTL).
-    pub fn sound(&mut self) -> Vec<SoundInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.sound_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_sound() {
-            Ok(info) => {
-                self.sound_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.sound_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .sound_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get IRQs (cached with TTL).
-    pub fn irqs(&mut self) -> Vec<IrqInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.irq_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_irqs() {
-            Ok(info) => {
-                self.irq_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.irq_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .irq_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get I/O ports (cached with TTL).
-    pub fn io_ports(&mut self) -> Vec<IoPortInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.ioport_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_io_ports() {
-            Ok(info) => {
-                self.ioport_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.ioport_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .ioport_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get memory map (cached with TTL).
-    pub fn memory_map(&mut self) -> Vec<MemoryMapEntry> {
-        let now = Self::now();
-        if let Some(ref entry) = self.memmap_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_memory_map() {
-            Ok(info) => {
-                self.memmap_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.memmap_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .memmap_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get DMA channels (cached with TTL).
-    pub fn dma(&mut self) -> Vec<DmaInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.dma_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_dma() {
-            Ok(info) => {
-                self.dma_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.dma_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .dma_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get services (cached with TTL).
-    pub fn services(&mut self) -> Vec<ServiceInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.service_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_services() {
-            Ok(info) => {
-                self.service_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.service_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .service_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get processes (cached with TTL).
-    pub fn processes(&mut self) -> Vec<ProcessEntry> {
-        let now = Self::now();
-        if let Some(ref entry) = self.process_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_processes() {
-            Ok(info) => {
-                self.process_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.process_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .process_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get drivers (cached with TTL).
-    pub fn drivers(&mut self) -> Vec<DriverInfo> {
-        let now = Self::now();
-        if let Some(ref entry) = self.driver_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_drivers() {
-            Ok(info) => {
-                self.driver_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.driver_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .driver_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get environment variables (cached with TTL).
-    pub fn env_vars(&mut self) -> Vec<(String, String)> {
-        let now = Self::now();
-        if let Some(ref entry) = self.env_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_env_vars() {
-            Ok(info) => {
-                self.env_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.env_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .env_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-
-    /// Get startup programs (cached with TTL).
-    pub fn startup(&mut self) -> Vec<StartupEntry> {
-        let now = Self::now();
-        if let Some(ref entry) = self.startup_cache
-            && !entry.is_stale(now)
-        {
-            return entry.data.clone();
-        }
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        match self.provider.query_startup() {
-            Ok(info) => {
-                self.startup_cache = Some(CacheEntry {
-                    data: info.clone(),
-                    timestamp: now,
-                    ttl_secs: self.startup_ttl,
-                });
-                info
-            }
-            Err(_) => self
-                .startup_cache
-                .as_ref()
-                .map(|e| e.data.clone())
-                .unwrap_or_default(),
-        }
-    }
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -2275,7 +1681,7 @@ mod tests {
         let stub = StubProvider::new();
         let disp = stub.query_display().expect("stub display");
         assert!(disp.gpu_name.contains("AMD"));
-        assert!(disp.vram_mb > 0);
+        assert!(disp.vram_mb.is_some_and(|mb| mb > 0));
     }
 
     #[test]
@@ -2498,104 +1904,13 @@ mod tests {
         let _ = provider; // use the provider to avoid unused warning
     }
 
-    // -- Cache entry --
-
-    #[test]
-    fn test_cache_entry_staleness() {
-        let entry = CacheEntry {
-            data: 42u32,
-            timestamp: 1000,
-            ttl_secs: 30,
-        };
-        assert!(!entry.is_stale(1010)); // 10s < 30s TTL
-        assert!(!entry.is_stale(1029)); // 29s < 30s TTL
-        assert!(entry.is_stale(1030)); // 30s >= 30s TTL
-        assert!(entry.is_stale(1100)); // 100s > 30s TTL
-    }
-
-    // -- Refresh manager --
-
-    #[test]
-    fn test_refresh_manager_with_stub() {
-        let mut mgr = RefreshManager::new(Box::new(StubProvider::new()));
-        let cpu = mgr.cpu().expect("a cpu from the stub");
-        assert_eq!(cpu.brand.as_deref(), Some("Fixture CPU"));
-        assert_eq!(mgr.refresh_count(), 1);
-
-        // Second access should be cached
-        let cpu2 = mgr.cpu().expect("a cached cpu");
-        assert_eq!(cpu2.brand, cpu.brand);
-        assert_eq!(mgr.refresh_count(), 1); // Still 1 — used cache
-    }
-
-    #[test]
-    fn test_refresh_manager_refresh_all_clears_cache() {
-        let mut mgr = RefreshManager::new(Box::new(StubProvider::new()));
-        let _ = mgr.cpu();
-        assert_eq!(mgr.refresh_count(), 1);
-
-        mgr.refresh_all();
-        let _ = mgr.cpu();
-        assert_eq!(mgr.refresh_count(), 2); // Had to re-query
-    }
-
-    #[test]
-    fn test_refresh_manager_memory() {
-        let mut mgr = RefreshManager::new(Box::new(StubProvider::new()));
-        let mem = mgr.memory();
-        assert_eq!(mem.total_mb, 32768);
-    }
-
-    #[test]
-    fn test_refresh_manager_storage() {
-        let mut mgr = RefreshManager::new(Box::new(StubProvider::new()));
-        let disks = mgr.storage();
-        assert!(!disks.is_empty());
-    }
-
-    #[test]
-    fn test_refresh_manager_network() {
-        let mut mgr = RefreshManager::new(Box::new(StubProvider::new()));
-        let nets = mgr.network();
-        assert!(!nets.is_empty());
-    }
-
-    #[test]
-    fn test_refresh_manager_all_categories() {
-        let mut mgr = RefreshManager::new(Box::new(StubProvider::new()));
-        let _ = mgr.cpu();
-        let _ = mgr.memory();
-        let _ = mgr.storage();
-        let _ = mgr.network();
-        let _ = mgr.display();
-        let _ = mgr.pci();
-        let _ = mgr.usb();
-        let _ = mgr.sound();
-        let _ = mgr.irqs();
-        let _ = mgr.io_ports();
-        let _ = mgr.memory_map();
-        let _ = mgr.dma();
-        let _ = mgr.services();
-        let _ = mgr.processes();
-        let _ = mgr.drivers();
-        let _ = mgr.env_vars();
-        let _ = mgr.startup();
-        assert_eq!(mgr.refresh_count(), 17); // One per category
-    }
-
-    #[test]
-    fn test_refresh_manager_provider_name() {
-        let mgr = RefreshManager::new(Box::new(StubProvider::new()));
-        assert!(mgr.provider_name().contains("Stub"));
-    }
-
     // -- Syscall provider (limited testing since sysfs doesn't exist on dev host) --
 
     #[test]
     fn test_syscall_provider_returns_error_for_missing_file() {
         let provider = SyscallProvider::new();
         let result = provider.query_cpu();
-        // Should fail since /sys/hardware/cpu doesn't exist on dev machine
+        // A development host has no SlateOS `/sys/devices/system/cpu` tree.
         assert!(result.is_err());
     }
 
@@ -2711,6 +2026,166 @@ mod tests {
         let provider = SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
         assert!(matches!(
             provider.query_network(),
+            Err(HwQueryError::NotAvailable { .. })
+        ));
+    }
+
+    /// The release is the third word of `/proc/version`, as SlateOS's kernel
+    /// writes it (`kernel/src/fs/procfs.rs`, `gen_version`).
+    #[test]
+    fn the_kernel_release_is_read_from_proc_version() {
+        let dir = scratchdir::ScratchDir::new("hwquery_version");
+        std::fs::create_dir_all(dir.dir().join("proc")).expect("fixture");
+        std::fs::write(
+            dir.dir().join("proc/version"),
+            "Linux version 6.6.0-slateos (slateos@slateos) (rustc) #1 SMP\n",
+        )
+        .expect("fixture");
+        let provider = SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+        assert_eq!(
+            provider.query_kernel_release().as_deref(),
+            Ok("6.6.0-slateos")
+        );
+        std::fs::write(dir.dir().join("proc/version"), "Linux\n").expect("fixture");
+        assert!(matches!(
+            provider.query_kernel_release(),
+            Err(HwQueryError::ParseError { .. })
+        ));
+    }
+
+    /// The processor is read from `/sys/devices/system/cpu` as the kernel
+    /// writes it (`kernel/src/fs/sysfs.rs`): the CPUID identity, the present
+    /// range, the cores counted from the topology rather than divided out, and
+    /// each cache from `cpu0/cache/indexN/` -- with a cache the processor does
+    /// not have left `None`, where it was a 0 that read as a measurement.
+    #[test]
+    fn the_processor_is_read_from_sys_devices() {
+        let dir = scratchdir::ScratchDir::new("hwquery_cpu");
+        let cpu = dir.dir().join("sys/devices/system/cpu");
+        let put = |rel: &str, text: &str| {
+            let path = cpu.join(rel);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("fixture");
+            std::fs::write(path, text).expect("fixture");
+        };
+        put("cpuid/family", "6\n");
+        put("cpuid/model", "158\n");
+        put("cpuid/stepping", "10\n");
+        put("present", "0-3\n");
+        // Two cores of two threads: four logical processors, two physical.
+        for (n, core) in [(0, 0), (1, 0), (2, 1), (3, 1)] {
+            put(&format!("cpu{n}/topology/physical_package_id"), "0\n");
+            put(&format!("cpu{n}/topology/core_id"), &format!("{core}\n"));
+        }
+        // Listed out of level order, the way nothing promises they are not.
+        for (index, level, kind, size) in [
+            (0, 2, "Unified", "256K"),
+            (1, 1, "Instruction", "32K"),
+            (2, 1, "Data", "48K"),
+        ] {
+            put(
+                &format!("cpu0/cache/index{index}/level"),
+                &format!("{level}\n"),
+            );
+            put(
+                &format!("cpu0/cache/index{index}/type"),
+                &format!("{kind}\n"),
+            );
+            put(
+                &format!("cpu0/cache/index{index}/size"),
+                &format!("{size}\n"),
+            );
+        }
+
+        let provider = SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+        let read = provider.query_cpu().expect("the fixture is readable");
+        assert_eq!((read.family, read.model, read.stepping), (6, 158, 10));
+        assert_eq!(read.logical_processors, 4);
+        assert_eq!(read.physical_cores, 2, "counted from the topology");
+        assert_eq!(read.l1_data_kb, Some(48));
+        assert_eq!(read.l1_inst_kb, Some(32));
+        assert_eq!(read.l2_kb, Some(256));
+        assert_eq!(read.l3_kb, None, "no L3 is not a 0 KiB one");
+        // Nothing serves these, and none is invented.
+        assert_eq!(read.brand, None);
+        assert_eq!(read.vendor, None);
+        assert_eq!(read.base_clock_mhz, None);
+        assert_eq!(read.max_turbo_mhz, None);
+    }
+
+    /// What nothing publishes comes back `None`, not 0: the memory's speed and
+    /// slots (SMBIOS, which nothing here reads) and the adapter's memory; and
+    /// with no output marked primary, no resolution or refresh rate is taken
+    /// from whichever row came first.
+    #[test]
+    fn what_nothing_publishes_is_none_not_zero() {
+        let dir = scratchdir::ScratchDir::new("hwquery_mem_display");
+        let memory = dir.dir().join("sys/devices/system/memory");
+        std::fs::create_dir_all(&memory).expect("fixture");
+        std::fs::write(memory.join("total_kb"), "4194304\n").expect("fixture");
+        std::fs::write(memory.join("available_kb"), "2097152\n").expect("fixture");
+        std::fs::create_dir_all(dir.dir().join("proc")).expect("fixture");
+        // `/proc/monitors` as the kernel writes it (`procfs.rs`,
+        // `gen_monitors`), with no row marked `[primary]`: the first row's
+        // mode is right there to be misread.
+        std::fs::write(
+            dir.dir().join("proc/monitors"),
+            "monitors: 1\n\
+             enabled: 1\n\
+             layout_mode: extended\n\
+             primary_id: 0\n\
+             ops: 3\n\
+             desktop: 1920x1080 at (0,0)\n\
+             1: HP-Z24 1920x1080@75Hz pos=(0,0) scale=100% HDMI\n",
+        )
+        .expect("fixture");
+        let provider = SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+
+        let mem = provider.query_memory().expect("the fixture is readable");
+        assert_eq!((mem.total_mb, mem.available_mb), (4096, 2048));
+        assert_eq!(mem.speed_mhz, None);
+        assert_eq!(mem.slots_used, None);
+        assert_eq!(mem.slots_total, None);
+        assert!(mem.mem_type.is_empty() && mem.slots.is_empty());
+
+        let display = provider.query_display().expect("the fixture is readable");
+        assert_eq!(display.outputs, vec![(String::from("HP-Z24"), true)]);
+        assert_eq!(
+            display.resolution, "",
+            "the first row taken for the primary"
+        );
+        assert_eq!(
+            display.refresh_rate_hz, None,
+            "the first row taken for the primary"
+        );
+        assert_eq!(display.vram_mb, None);
+    }
+
+    /// A file that is there but holds no number is a parse error naming it
+    /// and what it held -- not "not available", which is what a missing file
+    /// is, and which says nothing provides the file.
+    #[test]
+    fn a_file_that_holds_no_number_is_a_parse_error_not_a_missing_file() {
+        let dir = scratchdir::ScratchDir::new("hwquery_read_num");
+        let cpuid = dir.dir().join("sys/devices/system/cpu/cpuid");
+        std::fs::create_dir_all(&cpuid).expect("fixture");
+        std::fs::write(cpuid.join("family"), "six\n").expect("fixture");
+        std::fs::write(cpuid.join("model"), "158\n").expect("fixture");
+        std::fs::write(cpuid.join("stepping"), "10\n").expect("fixture");
+        let provider = SyscallProvider::at(dir.dir().to_str().expect("a scratch path in text"));
+        match provider.query_cpu() {
+            Err(HwQueryError::ParseError { detail }) => {
+                assert!(detail.contains("cpuid/family"), "names the file: {detail}");
+                assert!(detail.contains("\"six\""), "says what it held: {detail}");
+                assert!(
+                    detail.starts_with(dir.dir().to_str().expect("text")),
+                    "names the path opened: {detail}"
+                );
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+        std::fs::remove_file(cpuid.join("family")).expect("fixture");
+        assert!(matches!(
+            provider.query_cpu(),
             Err(HwQueryError::NotAvailable { .. })
         ));
     }

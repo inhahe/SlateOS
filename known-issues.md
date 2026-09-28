@@ -103887,6 +103887,21 @@ annotations anyway.
 
 ### C-CREDMANAGER-HAS-NO-VAULT-ON-DISK — 2026-08-26 — LANE C, OPEN
 
+**Status: FIXED 2026-09-27 (lane E, which owns `apps/` since the split).** The
+cipher this waited on is vendored -- RustCrypto's XChaCha20-Poly1305 and
+Argon2id under `rustcrypto/`, used through `rustcrypto/seal`
+(`design-decisions.md` §539, §1218) -- and the vault is one file,
+`<config>/credmanager/vault` (`apps/credmanager/src/vaultfile.rs`): a header
+naming the Argon2id parameters, the salt and the nonce, bound as associated
+data to the sealed contents. The three steps below happened, with one change
+of plan: there is no stored verifier at all. The key that opens the file *is*
+the check, so nothing checks a guess more cheaply than opening the vault does.
+A first run makes the vault from a master password typed twice (at least ten
+characters, strength shown); a file that is not a vault is shown as such and
+never written over; locking now forgets the key and every entry, where it used
+to change a flag; every change is saved as it is made, under a new nonce, and a
+save that fails is said in the window and holds a close once.
+
 **What happens.** credmanager now opens a real window, and that window opens an
 **empty vault, every launch**. There is no persistence layer at all: `main`
 calls `Vault::create("My Vault", "")` and hands it to `app::launch`. Anything
@@ -152743,6 +152758,12 @@ sweep from becoming mechanical. `apps/ebook` ships three books and **keeps
 them**: a title claims nothing about a disk, the prose reads, nobody is misled.
 `apps/spreadsheet` keeps its Item/Price/Qty/Total example for the same reason.
 
+*(Amended 2026-09-27, lane E: `apps/ebook` no longer ships them. Once it could
+open real books its library became the user's own list, and the books then
+failed the slot test below -- "The Clockwork Garden" beside a user's own
+books is a record in the slot where theirs go. They are test fixtures now,
+and a first run opens on an empty library that says how to fill it.)*
+
 Two tests separate the cases, and both came from being wrong first:
 
 * **The path test.** A filename is a claim that a file exists. `left.rs`,
@@ -156464,6 +156485,17 @@ screen-lock delay would reasonably put it next to the sleep timeout in
 defect this lane spent 2026-09-16 removing from eight other pages.
 
 ## BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS
+
+> **Status 2026-09-27: lane E's half FIXED; waiting on lanes D and B.** The
+> operator answered C-Q21 (design-decisions §1426): a service started at
+> boot runs the backups, and one missed while the machine was off runs as
+> soon as it is on again, without asking. The backup program now keeps
+> every schedule in `<config>/backup/schedules.json` (not in each
+> destination, where nothing could find them) with a time and a day, and
+> `backup run-due` runs whatever is due and records it -- so the service
+> only has to run that command, as each user, at boot and every few
+> minutes (`requests/e-db-the-backup-service-runs-backup-run-due.md`).
+> Until it exists, `backup schedule` says that nothing runs it on its own.
 
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `apps/backup/src/main.rs` — `cmd_schedule` (~2652), `schedules_path`
@@ -161811,7 +161843,7 @@ writer, and each is frozen at the value you would have chosen anyway:
 
 | App | Frozen at | Consequence |
 |---|---|---|
-| `markdowneditor` `autosave_enabled` | `true` | autosave is always on; it cannot be turned off, but nothing is lost by that |
+| `markdowneditor` `autosave_enabled` | `true` | autosave is always on; it cannot be turned off, but nothing is lost by that -- **it could be turned off after all, for the window only; since 2026-09-27 (lane E, C-Q26) the choice is kept in `markdowneditor.yaml`** |
 | `diskimager` `verify_after_write` | `true` | images are always verified; the window draws it as a checkbox that cannot be unchecked |
 | `imageviewer` `show_status_bar` | `true` | **fixed** -- `S` |
 | `spreadsheet` `show_toolbar` | `true` | **fixed** -- and it had to be `Ctrl+T`, because this handler's catch-all starts editing the cell on any printable character, so a bare `T` would have stopped being typeable into a spreadsheet. A fix that breaks typing is worse than the panel it frees |
@@ -162733,7 +162765,7 @@ and they want three different things:
 |---|---|
 | `apps/regextester` `i`/`g`/`m` | **a key.** The buttons are already drawn and already read; they needed a chord. Fixed. |
 | `apps/spreadsheet` `show_gridlines`, `show_formula_bar`, `show_status_bar` | **a key.** View toggles in an app that already has an `F1` list to advertise them on. |
-| `apps/lockscreen` `show_clock_seconds`, `show_date` | **a settings file, not a key.** `main` passes `LockScreenConfig::default()`, so a lock screen can never show seconds and always shows the date -- but a lock screen is a security surface where every keystroke belongs to the password field, and adding shortcuts to it would be the wrong repair. This one is blocked on where its configuration should live, which is a question for the operator rather than a line of code. |
+| `apps/lockscreen` `show_clock_seconds`, `show_date` | **Fixed 2026-09-27 (lane E, C-Q26): set on Settings' Screen Lock page, kept in `lockscreen.yaml`.** **a settings file, not a key.** `main` passes `LockScreenConfig::default()`, so a lock screen can never show seconds and always shows the date -- but a lock screen is a security surface where every keystroke belongs to the password field, and adding shortcuts to it would be the wrong repair. This one is blocked on where its configuration should live, which is a question for the operator rather than a line of code. |
 
 **Down to 51 in 23 apps** as of the spreadsheet and logviewer fixes, and
 `apps/passwordgen` dropped off the list entirely when its options were wired --
@@ -162810,6 +162842,18 @@ feature to design rather than a key to bind.
 Filed here so the next reader does not have to re-derive it, and not fixed,
 because guessing at a destructive default is exactly the kind of choice that
 should not be made by whoever happens to be passing.
+
+> **2026-09-27 (lane E, C-Q26):** the choice is offered without guessing
+> at a default -- the folder menu's *When the name is taken* (keep both,
+> skip, replace if newer, replace), kept in `explorer.yaml`, with keep
+> both still the default, so nothing changes for anybody who does not
+> choose. The prompt this entry asks for is the one piece left, and it is
+> bigger than a dialog: `ConflictPolicy::Ask` in the executor emits a
+> `Conflict` event and then **skips the file** ("In a real async
+> implementation the caller would respond. For now, skip."), and a move
+> skips without even the event -- so it cannot be offered until the
+> executor waits for an answer. `todo.txt` → *explorer: Ask when a pasted
+> name is taken*.
 
 **A second kind of noise, found by checking the two rows with the highest
 stakes.** `apps/installer`'s `wipe` and `auto_reboot` look frozen and are not:
@@ -164821,6 +164865,24 @@ to, because the test drives the app the way the crate's own callers do.
 both dialogs, so both doors reach it.
 
 ## `TD-C-A-PASSWORD-POLICY-NOBODY-CAN-STATE` (lane C, 2026-09-18)
+
+> **Status: FIXED 2026-09-27 (lane E), with C-Q26 answered (option A,
+> §1418).** The rules are drawn and changed on a Rules tab (`4`; Up/Down
+> choose, Left/Right change, Space flips) and kept in `passwordgen.yaml`
+> under `rules:` -- shortest and longest length, each kind of character,
+> how many kinds to mix, the least strength in bits, refuse the common
+> ones. A value there that cannot be used keeps its default and is said,
+> in the status bar and on the tab. The tab also says what the rules make
+> of the generated password and of the one in the analyser.
+>
+> **Four more things were wrong in the same program, found on the way:**
+> the analyser never drew what was typed into it (the meter measured a
+> password nobody could see); the digit keys switched tabs there, so
+> "abc123" jumped to the generator at the "1"; switching tabs kept
+> the old tab's strength on show beside the new tab's password, and the
+> status bar judged the generated password even on the analyser; and a
+> password's length was counted in bytes, so "pässwörd" was ten
+> characters long. All four fixed in the same change, each with a test.
 
 **In short:** `apps/passwordgen` checks every password it makes against a
 rule set -- must contain a digit, must contain a symbol, must not be a common
@@ -170131,7 +170193,7 @@ file has only its ASCII letters folded -- never a lossy decode. Seven tests and
 five mutations in `apps/filesearch/mutate.py`.
 
 ### [E] A test that forgets its scratch settings writes the developer's own -- 2026-09-25
-**Status:** OPEN -- the one leak found today is fixed; nothing stops the next
+**Status:** OPEN, but no longer unguarded -- the one leak found that day is fixed, and since then `scripts/check-scratch-config.py` (a pre-push gate) walks each crate's call graph from every settings `save()` and refuses a push whose tests can reach one without a scratch guard; it stopped one of lane E's own pushes on 2026-09-27. What is still open is the runtime guard below, which would catch what a static walk cannot see
 
 **In short:** a test that saves a setting without first taking a scratch
 configuration directory writes to the real `~/.config/slateos` of whoever runs
@@ -172613,7 +172675,7 @@ that mutate a file other than the crate root: `apps/editor` (now swept),
 result rests on the old reading; their sweeps are in lane E's queue.
 
 ### [E] "Open with" opened nothing in six of the file manager's eight programs -- 2026-09-26
-**Status:** FIXED for all six (lane E, 2026-09-26). OPEN only for a file whose name is not UTF-8, which still crashes whichever program it is sent to -- lane F's `Args` (`requests/e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`).
+**Status:** FIXED for all six (lane E, 2026-09-26), and since 2026-09-27 for a file whose name is not UTF-8 too: lane F's `oswindow::app::ArgsOs` (§1330) hands the programs their arguments as bytes, and all six -- with the editor, the image viewer, match3 and pinball -- read them through it (`b0471617a`; `requests/e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`, closed).
 
 **In short:** double-clicking a file in the file manager runs the program the
 associations name with the file's path after it. Six of the eight programs the
@@ -172707,8 +172769,13 @@ use `tararchive`; not filed as requests yet, since the kernel's is `no_std`
 and `tararchive` reads through `std::io`.
 
 ### [E] The credential manager said "Copied Password" over a clipboard no other program could read -- 2026-09-27
-**Status:** OPEN, waiting on lane A -- the false claim is FIXED (Copy refuses
-in words); copying itself needs `requests/e-a-a-clipboard-door-for-applications.md`.
+**Status:** OPEN, waiting on the operator -- the false claim is FIXED (Copy refuses
+in words); copying itself needs `requests/e-a-a-clipboard-door-for-applications.md`,
+which lane A holds (2026-09-27) until the operator answers `open-questions.md`
+C-Q29 -- which way copy and paste travels between programs -- where lane C is
+adding the kernel's own clipboard as option C. Whichever is chosen, the
+password manager's "clear it if it is still mine" (a token checked at clear
+time) carries over: `requests/a-ce-the-clipboard-transport-is-c-q29-and-the-kernel-clipboard-is-a-third-option.md`.
 
 **In short:** pressing Copy on a password showed "Copied Password -- clears in
 30s". The password went into a variable inside the credential manager, and
@@ -172795,6 +172862,172 @@ it for.
 such (the controllers appear as PCI functions). Nothing publishes either;
 `/sys/hardware/usb` and `/sys/hardware/sound` never existed.
 
+### [E] System Restore showed five invented restore points, and its schedule added more -- 2026-09-27
+**Status:** FIXED (lane E, 2026-09-27) for every program's settings and data. The system's own files are not covered, and say so: `open-questions.md` E-Q3.
+
+**In short:** System Restore opened on five restore points nobody had taken
+("Initial Setup", "After System Update v1.1" ...) under a banner saying they
+were not real. Its weekly schedule, switched on with a record of automatic
+points nobody had taken, added another invented one within a minute of
+opening. Compare made up files, packages and settings in proportion to the
+days between two points. Create refused -- and then added the point to the
+list anyway. It now keeps real restore points of the folder every program
+keeps its settings and data in, restores them for real, and compares what
+they hold.
+
+**What was wrong, one by one:** the tree was built in `new`; sizes were fixed
+estimates per component ("~2 GB" of system files); `check_schedule` added a
+point to the list and nothing to any disk; `compare_snapshots` generated
+`/system/lib/module_N.so` and "core-libs 1.2.0 -> 1.3.0"; `begin_create`
+showed "Cannot create" and then called `create_snapshot`; the create form's
+component boxes could not be changed and its "branch from the selection"
+described files that cannot be taken as they were in another point; the
+Schedule view had no control at all.
+
+**Now:** `apps/systemrestore/src/points.rs` -- where things are
+(`Locations`), which components can be kept (`SnapshotComponent::source`),
+the saved list (`to_text`/`parse`/`load`/`save`, refused whole when damaged
+and never written over), and the work on its own thread (`Worker`: take,
+restore after keeping the folder first, delete then free the space), all on
+`apps/snapstore`. The window: an overlay of real progress that cannot be
+abandoned half-way, a close that waits for the work, a restore dialog that
+says what will happen and to close other programs first, the current point
+marked, a Schedule view whose controls work and which says it runs only while
+the window is open, a retention policy that removes only scheduled points,
+and a Compare view of the files two points hold. §1217 says why.
+
+**Not done:** folders the user chooses (the design allows it; it needs a
+folder picker), and the system half (E-Q3).
+
+### [E] The backup tool's store lost data eleven ways, and System Restore needed it -- 2026-09-27
+**Status:** FIXED (lane E, 2026-09-27) -- the engine moved out of `apps/backup` into `apps/snapstore`, which the backup tool and (next) System Restore both use.
+
+**In short:** the backup tool's store -- the copies it keeps and the lists of
+what each backup holds -- could lose or misstate data in eleven ways, found
+when System Restore needed a real store to keep restore points in. A backup
+could be silently incomplete and still say "Backup complete"; two backups
+taken in one second overwrote each other's list; restoring a backup could
+bring back files deleted before it was taken; and a private file restored
+after being deleted came back readable by everyone. All eleven are fixed,
+each with a test that fails without its fix.
+
+| What went wrong | What a user saw |
+|---|---|
+| A file, folder or link it could not read was a warning on stderr and was left out | "Backup complete", exit 0, and the file was not in the backup |
+| Backup ids were `<seconds>-<kind>`, never checked | two backups in one second shared a directory; the second's list replaced the first's |
+| A file was hashed, then copied into the store under that hash | a file changed between the two was stored under another content's name, and handed back to every later backup that deduplicated against it |
+| An incremental listed only what changed, and restore rebuilt the rest by walking back to a full one, adding and never removing | restoring an incremental brought back every file deleted since the full backup; `diff` against one listed every unchanged file as deleted |
+| An incremental's parent was the newest backup of *any* source | a store of two folders compared each with the other |
+| A record (`meta.json`) that would not parse was skipped when listing | `prune` then treated every blob only that backup named as an orphan and deleted it |
+| `prune` collected orphans with no regard to what was being written | a backup running beside a prune could have its new blobs deleted before its list named them |
+| Modes were not recorded | a private file deleted and restored came back with the default mode |
+| "Keep monthly" counted thirty-day blocks | the first and last of one January were two "months", December and January one |
+| `schedules.json` that would not parse read as "no schedules" | adding one schedule wiped every other |
+| Arguments were read with `env::args()` | `backup create --source` on a folder whose name is not UTF-8 panicked before reading anything |
+
+And one in the store's JSON reader: a number read as a count was `n as u64`,
+so -5 read as 0 and a mode of 420.7 as 420, and the check that refuses a
+corrupt mode never refused anything.
+
+**Where.** `apps/snapstore/src/`: `lib.rs` (`Store::capture`, `restore`,
+`files`, `list`, `collect_garbage`, `claim_dir`, `valid_id`,
+`ensure_real_parents`), `store.rs` (`ContentStore::ingest` -- hash the source,
+skip the copy if the store has it, otherwise hash the *staged copy* and name
+the blob by that), `scan.rs` (`walk`, which returns what it could not read),
+`manifest.rs` (version 3: complete listings, modes, folders, unread paths,
+the capture's exclusions), `retention.rs` (calendar months; a complete
+snapshot does not hold its chain), `json.rs` (`as_u64`). The command line is
+`apps/backup/src/main.rs`, now its arguments and its messages. Every existing
+store reads: versions 1 and 2 of both files are still read, and an old
+incremental is still rebuilt from its chain.
+
+**New with it: a restore that makes a folder match a snapshot**
+(`RestoreOptions::mirror`) -- it removes what the snapshot does not have,
+never what the capture could not read or excluded, and never writes through
+a link. System Restore is its first user; the command line does not offer it.
+
+**Tests:** `apps/snapstore` 70 unit, 19 store and 1 routing test (the store's
+writes all go through `safeio`), run on Windows and on Linux under WSL (the
+link and mode tests are Unix-only); `apps/backup` 21. Mutation:
+`apps/snapstore/mutate.py`, 20 rows. The harness learnt to read failures from
+a crate's `tests/` binaries, which it scored as crashes
+(`scripts/mutation_harness.py`, `failed_tests`; `scripts/test-mutation_harness.py`).
+
+### [E] The credential manager's Export CSV and Backup buttons did nothing, and its "backup" left every password out -- 2026-09-27
+**Status:** FIXED (lane E, 2026-09-27), as the operator answered C-Q25 (§1417).
+
+**In short:** Settings drew "Export CSV" and "Backup" buttons that recorded no
+target, so pressing them did nothing. Behind them sat two writers nothing
+called: a CSV export that quoted a field only when it thought it had to, and a
+"backup" that wrote the names of the logins and none of the passwords -- a
+file that would have restored a vault of empty entries to someone who believed
+it held everything. There was also no vault on disk to back up.
+
+**Now,** with the vault kept on disk (the entry above):
+
+| Control | What it does |
+|---|---|
+| **Back up...** | writes the vault sealed, under a new nonce: it opens with the master password the vault has now, restores everything, and is as closed as the vault to anyone else |
+| **Restore from a backup...** | opens a backup with the master password it was made with -- a wrong one opens nothing -- then asks before replacing this vault's entries; what is restored is sealed under this vault's own master password |
+| **Export as plain text...** | says first what the file will be ("readable by anyone -- and any program -- that can open it"), then writes CSV with **every** field quoted and every `"` doubled, CRLF between records -- a password holding a comma, a quote, a line break, a tab or a leading `=` comes back out exactly (B-Q12) |
+
+All three write owner-only files; the file dialog and the dialogs are modal.
+`serialize_backup` is deleted.
+
+**Not done:** the operator's third part of C-Q25 -- a program reading a
+password through a capability after a prompt -- lives in `gui/credentials`,
+the system keyring (lane C). *(Amended the same day: the credential manager
+could not **edit** or **delete** an entry either -- `update_entry` and
+`remove_entry` had no caller -- which mattered more once entries were kept.
+Both are wired: Edit (Ctrl+E) opens the form filled in and keeps what it does
+not show; Delete asks first.)*
+
+### [E] The ebook reader could open no book but five invented ones -- 2026-09-27
+**Status:** FIXED (lane E, 2026-09-27).
+
+**In short:** the ebook reader opened on "The Clockwork Garden" by "Eleanor
+Voss" and four more books that do not exist, said "cannot open your own files
+yet", and had no way to open one. Where you were in a book and your bookmarks
+were forgotten when the window closed. It now opens plain-text books from
+disk and keeps them: the library, and each book's place, bookmarks and type
+size, are the same the next time.
+
+**What it does now.** Ctrl+O, or *Open a book* in the library's toolbar, puts
+up the Open dialog (which takes the keyboard while it is up, so a key meant
+for a file name cannot turn a page). A book is read by what its bytes are:
+UTF-8 (a byte-order mark dropped), UTF-16 with a byte-order mark, and anything
+else as Windows-1252 -- the encoding of most older plain-text books -- with
+the row saying "Read as Windows-1252", never a lossy decode. Its title and
+author are the ones a Gutenberg-style header gives, or the file's name and no
+author rather than an invented one. A file past 64 MiB is read that far and
+says so; a character the cap cuts in two is dropped rather than taken as
+proof the file is not UTF-8. The library is kept in
+`<config>/ebook/library.txt` (one line a book, paths spelled with `pathcodec`
+so any name survives), saved on adding or removing a book, on returning to
+the library, and on close.
+
+**The ways it refuses to lose things:**
+- A library file that does not read is left as it is and never written over:
+  the window says so, and nothing opened is kept until it is dealt with.
+- A close that cannot save says why and stays open once; the next close goes.
+- A book whose file has gone stays in the library with its place, marked
+  "Cannot be read" with the reason; it opens where it was if the file comes
+  back. A place inside a file that has changed moves back to the nearest real
+  one (never inside a character, never past the end).
+- Delete asks before taking a book out of the library, and never touches the
+  file.
+
+**Where.** `apps/ebook/src/shelf.rs` (the file, and `read_book`);
+`apps/ebook/src/main.rs`: `EbookApp::with_shelf`, `open_path`,
+`open_selected`, `remove_book`, `keep` (`Kept`), `fit_state`, and the
+picker's routing in `on_event`. Tests: 30 new, on Windows and on Linux under
+WSL; mutation: `apps/ebook/mutate.py`, 23 rows.
+
+**Not done:** EPUB, the format most books are sold and lent in (a zip of
+XHTML chapters) -- the obvious next format. (The reading theme, System or
+Sepia, was per session too; since 2026-09-27 it is kept in `ebook.yaml`, the
+per-program settings file `design-decisions.md` §1418 (C-Q26) settles.)
+
 ### [F] Text is never hinted: the `hinting` font setting changes nothing -- 2026-09-26
 
 **Status: FIXED 2026-09-26** (lane F) — the setting now switches on a port of
@@ -172861,7 +173094,52 @@ does not move the glyph by its phantom point's delta at all -- where this
 subtracted it. Found by `hint_oracle.py --var` (new): 69% agreement for Noto
 Sans at weight 700, width 87.5.
 
-### [F] A variable font without `HVAR` keeps its default advances at every weight -- 2026-09-26
+### [F] The tree's DEFLATE encoder wrote Huffman codes zlib refuses -- 2026-09-27 -- **FIXED 2026-09-27**
+
+**Status:** FIXED 2026-09-27 by lane F in `deflate/src/lib.rs`
+(`build_code_lengths`, new `limit_lengths`) -- a crate no lane owns (A-Q11),
+fixed there because every user shared the bug; lanes A, B and E notified.
+
+**In short (as found):** data compressed by this tree's `deflate` crate --
+gzip and zip files, initramfs images, the kernel's compressed files, PNGs
+written by `apps/pngwrite` -- could be unreadable by every other system.
+zlib, and so Python, Pillow, browsers and most tools, stopped with "invalid
+code lengths set"; this tree's own decompressor read them, so nothing here
+noticed. Found writing `imagecodec::encode_png`: Pillow refused a 30x40 RGBA
+picture this tree's decoder read back perfectly.
+
+**Cause.** A DEFLATE block with its own Huffman codes stores their lengths,
+limited to 15 bits (7 for the code that codes the lengths themselves). Where
+the tree's lengths ran past the limit, the encoder shortened the longest code
+and lengthened the shortest -- which does not keep the code *complete* (its
+lengths' Kraft sum exactly 1). zlib refuses any incomplete code-length code,
+and even one lone code of length 1 there (`inftrees.c`). The 19-symbol
+code-length alphabet with its 7-bit limit met this often.
+
+**Fix.** Lengths cut to the limit are rebalanced by counting codes per length
+-- lengthening the longest short codes until the code is not over-subscribed,
+then shortening the longest codes that fit the room left -- and handed out by
+frequency, as zlib's `gen_bitlen` does; a lone symbol is paired with another
+at length 1. Tests check every code the encoder builds, and every dynamic
+block's three codes in its output, as `inftrees.c` would, and fail on the old
+code; the callers' suites (ziparchive, zip, logrotate, mkinitramfs,
+archivemanager, pdfviewer, explorer, pngwrite: 1,012 tests) pass unchanged.
+
+**Left as it was, on purpose:** the decompressor still accepts an incomplete
+code, as it did. zlib would refuse one, but files this encoder wrote before
+the fix -- on disk now, some of them the kernel's own compressed files --
+must stay readable here. Such a file may still be unreadable elsewhere until
+it is written again.
+
+### [F] A variable font without `HVAR` keeps its default advances at every weight -- 2026-09-26 -- **FIXED 2026-09-27**
+
+**Status:** FIXED 2026-09-27 (lane F) -- `Face::advance_at` takes such a
+face's advance from its phantom points (`glyf::advance`), as HarfBuzz 14.3.0
+does. The fixture's Bold master now varies its widths (600 to 630), so the
+test can fail: `glyf::tests::a_face_without_hvar_advances_between_its_phantom_points`
+pins HarfBuzz's advances at weights 610 and 401, and its `HVAR` twin those of
+the face with the table. FreeType's hinted points for both variable faces were
+regenerated from the new masters and the hinter still matches them.
 
 **In short:** a variable font may leave out its table of advance-width
 changes (`HVAR`) and let each glyph's outline data carry them instead, as
@@ -172949,9 +173227,31 @@ bugs, worth reporting upstream; the point counting may be one too (FreeType
 counts from the start of the composite being built, which differs only for a
 nested one).
 
-### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26
+### [F] A colour glyph's box is its base glyph's, not the one HarfBuzz reports -- 2026-09-26 -- **FIXED 2026-09-27**
 
-**In short:** asked for the ink box of a colour emoji glyph, this crate
+**Status:** FIXED 2026-09-27 (lane F). `Face::glyph_extents_at` asks `COLR`
+first, as HarfBuzz does (`colr::extents::glyph_extents`). A glyph the `ClipList` covers
+reports its clip box, varied and rounded as `ClipBoxFormat2` does; any other
+colour glyph has its paint measured as `hb_paint_extents` measures it
+(`gui/font/src/colr/extents.rs`) -- a version-1 graph once HarfBuzz's bounded
+pre-pass finds it bounded, a version-0 glyph's layers -- in HarfBuzz's
+`float` arithmetic, with its nesting and edge limits and its cycle detectors.
+
+Checked against HarfBuzz 14.3.0 two ways. A fixture font built for it
+(`gui/font/tools/gen_colr_fixture.py`) has 56 colour glyphs: every paint that
+moves or combines, fixed and variable, at two instances; clip boxes reached
+through `PaintColrGlyph`; cycles; the nesting limit on both sides; a fan-out
+cut by the edge limit, where one edge more or less moves the box; null
+paints; and an unknown composite mode. And `tools/outline_oracle.py` ran over
+six colour fonts from Google Fonts and Mozilla. Four are variable COLRv1
+fonts with no clip list at all (Nabla, Honk, Foldit, Kalnia Glaze); the
+others are Bungee Spice and Twemoji Mozilla's COLRv0. Every one of 115,666
+glyph-instances agrees, where 6,658 had disagreed: Honk 2,960, Twemoji
+3,689, Nabla 4 and Bungee Spice 5. `seguiemj.ttf` still agrees on all 12,977.
+Tables HarfBuzz's sanitizer would edit are the one difference left, and only
+hostile fonts have them: see the next entry.
+
+**In short (as found):** asked for the ink box of a colour emoji glyph, this crate
 answers with the box of the plain glyph underneath it, while HarfBuzz answers
 with the colour glyph's own. Only the fallback placement of a combining mark
 on a colour glyph reads that box, so a mark on an emoji may sit a little off
@@ -172966,9 +173266,98 @@ at the instance, if it has one; otherwise the extents of its paint
 **Found by:** `tools/outline_oracle.py` over `seguiemj.ttf`, whose boxes
 disagree for 697 of 12,977 glyphs sampled while every path agrees.
 
-**The fix:** measure a `COLR` version-1 glyph as HarfBuzz does, in
-`glyph_extents_at` before the outline box -- `crate::colr` already reads the
-clip boxes and walks the paint graph -- and check it with the same oracle.
+**What was left, and was done:** the paint extents -- a walk of the paint
+graph as `hb_paint_extents` walks it (a clip glyph's box is the bounds of its
+drawn path, transformed; a paint unions the current clip into the group's
+bounds; `to_glyph_extents` rounds the corners) -- checked with a fixture font
+whose colour glyphs have no clip boxes, since no host font had one.
+
+### [F] A colour bitmap glyph's box was empty, or its outline's, not its picture's -- 2026-09-27 -- **FIXED 2026-09-27**
+
+**Status:** FIXED 2026-09-27 (lane F). `Face::glyph_extents_at` asks `sbix`,
+then `CBDT`, before `COLR` and the outlines, as HarfBuzz does
+(`bitmap::glyph_extents`, `gui/font/src/bitmap.rs`). It reads the tables
+HarfBuzz's way:
+
+- one strike per table, the biggest, the first of those tied, whatever its
+  bit depth;
+- up to eight `sbix` dupes, and a PNG header read unchecked (0 by 0 when the
+  data is too short for one);
+- `CBDT` image formats 17 and 18 through index formats 1 and 3 only, from the
+  first record that covers the glyph;
+- HarfBuzz's own `roundf`;
+- HarfBuzz's `upem`;
+- the `int16_t` in `scale_glyph_extents`
+  (`hbcalc::scale_glyph_extents_at_upem`), which the `COLR` clip-box path now
+  goes through too.
+
+A face of pictures alone now has no box for a glyph neither table answers
+for, as HarfBuzz has none.
+
+Checked against HarfBuzz 14.3.0 in two ways. `tools/gen_bitmap_fixture.py`
+builds 29 glyphs in two byte-built faces, one per case of that reading; five
+mutations of the rules are each caught. `tools/outline_oracle.py` ran over
+Noto Color Emoji's `CBDT` build and HarfBuzz's own `sbix` and `CBDT` test
+fonts (`test/api/fonts`, `test/fuzzing/fonts`): all 4,046 of Noto's glyphs
+and every glyph of the others agree.
+
+**In short (as found):** a font whose emoji are pictures rather than
+outlines is Noto Color Emoji's bitmap build, the usual emoji font on Linux,
+or Apple's `sbix` fonts. It gave every glyph an empty box, or the box of the
+plain glyph underneath, where HarfBuzz gives the box of the picture. The
+fallback placement of a combining mark reads that box, so a mark on such an
+emoji sat where HarfBuzz would not put it. In a face of pictures alone, a
+glyph with no picture got an empty box where HarfBuzz has none. That placed
+marks HarfBuzz leaves alone, or zeroes.
+
+**Where:** `Face::glyph_extents_at` (`gui/font/src/sfnt.rs`) asked `COLR`
+and then the outlines; `hb_ot_get_glyph_extents` asks `sbix` and `CBDT`
+first.
+
+### [F] A `COLR` table HarfBuzz's sanitizer would repair is measured as written -- 2026-09-27 -- **OPEN**
+
+**In short:** HarfBuzz checks a colour font's `COLR` table before it uses it,
+and quietly repairs what fails the check. It cuts a paint graph off where it
+nests more than 64 levels deep. It drops the whole table if the repairs would
+take more than 32 edits, or if the check runs out of its work budget. This
+crate reads the table as written. So for a font whose paint graph is deeper
+than 64 levels, or shared so heavily that checking it is expensive, a colour
+glyph's box can differ from HarfBuzz's. Other glyphs' boxes can differ too,
+because a repair made in a shared part of the table empties every glyph that
+uses that part. No real font is affected; only a hostile or fuzzed one is.
+
+**Where:** `gui/font/src/colr/extents.rs`, which measures boxes for
+`Face::glyph_extents_at`. The renderer (`colr.rs`) reads the table the same
+way, but it is not a HarfBuzz-parity renderer and has its own limits. The walk
+already handles the sanitizer's simplest repairs: a null offset, an offset
+past the end of the table and a record cut short all read as the null paint,
+as a nulled offset does.
+
+The colour bitmap tables read the same way (`bitmap::glyph_extents`). The
+sanitizer's structural checks decide there as they do in HarfBuzz: the
+versions, arrays that must fit, a `CBLC` record's first glyph not after its
+last, and a strike or subtable HarfBuzz would null. Its 32-edit cap and its
+work budget are not emulated there either. A `CBLC` with more than 32 broken
+subtables is refused whole by HarfBuzz and read record by record here.
+
+**How to reproduce:** add a glyph `nested(63, glyph("square"))` to
+`tools/gen_colr_fixture.py`. That chain is 65 levels deep, and fontTools
+shares its `PaintGlyph(square)` record with other glyphs. HarfBuzz nulls that
+record's paint offset, so `c_fill` and every other glyph using it report
+`[0, 0, 0, 0]`. This crate reports their real boxes. Found while building the
+fixture, which now reaches the walk's own nesting limit through
+`PaintColrGlyph` hops instead; the sanitizer does not follow those.
+
+**The fix:** once per face, emulate `hb_sanitize_context_t` over `COLR`.
+Visit the table in HarfBuzz's order: the base glyph list's records in order,
+then the layer list. Count a nesting level for each `Paint::sanitize`, and
+check each format's struct size, colour lines and affines as HarfBuzz does.
+Record every offset it would null. Run two rounds, as `sanitize_blob` does,
+and reject the table past 32 edits or once the operation budget is spent.
+The budget is 64 bytes of checking per table byte, and never less than
+16,384. Then have `Tables` read the recorded offsets as null. The budget
+must be charged byte for byte, as HarfBuzz charges each `check_range`, or the
+table is rejected at a different point.
 
 ### [F] A variable font whose outlines are CFF (`CFF2`) would not open -- 2026-09-26 -- **FIXED 2026-09-26**
 
@@ -173763,3 +174152,39 @@ where Linux sets none.
 loopback traffic.  Of `eth0`'s, the kernel keeps six -- bytes, packets and
 errors sent, bytes, packets and drops received (`SYS_NET_STAT`) -- and the
 other eighteen are zero.
+
+### [E] Deleting or moving a folder reached through the links inside it, and a paste could replace a file with itself -- 2026-09-27
+
+**Status: FIXED 2026-09-27** (lane E, before either reached `main`'s users
+in a published build -- the first is old, the second came with the folder
+menu's "Replace it" the same day).
+
+**What happened.** `apps/explorer/src/fileops.rs` planned every bulk
+operation with `fs::metadata`, which follows links:
+- a **permanent delete** of a folder holding a link to another folder deleted
+  the other folder's files, through the link;
+- a **move** of it copied those files and then deleted them at the source;
+- a link to a folder **above** it made the scan recurse until the stack ran
+  out;
+- the recycle bin's cross-drive fallback (`apps/recyclebin`) copied a linked
+  folder's contents into the bin.
+
+Separately, with "Replace it" chosen, a **cut pasted back into its own
+folder** copied the file onto itself and then deleted the source -- the only
+copy; a link made in its own folder deleted the file to put a link to it in
+its place; and "replace" with a link dropped on a folder's name removed the
+folder whole.
+
+**The fix.** Links are planned with `symlink_metadata` and carried as links
+(`PlannedAction::is_link`, design-decisions §1220); a source whose destination
+is itself is duplicated (copy, link) or left alone (move); a folder cannot be
+copied or moved inside itself; a file or link never replaces a folder.
+**Where:** `plan_transfer`, `scan_source`, `scan_delete`, `copy_link`,
+`remove_link`, `remove_link_or_file`, `same_entry`; `recyclebin::move_path`.
+**Tests:** junctions on the Windows host (which cannot make symbolic links
+without a privilege), symbolic links elsewhere; each test fails against the
+old code.
+
+**Still true:** on a Windows host without the symbolic-link privilege a link
+cannot be *copied* -- the one action fails and says why, and a move leaves
+that link where it was. The target OS makes links like any unix.

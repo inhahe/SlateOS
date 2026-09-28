@@ -2830,7 +2830,7 @@ fn main() -> ExitCode {
     // viewer's own argument list; `launch_with` is the entry point for an
     // application that has taken its own arguments, `launch` the one for an
     // application with none.
-    let args = match oswindow::app::Args::from_env() {
+    let args = match oswindow::app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("imageviewer: {e}");
@@ -3604,15 +3604,21 @@ the picture at once, which reads as D advancing the slideshow"
         state
             .pending_images
             .iter()
-            .map(|c| match c {
-                oswindow::app::ImageChange::Upload {
+            .map(|c| {
+                if let oswindow::app::ImageChange::Upload {
                     id,
                     width,
                     height,
                     bytes,
                     ..
-                } => ("up", *id, *width, *height, bytes.len()),
-                oswindow::app::ImageChange::Drop(id) => ("down", *id, 0, 0, 0),
+                } = c
+                {
+                    ("up", *id, *width, *height, bytes.len())
+                } else if let oswindow::app::ImageChange::Drop(id) = c {
+                    ("down", *id, 0, 0, 0)
+                } else {
+                    ("other", 0, 0, 0, 0)
+                }
             })
             .collect()
     }
@@ -4814,12 +4820,11 @@ the picture at once, which reads as D advancing the slideshow"
 
     /// The colour of the frame last put up, as `0xAARRGGBB`.
     fn frame_colour(state: &ViewerState) -> Option<u32> {
-        match state.pending_images.last()? {
-            oswindow::app::ImageChange::Upload { bytes, .. } => {
-                let b = bytes.as_slice();
-                Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            }
-            oswindow::app::ImageChange::Drop(_) => None,
+        if let oswindow::app::ImageChange::Upload { bytes, .. } = state.pending_images.last()? {
+            let b = bytes.as_slice();
+            Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        } else {
+            None
         }
     }
 

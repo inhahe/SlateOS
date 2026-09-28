@@ -51,6 +51,7 @@
 //! Because the two orders differ, one byte offset can have two legitimate
 //! caret positions — see [`Affinity`].
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::bidi::Level;
@@ -1007,6 +1008,264 @@ impl ShapedRun {
             i = to;
         }
         x
+    }
+}
+
+/// Break `text` into lines no wider than `max_width`, at spaces, leaving a
+/// word wider than a line whole on a line of its own: the rule
+/// `ScaledFont::wrap` and `SystemFont::wrap` share, `shape` being the font's
+/// own shaping.
+///
+/// # The rule
+///
+/// Greedy, a paragraph (the text between newlines) at a time: each line takes
+/// the next word while the line *shaped on its own* -- as it will be drawn --
+/// still fits, and a line never begins with the space it broke at. The words
+/// are what `split(' ')` makes of the paragraph, so two spaces in a row keep
+/// both, and a line's text is always a slice of the paragraph. This is the
+/// answer `wrap_by_words` computes by shaping every candidate line, and the
+/// answer is exactly the same.
+///
+/// # Shaping a paragraph once
+///
+/// Asking "does the line fit with one more word" by shaping the whole line
+/// each time made wrapping cost the paragraph's length times a line's length:
+/// every character was shaped again for each word after it on its line. Here
+/// the paragraph is shaped once, and each word boundary's pen position is read
+/// off that run -- less the kerning a line's last glyph carries against the
+/// space after it, which a line shaped alone does not have. Those positions
+/// *propose* where each line ends; two shapings of lines alone then *confirm*
+/// it: the proposed line fits, and the line with one more word does not.
+/// Where the paragraph run and a line alone disagree -- shaping across a space
+/// the run saw and the line does not -- the proposal fails that check, and the
+/// line is found as `wrap_by_words` finds it, word by word.
+///
+/// That the check suffices rests on one property of a line shaped alone: it
+/// is no narrower with a word more, so a line that fits fits with any of its
+/// words dropped from the end. A space and a word add more than any kerning
+/// or contextual shaping at the old end can take away. `wrap_by_words` is kept
+/// for tests, which compare the two on real fonts.
+pub(crate) fn wrap(text: &str, max_width: f32, shape: &dyn Fn(&str) -> ShapedRun) -> Vec<String> {
+    wrap_lines(text, max_width, shape)
+        .into_iter()
+        .map(|line| line.text)
+        .collect()
+}
+
+/// One line [`wrap_lines`] made.
+pub(crate) struct WrappedLine {
+    pub(crate) text: String,
+    /// Known to fit: a line of more than one word, whose fit was measured
+    /// while it was made. A line of one word -- which may be wider than any
+    /// line -- or of none was not measured, and a caller that must know
+    /// measures it.
+    pub(crate) fits: bool,
+}
+
+/// [`wrap`], saying which lines are known to fit: what `wrap_hard` needs, so
+/// that it measures again only the lines that may not.
+pub(crate) fn wrap_lines(
+    text: &str,
+    max_width: f32,
+    shape: &dyn Fn(&str) -> ShapedRun,
+) -> Vec<WrappedLine> {
+    let mut lines = Vec::new();
+    for para in text.split('\n') {
+        Paragraph::new(para, max_width, shape).wrap_into(&mut lines);
+    }
+    lines
+}
+
+/// The rule [`wrap`] follows, as it was first written: every candidate line
+/// shaped and measured whole. The oracle `wrap`'s tests compare against.
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn wrap_by_words(
+    text: &str,
+    max_width: f32,
+    measure: &dyn Fn(&str) -> f32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    for para in text.split('\n') {
+        let mut line = String::new();
+        for word in para.split(' ') {
+            if line.is_empty() {
+                line.push_str(word);
+                continue;
+            }
+            let mut candidate = line.clone();
+            candidate.push(' ');
+            candidate.push_str(word);
+            if measure(&candidate) <= max_width {
+                line = candidate;
+            } else {
+                lines.push(core::mem::take(&mut line));
+                line.push_str(word);
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// One paragraph being wrapped by [`wrap`].
+struct Paragraph<'a> {
+    text: &'a str,
+    /// Each word's byte range, as `split(' ')` yields them: an empty range for
+    /// the nothing between two spaces.
+    words: Vec<(usize, usize)>,
+    max_width: f32,
+    shape: &'a dyn Fn(&str) -> ShapedRun,
+    /// From the paragraph shaped whole, for each word: the pen position at
+    /// its start, and at its end less its last glyph's kern against what
+    /// follows. Made when first asked for: a paragraph of one word is never
+    /// shaped at all.
+    positions: Option<Vec<(f32, f32)>>,
+}
+
+impl<'a> Paragraph<'a> {
+    fn new(text: &'a str, max_width: f32, shape: &'a dyn Fn(&str) -> ShapedRun) -> Self {
+        let mut words = Vec::new();
+        let mut start = 0usize;
+        for word in text.split(' ') {
+            let end = start.saturating_add(word.len());
+            words.push((start, end));
+            // The space after it.
+            start = end.saturating_add(1);
+        }
+        Self {
+            text,
+            words,
+            max_width,
+            shape,
+            positions: None,
+        }
+    }
+
+    /// The text of words `first..=last`, and the spaces between them.
+    fn line(&self, first: usize, last: usize) -> &'a str {
+        let from = self.words.get(first).map_or(0, |w| w.0);
+        let to = self.words.get(last).map_or(from, |w| w.1);
+        self.text.get(from..to).unwrap_or("")
+    }
+
+    /// Whether words `first..=last` fit, shaped alone.
+    fn fits(&self, first: usize, last: usize) -> bool {
+        (self.shape)(self.line(first, last)).width() <= self.max_width
+    }
+
+    /// The paragraph run's estimate of words `first..=last`, shaped alone.
+    fn estimate(&mut self, first: usize, last: usize) -> f32 {
+        if self.positions.is_none() {
+            self.positions = Some(self.measure_positions());
+        }
+        let positions = self.positions.as_deref().unwrap_or(&[]);
+        match (positions.get(first), positions.get(last)) {
+            (Some(&(start, _)), Some(&(_, end))) => end - start,
+            _ => f32::INFINITY,
+        }
+    }
+
+    /// Shape the paragraph once and read each word's start and end off it.
+    fn measure_positions(&self) -> Vec<(f32, f32)> {
+        let run = (self.shape)(self.text);
+        let mut glyphs = run.glyphs.iter().peekable();
+        let (mut pen, mut kern) = (0.0f32, 0.0f32);
+        // Every glyph whose cluster starts before `at`: the pen after them,
+        // and the last one's kern against the glyph after it.
+        let mut advance_to = |at: usize| {
+            while let Some(g) = glyphs.next_if(|g| g.cluster < at) {
+                pen += g.advance;
+                kern = g.kern_next;
+            }
+            (pen, kern)
+        };
+        self.words
+            .iter()
+            .map(|&(start, end)| {
+                let (at_start, _) = advance_to(start);
+                let (at_end, last_kern) = advance_to(end);
+                (at_start, at_end - last_kern)
+            })
+            .collect()
+    }
+
+    /// The last word of the line that begins with word `first` and so far
+    /// ends with word `last`: [`wrap`]'s proposal, confirmed or found again.
+    fn extend(&mut self, first: usize, last: usize) -> usize {
+        let count = self.words.len();
+        let mut proposed = last;
+        while proposed.saturating_add(1) < count
+            && self.estimate(first, proposed.saturating_add(1)) <= self.max_width
+        {
+            proposed = proposed.saturating_add(1);
+        }
+        let kept = proposed == last || self.fits(first, proposed);
+        let next = proposed.saturating_add(1);
+        let stopped = next >= count || !self.fits(first, next);
+        if kept && stopped {
+            return proposed;
+        }
+        // The run and a line alone disagree here: word by word, as the rule
+        // is written.
+        let mut end = last;
+        while end.saturating_add(1) < count && self.fits(first, end.saturating_add(1)) {
+            end = end.saturating_add(1);
+        }
+        end
+    }
+
+    /// The text of words `first..=last` as a line, known to fit if it holds
+    /// more than one word: every word after the first was added only once
+    /// the line with it was measured to fit.
+    fn wrapped(&self, first: usize, last: usize) -> WrappedLine {
+        WrappedLine {
+            text: String::from(self.line(first, last)),
+            fits: last > first,
+        }
+    }
+
+    fn wrap_into(mut self, lines: &mut Vec<WrappedLine>) {
+        let count = self.words.len();
+        // The line so far, as its first and last words; `None` while it is
+        // empty, which it stays through spaces at its start.
+        let mut line: Option<(usize, usize)> = None;
+        let mut i = 0usize;
+        while i < count {
+            match line {
+                None => {
+                    if self.words.get(i).is_some_and(|w| w.0 < w.1) {
+                        line = Some((i, i));
+                    }
+                    i = i.saturating_add(1);
+                }
+                Some((first, last)) => {
+                    let end = self.extend(first, last);
+                    let next = end.saturating_add(1);
+                    if next < count {
+                        lines.push(self.wrapped(first, end));
+                        // The word that did not fit begins the next line --
+                        // or, if it is the nothing between two spaces,
+                        // leaves it empty.
+                        line = self
+                            .words
+                            .get(next)
+                            .is_some_and(|w| w.0 < w.1)
+                            .then_some((next, next));
+                        i = next.saturating_add(1);
+                    } else {
+                        line = Some((first, end));
+                        i = count;
+                    }
+                }
+            }
+        }
+        lines.push(line.map_or_else(
+            || WrappedLine {
+                text: String::new(),
+                fits: false,
+            },
+            |(first, last)| self.wrapped(first, last),
+        ));
     }
 }
 

@@ -19,6 +19,16 @@
 //! once, in an `Rc` both steps share: the history costs a copy per edit, as
 //! the stacks did, not two.
 //!
+//! **An edit's `before` is always the state the program says it is in** --
+//! even just after an undo, when the history knows the state it put the
+//! program in. A program changes some of what it keeps without an edit: the
+//! slide a deck is showing, the layer a picture is being painted on, a won
+//! game told to keep going. A `before` taken from the history instead would
+//! undo those too -- the edit on slide 3 undone onto slide 1, the game that
+//! was told to keep going asking again -- so the state an undo arrives at is
+//! copied once more when the next edit begins, and nothing is taken for
+//! granted.
+//!
 //! # What a program does
 //!
 //! What it did for its stack: say so before each edit begins, with the state
@@ -63,10 +73,6 @@ pub struct StateHistory<S> {
     /// state after the edit -- when the next edit begins, or when the history
     /// is walked.
     open: Option<Rc<S>>,
-    /// The state the program is in, when the history put it there: after an
-    /// undo, a redo or a journey, until the next edit begins. The next step's
-    /// `before` is then this `Rc` itself rather than a second copy of it.
-    known: Option<Rc<S>>,
 }
 
 impl<S: Clone> StateHistory<S> {
@@ -76,7 +82,6 @@ impl<S: Clone> StateHistory<S> {
         Self {
             tree: UndoHistory::new(limit),
             open: None,
-            known: None,
         }
     }
 
@@ -84,7 +89,7 @@ impl<S: Clone> StateHistory<S> {
     /// it. The edit before this one, if there was one, becomes a step here,
     /// with `now` as the state it left.
     pub fn begin(&mut self, now: S) {
-        let now = self.known.take().unwrap_or_else(|| Rc::new(now));
+        let now = Rc::new(now);
         if let Some(before) = self.open.replace(Rc::clone(&now)) {
             self.tree.record(Step { before, after: now });
         }
@@ -110,7 +115,7 @@ impl<S: Clone> StateHistory<S> {
     pub fn undo(&mut self, now: S) -> Option<S> {
         self.close(now);
         let step = self.tree.undo()?;
-        Some(self.arrive(step.before))
+        Some(Self::arrive(&step.before))
     }
 
     /// Put the last undone edit back, on the branch the program is on: the
@@ -119,7 +124,7 @@ impl<S: Clone> StateHistory<S> {
     pub fn redo(&mut self, now: S) -> Option<S> {
         self.close(now);
         let step = self.tree.redo()?;
-        Some(self.arrive(step.after))
+        Some(Self::arrive(&step.after))
     }
 
     /// Go to the state the program was in before this one was first reached,
@@ -144,19 +149,16 @@ impl<S: Clone> StateHistory<S> {
     pub fn clear(&mut self) {
         self.tree.clear();
         self.open = None;
-        self.known = None;
     }
 
     /// The edit in progress, if there is one, becomes a step: `now` is the
     /// state it left.
     fn close(&mut self, now: S) {
         if let Some(before) = self.open.take() {
-            let after = Rc::new(now);
             self.tree.record(Step {
                 before,
-                after: Rc::clone(&after),
+                after: Rc::new(now),
             });
-            self.known = Some(after);
         }
     }
 
@@ -167,14 +169,13 @@ impl<S: Clone> StateHistory<S> {
             Travel::Undo(step) => step.before,
             Travel::Redo(step) => step.after,
         };
-        Some(self.arrive(last))
+        Some(Self::arrive(&last))
     }
 
-    /// The program is going to `state`: it is the one the history knows.
-    fn arrive(&mut self, state: Rc<S>) -> S {
-        let owned = (*state).clone();
-        self.known = Some(state);
-        owned
+    /// The program is going to `state`: a copy of its own, for the history
+    /// keeps the one it has.
+    fn arrive(state: &Rc<S>) -> S {
+        (**state).clone()
     }
 }
 
@@ -322,18 +323,25 @@ mod tests {
             Rc::ptr_eq(&second.after, &first.before),
             "a state was copied"
         );
-        // And the state an undo arrives at is the next edit's `before`
-        // itself, not a copy of it.
-        let mut history = StateHistory::new(NonZeroUsize::new(10).unwrap());
-        history.begin(String::from("0"));
-        let back = history.undo(String::from("1")).expect("undone");
-        assert_eq!(back, "0");
-        history.begin(back);
-        let open = history.open.clone().expect("an edit is open");
-        let undone = history.tree.redo().expect("the undone step");
-        assert!(
-            Rc::ptr_eq(&open, &undone.before),
-            "the state an undo arrived at was copied"
+    }
+
+    /// **An edit's `before` is the state the program says**, even just after
+    /// an undo: a program changes some of its state without an edit -- the
+    /// slide showing, a game told to keep going -- and undoing the next edit
+    /// must put that back as it was, not as the undo left it.
+    #[test]
+    fn a_change_between_an_undo_and_the_next_edit_is_kept() {
+        let mut doc = Doc::new();
+        doc.edit("a");
+        assert!(doc.undo());
+        assert_eq!(doc.text, "");
+        // Changed without an edit, as a program changes the slide it shows.
+        doc.text = String::from("slide 3");
+        doc.edit("slide 3, written on");
+        assert!(doc.undo());
+        assert_eq!(
+            doc.text, "slide 3",
+            "the edit was undone onto the state the undo had left"
         );
     }
 

@@ -6687,6 +6687,31 @@ mod tests {
         }
     }
 
+    /// **An edit made on another slide after an undo is undone onto that
+    /// slide.** Going to a slide is no edit, and the history once took the
+    /// edit's `before` from where the undo had left the deck -- so undoing
+    /// the edit jumped back to the slide the undo had shown.
+    #[test]
+    fn an_edit_after_an_undo_is_undone_onto_its_own_slide() {
+        let mut app = fresh();
+        app.add_slide(SlideLayout::Blank);
+        app.add_slide(SlideLayout::Blank);
+        assert!(app.undo());
+        assert_eq!(app.slide_count(), 2);
+        app.handle_event(&press(Key::Home));
+        assert_eq!(app.current_index(), 0);
+        let before = element_count(&app);
+        app.handle_event(&press(Key::T));
+        assert_eq!(element_count(&app), before + 1);
+        assert!(app.undo());
+        assert_eq!(
+            app.current_index(),
+            0,
+            "the edit was undone onto the slide the earlier undo showed"
+        );
+        assert_eq!(element_count(&app), before);
+    }
+
     /// **The history keeps the last hundred edits** and drops the oldest:
     /// each holds a whole deck.
     #[test]

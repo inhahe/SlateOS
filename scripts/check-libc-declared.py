@@ -80,8 +80,6 @@ BASELINE_MISSING = frozenset({
     "cabsl", "cacosl", "cacoshl", "cargl", "casinl", "casinhl", "catanl", "catanhl", "ccosl",
     "ccoshl", "cexpl", "cimagl", "clogl", "conjl", "cpowl", "cprojl", "creall", "csinl",
     "csinhl", "csqrtl", "ctanl", "ctanhl",
-    # contexts (musl declares and does not define these either)
-    "getcontext", "setcontext", "makecontext", "swapcontext",
 })
 
 DECL = re.compile(r"[^;{}]*\)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)*;", re.S)

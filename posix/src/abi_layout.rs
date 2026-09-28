@@ -169,6 +169,50 @@ pub(crate) fn abi_asserts() -> String {
         ss_size
     );
 
+    // --- <ucontext.h>: the context getcontext records and a signal handler
+    // receives -------------------------------------------------------------
+    abi!(
+        out,
+        hdrs,
+        crate::ucontext::UcontextT,
+        "ucontext_t",
+        "ucontext.h",
+        uc_flags,
+        uc_link,
+        uc_stack,
+        uc_mcontext,
+        uc_sigmask,
+        fpregs_mem as "__fpregs_mem"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::ucontext::McontextT,
+        "mcontext_t",
+        "ucontext.h",
+        gregs,
+        fpregs,
+        reserved1 as "__reserved1"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::ucontext::Fpstate,
+        "struct _fpstate",
+        "ucontext.h",
+        cwd,
+        swd,
+        ftw,
+        fop,
+        rip,
+        rdp,
+        mxcsr,
+        mxcr_mask,
+        st as "_st",
+        xmm as "_xmm",
+        padding
+    );
+
     // --- threads: the cleanup record musl's pthread_cleanup_push declares --
     abi!(out, hdrs, crate::pthread::Ptcb, "struct __ptcb", "pthread.h",
          f as "__f", x as "__x", next as "__next");

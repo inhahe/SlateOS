@@ -503,6 +503,7 @@ pub mod tls;
 pub mod types;
 pub mod tz;
 pub mod uchar;
+pub mod ucontext;
 pub(crate) mod uio;
 pub mod ulimit;
 pub mod unistd;

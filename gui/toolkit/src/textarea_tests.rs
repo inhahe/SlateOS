@@ -20,22 +20,34 @@ const WEIGHT: FontWeightHint = FontWeightHint::Regular;
 /// A box `lines` lines tall and wide enough for `fits` and a pixel, so that a
 /// test says in words where its text wraps.
 fn box_for(fits: &str, lines: usize) -> Metrics {
-    Metrics {
-        width: text::measure(fits, SIZE, WEIGHT) + 1.0,
-        height: lines as f32 * text::line_height(SIZE, WEIGHT),
-        font_size: SIZE,
-        weight: WEIGHT,
-    }
+    Metrics::new(
+        text::measure(fits, SIZE, WEIGHT) + 1.0,
+        lines as f32 * text::line_height(SIZE, WEIGHT),
+        SIZE,
+        WEIGHT,
+    )
 }
 
 /// A box so wide nothing in these tests wraps.
 fn wide(lines: usize) -> Metrics {
-    Metrics {
-        width: 10_000.0,
-        height: lines as f32 * text::line_height(SIZE, WEIGHT),
-        font_size: SIZE,
-        weight: WEIGHT,
-    }
+    Metrics::new(
+        10_000.0,
+        lines as f32 * text::line_height(SIZE, WEIGHT),
+        SIZE,
+        WEIGHT,
+    )
+}
+
+/// **`Metrics::new` is the box and the font it is given**, field for field
+/// -- the constructor callers use so that a field added later arrives with
+/// its default rather than breaking them.
+#[test]
+fn metrics_new_is_the_box_and_font_it_is_given() {
+    let m = Metrics::new(120.0, 40.0, 14.0, FontWeightHint::Bold);
+    assert_eq!(
+        (m.width, m.height, m.font_size, m.weight),
+        (120.0, 40.0, 14.0, FontWeightHint::Bold)
+    );
 }
 
 fn key_with(k: Key, modifiers: Modifiers, text: &str) -> KeyEvent {

@@ -294,10 +294,9 @@ apps/ircclient/src/main.rs:topic_set_by
 # none is on a path a user can currently reach.
 apps/musicplayer/src/main.rs:track_number
 
-# apps/paint --
-# Not yet triaged individually. Each is a value computed and discarded, and
-# none is on a path a user can currently reach.
-apps/paint/src/main.rs:active_slider
+# apps/paint -- PAID OFF 2026-09-27. `active_slider` is written by a press on
+# a colour slider and read by the drag that follows it: the colour dialog
+# works, opened by the swatches or C / Shift+C (find-options-only-emptied).
 
 # apps/pdfviewer -- PAID OFF 2026-09-27. `pdf_version` was written only by
 # `create_sample`, the invented lorem-ipsum document, which is `#[cfg(test)]`
@@ -345,10 +344,9 @@ apps/sysmonitor/src/main.rs:running_count
 # none is on a path a user can currently reach.
 apps/torrent/src/main.rs:completed_time
 
-# apps/whiteboard --
-# Not yet triaged individually. Each is a value computed and discarded, and
-# none is on a path a user can currently reach.
-apps/whiteboard/src/main.rs:marquee
+# apps/whiteboard -- PAID OFF 2026-09-27. `marquee` is gone: the selection
+# box works through `DragState::Marquee`, and this was a second copy only ever
+# cleared (find-options-only-emptied).
 
 # gui/desktop --
 # Five shell fields.

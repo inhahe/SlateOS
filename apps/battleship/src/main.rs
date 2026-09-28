@@ -1787,29 +1787,98 @@ mod tests {
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
         let derived = [HIT.0, HIT.1, MISS.0, MISS.1, HALOS.0, HALOS.1];
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut placing = BattleshipApp::with_seed(7);
-            placing.theme_changed(&p);
-            let mut battle = firing_app();
-            battle.theme_changed(&p);
-            for r in 0..GRID_SIZE {
-                battle.player_fleet.receive_fire(r, r);
-                battle.opponent_fleet.receive_fire(r, (r + 3) % GRID_SIZE);
-            }
-            let mut over = firing_app();
-            over.theme_changed(&p);
-            over.phase = GamePhase::GameOver;
-            for (what, app) in [("placing", &placing), ("battle", &battle), ("over", &over)] {
-                let f = app.draw(SIZE);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("battleship, {what}, light: {light}"),
+                    &format!("battleship, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: placing the
+    /// fleet, a battle with hits and misses on both grids, the game over,
+    /// and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut placing = BattleshipApp::with_seed(7);
+        placing.theme_changed(p);
+        let mut battle = firing_app();
+        battle.theme_changed(p);
+        for r in 0..GRID_SIZE {
+            battle.player_fleet.receive_fire(r, r);
+            battle.opponent_fleet.receive_fire(r, (r + 3) % GRID_SIZE);
+        }
+        let mut over = firing_app();
+        over.theme_changed(p);
+        over.phase = GamePhase::GameOver;
+        vec![
+            ("placing", placing.draw(SIZE)),
+            ("battle", battle.draw(SIZE)),
+            ("over", over.draw(SIZE)),
+            ("cramped", battle.draw((420.0, 380.0))),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page]
+                .into_iter()
+                .map(|ground| {
+                    guitk::button::paint(
+                        &p,
+                        guitk::button::Kind::Plain,
+                        guitk::button::State {
+                            disabled: true,
+                            ..guitk::button::State::default()
+                        },
+                        ground,
+                    )
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "battleship: {bad:#?}");
     }
 
     /// **A mark is seen on every cell it can land on**, in either theme:

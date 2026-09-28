@@ -10,7 +10,11 @@ Ctrl+Shift+W to discard -- a key nothing bound -- and closing the window went
 at once whatever it held.  Both ask now, and the window stays open while they
 do (`Response::KeepOpen`, which lane F added for this).
 
-The table covers the close only; the rest of the editor's suite predates it.
+The table covers the close, and -- since 2026-09-28 (C-Q24, §1416) -- the
+history kept as a tree: an edit made after undoing starts a branch and the
+undone one is kept, reachable with Alt+Z and Alt+Shift+Z; Ctrl+F4 closes the
+tab; and AltGr, which arrives as Ctrl+Alt, types its letter. The rest of the
+editor's suite predates it.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -45,6 +49,37 @@ MAIN_MUTATIONS = [
         "                && doc.path.is_some()\n",
         "",
         ["saving_on_close_writes_what_has_a_file_and_asks_where_for_the_rest"],
+    ),
+    # -- the history as a tree (C-Q24, §1416) --------------------------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(action) => self.revert(&action),",
+        "                Travel::Undo(action) => self.reapply(&action),",
+        ["a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.history.earlier();",
+        "        let steps = self.history.later();",
+        ["a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "a journey that goes nowhere is said to have moved",
+        "        let moved = !steps.is_empty();",
+        "        let moved = true;",
+        ["there_is_nothing_before_the_first_version_or_after_the_newest"],
+    ),
+    (
+        "a step made again leaves the caret where it was",
+        "        (self.cursor_line, self.cursor_col) = action.cursor_after;",
+        "        let _ = action.cursor_after;",
+        ["a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "a reload keeps the old buffer's history",
+        "        self.history.clear();",
+        "",
+        ["a_reload_starts_the_history_again"],
     ),
 ]
 
@@ -91,12 +126,62 @@ INPUT_MUTATIONS = [
         "",
         ["saving_on_close_writes_what_has_a_file_and_asks_where_for_the_rest"],
     ),
+    # -- the keys C-Q24 asks for (§1416) --------------------------------------
+    (
+        "Alt+Z is not a key",
+        "        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        "        if false && key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        ["every_shortcut_a_menu_advertises_is_really_bound"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "            return self.run(if key.modifiers.shift {\n                Command::Later",
+        "            return self.run(if key.modifiers.shift {\n                Command::Earlier",
+        ["every_shortcut_a_menu_advertises_is_really_bound"],
+    ),
+    (
+        "AltGr is taken for Ctrl",
+        "        if key.modifiers.ctrl && !key.modifiers.alt {",
+        "        if key.modifiers.ctrl {",
+        ["an_altgr_letter_is_typed_not_taken_for_a_chord"],
+    ),
+    (
+        "Ctrl+F4 closes nothing",
+        "            Key::W | Key::F4 => self.run(Command::CloseTab),",
+        "            Key::W => self.run(Command::CloseTab),",
+        ["ctrl_f4_closes_the_current_document"],
+    ),
+    (
+        "Earlier Version is offered at the first version",
+        "            Command::Undo | Command::Earlier => doc.history.can_undo(),",
+        "            Command::Undo => doc.history.can_undo(),\n            Command::Earlier => true,",
+        ["the_ends_of_the_history_are_said"],
+    ),
+    (
+        "the newest version is not said",
+        "                    self.status = Some(String::from(\"This is the newest version\"));",
+        "",
+        ["the_ends_of_the_history_are_said"],
+    ),
 ]
 
 if __name__ == "__main__":
-    only = sys.argv[1:] or None
-    results = [
-        sweep(MAIN_SRC, MAIN_MUTATIONS, "editor", timeout=900, only=only),
-        sweep(INPUT_SRC, INPUT_MUTATIONS, "editor", timeout=900, only=only),
-    ]
-    raise SystemExit(max(results))
+    # Each table is given only the filters that name one of its own rows: the
+    # harness refuses a filter that selects nothing in its table, so handing
+    # both tables every filter refused any run that named rows in one.
+    only = sys.argv[1:]
+    tables = [(MAIN_SRC, MAIN_MUTATIONS), (INPUT_SRC, INPUT_MUTATIONS)]
+    names = [name for _, rows in tables for name, *_ in rows]
+    unmatched = [o for o in only if not any(o in n for n in names)]
+    if unmatched:
+        print(f"{len(unmatched)} filter(s) name no row in any table:")
+        for o in unmatched:
+            print(f"  {o!r}")
+        raise SystemExit(2)
+    results = []
+    for src, rows in tables:
+        mine = [o for o in only if any(o in name for name, *_ in rows)]
+        if only and not mine:
+            continue
+        results.append(sweep(src, rows, "editor", timeout=900, only=mine or None))
+    raise SystemExit(max(results, default=0))

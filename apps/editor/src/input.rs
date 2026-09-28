@@ -97,6 +97,10 @@ pub enum Command {
     Undo,
     /// Redo the last undone edit.
     Redo,
+    /// Go to the version before this one in time, on whichever branch.
+    Earlier,
+    /// Go to the version after this one in time, on whichever branch.
+    Later,
     /// Copy the selection, then delete it.
     Cut,
     /// Copy the selection.
@@ -126,7 +130,7 @@ impl Command {
     /// undispatchable -- consistently missing rather than silently running
     /// something else, which is why [`Command::id`] is the discriminant rather
     /// than a position in this list.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::New,
         Self::Open,
         Self::Save,
@@ -134,6 +138,8 @@ impl Command {
         Self::CloseTab,
         Self::Undo,
         Self::Redo,
+        Self::Earlier,
+        Self::Later,
         Self::Cut,
         Self::Copy,
         Self::Paste,
@@ -167,6 +173,8 @@ impl Command {
             Self::CloseTab => "Close Tab",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
+            Self::Earlier => "Earlier Version",
+            Self::Later => "Later Version",
             Self::Cut => "Cut",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
@@ -196,6 +204,8 @@ impl Command {
             Self::CloseTab => "Ctrl+W",
             Self::Undo => "Ctrl+Z",
             Self::Redo => "Ctrl+Y",
+            Self::Earlier => "Alt+Z",
+            Self::Later => "Alt+Shift+Z",
             Self::Cut => "Ctrl+X",
             Self::Copy => "Ctrl+C",
             Self::Paste => "Ctrl+V",
@@ -346,7 +356,19 @@ impl EditorState {
         {
             return response;
         }
-        if key.modifiers.ctrl {
+        // Alt without Ctrl: every version the document has been in, in the
+        // order each was made.
+        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key
+        {
+            return self.run(if key.modifiers.shift {
+                Command::Later
+            } else {
+                Command::Earlier
+            });
+        }
+        // Ctrl without Alt: Ctrl+Alt is AltGr, which types a letter on several
+        // layouts -- AltGr+Z is Polish's ż, which undid instead.
+        if key.modifiers.ctrl && !key.modifiers.alt {
             return self.control_key(key);
         }
         self.editing_key(key)
@@ -532,8 +554,10 @@ impl EditorState {
     pub fn command_enabled(&self, command: Command) -> bool {
         let doc = self.active_document();
         match command {
-            Command::Undo => !doc.undo_stack.is_empty(),
-            Command::Redo => !doc.redo_stack.is_empty(),
+            // Every version but the first has one before it, which is
+            // exactly when there is something to undo.
+            Command::Undo | Command::Earlier => doc.history.can_undo(),
+            Command::Redo => doc.history.can_redo(),
             Command::Cut | Command::Copy => doc.has_selection(),
             Command::Paste => !self.clipboard.is_empty(),
             Command::ToggleIndentStyle
@@ -545,7 +569,10 @@ impl EditorState {
             | Command::SelectAll
             | Command::SelectWord
             | Command::Find
-            | Command::Replace => true,
+            | Command::Replace
+            // Whether a later version exists is not something the history
+            // answers without going there; at the newest, running it says so.
+            | Command::Later => true,
         }
     }
 
@@ -594,6 +621,20 @@ impl EditorState {
             }
             Command::Redo => {
                 self.active_document_mut().redo();
+                self.after_cursor_move();
+                Response::Redraw
+            }
+            // Enabled only while there is an earlier version, so it always
+            // moves -- greyed at the first, as Undo is at the start.
+            Command::Earlier => {
+                self.active_document_mut().earlier();
+                self.after_cursor_move();
+                Response::Redraw
+            }
+            Command::Later => {
+                if !self.active_document_mut().later() {
+                    self.status = Some(String::from("This is the newest version"));
+                }
                 self.after_cursor_move();
                 Response::Redraw
             }
@@ -942,7 +983,10 @@ impl EditorState {
             Key::X => self.run(Command::Cut),
             Key::V => self.run(Command::Paste),
             Key::D => self.run(Command::SelectWord),
-            Key::W => self.run(Command::CloseTab),
+            // Ctrl+F4 closes the current document as well (C-Q24, §1416),
+            // the key programs with documents have used for it since before
+            // Ctrl+W.
+            Key::W | Key::F4 => self.run(Command::CloseTab),
             Key::Home => {
                 self.moving(shift, Document::move_to_start);
                 Response::Redraw
@@ -1514,6 +1558,31 @@ mod tests {
                         editor.active_document().lines[0],
                         "cab",
                         "Ctrl+Y did not reach Redo"
+                    );
+                }
+                Command::Earlier => {
+                    // "cab", undone, then "dab": the version made before
+                    // "dab" is the "cab" undone out of, on the other branch.
+                    let mut editor = editor_with("ab");
+                    editor.handle_event(&typed('c'));
+                    editor.handle_event(&ctrl(Key::Z));
+                    editor.handle_event(&typed('d'));
+                    editor.handle_event(&event);
+                    assert_eq!(
+                        editor.active_document().lines[0],
+                        "cab",
+                        "Alt+Z did not reach Earlier Version"
+                    );
+                }
+                Command::Later => {
+                    let mut editor = editor_with("ab");
+                    editor.handle_event(&typed('c'));
+                    editor.handle_event(&keystroke("Alt+Z"));
+                    editor.handle_event(&event);
+                    assert_eq!(
+                        editor.active_document().lines[0],
+                        "cab",
+                        "Alt+Shift+Z did not reach Later Version"
                     );
                 }
                 Command::Cut => {
@@ -2599,5 +2668,80 @@ mod tests {
             "K keeps the current buffer"
         );
         assert_eq!(editor.active_document().lines[0], "buffer");
+    }
+
+    // ---- the keys C-Q24 asks every program for (§1416) ----------------------
+
+    /// AltGr, which arrives as Ctrl+Alt, with the letter it types.
+    fn altgr(key: Key, letter: &str) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: letter.to_string(),
+        })
+    }
+
+    /// **AltGr is not Ctrl, and not Alt either.** AltGr arrives as
+    /// Ctrl+Alt, and AltGr+Z is how a Polish keyboard types ż -- which undid
+    /// the last edit instead; AltGr+E is € on most European layouts, and must
+    /// not open the Edit menu.
+    #[test]
+    fn an_altgr_letter_is_typed_not_taken_for_a_chord() {
+        let mut editor = editor_with("ab");
+        editor.handle_event(&typed('c'));
+        editor.handle_event(&altgr(Key::Z, "ż"));
+        assert_eq!(editor.active_document().lines[0], "cżab", "AltGr+Z undid");
+        editor.handle_event(&altgr(Key::E, "€"));
+        assert_eq!(
+            editor.active_document().lines[0],
+            "cż€ab",
+            "AltGr+E did not type"
+        );
+        assert!(!editor.menu_bar.is_open(), "AltGr+E opened a menu");
+    }
+
+    /// **Ctrl+F4 closes the current document**, as Ctrl+W does.
+    #[test]
+    fn ctrl_f4_closes_the_current_document() {
+        let mut editor = editor_with("ab");
+        editor.tabs.open(Document::new());
+        assert_eq!(editor.tabs.count(), 2);
+        editor.handle_event(&ctrl(Key::F4));
+        assert_eq!(editor.tabs.count(), 1, "Ctrl+F4 did not close the tab");
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut editor = editor_with("ab");
+        editor.handle_event(&typed('c'));
+        editor.handle_event(&ctrl(Key::Z));
+        editor.handle_event(&press(
+            Key::Z,
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(editor.active_document().lines[0], "cab");
+    }
+
+    /// **At either end of time, the keys say so rather than doing nothing
+    /// in silence** -- and the menu greys Earlier Version at the first.
+    #[test]
+    fn the_ends_of_the_history_are_said() {
+        let mut editor = editor_with("ab");
+        assert!(!editor.command_enabled(Command::Earlier));
+        editor.handle_event(&typed('c'));
+        assert!(editor.command_enabled(Command::Earlier));
+        editor.handle_event(&keystroke("Alt+Shift+Z"));
+        assert_eq!(editor.status.as_deref(), Some("This is the newest version"));
+        assert_eq!(editor.active_document().lines[0], "cab");
     }
 }

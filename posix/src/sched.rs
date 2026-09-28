@@ -654,27 +654,36 @@ pub(crate) fn affinity_change(mask: &CpuSetT, ncpus: usize) -> Result<(), i32> {
 // to define for itself -- a duplicate symbol at link time once this module's
 // archive member was pulled in for `sched_getaffinity`.
 
-/// Get the CPU number on which the calling thread is running.
+/// Get the CPU number on which the calling thread is running -- which this
+/// library cannot find out, so it answers 0 on every CPU.
 ///
-/// Stub: always returns 0 (single-CPU assumption until SMP is
-/// implemented in the kernel).
+/// The kernel is SMP and knows (`smp::current_cpu_index`, which the Linux
+/// ABI's `sys_getcpu` returns), but the native ABI has no call that asks;
+/// `requests/d-a-a-native-getcpu-for-sched-getcpu.md` asks lane A for one,
+/// and this becomes a route to it.  Until then 0 rather than `-1`/`ENOSYS`:
+/// callers turn the answer into a per-CPU array index (jemalloc's per-CPU
+/// arenas do), where `-1` is out of bounds, whereas 0 is merely every
+/// thread sharing CPU 0's slot -- slower under contention, never wrong,
+/// since a thread may migrate the instant after it asked anyway.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getcpu() -> i32 {
     0
 }
 
-/// Get CPU and NUMA node (Linux vDSO interface).
-///
-/// Stub: returns 0 for both CPU and node.
+/// Get CPU and NUMA node (Linux's `getcpu`): 0 and 0, for the reason
+/// [`sched_getcpu`] gives -- the node is 0 in fact, the machine being one
+/// node as far as the kernel knows (its `sys_getcpu` says the same).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getcpu(cpu: *mut u32, node: *mut u32) -> i32 {
     if !cpu.is_null() {
-        // SAFETY: Caller guarantees pointer validity.
+        // SAFETY: non-null, and the caller's contract makes it a writable
+        // `unsigned`, as for Linux's `getcpu`.
         unsafe {
             *cpu = 0;
         }
     }
     if !node.is_null() {
+        // SAFETY: as for `cpu`.
         unsafe {
             *node = 0;
         }

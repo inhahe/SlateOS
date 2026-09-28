@@ -81,6 +81,9 @@ DESK = "gui/desktop/src/lib.rs"
 # into the toolkit; its tests stayed in `appearance`, which is why the
 # defects below still name that package.
 TK_PALETTE = "gui/toolkit/src/palette.rs"
+# The colour type, and since 2026-09 the one hex parser: the calendar's
+# `parse_hex_color` reads through `Color::from_hex_text`.
+TK_COLOR = "gui/toolkit/src/color.rs"
 SEC = "gui/desktop/src/security_dialog.rs"
 RUN = "gui/desktop/src/run_dialog.rs"
 ICON = "gui/desktop/src/icons.rs"
@@ -148,11 +151,20 @@ PBAR = "gui/toolkit/src/pathbar.rs"
 DEFECTS = [
     (
         "A: the light palette keeps Catppuccin's own subtext0, which is 4.37:1",
-        APP,
-        [("pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x686B80);",
-          "pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x6C6F85);")],
-        ["appearance"],
-        ["every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette"],
+        TK_PALETTE,
+        [
+            ('pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x00688B);\n',
+             'pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x6C6F85);\n'),
+        ],
+        ["guitk", "appearance"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            # The resolved palette raises subtext0 to the text floor, so the role sweep no
+            # longer sees a weak constant; the constant's own floor test and the ladder's
+            # pinned subtext0/subtext1 tie do.
+            'light_inks_clear_the_contrast_floor_on_every_surface',
+            'the_surface_ladder_climbs_away_from_the_base_in_both_modes',
+        ],
     ),
     (
         # Re-modelled 2026-09-27. It copied the dark value into `subtext1:`,
@@ -189,20 +201,31 @@ DEFECTS = [
     ),
     (
         "E: the accent setting never reaches the palette",
-        APP,
-        [("        palette.accent = settings.effective_accent();\n", "")],
-        ["appearance", "desktop"],
-        ["the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone",
-         "a_custom_accent_reaches_the_palette_exactly_as_chosen"],
+        TK_PALETTE,
+        [
+            ('        palette.accent = settings.accent();\n',
+             ''),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            # `from_settings` reads the accent through `PaletteSource`.
+            'a_custom_accent_reaches_the_palette_exactly_as_chosen',
+            'the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone',
+        ],
     ),
     (
         "F: the accent overwrites the categorical blue as well",
-        APP,
-        [("        palette.accent = settings.effective_accent();",
-          "        palette.accent = settings.effective_accent();\n"
-          "        palette.blue = palette.accent;")],
-        ["appearance"],
-        ["the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone"],
+        TK_PALETTE,
+        [
+            ('        palette.accent = settings.accent();\n',
+             '        palette.accent = settings.accent();\n        palette.blue = palette.accent;\n'),
+        ],
+        ["guitk", "appearance"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            'the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone',
+        ],
     ),
     (
         "G: the transparency level never reaches the palette",
@@ -247,16 +270,18 @@ DEFECTS = [
         ["the_scrim_and_the_shadows_darken_whichever_palette_they_fall_on"],
     ),
     (
-        "L: hue() answers in dark-mode values whatever mode it is in",
+        "L: `AccentColor::in_mode` answers in dark-mode values whatever mode it is asked for",
         APP,
-        [("        if self.light {\n"
-          "            accent.color_light()\n"
-          "        } else {\n"
-          "            accent.color()\n"
-          "        }",
-          "        accent.color()")],
+        [
+            ('        if light {\n            self.color_light()\n        } else {\n            self.color()\n        }\n',
+             '        self.color()\n'),
+        ],
         ["appearance"],
-        ["every_named_hue_agrees_with_the_accent_of_the_same_name"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. `Palette::hue` became `AccentColor::in_mode`
+            # when the palette moved into the toolkit, which cannot name an accent.
+            'every_named_hue_agrees_with_the_accent_of_the_same_name',
+        ],
     ),
     (
         "M: text on the accent is the palette's text, not chosen for the accent",
@@ -314,14 +339,16 @@ DEFECTS = [
         # run of this defect reported NO TEST FAILED; that is what put the
         # sweep in.
         "U: in light mode only, the accent overwrites the categorical sapphire",
-        APP,
-        [("        palette.panel_alpha = settings.transparency.panel_alpha();",
-          "        palette.panel_alpha = settings.transparency.panel_alpha();\n"
-          "        if palette.light {\n"
-          "            palette.sapphire = palette.accent;\n"
-          "        }")],
-        ["appearance"],
-        ["the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone"],
+        TK_PALETTE,
+        [
+            ('        palette.panel_alpha = settings.panel_alpha();\n',
+             '        palette.panel_alpha = settings.panel_alpha();\n        if palette.light {\n            palette.sapphire = palette.accent;\n        }\n'),
+        ],
+        ["guitk", "appearance"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            'the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone',
+        ],
     ),
     (
         "R: a pressed taskbar button is raised one step too far",
@@ -8259,17 +8286,19 @@ DEFECTS = [
     ),
     (
         'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the default background names a colour again',
-        LOGIN,
+        APP,
         [
-            ('#[derive(Clone, Debug, Default, PartialEq)]\npub enum LoginBackground {',
-             '#[derive(Clone, Debug, PartialEq)]\npub enum LoginBackground {'),
-            ('    #[default]\n    Theme,',
-             '    Theme,'),
-            ('    Gradient { top: Color, bottom: Color },\n}',
-             '    Gradient { top: Color, bottom: Color },\n}\n\nimpl Default for LoginBackground {\n    fn default() -> Self {\n        Self::SolidColor(Color::from_hex(0x11111B))\n    }\n}'),
+            ('#[derive(Clone, Debug, Default, PartialEq)]\npub enum LoginBackground {\n',
+             '#[derive(Clone, Debug, PartialEq)]\npub enum LoginBackground {\n'),
+            ('    #[default]\n    Theme,\n',
+             '    Theme,\n'),
+            ('    Gradient { top: Color, bottom: Color },\n}\n',
+             '    Gradient { top: Color, bottom: Color },\n}\n\nimpl Default for LoginBackground {\n    fn default() -> Self {\n        Self::SolidColor(Color::from_hex(0x11111B))\n    }\n}\n'),
         ],
-        ["desktop"],
+        ["appearance", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `LoginBackground` is a setting now and lives in
+            # `appearance`; the greeter re-exports it.
             'the_default_background_defers_its_colour_to_the_palette',
         ],
     ),
@@ -16931,32 +16960,34 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a fresh configuration names the Mocha base as the user's choice",
         WP,
         [
-            ('            color: None,\n            slideshow_dir: String::new(),',
-             '            color: Some(Color::from_hex(0x1E1E2E)),\n            slideshow_dir: String::new(),'),
+            ('            color: None,\n            slideshow_dir: PathBuf::new(),\n',
+             '            color: Some(Color::from_hex(0x1E1E2E)),\n            slideshow_dir: PathBuf::new(),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_this_module_draws_comes_from_its_palette',
-            'an_images_underlay_follows_the_theme_too',
+            # Re-derived 2026-09-27 against the code as it now reads. The rotation folder is a `PathBuf` now.
             'a_fresh_config_has_chosen_no_colour',
-            'saving_an_unchosen_colour_writes_no_colour_key',
+            'an_images_underlay_follows_the_theme_too',
             'an_unchosen_colour_survives_a_save_and_load',
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'saving_an_unchosen_colour_writes_no_colour_key',
         ],
     ),
     (
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a fresh configuration names the Latte base as the user's choice",
         WP,
         [
-            ('            color: None,\n            slideshow_dir: String::new(),',
-             '            color: Some(Color::from_hex(0xEFF1F5)),\n            slideshow_dir: String::new(),'),
+            ('            color: None,\n            slideshow_dir: PathBuf::new(),\n',
+             '            color: Some(Color::from_hex(0xEFF1F5)),\n            slideshow_dir: PathBuf::new(),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_this_module_draws_comes_from_its_palette',
-            'an_images_underlay_follows_the_theme_too',
+            # Re-derived 2026-09-27 against the code as it now reads. The rotation folder is a `PathBuf` now.
             'a_fresh_config_has_chosen_no_colour',
-            'saving_an_unchosen_colour_writes_no_colour_key',
+            'an_images_underlay_follows_the_theme_too',
             'an_unchosen_colour_survives_a_save_and_load',
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'saving_an_unchosen_colour_writes_no_colour_key',
         ],
     ),
     (
@@ -17265,18 +17296,18 @@ DEFECTS = [
     ),
     (
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the light theme's ink drifts toward the page it is read on",
-        APP,
+        TK_PALETTE,
         [
-            ('pub const LIGHT_TEXT: Color = Color::from_hex(0x4C4F69);\n',
+            ('pub const LIGHT_TEXT: Color = Color::from_hex(0x000000);\n',
              'pub const LIGHT_TEXT: Color = Color::from_hex(0x8A8DA0);\n'),
         ],
         ["guitk", "appearance", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838). Light text is the
+            # operator's black since 829, not Latte's.
             # 2.90:1 on a Latte base. 0x8C8FA1 would have been the rounder
             # number but it is light overlay1's own value, and a duplicate would
             # trip the palette's distinctness tests for the wrong reason.
-            'the_thumb_is_legible_against_every_card_it_can_sit_on',
-            'every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette',
             # `text_beats_readable_on_the_fill_against_the_card` was declared
             # here too, and was MISSING for a subtler reason than under
             # GGG...x80: it *does* read LIGHT_TEXT. But the value it compares
@@ -17286,6 +17317,10 @@ DEFECTS = [
             # right-hand side is 1.00:1, and even a 2.90:1 ink beats it. The
             # test constrains the ink from below only as far as the base itself,
             # which is not far enough to see this.
+            'every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette',
+            'legible_on_is_a_no_op_for_a_pair_that_already_passes',
+            'light_inks_clear_the_contrast_floor_on_every_surface',
+            'the_thumb_is_legible_against_every_card_it_can_sit_on',
         ],
     ),
     (
@@ -17650,28 +17685,12 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the appearance crate goes back to its own copy of the luminance curve",
         APP,
         [
-            ('pub use guitk::theme::{contrast_ratio, relative_luminance};\n',
-             ('#[must_use]\n'
-              'pub fn relative_luminance(c: Color) -> f32 {\n'
-              '    fn channel(v: u8) -> f32 {\n'
-              '        let v = f32::from(v) / 255.0;\n'
-              '        if v <= 0.039_28 {\n'
-              '            v / 12.92\n'
-              '        } else {\n'
-              '            ((v + 0.055) / 1.055).powf(2.4)\n'
-              '        }\n'
-              '    }\n'
-              '    0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)\n'
-              '}\n'
-              '#[must_use]\n'
-              'pub fn contrast_ratio(a: Color, b: Color) -> f32 {\n'
-              '    let (la, lb) = (relative_luminance(a), relative_luminance(b));\n'
-              '    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };\n'
-              '    (hi + 0.05) / (lo + 0.05)\n'
-              '}\n')),
+            ('pub use guitk::theme::{contrast_ratio, perceptual_difference, relative_luminance};\n',
+             'pub use guitk::theme::perceptual_difference;\n#[must_use]\npub fn relative_luminance(c: Color) -> f32 {\n    fn channel(v: u8) -> f32 {\n        let v = f32::from(v) / 255.0;\n        if v <= 0.039_28 {\n            v / 12.92\n        } else {\n            ((v + 0.055) / 1.055).powf(2.4)\n        }\n    }\n    0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)\n}\n#[must_use]\npub fn contrast_ratio(a: Color, b: Color) -> f32 {\n    let (la, lb) = (relative_luminance(a), relative_luminance(b));\n    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };\n    (hi + 0.05) / (lo + 0.05)\n}\n'),
         ],
         ["guitk", "appearance", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The re-export names `perceptual_difference` too now.
             # A *correct* copy -- byte-for-byte what the toolkit computes, so
             # every ratio in the tree is unchanged and no legibility test can
             # see it. That is the point: the defect 537 fixed is the existence
@@ -18122,19 +18141,23 @@ DEFECTS = [
     ),
     (
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a hex colour's blue channel reads the green digits",
-        CAL,
+        TK_COLOR,
         [
-            ('    let b = u8::from_str_radix(s.get(4..6)?, 16).ok()?;',
-             '    let b = u8::from_str_radix(s.get(2..4)?, 16).ok()?;'),
+            ('            6 => Some(Self::rgb(byte(0)?, byte(2)?, byte(4)?)),\n',
+             '            6 => Some(Self::rgb(byte(0)?, byte(2)?, byte(2)?)),\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The calendar reads colours through the
+            # toolkit's `Color::from_hex_text` now, so the defect is there.
             # Every colour comes back on the blue-green diagonal. It still
             # parses and still round-trips through `export_text`, so nothing
             # short of a value assertion notices -- though in practice the
             # import path notices too, since a colour written out and read
             # back no longer matches what went in.
+            'a_colours_hex_text_reads_back_as_the_same_colour',
             'export_import_roundtrip',
+            'hex_text_reads_either_case_and_refuses_anything_else',
             'import_single_event',
             'parse_hex_color_valid',
         ],
@@ -19481,19 +19504,21 @@ DEFECTS = [
     ),
     (
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a hex colour made of non-hex characters parses as black",
-        CAL,
+        TK_COLOR,
         [
-            ('    let r = u8::from_str_radix(s.get(0..2)?, 16).ok()?;\n',
-             '    let r = u8::from_str_radix(s.get(0..2)?, 16).unwrap_or(0);\n'),
-            ('    let g = u8::from_str_radix(s.get(2..4)?, 16).ok()?;\n',
-             '    let g = u8::from_str_radix(s.get(2..4)?, 16).unwrap_or(0);\n'),
-            ('    let b = u8::from_str_radix(s.get(4..6)?, 16).ok()?;\n',
-             '    let b = u8::from_str_radix(s.get(4..6)?, 16).unwrap_or(0);\n'),
+            ('        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {\n            return None;\n        }\n',
+             ''),
+            ('            u8::from_str_radix(digits.get(i..i.checked_add(2)?)?, 16).ok()\n',
+             '            Some(u8::from_str_radix(digits.get(i..i.checked_add(2)?)?, 16).unwrap_or(0))\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The calendar reads colours through the
+            # toolkit's `Color::from_hex_text` now: this drops its digit check and reads
+            # a pair that is not hex as 0, which is what the old parser's defect did.
             # All three at once on purpose: `?` on the first channel hides a
             # broken second and third, so patching one is untestable.
+            'hex_text_reads_either_case_and_refuses_anything_else',
             'parse_hex_color_invalid_chars',
         ],
     ),

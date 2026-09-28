@@ -356,6 +356,7 @@ pub(crate) mod exit_list;
 pub mod fcntl;
 pub mod fcntl_ops;
 pub mod fdtable;
+pub mod fenv;
 pub mod file;
 pub mod fmtmsg;
 pub mod fnmatch;

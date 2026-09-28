@@ -175117,7 +175117,7 @@ glibc's `errno` (design-decisions §1132).
 **Tests:** `math::tests::every_answer_is_glibcs_or_within_its_error` replays
 23,113 calls answered by glibc 2.39 under WSL (`dlm/oracle/math_harness.py`).
 
-## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: OPEN**
+## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: OPEN (`<fenv.h>` done 2026-09-27: posix/src/fenv.rs, glibc's x86-64 fenv; the `long double` functions and `<complex.h>` remain)**
 
 **In short:** three parts of C's maths are missing from the C library, so a C
 program that uses them does not link: changing or reading the rounding mode
@@ -175135,6 +175135,11 @@ reached from Rust's standard library.
   `fnstcw`/`fldcw`/`fnstsw`/`fnclex` for the x87 unit, as `core::arch::asm!`.
   Until it exists, `rint` and `nearbyint` always round to nearest, which is
   also what they do after any `fesetround` a program could not link.
+  **Done 2026-09-27** (`posix/src/fenv.rs`): glibc 2.39's `sysdeps/x86_64/fpu`,
+  both units, with `feenableexcept`/`fedisableexcept`/`fegetexcept`,
+  `fesetexcept`/`fetestexceptflag` and `__flt_rounds`; `nearbyint` holds the
+  flags as glibc's does. Only C23's `fegetmode`/`fesetmode` wait -- musl's
+  headers, which the ABI gate checks against, have no `femode_t`.
 - **`long double`** -- on x86-64 an 80-bit x87 value: musl's
   `src/math/x86_64/*.s` for the functions the x87 unit computes (`sqrtl`,
   `fabsl`, `rintl`, `floorl` ... `expl`, `logl`, `atan2l`), and its generic

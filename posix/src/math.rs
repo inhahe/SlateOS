@@ -152,8 +152,8 @@ pub extern "C" fn roundevenf(x: f32) -> f32 {
     libm::roundevenf(x)
 }
 
-/// The integer nearest `x` in the current rounding direction -- which,
-/// until `<fenv.h>` can change it, is always to nearest, ties to even.
+/// The integer nearest `x` in the current rounding direction
+/// ([`crate::fenv::fesetround`]; to nearest, ties to even, by default).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn rint(x: f64) -> f64 {
     libm::rint(x)
@@ -165,17 +165,37 @@ pub extern "C" fn rintf(x: f32) -> f32 {
     libm::rintf(x)
 }
 
-/// [`rint`], without raising the inexact flag -- which nothing here can read
-/// yet, so the two are one.
+/// [`rint`], without raising the inexact flag: glibc's `s_nearbyint.c`
+/// rounds with the SSE unit's flags held, and puts them back. A NaN or an
+/// infinity is `x + x` outside the hold (a signaling NaN still raises
+/// invalid), and past 2^52 a double has no fraction to round.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nearbyint(x: f64) -> f64 {
-    libm::rint(x)
+    if !x.is_finite() {
+        return x + x;
+    }
+    if x.abs() >= 4_503_599_627_370_496.0 {
+        return x;
+    }
+    let held = crate::fenv::hold_sse();
+    let r = libm::rint(x);
+    crate::fenv::restore_sse(held);
+    r
 }
 
-/// [`nearbyint`] (float).
+/// [`nearbyint`] (float; past 2^23 a float has no fraction).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nearbyintf(x: f32) -> f32 {
-    libm::rintf(x)
+    if !x.is_finite() {
+        return x + x;
+    }
+    if x.abs() >= 8_388_608.0 {
+        return x;
+    }
+    let held = crate::fenv::hold_sse();
+    let r = libm::rintf(x);
+    crate::fenv::restore_sse(held);
+    r
 }
 
 /// An integral double as a `long`, or `LONG_MIN` -- what x86-64's conversion

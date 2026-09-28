@@ -376,6 +376,23 @@ pub(crate) fn abi_asserts() -> String {
     // One `cpu_set_t`: pthread.rs's copy, with its `__bits` field, went on
     // 2026-09-27, and its affinity calls take sched.rs's.
     abi!(out, hdrs, crate::sched::CpuSetT, "cpu_set_t", "sched.h");
+    // `__opcode` is a bit-field, which `offsetof` cannot name; the size and
+    // every field around it pin it.
+    abi!(
+        out,
+        hdrs,
+        crate::fenv::FenvT,
+        "fenv_t",
+        "fenv.h",
+        control_word as "__control_word",
+        status_word as "__status_word",
+        tags as "__tags",
+        eip as "__eip",
+        cs_selector as "__cs_selector",
+        data_offset as "__data_offset",
+        data_selector as "__data_selector",
+        mxcsr as "__mxcsr",
+    );
 
     // --- regex: `regex_t` is declared by value too ---------------------------
     abi!(out, hdrs, crate::regex::RegexT, "regex_t", "regex.h");

@@ -655,6 +655,16 @@ BASELINE_HEADER = """\
 # tree has no program that plays a picture.  Delete the line when the viewer
 # plays an AVIF sequence.
 #
+# Another line was ADDED on 2026-09-28, by lane C: gui/toolkit/src/codeview.rs,
+# the toolkit's code editor on screen (`guitk::codeview::CodeView`), over the
+# model and buffer that landed with it (codeedit.rs, textbuffer.rs, which it
+# reaches).  Its callers were looked for in lane C's own tree first, and none
+# edits code: the shell's text is a Run box, a search, a note.  The callers
+# are the two editors, apps/editor and apps/markdowneditor, which each carry
+# their own copy of an editor and are lane E's -- asked for in
+# requests/c-e-the-toolkit-has-a-code-editor.md.  Delete the line when an
+# application draws a CodeView.
+#
 # THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
 # rewrites this file from that constant, so anything added directly to the
 # generated file is deleted by the next run -- silently, because the gate

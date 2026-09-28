@@ -2549,7 +2549,11 @@ lane C's `guitk`.
   today's `client_pid` is a per-connection number. Unblocks the process
   explorer's window picker (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`,
   part 3), `open-questions.md` F-Q3's option B, and per-program (rather than
-  per-connection) grouping on the taskbar.
+  per-connection) grouping on the taskbar. **Blocked on lane A**
+  (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`):
+  a Linux-ABI program -- every Rust `std` one, the compositor included --
+  cannot reach channels at all; nothing can wait on channels beside sockets;
+  and until channel handles are unforgeable the peer's pid proves nothing.
 
 - `[F]` Port FreeRDP (line ~5058)
 

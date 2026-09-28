@@ -98,7 +98,11 @@ IPC for local clients, where the kernel already attests the peer:
 module has always planned that transport "when SlateOS's own channel IPC
 becomes reachable from a userspace application", and it now is. It is lane
 F's to build, and is on lane F's backlog in `roadmap.md` ("A display
-transport over channel IPC"). The same attested identity is what
+transport over channel IPC"). It in turn waits on lane A: a Linux-ABI program
+-- every Rust `std` one, the compositor included -- cannot reach channels,
+nothing can wait on channels beside sockets, and channel handles are
+guessable, so a peer's pid would prove nothing
+(`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`). The same attested identity is what
 `open-questions.md` F-Q3's option B needs, and what makes the taskbar's
 per-program grouping true rather than per-connection.
 

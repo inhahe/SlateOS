@@ -360,16 +360,23 @@ impl SystemFont {
     /// Breaks `text` into lines no wider than `max_width`, at whitespace.
     #[must_use]
     pub fn wrap(&self, text: &str, max_width: f32) -> Vec<String> {
+        self.wrap_lines(text, max_width)
+            .into_iter()
+            .map(|line| line.text)
+            .collect()
+    }
+
+    /// [`wrap`](Self::wrap), saying which lines are known to fit.
+    fn wrap_lines(&self, text: &str, max_width: f32) -> Vec<crate::shape::WrappedLine> {
         match &self.backend {
-            Backend::Outline(f) if self.fallbacks.is_empty() => f.wrap(text, max_width),
+            Backend::Outline(f) if self.fallbacks.is_empty() => f.wrap_lines(text, max_width),
             // With fallback faces the widths are this font's, not its own
             // face's: measured, like the bitmap face's, by the same rule.
-            Backend::Outline(_) => wrap_with(text, max_width, &|s| self.measure(s)),
+            Backend::Outline(_) => crate::shape::wrap_lines(text, max_width, &|s| self.shape(s)),
             // The bitmap face has no wrapper of its own; `ScaledFont`'s rule
             // (break at spaces, never inside a word) is not outline-specific,
-            // so it is reimplemented here against `measure` rather than
-            // duplicated into the bitmap type.
-            Backend::Bitmap { .. } => wrap_with(text, max_width, &|s| self.measure(s)),
+            // and `crate::shape::wrap` keeps it once, for any font that shapes.
+            Backend::Bitmap { .. } => crate::shape::wrap_lines(text, max_width, &|s| self.shape(s)),
         }
     }
 
@@ -382,8 +389,11 @@ impl SystemFont {
     #[must_use]
     pub fn wrap_hard(&self, text: &str, max_width: f32) -> Vec<String> {
         let mut lines = Vec::new();
-        for line in self.wrap(text, max_width) {
-            if self.measure(&line) <= max_width {
+        for wrapped in self.wrap_lines(text, max_width) {
+            // A line of several words was measured to fit as it was made;
+            // only one of a single word may be too wide.
+            let line = wrapped.text;
+            if wrapped.fits || self.measure(&line) <= max_width {
                 lines.push(line);
                 continue;
             }
@@ -853,36 +863,6 @@ fn builtin_scale(px_per_em: f32) -> u32 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let scale = (px_per_em / cell).round().clamp(1.0, 64.0) as u32;
     scale
-}
-
-/// Shared line-breaking rule, parameterised by how a run is measured.
-///
-/// Identical to [`ScaledFont::wrap`]: break at spaces, and leave a word that
-/// is longer than `max_width` alone on an over-long line rather than cutting
-/// it, because breaking inside a word is a per-script decision that belongs to
-/// a real line breaker.
-fn wrap_with(text: &str, max_width: f32, measure: &dyn Fn(&str) -> f32) -> Vec<String> {
-    let mut lines = Vec::new();
-    for para in text.split('\n') {
-        let mut line = String::new();
-        for word in para.split(' ') {
-            if line.is_empty() {
-                line.push_str(word);
-                continue;
-            }
-            let mut candidate = line.clone();
-            candidate.push(' ');
-            candidate.push_str(word);
-            if measure(&candidate) <= max_width {
-                line = candidate;
-            } else {
-                lines.push(core::mem::take(&mut line));
-                line.push_str(word);
-            }
-        }
-        lines.push(line);
-    }
-    lines
 }
 
 /// Widens a 1-bit glyph into the same 8-bit coverage the outline path
@@ -1480,6 +1460,61 @@ mod tests {
                 "ink at row {lowest} is below the baseline at {baseline}"
             );
         }
+    }
+
+    /// One shaping of each paragraph breaks where shaping every candidate
+    /// line does, at every width from narrower than a word to wider than the
+    /// text -- through spaces at either end of a paragraph or doubled, empty
+    /// paragraphs and a word wider than any line.
+    #[test]
+    fn wrapping_by_one_shaping_breaks_where_shaping_each_line_does() {
+        let font = SystemFont::builtin(16.0);
+        for text in [
+            "  the quick brown fox  jumps over the lazy dog. ",
+            "pack my box with five dozen liquor jugs\n\nhow vexingly quick daft zebras jump ",
+            "supercalifragilisticexpialidocious is long; so is antidisestablishmentarianism",
+            " a b  c   d e f g h i j k l m n o p q r s t u v w x y z ",
+            "",
+            "one",
+        ] {
+            let whole = font.measure(text).max(1.0);
+            for step in 0..=40u8 {
+                let width = whole * f32::from(step) / 32.0;
+                assert_eq!(
+                    font.wrap(text, width),
+                    crate::shape::wrap_by_words(text, width, &|s| font.measure(s)),
+                    "{text:?} at {width}"
+                );
+                assert_eq!(
+                    font.wrap_hard(text, width),
+                    hard_by_words(&font, text, width),
+                    "hard: {text:?} at {width}"
+                );
+            }
+        }
+    }
+
+    /// `wrap_hard` as it was first written: the word-by-word `wrap`, every
+    /// line measured again, and one too wide cut by one shaping.
+    fn hard_by_words(font: &SystemFont, text: &str, width: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        for line in crate::shape::wrap_by_words(text, width, &|s| font.measure(s)) {
+            if font.measure(&line) <= width {
+                lines.push(line);
+                continue;
+            }
+            let mut start = 0;
+            for cut in font.shape(&line).hard_breaks(width) {
+                if let Some(piece) = line.get(start..cut) {
+                    lines.push(piece.to_string());
+                    start = cut;
+                }
+            }
+            if let Some(rest) = line.get(start..) {
+                lines.push(rest.to_string());
+            }
+        }
+        lines
     }
 
     #[test]

@@ -2882,14 +2882,14 @@ fn button(f: &mut Frame<Target>, r: Rect, label: &str, target: Target, enabled: 
 fn main() -> ExitCode {
     // Parsed rather than indexed, so `--display` reaches the connection
     // instead of being refused as an option this game does not take.
-    let args = match app::Args::from_env() {
+    let args = match app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("pinball: {e}");
             return ExitCode::from(2);
         }
     };
-    refuse_arguments(args.rest.first().map(|a| std::ffi::OsStr::new(a.as_str())));
+    refuse_arguments(args.rest.first().map(std::ffi::OsString::as_os_str));
     let mut game = Pinball::from_settings();
     app::launch_with("pinball", args.display.as_deref(), &mut game)
 }

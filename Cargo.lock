@@ -15,6 +15,15 @@ name = "acpi"
 version = "0.1.0"
 
 [[package]]
+name = "aead"
+version = "0.6.1"
+dependencies = [
+ "blobby",
+ "crypto-common",
+ "inout",
+]
+
+[[package]]
 name = "aes"
 version = "0.1.0"
 
@@ -71,6 +80,16 @@ dependencies = [
  "quoting",
  "tararchive",
  "ziparchive",
+]
+
+[[package]]
+name = "argon2"
+version = "0.6.0"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures",
+ "password-hash",
 ]
 
 [[package]]
@@ -152,12 +171,12 @@ dependencies = [
 name = "backup-app"
 version = "0.1.0"
 dependencies = [
- "pathcodec",
  "pathtext",
  "quoting",
  "safeio",
  "scratchdir",
- "sha2",
+ "settingsfile",
+ "snapstore",
  "textfmt",
  "tzrules",
 ]
@@ -168,6 +187,10 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "base64ct"
+version = "1.8.3"
 
 [[package]]
 name = "battleship"
@@ -200,8 +223,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
+name = "blake2"
+version = "0.11.0"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "blkid"
 version = "0.1.0"
+
+[[package]]
+name = "blobby"
+version = "0.4.0"
+
+[[package]]
+name = "block-buffer"
+version = "0.12.1"
+dependencies = [
+ "hybrid-array",
+]
 
 [[package]]
 name = "blockbuf"
@@ -260,6 +301,7 @@ name = "calendar"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "calendarstore",
  "guitk",
  "oswindow",
  "pathtext",
@@ -268,6 +310,18 @@ dependencies = [
  "textfmt",
  "textline",
  "unsaved",
+]
+
+[[package]]
+name = "calendarstore"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "guitk",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
+ "textfmt",
 ]
 
 [[package]]
@@ -288,10 +342,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfg-if"
+version = "1.0.5"
+
+[[package]]
 name = "cgroup"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "chacha20"
+version = "0.10.2"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.11.0"
+dependencies = [
+ "aead",
+ "chacha20",
+ "cipher",
+ "poly1305",
 ]
 
 [[package]]
@@ -360,6 +437,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cipher"
+version = "0.5.2"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
+ "inout",
+]
+
+[[package]]
 name = "civildate"
 version = "0.1.0"
 
@@ -377,6 +463,10 @@ dependencies = [
  "pathtext",
  "safeio",
 ]
+
+[[package]]
+name = "cmov"
+version = "0.5.4"
 
 [[package]]
 name = "colorpicker"
@@ -473,6 +563,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufeatures"
+version = "0.3.1"
+
+[[package]]
 name = "cpupower"
 version = "0.1.0"
 dependencies = [
@@ -499,7 +593,13 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
- "pwkdf",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "seal",
+ "settingsfile",
+ "sha2",
+ "textfmt",
 ]
 
 [[package]]
@@ -533,10 +633,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto-common"
+version = "0.2.2"
+dependencies = [
+ "hybrid-array",
+]
+
+[[package]]
 name = "ctags"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "ctutils"
+version = "0.4.2"
+dependencies = [
+ "cmov",
 ]
 
 [[package]]
@@ -697,6 +811,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "digest"
+version = "0.11.3"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
+ "ctutils",
+]
+
+[[package]]
 name = "diskanalyzer"
 version = "0.1.0"
 dependencies = [
@@ -715,6 +838,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recyclebin",
 ]
 
 [[package]]
@@ -791,6 +915,12 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathcodec",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -1215,6 +1345,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-literal"
+version = "1.1.0"
+
+[[package]]
 name = "hexdump"
 version = "0.1.0"
 dependencies = [
@@ -1290,6 +1424,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hybrid-array"
+version = "0.4.15"
+dependencies = [
+ "typenum",
+]
+
+[[package]]
 name = "iconv"
 version = "0.1.0"
 dependencies = [
@@ -1354,6 +1495,13 @@ dependencies = [
 [[package]]
 name = "inotify"
 version = "0.1.0"
+
+[[package]]
+name = "inout"
+version = "0.2.2"
+dependencies = [
+ "hybrid-array",
+]
 
 [[package]]
 name = "inputsettings"
@@ -1617,9 +1765,11 @@ dependencies = [
  "posix",
  "pwkdf",
  "scratchdir",
+ "settingsfile",
  "sha2",
  "tzrules",
  "userdb",
+ "yamldoc",
 ]
 
 [[package]]
@@ -1852,6 +2002,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "settingsfile",
  "unsaved",
 ]
 
@@ -2230,6 +2381,7 @@ name = "osfont"
 version = "0.1.0"
 dependencies = [
  "imagecodec",
+ "osfont",
 ]
 
 [[package]]
@@ -2289,6 +2441,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.6.1"
+dependencies = [
+ "phc",
+]
+
+[[package]]
 name = "passwordgen"
 version = "0.1.0"
 dependencies = [
@@ -2298,6 +2457,8 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -2342,6 +2503,14 @@ dependencies = [
  "killconv",
  "procinfo",
  "quoting",
+]
+
+[[package]]
+name = "phc"
+version = "0.6.1"
+dependencies = [
+ "base64ct",
+ "ctutils",
 ]
 
 [[package]]
@@ -2436,6 +2605,14 @@ dependencies = [
  "quoting",
  "scratchdir",
  "userdb",
+]
+
+[[package]]
+name = "poly1305"
+version = "0.9.1"
+dependencies = [
+ "cpufeatures",
+ "universal-hash",
 ]
 
 [[package]]
@@ -2785,6 +2962,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "seal"
+version = "0.1.0"
+dependencies = [
+ "aead",
+ "argon2",
+ "blake2",
+ "chacha20",
+ "chacha20poly1305",
+ "hex-literal",
+ "poly1305",
+]
+
+[[package]]
 name = "selinux"
 version = "0.1.0"
 dependencies = [
@@ -2924,6 +3114,18 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+]
+
+[[package]]
+name = "snapstore"
+version = "0.1.0"
+dependencies = [
+ "pathcodec",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "sha2",
+ "tzrules",
 ]
 
 [[package]]
@@ -3247,6 +3449,11 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
+ "snapstore",
 ]
 
 [[package]]
@@ -3432,6 +3639,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "typenum"
+version = "1.20.1"
+
+[[package]]
 name = "typingtutor"
 version = "0.1.0"
 dependencies = [
@@ -3483,6 +3694,14 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+]
+
+[[package]]
+name = "universal-hash"
+version = "0.6.1"
+dependencies = [
+ "crypto-common",
+ "ctutils",
 ]
 
 [[package]]

@@ -518,6 +518,30 @@ pub struct LockScreenConfig {
     pub wallpaper_tint_alpha: u8,
 }
 
+/// The lock screen's own settings file, `lockscreen.yaml` -- written by the
+/// Settings program's Screen Lock page (C-Q26, option A). The name is repeated
+/// there as `settings::lockscreen::CLOCK_CONFIG`: neither program can depend
+/// on the other.
+const CONFIG_NAME: &str = "lockscreen";
+
+impl LockScreenConfig {
+    /// The defaults, with what the user chose in Settings over them.
+    ///
+    /// Until 2026-09-27 whether the clock showed seconds or the date was
+    /// compiled in, and the same for everyone.
+    #[must_use]
+    pub fn from_settings(doc: &yamldoc::Document) -> Self {
+        let mut config = Self::default();
+        if let Some(seconds) = doc.get_bool(&["clock", "seconds"]) {
+            config.show_clock_seconds = seconds;
+        }
+        if let Some(date) = doc.get_bool(&["clock", "date"]) {
+            config.show_date = date;
+        }
+        config
+    }
+}
+
 impl Default for LockScreenConfig {
     fn default() -> Self {
         Self {
@@ -2252,7 +2276,7 @@ fn main() -> ExitCode {
 
     let mut screen = LockScreen::new(
         system_users(users_yaml),
-        LockScreenConfig::default(),
+        LockScreenConfig::from_settings(&settingsfile::load(CONFIG_NAME)),
         Some(Box::new(SystemAuthority::new())),
     );
     // Before the first frame, so the clock's opening reading is the real time
@@ -3829,6 +3853,21 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // == The clock is the user's to set (2026-09-27, C-Q26) ====================
+
+    #[test]
+    fn what_settings_chose_for_the_clock_is_what_the_lock_screen_shows() {
+        let doc = yamldoc::Document::parse("clock:\n  seconds: true\n  date: false\n");
+        let config = LockScreenConfig::from_settings(&doc);
+        assert!(config.show_clock_seconds);
+        assert!(!config.show_date);
+        let unset = LockScreenConfig::from_settings(&yamldoc::Document::new());
+        assert!(
+            !unset.show_clock_seconds && unset.show_date,
+            "unset is not the default"
         );
     }
 }

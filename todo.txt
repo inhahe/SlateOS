@@ -56560,6 +56560,70 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
+## C-Q17: what is left of "wire the five up" (lane E, 2026-09-27)
+
+The operator answered C-Q17 (lane C's design-decisions §1423): the five
+finished-but-unreachable features are wired up, and where a live twin exists
+the survivor takes everything both could do. State, measured 2026-09-27:
+
+* installer bootloader setup -- wired (known-issues
+  `TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS`, fixed 09-25).
+* system information's hardware queries -- wired (fixed 09-15).
+* image viewer's video -- the code is gone; `apps/videoplayer` is the live
+  twin and had everything it did.
+* process explorer's six tools -- two wired (Environment, Memory); window
+  picker, wait analyzer and affinity wait on lanes F, A and A/D
+  (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`), priority
+  on `requests/e-ad-renicing-another-process-renices-the-caller.md`.
+* **settings' remote page (`apps/settings/src/remote.rs`, still under
+  `#![allow(dead_code)]`)** -- the one lane E can move now, in two halves:
+  - *Dynamic DNS.* The live page reads `/proc/dyndns` and cannot change
+    anything (`TD-C-DYNDNS-PAGE-IS-READ-ONLY`). The kernel's
+    `kernel/src/fs/dyndns.rs` only keeps state -- `update_now(id, ip)` records
+    "success" with an address it is handed; nothing in the kernel can make
+    the HTTP call a provider needs, and by the microkernel rule it should
+    not. So the fix is not the syscalls that entry proposed: a userspace
+    service (lane D) that reads a YAML config, asks the providers, and
+    publishes its status; Settings edits that config, with `remote.rs`'s
+    `ProviderSettings` (per-provider credential shapes) as the editor's model,
+    and the kernel module goes (lane A). Filed 2026-09-27 as
+    `requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`;
+    the editor follows once the shape is agreed.
+  - *Remote desktop access* (let others connect to this machine: port,
+    authentication, encryption, firewall/UPnP). No server exists to
+    configure: `apps/remotedesktop` is a VNC *client*, and the kernel's
+    `kernel/src/fs/remotedesktop.rs` is a settings-and-sessions model under
+    `#![allow(dead_code)]` with no encoder behind it. Wiring the page now
+    would be a panel of settings nothing reads. Needs: the server (whose?
+    the compositor's frames are lane F's), or an operator follow-up on
+    whether "wire it up" meant building one.
+
+## ~~explorer: Ask when a pasted name is taken (lane E, 2026-09-27)~~ -- DONE 2026-09-27
+
+**Done:** the executor waits at a taken name and the window asks; "Ask each
+time" is the menu's first choice and the default (design-decisions §1221).
+The original entry, for the record:
+
+The folder menu offers keep both / skip / replace if newer / replace for a
+paste or a drop onto a name the folder already has (C-Q26), and not "Ask",
+because nothing can ask yet:
+
+* `apps/explorer/src/fileops.rs`, copy: `ConflictPolicy::Ask` pushes
+  `FileOpEvent::Conflict` and returns `ActionOutcome::Skipped` -- "In a real
+  async implementation the caller would respond. For now, skip." A move
+  with `Ask` skips without the event.
+* The window has no conflict dialog.
+
+What it wants: the executor stops at the conflicting action in a state that
+says so (`src`, `dest`, and whether it is a copy or a move), `step()` does
+nothing further until the caller answers with keep both / skip / replace
+(and "the same for the rest"), and the answer is applied to that action
+before the loop moves on. The window draws the question when the
+operation it is stepping stops there -- names, sizes and dates of both --
+and "Ask" joins the menu's choices. The comment on
+`columnprefs::CONFLICT_CHOICES` says the executor can pause; it cannot, and
+the comment goes when this is done.
+
 ## credmanager: what a credential manager still cannot do
 
 Adding a credential and copying a field are wired up as of this change. The
@@ -56570,14 +56634,15 @@ what hid the Add button doing nothing.
 
 In rough order of how much a user would miss it:
 
-* **Edit** — `Vault::update_entry` and `get_entry_mut`. The detail view shows a
-  credential and cannot change one, so a password that has been rotated cannot
-  be recorded.
-* **Delete** — `Vault::remove_entry`.
-* **Export and backup** — `export_csv`, `escape_csv`, `serialize_backup`, all
-  advertised in the module doc. There is no filesystem to write to; the
-  clipboard is the sink these can have today, which is what `/copy` already
-  uses.
+* ~~**Edit**~~ — DONE 2026-09-27 (lane E): the entry's Edit button (Ctrl+E)
+  opens the form filled in; saving changes what the form shows and keeps what
+  it does not (a login's one-time-code secret, a card number left alone, its
+  tags, folder, star and creation time).
+* ~~**Delete**~~ — DONE 2026-09-27 (lane E): the entry's Delete button and the
+  Delete key ask first.
+* ~~**Export and backup**~~ — DONE 2026-09-27 (lane E): Settings has Back
+  up, Restore and Export (C-Q25, §1417); `serialize_backup`, which left every
+  password out, is deleted.
 * **Favourites** — `Vault::toggle_star`. The sidebar filters by favourites and
   nothing can set one, so that filter is always empty. Same shape for
   **tags** (`add_tag`/`remove_tag`, and the sidebar's tag list) and
@@ -56589,8 +56654,8 @@ In rough order of how much a user would miss it:
   and never read.
 * **Breach flagging** — `Vault::set_compromised`, which needs a feed to learn
   from as well as a control.
-* **Persistence** — `Vault::from_stored` is the door a loader would come in
-  through. Every launch opens an empty vault, as the module doc says.
+* ~~**Persistence**~~ — DONE 2026-09-27 (lane E): the vault is kept sealed
+  on disk (`src/vaultfile.rs`), and Edit and Delete came with it.
 
 One duplicate to resolve rather than build: `Vault::search_entries` is a second
 full-text search beside the toolbar's, which filters through
@@ -58766,6 +58831,12 @@ test of the fixture, not of the bound.
   `origin/main` (`git show origin/main:gui/toolkit/src/color.rs | grep
   hex_text`). Then each copy goes; files written afterwards carry lowercase
   hex, which the old readers already accept, so old and new files both load.
+
+- ~~**A file named on the command line may be any bytes.**~~ DONE 2026-09-27
+  (`b0471617a`): `ArgsOs` reached `origin/main`, and the eight programs that
+  open files named on the command line -- plus match3 and pinball -- read
+  their arguments through it; the request is closed and `known-issues.md` ->
+  `[E] "Open with" opened nothing...` is FIXED.
 
 - **The terminal has never run on SlateOS.** Its real child -- `forkpty` plus
   `execve` through `libcall::pty` -- is tested only on a Linux host against

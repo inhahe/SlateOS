@@ -87,8 +87,54 @@ pub enum ConflictPolicy {
     OverwriteIfNewer,
     /// Rename the destination with a numeric suffix, e.g. `file (2).txt`.
     Rename,
-    /// Emit a [`FileOpEvent::Conflict`] and wait for the caller to decide.
+    /// Stop at the taken name -- emit a [`FileOpEvent::Conflict`] and wait,
+    /// doing nothing more, until the caller answers with
+    /// [`OperationExecutor::answer`].
+    ///
+    /// Until 2026-09-27 this emitted the event and then *skipped the file*
+    /// ("In a real async implementation the caller would respond. For now,
+    /// skip."), and a link skipped without even the event -- so a caller that
+    /// chose `Ask` got `Skip` and a notice it could no longer act on.
     Ask,
+}
+
+/// A taken name the operation has stopped at, under [`ConflictPolicy::Ask`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictQuestion {
+    /// The planned action it stopped at.
+    pub action: u32,
+    /// What is being copied, moved or linked there.
+    pub src: PathBuf,
+    /// The name that is taken.
+    pub dest: PathBuf,
+}
+
+/// What to do with a taken name the operation has asked about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictAnswer {
+    /// Put the new one beside it, numbered: `name (2).txt`.
+    KeepBoth,
+    /// Leave the one there, and do not copy this one.
+    Skip,
+    /// Put the new one in its place.
+    Replace,
+    /// Stop the whole operation here. What is done stays done -- see
+    /// [`OperationExecutor::cancel`].
+    Stop,
+}
+
+impl ConflictAnswer {
+    /// The policy that carries the answer out. `Stop` has none: it is not a
+    /// way of dealing with a file.
+    #[must_use]
+    pub fn policy(self) -> Option<ConflictPolicy> {
+        match self {
+            Self::KeepBoth => Some(ConflictPolicy::Rename),
+            Self::Skip => Some(ConflictPolicy::Skip),
+            Self::Replace => Some(ConflictPolicy::Overwrite),
+            Self::Stop => None,
+        }
+    }
 }
 
 /// What to do when a per-file error occurs.
@@ -243,6 +289,15 @@ pub struct PlannedAction {
     pub size: u64,
     /// Whether this action is a directory creation rather than a file copy.
     pub is_dir: bool,
+    /// Whether the source is a symbolic link -- or, on Windows, a junction --
+    /// which is copied, moved and deleted *as the link* and never followed.
+    ///
+    /// Until 2026-09-27 every scan followed links. A permanent delete of a
+    /// folder holding a link to another folder deleted the other folder's
+    /// files, through the link; a move of it copied them and then deleted
+    /// them at the source; a link to a folder above it made the scan endless.
+    /// None of those files was ever selected.
+    pub is_link: bool,
     /// Unique index inside the plan (stable across pause/resume).
     pub index: u32,
 }
@@ -304,14 +359,73 @@ impl OperationPlan {
             action.src.hash(&mut hasher);
             action.dest.hash(&mut hasher);
             action.is_dir.hash(&mut hasher);
+            action.is_link.hash(&mut hasher);
         }
         hasher.finish()
     }
 
     /// Build a plan for copying `sources` into `dest_dir`.
+    ///
+    /// See [`plan_transfer`](Self::plan_transfer) for what happens to a
+    /// source that is already there, and to a folder asked to go inside
+    /// itself.
     pub fn plan_copy(
         sources: &[PathBuf],
         dest_dir: &Path,
+        conflict_policy: ConflictPolicy,
+        error_policy: ErrorPolicy,
+    ) -> io::Result<Self> {
+        Self::plan_transfer(
+            sources,
+            dest_dir,
+            FileOperation::Copy,
+            conflict_policy,
+            error_policy,
+        )
+    }
+
+    /// Build a plan for moving `sources` into `dest_dir`.
+    ///
+    /// A source already in `dest_dir` is left out: see
+    /// [`plan_transfer`](Self::plan_transfer).
+    pub fn plan_move(
+        sources: &[PathBuf],
+        dest_dir: &Path,
+        conflict_policy: ConflictPolicy,
+        error_policy: ErrorPolicy,
+    ) -> io::Result<Self> {
+        Self::plan_transfer(
+            sources,
+            dest_dir,
+            FileOperation::Move,
+            conflict_policy,
+            error_policy,
+        )
+    }
+
+    /// What copying and moving share: every source, and everything under
+    /// it, with where it goes.
+    ///
+    /// **A source whose destination is itself is never a taken name.** A
+    /// paste back into the folder it came from, or a drop onto its own
+    /// folder, puts the source exactly where it already is, and settling
+    /// that with the conflict policy is how data is lost: "replace it"
+    /// replaces a file with itself, and a move then deletes the source --
+    /// the only copy there is. So a copy of it is a duplicate, beside it and
+    /// numbered (`notes (2).txt`), whatever the policy says, which is what
+    /// a paste into the same folder means everywhere else; and a move of it
+    /// has nothing to do and is left out of the plan. The menu's "Replace
+    /// it" (2026-09-27) is what made the first reachable: until then the
+    /// policy was always to keep both, whose numbered copy hid the problem.
+    ///
+    /// **A folder cannot go inside itself.** Copying or moving `A` into `A`,
+    /// or anywhere under it, is refused: the tree read now would be written
+    /// into a branch of itself, and a move would then try to delete the
+    /// folder it had just been put in.
+    fn plan_transfer(
+        sources: &[PathBuf],
+        dest_dir: &Path,
+        operation: FileOperation,
         conflict_policy: ConflictPolicy,
         error_policy: ErrorPolicy,
     ) -> io::Result<Self> {
@@ -320,31 +434,39 @@ impl OperationPlan {
         let mut total_bytes: u64 = 0;
 
         for src in sources {
-            Self::scan_source(src, dest_dir, &mut actions, &mut index, &mut total_bytes)?;
+            let file_name = src.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "source has no file name")
+            })?;
+            if is_real_dir(src) && inside(dest_dir, src) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "\u{201c}{}\u{201d} cannot go inside itself",
+                        file_name.shown()
+                    ),
+                ));
+            }
+            let mut dest = dest_dir.join(file_name);
+            if same_entry(src, &dest) {
+                if operation == FileOperation::Move {
+                    continue;
+                }
+                dest = resolve_rename(&dest);
+            }
+            Self::scan_source(src, &dest, &mut actions, &mut index, &mut total_bytes)?;
         }
 
-        let total_files = actions.iter().filter(|a| !a.is_dir).count() as u32;
+        let total_files =
+            u32::try_from(actions.iter().filter(|a| !a.is_dir).count()).unwrap_or(u32::MAX);
 
         Ok(Self {
-            operation: FileOperation::Copy,
+            operation,
             actions,
             total_bytes,
             total_files,
             conflict_policy,
             error_policy,
         })
-    }
-
-    /// Build a plan for moving `sources` into `dest_dir`.
-    pub fn plan_move(
-        sources: &[PathBuf],
-        dest_dir: &Path,
-        conflict_policy: ConflictPolicy,
-        error_policy: ErrorPolicy,
-    ) -> io::Result<Self> {
-        let mut plan = Self::plan_copy(sources, dest_dir, conflict_policy, error_policy)?;
-        plan.operation = FileOperation::Move;
-        Ok(plan)
     }
 
     /// Build a plan for linking `sources` into `dest_dir`.
@@ -376,11 +498,20 @@ impl OperationPlan {
             let Some(name) = src.file_name() else {
                 continue;
             };
+            // A link made in the folder its target is in goes beside it,
+            // numbered, whatever the policy: "replace it" would delete the
+            // file to put a link to the deleted file in its place. See
+            // `plan_transfer`.
+            let mut dest = dest_dir.join(name);
+            if same_entry(src, &dest) {
+                dest = resolve_rename(&dest);
+            }
             actions.push(PlannedAction {
-                dest: Some(dest_dir.join(name)),
+                dest: Some(dest),
                 // Recorded from the *source*, and only so that a failure can
                 // say "directory" or "file". Nothing walks it.
                 is_dir: src.is_dir(),
+                is_link: is_link(src),
                 src: src.clone(),
                 size: 0,
                 index: u32::try_from(index).unwrap_or(u32::MAX),
@@ -420,89 +551,154 @@ impl OperationPlan {
         })
     }
 
-    /// Recursively scan a source path and add planned copy actions.
+    /// Every action under `src`: `src` going to `dest`, and everything under
+    /// it to the same place under `dest` -- a folder before what is in it, in
+    /// the order the folder lists them.
+    ///
+    /// Given the destination rather than the folder it goes in, because the
+    /// top of the tree is not always named as the source is: a duplicate in
+    /// the source's own folder is `name (2)`, and everything inside it has to
+    /// follow it there.
+    ///
+    /// **A walk with a list of its own, not a recursion.** A recursion is as
+    /// deep as the tree, and a debug build's frames overflowed a test thread's
+    /// stack about 500 folders down -- the main thread on Windows has half
+    /// that, and an overflow takes the window with it. [`MAX_TREE_DEPTH`]
+    /// still bounds the walk, for a tree that is a loop.
     fn scan_source(
         src: &Path,
-        dest_base: &Path,
+        dest: &Path,
         actions: &mut Vec<PlannedAction>,
         index: &mut u32,
         total_bytes: &mut u64,
     ) -> io::Result<()> {
-        let file_name = src.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "source has no file name")
-        })?;
-        let dest = dest_base.join(file_name);
-
-        let meta = fs::metadata(src)?;
-        if meta.is_dir() {
-            // Directory creation action.
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: Some(dest.clone()),
-                size: 0,
-                is_dir: true,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
-
-            // Recurse into children.
-            for entry in fs::read_dir(src)? {
-                let entry = entry?;
-                Self::scan_source(&entry.path(), &dest, actions, index, total_bytes)?;
+        // What is still to be looked at: where it is, where it goes, and how
+        // far down. Popped from the end, so a folder's contents -- pushed in
+        // reverse -- come off in the folder's own order, each whole before
+        // the next, as a recursion would take them.
+        let mut pending: Vec<(PathBuf, PathBuf, usize)> =
+            vec![(src.to_path_buf(), dest.to_path_buf(), 0)];
+        while let Some((src, dest, depth)) = pending.pop() {
+            too_deep(&src, depth)?;
+            // `symlink_metadata`, which does not follow: a link is one action,
+            // copied as the link. See `PlannedAction::is_link`.
+            let meta = fs::symlink_metadata(&src)?;
+            if meta.file_type().is_symlink() {
+                actions.push(PlannedAction {
+                    src,
+                    dest: Some(dest),
+                    size: 0,
+                    is_dir: false,
+                    is_link: true,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+                continue;
             }
-        } else {
-            let size = meta.len();
-            *total_bytes = total_bytes.saturating_add(size);
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: Some(dest),
-                size,
-                is_dir: false,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
+            if meta.is_dir() {
+                let mut contents = Vec::new();
+                for entry in fs::read_dir(&src)? {
+                    let entry = entry?;
+                    contents.push((
+                        entry.path(),
+                        dest.join(entry.file_name()),
+                        depth.saturating_add(1),
+                    ));
+                }
+                actions.push(PlannedAction {
+                    src,
+                    dest: Some(dest),
+                    size: 0,
+                    is_dir: true,
+                    is_link: false,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+                pending.extend(contents.into_iter().rev());
+            } else {
+                let size = meta.len();
+                *total_bytes = total_bytes.saturating_add(size);
+                actions.push(PlannedAction {
+                    src,
+                    dest: Some(dest),
+                    size,
+                    is_dir: false,
+                    is_link: false,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+            }
         }
-
         Ok(())
     }
 
-    /// Recursively scan a source path and add planned delete actions.
+    /// Every action a delete of `src` needs: what is in a folder before the
+    /// folder, so that deleting in order empties each folder before it goes.
     ///
-    /// Directories are scanned depth-first so that children appear before their
-    /// parent in the action list; this allows deletion in forward order.
+    /// A walk with a list of its own, for [`scan_source`](Self::scan_source)'s
+    /// reason.
     fn scan_delete(
         src: &Path,
         actions: &mut Vec<PlannedAction>,
         index: &mut u32,
         total_bytes: &mut u64,
     ) -> io::Result<()> {
-        let meta = fs::metadata(src)?;
-        if meta.is_dir() {
-            // Children first.
-            for entry in fs::read_dir(src)? {
-                let entry = entry?;
-                Self::scan_delete(&entry.path(), actions, index, total_bytes)?;
+        // What is still to be looked at, how far down, and -- for a folder
+        // whose contents are already on the list -- that only the folder
+        // itself is left to plan.
+        let mut pending: Vec<(PathBuf, usize, bool)> = vec![(src.to_path_buf(), 0, false)];
+        while let Some((src, depth, contents_listed)) = pending.pop() {
+            if contents_listed {
+                actions.push(PlannedAction {
+                    src,
+                    dest: None,
+                    size: 0,
+                    is_dir: true,
+                    is_link: false,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+                continue;
             }
-            // Then the directory itself.
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: None,
-                size: 0,
-                is_dir: true,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
-        } else {
-            let size = meta.len();
-            *total_bytes = total_bytes.saturating_add(size);
-            actions.push(PlannedAction {
-                src: src.to_path_buf(),
-                dest: None,
-                size,
-                is_dir: false,
-                index: *index,
-            });
-            *index = index.checked_add(1).unwrap_or(*index);
+            too_deep(&src, depth)?;
+            // `symlink_metadata`, which does not follow: a link is deleted as
+            // the link, and what it names is left alone. Following it deleted the
+            // files of whatever folder the link reached.
+            let meta = fs::symlink_metadata(&src)?;
+            if meta.file_type().is_symlink() {
+                actions.push(PlannedAction {
+                    src,
+                    dest: None,
+                    size: 0,
+                    is_dir: false,
+                    is_link: true,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+                continue;
+            }
+            if meta.is_dir() {
+                // The folder goes back on the list, to be planned once what is
+                // in it has been; its contents go on top of it.
+                let mut contents = Vec::new();
+                for entry in fs::read_dir(&src)? {
+                    contents.push((entry?.path(), depth.saturating_add(1), false));
+                }
+                pending.push((src, depth, true));
+                pending.extend(contents.into_iter().rev());
+            } else {
+                let size = meta.len();
+                *total_bytes = total_bytes.saturating_add(size);
+                actions.push(PlannedAction {
+                    src,
+                    dest: None,
+                    size,
+                    is_dir: false,
+                    is_link: false,
+                    index: *index,
+                });
+                *index = index.checked_add(1).unwrap_or(*index);
+            }
         }
         Ok(())
     }
@@ -767,6 +963,11 @@ pub struct ExecutorConfig {
 /// operation can be resumed if interrupted.
 pub struct OperationExecutor {
     plan: OperationPlan,
+    /// `plan.id()`, worked out once: it hashes every action's paths, and the
+    /// window asks for it every frame while a question is up -- a copy of a
+    /// hundred thousand files would hash them all sixty times a second. The
+    /// plan does not change after it is made, so neither does this.
+    id: u64,
     progress: OperationProgress,
     undo_entries: Vec<(PathBuf, UndoTarget)>,
     errors: Vec<FileOpError>,
@@ -786,13 +987,27 @@ pub struct OperationExecutor {
     stopped: bool,
     /// A file copy part-way through, held between steps.
     cursor: Option<CopyCursor>,
+    /// The taken name the operation has stopped at, under
+    /// [`ConflictPolicy::Ask`]. While it is here nothing moves; see
+    /// [`waiting_on`](Self::waiting_on).
+    question: Option<ConflictQuestion>,
+    /// How to deal with the taken name of one action, by the action's index:
+    /// the answer to its question. Held for as long as that action takes,
+    /// because a file copied in pieces meets its taken name again on every
+    /// step until the last piece lands.
+    answered: Option<(u32, ConflictPolicy)>,
+    /// "The same for the rest": the answer given for every later taken name,
+    /// in place of the plan's policy.
+    policy_for_the_rest: Option<ConflictPolicy>,
 }
 
 impl OperationExecutor {
     pub fn new(plan: OperationPlan) -> Self {
         let progress = OperationProgress::new(plan.total_bytes, plan.total_files);
+        let id = plan.id();
         Self {
             plan,
+            id,
             progress,
             undo_entries: Vec::new(),
             errors: Vec::new(),
@@ -804,6 +1019,9 @@ impl OperationExecutor {
             next: 0,
             stopped: false,
             cursor: None,
+            question: None,
+            answered: None,
+            policy_for_the_rest: None,
         }
     }
 
@@ -815,11 +1033,18 @@ impl OperationExecutor {
     /// window should drive `begin`/`step`/`finish` itself -- see `step`.
     ///
     /// Returns the events emitted during execution.
+    ///
+    /// A plan under [`ConflictPolicy::Ask`] cannot be run this way: there is
+    /// nobody to answer, so the first taken name stops it as though it had
+    /// been told to stop there.
     pub fn execute(&mut self) -> Vec<FileOpEvent> {
         if !self.begin() {
             return std::mem::take(&mut self.events);
         }
         while !self.is_done() {
+            if self.question.is_some() {
+                self.answer(ConflictAnswer::Stop, false);
+            }
             self.step();
         }
         self.finish();
@@ -840,8 +1065,53 @@ impl OperationExecutor {
     /// it was stopped half way; every individual file is wholly moved or
     /// wholly not. The journal is kept -- it is only removed on `Completed` --
     /// so the operation can be resumed instead.
+    ///
+    /// An operation waiting on an answer is stopped too: its question is
+    /// withdrawn, or `step` -- which does nothing while one is up -- would
+    /// never reach the check that ends it.
     pub fn cancel(&mut self) {
+        self.question = None;
         self.progress.state = OperationState::Cancelled;
+    }
+
+    /// The taken name the operation has stopped at, if it has.
+    ///
+    /// While there is one, [`step`](Self::step) does nothing and
+    /// [`is_done`](Self::is_done) answers false: the operation is neither
+    /// finished nor moving, and a caller stepping it in a loop must stop
+    /// asking until it has been answered.
+    #[must_use]
+    pub fn waiting_on(&self) -> Option<&ConflictQuestion> {
+        self.question.as_ref()
+    }
+
+    /// Answer the question the operation stopped at, and let it go on.
+    ///
+    /// `for_the_rest` makes the same answer for every later taken name in
+    /// this operation, which then stops at none of them. Nothing happens when
+    /// there is no question.
+    pub fn answer(&mut self, answer: ConflictAnswer, for_the_rest: bool) {
+        let Some(question) = self.question.take() else {
+            return;
+        };
+        match answer.policy() {
+            None => self.cancel(),
+            Some(policy) => {
+                self.answered = Some((question.action, policy));
+                if for_the_rest {
+                    self.policy_for_the_rest = Some(policy);
+                }
+                self.progress.state = OperationState::Running;
+            }
+        }
+    }
+
+    /// Which plan this is carrying out, for a caller that has to find the
+    /// operation again -- the answer to a question comes back to the
+    /// operation that asked it.
+    #[must_use]
+    pub fn plan_id(&self) -> u64 {
+        self.id
     }
 
     /// Take the events emitted since this was last called.
@@ -896,8 +1166,18 @@ impl OperationExecutor {
         self.next = 0;
         self.stopped = false;
 
+        // Nothing to do -- a move of files into the folder they are already
+        // in plans nothing. There is no destination to keep a journal in, and
+        // `journal_dir` would fall back to the process's working directory and
+        // write one there.
+        if self.actions.is_empty() {
+            self.progress.state = OperationState::Completed;
+            self.push_summary();
+            return true;
+        }
+
         let dest_dir = self.journal_dir();
-        let plan_id = self.plan.id();
+        let plan_id = self.id;
         match OperationJournal::open(&dest_dir, plan_id) {
             Ok(journal) => {
                 self.journal = Some(journal);
@@ -935,8 +1215,12 @@ impl OperationExecutor {
     /// journal already records, so it is also the unit an interrupted
     /// operation resumes from.
     ///
-    /// No-op once [`is_done`](Self::is_done) answers true.
+    /// No-op once [`is_done`](Self::is_done) answers true, and while the
+    /// operation is waiting on an answer ([`waiting_on`](Self::waiting_on)).
     pub fn step(&mut self) {
+        if self.question.is_some() {
+            return;
+        }
         // Taken and put back rather than borrowed: the body below calls
         // `self.execute_*_action`, which borrows `self` mutably, so a live
         // `&mut self.journal` across it would not compile. Restoring it is the
@@ -960,7 +1244,14 @@ impl OperationExecutor {
         self.next = self.next.saturating_add(1);
         let action = &action;
         let operation = self.plan.operation.clone();
-        let conflict_policy = self.plan.conflict_policy;
+        // The answer to this action's own question first, then "the same for
+        // the rest", then what the plan was made with.
+        let conflict_policy = match self.answered {
+            Some((index, policy)) if index == action.index => policy,
+            _ => self
+                .policy_for_the_rest
+                .unwrap_or(self.plan.conflict_policy),
+        };
         let error_policy = self.plan.error_policy;
 
         if self.progress.state == OperationState::Cancelled {
@@ -1000,6 +1291,13 @@ impl OperationExecutor {
             // least one byte until the file ends.
             Ok(ActionOutcome::Partial) => {
                 self.next = self.next.saturating_sub(1);
+            }
+            // Stopped at a taken name: back to the same action, as for
+            // `Partial`, and nothing more until the question is answered --
+            // not journalled, not counted, nothing to undo.
+            Ok(ActionOutcome::Waiting) => {
+                self.next = self.next.saturating_sub(1);
+                self.progress.state = OperationState::Paused;
             }
             Ok(ActionOutcome::Done) => {
                 // A journal write that fails only costs redone work on a
@@ -1062,7 +1360,13 @@ impl OperationExecutor {
                                 // A retry that came back part-way is not a
                                 // success to record: leave the retry loop and
                                 // let the next step carry the same action on.
-                                if outcome == ActionOutcome::Partial {
+                                if matches!(
+                                    outcome,
+                                    ActionOutcome::Partial | ActionOutcome::Waiting
+                                ) {
+                                    if outcome == ActionOutcome::Waiting {
+                                        self.progress.state = OperationState::Paused;
+                                    }
                                     self.next = self.next.saturating_sub(1);
                                     retried = true;
                                     break;
@@ -1150,7 +1454,14 @@ impl OperationExecutor {
                 if !journal.transferred(action.index) {
                     continue;
                 }
-                if let Err(e) = fs::remove_file(&action.src) {
+                // A link that moved is removed as the link: a Windows link to
+                // a folder does not go with `remove_file`.
+                let removed = if action.is_link {
+                    remove_link(&action.src)
+                } else {
+                    fs::remove_file(&action.src)
+                };
+                if let Err(e) = removed {
                     // A failed removal silently turned the Move into a Copy
                     // before this was reported: the summary said "moved" while
                     // the source was still there.
@@ -1209,16 +1520,21 @@ impl OperationExecutor {
             }
         }
 
+        self.push_summary();
+    }
+
+    /// The `Complete` event: what was done, skipped and failed.
+    fn push_summary(&mut self) {
         let elapsed = self.started.map_or(Duration::ZERO, |s| s.elapsed());
         let succeeded = self.progress.completed_files.saturating_sub(self.skipped);
 
         self.events.push(FileOpEvent::Complete {
             summary: OperationSummary {
-                operation: operation.clone(),
+                operation: self.plan.operation.clone(),
                 total_files: self.plan.total_files,
                 succeeded,
                 skipped: self.skipped,
-                failed: self.errors.len() as u32,
+                failed: u32::try_from(self.errors.len()).unwrap_or(u32::MAX),
                 total_bytes: self.plan.total_bytes,
                 elapsed,
                 errors: self.errors.clone(),
@@ -1277,7 +1593,11 @@ impl OperationExecutor {
         // "no" -- which would make the create below fail with a bare
         // AlreadyExists that the conflict policy never got to rule on.
         let occupied = fs::symlink_metadata(dest).is_ok();
-        let dest = if occupied {
+        let dest = if occupied && same_entry(&action.src, dest) {
+            // Occupied by the file it would link to: beside it, whatever the
+            // policy -- see `plan_link`.
+            resolve_rename(dest)
+        } else if occupied {
             match conflict {
                 ConflictPolicy::Skip => return Ok(ActionOutcome::Skipped),
                 // `OverwriteIfNewer` cannot be answered for a link: the
@@ -1287,15 +1607,15 @@ impl OperationExecutor {
                 // compare -- and said here rather than left to a reader to
                 // work out from the absence of an arm.
                 ConflictPolicy::Overwrite | ConflictPolicy::OverwriteIfNewer => {
-                    // `remove_file` and not `remove_dir_all`: what is being
-                    // replaced may be a link *to* a directory, and following
-                    // it would delete the user's folder to make room for a
-                    // shortcut.
+                    // A file or a link in the way is replaced; a folder is
+                    // not, and `remove_link_or_file` refuses one -- making
+                    // room for a link would delete the folder and everything
+                    // in it.
                     remove_link_or_file(dest)?;
                     dest.clone()
                 }
                 ConflictPolicy::Rename => resolve_rename(dest),
-                ConflictPolicy::Ask => return Ok(ActionOutcome::Skipped),
+                ConflictPolicy::Ask => return Ok(self.ask(action, dest)),
             }
         } else {
             dest.clone()
@@ -1322,7 +1642,17 @@ impl OperationExecutor {
             )
         })?;
 
+        if action.is_link {
+            return self.copy_link(action, dest, conflict);
+        }
+
         if action.is_dir {
+            // A folder that is its own destination has nothing to create --
+            // and must not be given an undo entry, since undoing a copy
+            // removes what the copy made, and this would name the original.
+            if same_entry(&action.src, dest) {
+                return Ok(ActionOutcome::Skipped);
+            }
             if !dest.exists() {
                 fs::create_dir_all(dest)?;
             }
@@ -1333,6 +1663,21 @@ impl OperationExecutor {
 
         // Conflict resolution.
         if dest.exists() {
+            // The planner leaves no source that is its own destination, but a
+            // name can come to be one by another route -- the same folder
+            // spelt two ways, or one renamed while the plan was waiting --
+            // and the policy must never be asked about a file and itself:
+            // see `plan_transfer`.
+            if same_entry(&action.src, dest) {
+                if self.plan.operation == FileOperation::Move {
+                    return Ok(ActionOutcome::Skipped);
+                }
+                let renamed = resolve_rename(dest);
+                self.atomic_copy_file(&action.src, &renamed)?;
+                self.undo_entries
+                    .push((action.src.clone(), UndoTarget::Path(renamed)));
+                return Ok(ActionOutcome::Done);
+            }
             match conflict {
                 ConflictPolicy::Skip => return Ok(ActionOutcome::Skipped),
                 ConflictPolicy::Overwrite => { /* continue to overwrite */ }
@@ -1348,16 +1693,7 @@ impl OperationExecutor {
                         .push((action.src.clone(), UndoTarget::Path(renamed)));
                     return Ok(ActionOutcome::Done);
                 }
-                ConflictPolicy::Ask => {
-                    self.events.push(FileOpEvent::Conflict {
-                        src: action.src.clone(),
-                        dest: dest.clone(),
-                        policy: conflict,
-                    });
-                    // In a real async implementation the caller would respond.
-                    // For now, skip.
-                    return Ok(ActionOutcome::Skipped);
-                }
+                ConflictPolicy::Ask => return Ok(self.ask(action, dest)),
             }
         }
 
@@ -1372,9 +1708,68 @@ impl OperationExecutor {
         Ok(outcome)
     }
 
+    /// Stop at `dest`, taken, and say so: the question for
+    /// [`waiting_on`](Self::waiting_on), and the event for a caller reading
+    /// the event stream.
+    fn ask(&mut self, action: &PlannedAction, dest: &Path) -> ActionOutcome {
+        self.events.push(FileOpEvent::Conflict {
+            src: action.src.clone(),
+            dest: dest.to_path_buf(),
+            policy: ConflictPolicy::Ask,
+        });
+        self.question = Some(ConflictQuestion {
+            action: action.index,
+            src: action.src.clone(),
+            dest: dest.to_path_buf(),
+        });
+        ActionOutcome::Waiting
+    }
+
+    /// Copy the link `action.src` to `dest` as a link -- the same target,
+    /// never what it names. See [`PlannedAction::is_link`].
+    ///
+    /// A host that cannot make links (Windows without the privilege) fails
+    /// the one action and says why; a move then leaves that link where it
+    /// was, since only what arrived is removed at the source.
+    fn copy_link(
+        &mut self,
+        action: &PlannedAction,
+        dest: &Path,
+        conflict: ConflictPolicy,
+    ) -> io::Result<ActionOutcome> {
+        let target = fs::read_link(&action.src)?;
+        // Whether it names a folder: Windows makes the two kinds differently,
+        // and one made as the wrong kind does not open.
+        let target_is_dir = fs::metadata(&action.src).is_ok_and(|m| m.is_dir());
+        let dest = if fs::symlink_metadata(dest).is_ok() {
+            match conflict {
+                ConflictPolicy::Skip => return Ok(ActionOutcome::Skipped),
+                ConflictPolicy::Ask => return Ok(self.ask(action, dest)),
+                ConflictPolicy::Rename => resolve_rename(dest),
+                // A link has no contents whose age could be compared -- see
+                // `execute_link_action` -- so "if newer" is plain replace.
+                ConflictPolicy::Overwrite | ConflictPolicy::OverwriteIfNewer => {
+                    remove_link_or_file(dest)?;
+                    dest.to_path_buf()
+                }
+            }
+        } else {
+            dest.to_path_buf()
+        };
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        create_symlink(&target, &dest, target_is_dir)?;
+        self.undo_entries
+            .push((action.src.clone(), UndoTarget::Path(dest)));
+        Ok(ActionOutcome::Done)
+    }
+
     fn execute_delete_action(&mut self, action: &PlannedAction) -> io::Result<ActionOutcome> {
         if action.is_dir {
             fs::remove_dir(&action.src)?;
+        } else if action.is_link {
+            remove_link(&action.src)?;
         } else {
             fs::remove_file(&action.src)?;
         }
@@ -1625,6 +2020,9 @@ enum ActionOutcome {
     /// turn. The action is *not* finished: it is not journalled, it is not
     /// counted, and the executor steps back to it.
     Partial,
+    /// Stopped at a taken name under [`ConflictPolicy::Ask`]: nothing was
+    /// done, and the executor steps back to the action once it is answered.
+    Waiting,
 }
 
 /// How much of one file a single step copies.
@@ -1836,24 +2234,104 @@ fn create_symlink(target: &Path, link: &Path, _target_is_dir: bool) -> io::Resul
     std::os::unix::fs::symlink(target, link)
 }
 
-/// Remove a path without following it if it is a link.
+/// Whether `a` and `b` are one directory entry: the same name in the same
+/// folder, however the folder is spelt -- `..`, a link on the way, another
+/// case on the Windows development host.
 ///
-/// `remove_dir_all` on a link to a directory deletes the *directory*. This is
-/// used where a link is being replaced, so following one would destroy the
-/// thing the old link pointed at in order to make room for a new link.
+/// The entry, and not the file it holds: two links to one file are two
+/// entries, and so are two hard links, and replacing one with a copy of the
+/// other loses nothing, since the copy is written beside the name and then
+/// moved over it. Only an entry and itself are in danger -- a file "replaced"
+/// by itself, and then deleted as the source of a move. "Cannot tell" is
+/// `false`, which is what "not there yet" should be.
+fn same_entry(a: &Path, b: &Path) -> bool {
+    let (Some(a_name), Some(b_name)) = (a.file_name(), b.file_name()) else {
+        return false;
+    };
+    let (Some(a_dir), Some(b_dir)) = (a.parent(), b.parent()) else {
+        return false;
+    };
+    let names_match = a_name == b_name || (cfg!(windows) && a_name.eq_ignore_ascii_case(b_name));
+    names_match
+        && fs::symlink_metadata(a).is_ok()
+        && fs::symlink_metadata(b).is_ok()
+        && matches!(
+            (fs::canonicalize(a_dir), fs::canonicalize(b_dir)),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
+/// Whether `path` is `dir` or anywhere under it, compared as resolved paths.
+/// "Cannot tell" is `false`.
+fn inside(path: &Path, dir: &Path) -> bool {
+    match (fs::canonicalize(path), fs::canonicalize(dir)) {
+        (Ok(p), Ok(d)) => p.starts_with(&d),
+        _ => false,
+    }
+}
+
+/// How deep a tree a bulk operation will walk: folders inside folders, 512
+/// levels.
+///
+/// No tree anybody made on purpose comes near it. One that does is a loop --
+/// a folder mounted inside itself -- or a trap, and the walk is a recursion:
+/// it would run out of stack and take the window with it. Refused, and said,
+/// instead. Links are never followed (see `PlannedAction::is_link`), so a
+/// link cannot make a loop; this is for everything else.
+const MAX_TREE_DEPTH: usize = 512;
+
+/// Refuse to walk below [`MAX_TREE_DEPTH`].
+fn too_deep(path: &Path, depth: usize) -> io::Result<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(io::Error::other(format!(
+            "folders nested more than {MAX_TREE_DEPTH} deep, at {}",
+            path.shown()
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `path` is a link (a symbolic link, or a junction on Windows).
+fn is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Whether `path` is a folder itself, and not a link to one.
+fn is_real_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+}
+
+/// Remove the link at `path` -- the link, never what it names.
+///
+/// Refused when `path` is no longer a link: something else has been put there
+/// since the plan was made, and removing it would remove what nobody chose.
+fn remove_link(path: &Path) -> io::Result<()> {
+    if !is_link(path) {
+        return Err(io::Error::other("it is no longer a link"));
+    }
+    // A Windows link to a folder, and a junction, go with `remove_dir`; every
+    // Unix link with `remove_file`. Neither follows it.
+    fs::remove_file(path).or_else(|_| fs::remove_dir(path))
+}
+
+/// Remove a file or a link that is in the way -- never a folder.
+///
+/// A folder in the way is refused rather than removed: this makes room for
+/// one file or one link, and "replace it" never meant deleting a folder and
+/// everything in it to do so. It removed one whole until 2026-09-27. A link
+/// is removed as the link, never followed: `remove_dir_all` on a link to a
+/// folder would delete the folder the old link pointed at.
 fn remove_link_or_file(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
-        // On Windows a directory symlink is removed with `remove_dir`; on Unix
-        // every symlink is removed with `remove_file`. Trying the file form
-        // first and falling back covers both without a second `cfg`.
-        return fs::remove_file(path).or_else(|_| fs::remove_dir(path));
+        return remove_link(path);
     }
     if meta.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
+        return Err(io::Error::other(
+            "a folder of that name is there, and a file or a link does not replace a folder",
+        ));
     }
+    fs::remove_file(path)
 }
 
 /// Move `from` back to `to`, creating the parent it used to live in.
@@ -3235,17 +3713,21 @@ mod tests {
         assert!(!victim.exists());
     }
 
-    /// A directory in the way is removed whole, since it is not a link.
+    /// A folder in the way is not removed to make room for a file or a link.
+    ///
+    /// It was, whole, until 2026-09-27: "replace it" on a link dropped onto
+    /// a folder's name deleted the folder and everything in it.
     #[test]
-    fn removing_a_directory_in_the_way_removes_the_directory() {
+    fn a_folder_in_the_way_is_never_removed_to_make_room() {
         let scratch = temp_dir("link_replace_dir");
         let dir = scratch.dir().to_path_buf();
         let victim = dir.join("in-the-way");
         fs::create_dir(&victim).expect("mkdir");
         write_file(&victim.join("child.txt"), "x");
 
-        remove_link_or_file(&victim).expect("remove");
-        assert!(!victim.exists());
+        let err = remove_link_or_file(&victim).expect_err("a folder was removed");
+        assert!(err.to_string().contains("folder"), "{err}");
+        assert_eq!(read_file(&victim.join("child.txt")), "x");
     }
 
     /// Undoing a link removes the link and leaves the target alone.
@@ -3350,6 +3832,785 @@ mod tests {
             OperationExecutor::temp_name(&a),
             OperationExecutor::temp_name(&b),
             "two distinct names share one scratch name, so a copy can land holding the wrong file"
+        );
+    }
+
+    // ---- asking about a taken name (2026-09-27) ----------------------------
+    //
+    // `Ask` used to emit its event and skip the file, and a link skipped
+    // without the event, so nobody asked could ever answer.
+
+    /// Two files to copy onto a folder that already has the first.
+    fn a_copy_onto_a_taken_name(
+        label: &str,
+        policy: ConflictPolicy,
+    ) -> (ScratchDir, PathBuf, OperationExecutor) {
+        let scratch = temp_dir(label);
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("src").join("a.txt"), "new a");
+        write_file(&root.join("src").join("b.txt"), "new b");
+        write_file(&root.join("dst").join("a.txt"), "old a");
+        let plan = OperationPlan::plan_copy(
+            &[
+                root.join("src").join("a.txt"),
+                root.join("src").join("b.txt"),
+            ],
+            &root.join("dst"),
+            policy,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        (scratch, root, executor)
+    }
+
+    /// Step until the operation finishes or stops to ask, bounded.
+    fn run_until_it_asks(executor: &mut OperationExecutor) {
+        for _ in 0..1000 {
+            if executor.is_done() || executor.waiting_on().is_some() {
+                return;
+            }
+            executor.step();
+        }
+        panic!("the operation neither finished nor asked");
+    }
+
+    #[test]
+    fn ask_stops_at_the_taken_name_and_waits() {
+        let (_scratch, root, mut executor) =
+            a_copy_onto_a_taken_name("ask_waits", ConflictPolicy::Ask);
+        run_until_it_asks(&mut executor);
+        let question = executor.waiting_on().cloned().expect("it did not ask");
+        assert_eq!(question.dest, root.join("dst").join("a.txt"));
+        assert_eq!(question.src, root.join("src").join("a.txt"));
+        assert!(
+            !executor.is_done(),
+            "an operation waiting on an answer is not done"
+        );
+        assert_eq!(executor.progress().state, OperationState::Paused);
+        // Stepping a waiting operation does nothing at all.
+        for _ in 0..10 {
+            executor.step();
+        }
+        assert!(executor.waiting_on().is_some());
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+        assert!(
+            !root.join("dst").join("b.txt").exists(),
+            "it went on past the question"
+        );
+        let asked = executor
+            .take_events()
+            .iter()
+            .filter(|e| matches!(e, FileOpEvent::Conflict { .. }))
+            .count();
+        assert_eq!(
+            asked, 1,
+            "asked {asked} times: a waiting operation was stepped anyway"
+        );
+    }
+
+    #[test]
+    fn each_answer_does_what_it_says_to_the_file_it_was_asked_about() {
+        for (answer, check) in [
+            (ConflictAnswer::Replace, "replace"),
+            (ConflictAnswer::Skip, "skip"),
+            (ConflictAnswer::KeepBoth, "keep both"),
+        ] {
+            let (_scratch, root, mut executor) = a_copy_onto_a_taken_name(
+                &format!("ask_{check}").replace(' ', "_"),
+                ConflictPolicy::Ask,
+            );
+            run_until_it_asks(&mut executor);
+            executor.answer(answer, false);
+            assert_eq!(executor.progress().state, OperationState::Running);
+            run_until_it_asks(&mut executor);
+            assert!(
+                executor.is_done(),
+                "{check}: it asked again about a free name"
+            );
+            executor.finish();
+            let dst = root.join("dst");
+            match answer {
+                ConflictAnswer::Replace => {
+                    assert_eq!(read_file(&dst.join("a.txt")), "new a", "{check}");
+                }
+                ConflictAnswer::Skip => {
+                    assert_eq!(read_file(&dst.join("a.txt")), "old a", "{check}");
+                }
+                ConflictAnswer::KeepBoth => {
+                    assert_eq!(read_file(&dst.join("a.txt")), "old a", "{check}");
+                    assert_eq!(read_file(&dst.join("a (2).txt")), "new a", "{check}");
+                }
+                ConflictAnswer::Stop => unreachable!(),
+            }
+            assert_eq!(
+                read_file(&dst.join("b.txt")),
+                "new b",
+                "{check}: the free name was not copied"
+            );
+        }
+    }
+
+    #[test]
+    fn stop_ends_the_operation_where_it_is() {
+        let (_scratch, root, mut executor) =
+            a_copy_onto_a_taken_name("ask_stop", ConflictPolicy::Ask);
+        run_until_it_asks(&mut executor);
+        executor.answer(ConflictAnswer::Stop, false);
+        run_until_it_asks(&mut executor);
+        assert!(executor.is_done());
+        executor.finish();
+        assert_eq!(executor.progress().state, OperationState::Cancelled);
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+        assert!(
+            !root.join("dst").join("b.txt").exists(),
+            "it went on after Stop"
+        );
+    }
+
+    #[test]
+    fn the_same_for_the_rest_asks_no_more() {
+        let scratch = temp_dir("ask_rest");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write_file(&root.join("src").join(name), &format!("new {name}"));
+            write_file(&root.join("dst").join(name), &format!("old {name}"));
+        }
+        let plan = OperationPlan::plan_copy(
+            &[
+                root.join("src").join("a.txt"),
+                root.join("src").join("b.txt"),
+                root.join("src").join("c.txt"),
+            ],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        run_until_it_asks(&mut executor);
+        executor.answer(ConflictAnswer::Replace, true);
+        run_until_it_asks(&mut executor);
+        assert!(
+            executor.is_done(),
+            "it asked again after \"the same for the rest\""
+        );
+        executor.finish();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            assert_eq!(
+                read_file(&root.join("dst").join(name)),
+                format!("new {name}")
+            );
+        }
+    }
+
+    #[test]
+    fn an_answer_for_one_file_is_not_an_answer_for_the_next() {
+        let scratch = temp_dir("ask_each");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt"] {
+            write_file(&root.join("src").join(name), &format!("new {name}"));
+            write_file(&root.join("dst").join(name), &format!("old {name}"));
+        }
+        let plan = OperationPlan::plan_copy(
+            &[
+                root.join("src").join("a.txt"),
+                root.join("src").join("b.txt"),
+            ],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        run_until_it_asks(&mut executor);
+        executor.answer(ConflictAnswer::Replace, false);
+        run_until_it_asks(&mut executor);
+        let second = executor
+            .waiting_on()
+            .cloned()
+            .expect("the second taken name was not asked about");
+        assert_eq!(second.dest, root.join("dst").join("b.txt"));
+        executor.answer(ConflictAnswer::Skip, false);
+        run_until_it_asks(&mut executor);
+        executor.finish();
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "new a.txt");
+        assert_eq!(read_file(&root.join("dst").join("b.txt")), "old b.txt");
+    }
+
+    #[test]
+    fn a_file_copied_in_pieces_keeps_its_answer_to_the_last_piece() {
+        let scratch = temp_dir("ask_chunks");
+        let root = scratch.dir().to_path_buf();
+        let big = "x".repeat(COPY_CHUNK * 2 + 17);
+        write_file(&root.join("src").join("big.bin"), &big);
+        write_file(&root.join("dst").join("big.bin"), "old");
+        let plan = OperationPlan::plan_copy(
+            &[root.join("src").join("big.bin")],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        run_until_it_asks(&mut executor);
+        executor.answer(ConflictAnswer::Replace, false);
+        run_until_it_asks(&mut executor);
+        assert!(
+            executor.is_done(),
+            "a later piece of the same file asked again"
+        );
+        executor.finish();
+        assert_eq!(read_file(&root.join("dst").join("big.bin")), big);
+    }
+
+    #[test]
+    fn a_move_answered_skip_keeps_its_source() {
+        let scratch = temp_dir("ask_move");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("src").join("a.txt"), "new a");
+        write_file(&root.join("dst").join("a.txt"), "old a");
+        let plan = OperationPlan::plan_move(
+            &[root.join("src").join("a.txt")],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        run_until_it_asks(&mut executor);
+        assert!(
+            executor.waiting_on().is_some(),
+            "a move onto a taken name did not ask"
+        );
+        executor.answer(ConflictAnswer::Skip, false);
+        run_until_it_asks(&mut executor);
+        executor.finish();
+        assert_eq!(
+            read_file(&root.join("src").join("a.txt")),
+            "new a",
+            "a skipped move lost its source"
+        );
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+    }
+
+    #[test]
+    fn execute_cannot_ask_so_the_first_taken_name_stops_it() {
+        let scratch = temp_dir("ask_blocking");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("src").join("a.txt"), "new a");
+        write_file(&root.join("src").join("b.txt"), "new b");
+        write_file(&root.join("dst").join("a.txt"), "old a");
+        let plan = OperationPlan::plan_copy(
+            &[
+                root.join("src").join("a.txt"),
+                root.join("src").join("b.txt"),
+            ],
+            &root.join("dst"),
+            ConflictPolicy::Ask,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(executor.progress().state, OperationState::Cancelled);
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+    }
+
+    #[test]
+    fn cancelling_an_operation_that_is_asking_ends_it() {
+        let (_scratch, root, mut executor) =
+            a_copy_onto_a_taken_name("ask_cancel", ConflictPolicy::Ask);
+        run_until_it_asks(&mut executor);
+        executor.cancel();
+        assert!(
+            executor.waiting_on().is_none(),
+            "the question outlived the cancel"
+        );
+        run_until_it_asks(&mut executor);
+        assert!(
+            executor.is_done(),
+            "a cancelled operation that was asking never ended"
+        );
+        executor.finish();
+        assert_eq!(read_file(&root.join("dst").join("a.txt")), "old a");
+        assert!(!root.join("dst").join("b.txt").exists());
+    }
+
+    // ---- a source that is its own destination (2026-09-27) ----------------
+    //
+    // With "Replace it" on the explorer's menu, a cut pasted back into its own
+    // folder copied the file onto itself and then deleted the source: the
+    // only copy there was.
+
+    const EVERY_POLICY: [ConflictPolicy; 5] = [
+        ConflictPolicy::Rename,
+        ConflictPolicy::Skip,
+        ConflictPolicy::Overwrite,
+        ConflictPolicy::OverwriteIfNewer,
+        ConflictPolicy::Ask,
+    ];
+
+    #[test]
+    fn a_file_moved_into_its_own_folder_stays_whatever_the_policy() {
+        for policy in EVERY_POLICY {
+            let scratch = temp_dir(&format!("self_move_{policy:?}"));
+            let root = scratch.dir().to_path_buf();
+            write_file(&root.join("note.txt"), "hello");
+            let plan = OperationPlan::plan_move(
+                &[root.join("note.txt")],
+                &root,
+                policy,
+                ErrorPolicy::StopOnFirst,
+            )
+            .unwrap();
+            assert!(
+                plan.actions.is_empty(),
+                "{policy:?}: a move to where it is planned work"
+            );
+            let mut executor = OperationExecutor::new(plan);
+            let _events = executor.execute();
+            assert_eq!(
+                read_file(&root.join("note.txt")),
+                "hello",
+                "{policy:?}: the file was lost"
+            );
+            assert!(!root.join("note (2).txt").exists(), "{policy:?}");
+            assert_eq!(
+                executor.progress().state,
+                OperationState::Completed,
+                "{policy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_copied_into_its_own_folder_is_a_duplicate_whatever_the_policy() {
+        for policy in EVERY_POLICY {
+            let scratch = temp_dir(&format!("self_copy_{policy:?}"));
+            let root = scratch.dir().to_path_buf();
+            write_file(&root.join("note.txt"), "hello");
+            let plan = OperationPlan::plan_copy(
+                &[root.join("note.txt")],
+                &root,
+                policy,
+                ErrorPolicy::StopOnFirst,
+            )
+            .unwrap();
+            let mut executor = OperationExecutor::new(plan);
+            let _events = executor.execute();
+            assert_eq!(read_file(&root.join("note.txt")), "hello", "{policy:?}");
+            assert_eq!(
+                read_file(&root.join("note (2).txt")),
+                "hello",
+                "{policy:?}: no duplicate"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_copied_into_its_own_folder_is_duplicated_whole() {
+        let scratch = temp_dir("self_copy_dir");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("album").join("a.txt"), "a");
+        write_file(&root.join("album").join("inner").join("b.txt"), "b");
+        let plan = OperationPlan::plan_copy(
+            &[root.join("album")],
+            &root,
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(read_file(&root.join("album (2)").join("a.txt")), "a");
+        assert_eq!(
+            read_file(&root.join("album (2)").join("inner").join("b.txt")),
+            "b"
+        );
+        assert!(
+            !root.join("album").join("a (2).txt").exists(),
+            "the files were duplicated inside the original instead"
+        );
+        assert_eq!(read_file(&root.join("album").join("a.txt")), "a");
+    }
+
+    #[test]
+    fn a_folder_moved_into_the_folder_it_is_in_is_left_alone() {
+        let scratch = temp_dir("self_move_dir");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("album").join("a.txt"), "a");
+        let plan = OperationPlan::plan_move(
+            &[root.join("album")],
+            &root,
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        assert!(plan.actions.is_empty());
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(read_file(&root.join("album").join("a.txt")), "a");
+    }
+
+    #[test]
+    fn a_folder_cannot_go_inside_itself() {
+        let scratch = temp_dir("self_inside");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("album").join("inner").join("b.txt"), "b");
+        for dest in [root.join("album"), root.join("album").join("inner")] {
+            for plan in [
+                OperationPlan::plan_copy(
+                    &[root.join("album")],
+                    &dest,
+                    ConflictPolicy::Rename,
+                    ErrorPolicy::StopOnFirst,
+                ),
+                OperationPlan::plan_move(
+                    &[root.join("album")],
+                    &dest,
+                    ConflictPolicy::Rename,
+                    ErrorPolicy::StopOnFirst,
+                ),
+            ] {
+                let err = plan.expect_err("a folder was planned into itself");
+                assert!(err.to_string().contains("inside itself"), "{err}");
+            }
+        }
+        // A sibling whose name merely starts the same is not inside it.
+        fs::create_dir_all(root.join("album2")).unwrap();
+        assert!(
+            OperationPlan::plan_copy(
+                &[root.join("album")],
+                &root.join("album2"),
+                ConflictPolicy::Rename,
+                ErrorPolicy::StopOnFirst,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_link_made_in_its_own_folder_never_replaces_the_file() {
+        let scratch = temp_dir("self_link");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("note.txt"), "hello");
+        let plan = OperationPlan::plan_link(
+            &[root.join("note.txt")],
+            &root,
+            ConflictPolicy::Overwrite,
+            ErrorPolicy::SkipAndContinue,
+        );
+        assert_eq!(
+            plan.actions.first().and_then(|a| a.dest.clone()),
+            Some(root.join("note (2).txt"))
+        );
+        let mut executor = OperationExecutor::new(plan);
+        // A host that cannot make links fails the one link; either way the
+        // file it points at is still there.
+        let _events = executor.execute();
+        assert_eq!(read_file(&root.join("note.txt")), "hello");
+    }
+
+    // ---- links are never followed (2026-09-27) -----------------------------
+    //
+    // Every scan followed links: deleting a folder holding a link to another
+    // folder deleted that folder's files, moving it copied them and deleted
+    // them at the source, and a link to a folder above made the scan endless.
+    // Links here are junctions on Windows (no privilege needed) and symbolic
+    // links elsewhere.
+
+    /// A link at `link` to the folder `target`, or `None` if this host can
+    /// make neither kind.
+    fn folder_link(target: &Path, link: &Path) -> Option<()> {
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+                return Some(());
+            }
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .ok()?;
+            (made.status.success() && is_link(link)).then_some(())
+        }
+        #[cfg(not(windows))]
+        {
+            std::os::unix::fs::symlink(target, link).ok()
+        }
+    }
+
+    /// `outside/keep.txt`, and `doomed/` holding a file and a link to
+    /// `outside`.
+    fn a_folder_with_a_link_out(root: &Path) -> Option<()> {
+        write_file(&root.join("outside").join("keep.txt"), "not selected");
+        write_file(&root.join("doomed").join("mine.txt"), "selected");
+        folder_link(&root.join("outside"), &root.join("doomed").join("link"))
+    }
+
+    #[test]
+    fn deleting_a_folder_never_deletes_what_a_link_inside_it_reaches() {
+        let scratch = temp_dir("link_delete");
+        let root = scratch.dir().to_path_buf();
+        if a_folder_with_a_link_out(&root).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        let plan =
+            OperationPlan::plan_delete(&[root.join("doomed")], ErrorPolicy::StopOnFirst).unwrap();
+        assert!(
+            plan.actions.iter().all(|a| !a
+                .src
+                .starts_with(root.join("doomed").join("link").join("keep.txt"))),
+            "the plan reaches through the link"
+        );
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(
+            read_file(&root.join("outside").join("keep.txt")),
+            "not selected"
+        );
+        assert!(
+            !root.join("doomed").exists(),
+            "the folder itself was not deleted"
+        );
+    }
+
+    #[test]
+    fn moving_a_folder_never_takes_what_a_link_inside_it_reaches() {
+        let scratch = temp_dir("link_move");
+        let root = scratch.dir().to_path_buf();
+        if a_folder_with_a_link_out(&root).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let plan = OperationPlan::plan_move(
+            &[root.join("doomed")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+        let link_actions: Vec<_> = plan.actions.iter().filter(|a| a.is_link).collect();
+        assert_eq!(
+            link_actions.len(),
+            1,
+            "the link is one action: {:?}",
+            plan.actions
+        );
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        assert_eq!(
+            read_file(&root.join("outside").join("keep.txt")),
+            "not selected"
+        );
+        assert_eq!(
+            read_file(&root.join("dst").join("doomed").join("mine.txt")),
+            "selected"
+        );
+        // Either the link arrived as a link, or this host could not make one
+        // and the link stayed where it was -- never a copy of what it reaches.
+        let arrived = root.join("dst").join("doomed").join("link");
+        assert!(
+            is_link(&arrived) || is_link(&root.join("doomed").join("link")),
+            "the link was neither moved nor left"
+        );
+        assert!(
+            !arrived.join("keep.txt").exists() || is_link(&arrived),
+            "the link's target was copied"
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_folder_above_does_not_make_the_scan_endless() {
+        let scratch = temp_dir("link_cycle");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("album").join("a.txt"), "a");
+        if folder_link(&root.join("album"), &root.join("album").join("again")).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let plan = OperationPlan::plan_copy(
+            &[root.join("album")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+        assert_eq!(plan.actions.len(), 3, "{:?}", plan.actions);
+        let deletion =
+            OperationPlan::plan_delete(&[root.join("album")], ErrorPolicy::StopOnFirst).unwrap();
+        assert_eq!(deletion.actions.len(), 3, "{:?}", deletion.actions);
+    }
+
+    #[test]
+    fn a_link_is_copied_as_the_link_where_the_host_can_make_one() {
+        let scratch = temp_dir("link_copy");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("outside").join("keep.txt"), "x");
+        if folder_link(&root.join("outside"), &root.join("shortcut")).is_none() {
+            eprintln!("skipped: this host can make no link");
+            return;
+        }
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let plan = OperationPlan::plan_copy(
+            &[root.join("shortcut")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::SkipAndContinue,
+        )
+        .unwrap();
+        assert_eq!(plan.actions.len(), 1);
+        assert!(plan.actions[0].is_link);
+        let mut executor = OperationExecutor::new(plan);
+        let _events = executor.execute();
+        let copy = root.join("dst").join("shortcut");
+        // A link, or nothing at all where no link can be made here -- never a
+        // folder holding a copy of what it reaches.
+        assert!(
+            is_link(&copy) || fs::symlink_metadata(&copy).is_err(),
+            "copied through the link"
+        );
+    }
+
+    #[test]
+    fn a_link_that_is_no_longer_one_is_not_removed() {
+        let scratch = temp_dir("link_gone");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("was-a-link"), "a file now");
+        let err = remove_link(&root.join("was-a-link")).expect_err("a file was removed as a link");
+        assert!(err.to_string().contains("no longer a link"), "{err}");
+        assert!(root.join("was-a-link").exists());
+    }
+
+    #[test]
+    fn the_same_entry_is_the_same_name_in_the_same_folder() {
+        let scratch = temp_dir("same_entry");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("a").join("note.txt"), "x");
+        write_file(&root.join("b").join("note.txt"), "x");
+        assert!(same_entry(
+            &root.join("a").join("note.txt"),
+            &root.join("a").join("..").join("a").join("note.txt")
+        ));
+        assert!(!same_entry(
+            &root.join("a").join("note.txt"),
+            &root.join("b").join("note.txt")
+        ));
+        assert!(!same_entry(
+            &root.join("a").join("note.txt"),
+            &root.join("a").join("absent.txt")
+        ));
+    }
+
+    /// Whatever a plan says, the executor never replaces a file with itself.
+    ///
+    /// The planner leaves no such action; this builds one by hand, since the
+    /// executor's own check is the one that must hold when a plan is wrong.
+    #[test]
+    fn the_executor_never_replaces_a_file_with_itself_whatever_the_plan_says() {
+        let scratch = temp_dir("self_by_hand");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("note.txt"), "hello");
+        for operation in [FileOperation::Move, FileOperation::Copy] {
+            let plan = OperationPlan {
+                operation: operation.clone(),
+                actions: vec![PlannedAction {
+                    src: root.join("note.txt"),
+                    dest: Some(root.join("note.txt")),
+                    size: 5,
+                    is_dir: false,
+                    is_link: false,
+                    index: 0,
+                }],
+                total_bytes: 5,
+                total_files: 1,
+                conflict_policy: ConflictPolicy::Overwrite,
+                error_policy: ErrorPolicy::StopOnFirst,
+            };
+            let mut executor = OperationExecutor::new(plan);
+            let _events = executor.execute();
+            assert_eq!(read_file(&root.join("note.txt")), "hello", "{operation:?}");
+        }
+    }
+
+    #[test]
+    fn a_tree_deeper_than_anyone_makes_is_refused_not_walked() {
+        let scratch = temp_dir("too_deep");
+        let root = scratch.dir().to_path_buf();
+        let mut deepest = root.join("top");
+        for _ in 0..(MAX_TREE_DEPTH + 4) {
+            deepest.push("d");
+        }
+        fs::create_dir_all(&deepest).unwrap();
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let err = OperationPlan::plan_copy(
+            &[root.join("top")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::StopOnFirst,
+        )
+        .expect_err("a tree deeper than the limit was planned");
+        assert!(err.to_string().contains("nested more than"), "{err}");
+        let err = OperationPlan::plan_delete(&[root.join("top")], ErrorPolicy::StopOnFirst)
+            .expect_err("a tree deeper than the limit was planned for deletion");
+        assert!(err.to_string().contains("nested more than"), "{err}");
+    }
+
+    /// The walk plans in the order a recursion did: a folder before its
+    /// contents for a copy, after them for a delete, and each folder's
+    /// contents whole before the next.
+    #[test]
+    fn a_tree_is_planned_in_the_order_it_is_walked() {
+        let scratch = temp_dir("walk_order");
+        let root = scratch.dir().to_path_buf();
+        write_file(&root.join("top").join("a").join("x.txt"), "x");
+        write_file(&root.join("top").join("b.txt"), "b");
+        fs::create_dir_all(root.join("dst")).unwrap();
+        let names = |plan: &OperationPlan| -> Vec<String> {
+            plan.actions
+                .iter()
+                .map(|a| {
+                    a.src
+                        .strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect()
+        };
+        let copy = OperationPlan::plan_copy(
+            &[root.join("top")],
+            &root.join("dst"),
+            ConflictPolicy::Rename,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let copy_order = names(&copy);
+        let pos = |order: &[String], n: &str| order.iter().position(|s| s == n).unwrap();
+        assert_eq!(copy_order.first().map(String::as_str), Some("top"));
+        assert!(pos(&copy_order, "top/a") < pos(&copy_order, "top/a/x.txt"));
+        let delete =
+            OperationPlan::plan_delete(&[root.join("top")], ErrorPolicy::StopOnFirst).unwrap();
+        let delete_order = names(&delete);
+        assert_eq!(delete_order.last().map(String::as_str), Some("top"));
+        assert!(pos(&delete_order, "top/a/x.txt") < pos(&delete_order, "top/a"));
+        // Each folder's contents whole before the next of its neighbours.
+        let a = pos(&copy_order, "top/a");
+        let x = pos(&copy_order, "top/a/x.txt");
+        let b = pos(&copy_order, "top/b.txt");
+        assert!(
+            b < a || b > x,
+            "a neighbour came between a folder and its contents: {copy_order:?}"
         );
     }
 }

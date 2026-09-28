@@ -35,11 +35,10 @@
 //!
 //! # What is not here
 //!
-//! * **Advances from the phantom points.** The phantom points are moved with
-//!   the rest ([`crate::glyf`] places them), but an advance is still read
-//!   from `HVAR` alone: every variable face on this host ships one, and a
-//!   `gvar`-derived advance -- the fallback for a face without -- is not
-//!   taken yet.
+//! * **Where advances come from.** The phantom points move with the rest
+//!   ([`crate::glyf`] places them), and a face without `HVAR` takes its
+//!   advances from them (`Face::advance_at`); a face with `HVAR` takes them
+//!   from that table, as HarfBuzz does, whatever its phantom points say.
 //! * **`CFF2`** varies through the charstring interpreter rather than through
 //!   this table: see [`crate::cff`].
 //!

@@ -3684,7 +3684,7 @@ fn main() -> ExitCode {
     // unexpected argument", before the window opened. The file manager's "open
     // with" opened nothing at all, and a path of `--display` was taken as a
     // path.
-    let args = match app::Args::from_env() {
+    let args = match app::ArgsOs::from_env() {
         Ok(args) => args,
         Err(e) => {
             eprintln!("archivemanager: {e}");
@@ -3703,7 +3703,7 @@ fn main() -> ExitCode {
 /// the user with no way to pick another file. A window holds one archive, so
 /// a second one named is said not to have been opened rather than dropped
 /// without a word.
-fn open_arguments(state: &mut AppState, paths: &[String]) {
+fn open_arguments(state: &mut AppState, paths: &[std::ffi::OsString]) {
     let Some((first, rest)) = paths.split_first() else {
         state.status_message = state.status_text();
         return;
@@ -5937,7 +5937,7 @@ mod tests {
         let dir = write_scratch("args");
         let path = dir.join("named.zip");
         std::fs::write(&path, ziparchive::create(&[])).expect("write a fixture");
-        let named = path.to_str().expect("a text path").to_owned();
+        let named = path.clone().into_os_string();
 
         let mut state = AppState::default();
         open_arguments(&mut state, std::slice::from_ref(&named));

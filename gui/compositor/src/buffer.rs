@@ -357,9 +357,18 @@ pub struct ImageAsset {
     src_format: BufferFormat,
     /// Normalized ARGB8888 pixels, row-major, length `width * height`.
     pixels: Vec<u32>,
-    /// Whether every pixel is fully opaque, measured at import — see
-    /// [`all_opaque`].
-    opaque: bool,
+    /// How many pixels are not fully opaque. Counted at import, and kept by
+    /// [`patch`](Self::patch) -- which counts out the pixels it replaces and
+    /// counts in the ones it writes -- so that the image is opaque exactly
+    /// when this is zero, as [`all_opaque`] would find, without a patch of a
+    /// few pixels looking at the millions it did not touch.
+    translucent: usize,
+}
+
+/// How many of `pixels` are not fully opaque. Zero for a format without alpha,
+/// whose pixels `normalize` has made opaque.
+fn translucent_in(pixels: &[u32]) -> usize {
+    pixels.iter().filter(|&&px| px >> 24 != 0xFF).count()
 }
 
 impl ImageAsset {
@@ -382,14 +391,62 @@ impl ImageAsset {
         bytes: &[u8],
     ) -> CompositorResult<Self> {
         let pixels = normalize(width, height, stride, format, bytes)?;
-        let opaque = all_opaque(format, &pixels);
+        let translucent = translucent_in(&pixels);
         Ok(Self {
             width,
             height,
             src_format: format,
             pixels,
-            opaque,
+            translucent,
         })
+    }
+
+    /// Write a `width` by `height` rectangle of a client's pixels at `(x, y)`,
+    /// leaving the rest of the image as it was: `bytes` hold the rectangle's
+    /// rows, `stride` bytes apart, in the format the image was imported in.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::PatchOutsideImage`] if the rectangle is empty or not
+    /// wholly inside the image, and the errors of [`Self::import`] if the bytes
+    /// do not describe it -- every one of them found before a pixel is
+    /// written, so a refused patch leaves the image as it was.
+    pub fn patch(
+        &mut self,
+        (x, y): (u32, u32),
+        (width, height): (u32, u32),
+        stride: u32,
+        bytes: &[u8],
+    ) -> CompositorResult<()> {
+        let fits = |at: u32, len: u32, room: u32| {
+            len > 0 && at.checked_add(len).is_some_and(|end| end <= room)
+        };
+        if !fits(x, width, self.width) || !fits(y, height, self.height) {
+            return Err(CompositorError::PatchOutsideImage {
+                rect: (x, y, width, height),
+                image: (self.width, self.height),
+            });
+        }
+        let patch = normalize(width, height, stride, self.src_format, bytes)?;
+        // Row by row, each row of the image cut at the rectangle's columns:
+        // inside it, as just checked, so every slice below is whole.
+        let (left, across) = (x as usize, width as usize);
+        let rows = self
+            .pixels
+            .chunks_exact_mut(self.width as usize)
+            .skip(y as usize)
+            .take(height as usize);
+        for (row, source) in rows.zip(patch.chunks_exact(across)) {
+            let Some(target) = row.get_mut(left..left.saturating_add(across)) else {
+                continue;
+            };
+            self.translucent = self
+                .translucent
+                .saturating_sub(translucent_in(target))
+                .saturating_add(translucent_in(source));
+            target.copy_from_slice(source);
+        }
+        Ok(())
     }
 
     /// Width in pixels.
@@ -419,7 +476,7 @@ impl ImageAsset {
     /// Whether every pixel is fully opaque, letting a blit skip alpha blending.
     #[must_use]
     pub const fn is_opaque(&self) -> bool {
-        self.opaque
+        self.translucent == 0
     }
 
     /// Bounds-checked single-pixel read in normalized ARGB8888.
@@ -642,6 +699,122 @@ mod tests {
             ),
             Err(CompositorError::BufferTooLarge { .. })
         ));
+    }
+
+    /// A `w` by `h` image in `format` whose pixel at `(x, y)` is
+    /// `0xFF00_0000 | (y << 8) | x`, so every pixel says where it is.
+    fn numbered(w: u32, h: u32, format: BufferFormat) -> ImageAsset {
+        let pixels: Vec<u32> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| 0xFF00_0000 | (y << 8) | x))
+            .collect();
+        let bytes: Vec<u8> = pixels.iter().flat_map(|px| px.to_le_bytes()).collect();
+        ImageAsset::import(w, h, w * 4, format, &bytes).expect("image")
+    }
+
+    fn all_pixels(image: &ImageAsset) -> Vec<u32> {
+        image.pixels().to_vec()
+    }
+
+    #[test]
+    fn a_patch_writes_its_rectangle_and_leaves_the_rest() {
+        let mut image = numbered(4, 3, BufferFormat::Argb8888);
+        // A 2x2 patch at (1, 1), its rows 12 bytes apart: four bytes of
+        // padding after each row, which must be skipped, not written.
+        let mut bytes = Vec::new();
+        for row in [[0xFFAA_0001u32, 0xFFAA_0002], [0xFFAA_0003, 0xFFAA_0004]] {
+            for px in row {
+                bytes.extend_from_slice(&px.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[0xEE; 4]);
+        }
+        image.patch((1, 1), (2, 2), 12, &bytes).expect("patch");
+        let n = |x: u32, y: u32| 0xFF00_0000 | (y << 8) | x;
+        assert_eq!(
+            all_pixels(&image),
+            vec![
+                n(0, 0),
+                n(1, 0),
+                n(2, 0),
+                n(3, 0),
+                n(0, 1),
+                0xFFAA_0001,
+                0xFFAA_0002,
+                n(3, 1),
+                n(0, 2),
+                0xFFAA_0003,
+                0xFFAA_0004,
+                n(3, 2),
+            ]
+        );
+        // The far corner, exactly: the last pixel it may reach.
+        image
+            .patch((3, 2), (1, 1), 4, &0xFF12_3456u32.to_le_bytes())
+            .expect("corner");
+        assert_eq!(image.pixel(3, 2), Some(0xFF12_3456));
+    }
+
+    #[test]
+    fn a_patch_outside_its_image_or_of_nothing_is_refused_and_changes_nothing() {
+        let mut image = numbered(4, 3, BufferFormat::Argb8888);
+        let before = all_pixels(&image);
+        let px = [0u8; 64];
+        for (at, size) in [
+            ((3, 0), (2, 1)),        // one column past the right edge
+            ((0, 2), (1, 2)),        // one row past the bottom
+            ((4, 0), (1, 1)),        // wholly to the right
+            ((0, 0), (0, 1)),        // no width
+            ((0, 0), (1, 0)),        // no height
+            ((u32::MAX, 0), (2, 1)), // an edge that overflows
+            ((0, u32::MAX), (1, 2)),
+        ] {
+            let err = image.patch(at, size, 16, &px).expect_err("refused");
+            assert!(
+                matches!(err, CompositorError::PatchOutsideImage { .. }),
+                "{at:?} {size:?}: {err:?}"
+            );
+        }
+        assert_eq!(all_pixels(&image), before, "a refused patch wrote pixels");
+    }
+
+    #[test]
+    fn a_patch_its_bytes_do_not_cover_is_refused_and_changes_nothing() {
+        let mut image = numbered(4, 3, BufferFormat::Argb8888);
+        let before = all_pixels(&image);
+        // Two rows of two pixels need 8 + 8 bytes at stride 8: one short.
+        assert!(matches!(
+            image.patch((0, 0), (2, 2), 8, &[0u8; 15]),
+            Err(CompositorError::InvalidBuffer(_))
+        ));
+        // A stride narrower than a row.
+        assert!(matches!(
+            image.patch((0, 0), (2, 2), 7, &[0u8; 64]),
+            Err(CompositorError::InvalidBuffer(_))
+        ));
+        assert_eq!(all_pixels(&image), before, "a refused patch wrote pixels");
+    }
+
+    #[test]
+    fn a_patch_keeps_the_images_opacity_exact() {
+        let mut image = numbered(4, 3, BufferFormat::Argb8888);
+        assert!(image.is_opaque());
+        // One translucent pixel in: no longer opaque.
+        image
+            .patch((2, 1), (1, 1), 4, &0x80FF_0000u32.to_le_bytes())
+            .expect("patch");
+        assert!(!image.is_opaque());
+        // A patch elsewhere does not change that...
+        image
+            .patch((0, 0), (1, 1), 4, &0xFF00_FF00u32.to_le_bytes())
+            .expect("patch");
+        assert!(!image.is_opaque());
+        // ...and covering the translucent pixel with an opaque one does.
+        image.patch((1, 1), (2, 1), 8, &[0xFFu8; 8]).expect("patch");
+        assert!(image.is_opaque());
+        // A format without alpha stays opaque whatever the bytes' alpha says.
+        let mut xrgb = numbered(2, 2, BufferFormat::Xrgb8888);
+        xrgb.patch((0, 0), (2, 1), 8, &[0u8; 8]).expect("patch");
+        assert!(xrgb.is_opaque());
+        assert_eq!(xrgb.pixel(0, 0), Some(0xFF00_0000));
     }
 
     #[test]

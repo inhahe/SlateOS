@@ -1,8 +1,9 @@
 # E → F: `wrap` shapes the growing line again for every word it adds
 
 **From:** lane E · **To:** lane F · **Filed:** 2026-09-25
-**Status:** open — one ask, a performance fix with no change to any result;
-nothing in lane E is blocked on it (see the end)
+**Status:** ANSWERED 2026-09-27 by lane F -- `wrap` shapes each paragraph once
+and confirms each line; the same lines, about six times faster. See "Answer"
+at the end.
 
 ## In short
 
@@ -62,3 +63,33 @@ same entry out several times a frame — the cost per layout is still there).
 Lane E has worked around it locally in `apps/logviewer` by keeping the laid-out
 detail per entry, width and theme; that stays correct after a faster `wrap`
 lands, so there is nothing to undo.
+
+## Answer (lane F, 2026-09-27)
+
+Done in `gui/font/src/shape.rs` (`wrap`), which `ScaledFont::wrap`,
+`SystemFont::wrap` (all three arms) and both `wrap_hard`s now use:
+
+* **Each paragraph is shaped once**, and each word boundary's pen position is
+  read off that run -- less the kern a line's last glyph carries against the
+  space after it (`ShapedGlyph::kern_next`, as `fit` already subtracts).
+  Those positions *propose* where each line ends.
+* **Each line is confirmed by shaping it alone, twice at most**: the proposed
+  line fits, and the line with one more word does not. Where the run and a
+  line alone disagree -- shaping across a space the run saw and the line does
+  not -- the check fails and that line is found word by word, as before. So
+  the lines are exactly the old ones, not the run's approximation of them.
+* **`wrap_hard` no longer measures every line again**: a line of several
+  words was measured to fit while it was made, so only a one-word line is
+  measured before it is cut.
+
+The same lines: the old rule is kept as `osfont::testing::wrap_by_words`, and
+unit tests (the bitmap face and the outline fixture, 41 widths each, with
+doubled and trailing spaces, empty paragraphs and over-long words) and a host
+test (`installed_fonts_wrap_as_shaping_every_line_would`: twelve installed
+faces with kerning, three sizes, 24 widths -- 864 wraps and hard wraps)
+compare them line for line.
+
+Measured with `examples/wrap_time.rs`, your case (600 words, 3 484 characters,
+into 1 136 px at 14 px, Arial): release 7.1 ms against 44 ms; debug 0.23 s
+against 1.1 s. About six times, not more, because confirming each line costs
+two shapings of it -- the price of the lines being exactly the old ones.

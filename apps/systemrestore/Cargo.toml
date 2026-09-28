@@ -7,6 +7,23 @@ edition = "2024"
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# Where every program keeps its settings and its data: the folder a restore
+# point holds (`settingsfile::config_dir`).
+settingsfile = { path = "../../gui/settingsfile" }
+# The store restore points are kept in -- the backup tool's, with its
+# guarantees: what could not be read is recorded and never removed by a
+# restore, and a restore never writes outside the folder or through a link.
+snapstore = { path = "../snapstore" }
+# The list of restore points is rewritten whole, so a truncated write would
+# lose every one of them.
+safeio = { path = "../safeio" }
+# A name on disk, shown by its bytes rather than a lossy decode.
+pathtext = { path = "../pathtext" }
+
+[dev-dependencies]
+# Scratch folders for the store and for the programs' settings, so no test
+# reads or restores the developer's own.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]
 workspace = true

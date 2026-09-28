@@ -251,6 +251,67 @@ pub enum SettingsPage {
 }
 
 impl SettingsPage {
+    /// Every page, in the order the categories list them.
+    fn all() -> impl Iterator<Item = SettingsPage> {
+        SettingsCategory::ALL
+            .iter()
+            .flat_map(|c| c.pages().iter().copied())
+    }
+
+    /// The page's name on the command line: `settings --page <name>`.
+    ///
+    /// Stable, because callers write it down -- the start menu's "Display
+    /// Settings", a pinned page in `startmenu.yaml`, a shortcut on the
+    /// desktop. Lower case, words joined by `-`; the Accessibility pages carry
+    /// their category, since "audio" alone would read as the Sound page.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Display => "display",
+            Self::Sound => "sound",
+            Self::Mouse => "mouse",
+            Self::Notifications => "notifications",
+            Self::Power => "power",
+            Self::NetworkStatus => "network-status",
+            Self::WiFi => "wifi",
+            Self::Ethernet => "ethernet",
+            Self::VPN => "vpn",
+            Self::Proxy => "proxy",
+            Self::DynamicDns => "dynamic-dns",
+            Self::Themes => "themes",
+            Self::Colors => "colors",
+            Self::Wallpaper => "wallpaper",
+            Self::Fonts => "fonts",
+            Self::LockScreen => "lock-screen",
+            Self::DefaultApps => "default-apps",
+            Self::StartupApps => "startup-apps",
+            Self::InstalledApps => "installed-apps",
+            Self::UserAccounts => "user-accounts",
+            Self::LoginOptions => "login-options",
+            Self::Permissions => "permissions",
+            Self::Capabilities => "capabilities",
+            Self::Visual => "accessibility-visual",
+            Self::Audio => "accessibility-audio",
+            Self::Interaction => "accessibility-interaction",
+            Self::SystemUpdates => "system-updates",
+            Self::Recovery => "recovery",
+            Self::Snapshots => "snapshots",
+        }
+    }
+
+    /// The page named `name` on the command line.
+    fn from_name(name: &str) -> Option<Self> {
+        Self::all().find(|p| p.name() == name)
+    }
+
+    /// The category the page is listed under.
+    fn category(self) -> SettingsCategory {
+        SettingsCategory::ALL
+            .iter()
+            .copied()
+            .find(|c| c.pages().contains(&self))
+            .unwrap_or(SettingsCategory::System)
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Display => "Display",
@@ -687,6 +748,11 @@ pub struct SettingsState {
     /// Held rather than re-read while drawing, like the two lists above:
     /// `build_page` runs on every repaint and again for every hit test.
     lock_after_minutes: u32,
+    /// Whether the lock screen's clock shows seconds, and the date: the lock
+    /// screen program's own settings (`lockscreen.yaml`), which until
+    /// 2026-09-27 were compiled in and the same for everyone (C-Q26).
+    lock_clock_seconds: bool,
+    lock_clock_date: bool,
     /// `session.yaml` was rewritten and the shell has not been told.
     ///
     /// Without the telling, a delay the user just chose takes effect at the
@@ -867,6 +933,8 @@ struct SettingsSnapshot {
     appearance: appearance::AppearanceSettings,
     input: inputsettings::InputSettings,
     notif: notifsettings::NotifSettings,
+    /// The lock screen's clock: (seconds, date) -- `lockscreen.yaml`.
+    lock_clock: (bool, bool),
 }
 
 /// Which of them an event changed.
@@ -878,6 +946,7 @@ struct ChangedDocuments {
     appearance: bool,
     input: bool,
     notif: bool,
+    lock_clock: bool,
 }
 
 impl Default for SettingsState {
@@ -901,6 +970,7 @@ impl SettingsState {
     /// I/O, and so out of [`new`](Self::new) with the rest of it.
     pub fn load_lock_delay(&mut self) {
         self.lock_after_minutes = lockscreen::stored_minutes();
+        (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
     }
 
     /// Enumerate the font families installed on this machine.
@@ -936,6 +1006,13 @@ impl SettingsState {
         if page == SettingsPage::DefaultApps {
             self.refresh_default_apps();
         }
+    }
+
+    /// Open on `page`, with its category chosen in the sidebar -- what
+    /// `settings --page <name>` asks for.
+    fn open_on(&mut self, page: SettingsPage) {
+        self.current_category = page.category();
+        self.go_to_page(page);
     }
 
     /// Write the appearance settings back to `appearance.yaml`.
@@ -1298,6 +1375,14 @@ impl SettingsState {
     /// `SettingsGroup` and control verb, not a missing write, and the shell
     /// end is already built -- `DesktopShell::poll_notification_rules` exists
     /// and answers correctly; nothing tells it to run.
+    /// Write the lock screen's clock to `lockscreen.yaml`, which the lock
+    /// screen reads when it starts -- so nothing needs telling.
+    fn save_lock_clock(&mut self) {
+        if let Err(err) = lockscreen::store_clock(self.lock_clock_seconds, self.lock_clock_date) {
+            eprintln!("settings: could not save lockscreen.yaml: {err}");
+        }
+    }
+
     fn save_notifications(&mut self) {
         if let Err(err) = self.notif.save() {
             eprintln!("settings: could not save notifications.yaml: {err}");
@@ -1395,6 +1480,8 @@ impl SettingsState {
             font_families: Vec::new(),
             mono_families: Vec::new(),
             lock_after_minutes: 0,
+            lock_clock_seconds: false,
+            lock_clock_date: true,
             session_dirty: false,
         }
     }
@@ -2095,6 +2182,10 @@ enum ToggleId {
     MouseKeys,
     ReduceAnimations,
     ReduceTransparency,
+    /// Whether the lock screen's clock shows seconds (`lockscreen.yaml`).
+    LockClockSeconds,
+    /// Whether it shows the date under the clock.
+    LockClockDate,
     /// Slide the taskbar out of the way when it is not in use.
     ///
     /// Unlike its neighbours here, the field behind this one lives in the
@@ -4676,6 +4767,18 @@ impl SettingsState {
             );
         }
 
+        s.section("Lock Screen Clock");
+        s.toggle_row(
+            "Show seconds",
+            ToggleId::LockClockSeconds,
+            self.lock_clock_seconds,
+        );
+        s.toggle_row(
+            "Show the date",
+            ToggleId::LockClockDate,
+            self.lock_clock_date,
+        );
+
         s.gap();
         // Said here because the alternative is a user setting a delay, walking
         // away, and finding the screen open. `design-decisions.md` 818 is the
@@ -5398,6 +5501,9 @@ impl SettingsState {
         if changed.notif {
             self.save_notifications();
         }
+        if changed.lock_clock {
+            self.save_lock_clock();
+        }
         result
     }
 
@@ -5413,6 +5519,7 @@ impl SettingsState {
             appearance: self.appearance.settings.clone(),
             input: self.input.settings.clone(),
             notif: self.notif.settings.clone(),
+            lock_clock: (self.lock_clock_seconds, self.lock_clock_date),
         }
     }
 
@@ -5427,6 +5534,7 @@ impl SettingsState {
             appearance: self.appearance.settings != before.appearance,
             input: self.input.settings != before.input,
             notif: self.notif.settings != before.notif,
+            lock_clock: (self.lock_clock_seconds, self.lock_clock_date) != before.lock_clock,
         }
     }
 
@@ -5820,6 +5928,11 @@ impl SettingsState {
                 self.drag_slider_to(id, mx);
             }
             RowHit::Toggle(id) => {
+                // Saved, where it is one of the lock screen's two, by the
+                // whole-snapshot comparison in `handle_event`, as every other
+                // setting is: a click that wrote for itself was a second way
+                // to persist, and it wrote the developer's own lockscreen.yaml
+                // from a test that clicks every switch.
                 if let Some(flag) = self.toggle_mut(id) {
                     *flag = !*flag;
                 }
@@ -6043,6 +6156,8 @@ impl SettingsState {
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
             ToggleId::TaskbarAutohide => &mut self.appearance.settings.taskbar_autohide,
+            ToggleId::LockClockSeconds => &mut self.lock_clock_seconds,
+            ToggleId::LockClockDate => &mut self.lock_clock_date,
         })
     }
 
@@ -6397,7 +6512,73 @@ impl oswindow::app::App for SettingsState {
     }
 }
 
+/// The page `settings --page <name>` asks for, or `None` for no arguments.
+///
+/// Anything else is refused by name, with the list of pages -- the rule the
+/// shared command line applies to an argument nobody takes: starting on the
+/// Display page instead would be a wrong answer given confidently.
+fn page_from_args(rest: &[std::ffi::OsString]) -> Result<Option<SettingsPage>, String> {
+    let known = || {
+        SettingsPage::all()
+            .map(SettingsPage::name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let named = |name: &std::ffi::OsStr| {
+        name.to_str()
+            .and_then(SettingsPage::from_name)
+            .ok_or_else(|| {
+                format!(
+                    "no page is called {}; the pages are: {}",
+                    std::path::Path::new(name).shown(),
+                    known()
+                )
+            })
+    };
+    let mut args = rest.iter();
+    let Some(first) = args.next() else {
+        return Ok(None);
+    };
+    let page = if first == "--page" {
+        let name = args
+            .next()
+            .ok_or_else(|| format!("--page needs a page's name, one of: {}", known()))?;
+        named(name)?
+    } else if let Some(name) = first.to_str().and_then(|a| a.strip_prefix("--page=")) {
+        named(std::ffi::OsStr::new(name))?
+    } else {
+        return Err(format!(
+            "unknown argument {}; settings takes --page <name>",
+            std::path::Path::new(first).shown()
+        ));
+    };
+    if let Some(extra) = args.next() {
+        return Err(format!(
+            "unknown argument {}; settings takes one --page",
+            std::path::Path::new(extra).shown()
+        ));
+    }
+    Ok(Some(page))
+}
+
 fn main() -> ExitCode {
+    // `settings --page <name>` opens on that page: the start menu's "Display
+    // Settings" and the launcher's settings entries ask for one by name
+    // (lane C's request c-e-settings-opens-on-the-page-it-is-asked-for).
+    let args = match oswindow::app::ArgsOs::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("settings: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let page = match page_from_args(&args.rest) {
+        Ok(page) => page,
+        Err(e) => {
+            eprintln!("settings: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let mut state = SettingsState::new();
     // The Personalization pages open on what the user actually has, which is
     // the same file the desktop shell paints from.
@@ -6428,15 +6609,17 @@ fn main() -> ExitCode {
     // The screen-lock delay, for the Lock Screen page.
     state.load_lock_delay();
 
-    // `launch` rather than `launch_with`: Settings takes no file and no page
-    // name, so it wants exactly the shared command line and nothing more —
-    // including the rejection of an unrecognised argument, which was previously
-    // Settings' own `split_args`. Silently starting on the Display page would be
-    // a wrong answer delivered confidently.
+    if let Some(page) = page {
+        state.open_on(page);
+    }
+
+    // `launch_with`, having read the command line above: `launch` refuses
+    // every argument, and `--page` is one. An argument that is not `--page`
+    // is still refused, in `page_from_args`.
     //
     // Settings names `oswindow` and never TCP — see `design-decisions.md` §460 —
     // so the day the transport becomes a SlateOS channel, none of this changes.
-    oswindow::app::launch("settings", &mut state)
+    oswindow::app::launch_with("settings", args.display.as_deref(), &mut state)
 }
 
 // ============================================================================
@@ -10791,6 +10974,102 @@ mod tests {
             contrasted.overlay0, contrasted.text,
             "and the faint role must stop being faint"
         );
+    }
+
+    /// The lock screen's clock is saved by `handle_event`, like everything
+    /// else here, and a click through `dispatch_event` alone writes nothing.
+    #[test]
+    fn the_lock_screen_clock_is_saved_by_the_event_not_the_click() {
+        settingsfile::testing::with_scratch_config("settings-lock-clock-event", |_root| {
+            let Some(mut state) = state_showing(RowHit::Toggle(ToggleId::LockClockSeconds)) else {
+                panic!("no page shows the lock screen's seconds switch");
+            };
+            let (x, y) = center_of(&state, RowHit::Toggle(ToggleId::LockClockSeconds))
+                .expect("just found it");
+            let press = Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            // Pinned: the page fixture turns every switch on, and a start
+            // equal to the file's defaults could not tell a save from none.
+            state.lock_clock_seconds = false;
+            state.lock_clock_date = true;
+            state.dispatch_event(&press);
+            assert!(state.lock_clock_seconds, "the switch did not move");
+            assert_eq!(
+                lockscreen::stored_clock(),
+                (false, true),
+                "a click wrote for itself"
+            );
+            state.handle_event(&press);
+            assert!(!state.lock_clock_seconds);
+            state.handle_event(&press);
+            assert_eq!(
+                lockscreen::stored_clock(),
+                (true, true),
+                "the event did not save it"
+            );
+        });
+    }
+
+    // == settings --page <name> (lane C's request, 2026-09-27) =================
+
+    #[test]
+    fn every_page_has_a_name_that_finds_it_again() {
+        let mut seen = std::collections::HashSet::new();
+        for page in SettingsPage::all() {
+            let name = page.name();
+            assert!(seen.insert(name), "two pages are called {name}");
+            assert!(
+                name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'),
+                "{name} is not lower case words joined by -"
+            );
+            assert_eq!(SettingsPage::from_name(name), Some(page), "{name}");
+            assert!(page.category().pages().contains(&page), "{name}'s category");
+        }
+    }
+
+    /// The names written down elsewhere -- the start menu's rows and the
+    /// launcher's entries -- are the ones Settings answers to.
+    #[test]
+    fn the_names_the_desktop_and_launcher_use_are_pages() {
+        for name in ["display", "network-status", "sound", "wifi"] {
+            assert!(SettingsPage::from_name(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_command_line_names_a_page_or_is_refused() {
+        let args = |a: &[&str]| a.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert_eq!(page_from_args(&args(&[])), Ok(None));
+        assert_eq!(
+            page_from_args(&args(&["--page", "wifi"])),
+            Ok(Some(SettingsPage::WiFi))
+        );
+        assert_eq!(
+            page_from_args(&args(&["--page=lock-screen"])),
+            Ok(Some(SettingsPage::LockScreen))
+        );
+        let unknown = page_from_args(&args(&["--page", "bluetooth"])).unwrap_err();
+        assert!(
+            unknown.contains("display") && unknown.contains("wifi"),
+            "{unknown}"
+        );
+        assert!(page_from_args(&args(&["--page"])).is_err());
+        assert!(
+            page_from_args(&args(&["--display"])).is_err(),
+            "the compositor's option"
+        );
+        assert!(page_from_args(&args(&["--page", "wifi", "extra"])).is_err());
+    }
+
+    #[test]
+    fn opening_on_a_page_chooses_its_category_too() {
+        let mut state = SettingsState::new();
+        state.open_on(SettingsPage::WiFi);
+        assert_eq!(state.current_page, SettingsPage::WiFi);
+        assert_eq!(state.current_category, SettingsCategory::Network);
     }
 }
 

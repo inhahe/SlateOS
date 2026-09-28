@@ -5035,3 +5035,82 @@ fn a_variation_index_kern_follows_the_instance() {
         expected.len()
     );
 }
+
+/// `ScaledFont::wrap` shapes a paragraph once and confirms each line; the
+/// rule it keeps is "each line takes words while the line, shaped alone,
+/// fits" -- which `osfont::testing::wrap_by_words` computes the slow way, by
+/// shaping every candidate line. On real faces, whose kerning and shaping a
+/// fixture does not have, the two must give the same lines at every width.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_wrap_as_shaping_every_line_would() {
+    // Faces with kerning, and the kinds this host's text is set in: sans,
+    // serif, monospace, variable, and one with fallback-heavy coverage.
+    const FACES: &[&str] = &[
+        "arial.ttf",
+        "times.ttf",
+        "segoeui.ttf",
+        "calibri.ttf",
+        "cambria.ttc",
+        "georgia.ttf",
+        "verdana.ttf",
+        "consola.ttf",
+        "bahnschrift.ttf",
+        "DejaVuSans.ttf",
+        "Carlito-Regular.ttf",
+        "LinLibertine_R_G.ttf",
+    ];
+    // Kerning pairs (AV, To, Wa, Ty, 'quotes'), punctuation against spaces,
+    // doubled spaces, accents, figures, and a word no line holds.
+    let text = "AVAST! To Wally, Tyrone and Yvette: \"WAVY\" lines, 'quoted' \
+                words -- 1,234.56 (in parentheses) and  two  spaces.\n\
+                Voilà, déjà vu: naïve café façades, Ångström and Øresund. \
+                Pneumonoultramicroscopicsilicovolcanoconiosis appears once.\n\n\
+                y. j, f' P. F. T. V. W. Y. -- the pairs a kern table names first.";
+    let mut compared = 0usize;
+    for dir in font_dirs() {
+        for name in FACES {
+            let path = dir.join(name);
+            let Ok(data) = fs::read(&path) else { continue };
+            let Ok(face) = Face::parse(data) else {
+                continue;
+            };
+            for px in [11.0f32, 14.0, 23.0] {
+                let Ok(font) = ScaledFont::new(face.clone(), px) else {
+                    continue;
+                };
+                let whole = font.measure(text).max(1.0);
+                for step in 1..=24u8 {
+                    let width = whole * f32::from(step) / 48.0;
+                    let fast = font.wrap(text, width);
+                    let slow = osfont::testing::wrap_by_words(text, width, &|s| font.measure(s));
+                    assert_eq!(fast, slow, "{name} at {px} px, {width} wide");
+                    // And `wrap_hard`, which now measures again only the
+                    // lines of one word, as it was: every line measured, the
+                    // over-long ones cut.
+                    let mut hard = Vec::new();
+                    for line in slow {
+                        if font.measure(&line) <= width {
+                            hard.push(line);
+                            continue;
+                        }
+                        let mut start = 0;
+                        for cut in font.shape(&line).hard_breaks(width) {
+                            if let Some(piece) = line.get(start..cut) {
+                                hard.push(piece.to_string());
+                                start = cut;
+                            }
+                        }
+                        if let Some(rest) = line.get(start..) {
+                            hard.push(rest.to_string());
+                        }
+                    }
+                    assert_eq!(font.wrap_hard(text, width), hard, "hard: {name} at {px} px");
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert!(compared > 0, "none of the faces is installed on this host");
+    println!("{compared} wraps compared");
+}

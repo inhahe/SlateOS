@@ -1,6 +1,6 @@
 //! The pending accent: the one piece of memory between two key events.
 //!
-//! Everything else in [`keymap`](crate::keymap) is a pure function of one
+//! Everything else in [`keymap`] is a pure function of one
 //! keystroke. A dead key is not: pressing `´` on a German board changes
 //! nothing on screen, and the `é` appears only when `e` follows. Something has
 //! to remember the accent in between, and this is it — a single `Option<char>`

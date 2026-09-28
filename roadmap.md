@@ -2392,9 +2392,12 @@ word; text inside them that says "lane C" is history.
   (`gamechrome::Ink`, `Chrome::on(ground)`). Wordle's help is the
   toolkit's shortcut card, still see-through under the bordered look
   (lane C's, `requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md`).
-  **Next:** the same test under themes that leave no room -- soft text,
-  pale and deep hues (todo.txt) -- then the fixed-size boards (match-3,
-  pinball; known-issues).
+  Then the same test under themes a user can put together that leave no
+  room -- text only as dark as the page needs, pale hues on light, deep
+  hues on dark (`gamechrome::legibility::looks()`, §1227) -- which found
+  words in five more games: battleship's message bar, 2048's score values,
+  hangman's keys, tic-tac-toe's winning marks, wordle's keys and header
+  buttons. **Next:** the fixed-size boards (match-3, pinball; known-issues).
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

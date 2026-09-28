@@ -1978,8 +1978,11 @@ live.
   `guitk::grab` is the rule for every draggable thing: a handle is a 24-pixel
   target however small it is drawn (WCAG 2.5.8), an edge gets three pixels
   either side. The notification pane's volume and brightness drag now.
-  **Lane C, next:** the toolkit's colour picker sliders, scrollbar thumbs and
-  `WidgetKind::Slider` onto it. **Lane E:** the applications' own sliders
+  **Lane C, next:** the toolkit's colour picker sliders and scrollbar thumbs
+  onto it. (`WidgetKind::Slider` is one of five widgets the unused retained
+  tree never drew -- `known-issues.md`
+  `TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING`.)
+  **Lane E:** the applications' own sliders
   (`requests/c-e-the-toolkit-has-a-slider-now.md`).
 
 - `[C]` **One push button, the reference's** -- done 2026-09-27

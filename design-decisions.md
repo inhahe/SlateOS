@@ -83590,6 +83590,86 @@ and after lost events every settings file in the folder. `settingsfile` now
 refuses a name the protocol could not announce, with the same rule
 (`gui/settingsname`), so every file it writes is one that can be.
 
+## 1435. A theme chooses the shapes of the controls as an axis of its own; padding, colour and visibility stay out of it
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (operator-approved scope:
+`roadmap-detailed.md` → *Tier 2 — Widget Styling* asks for the axis and its
+four items; which settings it has, their spellings and their limits are
+Claude's call) &middot; **Lane:** C
+
+**In short:** A theme can now say how the controls are shaped, not only what
+colours they are: how round a button's corners are and whether its face has
+the glassy brighter top, how a text box shows it is being typed in, how wide a
+scrollbar is and whether it hides, and whether an on/off setting is a pill or
+a tick box. The user picks which theme's shapes to use separately from its
+colours, the way icons already work. A few things were kept out on purpose: a
+theme cannot change a button's width (that would move the buttons beside it),
+cannot choose the colour of the "this is selected" ring (it could make it
+invisible), and under high contrast cannot keep the choices that make things
+harder to see.
+
+**The file.** A `widget-style` section in `theme.yaml`, named as the axis is
+in `meta.supports`; `theme.widget_style: <name>` in `appearance.yaml` chooses
+it, next to `theme.colors` and `theme.icons` (and named after the capability
+`ui.theme.widget_style`). The shipped `aero/theme.yaml` writes every setting
+out as the template:
+
+| Setting | Values | The built-in theme's | From |
+|---|---|---|---|
+| `button.radius` | 0-14 px (14 is a pill) | 4 | `.aero-srch-btn` |
+| `button.gloss` | the upper half a shade brighter | true | its gradient |
+| `button.shadow` | a soft shadow under it | false | it has none |
+| `field.radius` | 0-13 px | 3 | `.aero-srch-in` |
+| `field.border` | `box` or `underline` | box | its 1px border |
+| `field.focus` | `ring`, `glow` or `underline` | glow | `.aero-srch-in:focus` |
+| `check.radius` | 0-7 px (7 is a circle) | 2 | the toolkit's box |
+| `toggle` | `pill` or `checkbox` | pill | every switch drawn so far |
+| `scrollbar.width` | `thin` (6), `normal` (10), `wide` (14) | normal | the toolkit's 10 |
+| `scrollbar.visibility` | `always` or `overlay` | always | the browser's |
+
+As with colours, what a section leaves out is the built-in theme's, and a value
+that cannot be read costs that value and is listed for the theme's author. A
+radius past the roundest is drawn as the roundest, with a note, since that is
+plainly what was meant. Every measure is a whole number of pixels: a `Palette`
+carries the style and is compared for equality, so the style must be `Eq`.
+
+**How it reaches a control.** `AppearanceSettings::read_from` loads the chosen
+theme's section with the settings, as it loads the colours, and
+`Palette::from_settings` puts the result on the palette
+(`Palette::widget_style`). Every control is already handed a palette, so none
+needs a new argument, and every application gets the style with its colours
+through `oswindow`. The settings watcher's fingerprint covers the widget
+theme's file as it covers the colour theme's.
+
+**What was kept out, and why:**
+
+| Left out | Why | What would bring it in |
+|---|---|---|
+| **Button padding** (the roadmap's item names it) | a button's width decides where the next button in its row starts, and the toolkit's dialogs lay out *and hit-test* their rows without a palette (`modal.rs` `compute_layout`); a padding the drawing honoured and the click did not would put a click on the wrong button | the dialog layout taking the style from the palette it renders with, and storing the rectangles it drew for the click to use. `todo.txt` → *Judgment Calls* |
+| **Focus colour** | a focus mark is drawn over grounds nobody can list in advance, so a theme's colour could be one that vanishes; `guitk::style::FOCUS_RING_WIDTH`'s note already refuses the hue as a user setting for this reason. The mark is always the accent, at least the user's focus width | nothing: this is the rule |
+| **Scrollbar colour** (the roadmap's item names it) | it is the colours axis's already: the thumb is `surface2`, whose documented job is "a scrollbar thumb" | nothing: a theme sets `surface2` |
+| **A field with no edge** | a well on a page of nearly its own shade is a field nobody can find; `underline` keeps a line where the typing goes | nothing |
+
+**High contrast.** A high-contrast scheme is chosen for need and replaces the
+colours whole. It keeps the theme's shapes -- round or square, pill or box, a
+user who needs contrast can see either -- but puts back the four choices that
+make a control show less plainly: no gloss (a second ground under a label), no
+shadow (a soft edge), a ring for focus (a glow or an underline says less), and
+a scrollbar that stays (`WidgetStyle::for_high_contrast`).
+
+**The alternatives for the model:**
+
+| Option | For | Against |
+|---|---|---|
+| **A fixed set of named settings per control** (chosen) | each is checked, bounded and documented; a theme cannot ask for what the toolkit cannot draw | a new look needs a new setting |
+| A CSS-like property sheet (`design.txt` 772 floats "a subset of CSS") | open-ended | `design.txt` itself records the recommendation against CSS; every property is a promise every control must keep, and themes are "pure data" that must not reach layout |
+| Free numbers for the scrollbar width | finer choice | a 2-pixel scrollbar is one nobody can take hold of; three widths cover the looks the roadmap names (thin, wide) |
+
+**What honours it, as of this entry:** nothing yet draws differently -- the
+axis is read, carried and checked, and the controls follow in their own
+commits (button, text field, check box, switch, scrollbar), each noted in
+`roadmap-detailed.md` → *Tier 2 — Widget Styling*.
+
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 
 **Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text

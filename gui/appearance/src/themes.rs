@@ -9,7 +9,9 @@
 //! section per *axis* -- colours, window decorations, icons, cursors and so on
 //! -- each of which a user may take from a different theme. This module is the
 //! colours axis, together with the parts every axis will share: where themes
-//! are installed, how one is named, and how its file is read.
+//! are installed, how one is named, and how its file is read. The icons axis is
+//! [`crate::icons`]; the widget-style axis, the shapes of the toolkit's
+//! controls, is [`WidgetTheme`] and its `widget-style` section.
 //!
 //! # A theme on disk
 //!
@@ -97,6 +99,7 @@
 
 use guitk::color::Color;
 use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors};
+use guitk::widget_style::WidgetStyle;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -106,6 +109,10 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use yamldoc::Document;
+
+mod widgets;
+
+pub use widgets::WidgetTheme;
 
 /// The built-in theme's name: what `theme.colors` holds when the user has
 /// chosen nothing else.
@@ -140,6 +147,10 @@ pub const TERMINAL_DARK_SECTION: &str = "terminal";
 
 /// The section holding a terminal's light-mode colours.
 pub const TERMINAL_LIGHT_SECTION: &str = "terminal-light";
+
+/// The section holding a theme's widget style: the shapes of the toolkit's
+/// controls ([`WidgetTheme`]). Named as the axis is in `meta.supports`.
+pub const WIDGET_SECTION: &str = "widget-style";
 
 /// The largest theme file that is read.
 ///
@@ -280,6 +291,8 @@ pub enum ThemeError {
     Unreadable(String),
     /// The file was read but sets no colours, in either mode.
     NoColors,
+    /// The file was read but has no usable `widget-style` section.
+    NoWidgetStyle,
 }
 
 impl fmt::Display for ThemeError {
@@ -295,6 +308,7 @@ impl fmt::Display for ThemeError {
             Self::NotText => f.write_str("has a file that is not text"),
             Self::Unreadable(why) => write!(f, "could not be read ({why})"),
             Self::NoColors => f.write_str("sets no colours"),
+            Self::NoWidgetStyle => f.write_str("sets no widget style"),
         }
     }
 }
@@ -333,6 +347,10 @@ pub struct ThemeFile {
     pub meta: ThemeMeta,
     /// The colours it sets.
     pub colors: ThemeColors,
+    /// The shapes of the controls its `widget-style` section sets, over the
+    /// built-in ones; `None` when it has no such section, or one that sets
+    /// nothing usable.
+    pub widget_style: Option<WidgetStyle>,
     /// What in it was not understood and so was ignored -- a colour this
     /// desktop has no role for, a value that is not a colour. For the theme's
     /// author, and for a theme browser to show them: the theme is used without
@@ -363,9 +381,11 @@ pub fn parse(text: &str) -> ThemeFile {
         terminal_dark: read_terminal(&doc, TERMINAL_DARK_SECTION, &mut warnings),
         terminal_light: read_terminal(&doc, TERMINAL_LIGHT_SECTION, &mut warnings),
     };
+    let widget_style = widgets::read(&doc, &mut warnings);
     ThemeFile {
         meta,
         colors,
+        widget_style,
         warnings: warnings.finish(),
     }
 }
@@ -588,23 +608,47 @@ fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
     Ok(bytes)
 }
 
-/// What the colours read from `doc` depend on besides the document itself:
-/// the chosen theme's file -- where it was found, and what it holds. The
+/// What the settings read from `doc` depend on besides the document itself:
+/// the files of the themes chosen for the axes read with them -- the colours
+/// and the widget style -- where each was found, and what it holds. The
 /// dependency fingerprint of [`crate::watcher`].
 ///
-/// Empty for the built-in theme, whose colours are compiled in, and for a
-/// name that cannot be a theme. A theme that is not installed, or cannot be
-/// read, contributes that fact, so one appearing, disappearing or moving
-/// between the user's directory and the system's is a change as much as an
-/// edit is.
+/// A theme chosen for both axes is one file, and is counted once.
 pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
-    let Some(id) = crate::color_theme_name(doc) else {
-        return Vec::new();
-    };
-    if id == OsStr::new(BUILT_IN) || !is_valid_id(&id) {
+    let mut out = Vec::new();
+    let mut seen: Vec<OsString> = Vec::new();
+    for id in [crate::color_theme_name(doc), crate::widget_theme_name(doc)]
+        .into_iter()
+        .flatten()
+    {
+        if seen.contains(&id) {
+            continue;
+        }
+        let part = fingerprint_of(&id);
+        seen.push(id);
+        if part.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            // Between two themes' parts, so the pair is not read as one.
+            out.extend_from_slice(b"\0\0");
+        }
+        out.extend_from_slice(&part);
+    }
+    out
+}
+
+/// What reading the theme `id` depends on: its file's place and bytes.
+///
+/// Empty for the built-in theme, which is compiled in, and for a name that
+/// cannot be a theme. A theme that is not installed, or cannot be read,
+/// contributes that fact, so one appearing, disappearing or moving between the
+/// user's directory and the system's is a change as much as an edit is.
+fn fingerprint_of(id: &OsStr) -> Vec<u8> {
+    if id == OsStr::new(BUILT_IN) || !is_valid_id(id) {
         return Vec::new();
     }
-    let Some((dir, _)) = ThemeDirs::standard().find(&id) else {
+    let Some((dir, _)) = ThemeDirs::standard().find(id) else {
         return b"not installed".to_vec();
     };
     let file = dir.join(FILE_NAME);
@@ -778,6 +822,9 @@ pub struct ThemeInfo {
     pub has_dark: bool,
     /// Whether it sets light-mode colours.
     pub has_light: bool,
+    /// Whether it has a usable `widget-style` section: the shapes of the
+    /// toolkit's controls.
+    pub has_widget_style: bool,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -792,6 +839,14 @@ impl ThemeInfo {
     #[must_use]
     pub fn provides_colors(&self) -> bool {
         self.problem.is_none() && (self.has_dark || self.has_light)
+    }
+
+    /// Whether it can be chosen for the widget-style axis: it was read, and
+    /// its `widget-style` section sets something -- or it is the built-in
+    /// theme, whose controls are compiled in.
+    #[must_use]
+    pub fn provides_widget_style(&self) -> bool {
+        self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_widget_style)
     }
 
     /// Whether it can be chosen for the icons axis: its folder holds an
@@ -894,15 +949,17 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             screenshots: Vec::new(),
             has_dark: true,
             has_light: true,
+            has_widget_style: true,
             warnings: Vec::new(),
             problem: None,
         }
     };
-    // Whatever its file says, the built-in theme's colours and icons are
-    // compiled in: it covers both modes, draws every icon, and cannot fail to
-    // load.
+    // Whatever its file says, the built-in theme's colours, icons and controls
+    // are compiled in: it covers both modes, draws every icon and every
+    // control, and cannot fail to load.
     info.has_dark = true;
     info.has_light = true;
+    info.has_widget_style = true;
     info.problem = None;
     info
 }
@@ -935,6 +992,7 @@ fn describe(
                 dir: Some(dir),
                 has_dark: !file.colors.dark.is_empty(),
                 has_light: !file.colors.light.is_empty(),
+                has_widget_style: file.widget_style.is_some(),
                 meta: file.meta,
                 screenshots,
                 warnings,
@@ -950,6 +1008,7 @@ fn describe(
             screenshots: Vec::new(),
             has_dark: false,
             has_light: false,
+            has_widget_style: false,
             warnings: Vec::new(),
             problem: Some(err),
         },

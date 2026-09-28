@@ -91,6 +91,7 @@ pub mod treeview;
 pub mod undo;
 pub mod wheel;
 pub mod widget;
+pub mod widget_style;
 
 // Text-format escaping lives in `textfmt`, a dependency-free crate, because
 // the components that most need it are headless and must not link a widget

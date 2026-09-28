@@ -1772,8 +1772,8 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 ##### Theme Format
 - [x] YAML theme file following the OS config convention (comment-preserving parser) — 2026-09-25, `appearance::themes` (§874): `<name>/theme.yaml` under `/usr/share/slateos/themes` or the user's `~/.local/share/slateos/themes`, read with `yamldoc`. What a file gets wrong costs that line, not the theme, and is listed for its author.
 - [x] `meta` block: name, author, version, license, tags, screenshots, `supports` list — 2026-09-25. Lists may be written as a block or `[a, b]`; a screenshot that would resolve outside the theme's folder is dropped.
-- [-] `supports` field declares which axes this theme covers (e.g., `[colors, window-decorations, icons, cursors, widget-style, sounds, terminal]`) — *read and kept for a theme list to show (2026-09-25); not trusted over what the file actually sets, and only `colors` exists as an axis so far.*
-- [-] Mix-and-match: each axis is independently overridable — user can apply one theme's colors with a different theme's icons. A "full theme" sets everything, but no axis is mandatory. — *The choice is per axis (`theme.colors` in `appearance.yaml`), so the next axis is a key beside it; colours is the only axis yet.*
+- [-] `supports` field declares which axes this theme covers (e.g., `[colors, window-decorations, icons, cursors, widget-style, sounds, terminal]`) — *read and kept for a theme list to show (2026-09-25); not trusted over what the file actually sets, and only `colors` exists as an axis so far.* *2026-09-28: three axes exist -- colours, icons (§880) and the widget style (§1435, a `widget-style` section) -- and a theme's listing says which it can give (`ThemeInfo::provides_colors`, `provides_icons`, `provides_widget_style`).*
+- [-] Mix-and-match: each axis is independently overridable — user can apply one theme's colors with a different theme's icons. A "full theme" sets everything, but no axis is mandatory. — *The choice is per axis (`theme.colors` in `appearance.yaml`), so the next axis is a key beside it; colours is the only axis yet.* *2026-09-28: `theme.colors`, `theme.icons` and `theme.widget_style` each name a theme of their own.*
 
 ##### Tier 1 — Colors (baseline, include from the start)
 - [x] Semantic color tokens (~30-40 defined by OS): `background`, `surface`, `primary`, `secondary`, `accent`, `error`, `warning`, `text`, `text-dim`, `text-on-primary`, `border`, etc. — the palette's 27 roles (`guitk::palette::Palette`); a theme sets 26 of them by the palette's own names (`THEME_ROLES`), the accent being the user's. Why those names and not the example ones here: §874.
@@ -1813,11 +1813,12 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [ ] Themes recommend fonts (not bundle — licensing issues). Settings app offers to install recommended fonts from package manager.
 
 ##### Tier 2 — Widget Styling
-- [ ] Button shape: border radius, padding, shadow
-- [ ] Input field styling: border style, focus ring color/style
-- [ ] Scrollbar appearance: thin/wide, overlay/always-visible, color
-- [ ] Checkbox/radio/toggle appearance (e.g., pill toggle vs. checkbox)
-- [ ] These variables define the visual feel (flat modern vs. skeuomorphic vs. glassmorphism)
+_2026-09-28 (`design-decisions.md` §1435): the axis exists -- a theme's `widget-style` section, chosen as `theme.widget_style` in `appearance.yaml` and carried on the palette (`guitk::widget_style`, `Palette::widget_style`). The built-in values are the Aero reference's, written out in `aero/theme.yaml` as the template. Each control below is marked done when it draws from it._
+- [-] Button shape: border radius, padding, shadow — *read: `button.radius`, `button.gloss` (the brighter upper half) and `button.shadow`. Padding is not a setting yet, because the dialogs lay out and hit-test their buttons without a palette (`todo.txt`, Lane C, the widget-style axis).*
+- [-] Input field styling: border style, focus ring color/style — *read: `field.radius`, `field.border` (`box` or `underline`) and `field.focus` (`ring`, `glow` or `underline`). The focus colour is not a theme's: it is always the user's accent, which a theme cannot make vanish (§1435).*
+- [-] Scrollbar appearance: thin/wide, overlay/always-visible, color — *read: `scrollbar.width` (`thin`, `normal`, `wide`) and `scrollbar.visibility` (`always`, `overlay`). The colour is the colours axis's `surface2`.*
+- [-] Checkbox/radio/toggle appearance (e.g., pill toggle vs. checkbox) — *read: `toggle` (`pill` or `checkbox`) and `check.radius` (up to a circle). A radio button is always round.*
+- [-] These variables define the visual feel (flat modern vs. skeuomorphic vs. glassmorphism) — *the gloss, shadow, radii and focus mark are the difference between the three; high contrast keeps a theme's shapes but not its gloss, shadow, soft focus or hiding scrollbar.*
 
 ##### Tier 2 — Taskbar/Panel Styling
 - [ ] Transparency/blur level

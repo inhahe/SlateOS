@@ -237,6 +237,10 @@ impl PaletteSource for AppearanceSettings {
     fn theme(&self) -> Option<&ThemeColors> {
         self.color_theme.colors()
     }
+
+    fn widget_style(&self) -> guitk::widget_style::WidgetStyle {
+        self.widget_theme.style()
+    }
 }
 
 // ============================================================================
@@ -1490,6 +1494,13 @@ pub struct AppearanceSettings {
     /// "mix-and-match"). Nothing is read until an icon is drawn; see
     /// [`icons::IconTheme`].
     pub icon_theme: icons::IconTheme,
+    /// The theme the shapes of the controls come from -- a button's corners,
+    /// a field's focus mark, a scrollbar's width: the built-in one unless the
+    /// user chose another. `theme.widget_style` in the file, by the theme's
+    /// folder name, which may name a third theme again. Read with the file,
+    /// for [`color_theme`](Self::color_theme)'s reason; see
+    /// [`themes::WidgetTheme`] and `design-decisions.md` §1435.
+    pub widget_theme: themes::WidgetTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1744,6 +1755,7 @@ impl Default for AppearanceSettings {
             theme_mode: ThemeMode::Dark,
             color_theme: themes::ColorTheme::built_in(),
             icon_theme: icons::IconTheme::built_in(),
+            widget_theme: themes::WidgetTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -2418,6 +2430,12 @@ impl AppearanceSettings {
         {
             s.icon_theme = icons::IconTheme::load(&pathcodec::decode_path(&name).into_os_string());
         }
+        // The widget style, spelled and loaded as the colour theme is -- file
+        // and all, since the palette carries it and a palette is resolved per
+        // frame.
+        if let Some(name) = widget_theme_name(doc) {
+            s.widget_theme = themes::WidgetTheme::load(&name);
+        }
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -2714,6 +2732,10 @@ impl AppearanceSettings {
             &pathcodec::encode_path(std::path::Path::new(self.icon_theme.id())),
         );
         doc.set_str(
+            &["theme", "widget_style"],
+            &pathcodec::encode_path(std::path::Path::new(self.widget_theme.id())),
+        );
+        doc.set_str(
             &["theme", "surface_style"],
             surface_style_yaml_name(self.surface_style),
         );
@@ -2943,7 +2965,20 @@ fn read_wallpaper_schedule(entries: &[String], encoded: bool) -> Vec<ScheduledWa
 /// One decoding, shared by the reader and the watcher's fingerprint, so the
 /// two cannot disagree about which theme a file means.
 pub(crate) fn color_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
-    let name = doc.get_str(&["theme", "colors"])?;
+    theme_name_at(doc, "colors")
+}
+
+/// The widget-style theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn widget_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "widget_style")
+}
+
+/// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
+/// blank.
+fn theme_name_at(doc: &Document, axis: &str) -> Option<std::ffi::OsString> {
+    let name = doc.get_str(&["theme", axis])?;
     let name = name.trim();
     (!name.is_empty()).then(|| pathcodec::decode_path(name).into_os_string())
 }
@@ -3434,6 +3469,11 @@ mod tests {
     const ROUND_TRIP_THEME: &str = "nord 100% ça";
     const ROUND_TRIP_THEME_FILE: &str =
         "colors:\n  base: \"#102030\"\ncolors-light:\n  text: \"#0a0b0c\"\n";
+    /// The round trip's widget-style theme: a third theme, so a writer that
+    /// crossed one axis's name into another's key is caught.
+    const ROUND_TRIP_WIDGETS: &str = "round été";
+    const ROUND_TRIP_WIDGETS_FILE: &str =
+        "widget-style:\n  button:\n    radius: 11\n    gloss: false\n  toggle: checkbox\n";
 
     /// Install a theme in the scratch user's data directory under `root`,
     /// where `AppearanceSettings::read_from` will look for it.
@@ -3459,6 +3499,13 @@ mod tests {
             // A theme of its own, not the colour theme's, so a round trip that
             // wrote one axis into the other would be caught.
             icon_theme: icons::IconTheme::load(std::ffi::OsStr::new("line-icons")),
+            // A third, read back from the file the round trip installs.
+            widget_theme: themes::WidgetTheme::from_style(
+                ROUND_TRIP_WIDGETS,
+                themes::parse(ROUND_TRIP_WIDGETS_FILE)
+                    .widget_style
+                    .expect("the fixture sets a widget style"),
+            ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
             wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
@@ -3556,6 +3603,7 @@ mod tests {
         // where the reader looks: a scratch user's data directory.
         let reread = config::testing::with_scratch_config("round-trip", |root| {
             install_theme(root, ROUND_TRIP_THEME, ROUND_TRIP_THEME_FILE);
+            install_theme(root, ROUND_TRIP_WIDGETS, ROUND_TRIP_WIDGETS_FILE);
             AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
         });
         assert_eq!(reread, settings);
@@ -3717,6 +3765,165 @@ mod tests {
                     .problem()
                     .is_some()
             );
+        });
+    }
+
+    // ---- the widget style ----
+
+    /// A theme's controls reach the palette from the settings file and the
+    /// theme's own, as its colours do -- and they are a separate choice: the
+    /// colours stay the built-in ones.
+    #[test]
+    fn a_chosen_widget_style_reaches_the_palette() {
+        config::testing::with_scratch_config("widget-palette", |root| {
+            install_theme(
+                root,
+                "soft",
+                "widget-style:\n  button:\n    radius: 10\n  scrollbar:\n    width: thin\n",
+            );
+            let s =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  widget_style: soft\n"));
+            assert_eq!(s.widget_theme.problem(), None);
+            let p = Palette::from_settings(&s);
+            assert_eq!(p.widget_style.button.radius, 10);
+            assert_eq!(
+                p.widget_style.scrollbar.width,
+                guitk::widget_style::ScrollbarWidth::Thin
+            );
+            // What the theme left out is the built-in theme's.
+            assert_eq!(
+                p.widget_style.field,
+                guitk::widget_style::WidgetStyle::AERO.field
+            );
+            // And the colours are not the theme's business here.
+            assert_eq!(
+                p.roles(),
+                Palette::from_settings(&AppearanceSettings::default()).roles()
+            );
+        });
+    }
+
+    /// The widget style is its own setting: read from `theme.widget_style`,
+    /// written back there, the built-in one when the file names none or a
+    /// blank -- and a theme that cannot be used keeps its name through a save
+    /// and says why, while the built-in controls are drawn.
+    #[test]
+    fn the_widget_style_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("widget-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.widget_theme, themes::WidgetTheme::built_in());
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  widget_style: \" \"\n"));
+            assert_eq!(blank.widget_theme, themes::WidgetTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "widget_style"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            // A colours-only theme cannot give the controls.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let doc = Document::parse("theme:\n  colors: nord\n  widget_style: nord\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.color_theme.problem(), None, "the colours are usable");
+            assert_eq!(s.widget_theme.id(), "nord");
+            assert_eq!(
+                s.widget_theme.style(),
+                guitk::widget_style::WidgetStyle::AERO
+            );
+            assert!(
+                s.widget_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no widget style")),
+                "{:?}",
+                s.widget_theme.problem()
+            );
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "widget_style"]).as_deref(),
+                Some("nord")
+            );
+        });
+    }
+
+    /// **High contrast keeps the chosen controls, less what hides**: the
+    /// corners and the pill stay, the gloss and the overlaid scrollbar go.
+    #[test]
+    fn high_contrast_keeps_the_widget_style_less_what_hides() {
+        use guitk::widget_style::{ScrollbarVisibility, WidgetStyle};
+        let mut chosen = WidgetStyle::AERO;
+        chosen.button.radius = 12;
+        chosen.scrollbar.visibility = ScrollbarVisibility::Overlay;
+        let s = AppearanceSettings {
+            widget_theme: themes::WidgetTheme::from_style("soft", chosen),
+            high_contrast: Some(HighContrastScheme::WhiteOnBlack),
+            ..AppearanceSettings::default()
+        };
+        let p = Palette::from_settings(&s);
+        assert_eq!(p.widget_style, chosen.for_high_contrast());
+        assert_eq!(p.widget_style.button.radius, 12);
+        assert!(!p.widget_style.button.gloss);
+        assert_eq!(
+            p.widget_style.scrollbar.visibility,
+            ScrollbarVisibility::Always
+        );
+        // A palette built for high contrast with no settings at all is the
+        // built-in shapes, adjusted the same way.
+        let bare = Palette::high_contrast(
+            Color::rgb(0, 0, 0),
+            Color::rgb(255, 255, 255),
+            Color::rgb(0, 128, 255),
+        );
+        assert_eq!(bare.widget_style, WidgetStyle::AERO.for_high_contrast());
+    }
+
+    /// `watcher()` sees the chosen widget-style theme's file edited in place,
+    /// as it sees a colour theme's -- the controls change without a byte of
+    /// `appearance.yaml` changing.
+    #[test]
+    fn the_appearance_watcher_sees_the_chosen_widget_style_edited_in_place() {
+        config::testing::with_scratch_config("watch-widgets", |root| {
+            install_theme(root, "soft", "widget-style:\n  button:\n    radius: 10\n");
+            let mut file = AppearanceFile::load();
+            file.settings.widget_theme = themes::WidgetTheme::load(std::ffi::OsStr::new("soft"));
+            file.save().unwrap();
+
+            let mut w = watcher();
+            assert!(w.poll().is_some(), "the first look");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            install_theme(root, "soft", "widget-style:\n  button:\n    radius: 2\n");
+            let doc = w.poll().expect("the theme changed, so the controls did");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(Palette::from_settings(&s).widget_style.button.radius, 2);
+            assert!(w.poll().is_none(), "reported once");
+        });
+    }
+
+    /// A theme chosen for both axes is one file, and depends on it once: the
+    /// fingerprint is the colours-only one, not that file twice.
+    #[test]
+    fn a_theme_chosen_for_both_axes_is_one_dependency() {
+        config::testing::with_scratch_config("both-axes", |root| {
+            install_theme(
+                root,
+                "nord",
+                "colors:\n  base: \"#2e3440\"\nwidget-style:\n  toggle: checkbox\n",
+            );
+            install_theme(root, "soft", "widget-style:\n  button:\n    radius: 10\n");
+            let colours = Document::parse("theme:\n  colors: nord\n");
+            let both = Document::parse("theme:\n  colors: nord\n  widget_style: nord\n");
+            let two = Document::parse("theme:\n  colors: nord\n  widget_style: soft\n");
+            assert!(!themes::fingerprint(&colours).is_empty());
+            assert_eq!(themes::fingerprint(&both), themes::fingerprint(&colours));
+            assert_ne!(themes::fingerprint(&two), themes::fingerprint(&colours));
+            // The widget theme alone depends on its file too.
+            let widgets = Document::parse("theme:\n  widget_style: soft\n");
+            assert!(!themes::fingerprint(&widgets).is_empty());
         });
     }
 

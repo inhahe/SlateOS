@@ -22,6 +22,7 @@
 
 use crate::color::Color;
 use crate::theme::{contrast_ratio, perceptual_difference, relative_luminance, with_alpha};
+use crate::widget_style::WidgetStyle;
 use std::collections::BTreeMap;
 
 pub const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -535,6 +536,14 @@ pub struct Palette {
     /// a `mantle` band with labels on it, and a separated one is not, so which
     /// grounds exist depends on this.
     strip_style: StripStyle,
+    /// How the toolkit's controls are shaped: the theme's widget style
+    /// (`crate::widget_style`, design-decisions 1435).
+    ///
+    /// Carried on the palette for the reason `surface_style` is -- a palette
+    /// already reaches every draw site, so a control needs no new argument to
+    /// honour the theme. Public where `surface_style` is not, because nothing
+    /// here depends on it: it changes shapes, never which grounds carry text.
+    pub widget_style: WidgetStyle,
     /// The blue of the categorical set. See the type's note on hues.
     pub blue: Color,
     /// Green — also "this succeeded", "this is allowed", "this is safe".
@@ -916,6 +925,7 @@ impl Palette {
                 border: LIGHT_BORDER,
                 surface_style: SurfaceStyle::Borders,
                 strip_style: StripStyle::Filled,
+                widget_style: WidgetStyle::AERO,
                 blue: LIGHT_BLUE,
                 green: LIGHT_GREEN,
                 red: LIGHT_RED,
@@ -953,6 +963,7 @@ impl Palette {
                 border: BORDER,
                 surface_style: SurfaceStyle::Borders,
                 strip_style: StripStyle::Filled,
+                widget_style: WidgetStyle::AERO,
                 blue: BLUE,
                 green: GREEN,
                 red: RED,
@@ -1241,6 +1252,9 @@ impl Palette {
             // the fix.
             palette.surface_style = settings.surface_style();
             palette.strip_style = settings.strip_style();
+            // The theme's shapes survive too, less the choices that trade how
+            // plainly a control shows for how it looks.
+            palette.widget_style = settings.widget_style().for_high_contrast();
             return palette;
         }
         let mut palette = match settings.theme() {
@@ -1253,6 +1267,7 @@ impl Palette {
         // reason they are setters: which grounds exist depends on the styles.
         palette.set_surface_style(settings.surface_style());
         palette.set_strip_style(settings.strip_style());
+        palette.widget_style = settings.widget_style();
         palette
     }
 
@@ -1328,6 +1343,10 @@ impl Palette {
             // Rebuilt below from this palette's own page and ink: the
             // ordinary palette's terminal is drawn on the ordinary page.
             terminal: TerminalColors::UNSET,
+            // The built-in shapes, less what hides: see
+            // `WidgetStyle::for_high_contrast`. `from_settings` puts the
+            // user's theme's back, adjusted the same way.
+            widget_style: WidgetStyle::AERO.for_high_contrast(),
             // The categorical hues, from the mode that suits this background.
             ..ordinary
         }
@@ -1420,6 +1439,8 @@ impl Palette {
             // they are the roles above in a terminal's slots, and a theme's
             // `terminal` section sets them apart from its `colors`.
             terminal: _,
+            // Not a colour: the shapes of the controls.
+            widget_style: _,
         } = *self;
         [
             ("crust", crust),
@@ -1677,5 +1698,13 @@ pub trait PaletteSource {
     /// need not say so.
     fn theme(&self) -> Option<&ThemeColors> {
         None
+    }
+
+    /// The shapes of the toolkit's controls, from the widget-style theme the
+    /// user chose. Already read, for [`theme`](Self::theme)'s reason, and
+    /// defaulted for the same one: a source that knows nothing of themes has
+    /// the built-in theme's.
+    fn widget_style(&self) -> WidgetStyle {
+        WidgetStyle::AERO
     }
 }

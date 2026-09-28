@@ -1998,6 +1998,17 @@ live.
   the manifests for `imagecodec` and `osfont`, and every lane adds one when it
   ports code (`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`).
 
+- `[-]` `[C]` **A theme chooses the shapes of the controls** (the widget-style
+  axis, `roadmap-detailed.md` → *Tier 2 — Widget Styling*, `design-decisions.md`
+  §1435) -- the axis done 2026-09-28: a theme's `widget-style` section (button
+  radius, gloss and shadow; a field's radius, edge and focus mark; a check
+  box's radius; pill or checkbox for on/off; scrollbar width and whether it
+  hides), chosen as `theme.widget_style` apart from the colours, read with the
+  settings and carried on the palette to every control. **Next:** each control
+  draws from it -- the button, the text fields, the check box, the switch, the
+  scrollbars -- then button padding through the dialog layout, and lane E's
+  Settings picker for the axis.
+
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in
   `appearance.yaml`, each picture up from its time until the next's. The

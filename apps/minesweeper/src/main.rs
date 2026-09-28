@@ -685,7 +685,14 @@ impl MinesweeperApp {
     /// program's second game came to be a fixed function of its first.
     fn deal(&mut self, difficulty: Difficulty) {
         let seed = self.rng.next_u64();
+        // A new board, not a new window: the colours the window is drawn in
+        // and the size it was last drawn at carry over. Rebuilding them with
+        // the rest turned a light desktop's game dark at its first new game,
+        // until the theme next changed.
+        let (palette, size) = (self.palette, self.size);
         *self = Self::with_seed(difficulty, seed);
+        self.palette = palette;
+        self.size = size;
     }
 
     // ── Playing ────────────────────────────────────────────────────────────
@@ -3756,6 +3763,31 @@ mod tests {
             assert!(
                 ratio >= 1.4,
                 "covered and open are {ratio:.2}:1 apart (light: {light})"
+            );
+        }
+    }
+
+    /// **A new game keeps the user's colours**, and the size the window was
+    /// last drawn at, whichever way it is asked for. Dealing rebuilds the game
+    /// from scratch and used to rebuild those with it: a light desktop's game
+    /// went dark at its first new game.
+    #[test]
+    fn a_new_game_keeps_the_users_colours_and_the_window_size() {
+        let light = Palette::for_mode(true);
+        for action in [
+            Action::NewGame,
+            Action::CycleDifficulty,
+            Action::SetDifficulty(Difficulty::Expert),
+        ] {
+            let mut a = started(108);
+            a.theme_changed(&light);
+            a.resize(333.0, 444.0);
+            a.apply(action);
+            assert_eq!(a.palette, light, "{action:?} dropped the theme");
+            assert_eq!(
+                a.size,
+                (333.0, 444.0),
+                "{action:?} forgot the window's size"
             );
         }
     }

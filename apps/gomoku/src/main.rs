@@ -16,43 +16,65 @@
 //! synchronously, as it was, "White is thinking" was a string no frame ever
 //! showed, because the search ran to completion before the handler returned.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-
-// ── Board colors ────────────────────────────────────────────────────
-const BOARD_BG: Color = Color::from_hex(0xD4A867);
-const BOARD_BORDER: Color = Color::from_hex(0x8B6914);
-const GRID_LINE_COLOR: Color = Color::from_hex(0x2A2A2A);
-const STAR_POINT_COLOR: Color = Color::from_hex(0x2A2A2A);
-const CURSOR_COLOR: Color = Color::from_hex(0x89B4FA);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Black and white are which player is which, so the stones keep their colours
+// in every theme; everything else -- the board, its lines, the page, the panel
+// -- follows the user's palette (the operator's answer to C-Q16, §1422, and
+// lane C's call for this game). It was all a copy of Catppuccin Mocha round a
+// wooden board, dark on a light desktop. A stone the shade of the board is
+// ringed in a rim that stands off it (`gamechrome::edge_on`).
 const BLACK_STONE: Color = Color::from_hex(0x1A1A2E);
 const WHITE_STONE: Color = Color::from_hex(0xE8E8E8);
 const BLACK_STONE_BORDER: Color = Color::from_hex(0x000000);
 const WHITE_STONE_BORDER: Color = Color::from_hex(0xBBBBBB);
-const WIN_HIGHLIGHT: Color = Color::rgba(243, 139, 168, 150);
-const LAST_MOVE_MARKER: Color = Color::from_hex(0xF38BA8);
+/// The dot on the last stone played. A deep red that reads on either stone:
+/// the pale red it was is 1.9:1 on a white stone.
+const LAST_MOVE_MARKER: Color = Color::from_hex(0xD20F39);
+
+/// The colours the window and the board draw in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The board: a raised shade of the page.
+    board: Color,
+    /// The board's rim.
+    rim: Color,
+    /// The lines the stones are played on, and the star points: strong, as a
+    /// go board's are, since every move is read off them.
+    lines: Color,
+    /// The keyboard's ring: the accent, as every focus ring is.
+    cursor: Color,
+    /// The wash under the five stones that won.
+    win: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            board: p.surface0,
+            rim: p.surface2,
+            lines: p.subtext0,
+            cursor: p.accent,
+            win: with_alpha(p.red, 150),
+        }
+    }
+}
 
 // ── Board geometry ─────────────────────────────────────────
 const BOARD_SIZE: usize = 15;
@@ -782,6 +804,10 @@ struct GomokuApp {
     /// at and so the size the next click has to be read against.
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl GomokuApp {
@@ -801,6 +827,7 @@ impl GomokuApp {
             last_move: None,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         }
     }
 
@@ -1088,15 +1115,16 @@ impl GomokuApp {
     /// than from arithmetic over constants the picture may not have been drawn
     /// from. `render` used to take no width and no height at all.
     fn draw(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.window, BASE, CornerRadii::all(0.0));
-        self.draw_header(f, l);
-        self.draw_board(f, l);
-        self.draw_panel(f, l);
-        self.draw_status(f, l);
+        let c = Colours::of(&self.palette);
+        fill(f, l.window, c.chrome.page, CornerRadii::all(0.0));
+        self.draw_header(f, l, &c);
+        self.draw_board(f, l, &c);
+        self.draw_panel(f, l, &c);
+        self.draw_status(f, l, &c);
     }
 
     /// The title, and beside it whose turn it is.
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.header.is_empty() {
             return;
         }
@@ -1108,7 +1136,7 @@ impl GomokuApp {
             l.header.y + (l.header.h - l.title) / 2.0,
             l.title,
             FontWeightHint::Bold,
-            TEXT_COLOR,
+            c.chrome.text,
             Some(l.header.w - x - l.pad),
         );
 
@@ -1116,12 +1144,14 @@ impl GomokuApp {
         // rather than at a hand-tuned offset from it.
         let used = text::measure(TITLE_TEXT, l.title, FontWeightHint::Bold);
         let (turn_text, turn_color) = match self.phase {
-            GamePhase::Won if self.winner == Cell::Black => ("Black wins", GREEN),
-            GamePhase::Won => ("White wins", RED),
-            GamePhase::Draw => ("Draw", YELLOW),
-            GamePhase::Thinking => ("White is thinking", LAVENDER),
-            GamePhase::Playing if self.current_turn == Cell::Black => ("Black to play", BLUE),
-            GamePhase::Playing => ("White to play", SUBTEXT0),
+            GamePhase::Won if self.winner == Cell::Black => ("Black wins", c.chrome.good),
+            GamePhase::Won => ("White wins", c.chrome.bad),
+            GamePhase::Draw => ("Draw", c.chrome.even),
+            GamePhase::Thinking => ("White is thinking", c.chrome.title),
+            GamePhase::Playing if self.current_turn == Cell::Black => {
+                ("Black to play", c.chrome.key)
+            }
+            GamePhase::Playing => ("White to play", c.chrome.dim),
         };
         let tx = x + used + l.pad * 2.0;
         let room = l.header.right() - l.pad - tx;
@@ -1141,17 +1171,17 @@ impl GomokuApp {
 
     /// The board: its wood, its border, the grid, the star points, the
     /// coordinate labels, the win line, the stones and the cursor.
-    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.board.is_empty() || l.cell <= 0.0 {
             return;
         }
-        fill(f, l.board, BOARD_BG, CornerRadii::all(l.pad * 0.4));
+        fill(f, l.board, c.board, CornerRadii::all(l.pad * 0.4));
         f.push(RenderCommand::StrokeRect {
             x: l.board.x,
             y: l.board.y,
             width: l.board.w,
             height: l.board.h,
-            color: BOARD_BORDER,
+            color: c.rim,
             line_width: (l.cell * 0.08).clamp(1.0, 3.0),
             corner_radii: CornerRadii::all(l.pad * 0.4),
         });
@@ -1166,7 +1196,7 @@ impl GomokuApp {
                 y1: y,
                 x2: lx,
                 y2: y,
-                color: GRID_LINE_COLOR,
+                color: c.lines,
                 width: line_w,
             });
             let (x, _) = l.intersection(0, i);
@@ -1175,26 +1205,26 @@ impl GomokuApp {
                 y1: fy,
                 x2: x,
                 y2: ly,
-                color: GRID_LINE_COLOR,
+                color: c.lines,
                 width: line_w,
             });
         }
 
         let star_r = (l.cell * 0.11).max(1.0);
-        for &(r, c) in &STAR_POINTS {
-            let (x, y) = l.intersection(r as i32, c as i32);
+        for &(row, col) in &STAR_POINTS {
+            let (x, y) = l.intersection(row as i32, col as i32);
             fill(
                 f,
                 Rect::new(x - star_r, y - star_r, star_r * 2.0, star_r * 2.0),
-                STAR_POINT_COLOR,
+                c.lines,
                 CornerRadii::all(star_r),
             );
         }
 
-        self.draw_coordinates(f, l);
-        self.draw_win_line(f, l);
-        self.draw_stones(f, l);
-        self.draw_cursor(f, l);
+        self.draw_coordinates(f, l, c);
+        self.draw_win_line(f, l, c);
+        self.draw_stones(f, l, c);
+        self.draw_cursor(f, l, c);
     }
 
     /// Column letters above and below, row numbers left and right.
@@ -1203,7 +1233,7 @@ impl GomokuApp {
     /// by a constant, and dropped whole when the margin is too small to hold
     /// it -- which is what stops a squeezed board printing its labels over its
     /// own outermost stones.
-    fn draw_coordinates(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_coordinates(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let gap = l.origin.1 - l.board.y;
         if gap < l.label * 1.1 {
             return;
@@ -1226,7 +1256,7 @@ impl GomokuApp {
                     ly,
                     l.label,
                     FontWeightHint::Regular,
-                    SUBTEXT0,
+                    c.chrome.dim,
                     None,
                 );
             }
@@ -1241,7 +1271,7 @@ impl GomokuApp {
                     y - l.label / 2.0,
                     l.label,
                     FontWeightHint::Regular,
-                    SUBTEXT0,
+                    c.chrome.dim,
                     None,
                 );
             }
@@ -1249,19 +1279,19 @@ impl GomokuApp {
     }
 
     /// The five stones that won, marked behind them.
-    fn draw_win_line(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_win_line(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let Some(win) = self.win_line.as_ref() else {
             return;
         };
-        for &(r, c) in &win.positions {
-            let rect = l.stone_rect(r as i32, c as i32);
-            fill(f, rect, WIN_HIGHLIGHT, CornerRadii::all(l.stone));
+        for &(row, col) in &win.positions {
+            let rect = l.stone_rect(row as i32, col as i32);
+            fill(f, rect, c.win, CornerRadii::all(l.stone));
         }
     }
 
     /// Every stone on the board, and a hit box on every intersection --
     /// occupied or not, because an empty one is where the next stone goes.
-    fn draw_stones(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_stones(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         for row in 0..BOARD_SIZE {
             for col in 0..BOARD_SIZE {
                 let rect = l.stone_rect(row as i32, col as i32);
@@ -1269,11 +1299,14 @@ impl GomokuApp {
                 let Some(cell) = self.board.get(row as i32, col as i32) else {
                     continue;
                 };
-                let (body, border) = match cell {
+                let (body, own_edge) = match cell {
                     Cell::Black => (BLACK_STONE, BLACK_STONE_BORDER),
                     Cell::White => (WHITE_STONE, WHITE_STONE_BORDER),
                     Cell::Empty => continue,
                 };
+                // A black stone on a dark theme's board, or a white one on a
+                // light theme's, is ringed so it can be seen.
+                let border = gamechrome::edge_on(own_edge, body, c.board);
                 fill(f, rect, body, CornerRadii::all(l.stone));
                 f.push(RenderCommand::StrokeRect {
                     x: rect.x,
@@ -1299,7 +1332,7 @@ impl GomokuApp {
     }
 
     /// The keyboard cursor, drawn only while there is a move to make with it.
-    fn draw_cursor(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_cursor(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if self.phase != GamePhase::Playing || self.current_turn != Cell::Black {
             return;
         }
@@ -1309,7 +1342,7 @@ impl GomokuApp {
             y: rect.y,
             width: rect.w,
             height: rect.h,
-            color: CURSOR_COLOR,
+            color: c.cursor,
             line_width: (l.stone * 0.16).max(1.0),
             corner_radii: CornerRadii::all(l.stone * 0.3),
         });
@@ -1317,25 +1350,34 @@ impl GomokuApp {
 
     /// The information column: the move count, the scores, and the two
     /// buttons that used to be keyboard-only.
-    fn draw_panel(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_panel(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.panel.is_empty() {
             return;
         }
-        fill(f, l.panel, MANTLE, CornerRadii::all(0.0));
+        fill(f, l.panel, c.chrome.band, CornerRadii::all(0.0));
         let x = l.panel.x + l.pad;
         let w = (l.panel.w - l.pad * 2.0).max(0.0);
         let mut y = l.panel.y + l.pad;
         let step = l.font * 1.6;
 
         let heading = |f: &mut Frame<Target>, s: &str, y: &mut f32| {
-            text_at(f, s, x, *y, l.font, FontWeightHint::Bold, LAVENDER, Some(w));
+            text_at(
+                f,
+                s,
+                x,
+                *y,
+                l.font,
+                FontWeightHint::Bold,
+                c.chrome.title,
+                Some(w),
+            );
             *y += l.font * 1.2;
             f.push(RenderCommand::Line {
                 x1: x,
                 y1: *y,
                 x2: x + w,
                 y2: *y,
-                color: SURFACE1,
+                color: c.chrome.lit,
                 width: 1.0,
             });
             *y += l.pad * 0.6;
@@ -1360,7 +1402,7 @@ impl GomokuApp {
                 y,
                 l.font,
                 FontWeightHint::Regular,
-                TEXT_COLOR,
+                c.chrome.text,
                 Some(w),
             );
             y += step;
@@ -1369,9 +1411,15 @@ impl GomokuApp {
         y += l.pad;
         heading(f, SCORES_HEADING, &mut y);
         for (line, color) in [
-            (format!("{BLACK_SCORE_STEM}{}", self.scores.0), TEXT_COLOR),
-            (format!("{WHITE_SCORE_STEM}{}", self.scores.1), TEXT_COLOR),
-            (format!("{DRAWS_STEM}{}", self.scores.2), SUBTEXT0),
+            (
+                format!("{BLACK_SCORE_STEM}{}", self.scores.0),
+                c.chrome.text,
+            ),
+            (
+                format!("{WHITE_SCORE_STEM}{}", self.scores.1),
+                c.chrome.text,
+            ),
+            (format!("{DRAWS_STEM}{}", self.scores.2), c.chrome.dim),
         ] {
             text_at(
                 f,
@@ -1398,48 +1446,50 @@ impl GomokuApp {
                 break;
             }
             let r = Rect::new(x, y, w, bh);
-            fill(
+            // The toolkit's push button, switched off when there is nothing
+            // to do, on the panel it sits on.
+            gamechrome::button(
                 f,
-                r,
-                if enabled { SURFACE0 } else { MANTLE },
-                CornerRadii::all(l.pad * 0.4),
+                &self.palette,
+                (r.x, r.y, r.w, r.h),
+                label,
+                l.small,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled: !enabled,
+                    ..guitk::button::State::default()
+                },
+                c.chrome.band,
             );
             if enabled {
                 f.hit(target, r);
             }
-            let tw = text::measure(label, l.small, FontWeightHint::Regular);
-            text_at(
-                f,
-                label,
-                r.x + (r.w - tw) / 2.0,
-                r.y + (r.h - l.small) / 2.0,
-                l.small,
-                FontWeightHint::Regular,
-                if enabled { TEXT_COLOR } else { OVERLAY0 },
-                Some(r.w),
-            );
             y += bh + l.pad * 0.6;
         }
     }
 
     /// The band along the bottom: what the keys do, or how the game ended.
-    fn draw_status(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_status(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.status.is_empty() {
             return;
         }
         let (msg, color) = match self.phase {
-            GamePhase::Won if self.winner == Cell::Black => {
-                ("Black wins! Z to take it back, N for a new game", GREEN)
-            }
-            GamePhase::Won => ("White wins. Z to take it back, N for a new game", RED),
-            GamePhase::Draw => ("A draw. N for a new game", YELLOW),
-            GamePhase::Thinking => ("White is thinking...", LAVENDER),
+            GamePhase::Won if self.winner == Cell::Black => (
+                "Black wins! Z to take it back, N for a new game",
+                c.chrome.good,
+            ),
+            GamePhase::Won => (
+                "White wins. Z to take it back, N for a new game",
+                c.chrome.bad,
+            ),
+            GamePhase::Draw => ("A draw. N for a new game", c.chrome.even),
+            GamePhase::Thinking => ("White is thinking...", c.chrome.title),
             GamePhase::Playing => (
                 "Arrows move, Enter places, Z undoes, N starts again",
-                SUBTEXT0,
+                c.chrome.dim,
             ),
         };
-        fill(f, l.status, MANTLE, CornerRadii::all(0.0));
+        fill(f, l.status, c.chrome.band, CornerRadii::all(0.0));
         let tw = text::measure(msg, l.small, FontWeightHint::Regular);
         text_at(
             f,
@@ -1503,6 +1553,10 @@ fn text_at(
 }
 
 impl App for GomokuApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from(TITLE_TEXT)
     }
@@ -1599,6 +1653,179 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use guitk::probe;
+
+    /// **The window is drawn in the user's colours**, light or dark -- in
+    /// play with stones down and the cursor showing, and won -- with only the
+    /// board's own colours not the palette's. It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut derived = vec![
+                BLACK_STONE,
+                WHITE_STONE,
+                BLACK_STONE_BORDER,
+                WHITE_STONE_BORDER,
+                LAST_MOVE_MARKER,
+                gamechrome::RIMS.0,
+                gamechrome::RIMS.1,
+            ];
+            derived.extend(gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Plain,
+                c.chrome.band,
+            ));
+            let mut app = GomokuApp::new();
+            app.theme_changed(&p);
+            let fresh = app.frame(W.0, W.1);
+            // Undo is switched off with no history, New game on: both of a
+            // button's looks are in every frame.
+            assert!(app.board.set(7, 7, Cell::Black));
+            assert!(app.board.set(7, 8, Cell::White));
+            app.last_move = Some((7, 8));
+            let playing = app.frame(W.0, W.1);
+            app.phase = GamePhase::Won;
+            app.winner = Cell::Black;
+            let won = app.frame(W.0, W.1);
+            for (what, f) in [("fresh", fresh), ("playing", playing), ("won", won)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("gomoku, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **The last-move dot reads on either stone.** It was the pale red,
+    /// 1.9:1 on a white stone.
+    #[test]
+    fn the_last_move_dot_can_be_seen_on_either_stone() {
+        for stone in [BLACK_STONE, WHITE_STONE] {
+            let dot = guitk::theme::contrast_ratio(LAST_MOVE_MARKER, stone);
+            assert!(dot >= 3.0, "the last-move dot is {dot:.2}:1 on {stone:?}");
+        }
+    }
+
+    /// **Undo is switched off with nothing to undo**, in the toolkit's look for
+    /// a button that is off, and live once there is a move to take back.
+    #[test]
+    fn the_undo_button_is_switched_off_with_nothing_to_undo() {
+        let p = Palette::for_mode(false);
+        let band = Colours::of(&p).chrome.band;
+        let face = |disabled| {
+            guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled,
+                    ..guitk::button::State::default()
+                },
+                band,
+            )
+            .lower
+        };
+        let (off, on) = (face(true), face(false));
+        // The face under the button's own label: a switched-off button has no
+        // hit box to find it by.
+        let face_under_label = |app: &GomokuApp| {
+            let f = app.frame(W.0, W.1);
+            let (tx, ty) = f
+                .commands()
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Text { text, x, y, .. } if text == UNDO_LABEL => Some((*x, *y)),
+                    _ => None,
+                })
+                .expect("the Undo button is not labelled");
+            f.commands().iter().find_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                    && (*color == off || *color == on) =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+        };
+        let mut app = GomokuApp::new();
+        assert_eq!(
+            face_under_label(&app),
+            Some(off),
+            "Undo looks live with nothing to undo"
+        );
+        app.cursor_row = 7;
+        app.cursor_col = 7;
+        assert!(app.try_place_stone());
+        assert_eq!(
+            face_under_label(&app),
+            Some(on),
+            "Undo looks off with a move to undo"
+        );
+    }
+
+    /// **The lines stand off the board in either theme**: every move is read
+    /// off them, so they are drawn as strongly as a go board's.
+    #[test]
+    fn the_lines_stand_off_the_board_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            let ratio = guitk::theme::contrast_ratio(c.lines, c.board);
+            assert!(
+                ratio >= 3.0,
+                "the lines are {ratio:.2}:1 on the board (light: {light})"
+            );
+        }
+    }
+
+    /// **Both stones are seen on the board in either theme**: the board
+    /// follows the theme, so a black stone on a dark theme's board and a
+    /// white one on a light theme's are ringed, and the ring is what is drawn.
+    #[test]
+    fn both_stones_are_seen_on_the_board_in_either_theme() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut app = GomokuApp::new();
+            app.theme_changed(&p);
+            place_raw(&mut app.board, 7, 7, Cell::Black);
+            place_raw(&mut app.board, 7, 8, Cell::White);
+            let f = app.frame(W.0, W.1);
+            let l = Layout::solve(W.0, W.1);
+            for (col, body) in [(7, BLACK_STONE), (8, WHITE_STONE)] {
+                let want = l.stone_rect(7, col);
+                let edge = f
+                    .commands()
+                    .iter()
+                    .find_map(|cmd| match cmd {
+                        RenderCommand::StrokeRect { x, y, color, .. }
+                            if (*x - want.x).abs() < 0.01
+                                && (*y - want.y).abs() < 0.01
+                                && *color != c.cursor =>
+                        {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("the stone at (7, {col}) is not outlined"));
+                let seen = guitk::theme::contrast_ratio(body, c.board)
+                    .max(guitk::theme::contrast_ratio(edge, c.board));
+                assert!(
+                    seen >= 3.0,
+                    "(7, {col}) is seen at {seen:.2}:1 (light: {light})"
+                );
+            }
+        }
+    }
 
     // =======================================================================
     // Scaffolding
@@ -2942,7 +3169,21 @@ mod tests {
         let app = app_with(&[(3, 3, Cell::Black), (4, 4, Cell::White)]);
         let frame = app.frame(W.0, W.1);
         let l = Layout::solve(W.0, W.1);
-        for (row, col, color) in [(3, 3, BLACK_STONE_BORDER), (4, 4, WHITE_STONE_BORDER)] {
+        // The edge the board calls for: a stone's own, or a rim where the
+        // stone is the board's shade.
+        let board = Colours::of(&app.palette).board;
+        for (row, col, color) in [
+            (
+                3,
+                3,
+                gamechrome::edge_on(BLACK_STONE_BORDER, BLACK_STONE, board),
+            ),
+            (
+                4,
+                4,
+                gamechrome::edge_on(WHITE_STONE_BORDER, WHITE_STONE, board),
+            ),
+        ] {
             let want = l.stone_rect(row, col);
             assert!(
                 strokes_of(&frame, color)
@@ -2996,8 +3237,9 @@ mod tests {
             place_raw(&mut app.board, 7, c, Cell::Black);
         }
         let before = app.frame(W.0, W.1);
+        let win = Colours::of(&app.palette).win;
         assert!(
-            fills_of(&before, WIN_HIGHLIGHT).is_empty(),
+            fills_of(&before, win).is_empty(),
             "four in a row is not a win and was highlighted as one"
         );
 
@@ -3008,12 +3250,12 @@ mod tests {
 
         let l = Layout::solve(W.0, W.1);
         let frame = app.frame(W.0, W.1);
-        let marks = fills_of(&frame, WIN_HIGHLIGHT);
+        let marks = fills_of(&frame, win);
         assert_eq!(marks.len(), WIN_COUNT, "the win line is not five stones");
         for col in 4..9 {
             let (x, y) = l.intersection(7, col);
             assert!(
-                fill_centred_on(&frame, WIN_HIGHLIGHT, x, y),
+                fill_centred_on(&frame, win, x, y),
                 "(7, {col}) won the game and is not marked"
             );
         }
@@ -3033,7 +3275,7 @@ mod tests {
         let frame = app.frame(W.0, W.1);
         let want = l.stone_rect(6, 10);
         assert!(
-            strokes_of(&frame, CURSOR_COLOR)
+            strokes_of(&frame, Colours::of(&app.palette).cursor)
                 .iter()
                 .any(|r| (r.x - want.x).abs() < 0.01 && (r.y - want.y).abs() < 0.01),
             "the cursor is on (6, 10) and is drawn somewhere else"
@@ -3057,7 +3299,8 @@ mod tests {
         ] {
             app.phase = phase;
             app.current_turn = turn;
-            let drawn = !strokes_of(&app.frame(W.0, W.1), CURSOR_COLOR).is_empty();
+            let cursor = Colours::of(&app.palette).cursor;
+            let drawn = !strokes_of(&app.frame(W.0, W.1), cursor).is_empty();
             assert_eq!(
                 drawn,
                 want,

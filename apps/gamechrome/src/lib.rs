@@ -32,7 +32,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::surface::CommandSink;
 use guitk::text;
-use guitk::theme::{contrast_ratio, with_alpha};
+use guitk::theme::{contrast_ratio, relative_luminance, with_alpha};
 
 /// The roles a game's chrome is drawn in, from the user's palette.
 ///
@@ -148,6 +148,46 @@ pub fn legible_on((dark, light): (Color, Color), ground: Color) -> Color {
         dark
     } else {
         light
+    }
+}
+
+/// A board's two squares, `(light, dark)`, from the palette.
+///
+/// A board's squares only fill space, so they follow the theme (§1422) --
+/// a dark theme's board is dark -- but a player still tells them apart, and
+/// checkers is played on one of them alone: two shades that stay clearly
+/// apart in either theme. `light` is the lighter of the two whatever the
+/// theme, so a game that plays on the dark squares finds them by name.
+#[must_use]
+pub fn squares(p: &Palette) -> (Color, Color) {
+    let (a, b) = (p.surface0, p.overlay0);
+    if relative_luminance(a) >= relative_luminance(b) {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// The two outlines [`edge_on`] chooses between when a piece does not stand
+/// off its square by itself, `(light, dark)`.
+pub const RIMS: (Color, Color) = (Color::from_hex(0xBBBBBB), Color::from_hex(0x333333));
+
+/// The outline for a piece coloured `piece`, whose own outline is `own`, on
+/// `ground`.
+///
+/// A piece keeps its colours in every theme (§1422) and the board under it
+/// follows the theme, so a black disc lands on a dark square in a dark theme
+/// and a white one on a light square in a light one: a disc the shade of its
+/// square, seen by nothing but its shadow. Where the piece stands off the
+/// ground by itself -- 3:1, the contrast a shape needs to be seen -- it keeps
+/// its own outline; where it does not, the outline is whichever of [`RIMS`]
+/// stands off the ground, and the ring is what shows the piece.
+#[must_use]
+pub fn edge_on(own: Color, piece: Color, ground: Color) -> Color {
+    if contrast_ratio(piece, ground) >= 3.0 {
+        own
+    } else {
+        legible_on(RIMS, ground)
     }
 }
 

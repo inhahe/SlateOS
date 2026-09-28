@@ -208,3 +208,66 @@ fn a_button_with_no_room_draws_nothing() {
     );
     assert!(cmds.is_empty());
 }
+
+/// A board's two squares follow the theme -- a dark theme's board is dark --
+/// stay clearly apart in either, and are named the right way round.
+#[test]
+fn a_boards_squares_follow_the_theme_and_stay_apart() {
+    for light in [false, true] {
+        let p = Palette::for_mode(light);
+        let (pale, deep) = squares(&p);
+        assert!(
+            relative_luminance(pale) > relative_luminance(deep),
+            "the light square is the darker (light: {light})"
+        );
+        let apart = contrast_ratio(pale, deep);
+        assert!(
+            apart >= 1.5,
+            "the squares are {apart:.2}:1 apart (light: {light})"
+        );
+        appearance::palette_check::assert_colours_from(
+            &p,
+            &[("light square", pale), ("dark square", deep)],
+            &[],
+            "gamechrome squares",
+        );
+    }
+    let dark = squares(&Palette::for_mode(false));
+    let light = squares(&Palette::for_mode(true));
+    assert!(
+        relative_luminance(dark.0) < relative_luminance(light.1),
+        "a dark theme's board is not darker than a light theme's"
+    );
+}
+
+/// **A piece is seen on every square in either theme**: a black disc on a
+/// dark theme's squares and a white one on a light theme's are ringed in a
+/// rim that stands off the square, and a piece that stands off by itself
+/// keeps its own edge.
+#[test]
+fn a_piece_is_seen_on_every_square_in_either_theme() {
+    let black = (Color::from_hex(0x1A1A2E), Color::from_hex(0x000000));
+    let white = (Color::from_hex(0xE8E8E8), Color::from_hex(0xBBBBBB));
+    for light in [false, true] {
+        let (pale, deep) = squares(&Palette::for_mode(light));
+        for ground in [pale, deep] {
+            for (piece, own) in [black, white] {
+                let edge = edge_on(own, piece, ground);
+                let seen = contrast_ratio(piece, ground).max(contrast_ratio(edge, ground));
+                assert!(
+                    seen >= 3.0,
+                    "{piece:?} on {ground:?} is seen at {seen:.2}:1 (light: {light})"
+                );
+                if contrast_ratio(piece, ground) >= 3.0 {
+                    assert_eq!(edge, own, "a piece that stands off lost its own edge");
+                }
+            }
+        }
+    }
+    // Both ways round: the dark theme rings the black disc, the light theme
+    // the white one.
+    let (_, dark_square) = squares(&Palette::for_mode(false));
+    assert_eq!(edge_on(black.1, black.0, dark_square), RIMS.0);
+    let (light_square, _) = squares(&Palette::for_mode(true));
+    assert_eq!(edge_on(white.1, white.0, light_square), RIMS.1);
+}

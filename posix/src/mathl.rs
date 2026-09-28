@@ -253,12 +253,33 @@ pub fn remainderl(x: L, y: L) -> L {
     L::partial_remainder::<true>(x, y).0
 }
 
-/// [`remainderl`], and the low three bits of the quotient with its sign
-/// (musl's `remquol`: the bits `fprem1` reports).
+/// [`remainderl`], and the low three bits of its quotient with the
+/// quotient's sign (musl's `remquol`).
+///
+/// musl and glibc read those bits where `fprem1` reports them, in C0, C3 and
+/// C1. This does not, since 2026-09-28: QEMU's emulated `fprem1` leaves all
+/// three clear whatever the quotient -- its `floatx80_modrem` works the
+/// quotient out for `fprem`, and `fprem1` hands it a null pointer instead --
+/// so under QEMU without hardware virtualisation, which is where SlateOS's
+/// boot test runs, `remquol(10, 3)` answered a quotient of 0
+/// (`services/ctest-longdouble` 72). Theirs would too.
+///
+/// `fprem`'s bits are reported there as on hardware, and they are the
+/// *truncated* quotient's: the rounded one, or one short of it in magnitude.
+/// Short exactly when the two remainders differ, since `x - n*y` names `n`
+/// -- so both are computed and compared. The remainder returned is still
+/// `fprem1`'s, whose value QEMU gets right, and it is exact at any precision
+/// control, as neither instruction rounds.
 #[must_use]
 pub fn remquol(x: L, y: L) -> (L, i32) {
-    let (r, q) = L::partial_remainder::<true>(x, y);
-    let q = i32::from(q);
+    let r = L::partial_remainder::<true>(x, y).0;
+    let (t, n) = L::partial_remainder::<false>(x, y);
+    // Unordered -- a NaN, when C leaves the quotient unspecified -- is not
+    // "differs": `n` as `fprem` left it.
+    let rounded_up = r
+        .compare(t)
+        .is_some_and(|o| o != core::cmp::Ordering::Equal);
+    let q = i32::from(n.wrapping_add(u8::from(rounded_up)) & 7);
     (
         r,
         if x.is_sign_negative() != y.is_sign_negative() {
@@ -4045,6 +4066,32 @@ nanl "9999999999999999999999" = 7FFF:FFFFFFFFFFFFFFFF
             bits(unsafe { nanl(core::ptr::null()) }),
             (0x7FFF, 0xC000_0000_0000_0000)
         );
+    }
+
+    /// The quotient is the *rounded* one, though `remquol` reads it off the
+    /// truncating `fprem`: one further exactly when the two remainders
+    /// differ, ties to even. The oracle replay covers this on hardware; this
+    /// spells out each kind of case. QEMU, whose `fprem1` reports no
+    /// quotient at all, is covered from ring 3 by `ctest-longdouble` 72.
+    #[test]
+    fn remquol_rounds_the_truncated_quotient() {
+        extended();
+        for (x, y, r, q) in [
+            (10.0, 3.0, 1.0, 3),   // 3.33: truncated is already nearest
+            (11.0, 3.0, -1.0, 4),  // 3.67: one further, and past zero
+            (7.5, 3.0, 1.5, 2),    // 2.5, a tie, and 2 is even
+            (4.5, 3.0, -1.5, 2),   // 1.5, a tie, and 1 is odd
+            (-11.0, 3.0, 1.0, -4), // the sign is the signs' product
+            (11.0, -3.0, -1.0, -4),
+            (-11.0, -3.0, 1.0, 4),
+            (6.0, 3.0, 0.0, 2),
+            (7.0, 1.0, 0.0, 7),
+            (9.0, 1.0, 0.0, 1),   // the low three bits only: 0b1001
+            (15.5, 1.0, -0.5, 0), // 16, to even: 0b10000
+        ] {
+            let (got_r, got_q) = remquol(ld(x), ld(y));
+            assert_eq!((bits(got_r), got_q), (bits(ld(r)), q), "remquol({x}, {y})");
+        }
     }
 
     /// `fxtract`, which `significandl` is, on the cases the oracle's

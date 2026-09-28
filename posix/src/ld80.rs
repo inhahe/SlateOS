@@ -417,7 +417,11 @@ impl LongDouble {
     /// `x REM y` by `fprem` (`IEEE == false`: C's `fmod`, truncating) or
     /// `fprem1` (`IEEE == true`: `remainder`, to nearest), repeated until
     /// the reduction is complete, with the low three bits of the quotient
-    /// the unit reports (C0, C3, C1 -> bits 2, 1, 0), which `remquol` needs.
+    /// the unit reports (C0, C3, C1 -> bits 2, 1, 0).
+    ///
+    /// Trust `fprem`'s bits only: QEMU's emulated `fprem1` reports none, all
+    /// three clear whatever the quotient, where hardware reports them for
+    /// both -- which is why [`crate::mathl::remquol`] reads `fprem`'s.
     #[must_use]
     pub fn partial_remainder<const IEEE: bool>(x: Self, y: Self) -> (Self, u8) {
         let mut r = Self::POS_ZERO;

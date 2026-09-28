@@ -59,9 +59,9 @@ use dropzone::{
     DragModifiers, DropOperation, DropResult, DropZone, DropZoneEvent, DropZoneManager, Rect,
 };
 use fileops::{
-    ConflictAnswer, ConflictPolicy, ConflictQuestion, ErrorPolicy, FileOpEvent, FileOperation,
-    OperationExecutor, OperationPlan, OperationProgress, OperationSummary, RecycleBin, UndoStack,
-    UndoTarget,
+    ConflictAnswer, ConflictPolicy, ConflictQuestion, ErrorAnswer, ErrorPolicy, ErrorQuestion,
+    FileOpEvent, FileOperation, OperationExecutor, OperationPlan, OperationProgress,
+    OperationSummary, RecycleBin, UndoStack, UndoTarget,
 };
 use thumbs::{
     ThumbCategory, ThumbConfig, Thumbnail, ThumbnailCache, ThumbnailGenerator, ThumbnailRequest,
@@ -467,7 +467,8 @@ struct Outcome {
 }
 
 impl Outcome {
-    /// Everything asked for happened.
+    /// Everything asked for happened -- or what did not, the user has been
+    /// told about already and said what to do.
     fn ok(message: String) -> Self {
         Self {
             message,
@@ -620,6 +621,9 @@ enum Modal {
     /// A paste, move or link stopped at a name the folder already has, under
     /// "Ask each time", waiting to be told what to do with it.
     Conflict { prompt: ConflictPrompt },
+    /// A file an operation could not carry out, under "ask" --
+    /// `ErrorPolicy::Ask`.
+    Failed { prompt: ErrorPrompt },
     /// An erasure from the recycle bin the user has been asked to confirm.
     ///
     /// Its own variant rather than a [`PendingAction`]: that one acts on the
@@ -799,7 +803,10 @@ impl ConflictPrompt {
             card_w,
             card_h,
             8.0,
-            appearance::Surface::Card,
+            // A panel, as a dialog is: filled in every look. A card is an
+            // outline alone under borders, and the prompt's words would sit
+            // on the dimmed listing with its rows showing through.
+            appearance::Surface::Panel,
         );
         let left = x + 20.0;
         tree.text_in_weighted(
@@ -864,16 +871,209 @@ impl ConflictPrompt {
     }
 }
 
-/// Where each of [`CONFLICT_BUTTONS`] goes in a width of `inner`: its offset
-/// from the left, its row and its width -- and how many rows that takes.
+/// The question a file operation stopped at because it could not carry a
+/// file out -- `ErrorPolicy::Ask`: try it again, skip it, skip it and every
+/// later failure, or stop.
 ///
-/// A button that would cross the right edge starts a new row; the first in a
-/// row always stays, so a width too narrow for even one button still gives
-/// every answer a place rather than none.
-fn conflict_button_rows(inner: f32) -> ([(f32, u8, f32); 4], u8) {
-    let mut placed = [(0.0, 0, 0.0); 4];
+/// Drawn here, as the taken-name prompt is: four answers do not map onto an
+/// alert's OK, Cancel, Yes and No. It used to be no question at all: the
+/// window skipped a failed file and said so at the end, so a copy that met a
+/// file held open by another program could not be told to wait and go
+/// again.
+struct ErrorPrompt {
+    /// The operation that asked, by its plan's id: the answer goes back to
+    /// the operation that stopped, whatever has started or finished since.
+    plan: u64,
+    /// "Could not copy “notes.txt”".
+    title: String,
+    /// Why, as the system said it.
+    why: String,
+    /// Where each answer was drawn, for clicks. Empty until the first frame.
+    hits: Vec<(ErrorAnswer, Rect)>,
+}
+
+/// The failure prompt's answers, left to right, with the words and the key
+/// each is drawn with. Try again is first and is Enter's, as in every file
+/// manager that asks: the cause is often gone by the time anyone reads the
+/// question -- a drive plugged back in, a file closed in another program.
+const ERROR_BUTTONS: [(ErrorAnswer, &str, Key); 4] = [
+    (ErrorAnswer::TryAgain, "Try again (T)", Key::T),
+    (ErrorAnswer::Skip, "Skip (S)", Key::S),
+    (ErrorAnswer::SkipAll, "Skip all (A)", Key::A),
+    (ErrorAnswer::Stop, "Stop (Esc)", Key::Escape),
+];
+
+/// What an operation was doing, for "Could not ... ".
+fn present_verb(operation: &FileOperation) -> &'static str {
+    match operation {
+        FileOperation::Copy => "copy",
+        FileOperation::Move => "move",
+        FileOperation::Delete => "delete",
+        FileOperation::Recycle => "move to the recycle bin",
+        FileOperation::Restore => "restore",
+        FileOperation::Link => "make a link to",
+    }
+}
+
+impl ErrorPrompt {
+    fn new(plan: u64, operation: &FileOperation, question: &ErrorQuestion) -> Self {
+        let name = question.path.file_name().map_or_else(
+            || question.path.shown().to_string(),
+            |n| n.shown().to_string(),
+        );
+        Self {
+            plan,
+            title: format!(
+                "Could not {} \u{201c}{name}\u{201d}",
+                present_verb(operation)
+            ),
+            why: question.error.clone(),
+            hits: Vec::new(),
+        }
+    }
+
+    /// What an event does to the prompt: whether it was the prompt's, and
+    /// the answer it gave, if it gave one. Every key and click is the
+    /// prompt's while it is up -- it is modal -- except a tick.
+    fn handle(&mut self, event: &Event) -> (bool, Option<ErrorAnswer>) {
+        match event {
+            Event::Key(key) if key.pressed => {
+                if key.key == Key::Enter {
+                    return (true, Some(ErrorAnswer::TryAgain));
+                }
+                let answer = ERROR_BUTTONS
+                    .iter()
+                    .find(|(_, _, k)| *k == key.key)
+                    .map(|(answer, _, _)| *answer);
+                (true, answer)
+            }
+            Event::Key(_) => (true, None),
+            Event::Mouse(m) => {
+                if m.kind != MouseEventKind::Press(MouseButton::Left) {
+                    return (true, None);
+                }
+                let answer = self
+                    .hits
+                    .iter()
+                    .find(|(_, r)| r.contains(m.x, m.y))
+                    .map(|(answer, _)| *answer);
+                (true, answer)
+            }
+            _ => (false, None),
+        }
+    }
+
+    /// Draw the prompt over the window, dimming what is behind it, and note
+    /// where each answer went.
+    fn render(&mut self, pal: &Palette, w: f32, h: f32, tree: &mut RenderTree) {
+        tree.fill_rect(0.0, 0.0, w, h, with_alpha(pal.crust, 140));
+        let card_w = PROMPT_W.min(w - 32.0).max(0.0);
+        let inner = (card_w - 40.0).max(0.0);
+        let (buttons, rows) = prompt_button_rows(ERROR_BUTTONS.map(|(_, label, _)| label), inner);
+        let why = why_lines(&self.why, inner);
+        // The lines past the first push the answers down, and the card
+        // grows to hold them.
+        let more_why = WHY_LINE * f32::from(u8::try_from(why.len().saturating_sub(1)).unwrap_or(0));
+        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW * f32::from(rows.saturating_sub(1));
+        let x = ((w - card_w) / 2.0).max(0.0);
+        let y = ((h - card_h) / 2.0).max(0.0);
+        pal.push_surface(
+            &mut tree.commands,
+            x,
+            y,
+            card_w,
+            card_h,
+            8.0,
+            // A panel, as a dialog is: filled in every look. A card is an
+            // outline alone under borders, and the prompt's words would sit
+            // on the dimmed listing with its rows showing through.
+            appearance::Surface::Panel,
+        );
+        let left = x + 20.0;
+        tree.text_in_weighted(
+            left,
+            y + 18.0,
+            inner,
+            &self.title,
+            pal.text,
+            14.0,
+            guitk::render::FontWeightHint::Bold,
+        );
+        let mut line_y = y + 48.0;
+        for line in &why {
+            tree.text_in(left, line_y, inner, line, pal.subtext1, 12.0);
+            line_y += WHY_LINE;
+        }
+
+        self.hits.clear();
+        let first_row = y + ERROR_PROMPT_H - 50.0 + more_why;
+        for (i, ((answer, label, _), (dx, row, bw))) in
+            ERROR_BUTTONS.iter().zip(buttons).enumerate()
+        {
+            let rect = Rect::new(left + dx, first_row + PROMPT_ROW * f32::from(row), bw, 30.0);
+            let (surface, ink) = if i == 0 {
+                (appearance::Surface::Selected, pal.ink(pal.blue))
+            } else {
+                (appearance::Surface::Card, pal.text)
+            };
+            pal.push_surface(
+                &mut tree.commands,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                4.0,
+                surface,
+            );
+            tree.text_in(
+                rect.x + 12.0,
+                rect.y + 8.0,
+                (bw - 20.0).max(0.0),
+                label,
+                ink,
+                12.0,
+            );
+            self.hits.push((*answer, rect));
+        }
+    }
+}
+
+/// The failure prompt's height with every answer on one row and the reason
+/// on one line.
+const ERROR_PROMPT_H: f32 = 140.0;
+
+/// The distance between the lines of a failure's reason.
+const WHY_LINE: f32 = 18.0;
+
+/// The most lines a failure's reason is given.
+const WHY_LINES: usize = 3;
+
+/// A failure's reason in lines that fit `inner`: at most [`WHY_LINES`], the
+/// last cut with "…" when there is more.
+///
+/// Wrapped rather than drawn on one line, because a system's reason often
+/// runs past one -- "The process cannot access the file because it is being
+/// used by another process." -- and one line cut at the card's edge loses the
+/// end, which is the part that says what is in the way.
+fn why_lines(why: &str, inner: f32) -> Vec<String> {
+    let weight = guitk::render::FontWeightHint::Regular;
+    let mut lines = guitk::text::wrap_hard(why, inner, 12.0, weight);
+    if lines.len() > WHY_LINES {
+        let rest = lines.split_off(WHY_LINES - 1).join(" ");
+        lines.push(guitk::text::elide(&rest, inner, "\u{2026}", 12.0, weight));
+    }
+    lines
+}
+
+/// Where each of `labels` goes as a prompt's buttons in a width of `inner`:
+/// its offset from the left, its row and its width -- and how many rows that
+/// takes. A button that would cross the right edge starts a new row; the
+/// first in a row always stays, so a width too narrow for even one button
+/// still gives every answer a place rather than none.
+fn prompt_button_rows<const N: usize>(labels: [&str; N], inner: f32) -> ([(f32, u8, f32); N], u8) {
+    let mut placed = [(0.0, 0, 0.0); N];
     let (mut dx, mut row) = (0.0_f32, 0_u8);
-    for (slot, (_, label, _)) in placed.iter_mut().zip(CONFLICT_BUTTONS.iter()) {
+    for (slot, label) in placed.iter_mut().zip(labels) {
         let bw =
             guitk::text::padded_width(label, 12.0, 12.0, guitk::render::FontWeightHint::Regular);
         if dx > 0.0 && dx + bw > inner {
@@ -884,6 +1084,16 @@ fn conflict_button_rows(inner: f32) -> ([(f32, u8, f32); 4], u8) {
         dx += bw + 8.0;
     }
     (placed, row.saturating_add(1))
+}
+
+/// Where each of [`CONFLICT_BUTTONS`] goes in a width of `inner`: its offset
+/// from the left, its row and its width -- and how many rows that takes.
+///
+/// A button that would cross the right edge starts a new row; the first in a
+/// row always stays, so a width too narrow for even one button still gives
+/// every answer a place rather than none.
+fn conflict_button_rows(inner: f32) -> ([(f32, u8, f32); 4], u8) {
+    prompt_button_rows(CONFLICT_BUTTONS.map(|(_, label, _)| label), inner)
 }
 
 /// One side of a taken name, for the prompt: its size and when it last
@@ -2287,7 +2497,7 @@ impl ExplorerState {
             // An operation stopped at a question does nothing until it is
             // answered, so stepping it would spin out the slice for nothing.
             while !running.executor.is_done()
-                && running.executor.waiting_on().is_none()
+                && !running.executor.asking()
                 && std::time::Instant::now() < deadline
             {
                 running.executor.step();
@@ -2296,35 +2506,52 @@ impl ExplorerState {
         }
         self.retire_finished();
         self.update_operation_status();
-        self.ask_about_a_taken_name();
+        self.ask_about_a_stop();
         true
     }
 
-    /// Put up the question an operation has stopped at, when nothing else is
-    /// up -- and take down one nobody is waiting on any more.
-    fn ask_about_a_taken_name(&mut self) {
-        if let Some(Modal::Conflict { prompt }) = &self.modal {
-            let plan = prompt.plan;
-            let still_asking = self
-                .operations
-                .iter()
-                .any(|op| op.executor.plan_id() == plan && op.executor.waiting_on().is_some());
-            if !still_asking {
-                self.modal = None;
+    /// Put up the question an operation has stopped at -- a taken name, or a
+    /// file it could not carry out -- when nothing else is up, and take down
+    /// one nobody is waiting on any more.
+    fn ask_about_a_stop(&mut self) {
+        let asking = |ops: &[RunningOperation], plan: u64, failed: bool| {
+            ops.iter().any(|op| {
+                op.executor.plan_id() == plan
+                    && if failed {
+                        op.executor.failed_on().is_some()
+                    } else {
+                        op.executor.waiting_on().is_some()
+                    }
+            })
+        };
+        match &self.modal {
+            Some(Modal::Conflict { prompt }) => {
+                if !asking(&self.operations, prompt.plan, false) {
+                    self.modal = None;
+                }
+                return;
             }
-            return;
+            Some(Modal::Failed { prompt }) => {
+                if !asking(&self.operations, prompt.plan, true) {
+                    self.modal = None;
+                }
+                return;
+            }
+            Some(_) => return,
+            None => {}
         }
-        if self.modal.is_some() {
-            return;
-        }
-        let prompt = self.operations.iter().find_map(|op| {
-            op.executor
-                .waiting_on()
-                .map(|question| ConflictPrompt::new(op.executor.plan_id(), question))
+        self.modal = self.operations.iter().find_map(|op| {
+            let plan = op.executor.plan_id();
+            if let Some(question) = op.executor.waiting_on() {
+                Some(Modal::Conflict {
+                    prompt: ConflictPrompt::new(plan, question),
+                })
+            } else {
+                op.executor.failed_on().map(|question| Modal::Failed {
+                    prompt: ErrorPrompt::new(plan, op.executor.operation(), question),
+                })
+            }
         });
-        if let Some(prompt) = prompt {
-            self.modal = Some(Modal::Conflict { prompt });
-        }
     }
 
     /// Give `answer` to the operation that asked, found by its plan's id.
@@ -2341,15 +2568,27 @@ impl ExplorerState {
         }
     }
 
+    /// Give `answer` to the operation that failed, found by its plan's id.
+    fn answer_failure(&mut self, plan: u64, answer: ErrorAnswer) {
+        if let Some(running) = self
+            .operations
+            .iter_mut()
+            .find(|op| op.executor.plan_id() == plan)
+        {
+            running.executor.answer_error(answer);
+        }
+        if answer == ErrorAnswer::Stop {
+            self.status_message = "Stopped: what was already done stays done".to_string();
+        }
+    }
+
     /// Whether a file operation can get on without being told something: one
     /// running and not stopped at a question.
     ///
     /// What the clock is asked for by. An operation waiting on an answer needs
     /// no tick -- the answer is an event, and an event wakes the window.
     fn work_moving(&self) -> bool {
-        self.operations
-            .iter()
-            .any(|op| op.executor.waiting_on().is_none())
+        self.operations.iter().any(|op| !op.executor.asking())
             || (self.operations.is_empty() && !self.pending.is_empty())
     }
 
@@ -2610,7 +2849,15 @@ impl ExplorerState {
                     op.executor.progress().completed_files,
                     op.total_files
                 );
-                match op.executor.waiting_on().and_then(|q| q.dest.file_name()) {
+                // The name it is asking about: the one taken, or the file
+                // that could not be done.
+                let asking_about = op
+                    .executor
+                    .waiting_on()
+                    .map(|q| q.dest.as_path())
+                    .or_else(|| op.executor.failed_on().map(|q| q.path.as_path()))
+                    .and_then(Path::file_name);
+                match asking_about {
                     Some(name) => format!(
                         "{done} \u{2014} asking about \u{201c}{}\u{201d}",
                         name.shown()
@@ -3406,13 +3653,13 @@ impl ExplorerState {
                 &paths,
                 &self.current_path,
                 self.conflict_policy,
-                ErrorPolicy::SkipAndContinue,
+                ErrorPolicy::Ask,
             ),
             _ => OperationPlan::plan_copy(
                 &paths,
                 &self.current_path,
                 self.conflict_policy,
-                ErrorPolicy::SkipAndContinue,
+                ErrorPolicy::Ask,
             ),
         };
 
@@ -3469,7 +3716,7 @@ impl ExplorerState {
         }
 
         if permanent {
-            match OperationPlan::plan_delete(&paths, ErrorPolicy::SkipAndContinue) {
+            match OperationPlan::plan_delete(&paths, ErrorPolicy::Ask) {
                 // No undo entries: a permanent delete has nothing to put back.
                 Ok(plan) => {
                     self.start_operation(plan, "Deleted", false);
@@ -3530,7 +3777,7 @@ impl ExplorerState {
     fn describe_outcome(events: &[FileOpEvent], verb: &str) -> Outcome {
         let summary = events.iter().find_map(|e| match e {
             FileOpEvent::Complete { summary } => Some(summary),
-            _ => None,
+            FileOpEvent::Error { .. } => None,
         });
 
         let Some(OperationSummary {
@@ -3546,8 +3793,10 @@ impl ExplorerState {
             let reason = events
                 .iter()
                 .find_map(|e| match e {
-                    FileOpEvent::Error { error, .. } => Some(error.clone()),
-                    _ => None,
+                    FileOpEvent::Error { path, error } => {
+                        Some(format!("{}: {error}", path.shown()))
+                    }
+                    FileOpEvent::Complete { .. } => None,
                 })
                 .unwrap_or_else(|| "operation did not complete".to_string());
             let message = format!("{verb} nothing — {reason}");
@@ -3563,25 +3812,30 @@ impl ExplorerState {
         }
 
         msg.push_str(&format!(", {failed} failed"));
-        // The dialog names the first failure in full. Listing all of them
-        // would be the right thing for a queue view and the wrong thing for a
-        // dialog, which has to be readable at a glance; the status bar keeps
-        // the count, so nothing is lost.
-        let detail = match errors.first() {
-            Some(first) => {
-                msg.push_str(&format!(" — {}: {}", first.path.shown(), first.message));
-                format!(
-                    "{failed} of {} could not be done.\n\n{}: {}",
-                    succeeded.saturating_add(*failed),
-                    first.path.shown(),
-                    first.message
-                )
-            }
+        let Some(first) = errors.first() else {
             // A failure count with no error to go with it is the executor
             // contradicting itself. Say so rather than showing an empty
             // dialog, which reads as a bug in the dialog.
-            None => format!("{failed} item(s) could not be done, with no reason given."),
+            let detail = format!("{failed} item(s) could not be done, with no reason given.");
+            return Outcome::failed(msg, detail);
         };
+        msg.push_str(&format!(" — {}: {}", first.path.shown(), first.message));
+        // The dialog names the first failure the user has not been shown.
+        // One answered in the failure prompt -- skipped, or stopped at -- was
+        // shown there, and a dialog repeating it after the user said what to
+        // do about it is one more thing to dismiss for nothing: no file
+        // manager that asks does that. Listing every failure would be right
+        // for a queue view and wrong for a dialog, which has to be readable
+        // at a glance; the status bar keeps the count, so nothing is lost.
+        let Some(untold) = errors.iter().find(|e| !e.answered) else {
+            return Outcome::ok(msg);
+        };
+        let detail = format!(
+            "{failed} of {} could not be done.\n\n{}: {}",
+            succeeded.saturating_add(*failed),
+            untold.path.shown(),
+            untold.message
+        );
         Outcome::failed(msg, detail)
     }
 
@@ -3848,7 +4102,7 @@ impl ExplorerState {
                     &result.sources,
                     &result.target_dir,
                     self.conflict_policy,
-                    ErrorPolicy::SkipAndContinue,
+                    ErrorPolicy::Ask,
                 ),
                 "Moved",
             ),
@@ -3857,7 +4111,7 @@ impl ExplorerState {
                     &result.sources,
                     &result.target_dir,
                     self.conflict_policy,
-                    ErrorPolicy::SkipAndContinue,
+                    ErrorPolicy::Ask,
                 ),
                 "Copied",
             ),
@@ -3866,12 +4120,12 @@ impl ExplorerState {
                     &result.sources,
                     &result.target_dir,
                     self.conflict_policy,
-                    // The same policy the other two use, and for a reason
-                    // specific to links: a filesystem that refuses them
-                    // refuses each one separately -- Windows needs a
-                    // privilege -- so a batch must report which failed rather
-                    // than abandoning the ones that would have worked.
-                    ErrorPolicy::SkipAndContinue,
+                    // The same policy the other two use, and it suits links
+                    // in particular: a filesystem that refuses them refuses
+                    // each one separately -- Windows needs a privilege -- and
+                    // "Skip all" at the first lets the ones that would work
+                    // go on, rather than the batch being abandoned.
+                    ErrorPolicy::Ask,
                 )),
                 "Linked",
             ),
@@ -3982,6 +4236,7 @@ impl ExplorerState {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
             Some(Modal::Conflict { prompt }) => prompt.render(&self.palette, w, h, &mut tree),
+            Some(Modal::Failed { prompt }) => prompt.render(&self.palette, w, h, &mut tree),
             Some(Modal::ConfirmBin { dialog, .. }) => dialog.render(&self.palette, w, h, &mut tree),
             None => {}
         }
@@ -6620,6 +6875,9 @@ impl ExplorerState {
         if matches!(self.modal, Some(Modal::Conflict { .. })) {
             return self.handle_conflict_prompt(event);
         }
+        if matches!(self.modal, Some(Modal::Failed { .. })) {
+            return self.handle_failure_prompt(event);
+        }
         let Some(modal) = self.modal.as_mut() else {
             return false;
         };
@@ -6632,7 +6890,7 @@ impl ExplorerState {
             | Modal::NewFolder { dialog }
             | Modal::Search { dialog } => dialog.handle_event(event),
             // Answered above, and never reaches here.
-            Modal::Conflict { .. } => EventResult::Ignored,
+            Modal::Conflict { .. } | Modal::Failed { .. } => EventResult::Ignored,
         } == EventResult::Consumed;
 
         let answer = match modal {
@@ -6642,7 +6900,7 @@ impl ExplorerState {
             Modal::Rename { dialog, .. }
             | Modal::NewFolder { dialog }
             | Modal::Search { dialog } => dialog.result().cloned(),
-            Modal::Conflict { .. } => None,
+            Modal::Conflict { .. } | Modal::Failed { .. } => None,
         };
 
         let Some(answer) = answer else {
@@ -6669,6 +6927,21 @@ impl ExplorerState {
         let (plan, for_the_rest) = (prompt.plan, prompt.for_the_rest);
         self.modal = None;
         self.answer_conflict(plan, answer, for_the_rest);
+        true
+    }
+
+    /// Route an event to the failed-file prompt, and carry out its answer.
+    fn handle_failure_prompt(&mut self, event: &Event) -> bool {
+        let Some(Modal::Failed { prompt }) = self.modal.as_mut() else {
+            return false;
+        };
+        let (consumed, answer) = prompt.handle(event);
+        let Some(answer) = answer else {
+            return consumed;
+        };
+        let plan = prompt.plan;
+        self.modal = None;
+        self.answer_failure(plan, answer);
         true
     }
 
@@ -6729,7 +7002,7 @@ impl ExplorerState {
             // has already been reported; there is nothing left to carry out.
             // A notice has been reported already; a taken-name prompt is
             // answered through `handle_conflict_prompt` and never here.
-            Some(Modal::Notice { .. } | Modal::Conflict { .. }) | None => {}
+            Some(Modal::Notice { .. } | Modal::Conflict { .. } | Modal::Failed { .. }) | None => {}
         }
     }
 
@@ -7283,8 +7556,13 @@ mod tests {
     ///
     /// Bounded, and it panics rather than looping for ever: an operation that
     /// never finishes is a bug this should report, not hang on.
+    /// Tick until no file operation is running or waiting. At most ten
+    /// thousand ticks: each can spend a frame's slice stepping, so a paste
+    /// that never ends costs this at most a minute and a half, where a
+    /// hundred thousand cost a quarter of an hour -- past the time a
+    /// mutation sweep gives a suite.
     fn settle(state: &mut ExplorerState) {
-        for _ in 0..100_000 {
+        for _ in 0..10_000 {
             if !state.work_in_flight() {
                 return;
             }
@@ -11390,16 +11668,22 @@ mod tests {
         );
     }
 
-    /// An Alt-drag makes a link, or says it could not -- never a copy.
+    /// An Alt-drag makes a link, or asks about the one it could not make --
+    /// never a copy.
     ///
     /// Both outcomes are accepted because only one of them is available on a
     /// given machine: Windows needs a privilege to create a symbolic link, so
-    /// a host without it gets a per-file failure, which is the behaviour
-    /// `ErrorPolicy::SkipAndContinue` was chosen for. What is asserted in
-    /// *both* cases is the thing that must never happen -- a second
-    /// independent file. Silently copying would give the user a duplicate that
-    /// drifts out of step with the original with no sign it was ever meant to
-    /// be a stand-in, which is worse than the gesture failing.
+    /// a host without it gets a per-file failure, which the window asks
+    /// about (`ErrorPolicy::Ask`). What is asserted in *both* cases is the
+    /// thing that must never happen -- a second independent file. Silently
+    /// copying would give the user a duplicate that drifts out of step with
+    /// the original with no sign it was ever meant to be a stand-in, which is
+    /// worse than the gesture failing.
+    ///
+    /// It used to check straight after the drop, before the operation had
+    /// run: no link was there yet, and the progress line "Linked 0 of 1"
+    /// passed for "said it could not", so it passed on every host whatever
+    /// the link operation did.
     #[test]
     fn an_alt_drag_makes_a_link_or_reports_that_it_could_not() {
         let scratch = temp_dir("dz_link");
@@ -11423,6 +11707,13 @@ mod tests {
 
         let result = state.drop_at(x, y, alt).expect("drop");
         assert!(result.valid);
+        settle_until_asked(&mut state);
+        let asked = failure_prompt_of(&state).map(|prompt| prompt.title.clone());
+        if asked.is_some() {
+            // Skipped, so the drop finishes and says what it did.
+            assert!(state.handle_event(&Event::Key(key_press(Key::S))));
+        }
+        settle(&mut state);
 
         let made = root.join("target/note.txt");
         match fs::symlink_metadata(&made) {
@@ -11436,12 +11727,17 @@ mod tests {
                     fs::read_to_string(&made).expect("the link resolves"),
                     "hello"
                 );
+                assert_eq!(asked, None, "a link was made and asked about too");
             }
             Err(_) => {
+                assert_eq!(
+                    asked.as_deref(),
+                    Some("Could not make a link to \u{201c}note.txt\u{201d}"),
+                    "no link was made and nobody was asked"
+                );
                 assert!(
-                    state.status_message.contains("failed")
-                        || state.status_message.contains("Linked 0"),
-                    "no link was made and nothing said so: {:?}",
+                    state.status_message.contains("Linked 0 item(s), 1 failed"),
+                    "the drop did not say it made nothing: {:?}",
                     state.status_message
                 );
             }
@@ -13601,6 +13897,458 @@ mod tests {
             Some(Modal::Conflict { prompt }) => Some(prompt),
             _ => None,
         }
+    }
+
+    fn failure_prompt_of(state: &ExplorerState) -> Option<&ErrorPrompt> {
+        match state.modal.as_ref() {
+            Some(Modal::Failed { prompt }) => Some(prompt),
+            _ => None,
+        }
+    }
+
+    /// A paste of `f0.txt` and `f1.txt`, with `f0.txt` gone from under it
+    /// after the paste began, ticked until it asks.
+    fn paste_with_a_file_gone(scratch: &Path) -> ExplorerState {
+        let mut state = paste_of(scratch, 2);
+        state.paste();
+        fs::remove_file(scratch.join("src").join("f0.txt")).unwrap();
+        settle_until_asked(&mut state);
+        state
+    }
+
+    /// **A file a paste cannot copy is asked about**, and the paste waits:
+    /// try again, skip, skip all, stop. It skipped the file and said so at
+    /// the end, so a copy that met a file held open elsewhere could not be
+    /// told to go again.
+    #[test]
+    fn a_file_a_paste_cannot_copy_is_asked_about() {
+        let scratch = temp_dir("fail_prompt");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        let prompt = failure_prompt_of(&state).expect("nobody was asked");
+        assert_eq!(prompt.title, "Could not copy \u{201c}f0.txt\u{201d}");
+        assert!(!prompt.why.is_empty(), "the prompt does not say why");
+        assert!(
+            state.work_in_flight(),
+            "the paste finished without an answer"
+        );
+        assert!(
+            !state.work_moving(),
+            "a paste waiting on an answer still wants the clock"
+        );
+        assert_eq!(
+            state.transfer_labels(),
+            ["Pasted 0 of 2 \u{2014} asking about \u{201c}f0.txt\u{201d}"],
+            "the Transfers view does not say what it is waiting on"
+        );
+        let drawn = state.render();
+        let texts: Vec<String> = drawn
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for (_, label, _) in ERROR_BUTTONS {
+            assert!(
+                texts.iter().any(|t| t == label),
+                "{label} is not drawn: {texts:?}"
+            );
+        }
+        // Keys that mean something elsewhere mean nothing behind it.
+        assert!(state.handle_event(&Event::Key(key_press(Key::Delete))));
+        assert!(failure_prompt_of(&state).is_some());
+    }
+
+    /// **Each answer does what it says**: Try again copies the file once
+    /// it is back, Skip and Skip all leave it and go on, and every one lets
+    /// the rest of the paste finish.
+    #[test]
+    fn each_answer_to_a_failure_does_what_it_says() {
+        for (key, restore, f0_copied) in [
+            (Key::T, true, true),
+            (Key::Enter, true, true),
+            (Key::S, false, false),
+            (Key::A, false, false),
+        ] {
+            let scratch = temp_dir(&format!("fail_answer_{key:?}"));
+            let root = scratch.dir().to_path_buf();
+            let mut state = paste_with_a_file_gone(&root);
+            if restore {
+                write(&root.join("src").join("f0.txt"), "some content");
+            }
+            assert!(state.handle_event(&Event::Key(key_press(key))));
+            assert!(
+                failure_prompt_of(&state).is_none(),
+                "{key:?}: the prompt stayed up"
+            );
+            settle(&mut state);
+            let dst = root.join("dst");
+            assert_eq!(dst.join("f0.txt").exists(), f0_copied, "{key:?}");
+            assert!(
+                dst.join("f1.txt").exists(),
+                "{key:?}: the paste did not go on"
+            );
+            if !f0_copied {
+                assert!(
+                    state.status_message.contains("1 failed"),
+                    "{key:?}: {}",
+                    state.status_message
+                );
+            }
+            // The one failure was asked about and answered, so the end says
+            // it in the status bar and puts up no dialog about it again.
+            assert!(
+                state.modal.is_none(),
+                "{key:?}: a failure the user answered was reported again"
+            );
+        }
+    }
+
+    /// **Stop at a failure stops the paste**: what was done stays done, and
+    /// nothing after it is copied.
+    #[test]
+    fn stop_at_a_failure_stops_the_paste() {
+        let scratch = temp_dir("fail_stop");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        assert!(state.handle_event(&Event::Key(key_press(Key::Escape))));
+        assert!(failure_prompt_of(&state).is_none());
+        settle(&mut state);
+        assert!(
+            !root.join("dst").join("f1.txt").exists(),
+            "it went on after Stop"
+        );
+        assert!(!state.work_in_flight());
+        // Asked and answered: the end says what happened without a second
+        // dialog to dismiss for the same file.
+        assert!(
+            state.modal.is_none(),
+            "a failure the user answered was reported again"
+        );
+        assert!(
+            state.status_message.contains("1 failed") && state.status_message.contains("stopped"),
+            "{}",
+            state.status_message
+        );
+    }
+
+    /// **A click answers the failure prompt as its key does**, each button
+    /// the answer it names.
+    #[test]
+    fn the_failure_prompt_answers_a_click_on_its_buttons() {
+        for (answer, f0_copied, f1_copied) in [
+            (ErrorAnswer::TryAgain, true, true),
+            (ErrorAnswer::Skip, false, true),
+            (ErrorAnswer::SkipAll, false, true),
+            (ErrorAnswer::Stop, false, false),
+        ] {
+            let scratch = temp_dir(&format!("fail_click_{answer:?}"));
+            let root = scratch.dir().to_path_buf();
+            let mut state = paste_with_a_file_gone(&root);
+            if answer == ErrorAnswer::TryAgain {
+                write(&root.join("src").join("f0.txt"), "some content");
+            }
+            let _ = state.render();
+            let button = failure_prompt_of(&state)
+                .and_then(|p| p.hits.iter().find(|(a, _)| *a == answer).map(|(_, r)| *r))
+                .expect("the answer was not drawn");
+            // A click beside every button does nothing.
+            let beside = Event::Mouse(MouseEvent {
+                x: 2.0,
+                y: 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            assert!(state.handle_event(&beside));
+            assert!(
+                failure_prompt_of(&state).is_some(),
+                "a click beside it answered"
+            );
+            // Passing over the button, or letting go on it, is not a press.
+            for kind in [
+                MouseEventKind::Move,
+                MouseEventKind::Release(MouseButton::Left),
+            ] {
+                let what = format!("{kind:?}");
+                let over = Event::Mouse(MouseEvent {
+                    x: button.x + button.w / 2.0,
+                    y: button.y + button.h / 2.0,
+                    kind,
+                });
+                assert!(state.handle_event(&over));
+                assert!(
+                    failure_prompt_of(&state).is_some(),
+                    "{what} over the button answered"
+                );
+            }
+            let click = Event::Mouse(MouseEvent {
+                x: button.x + button.w / 2.0,
+                y: button.y + button.h / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            assert!(state.handle_event(&click));
+            assert!(failure_prompt_of(&state).is_none(), "{answer:?}: still up");
+            settle(&mut state);
+            let dst = root.join("dst");
+            assert_eq!(dst.join("f0.txt").exists(), f0_copied, "{answer:?}");
+            assert_eq!(dst.join("f1.txt").exists(), f1_copied, "{answer:?}");
+        }
+    }
+
+    /// **Cancelling a paste stopped at a failure takes its prompt down**:
+    /// the question belongs to an operation that has gone.
+    #[test]
+    fn cancelling_a_paste_stopped_at_a_failure_takes_its_prompt_down() {
+        let scratch = temp_dir("fail_cancel");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        assert!(state.cancel_operation());
+        settle(&mut state);
+        assert!(
+            failure_prompt_of(&state).is_none(),
+            "the prompt stayed up for an operation that has gone"
+        );
+        assert!(!root.join("dst").join("f1.txt").exists());
+    }
+
+    /// Skip all, then another failure: nobody is asked the second time, and
+    /// the end says so -- the second was never shown.
+    #[test]
+    fn a_failure_after_skip_all_is_reported_at_the_end() {
+        let scratch = temp_dir("fail_skip_all_end");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 3);
+        state.paste();
+        fs::remove_file(root.join("src").join("f0.txt")).unwrap();
+        fs::remove_file(root.join("src").join("f2.txt")).unwrap();
+        settle_until_asked(&mut state);
+        assert!(state.handle_event(&Event::Key(key_press(Key::A))));
+        settle_until_asked(&mut state);
+        assert!(
+            failure_prompt_of(&state).is_none(),
+            "asked again after Skip all"
+        );
+        settle(&mut state);
+        assert!(root.join("dst").join("f1.txt").exists());
+        let notice = notice_text(&state).expect("a failure nobody saw was not reported");
+        assert!(notice.contains("f2.txt"), "{notice}");
+        assert!(notice.starts_with("2 of 3"), "{notice}");
+    }
+
+    /// **The prompt keeps its answers inside a narrow window**, a row under
+    /// another when they do not fit side by side.
+    #[test]
+    fn the_failure_prompt_keeps_its_answers_inside_a_narrow_window() {
+        let scratch = temp_dir("fail_narrow");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_with_a_file_gone(&root);
+        for width in [1200.0_f32, 320.0, 240.0] {
+            let Some(Modal::Failed { prompt }) = state.modal.as_mut() else {
+                panic!("nobody was asked");
+            };
+            let mut tree = RenderTree::new();
+            prompt.render(&state.palette, width, 600.0, &mut tree);
+            let answers: Vec<Rect> = prompt.hits.iter().map(|(_, r)| *r).collect();
+            assert_eq!(answers.len(), ERROR_BUTTONS.len());
+            let (card, _) = card_of(&tree).expect("no card was drawn");
+            for r in &answers {
+                assert!(
+                    r.x >= card.x
+                        && r.y >= card.y
+                        && r.x + r.w <= card.x + card.w + 0.5
+                        && r.y + r.h <= card.y + card.h + 0.5,
+                    "an answer runs past the card at {width}: {r:?} {card:?}"
+                );
+            }
+            for (i, a) in answers.iter().enumerate() {
+                for b in answers.iter().skip(i + 1) {
+                    let apart = a.x + a.w <= b.x
+                        || b.x + b.w <= a.x
+                        || a.y + a.h <= b.y
+                        || b.y + b.h <= a.y;
+                    assert!(apart, "two answers overlap at {width}: {a:?} {b:?}");
+                }
+            }
+        }
+    }
+
+    /// The failure prompt for `why`, drawn `width` wide: the reason's lines
+    /// with where each is, where the answers are, and the card.
+    fn failure_prompt_drawn(why: &str, width: f32) -> (Vec<(f32, String)>, Vec<Rect>, Rect) {
+        let mut prompt = ErrorPrompt::new(
+            7,
+            &FileOperation::Copy,
+            &ErrorQuestion {
+                action: 0,
+                path: PathBuf::from("notes.txt"),
+                error: why.to_string(),
+            },
+        );
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut tree = RenderTree::new();
+        prompt.render(&pal, width, 600.0, &mut tree);
+        let lines = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { y, text, .. }
+                    if !text.is_empty() && why.contains(text.as_str()) =>
+                {
+                    Some((*y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let (card, _) = card_of(&tree).expect("no card was drawn");
+        let answers = prompt.hits.iter().map(|(_, r)| *r).collect();
+        (lines, answers, card)
+    }
+
+    /// A prompt's card -- the one box drawn with corners of 8 -- and its
+    /// fill, if it has one.
+    fn card_of(tree: &RenderTree) -> Option<(Rect, guitk::color::Color)> {
+        tree.commands.iter().find_map(|c| match c {
+            guitk::render::RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                corner_radii,
+            } if *corner_radii == guitk::style::CornerRadii::all(8.0) => {
+                Some((Rect::new(*x, *y, *width, *height), *color))
+            }
+            _ => None,
+        })
+    }
+
+    /// **Both prompts stand on a filled panel in every look**, every answer
+    /// inside it. They were drawn as cards, and under borders a card is an
+    /// outline alone: the prompt's words sat on the dimmed listing, its rows
+    /// showing through them.
+    #[test]
+    fn the_prompts_are_filled_in_every_look() {
+        let scratch = temp_dir("prompt_filled");
+        let root = scratch.dir().to_path_buf();
+        let mut asking = paste_onto_a_taken_name(&root);
+        for style in [
+            appearance::SurfaceStyle::Borders,
+            appearance::SurfaceStyle::Cards,
+        ] {
+            let mut pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+            pal.set_surface_style(style);
+            let mut failed = ErrorPrompt::new(
+                7,
+                &FileOperation::Copy,
+                &ErrorQuestion {
+                    action: 0,
+                    path: PathBuf::from("notes.txt"),
+                    error: "Access is denied.".to_string(),
+                },
+            );
+            let mut tree = RenderTree::new();
+            failed.render(&pal, 800.0, 600.0, &mut tree);
+            let failed_answers: Vec<Rect> = failed.hits.iter().map(|(_, r)| *r).collect();
+            let Some(Modal::Conflict { prompt }) = asking.modal.as_mut() else {
+                panic!("nobody was asked about the taken name");
+            };
+            let mut conflict_tree = RenderTree::new();
+            prompt.render(&pal, 800.0, 600.0, &mut conflict_tree);
+            let conflict_answers: Vec<Rect> = prompt
+                .hits
+                .iter()
+                .filter(|(c, _)| matches!(c, PromptControl::Answer(_)))
+                .map(|(_, r)| *r)
+                .collect();
+            for (which, tree, answers) in [
+                ("failure", &tree, &failed_answers),
+                ("taken name", &conflict_tree, &conflict_answers),
+            ] {
+                let (card, fill) = card_of(tree)
+                    .unwrap_or_else(|| panic!("{style:?}: the {which} prompt has no fill"));
+                assert_eq!(
+                    fill.a, 255,
+                    "{style:?}: the {which} prompt's fill is see-through"
+                );
+                for r in answers {
+                    assert!(
+                        r.x >= card.x
+                            && r.y >= card.y
+                            && r.x + r.w <= card.x + card.w + 0.5
+                            && r.y + r.h <= card.y + card.h + 0.5,
+                        "{style:?}: a {which} answer is outside its card: {r:?} {card:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A long reason is wrapped, not cut at the card's edge**: every word
+    /// of it drawn, on lines that fit, with the answers as far below its
+    /// last line as they are below a reason of one, in a card grown to hold
+    /// them.
+    #[test]
+    fn a_long_reason_is_wrapped_above_the_answers() {
+        let why = "The process cannot access the file because it is being used by \
+                   another process. (os error 32)";
+        // Narrow enough that the reason cannot be one line in any font.
+        let width = 400.0;
+        let inner = PROMPT_W.min(width - 32.0) - 40.0;
+        let weight = guitk::render::FontWeightHint::Regular;
+        let (lines, answers, card) = failure_prompt_drawn(why, width);
+        assert!(
+            lines.len() > 1,
+            "a reason wider than the card is on one line: {lines:?}"
+        );
+        let joined: Vec<&str> = lines.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(joined.join(" "), why, "the reason lost words");
+        for (_, line) in &lines {
+            assert!(
+                guitk::text::measure(line, 12.0, weight) <= inner + 0.5,
+                "{line:?} overflows"
+            );
+        }
+        let lowest =
+            |lines: &[(f32, String)]| lines.iter().map(|(y, _)| *y).fold(f32::MIN, f32::max);
+        let top = |answers: &[Rect]| answers.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+        // What is left of the card under the answers.
+        let margin = |answers: &[Rect], card: Rect| {
+            card.y + card.h - answers.iter().map(|r| r.y + r.h).fold(f32::MIN, f32::max)
+        };
+        let (one_line, one_line_answers, one_line_card) =
+            failure_prompt_drawn("Access is denied.", width);
+        assert_eq!(one_line.len(), 1, "{one_line:?}");
+        let gap = top(&answers) - lowest(&lines);
+        let one_line_gap = top(&one_line_answers) - lowest(&one_line);
+        assert!(
+            (gap - one_line_gap).abs() < 0.5,
+            "the answers are {gap} below the reason's last line, and {one_line_gap} below one line"
+        );
+        let under = margin(&answers, card);
+        let one_line_under = margin(&one_line_answers, one_line_card);
+        assert!(
+            (under - one_line_under).abs() < 0.5,
+            "the card ends {under} under the answers, and {one_line_under} under one line's"
+        );
+    }
+
+    /// A reason too long for three lines is cut on the third, with "…".
+    #[test]
+    fn a_reason_past_three_lines_is_cut_on_the_third() {
+        let why = "word ".repeat(200);
+        let lines = why_lines(&why, 300.0);
+        assert_eq!(lines.len(), WHY_LINES);
+        assert!(lines[2].ends_with('\u{2026}'), "{:?}", lines[2]);
+        let weight = guitk::render::FontWeightHint::Regular;
+        for line in &lines {
+            assert!(
+                guitk::text::measure(line, 12.0, weight) <= 300.5,
+                "{line:?} overflows"
+            );
+        }
+        // And a short one is one line, as it was.
+        assert_eq!(why_lines("Access is denied.", 300.0), ["Access is denied."]);
     }
 
     /// A paste of `f0.txt` onto a folder that already has one, asking.

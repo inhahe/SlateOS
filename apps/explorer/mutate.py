@@ -25,6 +25,13 @@ And the recycle bin's view (`BINVIEW`, and the bin rows in `MAIN`): the pane
 shows the bin in place of the folder, and nothing done there -- a click, a
 key, the wheel, the preview's divider -- reaches the folder behind it.
 
+And the failure prompt (2026-09-28, `FILEOPS` and the failure rows in
+`MAIN`): a file an operation cannot carry out is asked about -- try again,
+skip, skip all, stop -- as a taken name is, where it used to be skipped and
+said at the end; a file that failed part-way is tried again from its first
+byte; a failure the user answered is not reported again at the end; and
+both prompts stand on a panel, where under borders they were an outline.
+
 Rows the Windows host cannot decide are left out on purpose: it cannot make a
 symbolic link without a privilege, so a *copy* of a link always fails there,
 and "copied as a link" cannot be told from "failed" -- `copy_link` and the
@@ -97,6 +104,25 @@ CYCLE = "a_link_to_a_folder_above_does_not_make_the_scan_endless"
 NOT_A_LINK = "a_link_that_is_no_longer_one_is_not_removed"
 NO_FOLDER = "a_folder_in_the_way_is_never_removed_to_make_room"
 TOO_DEEP = "a_tree_deeper_than_anyone_makes_is_refused_not_walked"
+FAIL_ASKED = "a_failed_file_is_asked_about_and_nothing_moves_until_it_is_answered"
+FAIL_AGAIN = "try_again_carries_the_file_out_again"
+FAIL_SKIP = "skip_leaves_the_file_failed_and_goes_on"
+FAIL_SKIP_ALL = "skip_all_skips_every_later_failure_without_asking"
+FAIL_STOP = "stop_ends_the_operation_and_what_is_done_stays_done"
+FAIL_COUNTS = "a_failure_the_plan_skips_is_counted_as_failed_alone"
+FAIL_PART_WAY = "a_file_that_failed_part_way_is_tried_again_from_its_first_byte"
+FAIL_CANCEL = "cancelling_an_operation_stopped_at_a_failure_ends_it"
+W_FAIL_ASKED = "a_file_a_paste_cannot_copy_is_asked_about"
+W_FAIL_ANSWERS = "each_answer_to_a_failure_does_what_it_says"
+W_FAIL_STOP = "stop_at_a_failure_stops_the_paste"
+W_FAIL_CLICK = "the_failure_prompt_answers_a_click_on_its_buttons"
+W_FAIL_CANCEL = "cancelling_a_paste_stopped_at_a_failure_takes_its_prompt_down"
+W_FAIL_UNTOLD = "a_failure_after_skip_all_is_reported_at_the_end"
+W_FAIL_NARROW = "the_failure_prompt_keeps_its_answers_inside_a_narrow_window"
+W_WHY_WRAP = "a_long_reason_is_wrapped_above_the_answers"
+W_WHY_CUT = "a_reason_past_three_lines_is_cut_on_the_third"
+W_FILLED = "the_prompts_are_filled_in_every_look"
+LINK_DRAG = "an_alt_drag_makes_a_link_or_reports_that_it_could_not"
 EXIF = "a_photographs_exif_is_three_columns"
 LATE = "exif_past_the_head_of_a_webp_is_found"
 
@@ -258,15 +284,15 @@ MAIN = [
     # -- 2026-09-27: asking about a taken name --------------------------------
     (
         "the prompt never opens",
-        "            self.modal = Some(Modal::Conflict { prompt });",
-        "            let _unused = prompt;",
+        "            if let Some(question) = op.executor.waiting_on() {\n                Some(Modal::Conflict {",
+        "            if let Some(question) = op.executor.waiting_on().filter(|_| false) {\n                Some(Modal::Conflict {",
         [ASKS],
     ),
     (
         "an operation waiting on an answer wants the clock",
-        "            .any(|op| op.executor.waiting_on().is_none())",
-        "            .any(|_| true)",
-        [ASKS],
+        "        self.operations.iter().any(|op| !op.executor.asking())",
+        "        self.operations.iter().any(|_| true)",
+        [ASKS, W_FAIL_ASKED],
     ),
     (
         "the answer never reaches the operation",
@@ -328,6 +354,146 @@ MAIN = [
         "        address.contains(x, y)\n            || self\n",
         "        address.contains(x, y)\n            || false && self\n",
         ["the_address_completions_are_drawn_over_the_listing_and_take_a_press"],
+    ),
+    # -- a failed file is asked about (2026-09-28) ------------------------------
+    (
+        "a failure is never asked about",
+        "                op.executor.failed_on().map(|question| Modal::Failed {",
+        "                op.executor.failed_on().filter(|_| false).map(|question| Modal::Failed {",
+        [W_FAIL_ASKED],
+    ),
+    (
+        "a failure prompt outlives its question",
+        "                if !asking(&self.operations, prompt.plan, true) {",
+        "                if false && !asking(&self.operations, prompt.plan, true) {",
+        [W_FAIL_CANCEL],
+    ),
+    (
+        "the failure prompt's answer is not given",
+        "        self.modal = None;\n        self.answer_failure(plan, answer);",
+        "        self.modal = None;\n        let _unused = (plan, answer);",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "a failure's answer goes to another operation",
+        "            .find(|op| op.executor.plan_id() == plan)\n        {\n            running.executor.answer_error(answer);",
+        "            .find(|op| op.executor.plan_id() != plan)\n        {\n            running.executor.answer_error(answer);",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "Enter does not try again",
+        "                if key.key == Key::Enter {\n                    return (true, Some(ErrorAnswer::TryAgain));",
+        "                if key.key == Key::Tab {\n                    return (true, Some(ErrorAnswer::TryAgain));",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "a key answers what another key does",
+        "                let answer = ERROR_BUTTONS\n                    .iter()\n                    .find(|(_, _, k)| *k == key.key)",
+        "                let answer = ERROR_BUTTONS\n                    .iter()\n                    .find(|(_, _, k)| *k != key.key)",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "a click anywhere answers the failure prompt",
+        "                    .find(|(_, r)| r.contains(m.x, m.y))\n                    .map(|(answer, _)| *answer);",
+        "                    .find(|(_, _)| true)\n                    .map(|(answer, _)| *answer);",
+        [W_FAIL_CLICK],
+    ),
+    (
+        "passing over a failure's answer gives it",
+        "                if m.kind != MouseEventKind::Press(MouseButton::Left) {\n                    return (true, None);\n                }\n                let answer = self\n                    .hits\n                    .iter()\n                    .find(|(_, r)| r.contains(m.x, m.y))\n                    .map(|(answer, _)| *answer);",
+        "                let answer = self\n                    .hits\n                    .iter()\n                    .find(|(_, r)| r.contains(m.x, m.y))\n                    .map(|(answer, _)| *answer);",
+        [W_FAIL_CLICK],
+    ),
+    # Not a row: the prompt answering "mine" for an event it ignores (a
+    # tick, a resize). A tick reaches the work behind a modal whatever the
+    # modal says, and the window loop redraws after a resize whatever the
+    # window says, so the only difference is one redundant repaint --
+    # swept 2026-09-28 and survived, as an equivalent mutant must.
+    (
+        "a failed copy is called something else",
+        "        FileOperation::Copy => \"copy\",",
+        "        FileOperation::Copy => \"move\",",
+        [W_FAIL_ASKED],
+    ),
+    (
+        "a failed link is called something else",
+        "        FileOperation::Link => \"make a link to\",",
+        "        FileOperation::Link => \"link\",",
+        [LINK_DRAG],
+    ),
+    (
+        "the reason is one line cut at the edge",
+        "        let why = why_lines(&self.why, inner);",
+        "        let why = vec![self.why.clone()];",
+        [W_WHY_WRAP],
+    ),
+    (
+        "the reason is given every line it wraps to",
+        "    if lines.len() > WHY_LINES {",
+        "    if false {",
+        [W_WHY_CUT],
+    ),
+    (
+        "the reason's last line is not cut with an ellipsis",
+        "        lines.push(guitk::text::elide(&rest, inner, \"\\u{2026}\", 12.0, weight));",
+        "        lines.push(rest);",
+        [W_WHY_CUT],
+    ),
+    (
+        "the answers do not move down for the reason",
+        "        let first_row = y + ERROR_PROMPT_H - 50.0 + more_why;",
+        "        let first_row = y + ERROR_PROMPT_H - 50.0;",
+        [W_WHY_WRAP],
+    ),
+    (
+        "the card does not grow for the reason",
+        "        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW",
+        "        let card_h = ERROR_PROMPT_H + PROMPT_ROW",
+        [W_WHY_WRAP],
+    ),
+    (
+        "the failure prompt's answers do not wrap in a narrow window",
+        "        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW * f32::from(rows.saturating_sub(1));",
+        "        let card_h = ERROR_PROMPT_H + more_why;",
+        [W_FAIL_NARROW],
+    ),
+    (
+        "the failure prompt is an outline under borders",
+        "        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW * f32::from(rows.saturating_sub(1));\n"
+        "        let x = ((w - card_w) / 2.0).max(0.0);\n        let y = ((h - card_h) / 2.0).max(0.0);\n"
+        "        pal.push_surface(\n            &mut tree.commands,\n            x,\n            y,\n            card_w,\n            card_h,\n            8.0,\n            // A panel, as a dialog is: filled in every look. A card is an\n            // outline alone under borders, and the prompt's words would sit\n            // on the dimmed listing with its rows showing through.\n            appearance::Surface::Panel,",
+        "        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW * f32::from(rows.saturating_sub(1));\n"
+        "        let x = ((w - card_w) / 2.0).max(0.0);\n        let y = ((h - card_h) / 2.0).max(0.0);\n"
+        "        pal.push_surface(\n            &mut tree.commands,\n            x,\n            y,\n            card_w,\n            card_h,\n            8.0,\n            // A panel, as a dialog is: filled in every look. A card is an\n            // outline alone under borders, and the prompt's words would sit\n            // on the dimmed listing with its rows showing through.\n            appearance::Surface::Card,",
+        [W_FILLED],
+    ),
+    (
+        "the taken-name prompt is an outline under borders",
+        "        let card_h = PROMPT_H + PROMPT_ROW * f32::from(rows.saturating_sub(1));\n"
+        "        let x = ((w - card_w) / 2.0).max(0.0);\n        let y = ((h - card_h) / 2.0).max(0.0);\n"
+        "        pal.push_surface(\n            &mut tree.commands,\n            x,\n            y,\n            card_w,\n            card_h,\n            8.0,\n            // A panel, as a dialog is: filled in every look. A card is an\n            // outline alone under borders, and the prompt's words would sit\n            // on the dimmed listing with its rows showing through.\n            appearance::Surface::Panel,",
+        "        let card_h = PROMPT_H + PROMPT_ROW * f32::from(rows.saturating_sub(1));\n"
+        "        let x = ((w - card_w) / 2.0).max(0.0);\n        let y = ((h - card_h) / 2.0).max(0.0);\n"
+        "        pal.push_surface(\n            &mut tree.commands,\n            x,\n            y,\n            card_w,\n            card_h,\n            8.0,\n            // A panel, as a dialog is: filled in every look. A card is an\n            // outline alone under borders, and the prompt's words would sit\n            // on the dimmed listing with its rows showing through.\n            appearance::Surface::Card,",
+        [W_FILLED],
+    ),
+    (
+        "an answered failure is reported again at the end",
+        "        let Some(untold) = errors.iter().find(|e| !e.answered) else {",
+        "        let Some(untold) = errors.iter().find(|_| true) else {",
+        [W_FAIL_ANSWERS, W_FAIL_STOP],
+    ),
+    (
+        "the end names a failure the user saw",
+        "            untold.path.shown(),\n            untold.message",
+        "            first.path.shown(),\n            first.message",
+        [W_FAIL_UNTOLD],
+    ),
+    (
+        "the Transfers view does not say which file failed",
+        "                    .or_else(|| op.executor.failed_on().map(|q| q.path.as_path()))",
+        "                    .or_else(|| None)",
+        [W_FAIL_ASKED],
     ),
 ]
 
@@ -410,9 +576,9 @@ FILEOPS = [
     ),
     (
         "a waiting operation is stepped anyway",
-        "    pub fn step(&mut self) {\n        if self.question.is_some() {",
+        "    pub fn step(&mut self) {\n        if self.asking() {",
         "    pub fn step(&mut self) {\n        if false {",
-        [WAITS],
+        [WAITS, FAIL_ASKED],
     ),
     (
         "a waiting action is passed over",
@@ -438,6 +604,98 @@ FILEOPS = [
         "            None => {}",
         [STOP],
     ),
+    # -- a failed file is asked about (2026-09-28) ------------------------------
+    (
+        "asking forgets a failed file",
+        "        self.question.is_some() || self.failed.is_some()",
+        "        self.question.is_some()",
+        [W_FAIL_ASKED],
+    ),
+    (
+        "a failure leaves no question",
+        "                        self.failed = Some(ErrorQuestion {",
+        "                        let _unused = Some(ErrorQuestion {",
+        [FAIL_ASKED],
+    ),
+    (
+        "a failed file is passed over while asking",
+        "                        // question is answered, as for a taken name.\n                        self.next = self.next.saturating_sub(1);",
+        "                        // question is answered, as for a taken name.\n                        let _unused = self.next;",
+        [FAIL_AGAIN],
+    ),
+    (
+        "a failure's answer is never taken",
+        "        let Some(failed) = self.failed.take() else {",
+        "        let Some(failed) = self.failed.clone() else {",
+        [FAIL_AGAIN],
+    ),
+    (
+        "Try again skips the file",
+        "            ErrorAnswer::TryAgain => {}\n            ErrorAnswer::Skip | ErrorAnswer::SkipAll => {",
+        "            ErrorAnswer::TryAgain | ErrorAnswer::Skip | ErrorAnswer::SkipAll => {",
+        [FAIL_AGAIN],
+    ),
+    (
+        "Skip tries the file again",
+        "                self.next = self.next.saturating_add(1);\n                if answer == ErrorAnswer::SkipAll {",
+        "                let _unused = self.next;\n                if answer == ErrorAnswer::SkipAll {",
+        [FAIL_SKIP],
+    ),
+    (
+        "Skip all asks again",
+        "                    self.error_policy_for_the_rest = Some(ErrorPolicy::SkipAndContinue);",
+        "                    let _unused = ErrorPolicy::SkipAndContinue;",
+        [FAIL_SKIP_ALL],
+    ),
+    (
+        "the policy for the rest is not read",
+        "        let error_policy = self\n            .error_policy_for_the_rest\n            .unwrap_or(self.plan.error_policy);",
+        "        let error_policy = self.plan.error_policy;",
+        [FAIL_SKIP_ALL],
+    ),
+    (
+        "Stop at a failure does not stop",
+        "                self.record_failure(&failed.path, &failed.error, true);\n                self.cancel();",
+        "                self.record_failure(&failed.path, &failed.error, true);\n                self.progress.state = OperationState::Running;",
+        [FAIL_STOP],
+    ),
+    (
+        "a skipped failure counts as one nobody saw",
+        "                self.record_failure(&failed.path, &failed.error, true);\n                self.next = self.next.saturating_add(1);",
+        "                self.record_failure(&failed.path, &failed.error, false);\n                self.next = self.next.saturating_add(1);",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "a stop counts as a failure nobody saw",
+        "                self.record_failure(&failed.path, &failed.error, true);\n                self.cancel();",
+        "                self.record_failure(&failed.path, &failed.error, false);\n                self.cancel();",
+        [W_FAIL_STOP],
+    ),
+    (
+        "a failure skipped unasked counts as answered",
+        "                        self.record_failure(&action.src, &e.to_string(), false);",
+        "                        self.record_failure(&action.src, &e.to_string(), true);",
+        [W_FAIL_UNTOLD],
+    ),
+    (
+        "a failure is counted as skipped as well",
+        "    fn record_failure(&mut self, path: &Path, error: &str, answered: bool) {\n",
+        "    fn record_failure(&mut self, path: &Path, error: &str, answered: bool) {\n        self.skipped = self.skipped.saturating_add(1);\n",
+        [FAIL_COUNTS, FAIL_SKIP],
+    ),
+    (
+        "a file that failed part-way goes on from where it stood",
+        "                self.discard_cursor();\n                match error_policy {",
+        "                match error_policy {",
+        [FAIL_PART_WAY],
+    ),
+    (
+        "a cancel leaves the failure's question",
+        "        self.question = None;\n        self.failed = None;",
+        "        self.question = None;",
+        [FAIL_CANCEL],
+    ),
+
     (
         "a cancel leaves the question up",
         "    pub fn cancel(&mut self) {\n        self.question = None;",

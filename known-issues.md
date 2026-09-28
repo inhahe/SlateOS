@@ -157923,6 +157923,27 @@ once. A cache with no ceiling is the same failure with a slower fuse.
 **Where:** `apps/explorer/src/fileops.rs` — the module doc, `ConflictPolicy`,
 `ErrorPolicy`, `ExecutorConfig`.
 
+**Status:** FIXED (lane E, 2026-09-28). The blanket allow is gone and the file
+builds without a dead-code warning. Each finding was wired or removed on
+whether anything should call it:
+
+| finding | now |
+|---|---|
+| `ConflictPolicy::Ask`, `::Overwrite`, `::OverwriteIfNewer` | wired 2026-09-27: the window asks, and the menu offers the rest |
+| `ErrorPolicy` | **wired**: the window's operations stop at a file they cannot carry out and ask -- try again, skip, skip all, stop -- where they used to skip it and say so at the end. `SkipAndContinue` is what "Skip all" makes the policy for the rest |
+| `ErrorPolicy::StopOnFirst`, `::RetryN` | **removed**: nothing chose them. Stopping is one of the answers, given when the user can see what failed, and "Try again" is a retry the user times -- a drive plugged back in, a file closed elsewhere -- where `RetryN` retried at once, when nothing had changed |
+| `ExecutorConfig`, the `Progress`, `Conflict` and `UndoAvailable` events, four `OperationSummary` fields | **removed**: nothing read them. The window reads progress and questions from the executor, not the event stream |
+
+Found on the way and fixed with it: a failure was counted as skipped as well
+as failed, so three files with one failure reported one done; a file that
+failed part-way now starts again from its first byte when tried again (it
+would have gone on after the chunk whose write failed, leaving that chunk
+out); the end no longer repeats, in a dialog, a failure the user has just
+answered; and the explorer's two prompts stand on a panel -- under borders a
+card is an outline alone, and the taken-name prompt's words sat on the
+dimmed listing with its rows showing through. `apps/explorer/mutate.py`
+covers each.
+
 **In short:** the file-operations module lists what it offers at the top of the
 file: conflict resolution policies, per-file error handling (skip, retry,
 stop). Several of those settings exist as code and can never be chosen — no
@@ -157971,6 +157992,20 @@ indices, not the plan -- and the doc now says so. See `roadmap-detailed.md`
 `apps/explorer/src/{columns,fileops,thumbs}.rs`, `apps/imageviewer/src/video.rs`,
 `apps/procexplorer/src/features.rs`, `apps/settings/src/remote.rs`,
 `apps/match3`, `apps/pinball`, `apps/screenrecorder`, `apps/soundrecorder`.
+
+**Status (lane E, 2026-09-28):** one remains, `apps/settings/src/remote.rs`,
+and it waits on something other than a reading: it is the unreachable
+remote page C-Q17 says to wire up (§1423), whose dynamic-DNS half needs the
+userspace service in `requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`
+and whose remote-desktop half has no server to configure (`todo.txt`,
+"C-Q17: what is left"). The rest carry none: the explorer's `columns.rs` and
+`fileops.rs` (the last on this date:
+`TD-C-THE-FILE-OPERATIONS-MODULE-ADVERTISES-POLICIES-NOTHING-SELECTS`),
+`procexplorer`'s `features.rs`, `match3`, `pinball`, and on this date the
+screen recorder (an unused layout constant) and the sound recorder (the
+noise gate's attack, documented and never read -- it opened and shut in one
+sample, a click at each edge; it ramps now). `thumbs.rs` is `gui/thumbs`
+now, and `imageviewer/src/video.rs` is gone.
 
 **In short:** ten files tell the compiler not to mention code nothing uses.
 Each suppression covers the whole file — thousands of lines in several cases —

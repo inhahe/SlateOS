@@ -88,9 +88,6 @@ path = "tests/standard.rs"
 name = "url"
 path = "tests/url.rs"
 
-[[bench]]
-name = "mod"
-path = "benches/mod.rs"
 
 [dev-dependencies.base64]
 version = "0.22"

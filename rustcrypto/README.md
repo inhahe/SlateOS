@@ -75,6 +75,15 @@ normalised manifest cargo generated when the crate was published.
   aarch64 (Android, Linux, Apple) and loongarch64 Linux; SlateOS is x86_64,
   and vendoring the 5 MB `libc` crate for code no build compiles was not worth
   it. Those targets would not build from this copy.
+- `base64ct`, `blake2`, `chacha20` and `poly1305` lose their `[[bench]]`
+  target (2026-09-27). Each is `#![feature(test)]`, which only a nightly
+  compiler accepts, and the published manifests name them explicitly --
+  `autobenches = false` does not stop an explicit one. `cargo clippy
+  --all-targets`, which the pre-push cfg(unix) gate runs on `base64ct`,
+  compiled them on stable and failed with E0554, refusing every push that
+  touched a `.rs` file (lane F's finding). The files under `benches/` are
+  kept as published; to run one, put its `[[bench]]` back on a nightly
+  toolchain.
 
 Nothing under `src/` has been edited. `.cargo-checksum.json` in each directory
 is `cargo vendor`'s record of every file's hash as published; every file but
@@ -124,4 +133,4 @@ Appendix A.
 Re-run `cargo vendor --versioned-dirs` on a scratch crate that depends on
 `chacha20poly1305` and `argon2` (and on `aead` with its `dev` feature, and on
 `hex-literal`, for the test readers), replace the directories, re-apply the
-two `Cargo.toml` changes above, update the table, and run `seal`'s tests.
+three `Cargo.toml` changes above, update the table, and run `seal`'s tests.

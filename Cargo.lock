@@ -1355,6 +1355,7 @@ name = "hangman"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]

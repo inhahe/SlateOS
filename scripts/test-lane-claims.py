@@ -13,6 +13,17 @@ removed from the environment: a git hook exports `GIT_DIR`, and a test that
 inherited one would write its claims into the repository being pushed
 (`test-check-requests-not-deleted.py` records the day that happened to another
 script's self-test).
+
+**The scripts run from a copy inside that repository, not from this tree.**
+`which-lane.py` counts the worktree a script runs from as evidence of the
+lane, so run from a lane's own worktree they answer that lane whatever the
+environment says: `SLATEOS_LANE=E` then *contradicts* the worktree and the
+lane cannot be told, and a session with no lane at all is taken for the
+worktree's. The suite passed where it was written, in a worktree that names no
+lane, and failed its first boot in `os-lane-c` (2026-09-28). A copy in the
+throwaway repository runs from a worktree that is no lane's, so the
+environment alone decides, as in the cases below. The three scripts import
+only each other and the standard library.
 """
 
 from __future__ import annotations
@@ -23,7 +34,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent / "lane-claims.py"
+HERE = Path(__file__).resolve().parent
+SCRIPT = HERE / "lane-claims.py"
+#: What `lane-claims.py` loads beside itself, copied with it.
+COPIED = ("lane-claims.py", "check-lane-signals.py", "which-lane.py")
 
 
 def run(args, cwd, lane="C"):
@@ -31,7 +45,8 @@ def run(args, cwd, lane="C"):
            if not k.startswith("GIT_") and k not in ("SLATEOS_LANE", "ORCH2_AGENT_NAME")}
     if lane is not None:
         env["SLATEOS_LANE"] = lane
-    return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=cwd, env=env,
+    script = Path(cwd) / "scripts" / "lane-claims.py"
+    return subprocess.run([sys.executable, str(script), *args], cwd=cwd, env=env,
                           capture_output=True, text=True, check=False)
 
 
@@ -50,6 +65,9 @@ def main() -> int:
         repo = Path(tmp)
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True)
+        (repo / "scripts").mkdir()
+        for name in COPIED:
+            (repo / "scripts" / name).write_bytes((HERE / name).read_bytes())
 
         r = run(["--list"], repo)
         check(r.returncode == 0 and "no claims" in r.stdout, "an empty list", r)

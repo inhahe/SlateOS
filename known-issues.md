@@ -172381,3 +172381,113 @@ straggler.
 **Where it is blind:** a read in another crate. `gui/appearance`'s wallpaper
 settings are read by the desktop, from the file, so they report there as
 "kept" and nothing else; the same will be true of most of `gui/`'s rows.
+
+### [F] AVIF decoding has no committed benchmark, and rav1d runs without dav1d's assembly -- 2026-09-27
+
+**Status:** HALF FIXED on `lane-f` 2026-09-27. Part (1) is done:
+`avif::decode::bench::bench_avif_decode` (run with `cargo test -p imagecodec
+--release --lib -- --ignored --nocapture bench_avif`) over four
+photograph-like inputs from `tests/data/generate_avif_bench.py`, either side
+of `THREADED_PIXELS` and one deep. First figures, one thread, best of five on
+a loaded machine: 640x480 30 ms, 1920x1080 199 ms, 2560x1440 354 ms, 10-bit
+4:4:4 1080p 353 ms -- against Pillow's dav1d with its assembly at 22, 88,
+161 and 202 ms. The threaded figures of both decoders swung either way under
+the load, so `THREADED_PIXELS` wants an idle-machine run before it is
+retuned. Part (2) waits on the operator: `open-questions.md` F-Q4 (bring in
+dav1d's assembly, or write SIMD in Rust).
+
+**In short:** AVIF pictures decode correctly but more slowly than in Chrome
+or Pillow. rav1d, the AV1 decoder in `gui/video/rav1d`, was vendored as pure
+Rust without dav1d's hand-written assembly, and single-threaded it takes
+1.3 to 2.3 times as long as Pillow's dav1d on the same files (a 1204x800
+photograph: 108 ms against 52 ms; a 2048x1536 grid: 1.65 s against 0.72 s).
+
+**What there is.** `Cargo.toml` builds rav1d and `imagecodec` at `-O3` in
+release (the workspace default is `-Os`), justified by single timing runs on a
+machine shared with five other build lanes; `gui/imagecodec/src/avif/decode.rs`
+decodes tiles under two megapixels on the calling thread (`THREADED_PIXELS`),
+because starting rav1d's workers costs about 5 ms and a still picture gives
+them little to share -- Pillow's dav1d was slower with ten threads than with
+one on the same files.
+
+**The proper fix, in two parts.** (1) A committed benchmark -- AVIF decode
+at a few sizes and depths, best of several runs, single- and multi-threaded
+-- so the `-O3` override and `THREADED_PIXELS` rest on measurements anyone can
+repeat (`performance-targets.md` asks for one on every hot path). (2) SIMD for
+rav1d's hottest DSP routines (motion compensation, inverse transforms, loop
+filter, CDEF, loop restoration), with `std::arch` intrinsics under runtime CPU
+detection, checked sample-for-sample against the scalar code. Part 2 is the
+large one; part 1 should come first so it can measure part 2.
+
+### [F] An AVIF frame coded at another size than its `ispe` is refused -- 2026-09-27
+
+**Status:** OPEN (lane F).
+
+**In short:** a rare kind of AVIF, whose AV1 frame is stored at a different
+size from the size the file declares for it, fails to open with "unsupported";
+Chrome and Pillow rescale the frame and show it. None of the 224 files in the
+test corpus (libavif's test data and the AOM sample set) needs this.
+
+**Where.** `gui/imagecodec/src/avif/decode.rs`, `decode_as`: the check after
+each tile's decode returns `Error::Unsupported("AVIF frame of another size
+than its ispe")` where libavif calls `avifImageScaleWithLimit`.
+
+**The proper fix.** Port libavif's `src/scale.c` and the libyuv functions it
+calls -- `ScalePlane` and `ScalePlane_12` with `kFilterBox`, which choose among
+box downscaling, bilinear upscaling and the special ratios by the sizes -- into
+`avif/libyuv.rs`, and test it against Pillow with a fixture whose `ispe` is
+rewritten after encoding (the way `generate_avif_pixels.py` rewrites `colr`).
+
+### [F] An AVIF sequence decodes to its first frame only -- 2026-09-27
+
+**Status:** FIXED on `lane-f` 2026-09-27 (`imagecodec::avif::Animation`,
+`src/avif/animation.rs`); moves to `known-issues-resolved.md` once on `main`
+through a boot test. The viewer playing it is lane E's
+(`requests/f-bce-avif-pictures-open-and-animate.md`).
+
+**In short:** an animated AVIF shows as a still picture -- its first frame.
+GIF and WebP animate, through `gif::Animation` and `webp::Animation`.
+
+**The proper fix.** An `avif::Animation` of the same shape (`next_frame`,
+`rewind`, `repeat`), keeping one decoder per track across frames as libavif
+does, reading each frame's duration from the track's `stts` (`setup::Timing`,
+already parsed) and the repetition from `elst`, with a sync-sample check so
+that seeking restarts from a key frame. libavif's `avifDecoderNextImage` and
+`avifDecoderNthImage` are the model; Pillow's `get_frame(n)` is the oracle.
+
+### [F] The scene stream forwards no pictures, so a remote viewer would show blanks where windows draw images -- 2026-09-28
+
+**Status:** FIXED on `lane-f` 2026-09-28, as sketched below: scene version 2
+(`SceneImage` whole / patch / drop per window), `ImageAsset` revisions and a
+32-entry patch log stamped by the compositor, `SceneSession` sending each
+viewer only what it lacks, and `SceneViewer` applying it all or nothing.
+Tests: `guiremote`'s scene unit tests and `tests/scene_session.rs` (400 steps
+of random uploads, patches and drops, a viewer joining late),
+`compositor::tests::test_stream_forwards_pictures_to_the_viewer`. Moves to
+`known-issues-resolved.md` once on `main` through a boot test. Found while
+scoping the video-encoded capture fallback; nothing was broken for anyone,
+because nothing yet serves the scene stream to a viewer.
+
+**In short:** native remote desktop streams each window's draw commands (a
+`SceneFrame`, `gui/remote/src/scene.rs`) for the viewer to replay. A picture
+is drawn by a command that names an image *id*; the pixels reach the
+compositor separately (`UploadImage`, `PatchImage`, `DropImage`) and are
+never put in the stream. So a viewer replaying the commands would draw
+nothing wherever a window shows a picture -- every thumbnail, photo and icon
+that is an uploaded image. The roadmap marks native streaming done; this is
+the half of it that was never there.
+
+**Where.** `Compositor::capture_stream_frame` (`gui/compositor/src/lib.rs`)
+walks the windows' render trees only; `SceneSession` tracks command
+fingerprints, not images; `SceneFrame` has no field for pixels.
+
+**The proper fix.** A scene-protocol version 2 carrying image changes beside
+the windows: per window, `Upload` / `Patch` / `Drop` exactly as a client sends
+them. `SceneSession` records, per (window, image id), which version of the
+image its viewer holds; the compositor's image store bumps a version on
+every upload and patch and keeps a bounded log of recent patches, so a
+viewer one or a few patches behind receives the patches (a remote desktop's
+cursor blink is a few dozen pixels, not a screen) and one further behind the
+whole image again. A window leaving the stream takes its images with it.
+Tests: capture, encode, decode and `apply_scene_frame` end to end, with an
+upload, a patch, a drop and a late-joining viewer.

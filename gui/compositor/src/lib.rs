@@ -53,7 +53,7 @@ use guitk::color::Color;
 use guitk::event::{
     Event as ClientEvent, Key, KeyEvent as ClientKeyEvent, Modifiers,
     MouseButton as ClientMouseButton, MouseEvent as ClientMouseEvent,
-    MouseEventKind as ClientMouseKind, SettingsGroup,
+    MouseEventKind as ClientMouseKind, SettingsGroup, SettingsName,
 };
 #[allow(unused_imports)]
 use guitk::render::{
@@ -144,7 +144,7 @@ use guiremote::control::{BlurKind, StackTier, WindowPolicy, WindowSpec};
 // the compositor cannot disagree about what a reservation means.
 pub use guiremote::reserve::PanelEdge;
 use guiremote::reserve::ReservedEdges;
-use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
+use guiremote::scene::{ImageSnapshot, SceneFrame, SceneSession, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
 // have to reach past the compositor to name what it got.
 pub use guiremote::window_list::{WindowInfo, WindowList};
@@ -3479,6 +3479,13 @@ pub enum CompositorRequest {
     ///
     /// See [`guiremote::control::RequestBody::ReloadSession`].
     ReloadSession,
+    /// Announce that settings file `name` changed: any program's own file,
+    /// or -- by its name rather than its verb -- one of the four above, which
+    /// is then treated exactly as that verb treats it.
+    ///
+    /// See [`guiremote::control::RequestBody::AnnounceSettings`] and
+    /// [`Compositor::settings_rewritten`].
+    AnnounceSettings { name: SettingsName },
     /// Recover the display: the full redraw the Ctrl+Super+R chord asks for.
     ///
     /// See [`guiremote::control::RequestBody::RecoverDisplay`] and
@@ -5666,6 +5673,12 @@ pub struct Compositor {
     stream_sessions: BTreeMap<u64, SceneSession>,
     /// Monotonic allocator for stream session ids.
     next_stream_id: u64,
+    /// The last revision stamped on an image (`ImageAsset::revision`), from
+    /// which every upload and patch takes the next: one counter for every
+    /// window's images, so that a revision is never repeated -- a re-upload
+    /// under the same id included -- and a remote viewer's copy is never taken
+    /// for current when it is not.
+    last_image_revision: u64,
     /// Which virtual desktop is being shown.
     ///
     /// The compositor deliberately has no idea how many there are: a count is a
@@ -5883,6 +5896,7 @@ impl Compositor {
             idle_watches: HashMap::new(),
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
+            last_image_revision: 0,
             current_workspace: 0,
             key_grabs: HashMap::new(),
             grabbed_presses: HashMap::new(),
@@ -6143,6 +6157,32 @@ impl Compositor {
             self.pending_notifications
                 .push_back(EventNotification::SettingsChanged { window_id, group });
         }
+    }
+
+    /// A settings group's file was rewritten: adopt it, if this compositor
+    /// reads it, and then tell every window's program.
+    ///
+    /// What every settings request comes to, the four verbs and the
+    /// announcement by name alike, so a file announced by name is treated
+    /// exactly as its verb treats it.
+    ///
+    /// Telling everyone else is the point of these requests being
+    /// *notifications* rather than writes: the sender has already rewritten
+    /// the file, and every other program holding a copy of what it said is now
+    /// stale. Before the announcement, the compositor re-read `appearance.yaml`
+    /// and no one else ever learned it had changed -- so a theme change reached
+    /// the window decorations and nothing inside them until the next login.
+    pub fn settings_rewritten(&mut self, group: SettingsGroup) {
+        match group {
+            SettingsGroup::Appearance => self.reload_appearance(),
+            SettingsGroup::Input => self.reload_input(),
+            // Announced and not adopted, and not an omission: this compositor
+            // keeps no copy of the notification rules or the lock delay (the
+            // shell reads both, and holds the idle claim), nor of any
+            // program's own settings.
+            SettingsGroup::Notifications | SettingsGroup::Session | SettingsGroup::Program(_) => {}
+        }
+        self.announce_settings_change(group);
     }
 
     /// Re-read the user's `input.yaml` and adopt whatever it now says.
@@ -7575,7 +7615,9 @@ impl Compositor {
         format: BufferFormat,
         bytes: &[u8],
     ) -> CompositorResult<()> {
-        let image = ImageAsset::import(width, height, stride, format, bytes)?;
+        let mut image = ImageAsset::import(width, height, stride, format, bytes)?;
+        let revision = self.next_image_revision();
+        image.stamp_upload(revision);
         let window = self
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
@@ -7612,6 +7654,7 @@ impl Compositor {
         stride: u32,
         bytes: &[u8],
     ) -> CompositorResult<()> {
+        let revision = self.next_image_revision();
         let window = self
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
@@ -7620,9 +7663,17 @@ impl Compositor {
             .get_mut(&image_id)
             .ok_or(CompositorError::ImageNotFound(image_id))?;
         image.patch(at, size, stride, bytes)?;
+        image.stamp_patch(revision, at, size);
         window.dirty = true;
         self.damage_window(window_id);
         Ok(())
+    }
+
+    /// The next image revision ([`Compositor::last_image_revision`]'s rule).
+    /// One a refused upload or patch takes and never uses is simply skipped.
+    fn next_image_revision(&mut self) -> u64 {
+        self.last_image_revision = self.last_image_revision.wrapping_add(1);
+        self.last_image_revision
     }
 
     /// Drop one of a window's images. Returns whether an image was there.
@@ -10460,15 +10511,7 @@ impl Compositor {
                 }
             }
             CompositorRequest::ReloadAppearance => {
-                self.reload_appearance();
-                // And tell everyone else, which is the point of the request
-                // being a *notification* rather than a write: the sender has
-                // already rewritten the file, and every other program holding
-                // a copy of what it said is now stale. Before this, the
-                // compositor re-read the file and no one else ever learned it
-                // had changed -- so a theme change reached the window
-                // decorations and nothing inside them until the next login.
-                self.announce_settings_change(SettingsGroup::Appearance);
+                self.settings_rewritten(SettingsGroup::Appearance);
                 // `Ok` whether or not anything changed. The client is being
                 // told the compositor has re-read the file, which is true
                 // either way, and a reply that differed would leak the state of
@@ -10476,17 +10519,18 @@ impl Compositor {
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadNotifications => {
-                // No `self.reload_*` beside it, and that is not an omission:
-                // this compositor keeps no copy of the notification rules to
-                // refresh. It is announcing, not adopting.
-                self.announce_settings_change(SettingsGroup::Notifications);
+                self.settings_rewritten(SettingsGroup::Notifications);
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadSession => {
-                // Announcing, not adopting -- as with the notification rules,
-                // this compositor keeps no copy of the lock delay. The shell
-                // holds the idle claim and is the only thing that acts on it.
-                self.announce_settings_change(SettingsGroup::Session);
+                self.settings_rewritten(SettingsGroup::Session);
+                CompositorResponse::Ok
+            }
+            CompositorRequest::AnnounceSettings { name } => {
+                // The four desktop files by name are their verbs; any other
+                // name is a program's own file, announced and not read.
+                self.settings_rewritten(guiremote::settings_group(name));
+                // `Ok` whatever the file says, as for the verbs.
                 CompositorResponse::Ok
             }
             CompositorRequest::RecoverDisplay => {
@@ -10494,8 +10538,7 @@ impl Compositor {
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadInput => {
-                self.reload_input();
-                self.announce_settings_change(SettingsGroup::Input);
+                self.settings_rewritten(SettingsGroup::Input);
                 // `Ok` whether or not anything changed, on the same terms as
                 // the appearance reload above: a reply that differed would let
                 // anyone allowed to ask for a reload read back the user's
@@ -11537,6 +11580,19 @@ impl Compositor {
                     height: win.height,
                     opacity: win.opacity,
                     commands: &win.render_tree,
+                    images: win
+                        .images
+                        .iter()
+                        .map(|(&id, image)| ImageSnapshot {
+                            id,
+                            revision: image.revision(),
+                            width: image.width(),
+                            height: image.height(),
+                            pixels: image.pixels(),
+                            patch_base: image.patch_base(),
+                            patches: image.patch_log(),
+                        })
+                        .collect(),
                 });
             }
         }
@@ -17276,6 +17332,76 @@ mod tests {
             comp.handle_request(CompositorRequest::StreamCapture { stream_id }),
             CompositorResponse::Error { .. }
         ));
+    }
+
+    /// A remote viewer holds a window's pictures as the compositor does: the
+    /// whole picture when it is new to the viewer, only the rectangle after a
+    /// patch, a drop when it goes -- and a viewer joining after the patch gets
+    /// the picture whole, patch included.
+    #[test]
+    fn test_stream_forwards_pictures_to_the_viewer() {
+        fn capture(comp: &mut Compositor, stream: u64) -> guiremote::scene::SceneFrame {
+            let data = comp.capture_stream(stream).expect("the stream exists");
+            let (frame, used) = guiremote::scene::decode_scene_frame(&data).expect("decodes");
+            assert_eq!(used, data.len());
+            frame
+        }
+        let mut comp = Compositor::new(200, 150, 60).unwrap();
+        let id = comp.create_window("Pictures".to_string(), 100, 80, 1);
+        let grey: Vec<u8> = (0u32..16)
+            .flat_map(|i| (0xFF00_0000 | (i * 0x0001_0101)).to_le_bytes())
+            .collect();
+        comp.register_image(id, 7, 4, 4, 16, BufferFormat::Argb8888, &grey)
+            .unwrap();
+        let stream = comp.start_stream();
+        let mut viewer = guiremote::scene::SceneViewer::new();
+
+        let first = capture(&mut comp, stream);
+        assert!(matches!(
+            first.windows[0].images.as_slice(),
+            [guiremote::scene::SceneImage::Whole { id: 7, .. }]
+        ));
+        viewer.apply(&first).unwrap();
+        let held =
+            |viewer: &guiremote::scene::SceneViewer| viewer.windows[&id.raw()].images.clone();
+        let image = comp.window_ref(id).unwrap().images[&7].pixels().to_vec();
+        assert_eq!(held(&viewer)[&7].pixels, image);
+
+        // A 2x1 patch at (1, 2): only it crosses.
+        let red = [0xFFFF_0000u32.to_le_bytes(), 0xFFFF_0000u32.to_le_bytes()].concat();
+        comp.patch_image(id, 7, (1, 2), (2, 1), 8, &red).unwrap();
+        let patched = capture(&mut comp, stream);
+        assert_eq!(
+            patched.windows[0].images,
+            [guiremote::scene::SceneImage::Patch {
+                id: 7,
+                x: 1,
+                y: 2,
+                width: 2,
+                height: 1,
+                pixels: vec![0xFFFF_0000; 2],
+            }]
+        );
+        viewer.apply(&patched).unwrap();
+        let image = comp.window_ref(id).unwrap().images[&7].pixels().to_vec();
+        assert_eq!(held(&viewer)[&7].pixels, image);
+
+        // A second viewer, joining now, is sent the picture as it is.
+        let late = comp.start_stream();
+        let mut late_viewer = guiremote::scene::SceneViewer::new();
+        late_viewer.apply(&capture(&mut comp, late)).unwrap();
+        assert_eq!(held(&late_viewer)[&7].pixels, image);
+
+        // Unchanged: nothing. Dropped: a drop.
+        assert!(capture(&mut comp, stream).windows[0].images.is_empty());
+        assert!(comp.unregister_image(id, 7));
+        let dropped = capture(&mut comp, stream);
+        assert_eq!(
+            dropped.windows[0].images,
+            [guiremote::scene::SceneImage::Drop { id: 7 }]
+        );
+        viewer.apply(&dropped).unwrap();
+        assert!(held(&viewer).is_empty());
     }
 
     #[test]

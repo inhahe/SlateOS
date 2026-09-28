@@ -6,6 +6,12 @@
 //! caller's behaviour, only its message, so the variants carry libjpeg's name
 //! for the condition (`JERR_...`) as the message and are grouped by what kind
 //! of refusal they are.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jerror.h` (copyright (C) 1994-1997 Thomas G. Lane; (C) 1997-2009 Guido
+//! Vollbeding; (C) 1999 Ken Murchison; (C) 2014, 2017, 2021-2023 D. R.
+//! Commander), and changed for this project; used under the IJG License
+//! (`licenses/README.md` says how).
 
 use crate::ImageError;
 

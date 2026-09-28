@@ -38,6 +38,14 @@
 //! bits libwebp keeps them in; they wrap here as they do there
 //! (`lossy/transform.rs`), and no value from the stream is ever an index
 //! without a bound.
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `vp8_dec.c`, `frame_dec.c`, `tree_dec.c`, `quant_dec.c` (copyright
+//! 2010-2025 Google Inc.) and from RFC 6386's reference decoder (copyright
+//! 2010, 2011 Google Inc.), and changed for this project; used under
+//! libwebp's BSD licence and patent grant (`licenses/libwebp-COPYING`,
+//! `licenses/libwebp-PATENTS`) and the RFC's
+//! (`licenses/rfc6386-LICENSE.txt`).
 
 use alloc::vec;
 use alloc::vec::Vec;

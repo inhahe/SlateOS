@@ -28,6 +28,13 @@
 //! samples wide, which the across filter has no interior for; any ratio but
 //! two; and every plane of an eighth-scale decode, which libjpeg leaves
 //! unfiltered.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdsample.c` (copyright (C) 1991-1996 Thomas G. Lane; (C) 2009 Pierre
+//! Ossman for Cendio AB; (C) 2010, 2015-2016, 2022, 2024 D. R. Commander; (C)
+//! 2014 MIPS Technologies, Inc.; (C) 2015 Google, Inc.; (C) 2019-2020 Arm
+//! Limited), and changed for this project; used under the IJG License
+//! (`licenses/README.md` says how).
 
 use alloc::vec;
 use alloc::vec::Vec;

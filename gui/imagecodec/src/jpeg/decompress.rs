@@ -29,6 +29,21 @@
 //! planes, a multi-scan one into planes kept whole, as libjpeg keeps a
 //! whole-image sample array -- and reading a row of it that no scan wrote
 //! fails, as libjpeg's reading of an undefined row of that array does.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdapimin.c` (copyright (C) 1994-1998 Thomas G. Lane; (C) 1999 Ken
+//! Murchison; (C) 2016, 2022, 2024 D. R. Commander), `jdapistd.c` (copyright
+//! (C) 1994-1996 Thomas G. Lane; (C) 2010, 2015-2020, 2022-2024 D. R.
+//! Commander; (C) 2015 Google, Inc.), `jdinput.c` (copyright (C) 1991-1997
+//! Thomas G. Lane; (C) 1999 Ken Murchison; (C) 2010, 2016, 2018, 2022, 2024
+//! D. R. Commander; (C) 2015 Google, Inc.), `jdmaster.c` (copyright (C)
+//! 1991-1997 Thomas G. Lane; (C) 2002-2009 Guido Vollbeding; (C) 1999 Ken
+//! Murchison; (C) 2009-2011, 2016, 2019, 2022-2024 D. R. Commander; (C) 2013
+//! Linaro Limited; (C) 2015 Google, Inc.), `jdmainct.c` (copyright (C)
+//! 1994-1996 Thomas G. Lane; (C) 2010, 2016, 2022, 2024 D. R. Commander) and
+//! `jdpostct.c` (copyright (C) 1994-1996 Thomas G. Lane; (C) 2022-2024 D. R.
+//! Commander), and changed for this project; used under the IJG License
+//! (`licenses/README.md` says how).
 
 use alloc::boxed::Box;
 use alloc::vec;

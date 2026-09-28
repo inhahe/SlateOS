@@ -3936,9 +3936,6 @@ impl ExplorerState {
         // Toolbar (top)
         self.render_toolbar(&mut tree);
 
-        // Address bar
-        self.render_address_bar(&mut tree);
-
         // Sidebar (directory tree)
         self.render_sidebar(&mut tree, &mut zones);
 
@@ -3948,6 +3945,13 @@ impl ExplorerState {
         // The Transfers view over the bottom of the listing, before the
         // status bar it sits above.
         self.render_transfers(&mut tree);
+
+        // The address bar after the panes, because the completions it offers
+        // hang below it, over the sidebar and the listing: drawn before them,
+        // as it was, the list was there -- Tab and the arrows worked on it --
+        // and painted over, so nobody could see it. The bar's own rectangle
+        // overlaps nothing, so nothing else moves.
+        self.render_address_bar(&mut tree);
 
         // Status bar (bottom)
         self.render_status_bar(&mut tree);
@@ -4185,6 +4189,20 @@ impl ExplorerState {
     /// other than where it is painted is a widget that ignores them.
     fn address_bar_rect(&self) -> Rect {
         Rect::new(0.0, ADDRESS_BAR_Y, self.window_width as f32, ADDRESS_BAR_H)
+    }
+
+    /// Whether `(x, y)` is on the address bar, or on the completions it is
+    /// showing below itself -- which the toolkit places in the bar's own
+    /// space, just under it and as wide.
+    fn on_address_bar(&self, x: f32, y: f32) -> bool {
+        let address = self.address_bar_rect();
+        address.contains(x, y)
+            || self
+                .pathbar
+                .completions_rect(address.w, address.h)
+                .is_some_and(|(lx, ly, lw, lh)| {
+                    Rect::new(address.x + lx, address.y + ly, lw, lh).contains(x, y)
+                })
     }
 
     fn render_address_bar(&mut self, tree: &mut RenderTree) {
@@ -5898,6 +5916,22 @@ impl ExplorerState {
     /// A single left click: select the row under the pointer, follow the
     /// sidebar place under it, or clear the selection.
     fn click_at(&mut self, x: f32, y: f32) -> bool {
+        // The address bar, and the completions it shows below itself, before
+        // anything drawn under them -- the divider and the rows included. A
+        // press on a completion was handed to the row beneath it, since the
+        // bar was given only presses inside its own rectangle.
+        if self.on_address_bar(x, y) {
+            let address = self.address_bar_rect();
+            // Translated into the widget's own space, the way the drop zones
+            // convert a screen point: the widget's hit tests are in the
+            // coordinates it drew in.
+            let taken = self.pathbar.handle_mouse_event(&MouseEvent {
+                x: x - address.x,
+                y: y - address.y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            return self.route_to_pathbar(taken);
+        }
         // The divider first: it is drawn over the panes' edges, so a press on
         // it must be spent here rather than selecting whatever row happens to
         // end underneath. Its grab region is wider than the line, which is the
@@ -5923,18 +5957,6 @@ impl ExplorerState {
                 self.press_transfer_control(control);
             }
             return true;
-        }
-        let address = self.address_bar_rect();
-        if address.contains(x, y) {
-            // Translated into the widget's own space, the way the drop zones
-            // convert a screen point: the widget's hit tests are in the
-            // coordinates it drew in.
-            let taken = self.pathbar.handle_mouse_event(&MouseEvent {
-                x: x - address.x,
-                y: y - address.y,
-                kind: MouseEventKind::Press(MouseButton::Left),
-            });
-            return self.route_to_pathbar(taken);
         }
         // The bin's pane before the folder's rows: the zones may still hold
         // the rows of a frame drawn before the bin was opened, and a click on
@@ -8333,6 +8355,61 @@ mod tests {
             "nothing was said about it: {:?}",
             state.status_bar_text()
         );
+    }
+
+    /// **The address bar's completions are drawn over the listing, and a
+    /// press takes one.** They hung under the bar, were drawn before the
+    /// sidebar and the files -- which painted over them -- and a press on one
+    /// went to the row beneath.
+    #[test]
+    fn the_address_completions_are_drawn_over_the_listing_and_take_a_press() {
+        let scratch = temp_dir("addr_over");
+        let root = scratch.dir().to_path_buf();
+        for name in ["apples", "apricots", "bananas"] {
+            fs::create_dir(root.join(name)).expect("mkdir");
+        }
+        let mut state = state_at(&root);
+        press_address_bar(&mut state);
+        for ch in "/ap".chars() {
+            type_char(&mut state, ch);
+        }
+        let names: Vec<&str> = state
+            .pathbar
+            .completions()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["apples", "apricots"]);
+
+        // Drawn after the listing: the last "apricots" drawn is the list's,
+        // after the listing's last row.
+        let drawn = texts(&state.render());
+        let last = |name: &str| drawn.iter().rposition(|t| t == name);
+        assert!(
+            last("apricots") > last("bananas"),
+            "the completions are drawn under the listing: {drawn:?}"
+        );
+
+        // A press on the second takes it.
+        let address = state.address_bar_rect();
+        let (lx, ly, lw, lh) = state
+            .pathbar
+            .completions_rect(address.w, address.h)
+            .expect("the completions are showing");
+        send(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: address.x + lx + lw / 2.0,
+                y: address.y + ly + lh * 0.75,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        let typed = state.pathbar.typed_text().map(str::to_owned);
+        assert!(
+            typed.as_deref().is_some_and(|t| t.ends_with("/apricots/")),
+            "the press did not take the completion: {typed:?}"
+        );
+        assert!(state.selected_indices.is_empty(), "the press reached a row");
     }
 
     /// Navigating any other way keeps the address bar in step.

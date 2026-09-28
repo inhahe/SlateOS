@@ -2679,6 +2679,15 @@ elif [ -f "$(dirname "$ROOT_DIR")/fastpy/compiler/__init__.py" ]; then
 # therefore been false ever since, and this gate has been printing "no fastpy
 # checkout found" on every run: it could not tell a fixture built by a stale
 # compiler from a current one, which is the entire thing it exists to check.
+#
+# Spelled twice, because D: has two names. This script runs under WSL, which
+# mounts it at /mnt/d; /d is Git Bash's name for it. The first fix of the
+# paragraph above tried only /d, so under WSL -- every real run -- the NOTE
+# went on printing, and the gate went on passing fixtures it could not judge,
+# until 2026-09-28.
+elif [ -f "/mnt/d/visual studio projects/fastpy/compiler/__init__.py" ]; then
+    _fastpy_root="/mnt/d/visual studio projects/fastpy"
+    echo "[rootfs] fastpy: using $_fastpy_root (no sibling of $ROOT_DIR)"
 elif [ -f "/d/visual studio projects/fastpy/compiler/__init__.py" ]; then
     _fastpy_root="/d/visual studio projects/fastpy"
     echo "[rootfs] fastpy: using $_fastpy_root (no sibling of $ROOT_DIR)"

@@ -260,7 +260,7 @@ rm -rf "$T"
 # when it is a NOTE and the build goes on.
 slate_env
 mk_manifest ls cat
-msg="$(ALLOW_EMPTY_SLATE_BIN=1; eval "$SLATE_BLOCK" 2>&1)"
+msg="$(export ALLOW_EMPTY_SLATE_BIN=1; eval "$SLATE_BLOCK" 2>&1)"
 rc=$?
 [ "$rc" -eq 0 ] && ok || bad "ALLOW_EMPTY_SLATE_BIN must let an empty build dir through (exit $rc)"
 case "$msg" in

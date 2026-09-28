@@ -71,7 +71,7 @@
 //!    `#![allow(dead_code)]` and nine more crate-wide allows. All ten are
 //!    gone, and with them `spawn_tile_at` and `is_full`, which nothing called.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, Ink};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -80,6 +80,7 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -1220,7 +1221,10 @@ impl Game2048 {
             Rect::new(r.x, r.y, r.w, cap_h),
             caption,
             l.small.min(cap_h * 0.8),
-            c.chrome.dim,
+            // Secondary text moved only as far as it must be to read on the
+            // raised box: the palette's is made for the page, and was 4.1:1
+            // here in a light theme.
+            Ink::on(c.chrome.dim, &[c.chrome.raised]).at(l.small.min(cap_h * 0.8), false),
             FontWeightHint::Regular,
         );
         centred(
@@ -1367,7 +1371,21 @@ impl Game2048 {
         if h.is_empty() {
             return;
         }
-        fill(f, h, c.chrome.raised, (h.h * 0.04).min(10.0));
+        // The toolkit's panel, in the theme's look.
+        if h.w >= 1.0 && h.h >= 1.0 {
+            self.palette.push_surface(
+                f,
+                h.x,
+                h.y,
+                h.w,
+                h.h,
+                (h.h * 0.04).min(10.0),
+                Surface::Panel,
+            );
+        }
+        // On the toolkit's panel the chrome's roles read as they are: the
+        // palette inks its text colours for its own panel (`Palette::ink`).
+
         // The hit box is the whole *window*, not the sheet's own rectangle,
         // and the sheet's last line is the reason: it says "Click anywhere to
         // close", and anywhere means anywhere. Claiming only its own rectangle
@@ -1580,34 +1598,64 @@ mod tests {
     use super::*;
     use guitk::probe;
 
-    /// **The window is drawn in the user's colours**, light or dark -- a
-    /// board in play, a win, a loss and the help sheet -- with only the
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: a board of
+    /// every tile in play, won, lost, the help sheet up, and cramped.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.theme_changed(p);
+        app.board = bare([
+            [2, 4, 8, 16],
+            [32, 64, 128, 256],
+            [512, 1024, 2048, 4096],
+            [8192, 16384, 0, 0],
+        ]);
+        let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = app.frame(300.0, 340.0);
+        app.board.status = GameStatus::Won;
+        let won = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.board.status = GameStatus::Lost;
+        let lost = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.board.status = GameStatus::Playing;
+        app.show_help = true;
+        let help = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("playing", playing),
+            ("won", won),
+            ("lost", lost),
+            ("help", help),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look, in every state it shows, with only the
     /// tiles' own colours and their inks not the palette's. It drew in its
     /// own copy of Catppuccin Mocha, dark on a light desktop (the operator's
     /// C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.theme_changed(&p);
-            app.board = bare([
-                [2, 4, 8, 16],
-                [32, 64, 128, 256],
-                [512, 1024, 2048, 4096],
-                [8192, 16384, 0, 0],
-            ]);
-            let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.board.status = GameStatus::Won;
-            let won = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.board.status = GameStatus::Lost;
-            let lost = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.board.status = GameStatus::Playing;
-            app.show_help = true;
-            let help = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let c = Colours::of(&p);
             let mut derived: Vec<Color> = TILES.iter().map(|&(_, face)| face).collect();
             derived.extend([TILE_INKS.0, TILE_INKS.1]);
+            let moved = Ink::on(c.chrome.dim, &[c.chrome.raised]);
+            derived.extend([moved.large, moved.small]);
             for ground in [c.chrome.page, c.chrome.well] {
                 derived.extend(gamechrome::button_colours(
                     &p,
@@ -1615,20 +1663,53 @@ mod tests {
                     ground,
                 ));
             }
-            for (what, f) in [
-                ("playing", playing),
-                ("won", won),
-                ("lost", lost),
-                ("help", help),
-            ] {
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("2048, {what}, light: {light}"),
+                    &format!("2048, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it) -- every
+    /// tile's value on its face among them.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            // A switched-off button's label is exempt, as WCAG exempts an
+            // inactive control: the pad once the game is over, Undo with
+            // nothing to take back. They sit on the page.
+            let off = guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled: true,
+                    ..guitk::button::State::default()
+                },
+                Colours::of(&p).chrome.page,
+            );
+            let exempt = |r: &gamechrome::legibility::Read| {
+                r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "2048: {bad:#?}");
     }
 
     /// A tile past the table's last value is still drawn as a tile, and not

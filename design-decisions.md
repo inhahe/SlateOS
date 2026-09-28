@@ -33997,6 +33997,66 @@ file and waits (`OperationExecutor::waiting_on`/`answer`) instead of skipping
 it, as it did; the window draws its own prompt, since `guitk`'s alert offers
 only OK/Cancel/Yes/No.
 
+## 1222. What "due" means for a scheduled backup
+
+**Date:** 2026-09-27
+**Lane:** E
+**Decided by:** Claude (autonomous), inside the operator's answer to C-Q21
+(lane C's §1426: a service runs backups at boot, and a missed one runs as
+soon as the machine is on again, without asking)
+
+**In short:** `backup run-due` runs a schedule when the most recent moment it
+names -- today at 02:00, last Sunday at 02:00, the 1st of this month -- is
+later than its last run. That one comparison gives the operator's rule for
+free: a backup missed while the machine was off is due at the next check, and
+however many were missed, it runs once. Four smaller calls sit inside it.
+
+| Call | Chosen | The other way, and why not |
+|---|---|---|
+| A schedule that has never run | due at once | wait for its first time: someone who has just asked for nightly backups has none until tonight |
+| A last run *after* now | due | wait for the clock to catch up: only a clock that was wrong and was put right makes one, and waiting could mean years with no backup |
+| A day the month lacks (the 31st in February) | its last day | skip the month: a monthly backup that silently skips months is not monthly |
+| A destination with no store (a disk not plugged in) | not written, tried again at the next check | make the store: `Store::open` would build it in the empty mount point on the system disk, and the owner would believe the backup was on the other |
+
+And when a run is recorded: a backup that was written counts as run even if
+some files could not be read -- retaking it every few minutes would not read
+them either, and the run says so and fails its exit status -- while one that
+wrote nothing is left due.
+
+**The time zone.** A schedule's time is read in the desktop's zone, which is
+UTC until the system has one (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), as
+`notes`, `habits` and `finance` read theirs; `zone_offset` in `apps/backup` is
+the one place that changes when it does.
+
+## 1223. The recycle bin is a view over a folder, and Empty erases what it showed
+
+**Date:** 2026-09-27
+**Lane:** E
+**Decided by:** Claude (autonomous), answering lane C's
+`c-e-the-recycle-bin-icon-has-nowhere-to-open`
+
+**In short:** the file manager shows the recycle bin in its file pane, in place
+of the folder, when the desktop's bin icon runs `explorer --recycle-bin` or the
+sidebar's "Recycle Bin" is clicked. It is not a folder to walk into: Back,
+Escape or going anywhere leaves it for the folder underneath, as it was. And
+"Empty recycle bin" erases the items the bin *showed* when it asked -- not
+something that arrived while the question was on screen.
+
+| Call | Chosen | The other way, and why not |
+|---|---|---|
+| What the bin is on screen | a view of `RecycleBin::list`, over the folder | a folder at `~/.recycle`: its entries are id-named folders each holding a file called `data`, and a paste into it would put a file where the bin cannot see it |
+| Where Back goes | out of the bin, to the folder it was opened over | a place in the history like a folder: the history holds paths, the bin is not one, and a `Location` type through every navigation path is a large change for no visible gain |
+| What Empty erases | the entries listed when it asked, by id | everything in the bin at the moment of confirming (what other systems do): an item recycled while the dialog was up -- a second window deleting -- would be erased without ever having been shown |
+| Double click on a row | nothing | restore it: a gesture that means "look" should not move a file |
+| A damaged entry (unreadable record) | listed, erasable, not restorable; Restore is off and says why | hidden: its space would be unaccountable and un-freeable |
+| Folder and link sizes | "Folder" and "Link" in the Size column | a folder's own byte count, which is not what a size means; or its contents' total, which means walking every recycled tree each time the bin is listed |
+
+**Also decided here, in `recyclebin`:** an entry id must be one plain name --
+`delete("../Documents")` is refused before anything is joined to it -- and the
+bin never looks through a link, whether listing (a link planted in the bin is
+not an entry), describing (a recycled link is `is_link`, not the folder it
+names) or measuring.
+
 ## §253 — `requeue` means "re-enqueue if still Running", so every parking call site passes `true`
 
 **Date:** 2026-08-21

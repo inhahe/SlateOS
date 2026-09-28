@@ -155699,6 +155699,17 @@ defect this lane spent 2026-09-16 removing from eight other pages.
 
 ## BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS
 
+> **Status 2026-09-27: lane E's half FIXED; waiting on lanes D and B.** The
+> operator answered C-Q21 (design-decisions §1426): a service started at
+> boot runs the backups, and one missed while the machine was off runs as
+> soon as it is on again, without asking. The backup program now keeps
+> every schedule in `<config>/backup/schedules.json` (not in each
+> destination, where nothing could find them) with a time and a day, and
+> `backup run-due` runs whatever is due and records it -- so the service
+> only has to run that command, as each user, at boot and every few
+> minutes (`requests/e-db-the-backup-service-runs-backup-run-due.md`).
+> Until it exists, `backup schedule` says that nothing runs it on its own.
+
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `apps/backup/src/main.rs` — `cmd_schedule` (~2652), `schedules_path`
 (~1805).
@@ -168600,7 +168611,7 @@ file has only its ASCII letters folded -- never a lossy decode. Seven tests and
 five mutations in `apps/filesearch/mutate.py`.
 
 ### [E] A test that forgets its scratch settings writes the developer's own -- 2026-09-25
-**Status:** OPEN -- the one leak found today is fixed; nothing stops the next
+**Status:** OPEN, but no longer unguarded -- the one leak found that day is fixed, and since then `scripts/check-scratch-config.py` (a pre-push gate) walks each crate's call graph from every settings `save()` and refuses a push whose tests can reach one without a scratch guard; it stopped one of lane E's own pushes on 2026-09-27. What is still open is the runtime guard below, which would catch what a static walk cannot see
 
 **In short:** a test that saves a setting without first taking a scratch
 configuration directory writes to the real `~/.config/slateos` of whoever runs
@@ -170467,7 +170478,7 @@ that mutate a file other than the crate root: `apps/editor` (now swept),
 result rests on the old reading; their sweeps are in lane E's queue.
 
 ### [E] "Open with" opened nothing in six of the file manager's eight programs -- 2026-09-26
-**Status:** FIXED for all six (lane E, 2026-09-26). OPEN only for a file whose name is not UTF-8, which still crashes whichever program it is sent to -- lane F's `Args` (`requests/e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`).
+**Status:** FIXED for all six (lane E, 2026-09-26), and since 2026-09-27 for a file whose name is not UTF-8 too: lane F's `oswindow::app::ArgsOs` (§1330) hands the programs their arguments as bytes, and all six -- with the editor, the image viewer, match3 and pinball -- read them through it (`b0471617a`; `requests/e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`, closed).
 
 **In short:** double-clicking a file in the file manager runs the program the
 associations name with the file's path after it. Six of the eight programs the
@@ -170816,9 +170827,9 @@ picker's routing in `on_event`. Tests: 30 new, on Windows and on Linux under
 WSL; mutation: `apps/ebook/mutate.py`, 23 rows.
 
 **Not done:** EPUB, the format most books are sold and lent in (a zip of
-XHTML chapters) -- the obvious next format; and the reading theme (System or
-Sepia) is still per session -- it belongs in the per-program settings file
-`design-decisions.md` §1418 (C-Q26) settles.
+XHTML chapters) -- the obvious next format. (The reading theme, System or
+Sepia, was per session too; since 2026-09-27 it is kept in `ebook.yaml`, the
+per-program settings file `design-decisions.md` §1418 (C-Q26) settles.)
 
 ### [F] Text is never hinted: the `hinting` font setting changes nothing -- 2026-09-26
 

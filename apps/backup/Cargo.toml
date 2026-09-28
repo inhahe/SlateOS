@@ -30,6 +30,11 @@ textfmt = { path = "../../textfmt" }
 # `civil_from_days` in the tree until `tzrules` exported it.
 tzrules = { path = "../../tzrules" }
 
+# Where the schedules are kept: the user's settings folder, which is what
+# lets `backup run-due` find every one (C-Q21). `settingsfile` depends on
+# nothing but `yamldoc`, so this links no widget library.
+settingsfile = { path = "../../gui/settingsfile" }
+
 # The same crate again with its `audit` counters on, so the tests can prove the
 # schedule file's writes really go through `safeio` and did not quietly regress
 # to `std::fs::write`. Cargo unifies this with the dependency above when
@@ -37,6 +42,7 @@ tzrules = { path = "../../tzrules" }
 [dev-dependencies]
 safeio = { path = "../safeio", features = ["audit"] }
 scratchdir = { path = "../../userspace/scratchdir" }
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

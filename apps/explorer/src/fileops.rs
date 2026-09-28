@@ -963,6 +963,11 @@ pub struct ExecutorConfig {
 /// operation can be resumed if interrupted.
 pub struct OperationExecutor {
     plan: OperationPlan,
+    /// `plan.id()`, worked out once: it hashes every action's paths, and the
+    /// window asks for it every frame while a question is up -- a copy of a
+    /// hundred thousand files would hash them all sixty times a second. The
+    /// plan does not change after it is made, so neither does this.
+    id: u64,
     progress: OperationProgress,
     undo_entries: Vec<(PathBuf, UndoTarget)>,
     errors: Vec<FileOpError>,
@@ -999,8 +1004,10 @@ pub struct OperationExecutor {
 impl OperationExecutor {
     pub fn new(plan: OperationPlan) -> Self {
         let progress = OperationProgress::new(plan.total_bytes, plan.total_files);
+        let id = plan.id();
         Self {
             plan,
+            id,
             progress,
             undo_entries: Vec::new(),
             errors: Vec::new(),
@@ -1104,7 +1111,7 @@ impl OperationExecutor {
     /// operation that asked it.
     #[must_use]
     pub fn plan_id(&self) -> u64 {
-        self.plan.id()
+        self.id
     }
 
     /// Take the events emitted since this was last called.
@@ -1170,7 +1177,7 @@ impl OperationExecutor {
         }
 
         let dest_dir = self.journal_dir();
-        let plan_id = self.plan.id();
+        let plan_id = self.id;
         match OperationJournal::open(&dest_dir, plan_id) {
             Ok(journal) => {
                 self.journal = Some(journal);

@@ -49,8 +49,9 @@ use pathtext::ShowPath;
 use oswindow::app::Response;
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
@@ -159,11 +160,11 @@ impl CleanupCategory {
     pub fn default_pattern(self) -> &'static str {
         match self {
             Self::TempFiles => "/tmp/*",
-            Self::BrowserCache => "/home/*/.cache/browser/*",
+            Self::BrowserCache => "~/.cache/browser/*",
             Self::PackageCache => "/var/cache/pkg/archives/*",
             Self::LogFiles => "/var/log/*.log",
-            Self::RecycleBin => "/home/*/.local/share/Trash/*",
-            Self::ThumbnailCache => "/home/*/.cache/thumbnails/*",
+            Self::RecycleBin => "~/.recycle/*",
+            Self::ThumbnailCache => "~/.cache/thumbs/*",
             Self::CrashDumps => "/var/crash/*",
             Self::OldBackups => "/var/backups/old/*",
             Self::DownloadedUpdates => "/var/cache/updates/*",
@@ -199,6 +200,11 @@ pub struct CleanupItem {
     pub is_safe: bool,
     /// How many days since this item was last accessed.
     pub last_accessed_days: u32,
+    /// What to call it on screen, when its path is not what the user knows
+    /// it by. A recycled file lives at `~/.recycle/<id>`, and the id is not
+    /// the name it was deleted under; the list shows the name and the folder
+    /// it came from instead. `None` shows the path.
+    pub shown_as: Option<String>,
 }
 
 impl CleanupItem {
@@ -212,7 +218,22 @@ impl CleanupItem {
             estimated_size_bytes: 0,
             is_safe: true,
             last_accessed_days: 0,
+            shown_as: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_shown_as(mut self, label: String) -> Self {
+        self.shown_as = Some(label);
+        self
+    }
+
+    /// What the list calls it: [`Self::shown_as`], or the path.
+    #[must_use]
+    pub fn label(&self) -> String {
+        self.shown_as
+            .clone()
+            .unwrap_or_else(|| self.path.shown().to_string())
     }
 
     #[must_use]
@@ -411,16 +432,45 @@ pub struct CleanupScanner {
     max_log_age_days: u32,
     /// Maximum age (days) for package cache entries.
     max_package_cache_age_days: u32,
+    /// The user's home, as a path under each scan base: `home/alice` for a
+    /// `HOME` of `/home/alice`. `None` when there is no home to place, and
+    /// then the three categories that live in one find nothing.
+    ///
+    /// This was `home/user`, written into each of them: every user not
+    /// called "user" had their caches and their recycle bin looked for in
+    /// somebody else's home -- a folder that does not exist, so each category
+    /// reported nothing to free however much there was.
+    home: Option<PathBuf>,
 }
 
 impl CleanupScanner {
+    /// A scanner for the user running it: their home is `HOME`'s.
     pub fn new() -> Self {
         Self {
             items: Vec::new(),
             roots: Vec::new(),
             max_log_age_days: 30,
             max_package_cache_age_days: 60,
+            home: home_under_root(std::env::var_os("HOME").as_deref()),
         }
+    }
+
+    /// Look for the home at `home` under each base instead -- a relative
+    /// path, such as a test's `home/user` inside its scratch tree.
+    #[must_use]
+    pub fn with_home(mut self, home: impl AsRef<Path>) -> Self {
+        self.home = Some(home.as_ref().to_path_buf());
+        self
+    }
+
+    /// The folder `below` inside the user's home under `base_path`, or `None`
+    /// when there is no home.
+    fn in_home(&self, base_path: &str, below: &[&str]) -> Option<PathBuf> {
+        let mut dir = Path::new(base_path).join(self.home.as_ref()?);
+        for part in below {
+            dir.push(part);
+        }
+        Some(dir)
     }
 
     #[must_use]
@@ -483,14 +533,14 @@ impl CleanupScanner {
     /// nothing in the output to say which category had the bug.
     fn collect(
         &mut self,
-        dir: &str,
+        dir: impl AsRef<Path>,
         category: CleanupCategory,
         min_age_days: u32,
         description: &str,
         pattern: &str,
         is_safe: bool,
     ) {
-        let dir = Path::new(dir);
+        let dir = dir.as_ref();
         let found = enumerate_entries(dir, category, min_age_days);
         // Recorded whether or not anything was found: the confinement list says
         // where deletion is *permitted*, and that is a property of the scan's
@@ -563,41 +613,89 @@ impl CleanupScanner {
         );
     }
 
-    /// Scan for recycle bin contents under `<base>/home/*/…/Trash`.
+    /// Scan the recycle bin: `~/.recycle`, the one the file manager and the
+    /// image viewer put things in (`apps/recyclebin`).
+    ///
+    /// This looked in `~/.local/share/Trash` -- another desktop's bin, which
+    /// nothing on SlateOS writes -- so the category found nothing to free
+    /// however full the real bin was, and the bin is usually the biggest thing
+    /// a cleanup can free.
+    ///
+    /// One item per recycled thing, read through `recyclebin` so each is shown
+    /// as the name it was deleted under and the folder it came from rather
+    /// than as the id of its folder in the bin. Each item's path is that
+    /// folder, and removing it whole is exactly `RecycleBin::delete`: the
+    /// thing and the record of it together, never one without the other.
     pub fn scan_recycle_bin(&mut self, base_path: &str) {
-        let bin_path = join_paths(base_path, &["home", "user", ".local", "share", "Trash"]);
-        self.collect(
-            &bin_path,
-            CleanupCategory::RecycleBin,
-            0,
-            "Deleted files awaiting permanent removal",
-            "/home/*/.local/share/Trash/*",
-            true,
-        );
+        let Some(dir) = self.in_home(base_path, &[".recycle"]) else {
+            return;
+        };
+        // Recorded whether or not anything is found, as `collect` does.
+        self.roots.push(dir.clone());
+        // The age limit is the bin's own rule for purging, which this does
+        // not apply: the user chose this category to empty the bin.
+        let bin = recyclebin::RecycleBin::new(dir.clone(), Duration::ZERO);
+        // A bin that cannot be read contributes nothing, as a category whose
+        // folder is missing does; the executor could not delete from it either.
+        let Ok(entries) = bin.list() else {
+            return;
+        };
+        let now = SystemTime::now();
+        for entry in entries {
+            let path = dir.join(&entry.id);
+            let days = entry
+                .recycled_at
+                .and_then(|at| now.duration_since(at).ok())
+                .map_or(0, |age| {
+                    u32::try_from(age.as_secs() / SECS_PER_DAY).unwrap_or(u32::MAX)
+                });
+            let from = entry
+                .original_path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|folder| format!(", from {}", folder.shown()))
+                .unwrap_or_default();
+            self.items.push(
+                CleanupItem::new(&path, CleanupCategory::RecycleBin)
+                    .with_size(measure_recursive(&path))
+                    .with_last_accessed_days(days)
+                    .with_description("Deleted files awaiting permanent removal")
+                    .with_pattern("~/.recycle/*")
+                    .with_safety(true)
+                    .with_shown_as(format!("{}{from}", entry.display_name())),
+            );
+        }
     }
 
-    /// Scan for thumbnail cache under `<base>/home/*/.cache/thumbnails`.
+    /// Scan the thumbnail cache, `~/.cache/thumbs` -- where `gui/thumbs`
+    /// keeps the file manager's and the image viewer's thumbnails
+    /// (`DISK_CACHE_DIR` there). This looked in `~/.cache/thumbnails`, which
+    /// nothing writes.
     pub fn scan_thumbnail_cache(&mut self, base_path: &str) {
-        let cache_dir = join_paths(base_path, &["home", "user", ".cache", "thumbnails"]);
+        let Some(cache_dir) = self.in_home(base_path, &[".cache", "thumbs"]) else {
+            return;
+        };
         self.collect(
             &cache_dir,
             CleanupCategory::ThumbnailCache,
             0,
             "Cached image thumbnails",
-            "/home/*/.cache/thumbnails/*",
+            "~/.cache/thumbs/*",
             true,
         );
     }
 
-    /// Scan for browser cache under `<base>/home/*/.cache/browser`.
+    /// Scan for browser cache under `~/.cache/browser`.
     pub fn scan_browser_cache(&mut self, base_path: &str) {
-        let cache_dir = join_paths(base_path, &["home", "user", ".cache", "browser"]);
+        let Some(cache_dir) = self.in_home(base_path, &[".cache", "browser"]) else {
+            return;
+        };
         self.collect(
             &cache_dir,
             CleanupCategory::BrowserCache,
             0,
             "Cached web pages, images, scripts",
-            "/home/*/.cache/browser/*",
+            "~/.cache/browser/*",
             true,
         );
     }
@@ -1979,7 +2077,7 @@ impl CleanupUI {
                 tree.push(RenderCommand::Text {
                     x: PADDING,
                     y,
-                    text: item.path.shown().to_string(),
+                    text: item.label(),
                     color: self.palette.text,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
@@ -2239,6 +2337,27 @@ fn join_path(base: &str, child: &str) -> String {
         let trimmed = base.trim_end_matches('/');
         format!("{trimmed}/{child}")
     }
+}
+
+/// `HOME` as a path under a scan base: `/home/alice` becomes `home/alice`.
+///
+/// `None` for no `HOME`, and for one this cannot place under a base without
+/// guessing -- a relative path, one that climbs with `..`, or one with a drive
+/// prefix. A home the scanner cannot place is a home it does not clean.
+fn home_under_root(home: Option<&OsStr>) -> Option<PathBuf> {
+    let home = Path::new(home?);
+    if !home.has_root() {
+        return None;
+    }
+    let mut under = PathBuf::new();
+    for part in home.components() {
+        match part {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => under.push(name),
+            Component::ParentDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!under.as_os_str().is_empty()).then_some(under)
 }
 
 /// Join a base path with multiple child segments.
@@ -2528,13 +2647,16 @@ mod tests {
         }
     }
 
+    /// A pattern names a place: from the root, or in the user's home. The
+    /// home ones read `~/` because the scan looks in one home -- the user's --
+    /// and `/home/*/` claimed every home on the machine.
     #[test]
-    fn test_category_default_patterns_start_with_slash() {
+    fn test_category_default_patterns_are_absolute_or_in_the_home() {
         for cat in CleanupCategory::ALL {
+            let pattern = cat.default_pattern();
             assert!(
-                cat.default_pattern().starts_with('/'),
-                "pattern for {:?} should start with /",
-                cat
+                pattern.starts_with('/') || pattern.starts_with("~/"),
+                "pattern for {cat:?} names no place: {pattern}"
             );
         }
     }
@@ -2751,26 +2873,104 @@ mod tests {
         assert_eq!(lenient.items().len(), 1);
     }
 
+    /// The recycle bin is SlateOS's, `~/.recycle`: each thing in it is one
+    /// item, shown by the name it was deleted under, and cleaning it removes
+    /// the thing and its record together.
     #[test]
     fn test_scanner_scan_recycle_bin() {
         let scratch = ScratchDir::new("trash");
-        scratch.file("home/user/.local/share/Trash/gone.txt", 8);
-        let mut scanner = CleanupScanner::new();
+        scratch.file("home/alice/Documents/gone.txt", 8);
+        let home = Path::new(scratch.as_str()).join("home/alice");
+        let bin = recyclebin::RecycleBin::new(home.join(".recycle"), Duration::from_hours(1));
+        bin.recycle(&home.join("Documents/gone.txt"))
+            .expect("recycle");
+
+        let mut scanner = CleanupScanner::new().with_home("home/alice");
         scanner.scan_recycle_bin(scratch.as_str());
 
         assert_eq!(scanner.items().len(), 1);
-        assert_eq!(scanner.items()[0].category, CleanupCategory::RecycleBin);
+        let item = &scanner.items()[0];
+        assert_eq!(item.category, CleanupCategory::RecycleBin);
+        assert_eq!(
+            item.estimated_size_bytes,
+            8 + fs::metadata(item.path.join("meta.txt")).unwrap().len()
+        );
+        let label = item.label();
+        assert!(label.starts_with("gone.txt, from "), "{label}");
+        assert!(label.contains("Documents"), "{label}");
+
+        // Cleaning it empties the bin: nothing left over, nothing half-kept.
+        let plan = CleanupPlan::build(&scanner, &[CleanupCategory::RecycleBin]);
+        let result = CleanupExecutor::execute(&plan);
+        assert!(result.is_success(), "{result:?}");
+        assert!(
+            bin.list().expect("list").is_empty(),
+            "the bin still lists it"
+        );
+    }
+
+    /// Another desktop's bin, which nothing on SlateOS writes, is not looked in.
+    #[test]
+    fn the_recycle_bin_is_not_another_desktops_trash_folder() {
+        let scratch = ScratchDir::new("trash_other");
+        scratch.file("home/alice/.local/share/Trash/not-ours.txt", 8);
+        let mut scanner = CleanupScanner::new().with_home("home/alice");
+        scanner.scan_recycle_bin(scratch.as_str());
+        assert!(scanner.items().is_empty());
     }
 
     #[test]
     fn test_scanner_scan_thumbnail_cache() {
         let scratch = ScratchDir::new("thumbs");
-        scratch.file("home/user/.cache/thumbnails/a.png", 16);
-        let mut scanner = CleanupScanner::new();
+        scratch.file("home/user/.cache/thumbs/a.thumb", 16);
+        scratch.file("home/user/.cache/thumbnails/b.png", 16);
+        let mut scanner = CleanupScanner::new().with_home("home/user");
         scanner.scan_thumbnail_cache(scratch.as_str());
 
-        assert_eq!(scanner.items().len(), 1);
+        assert_eq!(scanner.items().len(), 1, "{:?}", scanner.items());
         assert_eq!(scanner.items()[0].category, CleanupCategory::ThumbnailCache);
+        assert!(scanner.items()[0].path.ends_with("a.thumb"));
+    }
+
+    /// The home is the user's, not a folder called `user` for everyone.
+    #[test]
+    fn the_home_categories_look_in_the_users_own_home() {
+        let scratch = ScratchDir::new("whose_home");
+        scratch.file("home/user/.cache/thumbs/theirs.thumb", 16);
+        scratch.file("home/alice/.cache/thumbs/mine.thumb", 16);
+        let mut scanner = CleanupScanner::new().with_home("home/alice");
+        scanner.scan_thumbnail_cache(scratch.as_str());
+        let found: Vec<_> = scanner.items().iter().map(|i| i.path.clone()).collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].ends_with("mine.thumb"), "{found:?}");
+    }
+
+    #[test]
+    fn home_is_placed_under_the_scan_base() {
+        let place = |h: &str| home_under_root(Some(OsStr::new(h)));
+        assert_eq!(place("/home/alice"), Some(PathBuf::from("home/alice")));
+        assert_eq!(place("/home/alice/"), Some(PathBuf::from("home/alice")));
+        assert_eq!(place("/"), None, "the root is nobody's home");
+        assert_eq!(
+            place("home/alice"),
+            None,
+            "a relative home cannot be placed"
+        );
+        assert_eq!(place("/home/../etc"), None, "a home that climbs is refused");
+        assert_eq!(home_under_root(None), None);
+    }
+
+    /// With no home, the home categories find nothing -- and do not guess.
+    #[test]
+    fn without_a_home_the_home_categories_find_nothing() {
+        let scratch = ScratchDir::new("no_home");
+        scratch.file("home/user/.cache/thumbs/a.thumb", 16);
+        let mut scanner = CleanupScanner::new();
+        scanner.home = None;
+        scanner.scan_thumbnail_cache(scratch.as_str());
+        scanner.scan_recycle_bin(scratch.as_str());
+        scanner.scan_browser_cache(scratch.as_str());
+        assert!(scanner.items().is_empty(), "{:?}", scanner.items());
     }
 
     #[test]

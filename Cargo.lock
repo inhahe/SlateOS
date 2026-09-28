@@ -196,6 +196,7 @@ dependencies = [
  "quoting",
  "safeio",
  "scratchdir",
+ "settingsfile",
  "snapstore",
  "textfmt",
  "tzrules",
@@ -850,6 +851,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recyclebin",
 ]
 
 [[package]]
@@ -931,6 +933,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]

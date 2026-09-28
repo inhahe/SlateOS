@@ -69,6 +69,9 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import selftestflag  # noqa: E402  (needs the path above)
+
 ROOT = Path(__file__).resolve().parent.parent
 
 #: The index `gui/notices` reads, and the file a person reads.
@@ -649,7 +652,9 @@ def self_test() -> int:
 
 
 def main(argv: list[str]) -> int:
-    if argv == ["--self-test"]:
+    # Every spelling of the self-test flag runs it: one that fell through to
+    # the default would print a gather and exit 0, which reads as a pass.
+    if selftestflag.wants_selftest(argv):
         return self_test()
     if not argv or argv[0] not in ("--check", "--out", "--list") or (argv[0] == "--out") != (len(argv) == 2) \
             or (argv[0] != "--out" and len(argv) != 1):

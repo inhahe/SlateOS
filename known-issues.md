@@ -172597,7 +172597,9 @@ can reach it -- then the same two remedies.
 
 ### [E] Match-3 and pinball draw at one size whatever the window is -- 2026-09-28
 
-**Status:** open.
+**Status:** match-3 FIXED 2026-09-28 -- laid out from the window's size
+(`Layout::new`), clicked through the frame it draws, its controls the
+toolkit's buttons, tested over seven window sizes. Pinball open.
 
 **In short:** the match-3 game lays its board out in fixed pixels -- 48-pixel
 cells (`CELL_SIZE`, `apps/match3/src/main.rs`), a window size computed from

@@ -47,7 +47,7 @@
 use core::num::NonZeroUsize;
 use core::ops::Range;
 
-use crate::textbuffer::{Edit, EditError, TextBuffer};
+use crate::textbuffer::{Changes, Edit, EditError, TextBuffer};
 use crate::undo::{Travel, UndoHistory};
 
 /// How many steps the undo history keeps.
@@ -399,8 +399,6 @@ pub struct CodeEditor {
     /// Whether the last step may take in the next of its kind: false after
     /// any move, undo or unrelated edit.
     open_run: bool,
-    /// Bumped by every change to the text.
-    revision: u64,
 }
 
 impl Default for CodeEditor {
@@ -429,7 +427,6 @@ impl CodeEditor {
                 NonZeroUsize::new(HISTORY_LIMIT).unwrap_or(NonZeroUsize::MIN),
             ),
             open_run: false,
-            revision: 0,
         }
     }
 
@@ -445,11 +442,20 @@ impl CodeEditor {
         self.buffer.text()
     }
 
-    /// Bumped by every change to the text, so a view knows when what it drew
-    /// is stale.
+    /// Changed by every change to the text and by nothing else, so a view
+    /// knows when what it drew is stale: the buffer's
+    /// [`revision`](TextBuffer::revision), which no other text in the process
+    /// has had.
     #[must_use]
     pub fn revision(&self) -> u64 {
-        self.revision
+        self.buffer.revision()
+    }
+
+    /// Every change to the text since this was last called, as the buffer
+    /// journalled it ([`TextBuffer::take_changes`]): what a syntax
+    /// highlighter re-reads the text by.
+    pub fn take_changes(&mut self) -> Changes {
+        self.buffer.take_changes()
     }
 
     /// The selections, sorted, never overlapping, at least one.
@@ -1349,7 +1355,6 @@ impl CodeEditor {
             })
             .collect();
         self.buffer.apply(&batch)?;
-        self.revision = self.revision.wrapping_add(1);
         changes.sort_by_key(|c| c.at);
         Ok(Batch { changes })
     }
@@ -1422,7 +1427,6 @@ impl CodeEditor {
     }
 
     fn after_travel(&mut self, selections: Vec<Selection>) {
-        self.revision = self.revision.wrapping_add(1);
         let primary = selections.last().copied();
         self.selections = selections;
         self.normalise(primary);

@@ -40,9 +40,28 @@
 //! its `'\r'`s as text at the ends of its lines; turning them into a line-ending
 //! setting is the editor's job when it opens and saves the file, not the
 //! buffer's.
+//!
+//! # What changed
+//!
+//! A syntax highlighter re-reads only what an edit touched, and to do that it
+//! needs every edit, in order, with where it happened in lines and columns as
+//! well as bytes -- tree-sitter's `InputEdit`. The buffer keeps that journal
+//! itself ([`TextBuffer::take_changes`]), because every change to the text
+//! passes through [`TextBuffer::apply`] and nowhere else does: an editor
+//! reporting its own edits would have to remember to at each of the places it
+//! makes one, undo and redo included, and the one it forgot would colour the
+//! wrong text.
+//!
+//! A batch is journalled as the splices it was made as -- last first, each in
+//! the text as the one before it left it -- so replaying the journal in order
+//! is exact. Each state of the text has a [`revision`](TextBuffer::revision)
+//! no other state in the process shares, and the journal says which revision it
+//! starts from, so a reader that missed some changes -- or is handed a
+//! different buffer -- can tell, and read the text afresh instead.
 
 use core::fmt;
 use core::ops::Range;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// The most a chunk holds, in bytes. A chunk may briefly hold up to three
 /// bytes more, so a split never has to cut a character in half.
@@ -118,6 +137,69 @@ pub struct Edit {
     pub text: String,
 }
 
+/// One change the buffer made, as an incremental parser takes it: the bytes
+/// `start..old_end` became `start..new_end`, with the same three positions as
+/// `(line, byte column)` points.
+///
+/// Every position is in the text as it was just before this splice -- the old
+/// ones -- or just after it -- `new_end` and `new_end_point`. The journal
+/// holds a batch's splices in the order they were made, so each is in the text
+/// the previous one left (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Splice {
+    /// Where the change starts.
+    pub start: usize,
+    /// Where the replaced text ended.
+    pub old_end: usize,
+    /// Where the new text ends.
+    pub new_end: usize,
+    /// `start` as a line and a byte column.
+    pub start_point: (usize, usize),
+    /// `old_end` as a line and a byte column, in the text before.
+    pub old_end_point: (usize, usize),
+    /// `new_end` as a line and a byte column, in the text after.
+    pub new_end_point: (usize, usize),
+}
+
+/// What changed since the journal was last taken: [`TextBuffer::take_changes`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Changes {
+    /// The [`revision`](TextBuffer::revision) the splices start from -- the
+    /// text as it was when the journal was last taken, or when the buffer was
+    /// made. A reader whose own record of the text is not this revision has
+    /// missed something, and must read the text afresh.
+    pub since: u64,
+    /// The splices, in the order they were made; empty when nothing changed.
+    /// `None` when more were made than the journal keeps ([`MAX_JOURNAL`]):
+    /// the text has to be read afresh.
+    pub splices: Option<Vec<Splice>>,
+}
+
+/// The most splices the journal keeps before it gives up on them and says so
+/// ([`Changes::splices`] is `None`): a buffer nobody takes the journal of must
+/// not grow without bound, and past a few thousand, reading the text afresh
+/// costs less than replaying them.
+pub const MAX_JOURNAL: usize = 4096;
+
+/// A revision no state of any buffer in the process has had before.
+fn next_revision() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    // Relaxed: only uniqueness is asked of it, never an order with other
+    // memory, and `fetch_add` is unique under any ordering.
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Where `text` ends, placed at `from`: the point after inserting it there.
+fn point_after(from: (usize, usize), text: &str) -> (usize, usize) {
+    match text.rfind('\n') {
+        Some(last) => (
+            from.0.saturating_add(count_newlines(text)),
+            text.len().saturating_sub(last.saturating_add(1)),
+        ),
+        None => (from.0, from.1.saturating_add(text.len())),
+    }
+}
+
 /// A chunk of the text.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Chunk {
@@ -134,7 +216,11 @@ impl Chunk {
 }
 
 /// The text of a file, in chunks, with its index. See the module docs.
-#[derive(Clone, Debug, Default)]
+///
+/// A clone keeps the original's revision and journal: it is the same text,
+/// with the same history, until one of the two changes -- and a change gives
+/// that one a revision of its own.
+#[derive(Clone, Debug)]
 pub struct TextBuffer {
     /// The text, in order. Never holds an empty chunk.
     chunks: Vec<Chunk>,
@@ -144,27 +230,106 @@ pub struct TextBuffer {
     /// The newlines before each chunk, and after the last one the text's
     /// newline count: `chunks.len() + 1` entries.
     newlines_before: Vec<usize>,
+    /// This state of the text: see [`revision`](Self::revision).
+    revision: u64,
+    /// The splices made since `journal_since`, unless `journal_lost`.
+    journal: Vec<Splice>,
+    /// The revision the journal starts from.
+    journal_since: u64,
+    /// Whether more splices were made than the journal keeps.
+    journal_lost: bool,
+}
+
+impl Default for TextBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TextBuffer {
     /// An empty buffer.
     #[must_use]
     pub fn new() -> Self {
-        let mut buffer = Self::default();
-        buffer.reindex_from(0);
-        buffer
+        Self::from_chunks(Vec::new())
     }
 
     /// A buffer holding `text`.
     #[must_use]
     pub fn from_text(text: &str) -> Self {
+        Self::from_chunks(cut(text))
+    }
+
+    fn from_chunks(chunks: Vec<Chunk>) -> Self {
+        let revision = next_revision();
         let mut buffer = Self {
-            chunks: cut(text),
+            chunks,
             starts: Vec::new(),
             newlines_before: Vec::new(),
+            revision,
+            journal: Vec::new(),
+            journal_since: revision,
+            journal_lost: false,
         };
         buffer.reindex_from(0);
         buffer
+    }
+
+    /// This state of the text: a number no other state of any buffer in the
+    /// process has had. It changes with every edit that changes the text, and
+    /// only then -- so a reader that recorded it knows whether the text is
+    /// still what it read.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Every change since this was last called, or since the buffer was made
+    /// -- and the journal starts again from here.
+    pub fn take_changes(&mut self) -> Changes {
+        let splices = if self.journal_lost {
+            None
+        } else {
+            Some(core::mem::take(&mut self.journal))
+        };
+        let changes = Changes {
+            since: self.journal_since,
+            splices,
+        };
+        self.journal.clear();
+        self.journal_lost = false;
+        self.journal_since = self.revision;
+        changes
+    }
+
+    /// The text from `offset` to the end of the chunk holding it: a piece of
+    /// the text as it is stored, for a reader that takes text a piece at a
+    /// time (a parser). Empty at or past the end.
+    #[must_use]
+    pub fn bytes_from(&self, offset: usize) -> &[u8] {
+        if offset >= self.len() {
+            return &[];
+        }
+        let (index, local) = self.chunk_at(offset);
+        self.chunks
+            .get(index)
+            .and_then(|chunk| chunk.text.as_bytes().get(local..))
+            .unwrap_or(&[])
+    }
+
+    /// The bytes in `range`, a piece of a chunk at a time; `range` is held to
+    /// the text. Bytes rather than text because `range` need not fall on
+    /// character boundaries -- a reader asking for a stretch by its bytes
+    /// gets exactly those.
+    pub fn bytes_in(&self, range: Range<usize>) -> impl Iterator<Item = &[u8]> + '_ {
+        let end = range.end.min(self.len());
+        let start = range.start.min(end);
+        self.pieces(start..end).filter_map(|(local, chunk)| {
+            chunk
+                .text
+                .as_bytes()
+                .get(local)
+                .filter(|piece| !piece.is_empty())
+        })
     }
 
     /// The text's length in bytes.
@@ -293,14 +458,58 @@ impl TextBuffer {
         // made right after each: an edit can re-cut or merge the chunks it
         // touches, and the next edit's offset has to find its chunk in the
         // chunks as they are now, not as they were.
+        let mut changed = false;
         for &i in order.iter().rev() {
             let Some(edit) = edits.get(i) else { continue };
+            let splice = self.splice_about_to_be_made(edit);
             let touched = self.splice(edit.range.clone(), &edit.text);
             if touched != usize::MAX {
                 self.reindex_from(touched);
+                changed = true;
+                self.journal(splice);
             }
         }
+        if changed {
+            self.revision = next_revision();
+        }
         Ok(())
+    }
+
+    /// `edit` as the journal records it, worked out before it is made -- its
+    /// old positions are in the text as it is now. `None` when the journal
+    /// has given up, which spares the lookups.
+    fn splice_about_to_be_made(&self, edit: &Edit) -> Option<Splice> {
+        if self.journal_lost {
+            return None;
+        }
+        let start_point = self.point(edit.range.start).ok()?;
+        let old_end_point = self.point(edit.range.end).ok()?;
+        Some(Splice {
+            start: edit.range.start,
+            old_end: edit.range.end,
+            new_end: edit.range.start.saturating_add(edit.text.len()),
+            start_point,
+            old_end_point,
+            new_end_point: point_after(start_point, &edit.text),
+        })
+    }
+
+    /// Record a splice just made -- or, past [`MAX_JOURNAL`], give up on
+    /// the journal until it is next taken.
+    fn journal(&mut self, splice: Option<Splice>) {
+        if self.journal_lost {
+            return;
+        }
+        match splice {
+            Some(splice) if self.journal.len() < MAX_JOURNAL => self.journal.push(splice),
+            // Past the bound -- or a splice whose points could not be found,
+            // which a checked range cannot produce, but an incomplete journal
+            // must never pass for a complete one.
+            _ => {
+                self.journal_lost = true;
+                self.journal = Vec::new();
+            }
+        }
     }
 
     /// The line `offset` is on, counting from 0.
@@ -1149,6 +1358,186 @@ mod tests {
         }
         assert_eq!(whole, built);
         assert_eq!(whole.to_string(), built.text());
+    }
+
+    /// `offset` in `text` as a line and a byte column, the slow way.
+    fn naive_point(text: &str, offset: usize) -> (usize, usize) {
+        let before = &text[..offset];
+        let line = before.matches('\n').count();
+        let column = before.rfind('\n').map_or(offset, |nl| offset - nl - 1);
+        (line, column)
+    }
+
+    /// **The journal replays exactly.** Random batches of edits at several
+    /// places, each journalled; replaying the splices one by one on a copy
+    /// of the text before, with the texts the batch put in, gives the text
+    /// after -- and every point in every splice is where the slow way puts
+    /// it, in the text as it was at that splice.
+    #[test]
+    fn the_journal_replays_every_batch_exactly() {
+        let mut rng = Rng(0x5eed_1234_abcd);
+        let mut model = String::from("fn a() {\n    b();\n}\n");
+        let mut buffer = TextBuffer::from_text(&model);
+        let pieces = ["", "x", "\n", "é", "ab\ncd", "\n\n", "日本"];
+        for round in 0..300 {
+            // Up to four edits at distinct places, in any order.
+            let mut edits = Vec::new();
+            let mut cuts: Vec<usize> = (0..(1 + rng.below(4)) * 2)
+                .map(|_| floor(&model, rng.below(model.len() + 1)))
+                .collect();
+            cuts.sort_unstable();
+            for pair in cuts.chunks(2) {
+                let text = pieces[rng.below(pieces.len())].to_owned();
+                edits.push(Edit {
+                    range: pair[0]..pair[1],
+                    text,
+                });
+            }
+            // Two edits meeting at a point are fine; two insertions at one
+            // point are too, but make the order a question -- keep them apart.
+            edits.dedup_by(|b, a| a.range.end > b.range.start || a.range == b.range);
+            if round % 3 == 0 {
+                edits.reverse();
+            }
+            let before = model.clone();
+            buffer.apply(&edits).unwrap();
+            // The model, the same way: last first.
+            let mut sorted = edits.clone();
+            sorted.sort_by_key(|e| (e.range.start, !e.range.is_empty()));
+            let mut replay = before.clone();
+            let changes = buffer.take_changes();
+            let splices = changes.splices.expect("a journal this small is kept");
+            let mut expected = Vec::new();
+            for edit in sorted.iter().rev() {
+                if edit.range.is_empty() && edit.text.is_empty() {
+                    continue;
+                }
+                let start_point = naive_point(&replay, edit.range.start);
+                let old_end_point = naive_point(&replay, edit.range.end);
+                replay.replace_range(edit.range.clone(), &edit.text);
+                let new_end = edit.range.start + edit.text.len();
+                expected.push(Splice {
+                    start: edit.range.start,
+                    old_end: edit.range.end,
+                    new_end,
+                    start_point,
+                    old_end_point,
+                    new_end_point: naive_point(&replay, new_end),
+                });
+            }
+            assert_eq!(splices, expected, "round {round}");
+            model = replay;
+            check(&buffer, &model);
+        }
+    }
+
+    /// **The journal says where it starts**, so a reader can tell whether it
+    /// has seen everything: a new buffer's journal starts at its own
+    /// revision, taking it moves the start to now, and a revision changes
+    /// only when the text does.
+    #[test]
+    fn the_journal_starts_where_it_was_last_taken() {
+        let mut buffer = TextBuffer::from_text("abc");
+        let made = buffer.revision();
+        assert_eq!(
+            buffer.take_changes(),
+            Changes {
+                since: made,
+                splices: Some(Vec::new())
+            }
+        );
+        // Nothing done, nothing changed: the revision stays.
+        buffer.apply(&[]).unwrap();
+        buffer.insert(1, "").unwrap();
+        assert_eq!(buffer.revision(), made);
+        buffer.insert(1, "X").unwrap();
+        let first = buffer.revision();
+        assert_ne!(first, made);
+        let changes = buffer.take_changes();
+        assert_eq!(changes.since, made);
+        assert_eq!(changes.splices.map(|s| s.len()), Some(1));
+        assert_eq!(buffer.take_changes().since, first);
+        // A refused edit changes nothing either.
+        assert!(buffer.insert(99, "?").is_err());
+        assert_eq!(buffer.revision(), first);
+        // Another buffer with the same text is another text as far as a
+        // reader knows, and a clone is the same one until it changes.
+        let other = TextBuffer::from_text(&buffer.text());
+        assert_ne!(other.revision(), buffer.revision());
+        let mut clone = buffer.clone();
+        assert_eq!(clone.revision(), buffer.revision());
+        clone.insert(0, "c").unwrap();
+        buffer.insert(0, "b").unwrap();
+        assert_ne!(clone.revision(), buffer.revision());
+    }
+
+    /// **Past [`MAX_JOURNAL`] the journal gives up, and says so** rather than
+    /// passing an incomplete one off as whole -- and starts again once
+    /// taken.
+    #[test]
+    fn a_journal_too_long_to_keep_is_reported_lost() {
+        let mut buffer = TextBuffer::new();
+        let since = buffer.revision();
+        for _ in 0..MAX_JOURNAL {
+            let end = buffer.len();
+            buffer.insert(end, "a").unwrap();
+        }
+        let mut full = buffer.clone();
+        assert_eq!(
+            full.take_changes().splices.map(|s| s.len()),
+            Some(MAX_JOURNAL)
+        );
+        let end = buffer.len();
+        buffer.insert(end, "b").unwrap();
+        assert!(buffer.journal.is_empty(), "a lost journal holds nothing");
+        assert_eq!(
+            buffer.take_changes(),
+            Changes {
+                since,
+                splices: None
+            }
+        );
+        buffer.insert(0, "c").unwrap();
+        assert_eq!(buffer.take_changes().splices.map(|s| s.len()), Some(1));
+    }
+
+    /// **The text a piece at a time**: `bytes_from` to the end of a chunk,
+    /// `bytes_in` over any range, character boundaries or not, held to the
+    /// text.
+    #[test]
+    fn the_text_is_read_a_piece_at_a_time() {
+        let mut text = String::new();
+        for i in 0..4000 {
+            text.push_str(&i.to_string());
+            text.push_str("é\n");
+        }
+        let buffer = TextBuffer::from_text(&text);
+        assert!(buffer.chunks.len() > 3);
+        let mut read = Vec::new();
+        let mut at = 0;
+        while at < buffer.len() {
+            let piece = buffer.bytes_from(at);
+            assert!(!piece.is_empty() && piece.len() <= MAX_CHUNK + 3);
+            read.extend_from_slice(piece);
+            at += piece.len();
+        }
+        assert_eq!(read, text.as_bytes());
+        assert!(buffer.bytes_from(buffer.len()).is_empty());
+        assert!(buffer.bytes_from(buffer.len() + 7).is_empty());
+        // Mid-character, across chunks, and past the end.
+        let e = text.find('é').unwrap() + 1;
+        // The last runs backwards, as a caller's arithmetic might make one.
+        let backwards = Range { start: 17, end: 16 };
+        for range in [e..e + 9000, 0..0, 5..5, 3000..text.len() + 50, backwards] {
+            let got: Vec<u8> = buffer.bytes_in(range.clone()).flatten().copied().collect();
+            let end = range.end.min(text.len());
+            let want = text
+                .as_bytes()
+                .get(range.start.min(end)..end)
+                .unwrap_or(&[]);
+            assert_eq!(got, want, "{range:?}");
+        }
+        assert!(buffer.bytes_in(0..0).next().is_none(), "no empty pieces");
     }
 
     /// A timing, not an assertion: run with `--ignored --nocapture` to see

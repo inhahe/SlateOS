@@ -2224,8 +2224,8 @@ mod tests {
     /// the rim a piece is ringed in, not the palette's (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let c = Colours::of(&p);
             let mut derived = vec![
                 WHITE_PIECE,
@@ -2239,22 +2239,108 @@ mod tests {
                 guitk::button::Kind::Plain,
                 c.chrome.page,
             ));
-            let mut app = ChessApp::new();
-            app.theme_changed(&p);
-            let fresh = app.draw(ChessApp::SIZE);
-            assert!(app.click_square(Pos::new(1, 4)), "e2 was not picked up");
-            let picked = app.draw(ChessApp::SIZE);
-            app.game_result = GameResult::WhiteWins;
-            let over = app.draw(ChessApp::SIZE);
-            for (what, f) in [("fresh", fresh), ("picked", picked), ("over", over)] {
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("chess, {what}, light: {light}"),
+                    &format!("chess, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut app = ChessApp::new();
+        app.theme_changed(p);
+        let fresh = app.draw(ChessApp::SIZE);
+        let cramped = app.draw((320.0, 360.0));
+        assert!(app.click_square(Pos::new(1, 4)), "e2 was not picked up");
+        let picked = app.draw(ChessApp::SIZE);
+        app.game_result = GameResult::WhiteWins;
+        let over = app.draw(ChessApp::SIZE);
+        vec![
+            ("fresh", fresh),
+            ("picked", picked),
+            ("over", over),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            // A piece is not text: it is two glyphs, a solid body and a
+            // hollow ring, and is seen by whichever of them stands off its
+            // square -- a black body on a dark square by its ring, a white
+            // piece's dark ring on a dark square not at all, because its body
+            // does the work. `every_piece_is_seen_on_its_square_in_either_theme`
+            // holds that; each glyph read on its own would fail the half
+            // that is not meant to show.
+            let piece = |r: &gamechrome::legibility::Read| {
+                r.text
+                    .chars()
+                    .all(|ch| ('\u{2654}'..='\u{265F}').contains(&ch))
+            };
+            let exempt = |r: &gamechrome::legibility::Read| {
+                piece(r)
+                    || off
+                        .iter()
+                        .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "chess: {bad:#?}");
     }
 
     /// **White's pieces are white and black's black, in either theme**, and

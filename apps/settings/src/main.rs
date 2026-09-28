@@ -6319,7 +6319,11 @@ impl SettingsState {
             }
             RowHit::Pill(crate::PillId::SurfaceStyle, idx) => {
                 if let Some(style) = SURFACE_STYLES.get(idx) {
-                    self.appearance.settings.surface_style = *style;
+                    // Through the setter, which trades the looks' colours
+                    // over: each look keeps its own accent (§1421, C-Q15).
+                    // Assigning the field left the accent chosen under the
+                    // old look on the new one.
+                    self.appearance.settings.set_surface_style(*style);
                 }
             }
             RowHit::Pill(crate::PillId::StripStyle, idx) => {
@@ -7755,6 +7759,53 @@ mod tests {
             std::ffi::OsStr::new("dusk"),
             "choosing icons changed the colours"
         );
+    }
+
+    /// **Each look keeps its own accent** (§1421, the operator's answer to
+    /// C-Q15): an accent chosen under Filled is Filled's, and switching back
+    /// to Outlined brings Outlined's back. The look pill assigned the field,
+    /// which carried the accent across.
+    #[test]
+    fn each_look_keeps_its_own_accent() {
+        let mut state = SettingsState::new();
+        // The look is chosen on the Themes page, the accent on the Colors page.
+        let click = |state: &mut SettingsState, page, hit| {
+            state.current_page = page;
+            let (x, y) = center_of(state, hit).expect("the control is on its page");
+            state.handle_click(x, y);
+        };
+        let accent = |name: AccentColor| {
+            RowHit::Select(
+                SelectId::AccentColor,
+                AccentColor::presets()
+                    .iter()
+                    .position(|a| *a == name)
+                    .expect("a preset"),
+            )
+        };
+        let look = |style: SurfaceStyle| {
+            RowHit::Pill(
+                PillId::SurfaceStyle,
+                SURFACE_STYLES
+                    .iter()
+                    .position(|s| *s == style)
+                    .expect("a look"),
+            )
+        };
+        let (themes, colors) = (SettingsPage::Themes, SettingsPage::Colors);
+        click(&mut state, themes, look(SurfaceStyle::Borders));
+        click(&mut state, colors, accent(AccentColor::Green));
+        click(&mut state, themes, look(SurfaceStyle::Cards));
+        click(&mut state, colors, accent(AccentColor::Mauve));
+        assert_eq!(state.appearance.settings.accent_color, AccentColor::Mauve);
+        click(&mut state, themes, look(SurfaceStyle::Borders));
+        assert_eq!(
+            state.appearance.settings.accent_color,
+            AccentColor::Green,
+            "the outlined look lost its accent to the filled one's"
+        );
+        click(&mut state, themes, look(SurfaceStyle::Cards));
+        assert_eq!(state.appearance.settings.accent_color, AccentColor::Mauve);
     }
 
     /// **The automatic mode's hours are beside "System (Auto)", and only
@@ -13128,7 +13179,7 @@ mod against_the_real_compositor {
         let strokes_for = |style| {
             let mut state = SettingsState::new();
             state.current_page = SettingsPage::Themes;
-            state.appearance.settings.surface_style = style;
+            state.appearance.settings.set_surface_style(style);
             let mut tree = RenderTree::new();
             state.render_current_page(&mut tree, 0.0, 0.0);
             tree.commands

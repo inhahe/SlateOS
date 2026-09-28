@@ -35,6 +35,12 @@ FOUR = "four_world_clocks_are_the_most_and_the_page_says_so"
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     (
+        "the look pill carries the accent from one look to the other",
+        "                    self.appearance.settings.set_surface_style(*style);",
+        "                    self.appearance.settings.surface_style = *style;",
+        ["each_look_keeps_its_own_accent"],
+    ),
+    (
         "the window-titles switch is another setting",
         "            ToggleId::TaskbarLabels => &mut self.appearance.settings.taskbar_labels,",
         "            ToggleId::TaskbarLabels => &mut self.appearance.settings.taskbar_autohide,",

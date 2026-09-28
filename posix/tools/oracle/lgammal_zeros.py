@@ -13,8 +13,8 @@ For each zero x0 of log|gamma| in (-n - 1, -n), n = 2..NMAX, the one nearer
   c       the rest, c_k = (-1)^(k+1) psi^(k-1)(1 - x0) / k!, k = 2..K, with K
           the fewest for which |c_(K+1)| DMAX^K is below 2^-72
 
-  python lgammal_zeros.py table [NMAX]   the Rust table (NMAX 30)
-  python lgammal_zeros.py oracle         posix/src/lgammal_zero_oracle.txt
+  python lgammal_zeros.py table [NMAX]   prints the Rust table (NMAX 30)
+  python lgammal_zeros.py oracle         writes posix/src/lgammal_zero_oracle.txt
 
 The oracle: log|gamma(x)| correctly rounded to long double, near each zero
 and pole below -2 -- at 1 to 10^4 ulps from each zero and 10^-15 to 1/4 from
@@ -23,8 +23,13 @@ it, 1 ulp to 3/10 from each pole, both sides -- and at 1,500 random points in
 """
 import random
 import sys
+from pathlib import Path
 
 import mpmath
+
+# The oracle's file, written here rather than printed: a redirect of Python's
+# stdout on Windows ends every line CRLF.
+ORACLE = Path(__file__).resolve().parent.parent.parent / "src" / "lgammal_zero_oracle.txt"
 
 mpmath.mp.dps = 80
 DMAX = mpmath.mpf("0.25")
@@ -162,7 +167,7 @@ def ulp_of(v):
 
 
 def oracle():
-    """The reference values, printed: see the module documentation."""
+    """The reference values, written to ORACLE: see the module documentation."""
     random.seed(20260928)
     xs = []
     for n in range(2, 36):
@@ -209,7 +214,8 @@ def oracle():
         seen.add(key)
         y = f(x)
         out.append(f"{key} {hexl(y)}")
-    print("\n".join(out))
+    ORACLE.write_text("\n".join(out) + "\n", encoding="utf-8", newline="\n")
+    print(f"{len(out)} points -> {ORACLE}")
 
 
 if __name__ == "__main__":

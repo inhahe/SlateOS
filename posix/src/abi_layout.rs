@@ -177,7 +177,15 @@ pub(crate) fn abi_asserts() -> String {
     abi!(out, hdrs, crate::search::HsearchData, "struct hsearch_data", "search.h",
          tab as "__tab", unused1 as "__unused1", unused2 as "__unused2");
     // ...and the entry hsearch and hsearch_r take and hand back.
-    abi!(out, hdrs, crate::search::Entry, "ENTRY", "search.h", key, data);
+    abi!(
+        out,
+        hdrs,
+        crate::search::Entry,
+        "ENTRY",
+        "search.h",
+        key,
+        data
+    );
 
     // --- time: ftime's result -------------------------------------------------
     abi!(

@@ -3864,11 +3864,13 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMM: a widget's title-bar icon is drawn in body text",
         WID,
         [
-            ('color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Regular,',
-             'color: Color::rgba(\n                p.text.r,\n                p.text.g,\n                p.text.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Regular,'),
+            ('            w.kind.icon_name(),\n            Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n        );\n',
+             '            w.kind.icon_name(),\n            Color::rgba(\n                p.text.r,\n                p.text.g,\n                p.text.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now, drawn by `self.icon` with a colour.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -3876,11 +3878,13 @@ DEFECTS = [
         "NNNNNNNNNNNNNNNNN: a widget's title-bar icon loses its emphasis over the panel",
         WID,
         [
-            ('color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Regular,',
-             'color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                w.bg_opacity,\n            ),\n            font_weight: FontWeightHint::Regular,'),
+            ('            w.kind.icon_name(),\n            Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n        );\n',
+             '            w.kind.icon_name(),\n            Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                w.bg_opacity,\n            ),\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now, drawn by `self.icon` with a colour.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -3901,11 +3905,12 @@ DEFECTS = [
         "PPPPPPPPPPPPPPPPP: the clock's time keeps Mocha's text",
         WID,
         [
-            ('text: "12:34".to_string(),\n                    font_size: 36.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),',
-             'text: "12:34".to_string(),\n                    font_size: 36.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),'),
+            ('                    text: live.clock_time.clone(),\n                    font_size: 36.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n',
+             '                    text: live.clock_time.clone(),\n                    font_size: 36.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The clock draws the live reading now.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -3914,23 +3919,26 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQ: the clock's date is dimmed to a placeholder",
         WID,
         [
-            ('text: "Sunday, May 18".to_string(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "Sunday, May 18".to_string(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),'),
+            ('                    text: live.clock_date.clone(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                    text: live.clock_date.clone(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The clock draws the live reading now.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
     (
-        "RRRRRRRRRRRRRRRRR: the CPU meter's label keeps Mocha's subtext0",
+        "RRRRRRRRRRRRRRRRR: the meters' labels keep Mocha's subtext0",
         WID,
         [
-            ('text: "CPU".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "CPU".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),'),
+            ('                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The three meters are drawn in one loop now: one label site, one fill site.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -3966,30 +3974,22 @@ DEFECTS = [
         ],
     ),
     (
-        "UUUUUUUUUUUUUUUUU: the CPU meter is drawn opaque over a translucent panel",
+        "UUUUUUUUUUUUUUUUU: the meters are drawn opaque over a translucent panel",
         WID,
         [
-            ('width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),',
-             'width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, 255),'),
+            ('                            color: Color::rgba(role.r, role.g, role.b, alpha),\n',
+             '                            color: Color::rgba(role.r, role.g, role.b, 255),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The three meters are drawn in one loop now: one label site, one fill site.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
-    (
-        "VVVVVVVVVVVVVVVVV: the Memory meter's label keeps Mocha's subtext0",
-        WID,
-        [
-            ('text: "Memory".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "Memory".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
-        ],
-    ),
+    # RETIRED 2026-09-27: the Memory meter's label keeps Mocha's subtext0.
+    #   The meters share one label site now, so this is the same edit as
+    #   "the meters' labels keep Mocha's subtext0", which stays.
     (
         "WWWWWWWWWWWWWWWWW: the Memory meter's track keeps Mocha's surface1",
         WID,
@@ -4021,14 +4021,16 @@ DEFECTS = [
         ],
     ),
     (
-        "YYYYYYYYYYYYYYYYY: the Disk meter's label is promoted to body text",
+        "YYYYYYYYYYYYYYYYY: the meters' labels are promoted to body text",
         WID,
         [
-            ('text: "Disk".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "Disk".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),'),
+            ('                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The three meters are drawn in one loop now: one label site, one fill site.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -4068,11 +4070,13 @@ DEFECTS = [
         "CCCCCCCCCCCCCCCCCC: a written note keeps Mocha's text",
         WID,
         [
-            ('                        if w.state_text.is_empty() {\n                            p.overlay0.r\n                        } else {\n                            p.text.r\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.g\n                        } else {\n                            p.text.g\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.b\n                        } else {\n                            p.text.b\n                        },',
-             '                        if w.state_text.is_empty() {\n                            p.overlay0.r\n                        } else {\n                            0xCD\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.g\n                        } else {\n                            0xD6\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.b\n                        } else {\n                            0xF4\n                        },'),
+            ('                        color: ink(p.text),\n',
+             '                        color: ink(Color::from_hex(0xCDD6F4)),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A note draws through the toolkit's text area; its
+            # ink is washed by the `ink` closure.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -4081,11 +4085,13 @@ DEFECTS = [
         "DDDDDDDDDDDDDDDDDD: a note is drawn opaque over a translucent panel",
         WID,
         [
-            ('                        },\n                        alpha,\n                    ),\n                    font_weight: FontWeightHint::Regular,\n                    max_width: Some(width),\n                    overflow: TextOverflow::Ellipsis,\n                });\n            }\n            WidgetKind::BatteryStatus => {',
-             '                        },\n                        255,\n                    ),\n                    font_weight: FontWeightHint::Regular,\n                    max_width: Some(width),\n                    overflow: TextOverflow::Ellipsis,\n                });\n            }\n            WidgetKind::BatteryStatus => {'),
+            ('                let ink = |c: Color| Color::rgba(c.r, c.g, c.b, alpha);\n',
+             '                let ink = |c: Color| Color::rgba(c.r, c.g, c.b, 255);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A note draws through the toolkit's text area; its
+            # ink is washed by the `ink` closure.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -4126,11 +4132,12 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGG: the battery's reading keeps Mocha's text",
         WID,
         [
-            ('text: "85%".to_string(),\n                    font_size: 20.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),',
-             'text: "85%".to_string(),\n                    font_size: 20.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),'),
+            ('                    text: headline,\n                    font_size: 20.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n',
+             '                    text: headline,\n                    font_size: 20.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The reading is the live charge now.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -4139,11 +4146,12 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHH: the battery's estimate is promoted to body text",
         WID,
         [
-            ('text: "3h 42m remaining".to_string(),\n                    font_size: 11.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "3h 42m remaining".to_string(),\n                    font_size: 11.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),'),
+            ('                        font_size: 11.0,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                        font_size: 11.0,\n                        color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The estimate is drawn only when one is known.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -4151,11 +4159,13 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIII: the generic widget's placeholder icon keeps Mocha's surface2",
         WID,
         [
-            ('font_size: 32.0,\n                    color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),',
-             'font_size: 32.0,\n                    color: Color::rgba(0x58, 0x5B, 0x70, alpha),'),
+            ('                    w.kind.icon_name(),\n                    Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),\n',
+             '                    w.kind.icon_name(),\n                    Color::rgba(0x58, 0x5B, 0x70, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now, drawn by `self.icon` with a colour.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -4188,11 +4198,12 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLL: the picker's panel keeps Mocha's mantle",
         WID,
         [
-            ('            color: p.mantle,',
-             '            color: guitk::color::Color::from_hex(0x181825),'),
+            ('        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(paint.border.unwrap_or(p.surface1));\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(paint.border.unwrap_or(p.surface1));\n        paint.fill = Some(guitk::color::Color::from_hex(0x181825));\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The picker is a card surface now (`surface_paint`).
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'the_pickers_own_surfaces_come_from_the_palette',
         ],
@@ -4201,11 +4212,12 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMM: the picker's border keeps Mocha's surface1",
         WID,
         [
-            ('            color: p.surface1,\n            line_width: 1.0,',
-             '            color: guitk::color::Color::from_hex(0x45475A),\n            line_width: 1.0,'),
+            ('        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(paint.border.unwrap_or(p.surface1));\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(guitk::color::Color::from_hex(0x45475A));\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The picker is a card surface now (`surface_paint`).
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'the_pickers_own_surfaces_come_from_the_palette',
         ],
@@ -4226,11 +4238,13 @@ DEFECTS = [
         "OOOOOOOOOOOOOOOOOO: every picker row's icon follows the accent",
         WID,
         [
-            ('font_size: 16.0,\n                color: p.blue,',
-             'font_size: 16.0,\n                color: p.accent,'),
+            ('                kind.icon_name(),\n                p.ink(p.blue),\n',
+             '                kind.icon_name(),\n                p.ink(p.accent),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now, drawn by `self.icon` with a colour.
             # Every row is drawn identically, so an accent here says nothing about
             # any row -- and it costs the accent its one job, which is the ring.
             'the_pickers_own_surfaces_come_from_the_palette',
@@ -4295,11 +4309,12 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTT: a hidden widget is drawn anyway",
         WID,
         [
-            ('            if !w.visible {\n                continue;\n            }\n            self.render_widget(w, p, &mut commands);',
-             '            if !w.visible && w.bg_opacity == 0 {\n                continue;\n            }\n            self.render_widget(w, p, &mut commands);'),
+            ('            if !w.visible {\n                continue;\n            }\n            self.render_widget(w, p, live, &mut commands);\n',
+             '            if !w.visible && w.bg_opacity == 0 {\n                continue;\n            }\n            self.render_widget(w, p, live, &mut commands);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `render` passes the live readings through now.
             'the_fixture_takes_every_branch_the_widget_layer_has',
         ],
     ),

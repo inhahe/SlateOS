@@ -1,8 +1,12 @@
 # C -> F -- announcing a change to any program's settings file, not only the four the compositor knows
 
 **From:** Lane C. **To:** Lane F (`gui/remote`, `gui/compositor`, `gui/window`).
-**Filed:** 2026-09-27. **Status:** OPEN -- a protocol change lane C cannot land
-alone; lane C's watcher is built on it.
+**Filed:** 2026-09-27. **Status:** DONE 2026-09-28. Lane F landed the
+announcement (4a845e43f, on main in 4a8b2f381): `SettingsGroup::Program`,
+`AnnounceSettings`, `EventLoop::settings_file_changed`. Lane C built the watch
+on it (`gui/settingswatch`, `libcall::inotify`); it runs in the desktop shell
+rather than as a service of its own (design-decisions 1434), and `settingsfile`
+now refuses a name that could not be announced (`gui/settingsname`).
 
 **In short:** the operator decided (C-Q26, `design-decisions.md` §1418) that
 each program keeps its settings in a file of its own, and that a service tells

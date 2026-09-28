@@ -1957,12 +1957,16 @@ live.
   the ported cipher and password hash (lane E's question to lane A).
 
 - `[C]` **A settings service that tells open windows when a setting
-  changes** -- open, **blocked on lane F** (C-Q26, §1418). Beside
+  changes** -- **done 2026-09-28** (C-Q26, §1418, §1434). Beside
   `gui/settingsfile`, never in front of it: saving stays a program writing its
-  own file. The announcement for a program's own file is a protocol change in
-  lane F's codec (`requests/c-f-announce-a-change-to-any-programs-settings-file.md`);
-  then lane C's `gui/settingswatch` (an `inotify` watch on the settings folder)
-  sends it, and `settingsfile` refuses names that could not be announced.
+  own file. Lane F's announcement carries a program's own file
+  (`AnnounceSettings`); lane C's `gui/settingswatch` watches the settings
+  folder (`libcall::inotify`) from a thread of the desktop shell and the shell
+  announces each file rewritten -- a rename at once, a file written in place
+  once it goes quiet, everything after lost events. `settingsfile` refuses a
+  name that could not be announced, by the one rule (`gui/settingsname`).
+  **Lane E:** the programs re-reading their own file when told
+  (`requests/c-e-a-changed-settings-file-is-announced-now.md`).
 
 - `[C]` **C-Q11: measure the whole-workspace check under the machine's normal
   load, then decide the gate** -- **done 2026-09-27** (`design-decisions.md`

@@ -391,6 +391,10 @@ pub struct ShellSession<T: Transport> {
     /// The thread that decodes pictures, so a photograph's second of decoding
     /// is not a second the desktop stops drawing (`crate::pictures`).
     pictures: PictureWorker,
+    /// The names the settings watcher reports, each to be announced to every
+    /// window (`watch_settings`, design-decisions 1418). `None` until the
+    /// watch is started, which only a real session does.
+    settings_watch: Option<std::sync::mpsc::Receiver<Vec<settingswatch::SettingsName>>>,
     /// Where installed programs' desktop entries are looked for.
     app_dirs: desktopentry::scan::DataDirs,
     /// Every entry file as it was at the last read (`app_dir_stamps`) --
@@ -781,6 +785,7 @@ impl<T: Transport> ShellSession<T> {
             wallpaper_image: None,
             wallpaper_uploaded: None,
             pictures: PictureWorker::spawn(picture_waker),
+            settings_watch: None,
             app_dirs: default_app_dirs(),
             app_dirs_seen: None,
             start_menu_was_open: false,
@@ -1459,6 +1464,81 @@ impl<T: Transport> ShellSession<T> {
         self.refresh_installed_apps();
     }
 
+    /// Tell every window when a settings file changes: watch `dir`, the
+    /// settings folder, on a thread of its own for the rest of the session,
+    /// and announce each file it reports (design-decisions 1418, C-Q26).
+    ///
+    /// A program saving its settings only writes its file; this is what makes
+    /// the change show at once in its other windows, and a hand edit show at
+    /// all. It is the operator's "not as the same function that saves": a
+    /// watch that could not start, or stops, loses the announcements and
+    /// nothing else -- every setting is still saved and still read the next
+    /// time its program starts -- so a failure is said once, on the error
+    /// stream, and the desktop goes on.
+    ///
+    /// Started by the desktop's `main` and not by `start`, so that no test
+    /// watches the folder of whoever runs it.
+    pub fn watch_settings(&mut self, dir: PathBuf) {
+        let (reports, names) = std::sync::mpsc::channel::<Vec<settingswatch::SettingsName>>();
+        // The loop's waker, so a report reaches a loop parked with nothing on
+        // the wire; without one a report waits for the loop's next pass.
+        let waker = self.events.waker().ok().flatten();
+        let started = std::thread::Builder::new()
+            .name("desktop-settings-watch".into())
+            .spawn(move || {
+                let outcome = settingswatch::run(&dir, |batch| {
+                    let delivered = reports.send(batch.to_vec()).is_ok();
+                    if let Some(waker) = &waker {
+                        waker.wake_by_ref();
+                    }
+                    // A session that has gone away has no one to tell.
+                    delivered
+                });
+                if let Err(e) = outcome {
+                    eprintln!(
+                        "desktop: a changed settings file will not reach open windows until they restart: {e}"
+                    );
+                }
+            });
+        if let Err(e) = started {
+            eprintln!("desktop: the settings watch could not start: {e}");
+            return;
+        }
+        self.settings_watch = Some(names);
+    }
+
+    /// Feed the watch's reports from `names` rather than from a thread: what
+    /// `watch_settings` does, less the watching, for a test.
+    #[cfg(test)]
+    pub(crate) fn watch_settings_from(
+        &mut self,
+        names: std::sync::mpsc::Receiver<Vec<settingswatch::SettingsName>>,
+    ) {
+        self.settings_watch = Some(names);
+    }
+
+    /// Announce every settings file the watch has reported since the last
+    /// pump, each once, answering whether there were any.
+    ///
+    /// # Errors
+    ///
+    /// As [`EventLoop::settings_file_changed`].
+    fn announce_settings(&mut self) -> Result<bool, Error<T>> {
+        let Some(watch) = &self.settings_watch else {
+            return Ok(false);
+        };
+        let mut names: Vec<settingswatch::SettingsName> = Vec::new();
+        for name in watch.try_iter().flatten() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        for name in &names {
+            self.events.settings_file_changed(*name)?;
+        }
+        Ok(!names.is_empty())
+    }
+
     /// Adopt every picture the decoding thread has finished, answering whether
     /// there were any.
     ///
@@ -1967,6 +2047,7 @@ impl<T: Transport> ShellSession<T> {
         // Pictures the decoding thread finished while the loop was parked --
         // it woke the loop to say so -- or while it was busy.
         let mut worked = self.collect_pictures()?;
+        worked |= self.announce_settings()?;
         while let Some((window, event)) = self.events.poll()? {
             worked = true;
             self.dispatch(window, event)?;

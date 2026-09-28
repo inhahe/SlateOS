@@ -318,6 +318,44 @@ fn only_the_overlay_surface_refuses_the_mouse() {
     assert!(specs[3].input_transparent);
 }
 
+/// **What the settings watch reports is announced to every window, each file
+/// once** (design-decisions 1418). A save and the editor's second save of the
+/// same file, reported in two batches before the loop came round, are one
+/// change as far as any window needs to know.
+#[test]
+fn every_settings_file_the_watch_reports_is_announced_once() {
+    let (mut session, desktop, _turn) = session();
+    let (reports, names) = std::sync::mpsc::channel();
+    session.watch_settings_from(names);
+    let name = |s: &str| guitk::event::SettingsName::new(s.as_bytes()).unwrap();
+    let announced = |desktop: &Desktop| -> Vec<String> {
+        desktop
+            .borrow()
+            .seen
+            .iter()
+            .filter_map(|r| match r.body {
+                RequestBody::AnnounceSettings { name } => Some(name.as_str().to_owned()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        announced(&desktop),
+        Vec::<String>::new(),
+        "nothing before a report"
+    );
+
+    reports.send(vec![name("notes"), name("calendar")]).unwrap();
+    reports.send(vec![name("notes")]).unwrap();
+    session.pump().unwrap();
+    assert_eq!(announced(&desktop), ["notes", "calendar"]);
+
+    // A later change to the same file is a new change, and announced again.
+    reports.send(vec![name("notes")]).unwrap();
+    session.pump().unwrap();
+    assert_eq!(announced(&desktop), ["notes", "calendar", "notes"]);
+}
+
 #[test]
 fn the_shell_asks_to_be_told_about_windows_it_does_not_own() {
     let (_session, desktop, _turn) = session();

@@ -38,6 +38,12 @@
 //! on the well ([`legible_on`]); the edge takes a tint of the accent under the
 //! pointer, as the reference's controls do on hover. A box is a small target,
 //! so it is taken hold of by its [`crate::grab`] region and by its label.
+//!
+//! The box's corners are the theme's (`Palette::widget_style`'s `check`,
+//! design-decisions 1435): 2 pixels in the built-in theme, up to a circle.
+//! [`draw_box`] draws the box alone, for a control that is a check box in
+//! another's room -- an on/off switch under a theme that draws switches as
+//! boxes (`crate::switch`).
 
 use crate::color::Color;
 use crate::disabled::DISABLED_OPACITY;
@@ -60,8 +66,6 @@ pub const LABEL_GAP: f32 = 6.0;
 /// A checkbox's height where the caller has no layout of its own: tall
 /// enough for the label's line.
 pub const HEIGHT: f32 = 20.0;
-/// The box's corners.
-const RADIUS: f32 = 2.0;
 /// How far the edge is tinted towards the accent under the pointer.
 const HOVER_TINT: f32 = 0.5;
 /// The mark's stroke.
@@ -178,6 +182,13 @@ pub fn paint(p: &Palette, state: State) -> Paint {
     }
 }
 
+/// The corner radius a box `side` pixels across is drawn with in the theme:
+/// the widget style's, never more than half the side -- a circle.
+#[must_use]
+pub fn radius(p: &Palette, side: f32) -> f32 {
+    f32::from(p.widget_style.check.radius).min((side / 2.0).max(0.0))
+}
+
 /// Draw a checkbox whose row starts at `(x, y)` and is `h` tall, with `label`
 /// beside the box.
 ///
@@ -197,37 +208,73 @@ pub fn draw(
     focus_ring: f32,
 ) {
     let colours = paint(p, state);
-    let fade = |c: Color| {
-        if state.disabled {
-            let a = (f32::from(c.a) * DISABLED_OPACITY).round();
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "rounded, and between 0 and 255 because both factors are"
-            )]
-            let a = a as u8;
-            Color::rgba(c.r, c.g, c.b, a)
-        } else {
-            c
-        }
-    };
     let b = box_rect(x, y, h);
+    draw_box(sink, p, b, check, state, focus_ring, colours.mark);
+    if !label.is_empty() {
+        sink.emit(RenderCommand::Text {
+            x: b.right() + LABEL_GAP,
+            y: y + (h - FONT_SIZE) / 2.0,
+            text: label.to_string(),
+            color: fade(colours.label, state),
+            font_size: FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+    }
+}
+
+/// `c` as a control in `state` shows it: at the toolkit's disabled opacity
+/// when it cannot be used.
+fn fade(c: Color, state: State) -> Color {
+    if state.disabled {
+        let a = (f32::from(c.a) * DISABLED_OPACITY).round();
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "rounded, and between 0 and 255 because both factors are"
+        )]
+        let a = a as u8;
+        Color::rgba(c.r, c.g, c.b, a)
+    } else {
+        c
+    }
+}
+
+/// Draw a check box's box alone at `b`: the well, its edge in `state`, the
+/// mark for `check` in `mark`, and the keyboard's ring -- with the theme's
+/// corners. For a control that is a check box without a label of its own,
+/// in a room another control would have had: `mark` is the caller's colour
+/// for "set", held legible on the well here, so a switch whose "on" means
+/// *safe* keeps its green as a box.
+pub fn draw_box(
+    sink: &mut impl CommandSink,
+    p: &Palette,
+    b: Rect,
+    check: CheckState,
+    state: State,
+    focus_ring: f32,
+    mark: Color,
+) {
+    let colours = paint(p, state);
+    let mark = legible_on(mark, colours.well);
+    let r = radius(p, b.w.min(b.h));
     sink.emit(RenderCommand::FillRect {
         x: b.x,
         y: b.y,
         width: b.w,
         height: b.h,
-        color: fade(colours.well),
-        corner_radii: CornerRadii::all(RADIUS),
+        color: fade(colours.well, state),
+        corner_radii: CornerRadii::all(r),
     });
     sink.emit(RenderCommand::StrokeRect {
         x: b.x,
         y: b.y,
         width: b.w,
         height: b.h,
-        color: fade(colours.edge),
+        color: fade(colours.edge, state),
         line_width: 1.0,
-        corner_radii: CornerRadii::all(RADIUS),
+        corner_radii: CornerRadii::all(r),
     });
     match check {
         CheckState::Unchecked => {}
@@ -243,7 +290,7 @@ pub fn draw(
                     y1: ya,
                     x2: xb,
                     y2: yb,
-                    color: fade(colours.mark),
+                    color: fade(mark, state),
                     width: MARK_WIDTH,
                 });
             }
@@ -254,7 +301,7 @@ pub fn draw(
                 y: b.y + (b.h - PARTLY) / 2.0,
                 width: PARTLY,
                 height: PARTLY,
-                color: fade(colours.mark),
+                color: fade(mark, state),
                 corner_radii: CornerRadii::all(1.0),
             });
         }
@@ -268,19 +315,7 @@ pub fn draw(
             height: b.h + reach * 2.0,
             color: p.accent,
             line_width: focus_ring,
-            corner_radii: CornerRadii::all(RADIUS + reach),
-        });
-    }
-    if !label.is_empty() {
-        sink.emit(RenderCommand::Text {
-            x: b.right() + LABEL_GAP,
-            y: y + (h - FONT_SIZE) / 2.0,
-            text: label.to_string(),
-            color: fade(colours.label),
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            corner_radii: CornerRadii::all(r + reach),
         });
     }
 }
@@ -336,6 +371,39 @@ mod tests {
         assert_eq!(next(Indeterminate, Mode::ThreeState), Checked);
         assert_eq!(next(Checked, Mode::ThreeState), Unchecked);
         assert_eq!(next(Unchecked, Mode::ThreeState), Indeterminate);
+    }
+
+    /// **The box's corners are the theme's**: 2 pixels in the built-in theme,
+    /// a circle at the most, and the focus ring round with them.
+    #[test]
+    fn the_boxs_corners_are_the_themes() {
+        let corners = |radius: u8| -> (f32, f32) {
+            let mut p = Palette::for_mode(false);
+            p.widget_style.check.radius = radius;
+            let mut cmds = Vec::new();
+            let focused = State {
+                focused: true,
+                ..State::default()
+            };
+            draw(&mut cmds, &p, (0.0, 0.0, HEIGHT), "", CheckState::Checked, focused, 2.0);
+            let well = cmds.iter().find_map(|c| match c {
+                RenderCommand::FillRect { corner_radii, .. } => Some(corner_radii.top_left),
+                _ => None,
+            });
+            let ring = cmds.iter().find_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    color,
+                    corner_radii,
+                    ..
+                } if *color == p.accent => Some(corner_radii.top_left),
+                _ => None,
+            });
+            (well.expect("no well"), ring.expect("no ring"))
+        };
+        assert_eq!(corners(2), (2.0, 5.0), "the built-in box");
+        assert_eq!(corners(7), (7.0, 10.0), "a circle");
+        assert_eq!(corners(40), (7.0, 10.0), "never rounder than a circle");
+        assert_eq!(Palette::for_mode(false).widget_style.check.radius, 2);
     }
 
     /// The box is an input's well with an input's edge; checked draws a tick

@@ -1402,11 +1402,9 @@ impl AccountSettingsUI {
         // two an "on" switch uses; that inconsistency is recorded in
         // known-issues.md and is not a thing to settle mid-conversion.
         let toggle_bg = if enabled { p.green } else { p.surface0 };
-        cmds.extend(guitk::switch::switch(
-            toggle_x,
-            y + 2.0,
-            36.0,
-            18.0,
+        cmds.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(toggle_x, y + 2.0, 36.0, 18.0),
             enabled,
             toggle_bg,
         ));

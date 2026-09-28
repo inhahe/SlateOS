@@ -6,9 +6,19 @@
 //! hand-drawn switches and one correct answer between them, and moved here on
 //! 2026-09-27 with its reasoning and its tests, as the slider did
 //! ([`crate::slider`]): three applications draw switches of their own, and a
-//! control a user learns once should be drawn once. [`switch`] is the shapes,
-//! unchanged; [`draw`] is the control -- the light under the pointer, the
-//! keyboard ring, the disabled look; [`hit`] and [`toggles`] are its input.
+//! control a user learns once should be drawn once. [`switch`] is the pill's
+//! shapes, unchanged; [`shapes`] is whatever form the theme gives a switch;
+//! [`draw`] is the control -- the light under the pointer, the keyboard ring,
+//! the disabled look; [`hit`] and [`toggles`] are its input.
+//!
+//! # A pill, or a box
+//!
+//! The theme's widget style chooses the form (`Palette::widget_style`'s
+//! `toggle`, design-decisions 1435): the pill, or a check box, ticked when
+//! on. A box is drawn in the pill's room -- at its left, centred down it -- so
+//! what a click lands on, and everything laid out around it, stays where it
+//! was; and its tick is the caller's "on" colour held legible on the box, so a
+//! switch whose "on" means *safe* is still green.
 //!
 //! # The knob is derived from the track
 //!
@@ -37,6 +47,7 @@
 //! 36x18 alike, and [`switch`] takes the track's size as arguments so every
 //! existing caller draws the pixels it did before.
 
+use crate::checkbox;
 use crate::color::Color;
 use crate::disabled::DISABLED_OPACITY;
 use crate::event::{Key, KeyEvent};
@@ -46,6 +57,8 @@ use crate::palette::{Palette, emphasized, readable_on};
 use crate::render::RenderCommand;
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
+use crate::widget::CheckState;
+use crate::widget_style::ToggleStyle;
 
 /// The gap between the knob and each edge of the track.
 ///
@@ -105,6 +118,46 @@ pub fn switch(
     ]
 }
 
+/// Draw an on/off switch's shapes at `rect` in the form the theme gives it:
+/// [`switch`]'s pill, or a check box in the pill's room, ticked in `track`
+/// when on.
+///
+/// For a caller that draws the switch as a picture -- with no pointer or
+/// keyboard of its own to show; one that has them uses [`draw`]. `track` is
+/// the colour for the state, as [`switch`] takes it.
+#[must_use]
+pub fn shapes(p: &Palette, rect: Rect, on: bool, track: Color) -> Vec<RenderCommand> {
+    match p.widget_style.toggle {
+        ToggleStyle::Pill => switch(rect.x, rect.y, rect.w, rect.h, on, track).to_vec(),
+        ToggleStyle::Checkbox => {
+            let mut cmds = Vec::new();
+            checkbox::draw_box(
+                &mut cmds,
+                p,
+                box_in(rect),
+                if on {
+                    CheckState::Checked
+                } else {
+                    CheckState::Unchecked
+                },
+                checkbox::State::default(),
+                0.0,
+                track,
+            );
+            cmds
+        }
+    }
+}
+
+/// Where a switch drawn as a check box puts its box in the pill's room `rect`:
+/// at the left, centred down it, the toolkit's box size or the room's height
+/// if that is less.
+#[must_use]
+pub fn box_in(rect: Rect) -> Rect {
+    let side = checkbox::SIZE.min(rect.h.max(0.0));
+    Rect::new(rect.x, rect.y + (rect.h - side) / 2.0, side, side)
+}
+
 /// The two track colours of a switch: what it is when on, and when off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Look {
@@ -148,13 +201,15 @@ pub struct State {
     pub disabled: bool,
 }
 
-/// Draw a switch as a control at `rect`.
+/// Draw a switch as a control at `rect`, in the form the theme gives it.
 ///
 /// The track is `look.on` or `look.off`, lit a step ([`emphasized`]) while the
 /// pointer is over it -- and the knob, being derived from the track, follows
 /// the lit colour. A focused switch has a ring outside its pill, `focus_ring`
 /// wide, in the accent; a disabled one is drawn at the toolkit's disabled
-/// opacity and nothing else.
+/// opacity and nothing else. As a check box ([`ToggleStyle::Checkbox`]) it is
+/// the toolkit's check box in the pill's room, its tick in `look.on`, lit,
+/// ringed and dimmed as a check box is.
 pub fn draw(
     sink: &mut impl CommandSink,
     p: &Palette,
@@ -164,6 +219,26 @@ pub fn draw(
     state: State,
     focus_ring: f32,
 ) {
+    if p.widget_style.toggle == ToggleStyle::Checkbox {
+        checkbox::draw_box(
+            sink,
+            p,
+            box_in(rect),
+            if on {
+                CheckState::Checked
+            } else {
+                CheckState::Unchecked
+            },
+            checkbox::State {
+                hovered: state.hovered,
+                focused: state.focused,
+                disabled: state.disabled,
+            },
+            focus_ring,
+            look.on,
+        );
+        return;
+    }
     let base = if on { look.on } else { look.off };
     let track = if state.hovered && !state.disabled {
         emphasized(base)
@@ -248,7 +323,7 @@ mod tests {
 
     use super::*;
     use crate::event::Modifiers;
-    use crate::palette::{DARK_EXTREME, LIGHT_EXTREME};
+    use crate::palette::{DARK_EXTREME, LIGHT_EXTREME, legible_on};
     use crate::theme::contrast_ratio;
 
     fn rect(c: &RenderCommand) -> (f32, f32, f32, f32, Color, f32) {
@@ -478,6 +553,122 @@ mod tests {
             (rect(&dim[0]).4.r, rect(&dim[0]).4.g),
             (p.accent.r, p.accent.g),
             "and not lit"
+        );
+    }
+
+    /// A palette whose theme draws switches as check boxes.
+    fn boxed() -> Palette {
+        let mut p = Palette::for_mode(false);
+        p.widget_style.toggle = ToggleStyle::Checkbox;
+        p
+    }
+
+    /// **The built-in theme's switch is the pill**: `shapes` is exactly
+    /// `switch`'s two shapes.
+    #[test]
+    fn the_built_in_form_is_the_pill() {
+        let p = Palette::for_mode(false);
+        let r = Rect::new(10.0, 10.0, WIDTH, HEIGHT);
+        for on in [false, true] {
+            assert_eq!(
+                shapes(&p, r, on, p.accent),
+                switch(r.x, r.y, r.w, r.h, on, p.accent).to_vec()
+            );
+        }
+    }
+
+    /// **As a check box, a switch is the toolkit's box in the pill's room**:
+    /// at its left, centred down it, ticked only when on, the tick in the
+    /// caller's "on" colour -- green stays green -- held legible on the well.
+    #[test]
+    fn as_a_check_box_it_is_a_box_in_the_pills_room() {
+        let p = boxed();
+        let r = Rect::new(100.0, 50.0, WIDTH, HEIGHT);
+        let b = box_in(r);
+        assert_eq!(
+            (b.x, b.y, b.w, b.h),
+            (
+                100.0,
+                50.0 + (HEIGHT - checkbox::SIZE) / 2.0,
+                checkbox::SIZE,
+                checkbox::SIZE
+            )
+        );
+        let lines = |cmds: &[RenderCommand]| -> Vec<Color> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Line { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect()
+        };
+        let off = shapes(&p, r, false, p.surface2);
+        assert!(lines(&off).is_empty(), "an off box is ticked");
+        let on = shapes(&p, r, true, p.green);
+        let ticks = lines(&on);
+        assert_eq!(ticks.len(), 2, "the tick is two strokes");
+        assert!(ticks.iter().all(|c| *c == legible_on(p.green, p.crust)));
+        // Nothing reaches outside the pill's room.
+        for cmd in &on {
+            if let Some((x, y, w, h)) = crate::surface::logical_rect(cmd) {
+                assert!(x >= r.x - 1.0 && y >= r.y - 1.0, "{cmd:?}");
+                assert!(
+                    x + w <= r.right() + 1.0 && y + h <= r.bottom() + 1.0,
+                    "{cmd:?}"
+                );
+            }
+        }
+        // The box's corners are the theme's check box's.
+        let mut round = boxed();
+        round.widget_style.check.radius = 7;
+        let well = shapes(&round, r, false, p.surface2);
+        assert!(matches!(
+            well.first(),
+            Some(RenderCommand::FillRect { corner_radii, .. })
+                if (corner_radii.top_left - 7.0).abs() < f32::EPSILON
+        ));
+    }
+
+    /// **As a check box, the control lights, rings and dims as a check box
+    /// does**, the ring round the box rather than the pill.
+    #[test]
+    fn as_a_check_box_the_control_is_a_check_boxs() {
+        let p = boxed();
+        let r = Rect::new(10.0, 10.0, WIDTH, HEIGHT);
+        let look = Look::safe(&p);
+        let focused = State {
+            focused: true,
+            ..State::default()
+        };
+        let mut ringed = Vec::new();
+        draw(&mut ringed, &p, r, true, look, focused, 2.0);
+        let b = box_in(r);
+        assert!(
+            ringed.iter().any(
+                |c| matches!(c, RenderCommand::StrokeRect { color, x, width, .. }
+                if *color == p.accent && *x < b.x && *width < b.w + 10.0)
+            ),
+            "no ring round the box: {ringed:?}"
+        );
+        assert!(
+            ringed
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Line { color, .. }
+                if *color == legible_on(p.green, p.crust))),
+            "the tick is not the look's green"
+        );
+        let mut dim = Vec::new();
+        let disabled = State {
+            disabled: true,
+            focused: true,
+            hovered: true,
+        };
+        draw(&mut dim, &p, r, true, look, disabled, 2.0);
+        assert!(
+            !dim.iter().any(
+                |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == p.accent)
+            ),
+            "a disabled box is ringed"
         );
     }
 

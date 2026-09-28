@@ -1619,11 +1619,9 @@ impl NotificationPane {
         // this pane's knob was already inset two pixels all round.
         let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
         let pill_bg = if enabled { p.accent } else { p.surface2 };
-        cmds.extend(guitk::switch::switch(
-            pill_x,
-            y + 6.0,
-            TOGGLE_WIDTH,
-            TOGGLE_HEIGHT,
+        cmds.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(pill_x, y + 6.0, TOGGLE_WIDTH, TOGGLE_HEIGHT),
             enabled,
             pill_bg,
         ));
@@ -1953,8 +1951,11 @@ impl NotificationPane {
             let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(y);
             let enabled = app.importance != Importance::Silent;
             let pill_bg = if enabled { p.green } else { p.surface2 };
-            cmds.extend(guitk::switch::switch(
-                pill_x, pill_y, pill_w, pill_h, enabled, pill_bg,
+            cmds.extend(guitk::switch::shapes(
+                p,
+                guitk::frame::Rect::new(pill_x, pill_y, pill_w, pill_h),
+                enabled,
+                pill_bg,
             ));
 
             // Status text row.

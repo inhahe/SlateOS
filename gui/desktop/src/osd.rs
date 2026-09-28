@@ -1105,11 +1105,9 @@ impl OsdSettingsUI {
         } else {
             p.subtext0
         };
-        commands.extend(guitk::switch::switch(
-            x + padding,
-            cy,
-            40.0,
-            20.0,
+        commands.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(x + padding, cy, 40.0, 20.0),
             self.config.enabled,
             enable_color,
         ));

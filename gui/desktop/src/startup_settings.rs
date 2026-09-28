@@ -776,11 +776,9 @@ impl StartupSettingsUI {
 
             // Enable/disable toggle
             let toggle_color = if entry.enabled { p.accent } else { p.surface2 };
-            cmds.extend(guitk::switch::switch(
-                x + 8.0,
-                cy + 18.0,
-                36.0,
-                20.0,
+            cmds.extend(guitk::switch::shapes(
+                p,
+                guitk::frame::Rect::new(x + 8.0, cy + 18.0, 36.0, 20.0),
                 entry.enabled,
                 toggle_color,
             ));
@@ -1028,11 +1026,9 @@ impl StartupSettingsUI {
             overflow: TextOverflow::Ellipsis,
         });
         let sw_x = x + width - 44.0;
-        cmds.extend(guitk::switch::switch(
-            sw_x,
-            y + 2.0,
-            40.0,
-            22.0,
+        cmds.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(sw_x, y + 2.0, 40.0, 22.0),
             enabled,
             if enabled { p.accent } else { p.surface2 },
         ));

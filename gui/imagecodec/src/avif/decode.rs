@@ -815,3 +815,93 @@ fn copy_tile<T: Sample>(
     }
     Ok(())
 }
+
+/// How fast AVIF decodes: the measurements `THREADED_PIXELS` and the `-O3`
+/// profile for rav1d and this crate (the workspace `Cargo.toml`) rest on, and
+/// the yardstick for making rav1d faster.
+///
+/// Ignored in an ordinary run: timing is only meaningful in a release build,
+/// and it is a measurement, not a check. Run it as
+/// `cargo test -p imagecodec --release --lib -- --ignored --nocapture bench_avif`.
+#[cfg(test)]
+mod bench {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        reason = "a benchmark over committed inputs, which fails loudly"
+    )]
+
+    extern crate std;
+
+    use std::time::{Duration, Instant};
+
+    use super::{Decoder, next_picture, settings};
+    use crate::Limits;
+    use crate::avif::setup::Picture;
+
+    /// Each figure is the best of this many runs: the least disturbed by
+    /// whatever else the machine was doing, which on a machine shared with
+    /// other builds is most of the noise.
+    const RUNS: usize = 5;
+
+    fn best(mut run: impl FnMut() -> Duration) -> Duration {
+        (0..RUNS).map(|_| run()).min().unwrap_or_default()
+    }
+
+    fn ms(d: Duration) -> f64 {
+        d.as_secs_f64() * 1000.0
+    }
+
+    /// The inputs are `tests/data/generate_avif_bench.py`'s: photograph-like
+    /// pictures at sizes either side of `THREADED_PIXELS`, and one deep.
+    #[test]
+    #[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
+    fn bench_avif_decode() {
+        std::println!(
+            "{:<28} {:>12} {:>12} {:>12}",
+            "picture",
+            "av1 1 thread",
+            "av1 all",
+            "as shipped"
+        );
+        for name in [
+            "avifbench_8_420_640x480",
+            "avifbench_8_420_1920x1080",
+            "avifbench_8_420_2560x1440",
+            "avifbench_10_444_1920x1080",
+        ] {
+            let path = std::format!("{}/tests/data/{name}.avif", env!("CARGO_MANIFEST_DIR"));
+            let bytes = std::fs::read(&path).unwrap();
+            let picture = Picture::read(&bytes).unwrap();
+            let tile = picture.color.tiles[0];
+            let sample = picture.sample(&tile, 0, 0).unwrap();
+            // The AV1 frame alone, through a decoder made for it as `decode`
+            // makes one -- its start-up included, since a still picture pays
+            // it every time -- at one thread and at every CPU.
+            let av1 = |threads: u32| {
+                best(|| {
+                    let mut chosen = settings(&tile);
+                    chosen.threads = threads;
+                    let start = Instant::now();
+                    let mut decoder = Decoder::new(&chosen).unwrap();
+                    next_picture(&mut decoder, &sample, None, false).unwrap();
+                    start.elapsed()
+                })
+            };
+            let (one, all) = (av1(1), av1(0));
+            // And the whole of it as shipped: the container, the frame at the
+            // threads THREADED_PIXELS picks, and the conversion to pixels.
+            let shipped = best(|| {
+                let start = Instant::now();
+                crate::avif::decode(&bytes, Limits::default()).unwrap();
+                start.elapsed()
+            });
+            std::println!(
+                "{name:<28} {:>9.1} ms {:>9.1} ms {:>9.1} ms",
+                ms(one),
+                ms(all),
+                ms(shipped)
+            );
+        }
+    }
+}

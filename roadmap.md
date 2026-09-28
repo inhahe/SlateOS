@@ -2536,8 +2536,10 @@ lane C's `guitk`.
   - `[ ]` Frames coded at another size than their `ispe`, rescaled as libavif
     rescales them (known-issues.md, "[F] An AVIF frame coded at another
     size").
-  - `[ ]` Speed: a committed benchmark, then SIMD in rav1d (known-issues.md,
-    "[F] AVIF decoding has no committed benchmark").
+  - `[-]` Speed: the committed benchmark is in (`bench_avif_decode`: about
+    twice dav1d's time, one thread); making rav1d faster waits on
+    `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
+    (known-issues.md, "[F] AVIF decoding has no committed benchmark").
 
 - `[F]` **A display transport over channel IPC** for local clients, beside
   the TCP one (`gui/remote/src/socket.rs` planned it "when SlateOS's own

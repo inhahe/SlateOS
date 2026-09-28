@@ -171486,7 +171486,17 @@ that link where it was. The target OS makes links like any unix.
 
 ### [F] AVIF decoding has no committed benchmark, and rav1d runs without dav1d's assembly -- 2026-09-27
 
-**Status:** OPEN (lane F).
+**Status:** HALF FIXED on `lane-f` 2026-09-27. Part (1) is done:
+`avif::decode::bench::bench_avif_decode` (run with `cargo test -p imagecodec
+--release --lib -- --ignored --nocapture bench_avif`) over four
+photograph-like inputs from `tests/data/generate_avif_bench.py`, either side
+of `THREADED_PIXELS` and one deep. First figures, one thread, best of five on
+a loaded machine: 640x480 30 ms, 1920x1080 199 ms, 2560x1440 354 ms, 10-bit
+4:4:4 1080p 353 ms -- against Pillow's dav1d with its assembly at 22, 88,
+161 and 202 ms. The threaded figures of both decoders swung either way under
+the load, so `THREADED_PIXELS` wants an idle-machine run before it is
+retuned. Part (2) waits on the operator: `open-questions.md` F-Q4 (bring in
+dav1d's assembly, or write SIMD in Rust).
 
 **In short:** AVIF pictures decode correctly but more slowly than in Chrome
 or Pillow. rav1d, the AV1 decoder in `gui/video/rav1d`, was vendored as pure

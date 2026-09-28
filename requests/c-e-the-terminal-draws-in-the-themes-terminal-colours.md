@@ -1,8 +1,11 @@
 # C -> E -- the terminal draws in the theme's terminal colours
 
 **From:** Lane C (`gui/toolkit`, `gui/appearance`). **To:** Lane E (`apps/terminal`).
-**Filed:** 2026-09-27. **Status:** OPEN -- nothing is broken while it waits; the
-terminal keeps its own colours until it moves.
+**Filed:** 2026-09-27. **Status:** DONE (lane E, 2026-09-28) --
+`ColorScheme::from_palette` takes the foreground, background, cursor and the
+sixteen from `palette.terminal`, and the selection from the accent, exactly as
+asked; its comment says why the slots keep their meanings while the theme
+picks the shades. tmux's panes are drawn by the same code and follow.
 
 **In short:** the palette every application is handed (`App::theme_changed`,
 design-decisions §822) now carries a terminal's colours: `Palette::terminal`,

@@ -15,40 +15,64 @@
 //! and the bid pad were hit-tested from a second copy of their geometry that
 //! disagreed with the first by twenty-five pixels.
 
+use gamechrome::{Chrome, cards};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::cmp::Ordering;
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// The cards are white with red and black suits in every theme
+// (`gamechrome::cards`), the trump suit printed in its own purple; the table,
+// the seats, the panel, the bid pad and the bands follow the user's palette
+// (the operator's answer to C-Q16, §1422, and lane C's call for the card
+// games). It was all a copy of Catppuccin Mocha round a green felt that stayed
+// green in any theme.
 
-const CARD_FACE: Color = Color::from_hex(0xEFF1F5);
-const CARD_INK: Color = Color::from_hex(0x1E1E2E);
-const CARD_INK_RED: Color = Color::from_hex(0xD20F39);
-const CARD_TRUMP_INK: Color = Color::from_hex(0x6C33A8);
-const FELT: Color = Color::from_hex(0x14352B);
-const MANTLE: Color = Color::from_hex(0x181825);
+/// The trump suit's ink on a card's face: spades are printed in purple, so
+/// the suit that beats every other is told apart at a glance.
+const TRUMP_INK: Color = Color::from_hex(0x6C33A8);
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    table: cards::Table,
+    /// Washed over a card the rules will not allow: the page, most of the way.
+    /// A dimmed card is still a white card with its own suit on it; it is the
+    /// wash that says it cannot be played, darkening it in a dark theme and
+    /// fading it in a light one.
+    veil: Color,
+    /// The other partnership's scores, beside ours in the good colour.
+    them: Color,
+    /// What is written across an empty table.
+    message: Color,
+    /// The status line while a settled trick is on the table.
+    settled: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            table: cards::Table::of(p),
+            veil: with_alpha(p.base, 150),
+            them: p.ink(p.peach),
+            message: p.ink(p.mauve),
+            settled: p.ink(p.teal),
+        }
+    }
+}
 
 // ── Constants ───────────────────────────────────────────────────────
 
@@ -143,14 +167,14 @@ impl Suit {
     }
 
     /// The ink a pip of this suit is printed in **on a card face**, which is
-    /// near-white.  The old `color` returned the palette's GREEN and BLUE for
+    /// near-white.  The old `color` returned the palette's GREEN and c.chrome.key for
     /// clubs and diamonds -- fine on the dark background it was chosen for,
     /// illegible on paper.
     fn ink(self) -> Color {
         match self {
-            Suit::Clubs => CARD_INK,
-            Suit::Spades => CARD_TRUMP_INK,
-            Suit::Diamonds | Suit::Hearts => CARD_INK_RED,
+            Suit::Clubs => cards::BLACK,
+            Suit::Spades => TRUMP_INK,
+            Suit::Diamonds | Suit::Hearts => cards::RED,
         }
     }
 
@@ -872,6 +896,10 @@ struct SpadesGame {
     sweep_ms: u32,
     /// Whether the help card is up.
     show_help: bool,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame. A new game deals into this same state, so they carry over.
+    palette: Palette,
 }
 
 impl SpadesGame {
@@ -916,6 +944,7 @@ impl SpadesGame {
             think_ms: 0,
             sweep_ms: 0,
             show_help: false,
+            palette: Palette::for_mode(false),
         };
         game.deal();
         game.begin_bidding();
@@ -1812,21 +1841,22 @@ impl SpadesGame {
     fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let mut f = Frame::new(width, height);
         let l = Layout::solve(width, height);
-        fill(&mut f, l.window, BASE, 0.0);
-        self.draw_header(&mut f, &l);
-        self.draw_table(&mut f, &l);
-        self.draw_hand(&mut f, &l);
-        self.draw_footer(&mut f, &l);
-        self.draw_status(&mut f, &l);
+        let c = Colours::of(&self.palette);
+        fill(&mut f, l.window, c.chrome.page, 0.0);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_table(&mut f, &l, &c);
+        self.draw_hand(&mut f, &l, &c);
+        self.draw_footer(&mut f, &l, &c);
+        self.draw_status(&mut f, &l, &c);
         if self.show_help {
-            self.draw_help(&mut f, &l);
+            self.draw_help(&mut f, &l, &c);
         }
         f
     }
 
     /// The title bar: the game's name, and which round is being played.
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, 0.0);
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.header, c.chrome.band, 0.0);
         if l.header.is_empty() {
             return;
         }
@@ -1835,7 +1865,7 @@ impl SpadesGame {
             (l.pad, l.header.y + (l.header.h - l.title) / 2.0),
             (l.header.w - l.pad * 2.0).max(0.0),
             TITLE,
-            LAVENDER,
+            c.chrome.title,
             l.title,
             FontWeightHint::Bold,
         );
@@ -1850,7 +1880,7 @@ impl SpadesGame {
                 x,
                 l.header.y + (l.header.h - l.small) / 2.0,
                 &right,
-                SUBTEXT0,
+                c.chrome.dim,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1858,13 +1888,13 @@ impl SpadesGame {
     }
 
     /// The felt, and everything on it.
-    fn draw_table(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.table, FELT, l.pad * 0.6);
-        self.draw_trick(f, l);
-        self.draw_seats(f, l);
-        self.draw_panel(f, l);
+    fn draw_table(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.table, c.table.felt, l.pad * 0.6);
+        self.draw_trick(f, l, c);
+        self.draw_seats(f, l, c);
+        self.draw_panel(f, l, c);
         if self.phase == Phase::Bidding && self.current_player.is_human() {
-            self.draw_bid_pad(f, l);
+            self.draw_bid_pad(f, l, c);
         }
     }
 
@@ -1875,7 +1905,7 @@ impl SpadesGame {
     /// out: the game sat at `TrickDone` until the human pressed Enter, and
     /// pressing Enter was also the only thing that let the machines play, so a
     /// game left alone stopped where it stood.
-    fn draw_trick(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_trick(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let settled = self.phase == Phase::TrickDone;
         let trick = if settled {
             self.last_trick.as_ref().unwrap_or(&self.current_trick)
@@ -1890,11 +1920,11 @@ impl SpadesGame {
         let stroke = (l.card.0 * 0.07).clamp(1.0, 4.0);
         for &(player, card) in &trick.cards {
             let r = l.trick_card(player.index());
-            draw_card_face(f, r, card, false);
+            draw_card_face(f, r, card, false, c);
             if taker == Some(player) {
-                outline(f, r, GREEN, stroke);
+                outline(f, r, c.chrome.good, stroke);
             } else if leader == Some(player) {
-                outline(f, r, LAVENDER, stroke);
+                outline(f, r, c.chrome.title, stroke);
             }
         }
         if trick.cards.is_empty()
@@ -1907,7 +1937,7 @@ impl SpadesGame {
                 l.table.w,
                 cy - l.font / 2.0,
                 &message,
-                MAUVE,
+                c.message,
                 l.font,
                 FontWeightHint::Bold,
             );
@@ -1918,7 +1948,7 @@ impl SpadesGame {
                 (l.table.x + l.pad, l.table.bottom() - l.pad - l.small),
                 (l.table.w - l.pad * 2.0).max(0.0),
                 &format!("{} broken", Suit::Spades.name()),
-                LAVENDER,
+                c.chrome.title,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1945,7 +1975,7 @@ impl SpadesGame {
     ///
     /// The old program wrote three compass letters at literal offsets from a
     /// literal centre and put everything else in a sidebar pinned at x = 720.
-    fn draw_seats(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_seats(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         for index in 0..SEATS {
             let r = l.seat_label(index);
             if r.is_empty() {
@@ -1953,14 +1983,23 @@ impl SpadesGame {
             }
             let pid = seat(index);
             let acting = pid == self.current_player && self.sweep_ms == 0;
-            fill(f, r, if acting { SURFACE1 } else { SURFACE0 }, l.pad * 0.3);
+            fill(
+                f,
+                r,
+                if acting {
+                    c.chrome.lit
+                } else {
+                    c.chrome.raised
+                },
+                l.pad * 0.3,
+            );
             let budget = (r.w - l.pad * 0.6).max(0.0);
             bounded(
                 f,
                 (r.x + l.pad * 0.3, r.y + r.h * 0.08),
                 budget,
                 pid.name(),
-                if acting { YELLOW } else { TEXT_COLOR },
+                if acting { c.chrome.even } else { c.chrome.text },
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -1969,7 +2008,7 @@ impl SpadesGame {
                 (r.x + l.pad * 0.3, r.y + r.h * 0.52),
                 budget,
                 &format!("{} left", self.hand_of(pid).len()),
-                SUBTEXT0,
+                c.chrome.dim,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -1982,11 +2021,11 @@ impl SpadesGame {
     /// is the answer the old sidebar could not give: it was drawn at x = 720
     /// whatever the window was, so in anything narrower than 890 it was off the
     /// right-hand edge entirely.
-    fn draw_panel(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_panel(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         if l.panel.is_empty() {
             return;
         }
-        fill(f, l.panel, SURFACE0, l.pad * 0.4);
+        fill(f, l.panel, c.chrome.raised, l.pad * 0.4);
         let x = l.panel.x + l.pad * 0.6;
         let budget = (l.panel.w - l.pad * 1.2).max(0.0);
         let step = l.small * 1.9;
@@ -1995,7 +2034,7 @@ impl SpadesGame {
             bounded(f, (x, y), budget, text, color, l.small, weight);
             y += step;
         };
-        row(f, "Scores", LAVENDER, FontWeightHint::Bold);
+        row(f, "Scores", c.chrome.title, FontWeightHint::Bold);
         for (index, team) in self.teams.iter().enumerate() {
             let text = format!(
                 "{}: {} \u{00b7} {} bags",
@@ -2003,7 +2042,7 @@ impl SpadesGame {
                 team.score,
                 team.bags
             );
-            let color = if index == 0 { GREEN } else { PEACH };
+            let color = if index == 0 { c.chrome.good } else { c.them };
             row(f, &text, color, FontWeightHint::Bold);
             // The partnership's contract against what it has taken -- the one
             // number that says whether the round is being made or set, and the
@@ -2013,7 +2052,7 @@ impl SpadesGame {
                 self.team_bid(index),
                 self.team_tricks(index)
             );
-            row(f, &contract, SUBTEXT0, FontWeightHint::Regular);
+            row(f, &contract, c.chrome.dim, FontWeightHint::Regular);
         }
         for (index, pr) in self.player_rounds.iter().enumerate() {
             let bid = pr.bid.map_or_else(|| String::from("\u{2014}"), bid_name);
@@ -2023,7 +2062,7 @@ impl SpadesGame {
                 bid,
                 pr.tricks_won
             );
-            row(f, &text, SUBTEXT0, FontWeightHint::Regular);
+            row(f, &text, c.chrome.dim, FontWeightHint::Regular);
         }
     }
 
@@ -2035,20 +2074,20 @@ impl SpadesGame {
     /// tested against `overlay_x = TRICK_CENTER_X - 120.0` and `overlay_y +
     /// 50.0`, so a click on the button marked 5 was answered by the square
     /// drawn one row up and half a cell left of it.
-    fn draw_bid_pad(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_bid_pad(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let pad = l.bid_pad();
         if pad.is_empty() {
             return;
         }
-        fill(f, pad, MANTLE, l.pad * 0.6);
-        outline(f, pad, LAVENDER, (l.pad * 0.12).clamp(1.0, 3.0));
+        fill(f, pad, c.chrome.band, l.pad * 0.6);
+        outline(f, pad, c.chrome.title, (l.pad * 0.12).clamp(1.0, 3.0));
         centred(
             f,
             pad.x,
             pad.w,
             pad.y + l.pad * 0.7,
             &format!("Your bid: {}", bid_name(self.bid_selection)),
-            TEXT_COLOR,
+            c.chrome.text,
             l.font,
             FontWeightHint::Bold,
         );
@@ -2058,17 +2097,21 @@ impl SpadesGame {
                 continue;
             }
             let on = value == self.bid_selection;
-            fill(f, r, if on { BLUE } else { SURFACE1 }, r.w * 0.2);
-            let size = (r.w * 0.42).max(7.0);
-            centred(
+            // The toolkit's push buttons; the bid chosen is the default one,
+            // in the accent.
+            gamechrome::button(
                 f,
-                r.x,
-                r.w,
-                r.y + (r.h - size) / 2.0,
+                &self.palette,
+                (r.x, r.y, r.w, r.h),
                 &bid_key_label(value),
-                if on { BASE } else { TEXT_COLOR },
-                size,
-                FontWeightHint::Bold,
+                (r.w * 0.42).max(7.0),
+                if on {
+                    guitk::button::Kind::Primary
+                } else {
+                    guitk::button::Kind::Plain
+                },
+                guitk::button::State::default(),
+                c.chrome.band,
             );
             f.hit(Target::Bid(value), r);
         }
@@ -2081,7 +2124,7 @@ impl SpadesGame {
     /// program drew a selected card ten pixels high and searched the strip it
     /// had left, so the top ten pixels of the card the player was aiming at
     /// were the one part of it that could not be clicked.
-    fn draw_hand(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_hand(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let hand = &self.hands[0];
         let n = hand.len();
         let choosing = self.phase == Phase::Playing && self.current_player.is_human();
@@ -2097,9 +2140,9 @@ impl SpadesGame {
             } else {
                 l.hand_card(i, n)
             };
-            draw_card_face(f, r, card, choosing && !legal.contains(&i));
+            draw_card_face(f, r, card, choosing && !legal.contains(&i), c);
             if on {
-                outline(f, r, YELLOW, (l.card.0 * 0.07).clamp(1.0, 4.0));
+                outline(f, r, c.table.focus, (l.card.0 * 0.07).clamp(1.0, 4.0));
             }
             f.hit(Target::Card(i), r);
         }
@@ -2109,8 +2152,8 @@ impl SpadesGame {
     ///
     /// The old window had no buttons at all: every verb was a keystroke, and
     /// the only list of them was one line of grey text in the footer.
-    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.footer, BASE, 0.0);
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.footer, c.chrome.page, 0.0);
         if l.footer.is_empty() {
             return;
         }
@@ -2129,16 +2172,20 @@ impl SpadesGame {
             }
             let r = Rect::new(x, y, w, h);
             let on = button == Button::Help && self.show_help;
-            fill(f, r, if on { SURFACE1 } else { SURFACE0 }, h * 0.25);
-            let (cx, cy) = r.centre();
-            text_at(
+            // The toolkit's push button; Help is held down while its card is
+            // up.
+            gamechrome::button(
                 f,
-                cx - text::measure(label, size, FontWeightHint::Bold) / 2.0,
-                cy - size / 2.0,
+                &self.palette,
+                (r.x, r.y, r.w, r.h),
                 label,
-                if on { TEXT_COLOR } else { SUBTEXT0 },
                 size,
-                FontWeightHint::Bold,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    pressed: on,
+                    ..guitk::button::State::default()
+                },
+                c.chrome.page,
             );
             f.hit(Target::Button(button), r);
             x += w + gap;
@@ -2151,8 +2198,8 @@ impl SpadesGame {
     /// keystrokes at `FOOTER_Y`, both unbounded, so a status naming a seat ran
     /// straight off the right edge of any window narrower than the one the
     /// coordinates were written for.
-    fn draw_status(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.status, MANTLE, 0.0);
+    fn draw_status(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.status, c.chrome.band, 0.0);
         if l.status.is_empty() {
             return;
         }
@@ -2170,7 +2217,7 @@ impl SpadesGame {
                     l.status.right() - l.pad - w,
                     l.status.y + (l.status.h - l.small) / 2.0,
                     &counter,
-                    SUBTEXT0,
+                    c.chrome.dim,
                     l.small,
                     FontWeightHint::Regular,
                 );
@@ -2179,10 +2226,10 @@ impl SpadesGame {
         }
 
         let color = match self.phase {
-            Phase::GameOver => RED,
-            Phase::RoundOver => YELLOW,
-            Phase::TrickDone => TEAL,
-            Phase::Bidding | Phase::Playing => TEXT_COLOR,
+            Phase::GameOver => c.chrome.bad,
+            Phase::RoundOver => c.chrome.even,
+            Phase::TrickDone => c.settled,
+            Phase::Bidding | Phase::Playing => c.chrome.text,
         };
         bounded(
             f,
@@ -2201,8 +2248,8 @@ impl SpadesGame {
     /// `button_label` -- the same two functions the footer draws from, so a
     /// button whose label changes cannot leave the help card describing the old
     /// one. The old window had no help at all.
-    fn draw_help(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.window, Color::rgba(0, 0, 0, 180), 0.0);
+    fn draw_help(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.window, c.chrome.scrim, 0.0);
 
         let mut rows: Vec<(String, String)> = vec![
             (
@@ -2241,14 +2288,14 @@ impl SpadesGame {
             card_w,
             card_h,
         );
-        fill(f, card, MANTLE, l.pad * 0.6);
+        fill(f, card, c.chrome.band, l.pad * 0.6);
         centred(
             f,
             card.x,
             card.w,
             card.y + l.pad,
             heading,
-            TEXT_COLOR,
+            c.chrome.text,
             l.title,
             FontWeightHint::Bold,
         );
@@ -2267,7 +2314,7 @@ impl SpadesGame {
                 (key_x, y),
                 key_w.min((card.right() - l.pad - key_x).max(0.0)),
                 key,
-                BLUE,
+                c.chrome.key,
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -2277,7 +2324,7 @@ impl SpadesGame {
                 (desc_x, y),
                 (card.right() - l.pad - desc_x).max(0.0),
                 desc,
-                SUBTEXT0,
+                c.chrome.dim,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2475,12 +2522,24 @@ fn centred(
 /// A card, face up: rank and suit in the corner, the suit again in the middle.
 ///
 /// `dim` is a card the rules will not allow to be played now.
-fn draw_card_face(f: &mut Frame<Target>, r: Rect, card: Card, dim: bool) {
+fn draw_card_face(f: &mut Frame<Target>, r: Rect, card: Card, dim: bool, c: &Colours) {
     if r.is_empty() {
         return;
     }
-    fill(f, r, if dim { SUBTEXT0 } else { CARD_FACE }, r.w * 0.12);
-    let ink = if dim { OVERLAY0 } else { card.suit.ink() };
+    fill(f, r, cards::FACE, r.w * 0.12);
+    // Its edge: white on a light theme's table is a card seen by nothing but
+    // its shadow, so there it is ringed.
+    outline(f, r, c.table.face_edge(), 1.0);
+    draw_card_letters(f, r, card);
+    if dim {
+        // Over the finished card: the letters fade with it.
+        fill(f, r, c.veil, r.w * 0.12);
+    }
+}
+
+/// A card's rank and suit, in its corner and in the middle.
+fn draw_card_letters(f: &mut Frame<Target>, r: Rect, card: Card) {
+    let ink = card.suit.ink();
     let corner = (r.w * 0.30).max(6.0);
     // A card too small to letter is left blank rather than scribbled over:
     // below about twenty pixels the smallest legible rank is wider than the
@@ -2529,6 +2588,10 @@ fn draw_card_face(f: &mut Frame<Target>, r: Rect, card: Card, dim: bool) {
 // ── The window ──────────────────────────────────────────────────────
 
 impl App for SpadesGame {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from(TITLE)
     }
@@ -2604,6 +2667,59 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark --
+    /// bidding with the pad up, a trick in play with a card the rules forbid,
+    /// and the help card -- with only the cards' white, red, black and trump
+    /// purple, and the rim a card is ringed in, not the palette's (the
+    /// operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut derived = vec![
+                cards::FACE,
+                cards::RED,
+                cards::BLACK,
+                TRUMP_INK,
+                gamechrome::RIMS.0,
+                gamechrome::RIMS.1,
+            ];
+            for (kind, ground) in [
+                (guitk::button::Kind::Plain, c.chrome.band),
+                (guitk::button::Kind::Primary, c.chrome.band),
+                (guitk::button::Kind::Plain, c.chrome.page),
+            ] {
+                derived.extend(gamechrome::button_colours(&p, kind, ground));
+                for pressed in [false, true] {
+                    let paint = guitk::button::paint(
+                        &p,
+                        kind,
+                        guitk::button::State {
+                            pressed,
+                            ..guitk::button::State::default()
+                        },
+                        ground,
+                    );
+                    derived.extend([paint.upper, paint.lower, paint.edge, paint.ink]);
+                }
+            }
+            let mut game = SpadesGame::with_seed(7);
+            game.theme_changed(&p);
+            let bidding = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            game.show_help = true;
+            let help = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            for (what, f) in [("bidding", bidding), ("help", help)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("spades, {what}, light: {light}"),
+                );
+            }
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe::{click_sized, press, press_with, rect_of_sized};
 
@@ -3041,6 +3157,40 @@ mod tests {
         for &idx in &legal {
             assert_eq!(game.hands[0][idx].suit, Suit::Hearts);
         }
+    }
+
+    /// **A card the rules forbid is washed out** while the human chooses --
+    /// the page washed over it, which darkens it in a dark theme and fades it
+    /// in a light one -- and the cards that may be played are not.
+    #[test]
+    fn a_card_the_rules_forbid_is_washed_out() {
+        let mut game = SpadesGame::with_seed(7);
+        game.phase = Phase::Playing;
+        game.current_player = PlayerId::SOUTH;
+        game.hands[0] = vec![
+            Card::new(Suit::Hearts, Rank::ACE),
+            Card::new(Suit::Clubs, Rank::TWO),
+        ];
+        game.current_trick = Trick::new();
+        game.current_trick
+            .add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
+        assert_eq!(game.legal_plays(PlayerId::SOUTH), vec![0]);
+        let veil = Colours::of(&game.palette).veil;
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let f = game.frame(size.0, size.1);
+        let washed = |i: usize| {
+            let r = rect_of_sized(&game, Target::Card(i), size).expect("the card is drawn");
+            f.commands().iter().any(|cmd| {
+                matches!(cmd, RenderCommand::FillRect { x, y, width, color, .. }
+                    if *color == veil && (x - r.x).abs() < 0.01 && (y - r.y).abs() < 0.01
+                        && (width - r.w).abs() < 0.01)
+            })
+        };
+        assert!(!washed(0), "the heart that follows suit is washed out");
+        assert!(
+            washed(1),
+            "the club the rules forbid is drawn as though it could be played"
+        );
     }
 
     #[test]
@@ -3574,6 +3724,7 @@ mod tests {
             Rect::new(10.0, 10.0, 60.0, 84.0),
             Card::new(Suit::Spades, Rank::ACE),
             false,
+            &Colours::of(&Palette::for_mode(false)),
         );
         // A face, a rank in the corner, the suit beside it, and the suit again
         // across the middle.
@@ -3588,6 +3739,7 @@ mod tests {
             Rect::EMPTY,
             Card::new(Suit::Spades, Rank::ACE),
             false,
+            &Colours::of(&Palette::for_mode(false)),
         );
         assert!(f.commands().is_empty());
     }
@@ -4267,7 +4419,7 @@ mod tests {
                 w,
                 10.0,
                 s,
-                TEXT_COLOR,
+                Color::from_hex(0xCDD6F4),
                 14.0,
                 FontWeightHint::Regular,
             );
@@ -4526,7 +4678,9 @@ mod tests {
                     height,
                     color,
                     ..
-                } if *color == GREEN => Some(Rect::new(*x, *y, *width, *height)),
+                } if *color == Colours::of(&Palette::for_mode(false)).chrome.good => {
+                    Some(Rect::new(*x, *y, *width, *height))
+                }
                 _ => None,
             })
             .collect();

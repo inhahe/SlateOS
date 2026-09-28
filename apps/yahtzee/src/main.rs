@@ -21,32 +21,52 @@
 
 use std::process::ExitCode;
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// A die is white with black pips -- that is what a die is -- in every theme;
+// the score sheet, the rings round the dice and the chrome follow the user's
+// palette (the operator's answer to C-Q16, §1422, and lane C's call for this
+// game). The dice were the dark theme's own greys with light pips, and the
+// whole window a copy of Catppuccin Mocha, dark on a light desktop.
+
+/// A die's face, and its pips. The pips' near-black is not the dark theme's
+/// page colour, so a pip is never mistaken for the page behind it.
+const DIE_FACE: Color = Color::from_hex(0xF7F7F4);
+const DIE_PIP: Color = Color::from_hex(0x161616);
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// A die kept for the next roll: its ring and its HELD.
+    held: Color,
+    /// A category's score if it were taken now.
+    potential: Color,
+    /// The Yahtzee bonus rows.
+    bonus: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            held: p.ink(p.peach),
+            potential: p.ink(p.teal),
+            bonus: p.ink(p.mauve),
+        }
+    }
+}
 
 // ── The size the window opens at ────────────────────────────────────
 //
@@ -622,6 +642,11 @@ struct Yahtzee {
     /// is read against.
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame. A new game resets only the game's own fields, so they
+    /// carry over.
+    palette: Palette,
 }
 
 impl Yahtzee {
@@ -644,6 +669,7 @@ impl Yahtzee {
             rng: SeededRng::new(seed),
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         }
     }
 
@@ -1036,6 +1062,7 @@ impl Yahtzee {
     /// so a hit test cannot disagree with the picture.
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
+        let c = Colours::of(&self.palette);
         let mut f = Frame::new(w, h);
 
         // The background is the window, not a remembered size.
@@ -1044,14 +1071,14 @@ impl Yahtzee {
             y: 0.0,
             width: w,
             height: h,
-            color: BASE,
+            color: c.chrome.page,
             corner_radii: CornerRadii::ZERO,
         });
         f.clip(l.window);
 
-        self.draw_header(&mut f, &l);
-        self.draw_scorecard(&mut f, &l);
-        self.draw_left(&mut f, &l);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_scorecard(&mut f, &l, &c);
+        self.draw_left(&mut f, &l, &c);
 
         f.unclip();
         f
@@ -1064,7 +1091,7 @@ impl Yahtzee {
     /// `PADDING + 400.0`: in a narrow window the high score was off the right
     /// edge entirely, and in a wide one all three huddled in the left quarter
     /// with the rest of the strip empty.
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let band = inset(l.header, l.pad);
         if band.is_empty() {
             return;
@@ -1076,7 +1103,7 @@ impl Yahtzee {
             x: title.x,
             y: title.y,
             text: String::from("Yahtzee"),
-            color: LAVENDER,
+            color: c.chrome.title,
             font_size: l.title,
             font_weight: FontWeightHint::Bold,
             max_width: Some(title.w),
@@ -1114,7 +1141,7 @@ impl Yahtzee {
             x: turn.x,
             y: turn.y + (l.title - l.font).max(0.0) / 2.0,
             text: turn_text,
-            color: SUBTEXT0,
+            color: c.chrome.dim,
             font_size: l.font,
             font_weight: FontWeightHint::Regular,
             max_width: Some(turn.w),
@@ -1126,7 +1153,7 @@ impl Yahtzee {
             x: high.x,
             y: high.y + (l.title - l.font).max(0.0) / 2.0,
             text: high_text,
-            color: YELLOW,
+            color: c.chrome.even,
             font_size: l.font,
             font_weight: FontWeightHint::Bold,
             max_width: Some(high.w),
@@ -1136,15 +1163,15 @@ impl Yahtzee {
     }
 
     /// The dice, the roll button and the key help.
-    fn draw_left(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_left(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let (dice_area, button, hints) = l.left_bands();
         let d = Dice::fit(dice_area, l.small);
 
         for i in 0..NUM_DICE {
-            self.draw_die(f, l, d, i);
+            self.draw_die(f, l, d, i, c);
         }
 
-        self.draw_button(f, l, button, d);
+        self.draw_button(f, l, button, d, c);
 
         for (i, hint) in HINTS.iter().enumerate() {
             let line = l.small * 1.5;
@@ -1163,7 +1190,7 @@ impl Yahtzee {
                 x: row.x,
                 y: row.y,
                 text: String::from(*hint),
-                color: OVERLAY0,
+                color: c.chrome.dim,
                 font_size: l.small,
                 font_weight: FontWeightHint::Light,
                 max_width: Some(row.w),
@@ -1173,7 +1200,7 @@ impl Yahtzee {
         }
     }
 
-    fn draw_die(&self, f: &mut Frame<Target>, l: &Layout, d: Dice, i: usize) {
+    fn draw_die(&self, f: &mut Frame<Target>, l: &Layout, d: Dice, i: usize, c: &Colours) {
         let die = d.die(i);
         if die.is_empty() {
             return;
@@ -1182,11 +1209,11 @@ impl Yahtzee {
         let selected = self.focus == FocusRegion::Dice && self.selected_die == i;
 
         let border = if selected {
-            BLUE
+            c.chrome.ring
         } else if held {
-            PEACH
+            c.held
         } else {
-            OVERLAY0
+            c.chrome.off
         };
         let ring = (d.side * 0.05).max(1.0);
         f.push(RenderCommand::FillRect {
@@ -1202,7 +1229,7 @@ impl Yahtzee {
             y: die.y,
             width: die.w,
             height: die.h,
-            color: if held { SURFACE1 } else { SURFACE0 },
+            color: DIE_FACE,
             corner_radii: CornerRadii::all(d.side * 0.14),
         });
 
@@ -1216,7 +1243,7 @@ impl Yahtzee {
             x: die.centre().0 - text::measure("5", l.small, FontWeightHint::Regular) / 2.0,
             y: (die.y - l.small * 1.5).max(0.0),
             text: format!("{}", i.saturating_add(1)),
-            color: OVERLAY0,
+            color: c.chrome.dim,
             font_size: l.small,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1228,7 +1255,7 @@ impl Yahtzee {
                 x: die.centre().0 - label_w / 2.0,
                 y: die.bottom() + l.small * 0.4,
                 text: String::from("HELD"),
-                color: PEACH,
+                color: c.held,
                 font_size: l.small,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1275,20 +1302,20 @@ impl Yahtzee {
                 y: cy + sy * off - r,
                 width: r * 2.0,
                 height: r * 2.0,
-                color: TEXT_COLOR,
+                color: DIE_PIP,
                 corner_radii: CornerRadii::all(r),
             });
         }
     }
 
-    fn draw_button(&self, f: &mut Frame<Target>, l: &Layout, band: Rect, d: Dice) {
+    fn draw_button(&self, f: &mut Frame<Target>, l: &Layout, band: Rect, d: Dice, c: &Colours) {
         if band.is_empty() {
             return;
         }
-        let (fill, label) = match self.phase() {
-            GamePhase::GameOver => (GREEN, "New Game (N)"),
-            GamePhase::MustScore => (OVERLAY0, "No Rolls Left"),
-            GamePhase::Rolling => (BLUE, "Roll (R)"),
+        let label = match self.phase() {
+            GamePhase::GameOver => "New Game (N)",
+            GamePhase::MustScore => "No Rolls Left",
+            GamePhase::Rolling => "Roll (R)",
         };
         // The button is as wide as its widest legend rather than a constant, so
         // "No Rolls Left" cannot spill out of a box sized for "Roll (R)".
@@ -1302,34 +1329,24 @@ impl Yahtzee {
         let row = d.row();
         let x = (row.centre().0 - width / 2.0).clamp(band.x, (band.right() - width).max(band.x));
         let button = Rect::new(x, band.y, width, band.h);
-        f.push(RenderCommand::FillRect {
-            x: button.x,
-            y: button.y,
-            width: button.w,
-            height: button.h,
-            color: fill,
-            corner_radii: CornerRadii::all(button.h * 0.2),
-        });
-        let label_w = text::measure(label, l.font, FontWeightHint::Bold);
-        f.push(RenderCommand::Text {
-            x: button.centre().0 - label_w / 2.0,
-            y: button.centre().1 - l.font * 0.6,
-            text: String::from(label),
-            color: if self.phase() == GamePhase::MustScore {
-                SUBTEXT0
-            } else {
-                CRUST
+        gamechrome::button(
+            f,
+            &self.palette,
+            (button.x, button.y, button.w, button.h),
+            label,
+            l.font,
+            guitk::button::Kind::Primary,
+            guitk::button::State {
+                disabled: self.phase() == GamePhase::MustScore,
+                ..guitk::button::State::default()
             },
-            font_size: l.font,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(button.w),
-            overflow: TextOverflow::Ellipsis,
-        });
+            c.chrome.page,
+        );
         f.hit(Target::RollButton, button);
     }
 
     /// The scorecard: one row per entry in [`Yahtzee::rows`].
-    fn draw_scorecard(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_scorecard(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
         let area = inset(l.card, l.pad);
         if area.is_empty() {
             return;
@@ -1348,7 +1365,7 @@ impl Yahtzee {
             y: area.y,
             width: area.w,
             height: card_h.min(area.h),
-            color: MANTLE,
+            color: c.chrome.band,
             corner_radii: CornerRadii::all(row_h * 0.3),
         });
         f.hit(Target::Scorecard, Rect::new(area.x, area.y, area.w, card_h));
@@ -1360,11 +1377,11 @@ impl Yahtzee {
                 // is a row painted over whatever the compositor puts there.
                 break;
             }
-            self.draw_row(f, l, band, *row);
+            self.draw_row(f, l, band, *row, c);
         }
     }
 
-    fn draw_row(&self, f: &mut Frame<Target>, l: &Layout, band: Rect, row: Row) {
+    fn draw_row(&self, f: &mut Frame<Target>, l: &Layout, band: Rect, row: Row, c: &Colours) {
         // The score column is a share of the row rather than a fixed 80 pixels
         // from its right edge, which at a narrow card left the name and the
         // number on top of one another.
@@ -1405,13 +1422,13 @@ impl Yahtzee {
 
         match row {
             Row::Head => {
-                fill(f, SURFACE1);
+                fill(f, c.chrome.lit);
                 write(
                     f,
                     name_x,
                     score_x - name_x,
                     String::from("Category"),
-                    TEXT_COLOR,
+                    c.chrome.text,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1420,7 +1437,7 @@ impl Yahtzee {
                     score_x,
                     score_w,
                     String::from("Score"),
-                    TEXT_COLOR,
+                    c.chrome.text,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1432,11 +1449,11 @@ impl Yahtzee {
                 fill(
                     f,
                     if selected {
-                        SURFACE1
+                        c.chrome.lit
                     } else if i.is_multiple_of(2) {
-                        CRUST
+                        c.chrome.well
                     } else {
-                        MANTLE
+                        c.chrome.band
                     },
                 );
                 if selected {
@@ -1445,7 +1462,7 @@ impl Yahtzee {
                         y: band.y,
                         width: (band.w * 0.012).max(2.0),
                         height: band.h,
-                        color: BLUE,
+                        color: c.chrome.key,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
@@ -1455,9 +1472,9 @@ impl Yahtzee {
                     score_x - name_x,
                     String::from(cat.name()),
                     if filled.is_some() {
-                        SUBTEXT0
+                        c.chrome.dim
                     } else {
-                        TEXT_COLOR
+                        c.chrome.text
                     },
                     if selected {
                         FontWeightHint::Bold
@@ -1467,12 +1484,18 @@ impl Yahtzee {
                     l.font,
                 );
                 let (s, color) = match filled {
-                    Some(v) => (format!("{v}"), if v > 0 { GREEN } else { RED }),
+                    Some(v) => (
+                        format!("{v}"),
+                        if v > 0 { c.chrome.good } else { c.chrome.bad },
+                    ),
                     None if self.roll_number > 0 => {
                         let pot = potential_score(&self.dice, cat);
-                        (format!("({pot})"), if pot > 0 { TEAL } else { OVERLAY0 })
+                        (
+                            format!("({pot})"),
+                            if pot > 0 { c.potential } else { c.chrome.dim },
+                        )
                     }
-                    None => (String::from("-"), OVERLAY0),
+                    None => (String::from("-"), c.chrome.dim),
                 };
                 write(
                     f,
@@ -1486,13 +1509,13 @@ impl Yahtzee {
                 f.hit(Target::Category(i), band);
             }
             Row::UpperTotal => {
-                fill(f, SURFACE0);
+                fill(f, c.chrome.raised);
                 write(
                     f,
                     name_x,
                     score_x - name_x,
                     String::from("Upper Total"),
-                    SUBTEXT0,
+                    c.chrome.dim,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1503,9 +1526,9 @@ impl Yahtzee {
                     score_w,
                     format!("{total} / {UPPER_BONUS_THRESHOLD}"),
                     if total >= UPPER_BONUS_THRESHOLD {
-                        GREEN
+                        c.chrome.good
                     } else {
-                        SUBTEXT0
+                        c.chrome.dim
                     },
                     FontWeightHint::Regular,
                     l.font,
@@ -1513,13 +1536,13 @@ impl Yahtzee {
                 f.hit(Target::Tally(Row::UpperTotal), band);
             }
             Row::Bonus => {
-                fill(f, SURFACE0);
+                fill(f, c.chrome.raised);
                 write(
                     f,
                     name_x,
                     score_x - name_x,
                     String::from("Bonus"),
-                    SUBTEXT0,
+                    c.chrome.dim,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1533,7 +1556,11 @@ impl Yahtzee {
                     } else {
                         String::from("-")
                     },
-                    if bonus > 0 { GREEN } else { OVERLAY0 },
+                    if bonus > 0 {
+                        c.chrome.good
+                    } else {
+                        c.chrome.dim
+                    },
                     FontWeightHint::Regular,
                     l.font,
                 );
@@ -1545,19 +1572,19 @@ impl Yahtzee {
                     y1: band.centre().1,
                     x2: band.right(),
                     y2: band.centre().1,
-                    color: SURFACE1,
+                    color: c.chrome.lit,
                     width: 1.0,
                 });
                 f.hit(Target::Tally(Row::Rule), band);
             }
             Row::YahtzeeBonus => {
-                fill(f, SURFACE0);
+                fill(f, c.chrome.raised);
                 write(
                     f,
                     name_x,
                     score_x - name_x,
                     format!("Yahtzee Bonus (x{})", self.yahtzee_bonus_count),
-                    MAUVE,
+                    c.bonus,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1566,20 +1593,20 @@ impl Yahtzee {
                     score_x,
                     score_w,
                     format!("+{}", self.yahtzee_bonus_total()),
-                    MAUVE,
+                    c.bonus,
                     FontWeightHint::Regular,
                     l.font,
                 );
                 f.hit(Target::Tally(Row::YahtzeeBonus), band);
             }
             Row::GrandTotal => {
-                fill(f, SURFACE1);
+                fill(f, c.chrome.lit);
                 write(
                     f,
                     name_x,
                     score_x - name_x,
                     String::from("GRAND TOTAL"),
-                    TEXT_COLOR,
+                    c.chrome.text,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1588,7 +1615,7 @@ impl Yahtzee {
                     score_x,
                     score_w,
                     format!("{}", self.grand_total()),
-                    YELLOW,
+                    c.chrome.even,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1636,6 +1663,10 @@ fn handle_event(game: &mut Yahtzee, event: &Event) -> EventResult {
 }
 
 impl App for Yahtzee {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Yahtzee".to_string()
     }
@@ -1723,6 +1754,128 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- a
+    /// fresh game, a roll with a die held and a score taken, and a game with
+    /// no rolls left -- with only the dice's own white and black not the
+    /// palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let page = Chrome::of(&p).page;
+            let mut derived = vec![DIE_FACE, DIE_PIP];
+            derived.extend(gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Primary,
+                page,
+            ));
+            let mut game = Yahtzee::with_seed(7);
+            game.theme_changed(&p);
+            let fresh = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            assert!(game.roll(), "the dice would not roll");
+            game.held[0] = true;
+            game.scores[0] = Some(3);
+            let rolled = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            game.roll_number = MAX_ROLLS;
+            let spent = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            for (what, f) in [("fresh", fresh), ("rolled", rolled), ("spent", spent)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("yahtzee, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **The roll button is switched off with no rolls left**, in the
+    /// toolkit's look for it, and the default button while there are.
+    #[test]
+    fn the_roll_button_is_switched_off_with_no_rolls_left() {
+        let p = Palette::for_mode(false);
+        let page = Chrome::of(&p).page;
+        let face = |disabled| {
+            guitk::button::paint(
+                &p,
+                guitk::button::Kind::Primary,
+                guitk::button::State {
+                    disabled,
+                    ..guitk::button::State::default()
+                },
+                page,
+            )
+            .lower
+        };
+        let (off, on) = (face(true), face(false));
+        // The face under the button's own label.
+        let face_under = |game: &Yahtzee, caption: &str| {
+            let f = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let (tx, ty) = f
+                .commands()
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Text { text, x, y, .. } if text == caption => Some((*x, *y)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{caption} is not drawn"));
+            f.commands().iter().find_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                    && (*color == off || *color == on) =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+        };
+        let mut game = Yahtzee::with_seed(7);
+        assert_eq!(
+            face_under(&game, "Roll (R)"),
+            Some(on),
+            "Roll looks off with rolls left"
+        );
+        game.roll_number = MAX_ROLLS;
+        assert_eq!(
+            face_under(&game, "No Rolls Left"),
+            Some(off),
+            "the spent button looks live"
+        );
+    }
+
+    /// **A die is white with black pips in either theme**, every pip drawn
+    /// on the white.
+    #[test]
+    fn a_die_is_white_with_black_pips_in_either_theme() {
+        for light in [false, true] {
+            let mut game = Yahtzee::with_seed(7);
+            game.theme_changed(&Palette::for_mode(light));
+            assert!(game.roll(), "the dice would not roll");
+            let f = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let faces = f
+                .commands()
+                .iter()
+                .filter(|cmd| matches!(cmd, RenderCommand::FillRect { color, .. } if *color == DIE_FACE))
+                .count();
+            assert_eq!(faces, NUM_DICE, "light: {light}");
+            let pips: usize = game.dice.iter().map(|&v| usize::from(v)).sum();
+            let drawn = f
+                .commands()
+                .iter()
+                .filter(
+                    |cmd| matches!(cmd, RenderCommand::FillRect { color, .. } if *color == DIE_PIP),
+                )
+                .count();
+            assert_eq!(drawn, pips, "light: {light}");
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
 

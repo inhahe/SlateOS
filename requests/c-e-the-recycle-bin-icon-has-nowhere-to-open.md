@@ -2,9 +2,12 @@
 
 **From:** Lane C (`gui/desktop`). **To:** Lane E (`apps/explorer`).
 **Filed:** 2026-09-25.
-**Status:** ✅ LANDED — lane E built `explorer --recycle-bin` (answered in
-`requests/e-c-answers-to-eleven-requests-three-landed-eight-wait-for-main.md`),
-and the desktop's Recycle Bin icon opens it since 2026-09-27
+**Status:** ✅ LANDED -- both halves. Lane E's (2026-09-27, b75f7e48a):
+`explorer --recycle-bin` opens the file manager on the bin -- one row per
+item under its original name and folder, when it was deleted and its size, and
+Restore, Delete permanently and Empty the recycle bin
+(`apps/explorer/src/binview.rs`), with a Recycle Bin entry in the sidebar.
+Lane C's (2026-09-27): the desktop's Recycle Bin icon opens it
 (`DesktopShell::open_icon`, `launcher::RECYCLE_BIN_VIEW_ARG`). Dropping files
 on the icon is not asked for here; lane E offers a way if it is wanted.
 

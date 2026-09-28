@@ -1504,8 +1504,20 @@ pub struct CreateOptions {
     pub source_drive_id: String,
     pub output_path: PathBuf,
     pub compress: bool,
-    pub format: ImageFormat,
 }
+
+/// The format of every image this program creates: the drive's bytes, as
+/// they are -- `CopyJob` neither compresses them nor wraps them.
+///
+/// `CreateOptions` carried a `format` for this, offering Raw, ISO and
+/// Gzip-compressed, which nothing set and nothing branched on, drawn as
+/// "Output format: Raw (.img)". It was right by coincidence: the day a picker
+/// set it to Gzip, the copy would have written raw bytes under an `.img.gz`
+/// name, and the failure would have surfaced much later as a corrupt archive
+/// (known-issues `TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES`, where this was
+/// recorded as a trap). The label reads what the copy does now; a format that
+/// needs converting is a change to the copy first, and then to this.
+const CREATED_FORMAT: ImageFormat = ImageFormat::Raw;
 
 impl Default for CreateOptions {
     fn default() -> Self {
@@ -1513,7 +1525,6 @@ impl Default for CreateOptions {
             source_drive_id: String::new(),
             output_path: PathBuf::new(),
             compress: false,
-            format: ImageFormat::Raw,
         }
     }
 }
@@ -3522,8 +3533,8 @@ impl DiskImagerApp {
             y: cy,
             text: format!(
                 "Output format: {} ({})",
-                self.create_options.format.name(),
-                self.create_options.format.extensions()
+                CREATED_FORMAT.name(),
+                CREATED_FORMAT.extensions()
             ),
             color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
@@ -6882,6 +6893,22 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn the_create_tab_names_the_format_the_copy_writes() {
+        let mut app = app_with_drives(1);
+        app.active_tab = MainTab::Create;
+        let said = format!(
+            "Output format: {} ({})",
+            ImageFormat::Raw.name(),
+            ImageFormat::Raw.extensions()
+        );
+        assert!(
+            drawn_text(&mut app).contains(&said),
+            "the Create tab does not say the image is raw: {:?}",
+            drawn_text(&mut app)
+        );
     }
 
     #[test]

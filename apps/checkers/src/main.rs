@@ -14,46 +14,84 @@
 
 use std::process::ExitCode;
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Red and black are which side is which, so the pieces keep their colours in
+// every theme; the squares, the markers on them and the window round the
+// board follow the user's palette (the operator's answer to C-Q16, §1422, and
+// lane C's call for this game: "the squares, in two palette shades that stay
+// clearly apart"). It was all a copy of Catppuccin Mocha, dark on a light
+// desktop. A piece the shade of its square is ringed in a rim that stands off
+// the square (`gamechrome::edge_on`).
 
-// ── Board colors ────────────────────────────────────────────────────
-const LIGHT_SQUARE: Color = Color::from_hex(0x9CA0B0);
-const DARK_SQUARE: Color = Color::from_hex(0x585B70);
-const SELECTED_SQUARE: Color = Color::from_hex(0x89B4FA);
-const LEGAL_MOVE_DOT: Color = Color::rgba(166, 227, 161, 140);
-const LAST_MOVE_HIGHLIGHT: Color = Color::rgba(250, 179, 135, 80);
-
-// ── Piece colors ────────────────────────────────────────────────────
 const RED_PIECE: Color = Color::from_hex(0xF38BA8);
 const RED_PIECE_DARK: Color = Color::from_hex(0xD06080);
-const BLACK_PIECE: Color = Color::from_hex(0x45475A);
-const BLACK_PIECE_DARK: Color = Color::from_hex(0x313244);
+/// Black's pieces: neutral dark greys, not the Mocha surfaces (`45475A`,
+/// `313244`) they were. The palette test matches the game's own colours on
+/// RGB, and a Mocha surface among them would pass that surface left over
+/// anywhere in a light window.
+const BLACK_PIECE: Color = Color::from_hex(0x474747);
+const BLACK_PIECE_DARK: Color = Color::from_hex(0x333333);
 const KING_CROWN: Color = Color::from_hex(0xF9E2AF);
+/// Red's colour as text, `(pale, deep)`: the piece's own red on a dark page,
+/// a deeper red on a light one, where the pale red is 2:1.
+const RED_TEXT: (Color, Color) = (RED_PIECE, Color::from_hex(0xB0103A));
+
+/// The colours the window and the board draw in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The board's two squares (`gamechrome::squares`). The pieces stand on
+    /// the dark ones.
+    light_square: Color,
+    dark_square: Color,
+    /// The keyboard's square: the accent, as every focus ring is.
+    cursor: Color,
+    /// The ring round the piece picked up, and the dots where it may go: the
+    /// theme's strongest mark, which reads on either square in either theme.
+    selected: Color,
+    legal: Color,
+    /// The wash over the two squares of the last move.
+    last: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        let (light_square, dark_square) = gamechrome::squares(p);
+        Self {
+            chrome: Chrome::of(p),
+            light_square,
+            dark_square,
+            cursor: p.accent,
+            selected: p.text,
+            legal: p.text,
+            last: with_alpha(p.peach, 110),
+        }
+    }
+
+    /// A side's name and counts as text on `ground`: red in the red that
+    /// reads there, black in the secondary text colour.
+    fn side_ink(&self, side: Side, ground: Color) -> Color {
+        match side {
+            Side::Red => gamechrome::legible_on(RED_TEXT, ground),
+            Side::Black => self.chrome.dim,
+        }
+    }
+}
 
 // ── The size the window opens at ────────────────────────────────────
 //
@@ -1039,6 +1077,10 @@ struct CheckersApp {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl CheckersApp {
@@ -1055,6 +1097,7 @@ impl CheckersApp {
             red_takes: 0,
             black_takes: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
         }
     }
 
@@ -1275,13 +1318,14 @@ impl CheckersApp {
     /// One frame at the given size: what to draw, and what a click there hits.
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
+        let c = Colours::of(&self.palette);
         let mut f = Frame::new(l.window.w, l.window.h);
         f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: l.window.w,
             height: l.window.h,
-            color: BASE,
+            color: c.chrome.page,
             corner_radii: CornerRadii::ZERO,
         });
         // A window too small for its contents crops them rather than painting
@@ -1290,22 +1334,22 @@ impl CheckersApp {
         // the size the constants happened to add up to, painted whatever the
         // window's actual size was.
         f.clip(l.window);
-        self.draw_header(&l, &mut f);
-        self.draw_board(&l, &mut f);
-        self.draw_panel(&l, &mut f);
-        self.draw_status(&l, &mut f);
+        self.draw_header(&l, &mut f, &c);
+        self.draw_board(&l, &mut f, &c);
+        self.draw_panel(&l, &mut f, &c);
+        self.draw_status(&l, &mut f, &c);
         f.unclip();
         f
     }
 
     /// The title along the top, and the piece counts beside it.
-    fn draw_header(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_header(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         let band = inset(l.header, l.pad);
         let title = label_in(
             f,
             band,
             "Checkers",
-            Ink::new(l.title, FontWeightHint::Bold, LAVENDER),
+            Ink::new(l.title, FontWeightHint::Bold, c.chrome.title),
         );
         f.hit(Target::Title, title);
 
@@ -1318,10 +1362,7 @@ impl CheckersApp {
             let ink = Ink::new(
                 l.font,
                 FontWeightHint::Bold,
-                match side {
-                    Side::Red => RED_PIECE,
-                    Side::Black => SUBTEXT0,
-                },
+                c.side_ink(side, c.chrome.page),
             );
             let kings = self.board.count_kings(side);
             let text = if kings == 0 {
@@ -1343,7 +1384,7 @@ impl CheckersApp {
 
     /// The board: its border, its squares, the pieces on them, and its a-h and
     /// 1-8.
-    fn draw_board(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_board(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         let g = Grid::fit(inset(l.board_area, l.pad), l.small);
         let board = g.board_rect();
 
@@ -1353,7 +1394,7 @@ impl CheckersApp {
             y: board.y - edge,
             width: board.w + edge * 2.0,
             height: board.h + edge * 2.0,
-            color: SURFACE1,
+            color: c.chrome.lit,
             line_width: edge,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1373,14 +1414,11 @@ impl CheckersApp {
                 let pos = Pos::new(row, col);
                 let square = g.square(row, col);
 
-                let mut shade = if pos.is_dark() {
-                    DARK_SQUARE
+                let shade = if pos.is_dark() {
+                    c.dark_square
                 } else {
-                    LIGHT_SQUARE
+                    c.light_square
                 };
-                if self.last_move_from == Some(pos) || self.last_move_to == Some(pos) {
-                    shade = LAST_MOVE_HIGHLIGHT;
-                }
                 f.push(RenderCommand::FillRect {
                     x: square.x,
                     y: square.y,
@@ -1389,6 +1427,19 @@ impl CheckersApp {
                     color: shade,
                     corner_radii: CornerRadii::ZERO,
                 });
+                // Washed over the square rather than painted instead of it:
+                // the square is still the shade it is, and the piece on it is
+                // outlined against that.
+                if self.last_move_from == Some(pos) || self.last_move_to == Some(pos) {
+                    f.push(RenderCommand::FillRect {
+                        x: square.x,
+                        y: square.y,
+                        width: square.w,
+                        height: square.h,
+                        color: c.last,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
 
                 if self.selected == Some(pos) {
                     let ring = (g.step * 0.05).max(1.0);
@@ -1397,7 +1448,7 @@ impl CheckersApp {
                         y: square.y + ring,
                         width: (square.w - ring * 2.0).max(0.0),
                         height: (square.h - ring * 2.0).max(0.0),
-                        color: SELECTED_SQUARE,
+                        color: c.selected,
                         line_width: ring,
                         corner_radii: CornerRadii::ZERO,
                     });
@@ -1410,7 +1461,7 @@ impl CheckersApp {
                         y: square.y + ring * 2.0,
                         width: (square.w - ring * 4.0).max(0.0),
                         height: (square.h - ring * 4.0).max(0.0),
-                        color: YELLOW,
+                        color: c.cursor,
                         line_width: ring,
                         corner_radii: CornerRadii::ZERO,
                     });
@@ -1418,7 +1469,7 @@ impl CheckersApp {
 
                 if let Some(piece) = self.board.get(pos) {
                     let (cx, cy) = g.centre(row, col);
-                    draw_piece(f, cx, cy, g.step * 0.37, piece);
+                    draw_piece(f, cx, cy, g.step * 0.37, piece, shade);
                 }
 
                 if legal_dests.contains(&pos) {
@@ -1429,7 +1480,7 @@ impl CheckersApp {
                         y: cy - r,
                         width: r * 2.0,
                         height: r * 2.0,
-                        color: LEGAL_MOVE_DOT,
+                        color: c.legal,
                         corner_radii: CornerRadii::all(r),
                     });
                 }
@@ -1442,7 +1493,7 @@ impl CheckersApp {
         // against `g.square(i, ...)` rather than counted down the screen: the
         // grid owns the flip, and a label placed by its own arithmetic is a
         // second copy of it waiting to disagree.
-        let ink = Ink::new(l.small, FontWeightHint::Regular, SUBTEXT0);
+        let ink = Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim);
         for i in 0..8i8 {
             let square = g.square(i, 0);
             let number = format!("{}", i.saturating_add(1));
@@ -1478,50 +1529,46 @@ impl CheckersApp {
     /// `+ 210.0`, `+ 235.0` -- and drew a fixed eighteen history rows at a
     /// fixed eighteen pixels apart, which in a short window ran straight
     /// through its own help text.
-    fn draw_panel(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_panel(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         let band = inset(l.panel, l.pad);
         f.push(RenderCommand::FillRect {
             x: band.x,
             y: band.y,
             width: band.w,
             height: band.h,
-            color: MANTLE,
+            color: c.chrome.band,
             corner_radii: CornerRadii::all(l.pad),
         });
         f.hit(Target::Panel, band);
 
         let inner = inset(band, l.pad);
-        let label_ink = Ink::new(l.small, FontWeightHint::Bold, SUBTEXT0);
-        let body_ink = Ink::new(l.font, FontWeightHint::Regular, TEXT_COLOR);
+        let label_ink = Ink::new(l.small, FontWeightHint::Bold, c.chrome.dim);
+        let body_ink = Ink::new(l.font, FontWeightHint::Regular, c.chrome.text);
         let mut y = inner.y;
 
         // The new-game button. `Ctrl+N` still works, but a control that exists
         // only as a line of help text is a control half the players never find.
-        let button_ink = Ink::new(l.font, FontWeightHint::Bold, CRUST);
+        let button_ink = Ink::new(l.font, FontWeightHint::Bold, c.chrome.text);
         let button = Rect::new(inner.x, y, inner.w, button_ink.height() + l.pad);
         // Same rule as `panel_row`, which the button cannot use because it is a
         // filled control rather than a line of text: a button that hangs off
         // the panel is a button drawn on the board.
         if button.bottom() <= inner.bottom() + 0.01 {
-            f.push(RenderCommand::FillRect {
-                x: button.x,
-                y: button.y,
-                width: button.w,
-                height: button.h,
-                color: if self.game_result == GameResult::Ongoing {
-                    SURFACE2
-                } else {
-                    GREEN
-                },
-                corner_radii: CornerRadii::all(l.pad / 2.0),
-            });
-            let text = "New Game";
-            label(
+            // The toolkit's push button; the default one -- the accent's --
+            // once the game is over, when a new game is the thing to do next.
+            gamechrome::button(
                 f,
-                button.x + (button.w - button_ink.width(text)).max(0.0) / 2.0,
-                button.y + (button.h - button_ink.height()).max(0.0) / 2.0,
-                text,
-                button_ink,
+                &self.palette,
+                (button.x, button.y, button.w, button.h),
+                "New Game",
+                l.font,
+                if self.game_result == GameResult::Ongoing {
+                    guitk::button::Kind::Plain
+                } else {
+                    guitk::button::Kind::Primary
+                },
+                guitk::button::State::default(),
+                c.chrome.band,
             );
             f.hit(Target::NewGame, button);
         }
@@ -1533,7 +1580,7 @@ impl CheckersApp {
             inner,
             &mut y,
             &format!("Red {}   Black {}", self.red_takes, self.black_takes),
-            Ink::new(l.font, FontWeightHint::Regular, PEACH),
+            Ink::new(l.font, FontWeightHint::Regular, c.chrome.even),
         );
         f.hit(Target::Captures, drawn);
         y += l.small * 0.6;
@@ -1554,7 +1601,7 @@ impl CheckersApp {
                 y1: rule_y,
                 x2: inner.right(),
                 y2: rule_y,
-                color: SURFACE0,
+                color: c.chrome.raised,
                 width: 1.0,
             });
         }
@@ -1563,12 +1610,12 @@ impl CheckersApp {
         // The help sits on the floor of the panel and the history fills
         // whatever is between the cursor and it, so the two cannot collide
         // however long the game runs or however short the window is.
-        let help_ink = Ink::new(l.small, FontWeightHint::Regular, OVERLAY0);
+        let help_ink = Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim);
         let help_h = help_ink.height() * 2.0;
         let help_top = (inner.bottom() - help_h).max(y);
 
         let heading = panel_row(f, inner, &mut y, "Move History", label_ink);
-        let row_h = Ink::new(l.small, FontWeightHint::Regular, TEXT_COLOR).height();
+        let row_h = Ink::new(l.small, FontWeightHint::Regular, c.chrome.text).height();
         let rows = count_from_f32((help_top - y) / row_h);
         let start = self.move_history.len().saturating_sub(rows);
         let mut history_box = heading;
@@ -1584,7 +1631,7 @@ impl CheckersApp {
             let ink = Ink::new(
                 l.small,
                 FontWeightHint::Regular,
-                if red { RED_PIECE } else { SUBTEXT0 },
+                c.side_ink(if red { Side::Red } else { Side::Black }, c.chrome.band),
             );
             let drawn = panel_row(f, inner, &mut y, &text, ink);
             history_box = union(history_box, drawn);
@@ -1604,16 +1651,16 @@ impl CheckersApp {
     }
 
     /// The line along the bottom of the window.
-    fn draw_status(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_status(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         let band = inset(l.status, l.pad);
         let ink = Ink::new(
             l.font,
             FontWeightHint::Regular,
             match self.game_result {
-                GameResult::RedWins => GREEN,
-                GameResult::BlackWins => RED,
-                GameResult::Draw => YELLOW,
-                GameResult::Ongoing => TEXT_COLOR,
+                GameResult::RedWins => c.chrome.good,
+                GameResult::BlackWins => c.chrome.bad,
+                GameResult::Draw => c.chrome.even,
+                GameResult::Ongoing => c.chrome.text,
             },
         );
         let drawn = label_in(f, band, &self.status(), ink);
@@ -1634,11 +1681,12 @@ fn file_letter(col: i8) -> char {
     char::from(b'a'.saturating_add(offset))
 }
 
-/// A checker, drawn as two concentric discs and, for a king, a crown.
+/// A checker on a square of colour `ground`, drawn as two concentric discs
+/// and, for a king, a crown.
 ///
 /// A free function rather than a method: it read `&self` and used nothing from
 /// it, which is a method only in spelling.
-fn draw_piece(f: &mut Frame<Target>, cx: f32, cy: f32, radius: f32, piece: Piece) {
+fn draw_piece(f: &mut Frame<Target>, cx: f32, cy: f32, radius: f32, piece: Piece, ground: Color) {
     let (outer, inner) = match piece.side {
         Side::Red => (RED_PIECE, RED_PIECE_DARK),
         Side::Black => (BLACK_PIECE, BLACK_PIECE_DARK),
@@ -1649,6 +1697,18 @@ fn draw_piece(f: &mut Frame<Target>, cx: f32, cy: f32, radius: f32, piece: Piece
         width: radius * 2.0,
         height: radius * 2.0,
         color: outer,
+        corner_radii: CornerRadii::all(radius),
+    });
+    // The piece's edge: its own colour where it stands off the square, and a
+    // rim that does where it is the square's shade -- a black piece on a dark
+    // theme's square, a red one on a light theme's.
+    f.push(RenderCommand::StrokeRect {
+        x: cx - radius,
+        y: cy - radius,
+        width: radius * 2.0,
+        height: radius * 2.0,
+        color: gamechrome::edge_on(outer, outer, ground),
+        line_width: (radius * 0.08).max(1.0),
         corner_radii: CornerRadii::all(radius),
     });
     let core = radius * 0.62;
@@ -1780,6 +1840,10 @@ fn handle_event(app: &mut CheckersApp, event: &Event) -> EventResult {
 }
 
 impl App for CheckersApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Checkers".to_string()
     }
@@ -1870,6 +1934,137 @@ mod tests {
 
     use super::*;
     use guitk::probe;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark -- a game
+    /// with a piece picked up, the last move marked and a king on the board,
+    /// and one that is over -- with only the pieces' own colours, and the rim
+    /// a piece is ringed in, not the palette's. It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut derived = vec![
+                RED_PIECE,
+                RED_PIECE_DARK,
+                BLACK_PIECE,
+                BLACK_PIECE_DARK,
+                KING_CROWN,
+                RED_TEXT.0,
+                RED_TEXT.1,
+                gamechrome::RIMS.0,
+                gamechrome::RIMS.1,
+            ];
+            for kind in [guitk::button::Kind::Plain, guitk::button::Kind::Primary] {
+                derived.extend(gamechrome::button_colours(&p, kind, c.chrome.band));
+            }
+            let mut app = CheckersApp::new();
+            app.theme_changed(&p);
+            app.last_move_from = Some(Pos::new(2, 2));
+            app.last_move_to = Some(Pos::new(3, 3));
+            app.board.set(
+                Pos::new(3, 3),
+                Some(Piece {
+                    side: Side::Red,
+                    is_king: true,
+                }),
+            );
+            app.click_square(Pos::new(2, 6));
+            let playing = app.draw(CheckersApp::SIZE);
+            app.game_result = GameResult::RedWins;
+            let over = app.draw(CheckersApp::SIZE);
+            for (what, f) in [("playing", playing), ("over", over)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("checkers, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **Every piece is seen on its square in either theme**: the squares
+    /// follow the theme, so a black piece on a dark theme's square and a red
+    /// one on a light theme's are ringed, and the ring is what is drawn.
+    #[test]
+    fn every_piece_is_seen_on_its_square_in_either_theme() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut app = CheckersApp::new();
+            app.theme_changed(&p);
+            let f = app.draw(CheckersApp::SIZE);
+            // Each piece's disc and the outline drawn round the same box, as
+            // drawn. The opening position stands every piece on a dark square.
+            let discs: Vec<(Rect, Color)> = f
+                .commands()
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if *color == RED_PIECE || *color == BLACK_PIECE => {
+                        Some((Rect::new(*x, *y, *width, *height), *color))
+                    }
+                    _ => None,
+                })
+                .filter(|(r, _)| (r.w - r.h).abs() < 0.01)
+                .collect();
+            assert_eq!(discs.len(), 24, "light: {light}");
+            for (disc, piece) in discs {
+                let edge = f
+                    .commands()
+                    .iter()
+                    .find_map(|cmd| match cmd {
+                        RenderCommand::StrokeRect {
+                            x, y, width, color, ..
+                        } if (*x - disc.x).abs() < 0.01
+                            && (*y - disc.y).abs() < 0.01
+                            && (*width - disc.w).abs() < 0.01 =>
+                        {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("the piece at {disc:?} has no outline"));
+                let seen = guitk::theme::contrast_ratio(piece, c.dark_square)
+                    .max(guitk::theme::contrast_ratio(edge, c.dark_square));
+                assert!(
+                    seen >= 3.0,
+                    "{piece:?} is seen at {seen:.2}:1 (light: {light})"
+                );
+            }
+        }
+    }
+
+    /// **The marks on the board read on it**: the selection, the legal
+    /// moves, and red's name as text, in either theme.
+    #[test]
+    fn the_marks_on_the_board_read_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for square in [c.light_square, c.dark_square] {
+                for (what, mark) in [("selection", c.selected), ("legal move", c.legal)] {
+                    let ratio = guitk::theme::contrast_ratio(mark, square);
+                    assert!(ratio >= 3.0, "the {what} is {ratio:.2}:1 (light: {light})");
+                }
+            }
+            let red = c.side_ink(Side::Red, c.chrome.page);
+            let ratio = guitk::theme::contrast_ratio(red, c.chrome.page);
+            assert!(ratio >= 4.5, "red's name is {ratio:.2}:1 (light: {light})");
+        }
+    }
 
     // ── The window ──────────────────────────────────────────────────
     //
@@ -1974,10 +2169,7 @@ mod tests {
                         height,
                         color,
                         ..
-                    } if *color == LIGHT_SQUARE
-                        || *color == DARK_SQUARE
-                        || *color == LAST_MOVE_HIGHLIGHT =>
-                    {
+                    } if *color == colours().light_square || *color == colours().dark_square => {
                         Some((*x, *y, *width, *height))
                     }
                     _ => None,
@@ -1987,10 +2179,11 @@ mod tests {
                 for col in 0..8i8 {
                     let square = box_at(&app, Target::Square(row, col), size);
                     // Exactly one, not at least one. A count over the whole
-                    // frame cannot say this: `SURFACE2` and `DARK_SQUARE` are
-                    // both 0x585B70, so every panel drawn in the one answers
+                    // frame cannot say this: `SURFACE2` and `DARK_SQUARE` were
+                    // both 0x585B70, so every panel drawn in the one answered
                     // to a test looking for the other, and "64 shaded fills"
-                    // came back 65. Matching on the square's own box is the
+                    // came back 65 -- and a square is a palette shade now, so
+                    // the panels share its colour for good. Matching on the square's own box is the
                     // claim that does not care what else the window paints in
                     // the same colour.
                     let painted = shades
@@ -2382,7 +2575,10 @@ mod tests {
                         height,
                         color,
                         corner_radii,
+                        // Discs only -- a square box, fully rounded: the dark
+                        // theme's push button is faced in the black pieces' colour.
                     } if corner_radii.top_left > 0.0
+                        && (width - height).abs() < 0.01
                         && (*color == RED_PIECE || *color == BLACK_PIECE) =>
                     {
                         Some((x + width / 2.0, y + height / 2.0))
@@ -2438,7 +2634,7 @@ mod tests {
                     height,
                     color,
                     ..
-                } if *color == LEGAL_MOVE_DOT => Some((x + width / 2.0, y + height / 2.0)),
+                } if *color == colours().legal => Some((x + width / 2.0, y + height / 2.0)),
                 _ => None,
             })
             .collect();
@@ -2865,7 +3061,7 @@ mod tests {
                 height,
                 color,
                 ..
-            } if *color == YELLOW => Some(Rect::new(*x, *y, *width, *height)),
+            } if *color == colours().cursor => Some(Rect::new(*x, *y, *width, *height)),
             _ => None,
         });
         let ring = ring.expect("the cursor was not drawn");
@@ -2894,7 +3090,7 @@ mod tests {
                     height,
                     color,
                     ..
-                } if *color == SELECTED_SQUARE => Some(Rect::new(*x, *y, *width, *height)),
+                } if *color == colours().selected => Some(Rect::new(*x, *y, *width, *height)),
                 _ => None,
             })
             .expect("the selection was not drawn");
@@ -3203,7 +3399,7 @@ mod tests {
         // rather than unwrapping into a panic with a different message.
         assert_eq!(
             bottom_left,
-            Some(DARK_SQUARE),
+            Some(colours().dark_square),
             "the lower-left square of a checkers board is dark"
         );
     }
@@ -4105,7 +4301,7 @@ mod tests {
         let frame = app.draw(CheckersApp::SIZE);
         let commands = frame.commands();
         let has_selection = commands.iter().any(
-            |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == SELECTED_SQUARE),
+            |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == colours().selected),
         );
         assert!(has_selection, "Should render selected square highlight");
     }
@@ -4119,7 +4315,7 @@ mod tests {
         let dot_count = commands
             .iter()
             .filter(
-                |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == LEGAL_MOVE_DOT),
+                |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == colours().legal),
             )
             .count();
         assert!(
@@ -4133,9 +4329,9 @@ mod tests {
         let app = CheckersApp::new();
         let frame = app.draw(CheckersApp::SIZE);
         let commands = frame.commands();
-        let has_cursor = commands
-            .iter()
-            .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == YELLOW));
+        let has_cursor = commands.iter().any(
+            |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == colours().cursor),
+        );
         assert!(has_cursor, "Should render cursor highlight");
     }
 
@@ -4144,12 +4340,15 @@ mod tests {
         let app = CheckersApp::new();
         let frame = app.draw(CheckersApp::SIZE);
         let commands = frame.commands();
-        // Count piece circles (each piece = 2 FillRects with rounded corners)
+        // Count piece circles (each piece = 2 FillRects with rounded corners).
+        // Square boxes only: the dark theme's push button is faced in the
+        // palette's surface, which is the black pieces' colour.
         let circle_count = commands
             .iter()
             .filter(|c| {
-                matches!(c, RenderCommand::FillRect { corner_radii, color, .. }
+                matches!(c, RenderCommand::FillRect { corner_radii, color, width, height, .. }
                     if *corner_radii != CornerRadii::ZERO
+                    && (width - height).abs() < 0.01
                     && (*color == RED_PIECE || *color == BLACK_PIECE
                         || *color == RED_PIECE_DARK || *color == BLACK_PIECE_DARK))
             })

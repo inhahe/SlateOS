@@ -61,9 +61,10 @@ WHAT IT CANNOT SEE, stated plainly:
     with the error messages and not printed. "Cannot open {path}: this program
     has no file access" would be missed.
 
-THE FOUR IT STILL REPORTS, so nobody investigates them twice. All four are
-correct code, and three of them are the documented blind spot above -- a crate
-holding one capability and truthfully denying another:
+THE SEVEN IT STILL REPORTS, so nobody investigates them twice. All seven are
+correct code, and most are the documented blind spot above -- a crate holding
+one capability and truthfully denying another. (The last three were read on
+2026-09-27, when this list said four and the scan reported five.)
 
   * `apps/dbviewer` [file] -- "a .db or .sqlite file cannot be read; one CSV
     becomes one table". It reads CSV and genuinely has no database driver.
@@ -79,6 +80,14 @@ holding one capability and truthfully denying another:
     uses exactly one call from it: `read_capped`, for the `.torrent` a user
     opens with Ctrl+O. Reading is not writing, and the sentence claims only
     that it cannot write.
+  * `apps/credmanager` [file] -- "The vault cannot be opened". The heading of
+    the panel shown when the vault file is there and one attempt to open it
+    failed; the reason is printed under it. A report of that attempt, not a
+    standing incapacity -- the same program opens a readable vault.
+  * `apps/hexeditor` [file] -- "It has no file yet", and `apps/jsonviewer`
+    [file] -- "Not saved: it has no file yet -- use Save As". Both are about
+    one document that has never been saved, said when plain Save is pressed on
+    it; both programs open and save files.
 
 On 2026-09-17 this list said three and the scan reported eight. The five it
 did not cover were not exceptions; three were real, and the scanner was right
@@ -107,57 +116,13 @@ import re
 import sys
 
 from rustlex import live_code, string_literals, strip_noise
-# The count this file's "IT STILL REPORTS" note claims, so the scan can say
-# when the two have drifted apart.
-#
-# Twice on 2026-09-17 a note like that sat beside a larger scan and nobody
-# noticed: `find-claimed-acts` listed four while reporting six, and
-# `find-stale-admissions` listed three while reporting eight -- and three of
-# that eight were real, windows denying capabilities they had gained. The note
-# exists so nobody investigates a known-good finding twice, and it can only do
-# that if it covers everything reported. The gap is the finding, so the tool
-# says so rather than leaving it to be spotted.
-_COUNT_WORDS = {
-    "ZERO": 0, "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
-    "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10, "ELEVEN": 11,
-    "TWELVE": 12,
-}
-
-
-def documented_count():
-    """How many findings this file's own note says it covers, or None."""
-    match = re.search(r"THE ([A-Z]+) IT STILL REPORTS", __doc__ or "")
-    if match is None:
-        return None
-    return _COUNT_WORDS.get(match.group(1))
+from stillreports import report_drift as _report_drift  # noqa: E402
 
 
 def report_drift(found, out=sys.stdout):
-    """Say so when the scan reports more than this file's note covers.
-
-    One direction only. Finding *fewer* than the note lists is usually not
-    staleness: a documented entry can sit outside the roots this run scanned,
-    and warning on that would cry wolf on every default run. A checker nobody
-    believes is worse than no checker. The dangerous direction is the other
-    one, where something is reported that nobody has ever read.
-    """
-    documented = documented_count()
-    if documented is None or found <= documented:
-        return False
-    missing = found - documented
-    print("", file=out)
-    print(
-        "  NOTE OUT OF DATE: this file documents {} known-good finding(s) and"
-        " the scan reports {}.".format(documented, found),
-        file=out,
-    )
-    print(
-        "  The {} not covered have never been read. Read them, and either fix"
-        " what they".format(missing),
-        file=out,
-    )
-    print("  found or add them to the note with the reason.", file=out)
-    return True
+    """This file's note against what the scan found -- `stillreports`, one copy
+    for the three scanners that keep such a note."""
+    return _report_drift(__doc__, found, out)
 
 
 PAIRS = {

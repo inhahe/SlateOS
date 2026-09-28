@@ -66,9 +66,6 @@ path = "tests/kats.rs"
 name = "rng"
 path = "tests/rng.rs"
 
-[[bench]]
-name = "mod"
-path = "benches/mod.rs"
 
 [dependencies.cfg-if]
 path = "../cfg-if"

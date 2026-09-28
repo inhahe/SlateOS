@@ -136,6 +136,24 @@ MAIN = [
         "",
         [CONVERSATION],
     ),
+    (
+        "the server password is dropped",
+        "                self.server_config.password = words.next().map(str::to_string);",
+        "                let _ = words.next();",
+        ["a_server_password_is_sent_first_and_not_kept_in_history"],
+    ),
+    (
+        "the history keeps the password",
+        "        self.input_history.push(without_password(&line));",
+        "        self.input_history.push(line.clone());",
+        ["a_server_password_is_sent_first_and_not_kept_in_history"],
+    ),
+    (
+        "an old password is kept for the next server",
+        "                self.server_config.password = words.next().map(str::to_string);",
+        "                if let Some(p) = words.next() {\n                    self.server_config.password = Some(p.to_string());\n                }",
+        ["a_connect_without_a_password_clears_the_last_one"],
+    ),
 ]
 
 TABLES = {

@@ -47,9 +47,11 @@
 //!
 //! Only the grid was clickable: no new game, no board size, no help.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
@@ -59,53 +61,65 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha, only the entries this program paints with ──
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_MANTLE: Color = Color::from_hex(0x181825);
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-const COL_OVERLAY: Color = Color::from_hex(0x6C7086);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-const COL_MAUVE: Color = Color::from_hex(0xCBA6F7);
-const COL_TEAL: Color = Color::from_hex(0x94E2D5);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// A face's letter is in one of eight hues, and a player remembers a card by
+// it: the hues keep their identity in every theme, each in the shade that
+// reads on the card it is written on (`gamechrome::legible_on`, §1225). The
+// card backs, the table and the chrome round them follow the user's palette
+// (the operator's answer to C-Q16, §1422, and lane C's call for this game). It
+// was all a copy of Catppuccin Mocha, dark on a light desktop -- and the pale
+// hues would have been unreadable on a light theme's card.
 
-const COL_SCRIM: Color = Color::rgba(0x1E, 0x1E, 0x2E, 158);
-const COL_BANNER: Color = Color::rgba(0x11, 0x11, 0x1B, 224);
-const COL_VEIL: Color = Color::rgba(0x11, 0x11, 0x1B, 214);
+/// The eight hues a face may be written in, `(pale, deep)`: the pale shade on
+/// a dark card, the deep one on a light card.
+const HUES: [(Color, Color); 8] = [
+    (Color::from_hex(0xF38BA8), Color::from_hex(0xB0103A)), // red
+    (Color::from_hex(0x89B4FA), Color::from_hex(0x1A4FC0)), // blue
+    (Color::from_hex(0xA6E3A1), Color::from_hex(0x1E6B22)), // green
+    (Color::from_hex(0xF9E2AF), Color::from_hex(0x8A5A00)), // yellow
+    (Color::from_hex(0xFAB387), Color::from_hex(0xB34700)), // peach
+    (Color::from_hex(0xCBA6F7), Color::from_hex(0x6F2BC4)), // mauve
+    (Color::from_hex(0x94E2D5), Color::from_hex(0x0B6E75)), // teal
+    (Color::from_hex(0xB4BEFE), Color::from_hex(0x4550C8)), // lavender
+];
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// A card face down: raised, with a dot in the well's shade.
+    back: Color,
+    dot: Color,
+    /// A card face up, and one whose pair has been found.
+    face: Color,
+    found: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        let chrome = Chrome::of(p);
+        Self {
+            chrome,
+            back: chrome.lit,
+            dot: chrome.well,
+            face: chrome.band,
+            found: chrome.raised,
+        }
+    }
+
+    /// The ink of face `face`'s letter on a card of colour `card`: its hue,
+    /// in the shade that reads there.
+    fn hue(&self, face: usize, card: Color) -> Color {
+        face.checked_rem(HUES.len())
+            .and_then(|i| HUES.get(i))
+            .map_or(self.chrome.text, |&pair| gamechrome::legible_on(pair, card))
+    }
+}
 
 /// The card faces, one per pair. The largest board needs eighteen.
 const SYMBOLS: [&str; 18] = [
     "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
-];
-/// A colour per face. Only eight hues exist, so the ninth face onward repeats
-/// one — which is why the letter, not the colour, is what identifies a card.
-const SYMBOL_COLORS: [Color; 18] = [
-    COL_RED,
-    COL_BLUE,
-    COL_GREEN,
-    COL_YELLOW,
-    COL_PEACH,
-    COL_MAUVE,
-    COL_TEAL,
-    COL_LAVENDER,
-    COL_RED,
-    COL_BLUE,
-    COL_GREEN,
-    COL_YELLOW,
-    COL_PEACH,
-    COL_MAUVE,
-    COL_TEAL,
-    COL_LAVENDER,
-    COL_RED,
-    COL_BLUE,
 ];
 
 /// Every board the game offers, as (rows, cols), in the order offered.
@@ -422,6 +436,10 @@ pub struct MemoryGame {
     /// against the same geometry it was aimed at.
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame. A new deal is made in this same state, so they carry over.
+    palette: Palette,
 }
 
 impl Default for MemoryGame {
@@ -459,6 +477,7 @@ impl MemoryGame {
             rng,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         };
         game.deal();
         game
@@ -883,31 +902,32 @@ impl MemoryGame {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = self.layout(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
+        let c = Colours::of(&self.palette);
+        fill(&mut f, l.window, c.chrome.page, 0.0);
 
         if l.shows_header() {
-            self.draw_header(&mut f, &l);
+            self.draw_header(&mut f, &l, &c);
         }
         if l.shows_info() {
-            self.draw_info(&mut f, &l);
+            self.draw_info(&mut f, &l, &c);
         }
         if l.shows_best() {
-            self.draw_best(&mut f, &l);
+            self.draw_best(&mut f, &l, &c);
         }
-        self.draw_board(&mut f, &l);
+        self.draw_board(&mut f, &l, &c);
         if self.won() {
-            self.draw_banner(&mut f, &l);
+            self.draw_banner(&mut f, &l, &c);
         }
         if l.shows_footer() {
-            self.draw_footer(&mut f, &l);
+            self.draw_footer(&mut f, &l, &c);
         }
         if self.show_help {
-            draw_help(&mut f, &l);
+            draw_help(&mut f, &l, &c);
         }
         f
     }
 
-    fn draw_header(&self, f: &mut Frame, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let cy = l.header.y + l.header.h / 2.0;
         let btn = l.help_button();
         let title_span = (btn.x - l.pad * 2.0 - l.header.x).max(0.0);
@@ -917,37 +937,30 @@ impl MemoryGame {
             cy - text::line_height(l.font, FontWeightHint::Bold) / 2.0,
             "Memory",
             l.font,
-            COL_LAVENDER,
+            c.chrome.title,
             FontWeightHint::Bold,
             Some(title_span),
         );
 
         if btn.w > 0.0 && btn.h > 0.0 {
-            fill(
+            gamechrome::button(
                 f,
-                btn,
-                if self.show_help {
-                    COL_SURFACE1
-                } else {
-                    COL_SURFACE0
-                },
-                (btn.h * 0.25).min(6.0),
-            );
-            centred_in(
-                f,
-                btn.x,
-                btn.w,
-                btn.y + btn.h / 2.0,
+                &self.palette,
+                (btn.x, btn.y, btn.w, btn.h),
                 "?",
                 l.small,
-                COL_TEXT,
-                FontWeightHint::Bold,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    pressed: self.show_help,
+                    ..guitk::button::State::default()
+                },
+                c.chrome.page,
             );
             f.hit(Target::Help, btn);
         }
     }
 
-    fn draw_info(&self, f: &mut Frame, l: &Layout) {
+    fn draw_info(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let body = format!(
             "Deal {}   {}x{}   Moves {}   Pairs {}/{}",
             self.board_no,
@@ -964,12 +977,12 @@ impl MemoryGame {
             l.info.y + l.info.h / 2.0,
             &body,
             l.small,
-            COL_SUBTEXT,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
     }
 
-    fn draw_best(&self, f: &mut Frame, l: &Layout) {
+    fn draw_best(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let mut body = String::from("Best");
         for (i, (rows, cols)) in SIZES.iter().enumerate() {
             let score = match self.best_moves.get(i).copied().flatten() {
@@ -985,12 +998,12 @@ impl MemoryGame {
             l.best.y + l.best.h / 2.0,
             &body,
             l.small,
-            COL_OVERLAY,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
     }
 
-    fn draw_board(&self, f: &mut Frame, l: &Layout) {
+    fn draw_board(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         if l.board.w <= 0.0 || l.board.h <= 0.0 {
             return;
         }
@@ -1019,18 +1032,18 @@ impl MemoryGame {
                 };
                 let up = self.face_up(index);
                 let back = if matched {
-                    COL_SURFACE0
+                    c.found
                 } else if up {
-                    COL_MANTLE
+                    c.face
                 } else {
-                    COL_SURFACE1
+                    c.back
                 };
                 fill(f, card, back, radius);
                 if up {
                     let colour = if matched {
-                        COL_GREEN
+                        c.chrome.good
                     } else {
-                        SYMBOL_COLORS.get(face).copied().unwrap_or(COL_TEXT)
+                        c.hue(face, back)
                     };
                     let glyph = SYMBOLS.get(face).copied().unwrap_or("?");
                     centred_in(
@@ -1056,24 +1069,24 @@ impl MemoryGame {
                             dot,
                             dot,
                         ),
-                        COL_CRUST,
+                        c.dot,
                         dot / 2.0,
                     );
                 }
                 if row == crow && col == ccol {
-                    ring(f, card, (gutter * 0.9).max(1.0), COL_YELLOW);
+                    ring(f, card, (gutter * 0.9).max(1.0), c.chrome.ring);
                 }
                 f.hit(Target::Card(index), cell);
             }
         }
     }
 
-    fn draw_banner(&self, f: &mut Frame, l: &Layout) {
+    fn draw_banner(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let r = l.banner();
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
-        fill(f, r, COL_BANNER, (r.h * 0.2).min(10.0));
+        fill(f, r, c.chrome.veil, (r.h * 0.2).min(10.0));
         let body = format!("Cleared in {} moves — click for a new deal", self.moves);
         centred_in(
             f,
@@ -1082,7 +1095,7 @@ impl MemoryGame {
             r.y + r.h / 2.0,
             &body,
             l.small,
-            COL_GREEN,
+            c.chrome.good,
             FontWeightHint::Bold,
         );
         // The banner is the new-deal button while it is up: a player who has
@@ -1090,25 +1103,23 @@ impl MemoryGame {
         f.hit(Target::NewGame, r);
     }
 
-    fn draw_footer(&self, f: &mut Frame, l: &Layout) {
+    fn draw_footer(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         for (i, (rows, cols)) in SIZES.iter().enumerate() {
             let r = l.footer_button(i);
             let current = self.rows == *rows && self.cols == *cols;
-            fill(
+            gamechrome::button(
                 f,
-                r,
-                if current { COL_SURFACE1 } else { COL_SURFACE0 },
-                (r.h * 0.2).min(6.0),
-            );
-            centred_in(
-                f,
-                r.x,
-                r.w,
-                r.y + r.h / 2.0,
+                &self.palette,
+                (r.x, r.y, r.w, r.h),
                 &format!("{rows}x{cols}"),
                 l.small,
-                if current { COL_YELLOW } else { COL_TEXT },
-                FontWeightHint::Bold,
+                if current {
+                    guitk::button::Kind::Primary
+                } else {
+                    guitk::button::Kind::Plain
+                },
+                guitk::button::State::default(),
+                c.chrome.page,
             );
             // Recorded even for the board already showing: a click there
             // should stop at the button, not reach whatever is behind it.
@@ -1116,28 +1127,27 @@ impl MemoryGame {
         }
 
         let r = l.footer_button(SIZES.len());
-        fill(f, r, COL_SURFACE0, (r.h * 0.2).min(6.0));
-        centred_in(
+        gamechrome::button(
             f,
-            r.x,
-            r.w,
-            r.y + r.h / 2.0,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
             "New",
             l.small,
-            COL_BLUE,
-            FontWeightHint::Bold,
+            guitk::button::Kind::Plain,
+            guitk::button::State::default(),
+            c.chrome.page,
         );
         f.hit(Target::NewGame, r);
     }
 }
 
 /// The help sheet the old code toggled a flag for and never drew.
-fn draw_help(f: &mut Frame, l: &Layout) {
+fn draw_help(f: &mut Frame, l: &Layout, c: &Colours) {
     // Dim the whole window first, then the panel on top of it, so the sheet
     // reads as in front of the game rather than part of it.
-    fill(f, l.window, COL_SCRIM, 0.0);
+    fill(f, l.window, c.chrome.scrim, 0.0);
     let p = l.help;
-    fill(f, p, COL_VEIL, 10.0);
+    fill(f, p, c.chrome.veil, 10.0);
 
     let pad = (p.w * 0.06).clamp(6.0, 18.0);
     let inner = (p.w - pad * 2.0).max(0.0);
@@ -1148,7 +1158,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
         p.y + pad,
         HELP_TITLE,
         l.font,
-        COL_YELLOW,
+        c.chrome.even,
         FontWeightHint::Bold,
         Some(inner),
     );
@@ -1171,7 +1181,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
                 y,
                 v,
                 l.small,
-                COL_SUBTEXT,
+                c.chrome.dim,
                 FontWeightHint::Regular,
                 Some(inner),
             );
@@ -1182,7 +1192,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
                 y,
                 k,
                 l.small,
-                COL_BLUE,
+                c.chrome.key,
                 FontWeightHint::Bold,
                 Some(key_span),
             );
@@ -1192,7 +1202,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
                 y,
                 v,
                 l.small,
-                COL_TEXT,
+                c.chrome.text,
                 FontWeightHint::Regular,
                 Some((inner - key_span).max(0.0)),
             );
@@ -1311,6 +1321,10 @@ pub fn handle_event(app: &mut MemoryGame, event: &Event) -> EventResult {
 }
 
 impl App for MemoryGame {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Memory".to_string()
     }
@@ -1401,6 +1415,74 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- a
+    /// board with two cards up, a pair found, the keyboard on a card, the
+    /// help sheet, and a cleared board -- with only the faces' own hues not
+    /// the palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let page = Chrome::of(&p).page;
+            let mut derived: Vec<Color> = HUES.iter().flat_map(|&(a, b)| [a, b]).collect();
+            for kind in [guitk::button::Kind::Plain, guitk::button::Kind::Primary] {
+                derived.extend(gamechrome::button_colours(&p, kind, page));
+            }
+            let paint = guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    pressed: true,
+                    ..guitk::button::State::default()
+                },
+                page,
+            );
+            derived.extend([paint.upper, paint.lower, paint.edge, paint.ink]);
+            let mut app = MemoryGame::with_seed(7);
+            app.theme_changed(&p);
+            // A found pair and a card up.
+            let face = app.cards[0].face;
+            let twin = (1..app.cards.len())
+                .find(|&i| app.cards[i].face == face)
+                .expect("every face has a twin");
+            app.cards[0].matched = true;
+            app.cards[twin].matched = true;
+            app.first_pick = Some(if twin == 1 { 2 } else { 1 });
+            let playing = app.frame(900.0, 700.0);
+            app.show_help = true;
+            let help = app.frame(900.0, 700.0);
+            app.show_help = false;
+            for card in &mut app.cards {
+                card.matched = true;
+            }
+            let cleared = app.frame(900.0, 700.0);
+            for (what, f) in [("playing", playing), ("help", help), ("cleared", cleared)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("memory, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **Every face's letter reads on its card in either theme**, in its own
+    /// hue -- the dark theme's pale hues would vanish on a light card.
+    #[test]
+    fn every_faces_letter_reads_on_its_card_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for face in 0..HUES.len() {
+                let ink = c.hue(face, c.face);
+                let ratio = guitk::theme::contrast_ratio(ink, c.face);
+                assert!(ratio >= 4.5, "face {face} is {ratio:.2}:1 (light: {light})");
+                let (pale, deep) = HUES[face];
+                assert!(ink == pale || ink == deep, "face {face} is not its own hue");
+            }
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
 
@@ -2135,7 +2217,7 @@ mod tests {
                 RenderCommand::FillRect {
                     x, y, color, width, ..
                 } => {
-                    *color == COL_YELLOW
+                    *color == Colours::of(&app.palette).chrome.ring
                         && *x >= cell.x - 0.01
                         && *y >= cell.y - 0.01
                         && *x + *width <= cell.right() + 0.01

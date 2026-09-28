@@ -4,13 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# The shortcut card draws in the user's colours, per design-decisions 822.
-appearance = { path = "../../gui/appearance" }
+# The chrome every game draws in the user's theme (C-Q16, §1422).
+gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 # The window. Without it `main` was `let _app = Wordle::new();` — it drew a
 # seeded word from the system, built a grid and an on-screen keyboard, and
 # dropped the lot, so no puzzle ever reached a screen and no key ever arrived.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `palette_check`: the window is drawn from the palette.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

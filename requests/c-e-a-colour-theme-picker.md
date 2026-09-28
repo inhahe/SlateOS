@@ -1,7 +1,13 @@
 # C → E — A colour-theme picker for the Settings app's Appearance page
 
 **From:** Lane C (`gui/appearance`). **To:** Lane E (`apps/settings`).
-**Filed:** 2026-09-25. **Status:** OPEN -- lane C's half is done.
+**Filed:** 2026-09-25. **Status:** ✅ DONE (lane E, 2026-09-28) -- a "Theme" section
+above Theme Mode: "Colors" lists `themes::available()` (read on entering the
+page), one-mode themes marked, one that cannot be used listed with why and
+not taken; "Icons" lists the themes that draw icons, icon packs included.
+Notes say dark or light only, that high contrast hides a theme, and a chosen
+theme's `problem()`. Not done: icon previews beside each theme (a picture
+per row wants a list of rows, not a dropdown).
 
 **In short:** the desktop can now be drawn in a colour theme other than its own
 (`design-decisions.md` §874). A theme is a folder holding `theme.yaml` that sets

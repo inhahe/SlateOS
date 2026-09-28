@@ -31,11 +31,13 @@
 //! anything, and a [`Frame`] that records a hit box for every clickable thing
 //! as it draws it.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -44,23 +46,76 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// A brick row's colour is what it is worth, and a power-up's what it does, so
+// those keep their hues in every theme -- each as a pale shade and a deep one,
+// drawn in whichever stands off the field (`gamechrome::legible_on`, §1225):
+// a light theme's field would lose the pale yellow row entirely. The field,
+// the paddle, the ball and the chrome follow the user's palette (the
+// operator's answer to C-Q16, §1422, and lane C's call for this game). It was
+// all a copy of Catppuccin Mocha, dark on a light desktop.
+
+/// The six rows' hues, top to bottom, `(pale, deep)`: red, peach, yellow,
+/// green, blue, lavender -- the order of their points.
+const BRICK_ROWS_HUES: [(Color, Color); BRICK_ROWS] = [
+    (Color::from_hex(0xF38BA8), Color::from_hex(0xB0103A)),
+    (Color::from_hex(0xFAB387), Color::from_hex(0xB34700)),
+    (Color::from_hex(0xF9E2AF), Color::from_hex(0x8A5A00)),
+    (Color::from_hex(0xA6E3A1), Color::from_hex(0x1E6B22)),
+    (Color::from_hex(0x89B4FA), Color::from_hex(0x1A4FC0)),
+    (Color::from_hex(0xB4BEFE), Color::from_hex(0x4550C8)),
+];
+/// The power-ups' hues, the same way: green, mauve, red.
+const POWERUP_HUES: [(Color, Color); 3] = [
+    (Color::from_hex(0xA6E3A1), Color::from_hex(0x1E6B22)),
+    (Color::from_hex(0xCBA6F7), Color::from_hex(0x6F2BC4)),
+    (Color::from_hex(0xF38BA8), Color::from_hex(0xB0103A)),
+];
+/// A power-up's letter: white or near-black, whichever reads on its box.
+///
+/// The near-black is a neutral one, not Mocha's crust (`11111B`): the palette
+/// test names these as the game's own colours and matches them on RGB, so a
+/// crust here would pass a leftover Mocha crust anywhere in a light window.
+const POWERUP_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x161616));
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The paddle: the accent; green while it is wide.
+    paddle: Color,
+    wide: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            paddle: p.accent,
+            wide: p.ink(p.green),
+        }
+    }
+
+    /// Row `row`'s bricks, in the shade that stands off the field.
+    fn brick(&self, row: usize) -> Color {
+        BRICK_ROWS_HUES.get(row).map_or(self.chrome.high, |&pair| {
+            gamechrome::legible_on(pair, self.chrome.page)
+        })
+    }
+
+    /// Power-up `kind`'s box, the same way.
+    fn powerup(&self, kind: PowerUpKind) -> Color {
+        let i = match kind {
+            PowerUpKind::WidePaddle => 0,
+            PowerUpKind::MultiBall => 1,
+            PowerUpKind::ExtraLife => 2,
+        };
+        POWERUP_HUES.get(i).map_or(self.chrome.high, |&pair| {
+            gamechrome::legible_on(pair, self.chrome.page)
+        })
+    }
+}
 
 // ── Layout constants ────────────────────────────────────────────────
 const PLAY_WIDTH: f32 = 600.0;
@@ -169,14 +224,6 @@ enum PowerUpKind {
 }
 
 impl PowerUpKind {
-    fn color(self) -> Color {
-        match self {
-            Self::WidePaddle => GREEN,
-            Self::MultiBall => MAUVE,
-            Self::ExtraLife => RED,
-        }
-    }
-
     fn label(self) -> &'static str {
         match self {
             Self::WidePaddle => "W",
@@ -234,8 +281,7 @@ struct PowerUp {
 // `brick_rect` supplies the geometry. There was a `Brick` struct here holding
 // exactly that -- `alive`, `row`, `col` -- which nothing ever constructed.
 
-/// Row colors and point values for bricks, top to bottom.
-const BRICK_ROW_COLORS: [Color; BRICK_ROWS] = [RED, PEACH, YELLOW, GREEN, BLUE, LAVENDER];
+/// Point values for bricks, top to bottom; their colours are `BRICK_ROWS_HUES`.
 const BRICK_ROW_POINTS: [u32; BRICK_ROWS] = [60, 50, 40, 30, 20, 10];
 
 // ── Helper: compute brick rectangle ─────────────────────────────────
@@ -517,6 +563,10 @@ struct BreakoutApp {
     width: f32,
     /// Height of the window as of the last frame or resize.
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl BreakoutApp {
@@ -545,6 +595,7 @@ impl BreakoutApp {
             ball_speed: BASE_BALL_SPEED,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         };
         app.init_bricks();
         app
@@ -589,10 +640,13 @@ impl BreakoutApp {
         // being drawn at, or the next frame is laid out for a window that is
         // not there.
         let (w, h) = (self.width, self.height);
+        let palette = self.palette;
         *self = Self::with_seed(seed);
         self.high_score = hs;
         self.width = w;
         self.height = h;
+        // Nor did the theme change: the window's colours carry over too.
+        self.palette = palette;
         self.state = GameState::Playing;
         self.spawn_ball();
     }
@@ -1114,14 +1168,15 @@ impl BreakoutApp {
     fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(width, height);
+        let c = Colours::of(&self.palette);
 
-        fill(&mut f, l.window, MANTLE, 0.0);
-        self.draw_header(&mut f, &l);
-        self.draw_play(&mut f, &l);
-        self.draw_footer(&mut f, &l);
+        fill(&mut f, l.window, c.chrome.band, 0.0);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_play(&mut f, &l, &c);
+        self.draw_footer(&mut f, &l, &c);
         // Last, because `hit_test` searches backwards: the panel is in front
         // of everything it covers, and a click on it must not reach through.
-        self.draw_overlay(&mut f, &l);
+        self.draw_overlay(&mut f, &l, &c);
         f
     }
 
@@ -1147,27 +1202,35 @@ impl BreakoutApp {
         }
     }
 
-    fn draw_header(&self, f: &mut Frame, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         if l.header.is_empty() {
             return;
         }
-        fill(f, l.header, CRUST, 4.0);
+        fill(f, l.header, c.chrome.well, 4.0);
 
         let fields = [
             (
                 format!("Score: {}", self.score),
-                TEXT_COLOR,
+                c.chrome.text,
                 FontWeightHint::Bold,
             ),
             (
                 format!("Lives: {}", self.lives),
-                if self.lives <= 1 { RED } else { GREEN },
+                if self.lives <= 1 {
+                    c.chrome.bad
+                } else {
+                    c.chrome.good
+                },
                 FontWeightHint::Bold,
             ),
-            (format!("Level: {}", self.level), BLUE, FontWeightHint::Bold),
+            (
+                format!("Level: {}", self.level),
+                c.chrome.key,
+                FontWeightHint::Bold,
+            ),
             (
                 format!("Best: {}", self.high_score),
-                YELLOW,
+                c.chrome.even,
                 FontWeightHint::Regular,
             ),
         ];
@@ -1182,12 +1245,12 @@ impl BreakoutApp {
         f.unclip();
     }
 
-    fn draw_play(&self, f: &mut Frame, l: &Layout) {
+    fn draw_play(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         if l.play.is_empty() {
             return;
         }
-        fill(f, l.play, BASE, 4.0);
-        stroke(f, l.play, SURFACE1, 1.0, 4.0);
+        fill(f, l.play, c.chrome.page, 4.0);
+        stroke(f, l.play, c.chrome.lit, 1.0, 4.0);
 
         // A ball touching a wall is half outside the play area in play units,
         // and a brick's rounded corner rides the border. Clipping is what
@@ -1197,7 +1260,7 @@ impl BreakoutApp {
             // Rows and colours are built from the same length, so this cannot
             // miss; a brick in grey would be the visible sign that they had
             // stopped agreeing.
-            let color = BRICK_ROW_COLORS.get(row).copied().unwrap_or(SURFACE2);
+            let color = c.brick(row);
             for (col, &alive) in cells.iter().enumerate() {
                 if !alive {
                     continue;
@@ -1222,9 +1285,9 @@ impl BreakoutApp {
             f,
             paddle,
             if self.wide_paddle_remaining_ms > 0 {
-                GREEN
+                c.wide
             } else {
-                LAVENDER
+                c.paddle
             },
             PADDLE_CORNER_RADIUS * l.scale,
         );
@@ -1236,13 +1299,14 @@ impl BreakoutApp {
                 BALL_RADIUS * 2.0,
                 BALL_RADIUS * 2.0,
             );
-            fill(f, r, TEXT_COLOR, BALL_RADIUS * l.scale);
+            fill(f, r, c.chrome.text, BALL_RADIUS * l.scale);
         }
 
         for pu in &self.powerups {
             let half = POWERUP_SIZE / 2.0;
             let r = l.to_screen(pu.x - half, pu.y - half, POWERUP_SIZE, POWERUP_SIZE);
-            fill(f, r, pu.kind.color(), 4.0 * l.scale);
+            let face = c.powerup(pu.kind);
+            fill(f, r, face, 4.0 * l.scale);
             let (cx, cy) = r.centre();
             centred(
                 f,
@@ -1250,7 +1314,7 @@ impl BreakoutApp {
                 cy,
                 pu.kind.label(),
                 (POWERUP_SIZE * 0.6 * l.scale).max(1.0),
-                CRUST,
+                gamechrome::legible_on(POWERUP_INKS, face),
                 FontWeightHint::Bold,
             );
         }
@@ -1272,7 +1336,7 @@ impl BreakoutApp {
         }
     }
 
-    fn draw_footer(&self, f: &mut Frame, l: &Layout) {
+    fn draw_footer(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         if l.footer.is_empty() {
             return;
         }
@@ -1282,19 +1346,19 @@ impl BreakoutApp {
                 continue;
             }
             let on = self.enabled(*action);
-            fill(f, r, if on { SURFACE1 } else { SURFACE0 }, 4.0);
-            let (cx, cy) = r.centre();
-            f.clip(r);
-            centred(
+            gamechrome::button(
                 f,
-                cx,
-                cy,
+                &self.palette,
+                (r.x, r.y, r.w, r.h),
                 self.button_label(*action, text_body),
                 l.font,
-                if on { TEXT_COLOR } else { OVERLAY0 },
-                FontWeightHint::Regular,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled: !on,
+                    ..guitk::button::State::default()
+                },
+                c.chrome.band,
             );
-            f.unclip();
             // A button that can do nothing still takes its own click. Letting
             // one fall through would hand it to whatever is behind, which is
             // never what a player aiming at a button meant.
@@ -1316,27 +1380,27 @@ impl BreakoutApp {
                 y,
                 HELP,
                 l.font,
-                SUBTEXT0,
+                c.chrome.dim,
                 FontWeightHint::Regular,
                 Some(w),
             );
         }
     }
 
-    fn draw_overlay(&self, f: &mut Frame, l: &Layout) {
+    fn draw_overlay(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let Some((title, hint, extra)) = self.overlay_text() else {
             return;
         };
         // Dim what is behind, so the panel reads as being in front of a game
         // that is still there rather than as a screen that replaced it.
-        fill(f, l.window, Color::rgba(0x11, 0x11, 0x1B, 180), 0.0);
+        fill(f, l.window, c.chrome.veil, 0.0);
 
         let r = l.overlay;
         if r.is_empty() {
             return;
         }
-        fill(f, r, SURFACE0, 8.0);
-        stroke(f, r, SURFACE2, 1.0, 8.0);
+        fill(f, r, c.chrome.raised, 8.0);
+        stroke(f, r, c.chrome.high, 1.0, 8.0);
 
         let title_size = (r.h * 0.26).clamp(l.font, TITLE_FONT_SIZE);
         let th = text::line_height(title_size, FontWeightHint::Bold);
@@ -1350,12 +1414,36 @@ impl BreakoutApp {
         let (cx, cy) = r.centre();
         let mut y = cy - total / 2.0 + th / 2.0;
         f.clip(r);
-        centred(f, cx, y, title, title_size, LAVENDER, FontWeightHint::Bold);
+        centred(
+            f,
+            cx,
+            y,
+            title,
+            title_size,
+            c.chrome.title,
+            FontWeightHint::Bold,
+        );
         y += th / 2.0 + gap + bh / 2.0;
-        centred(f, cx, y, hint, l.font, SUBTEXT0, FontWeightHint::Regular);
+        centred(
+            f,
+            cx,
+            y,
+            hint,
+            l.font,
+            c.chrome.dim,
+            FontWeightHint::Regular,
+        );
         if let Some(extra) = &extra {
             y += bh + gap;
-            centred(f, cx, y, extra, l.font, YELLOW, FontWeightHint::Regular);
+            centred(
+                f,
+                cx,
+                y,
+                extra,
+                l.font,
+                c.chrome.even,
+                FontWeightHint::Regular,
+            );
         }
         f.unclip();
 
@@ -1513,6 +1601,10 @@ fn handle_event(app: &mut BreakoutApp, event: &Event) -> EventResult {
 }
 
 impl App for BreakoutApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         match handle_event(self, event) {
             EventResult::Consumed => Response::Redraw,
@@ -1606,6 +1698,104 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark -- in
+    /// play with a power-up falling, paused, and over -- with only the brick
+    /// rows' and power-ups' own hues and a power-up's letter not the palette's
+    /// (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        let mut derived: Vec<Color> = BRICK_ROWS_HUES.iter().flat_map(|&(a, b)| [a, b]).collect();
+        derived.extend(POWERUP_HUES.iter().flat_map(|&(a, b)| [a, b]));
+        derived.extend([POWERUP_INKS.0, POWERUP_INKS.1]);
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut all = derived.clone();
+            all.extend(gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Plain,
+                Chrome::of(&p).band,
+            ));
+            let mut app = test_app();
+            app.theme_changed(&p);
+            app.powerups.push(PowerUp {
+                x: PLAY_WIDTH / 2.0,
+                y: PLAY_HEIGHT / 2.0,
+                kind: PowerUpKind::MultiBall,
+            });
+            let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            // The falling power-up's letter, as drawn, reads on its box.
+            let letter = playing
+                .commands()
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Text { text, color, .. } if text == "M" => Some(*color),
+                    _ => None,
+                })
+                .expect("the power-up's letter is not drawn");
+            let face = Colours::of(&p).powerup(PowerUpKind::MultiBall);
+            let ratio = guitk::theme::contrast_ratio(letter, face);
+            assert!(
+                ratio >= 4.5,
+                "the letter is {ratio:.2}:1 on its box (light: {light})"
+            );
+            app.state = GameState::Paused;
+            let paused = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.state = GameState::GameOver;
+            let over = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            for (what, f) in [("playing", playing), ("paused", paused), ("over", over)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &all,
+                    &format!("breakout, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **Every brick row and power-up stands off the field in either theme**,
+    /// in its own hue: the pale yellow row was 1.15:1 on a light field.
+    #[test]
+    fn every_brick_and_power_up_stands_off_the_field_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for row in 0..BRICK_ROWS {
+                let ratio = guitk::theme::contrast_ratio(c.brick(row), c.chrome.page);
+                assert!(ratio >= 3.0, "row {row} is {ratio:.2}:1 (light: {light})");
+            }
+            for kind in [
+                PowerUpKind::WidePaddle,
+                PowerUpKind::MultiBall,
+                PowerUpKind::ExtraLife,
+            ] {
+                let face = c.powerup(kind);
+                let ratio = guitk::theme::contrast_ratio(face, c.chrome.page);
+                assert!(ratio >= 3.0, "{kind:?} is {ratio:.2}:1 (light: {light})");
+                let ink = gamechrome::legible_on(POWERUP_INKS, face);
+                let ratio = guitk::theme::contrast_ratio(ink, face);
+                assert!(
+                    ratio >= 4.5,
+                    "{kind:?}'s letter is {ratio:.2}:1 (light: {light})"
+                );
+            }
+        }
+    }
+
+    /// **A new game keeps the user's colours**, as it keeps the window's size.
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut app = test_app();
+        app.theme_changed(&light);
+        app.start_game();
+        assert_eq!(app.palette, light);
+    }
     use guitk::probe;
     use std::collections::BTreeSet;
 
@@ -2264,12 +2454,12 @@ mod tests {
     #[test]
     fn test_powerup_kind_colors_different() {
         assert_ne!(
-            PowerUpKind::WidePaddle.color(),
-            PowerUpKind::MultiBall.color()
+            colours().powerup(PowerUpKind::WidePaddle),
+            colours().powerup(PowerUpKind::MultiBall)
         );
         assert_ne!(
-            PowerUpKind::MultiBall.color(),
-            PowerUpKind::ExtraLife.color()
+            colours().powerup(PowerUpKind::MultiBall),
+            colours().powerup(PowerUpKind::ExtraLife)
         );
     }
 
@@ -2447,7 +2637,7 @@ mod tests {
         // First command should be the background fill.
         match &cmds[0] {
             RenderCommand::FillRect { color, .. } => {
-                assert_eq!(*color, MANTLE);
+                assert_eq!(*color, colours().chrome.band);
             }
             _ => panic!("First command should be FillRect background"),
         }

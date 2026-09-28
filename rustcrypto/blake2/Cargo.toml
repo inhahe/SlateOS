@@ -66,9 +66,6 @@ path = "tests/persona.rs"
 name = "unkeyed"
 path = "tests/unkeyed.rs"
 
-[[bench]]
-name = "mod"
-path = "benches/mod.rs"
 
 [dependencies.digest]
 path = "../digest"

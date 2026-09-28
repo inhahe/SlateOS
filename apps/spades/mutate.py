@@ -212,8 +212,8 @@ MUTATIONS = [
     ),
     (
         "the hand is hit-boxed on a rectangle nobody painted",
-        "            draw_card_face(f, r, card, choosing && !legal.contains(&i));",
-        "            draw_card_face(f, r.translated(0.0, 3.0), card, choosing && !legal.contains(&i));",
+        "            draw_card_face(f, r, card, choosing && !legal.contains(&i), c);",
+        "            draw_card_face(f, r.translated(0.0, 3.0), card, choosing && !legal.contains(&i), c);",
         ["the_hand_is_hit_boxed_where_it_is_painted"],
     ),
     (
@@ -502,6 +502,36 @@ MUTATIONS = [
         "        Self::with_rng(Rng::new(seed))",
         "        Self::with_rng(Rng::new(42))",
         ["two_different_seeds_deal_two_different_games"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the help card's scrim is Mocha's whatever the theme",
+        "        fill(f, l.window, c.chrome.scrim, 0.0);",
+        "        fill(f, l.window, Color::rgba(17, 17, 27, 180), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the table is the green felt whatever the theme",
+        "        fill(f, l.table, c.table.felt, l.pad * 0.6);",
+        "        fill(f, l.table, Color::from_hex(0x14352B), l.pad * 0.6);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a forbidden card is not washed out",
+        "        fill(f, r, c.veil, r.w * 0.12);",
+        "        let _ = c.veil;",
+        ["a_card_the_rules_forbid_is_washed_out"],
+    ),
+    (
+        "the page is Mocha's base whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
     ),
 ]
 

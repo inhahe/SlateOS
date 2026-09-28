@@ -122,6 +122,12 @@ const TAB_HEIGHT: f32 = 32.0;
 const NOTICE_H: f32 = 50.0;
 const NOTICE_LINE_H: f32 = 15.0;
 const TRANSFER_ITEM_HEIGHT: f32 = 48.0;
+/// The scrollbars beside a remote screen larger than the room for it.
+const SCREEN_BAR: f32 = 12.0;
+/// The shortest a scrollbar's thumb gets, so it can still be taken hold of.
+const SCREEN_BAR_MIN_THUMB: f32 = 24.0;
+/// How far a wheel's row pans a remote screen, in window pixels.
+const PAN_PER_ROW: f32 = 16.0;
 const HISTORY_ITEM_HEIGHT: f32 = 44.0;
 
 // ============================================================================
@@ -179,6 +185,28 @@ impl ScalingMode {
             Self::AutoFit => "Auto-fit".into(),
             Self::Fixed100 => "100%".into(),
             Self::Custom(pct) => format!("{pct}%"),
+        }
+    }
+
+    /// The scale `Z` steps to: fitted, then half, three quarters, full size,
+    /// one and a half and double, then fitted again.
+    pub fn next(self) -> Self {
+        match self {
+            Self::AutoFit => Self::Custom(50),
+            Self::Custom(50) => Self::Custom(75),
+            Self::Custom(75) => Self::Fixed100,
+            Self::Fixed100 => Self::Custom(150),
+            Self::Custom(150) => Self::Custom(200),
+            Self::Custom(_) => Self::AutoFit,
+        }
+    }
+
+    /// Window pixels per remote pixel, with `fit` the scale that fits.
+    fn factor(self, fit: f32) -> f32 {
+        match self {
+            Self::AutoFit => fit,
+            Self::Fixed100 => 1.0,
+            Self::Custom(pct) => f32::from(pct.max(25)) / 100.0,
         }
     }
 }
@@ -246,13 +274,17 @@ impl QualityPreset {
         }
     }
 
-    /// Returns (color_depth, refresh_rate, scaling) for this preset.
-    pub fn settings(self) -> (ColorDepth, u8, ScalingMode) {
+    /// Returns (color_depth, refresh_rate) for this preset.
+    ///
+    /// Not the scale: that is how the screen is shown here, not what crosses
+    /// the network, and while the presets set it every one set Auto-fit --
+    /// so Q put back whatever scale `Z` had chosen.
+    pub fn settings(self) -> (ColorDepth, u8) {
         match self {
-            Self::Auto => (ColorDepth::Bit24, 30, ScalingMode::AutoFit),
-            Self::LowBandwidth => (ColorDepth::Bit8, 15, ScalingMode::AutoFit),
-            Self::Balanced => (ColorDepth::Bit16, 30, ScalingMode::AutoFit),
-            Self::HighQuality => (ColorDepth::Bit32, 60, ScalingMode::AutoFit),
+            Self::Auto => (ColorDepth::Bit24, 30),
+            Self::LowBandwidth => (ColorDepth::Bit8, 15),
+            Self::Balanced => (ColorDepth::Bit16, 30),
+            Self::HighQuality => (ColorDepth::Bit32, 60),
         }
     }
 
@@ -693,6 +725,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Left / Right", "Another detail tab, on Connections"),
     ("Enter", "Connect to the chosen one"),
     ("Q", "Cycle the quality preset, on Connections"),
+    ("Z", "Cycle the screen's scale, on Connections"),
     ("M", "Cycle the monitor mode, on Sessions"),
     ("D", "Disconnect this session"),
     ("R", "Reconnect it"),
@@ -723,6 +756,80 @@ struct LiveScreen {
     held: Vec<(Key, u32)>,
 }
 
+/// A rectangle as the render commands take one: x, y, width, height.
+type Area = (f32, f32, f32, f32);
+
+fn inside(x: f32, y: f32, (ax, ay, aw, ah): Area) -> bool {
+    x >= ax && y >= ay && x < ax + aw && y < ay + ah
+}
+
+/// How the shown remote screen sits in the window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScreenView {
+    /// Where it is shown: right of the sidebar, less a scrollbar on each
+    /// side it overflows.
+    view: Area,
+    /// The whole screen at its scale, moved by the pan: its corner may lie
+    /// above and left of the view's.
+    placed: Area,
+    /// Window pixels per remote pixel.
+    scale: f32,
+    /// The scrollbar across the bottom, when the screen is wider than the view.
+    across: Option<Area>,
+    /// The scrollbar down the side, when it is taller.
+    down: Option<Area>,
+}
+
+impl ScreenView {
+    /// The part of the view the screen covers, where the pointer is its.
+    fn shown(&self) -> Area {
+        let (vx, vy, vw, vh) = self.view;
+        let (px, py, pw, ph) = self.placed;
+        let (x0, y0) = (vx.max(px), vy.max(py));
+        let (x1, y1) = ((vx + vw).min(px + pw), (vy + vh).min(py + ph));
+        (x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+    }
+
+    /// The thumb on the bar `across` (or down): as long as the part shown
+    /// is of the whole, placed as far along as the pan is.
+    fn thumb(&self, across: bool) -> Option<Area> {
+        let track = if across { self.across? } else { self.down? };
+        let (view_len, whole, pan, start, len) = if across {
+            (
+                self.view.2,
+                self.placed.2,
+                self.view.0 - self.placed.0,
+                track.0,
+                track.2,
+            )
+        } else {
+            (
+                self.view.3,
+                self.placed.3,
+                self.view.1 - self.placed.1,
+                track.1,
+                track.3,
+            )
+        };
+        let thumb = (len * view_len / whole.max(1.0)).clamp(SCREEN_BAR_MIN_THUMB.min(len), len);
+        let at = start + pan / (whole - view_len).max(1.0) * (len - thumb);
+        Some(if across {
+            (at, track.1, thumb, track.3)
+        } else {
+            (track.0, at, track.2, thumb)
+        })
+    }
+}
+
+/// A scrollbar thumb held by the pointer, panning the shown screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PanDrag {
+    /// The bar across the bottom, or the one down the side.
+    across: bool,
+    /// Where on the thumb it was taken, from the thumb's start.
+    grab: f32,
+}
+
 /// Asking for a VNC password before connecting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PasswordPrompt {
@@ -740,6 +847,11 @@ pub struct RemoteDesktopApp {
     // --- Sessions ---
     pub sessions: Vec<RemoteSession>,
     pub selected_session: Option<usize>,
+    /// How far the shown screen is panned, in window pixels: kept within
+    /// what the screen overflows by wherever it is read.
+    screen_pan: (f32, f32),
+    /// A scrollbar thumb being dragged.
+    pan_drag: Option<PanDrag>,
     pub next_session_id: u32,
 
     // --- Performance ---
@@ -877,6 +989,8 @@ impl RemoteDesktopApp {
             editing_profile: None,
             sessions: Vec::new(),
             selected_session: None,
+            screen_pan: (0.0, 0.0),
+            pan_drag: None,
             next_session_id: 1,
             perf_metrics: PerfMetrics::default(),
             show_perf_overlay: false,
@@ -1495,9 +1609,22 @@ impl RemoteDesktopApp {
             .find(|l| l.session_id == session.id && l.ready)
     }
 
+    /// The profile's scale for the shown session: Auto-fit when there is none.
+    fn shown_scaling(&self) -> ScalingMode {
+        self.selected_session
+            .and_then(|i| self.sessions.get(i))
+            .and_then(|s| self.profiles.iter().find(|p| p.id == s.profile_id))
+            .map_or(ScalingMode::AutoFit, |p| p.display.scaling)
+    }
+
     /// Where the shown screen is drawn: the content area right of the
-    /// sidebar, the screen scaled to fit with its shape kept.
-    fn screen_rect(&self) -> Option<(f32, f32, f32, f32)> {
+    /// sidebar, at its profile's scale -- fitted, full size or a percentage
+    /// -- panned when it is larger than the room, with a scrollbar on each
+    /// side it overflows.
+    ///
+    /// It was fitted whatever the profile's Scaling said: "100%" was drawn in
+    /// the profile and could not be had.
+    fn screen_view(&self) -> Option<ScreenView> {
         if self.current_view != MainView::ActiveSessions {
             return None;
         }
@@ -1511,16 +1638,41 @@ impl RemoteDesktopApp {
             reason = "a screen is at most 16384 pixels a side"
         )]
         let (w, h) = (screen.width.max(1) as f32, screen.height.max(1) as f32);
-        let scale = (room_w / w).min(room_h / h);
-        Some((left, top, w * scale, h * scale))
+        let scale = self.shown_scaling().factor((room_w / w).min(room_h / h));
+        let (whole_w, whole_h) = (w * scale, h * scale);
+        // A bar down the side takes width from the view, which can make the
+        // screen overflow across as well; the second pass settles it.
+        let (mut across, mut down) = (false, false);
+        for _ in 0..2 {
+            across = whole_w > room_w - if down { SCREEN_BAR } else { 0.0 } + 0.5;
+            down = whole_h > room_h - if across { SCREEN_BAR } else { 0.0 } + 0.5;
+        }
+        let view_w = (room_w - if down { SCREEN_BAR } else { 0.0 }).max(1.0);
+        let view_h = (room_h - if across { SCREEN_BAR } else { 0.0 }).max(1.0);
+        let pan_x = self.screen_pan.0.clamp(0.0, (whole_w - view_w).max(0.0));
+        let pan_y = self.screen_pan.1.clamp(0.0, (whole_h - view_h).max(0.0));
+        Some(ScreenView {
+            view: (left, top, view_w, view_h),
+            placed: (left - pan_x, top - pan_y, whole_w, whole_h),
+            scale,
+            across: across.then_some((left, top + view_h, view_w, SCREEN_BAR)),
+            down: down.then_some((left + view_w, top, SCREEN_BAR, view_h)),
+        })
     }
 
-    /// Draw the shown screen.
+    /// Draw the shown screen, clipped to its view, and its scrollbars.
     fn render_remote_screen(&self, cmds: &mut Vec<RenderCommand>) {
-        let (Some(screen), Some((x, y, width, height))) = (self.shown_screen(), self.screen_rect())
-        else {
+        let (Some(screen), Some(v)) = (self.shown_screen(), self.screen_view()) else {
             return;
         };
+        let (x, y, width, height) = v.view;
+        cmds.push(RenderCommand::PushClip {
+            x,
+            y,
+            width,
+            height,
+        });
+        let (x, y, width, height) = v.placed;
         cmds.push(RenderCommand::Image {
             x,
             y,
@@ -1528,6 +1680,123 @@ impl RemoteDesktopApp {
             height,
             image_id: screen_image(screen.session_id),
         });
+        cmds.push(RenderCommand::PopClip);
+        for across in [true, false] {
+            let (Some(track), Some(thumb)) =
+                (if across { v.across } else { v.down }, v.thumb(across))
+            else {
+                continue;
+            };
+            for ((x, y, width, height), color, radius) in [
+                (track, self.palette.surface0, 0.0),
+                (thumb, self.palette.surface2, 4.0),
+            ] {
+                cmds.push(RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    corner_radii: CornerRadii::all(radius),
+                });
+            }
+        }
+    }
+
+    /// The pointer on a scrollbar beside the shown screen: a thumb dragged,
+    /// a track clicked a view's length at a time, a wheel turned over it.
+    /// A drag holds the pointer until it is let go, wherever it goes -- it
+    /// is not the remote machine's while the thumb is held.
+    fn pan_with_bars(&mut self, mouse: &guitk::event::MouseEvent) -> Option<EventResult> {
+        if let Some(drag) = self.pan_drag {
+            match mouse.kind {
+                MouseEventKind::Release(MouseButton::Left) => self.pan_drag = None,
+                MouseEventKind::Move => self.drag_pan(drag, mouse.x, mouse.y),
+                _ => {}
+            }
+            return Some(EventResult::Consumed);
+        }
+        let v = self.screen_view()?;
+        for across in [true, false] {
+            let Some(track) = (if across { v.across } else { v.down }) else {
+                continue;
+            };
+            if !inside(mouse.x, mouse.y, track) {
+                continue;
+            }
+            match mouse.kind {
+                MouseEventKind::Press(MouseButton::Left) => {
+                    let (along, view_len) = if across {
+                        (mouse.x, v.view.2)
+                    } else {
+                        (mouse.y, v.view.3)
+                    };
+                    let (start, len) = match v.thumb(across) {
+                        Some(t) if across => (t.0, t.2),
+                        Some(t) => (t.1, t.3),
+                        None => return Some(EventResult::Consumed),
+                    };
+                    if along < start {
+                        self.pan_by(across, -view_len);
+                    } else if along >= start + len {
+                        self.pan_by(across, view_len);
+                    } else {
+                        self.pan_drag = Some(PanDrag {
+                            across,
+                            grab: along - start,
+                        });
+                    }
+                }
+                MouseEventKind::Scroll { dx, dy } => {
+                    let turned = if across && dx != 0.0 { dx } else { dy };
+                    self.pan_by(across, wheel::rows_f(turned) * PAN_PER_ROW);
+                }
+                _ => {}
+            }
+            return Some(EventResult::Consumed);
+        }
+        None
+    }
+
+    /// Pan the shown screen `by` window pixels, across or down, within what
+    /// it overflows by.
+    fn pan_by(&mut self, across: bool, by: f32) {
+        let Some(v) = self.screen_view() else {
+            return;
+        };
+        if across {
+            let most = (v.placed.2 - v.view.2).max(0.0);
+            self.screen_pan.0 = (self.screen_pan.0.min(most) + by).clamp(0.0, most);
+        } else {
+            let most = (v.placed.3 - v.view.3).max(0.0);
+            self.screen_pan.1 = (self.screen_pan.1.min(most) + by).clamp(0.0, most);
+        }
+    }
+
+    /// A held thumb follows the pointer, and the screen pans with it.
+    fn drag_pan(&mut self, drag: PanDrag, x: f32, y: f32) {
+        let Some(v) = self.screen_view() else {
+            self.pan_drag = None;
+            return;
+        };
+        let (Some(track), Some(thumb)) = (
+            if drag.across { v.across } else { v.down },
+            v.thumb(drag.across),
+        ) else {
+            return;
+        };
+        let (along, start, len, thumb_len, view_len, whole) = if drag.across {
+            (x, track.0, track.2, thumb.2, v.view.2, v.placed.2)
+        } else {
+            (y, track.1, track.3, thumb.3, v.view.3, v.placed.3)
+        };
+        let fraction = ((along - drag.grab - start) / (len - thumb_len).max(1.0)).clamp(0.0, 1.0);
+        let pan = fraction * (whole - view_len).max(0.0);
+        if drag.across {
+            self.screen_pan.0 = pan;
+        } else {
+            self.screen_pan.1 = pan;
+        }
     }
 
     /// Draw the password prompt, while one is open.
@@ -1608,7 +1877,7 @@ impl RemoteDesktopApp {
     /// A key while a remote screen is shown: it goes to the remote machine,
     /// except the escape hotkey, which gives the keyboard back.
     fn forward_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
-        if key.key == self.escape_hotkey || self.screen_rect().is_none() {
+        if key.key == self.escape_hotkey || self.screen_view().is_none() {
             return None;
         }
         let id = self.shown_screen()?.session_id;
@@ -1630,25 +1899,25 @@ impl RemoteDesktopApp {
 
     /// The pointer over a remote screen: moved, pressed and released there.
     fn forward_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> Option<EventResult> {
-        let (x, y, w, h) = self.screen_rect()?;
-        if mouse.x < x || mouse.y < y || mouse.x >= x + w || mouse.y >= y + h {
+        let v = self.screen_view()?;
+        if !inside(mouse.x, mouse.y, v.shown()) {
             return None;
         }
         let id = self.shown_screen()?.session_id;
         let live = self.live.iter_mut().find(|l| l.session_id == id)?;
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a screen is at most 16384 pixels a side"
-        )]
-        let (sw, sh) = (live.width as f32, live.height as f32);
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "inside the screen, so 0..width and 0..height"
-        )]
+        // Through the scale and the pan: the remote pixel under the pointer.
+        let to_remote = |at: f32, from: f32, size: u32| -> u16 {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "inside the shown part, so 0..size; clamped besides"
+            )]
+            let pixel = ((at - from) / v.scale).max(0.0) as u32;
+            u16::try_from(pixel.min(size.saturating_sub(1))).unwrap_or(u16::MAX)
+        };
         let (rx, ry) = (
-            ((mouse.x - x) / w * sw) as u16,
-            ((mouse.y - y) / h * sh) as u16,
+            to_remote(mouse.x, v.placed.0, live.width),
+            to_remote(mouse.y, v.placed.1, live.height),
         );
         let bit = |b: &MouseButton| match b {
             MouseButton::Left => 1_u8,
@@ -1884,14 +2153,13 @@ impl RemoteDesktopApp {
 
     /// Apply a quality preset to the current display settings.
     pub fn apply_quality_preset(&mut self, preset: QualityPreset) {
-        let (depth, rate, scaling) = preset.settings();
+        let (depth, rate) = preset.settings();
         if let Some(idx) = self.selected_profile
             && let Some(profile) = self.profiles.get_mut(idx)
         {
             profile.quality = preset;
             profile.display.color_depth = depth;
             profile.display.refresh_rate = rate;
-            profile.display.scaling = scaling;
         }
     }
 
@@ -1959,7 +2227,8 @@ impl RemoteDesktopApp {
                 .forward_key(key)
                 .unwrap_or_else(|| self.handle_key(key)),
             Event::Mouse(mouse) => self
-                .forward_mouse(mouse)
+                .pan_with_bars(mouse)
+                .or_else(|| self.forward_mouse(mouse))
                 .unwrap_or_else(|| self.handle_mouse(mouse)),
             Event::Resize { width, height } => {
                 self.window_width = *width as f32;
@@ -2252,6 +2521,20 @@ impl RemoteDesktopApp {
             // and tested, and `apply_quality_preset` had no caller -- so a
             // profile's colour depth, refresh rate and scaling were whatever
             // they were created with, for ever.
+            // The selected profile's scale: fitted, half, three quarters, full
+            // size, one and a half, double. It had no control at all -- every
+            // preset set Auto-fit -- and it applies at once, open or not: it
+            // is how the screen is shown here, not what the server sends.
+            Key::Z if self.current_view == MainView::Connections => {
+                if let Some(profile) = self.selected_profile.and_then(|i| self.profiles.get_mut(i))
+                {
+                    let next = profile.display.scaling.next();
+                    profile.display.scaling = next;
+                    self.screen_pan = (0.0, 0.0);
+                    self.status_message = Some(format!("scaling: {}", next.label()));
+                }
+                EventResult::Consumed
+            }
             Key::Q if self.current_view == MainView::Connections => {
                 let next = match self.selected_quality() {
                     QualityPreset::Auto => QualityPreset::LowBandwidth,
@@ -2260,7 +2543,7 @@ impl RemoteDesktopApp {
                     QualityPreset::HighQuality => QualityPreset::Auto,
                 };
                 self.apply_quality_preset(next);
-                let (depth, rate, _) = next.settings();
+                let (depth, rate) = next.settings();
                 let mut said = format!(
                     "quality: {} -- {} colour, at most {rate} frames a second",
                     next.label(),
@@ -5174,22 +5457,21 @@ mod tests {
 
     #[test]
     fn test_quality_preset_settings_auto() {
-        let (depth, rate, scaling) = QualityPreset::Auto.settings();
+        let (depth, rate) = QualityPreset::Auto.settings();
         assert_eq!(depth, ColorDepth::Bit24);
         assert_eq!(rate, 30);
-        assert_eq!(scaling, ScalingMode::AutoFit);
     }
 
     #[test]
     fn test_quality_preset_settings_low() {
-        let (depth, rate, _scaling) = QualityPreset::LowBandwidth.settings();
+        let (depth, rate) = QualityPreset::LowBandwidth.settings();
         assert_eq!(depth, ColorDepth::Bit8);
         assert_eq!(rate, 15);
     }
 
     #[test]
     fn test_quality_preset_settings_high() {
-        let (depth, rate, _scaling) = QualityPreset::HighQuality.settings();
+        let (depth, rate) = QualityPreset::HighQuality.settings();
         assert_eq!(depth, ColorDepth::Bit32);
         assert_eq!(rate, 60);
     }
@@ -6508,6 +6790,210 @@ mod tests {
         assert!(said.contains("from the next connection"), "{said:?}");
     }
 
+    // == The profile's scale (2026-09-27) ========================================
+
+    /// A connected app showing a `w` by `h` remote screen at `scaling`, and
+    /// what the server heard, with a pointer message's worth still to hear.
+    fn showing(
+        w: u16,
+        h: u16,
+        scaling: ScalingMode,
+    ) -> (RemoteDesktopApp, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let mut script = crate::rfb::fake::handshake_sized(w, h);
+        script.push(Step::Hear(6));
+        let (port, heard) = server(script);
+        let mut app = vnc_app(port);
+        app.profiles[0].display.scaling = scaling;
+        app.connect_vnc(0, "").expect("a session");
+        pump_until(&mut app, |a| a.live.iter().any(|l| l.ready));
+        app.current_view = MainView::ActiveSessions;
+        for _ in 0..6 {
+            heard
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the handshake");
+        }
+        (app, heard)
+    }
+
+    fn pointer_at(app: &mut RemoteDesktopApp, x: f32, y: f32, kind: MouseEventKind) {
+        app.handle_event(&Event::Mouse(guitk::event::MouseEvent { x, y, kind }));
+    }
+
+    #[test]
+    fn a_profiles_scale_is_how_the_screen_is_shown() {
+        let (app, _heard) = showing(2000, 1500, ScalingMode::AutoFit);
+        let fit = app.screen_view().expect("shown");
+        assert!(
+            fit.scale < 1.0,
+            "a 2000x1500 screen fits a {}x{} window",
+            app.window_width,
+            app.window_height
+        );
+        assert_eq!(
+            (fit.across, fit.down),
+            (None, None),
+            "a fitted screen needs no bars"
+        );
+
+        let (app, _heard) = showing(2000, 1500, ScalingMode::Fixed100);
+        let full = app.screen_view().expect("shown");
+        assert!((full.scale - 1.0).abs() < f32::EPSILON);
+        assert!((full.placed.2 - 2000.0).abs() < 0.5 && (full.placed.3 - 1500.0).abs() < 0.5);
+        assert!(
+            full.across.is_some() && full.down.is_some(),
+            "no scrollbars: {full:?}"
+        );
+        let drawn = app.render_commands();
+        let id = screen_image(app.sessions[0].id);
+        let image = drawn
+            .iter()
+            .position(|c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == id))
+            .expect("the screen is not drawn");
+        assert!(
+            matches!(
+                drawn.get(image.saturating_sub(1)),
+                Some(RenderCommand::PushClip { width, height, .. })
+                    if (*width - full.view.2).abs() < 0.5 && (*height - full.view.3).abs() < 0.5
+            ),
+            "the screen is not clipped to its view"
+        );
+        assert!(
+            matches!(drawn.get(image), Some(RenderCommand::Image { width, .. }) if (*width - 2000.0).abs() < 0.5),
+            "the screen is not drawn full size"
+        );
+
+        let (app, _heard) = showing(400, 300, ScalingMode::Custom(50));
+        let half = app.screen_view().expect("shown");
+        assert!((half.placed.2 - 200.0).abs() < 0.5 && (half.placed.3 - 150.0).abs() < 0.5);
+        assert_eq!((half.across, half.down), (None, None));
+    }
+
+    /// **The bars pan the screen, and the pointer follows the pan**: the
+    /// down thumb dragged to the bottom shows the bottom, a click on the
+    /// track before the across thumb pages back, and a click on the screen
+    /// reaches the remote pixel under it.
+    #[test]
+    fn the_bars_pan_the_screen_and_the_pointer_follows() {
+        let (mut app, heard) = showing(2000, 1500, ScalingMode::Fixed100);
+        let v = app.screen_view().expect("shown");
+        let thumb = v.thumb(false).expect("a thumb down the side");
+        let (tx, ty) = (thumb.0 + thumb.2 / 2.0, thumb.1 + 2.0);
+        pointer_at(&mut app, tx, ty, MouseEventKind::Press(MouseButton::Left));
+        pointer_at(&mut app, tx, ty + 10_000.0, MouseEventKind::Move);
+        pointer_at(
+            &mut app,
+            tx,
+            ty + 10_000.0,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        let v = app.screen_view().expect("shown");
+        let bottom = 1500.0 - v.view.3;
+        assert!(
+            (app.screen_pan.1 - bottom).abs() < 0.5,
+            "dragged to {:?}, the bottom is {bottom}",
+            app.screen_pan
+        );
+        assert!(
+            (v.placed.1 + 1500.0 - (v.view.1 + v.view.3)).abs() < 0.5,
+            "the bottom is not shown"
+        );
+
+        // Across: a click on the track past the thumb pages right.
+        let across = v.across.expect("a bar across");
+        let thumb = v.thumb(true).expect("a thumb across");
+        let past = thumb.0 + thumb.2 + 5.0;
+        pointer_at(
+            &mut app,
+            past,
+            across.1 + 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        let paged = app.screen_pan.0;
+        assert!(
+            (paged - v.view.2.min(2000.0 - v.view.2)).abs() < 0.5,
+            "a page is a view's width: {paged}"
+        );
+
+        // The wheel over the bar down the side pans back up.
+        let down = v.down.expect("a bar down");
+        pointer_at(
+            &mut app,
+            down.0 + 2.0,
+            down.1 + 5.0,
+            MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        );
+        assert!(app.screen_pan.1 < bottom, "the wheel did not pan up");
+
+        // A click on the screen reaches the remote pixel under it.
+        let v = app.screen_view().expect("shown");
+        let (at_x, at_y) = (v.view.0 + 10.0, v.view.1 + 10.0);
+        pointer_at(
+            &mut app,
+            at_x,
+            at_y,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        let sent = heard
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a pointer message");
+        let x = u16::from_be_bytes([sent[2], sent[3]]);
+        let y = u16::from_be_bytes([sent[4], sent[5]]);
+        #[allow(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            reason = "a pan is never negative, and within the screen"
+        )]
+        let want = (
+            (app.screen_pan.0 + 10.0) as u16,
+            (app.screen_pan.1 + 10.0) as u16,
+        );
+        assert_eq!((x, y), want, "the pointer went to the wrong remote pixel");
+        assert_eq!(sent[..2], [5, 1]);
+    }
+
+    #[test]
+    fn z_chooses_the_scale_and_q_leaves_it_alone() {
+        let mut app = vnc_app(1);
+        app.selected_profile = Some(0);
+        app.current_view = MainView::Connections;
+        let press = |app: &mut RemoteDesktopApp, key: Key| {
+            app.handle_event(&Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: String::new(),
+            }));
+        };
+        let mut seen = vec![app.profiles[0].display.scaling];
+        for _ in 0..6 {
+            press(&mut app, Key::Z);
+            seen.push(app.profiles[0].display.scaling);
+        }
+        assert_eq!(
+            seen,
+            [
+                ScalingMode::AutoFit,
+                ScalingMode::Custom(50),
+                ScalingMode::Custom(75),
+                ScalingMode::Fixed100,
+                ScalingMode::Custom(150),
+                ScalingMode::Custom(200),
+                ScalingMode::AutoFit,
+            ]
+        );
+        press(&mut app, Key::Z);
+        press(&mut app, Key::Z);
+        press(&mut app, Key::Z);
+        assert_eq!(app.profiles[0].display.scaling, ScalingMode::Fixed100);
+        assert_eq!(app.status_message.as_deref(), Some("scaling: 100%"));
+        press(&mut app, Key::Q);
+        assert_eq!(
+            app.profiles[0].display.scaling,
+            ScalingMode::Fixed100,
+            "a quality preset put the scale back"
+        );
+    }
+
     /// Keys and the pointer reach the remote machine while its screen is
     /// shown; the escape hotkey does not -- it gives the keyboard back.
     #[test]
@@ -6552,7 +7038,7 @@ mod tests {
             "the release did not carry the keysym the press was sent as"
         );
 
-        let (x, y, w, h) = app.screen_rect().expect("the screen is shown");
+        let (x, y, w, h) = app.screen_view().expect("the screen is shown").placed;
         app.handle_event(&Event::Mouse(guitk::event::MouseEvent {
             x: x + w - 0.5,
             y: y + h - 0.5,

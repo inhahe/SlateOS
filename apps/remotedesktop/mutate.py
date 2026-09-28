@@ -53,6 +53,9 @@ WIDENS = "every_channel_widens_to_its_full_range"
 PACED = "a_frame_rate_spaces_the_requests"
 PROFILE_DEPTH = "a_vnc_session_asks_for_the_profiles_colour_depth"
 PRESET_SAYS = "a_quality_preset_changed_under_a_live_session_says_when_it_applies"
+SCALE = "a_profiles_scale_is_how_the_screen_is_shown"
+BARS = "the_bars_pan_the_screen_and_the_pointer_follows"
+Z_SCALE = "z_chooses_the_scale_and_q_leaves_it_alone"
 
 MAIN = [
     (
@@ -105,8 +108,8 @@ MAIN = [
     ),
     (
         "the escape hotkey goes to the remote machine",
-        "        if key.key == self.escape_hotkey || self.screen_rect().is_none() {",
-        "        if self.screen_rect().is_none() {",
+        "        if key.key == self.escape_hotkey || self.screen_view().is_none() {",
+        "        if self.screen_view().is_none() {",
         [INPUT],
     ),
     (
@@ -166,6 +169,67 @@ MAIN = [
         "                if self.selected_profile_is_live() {",
         "                if false {",
         [PRESET_SAYS],
+    ),
+    # The profile's scale (2026-09-27).
+    (
+        "the profile's scale is not read",
+        "        let scale = self.shown_scaling().factor((room_w / w).min(room_h / h));",
+        "        let scale = ScalingMode::AutoFit.factor((room_w / w).min(room_h / h));",
+        [SCALE],
+    ),
+    (
+        "full size is fitted",
+        "            Self::Fixed100 => 1.0,",
+        "            Self::Fixed100 => fit,",
+        [SCALE],
+    ),
+    (
+        "a screen wider than the room gets no bar",
+        "            across = whole_w > room_w - if down { SCREEN_BAR } else { 0.0 } + 0.5;",
+        "            across = false;",
+        [SCALE, BARS],
+    ),
+    (
+        "the screen is not clipped to its view",
+        "        let (x, y, width, height) = v.view;\n        cmds.push(RenderCommand::PushClip {\n            x,\n            y,\n            width,\n            height,\n        });\n",
+        "",
+        [SCALE],
+    ),
+    (
+        "the pointer ignores the pan",
+        "            to_remote(mouse.x, v.placed.0, live.width),",
+        "            to_remote(mouse.x, v.view.0, live.width),",
+        [BARS],
+    ),
+    (
+        "a dragged thumb does not pan",
+        "            self.screen_pan.1 = pan;",
+        "",
+        [BARS],
+    ),
+    (
+        "a click on the track does not page",
+        "                        self.pan_by(across, view_len);",
+        "                        self.pan_by(across, 0.0);",
+        [BARS],
+    ),
+    (
+        "the wheel over a bar does not pan",
+        "                    self.pan_by(across, wheel::rows_f(turned) * PAN_PER_ROW);",
+        "",
+        [BARS],
+    ),
+    (
+        "Z chooses nothing",
+        "                    profile.display.scaling = next;",
+        "",
+        [Z_SCALE],
+    ),
+    (
+        "a quality preset puts the scale back to fitted",
+        "            profile.display.refresh_rate = rate;",
+        "            profile.display.refresh_rate = rate;\n            profile.display.scaling = ScalingMode::AutoFit;",
+        [Z_SCALE],
     ),
 ]
 

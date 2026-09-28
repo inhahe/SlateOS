@@ -171554,10 +171554,8 @@ used. It needs a code-page decoder the tree does not have yet: nothing in
 
 ### [E] Settings a window draws and lets you change, and nothing acts on -- 2026-09-27
 
-**Status:** `apps/` -- every row fixed or answered except
-`apps/remotedesktop`'s three, which are being made real (next entry in the
-log when they land). `gui/` -- 33 rows, lane C's to triage; listed by the
-scanner, not here.
+**Status:** `apps/` -- every row fixed or answered, the same day. `gui/` --
+33 rows, lane C's to triage; listed by the scanner, not here.
 
 **In short:** a settings row that draws its value, lets you change it, draws
 the new value -- and nothing else in the program ever reads it. The user did
@@ -171573,7 +171571,7 @@ for command-line programs and could not see these -- the reads are not in a
 | `videoplayer` | six rows | **fixed** -- Auto-load Subtitles, Remember Volume and both languages act; Resume, Hardware Decode, On Finish and Deinterlace say "Not applied: nothing here decodes video" |
 | `pomodoro` | Notification Sound | **fixed** -- the settings say nothing here plays sound |
 | `diskimager` | `CreateOptions::format` | **fixed** -- the field is gone; the label reads what the copy writes |
-| `remotedesktop` | Scaling, Color Depth, Refresh Rate | **real, open** -- VNC connects now, and the session asks for 32-bit colour at full speed and fits the screen whatever the profile says |
+| `remotedesktop` | Scaling, Color Depth, Refresh Rate | **fixed** -- a VNC session asks for the profile's bits a pixel and keeps its frame rate; the screen is shown at its scale (fitted, 50-200%, full size) with scrollbars to pan, and Z chooses it -- it had no control, every preset set Auto-fit |
 | `torrent`, `fontmanager` | 9 | answered -- each panel says its settings are not applied |
 | `netscan`, `diskimager` | a method, an output path | answered -- labels and records, not controls |
 | `netmanager` | the VPN rows | answered -- the list is empty in the shipping program |

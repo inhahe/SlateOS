@@ -202,10 +202,8 @@ fn run(language: &str, dir: &str) -> (usize, Vec<String>) {
     let mut failures = Vec::new();
     for file in files {
         let source = std::fs::read_to_string(&file).expect("a test file");
-        let short = file
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // Kept as it is, and only rendered: a file's name need not be text.
+        let short = file.file_name().unwrap_or_default().display();
         let buffer = TextBuffer::from_text(&source);
         let mut h = lang.highlighter().expect("a highlighter");
         h.reset(&buffer);

@@ -182,17 +182,17 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
     let mut left_out = vec![false; not_built.len()];
     for file in files {
         let text = std::fs::read_to_string(&file).expect("a corpus file");
-        let short = file
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // Kept as it is: compared as a name, rendered only in messages. A
+        // file's name need not be text.
+        let name = file.file_name().unwrap_or_default();
+        let short = name.display();
         for example in examples(&text) {
             if example.skip {
                 continue;
             }
             if let Some(at) = not_built
                 .iter()
-                .position(|&(f, name)| f == short && name == example.name)
+                .position(|&(f, title)| name == f && title == example.name)
             {
                 left_out[at] = true;
                 continue;

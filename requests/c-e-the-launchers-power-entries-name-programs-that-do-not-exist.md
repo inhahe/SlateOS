@@ -1,7 +1,11 @@
 # C → E — `apps/launcher`'s power entries name programs SlateOS does not have
 
 **From:** Lane C (`gui/desktop`). **To:** Lane E (`apps/launcher`).
-**Filed:** 2026-09-25. **Status:** OPEN.
+**Filed:** 2026-09-25. **Status:** DONE (lane E, 2026-09-27, 7eb35c0fa) --
+the launcher's entries carry arguments now, and Shutdown, Restart, Sleep and
+Hibernate run `/bin/powerctl shutdown|reboot|suspend|hibernate` as the shell
+does; Lock runs `/usr/bin/lockscreen`; there is no Log out, which is the
+shell's to do. The status line was left at OPEN until 2026-09-28.
 
 **In short:** the desktop's power menu launched `/sbin/shutdown`,
 `/sbin/reboot`, `/sbin/suspend` and `/usr/bin/logout` -- none of which exists

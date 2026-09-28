@@ -50,7 +50,7 @@
 //! value of every reachable position, computed independently of the code being
 //! tested — rather than against a handful of hand-set boards.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, Ink};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -58,6 +58,7 @@ use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -236,6 +237,19 @@ impl Layout {
             small,
             pad,
         }
+    }
+
+    /// The result's panel, over the middle of the board.
+    #[must_use]
+    pub fn banner(&self) -> Rect {
+        let h = (self.board.h * 0.2).clamp(0.0, 48.0);
+        let w = (self.board.w * 0.86).min(340.0);
+        Rect::new(
+            self.board.x + (self.board.w - w) / 2.0,
+            self.board.y + (self.board.h - h) / 2.0,
+            w,
+            h,
+        )
     }
 
     /// The `index`th of `count` evenly-spaced buttons filling `row`.
@@ -975,7 +989,7 @@ impl TicTacToe {
             self.draw_footer(&mut f, &l, &c);
         }
         if self.show_help {
-            draw_help(&mut f, &l, &c);
+            draw_help(&mut f, &l, &c, &self.palette);
         }
         f
     }
@@ -1107,18 +1121,22 @@ impl TicTacToe {
 
     /// The result, over the finished board.
     fn draw_banner(&self, f: &mut Frame, l: &Layout, c: &Colours) {
-        let h = (l.board.h * 0.2).clamp(0.0, 48.0);
-        let w = (l.board.w * 0.86).min(340.0);
-        if h <= 0.0 || w <= 0.0 {
+        let r = l.banner();
+        if r.h <= 0.0 || r.w <= 0.0 {
             return;
         }
-        let r = Rect::new(
-            l.board.x + (l.board.w - w) / 2.0,
-            l.board.y + (l.board.h - h) / 2.0,
-            w,
-            h,
-        );
-        fill(f, r, c.chrome.veil, (h * 0.3).min(12.0));
+        // The toolkit's panel, a ground of its own over the board. It was
+        // the chrome's veil, nearly opaque, and the palette's inks fell to
+        // 4.2:1 on it in a light theme. The palette inks its text colours
+        // for its panel (`Palette::ink`), so the chrome's roles read on it as
+        // they are.
+        self.palette
+            .push_surface(f, r.x, r.y, r.w, r.h, (r.h * 0.3).min(12.0), Surface::Panel);
+        let said = match self.state {
+            GameState::Won(mark, _) if mark == self.human => c.chrome.good,
+            GameState::Won(_, _) => c.chrome.bad,
+            _ => c.chrome.even,
+        };
         centred_in(
             f,
             r.x,
@@ -1126,11 +1144,7 @@ impl TicTacToe {
             r.y + r.h * 0.36,
             &self.status(),
             l.font,
-            match self.state {
-                GameState::Won(mark, _) if mark == self.human => c.chrome.good,
-                GameState::Won(_, _) => c.chrome.bad,
-                _ => c.chrome.even,
-            },
+            said,
             FontWeightHint::Bold,
         );
         centred_in(
@@ -1171,6 +1185,10 @@ impl TicTacToe {
                 c.chrome.dim,
                 FontWeightHint::Regular,
             );
+            // In its player's colour, moved only as far as it must be to
+            // read on the well: the palette's inks are made for the page,
+            // and two of the three fell to 4.1:1 on the well in a light
+            // theme.
             centred_in(
                 f,
                 r.x,
@@ -1178,19 +1196,25 @@ impl TicTacToe {
                 r.y + r.h * 0.7,
                 &count.to_string(),
                 l.small,
-                colour,
+                Ink::on(colour, &[c.chrome.well]).at(l.small, true),
                 FontWeightHint::Bold,
             );
         }
     }
 }
 
-fn draw_help(f: &mut Frame, l: &Layout, c: &Colours) {
+fn draw_help(f: &mut Frame, l: &Layout, c: &Colours, palette: &Palette) {
     // Dim the whole window first, then the panel on top of it, so the sheet
     // reads as in front of the game rather than part of it.
     fill(f, l.window, c.chrome.scrim, 0.0);
     let p = l.help;
-    fill(f, p, c.chrome.veil, 10.0);
+    // The toolkit's panel. Under a point either way its border, stroked half
+    // a point in, would reach outside the sheet.
+    if p.w >= 1.0 && p.h >= 1.0 {
+        palette.push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Panel);
+    }
+    // The palette inks its text colours for its panel (`Palette::ink`), so
+    // the chrome's roles read on the sheet as they are.
 
     let pad = (p.w * 0.06).clamp(6.0, 18.0);
     let inner = (p.w - pad * 2.0).max(0.0);
@@ -1454,46 +1478,200 @@ mod tests {
     use guitk::event::Modifiers;
     use guitk::probe;
 
-    /// **The window is drawn in the user's colours**, light or dark, in
-    /// every state it shows: playing with the keyboard on a square, won,
-    /// drawn, and with the help sheet up. It drew in its own copy of
-    /// Catppuccin Mocha, dark on a light desktop (the operator's C-Q16).
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: playing with the
+    /// keyboard on a square, the computer thinking, won, drawn, the help
+    /// sheet up, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut game = TicTacToe::new();
+        game.theme_changed(p);
+        game.cells[0] = Some(Mark::X);
+        game.cells[4] = Some(Mark::O);
+        let playing = game.frame(640.0, 520.0);
+        let cramped = game.frame(300.0, 260.0);
+        let mut thinking = TicTacToe::new();
+        thinking.theme_changed(p);
+        assert!(
+            thinking.apply(Action::Play(4)),
+            "the fixture's move was refused"
+        );
+        assert!(
+            thinking.thinking(),
+            "the fixture's computer is not thinking"
+        );
+        let thinking = thinking.frame(640.0, 520.0);
+        game.cells = [Some(Mark::X); CELLS];
+        game.state = GameState::Won(Mark::X, [0, 1, 2]);
+        let won = game.frame(640.0, 520.0);
+        let cramped_won = game.frame(300.0, 260.0);
+        game.state = GameState::Won(Mark::O, [3, 4, 5]);
+        let lost = game.frame(640.0, 520.0);
+        game.state = GameState::Draw;
+        let drawn = game.frame(640.0, 520.0);
+        game.show_help = true;
+        let help = game.frame(640.0, 520.0);
+        let cramped_help = game.frame(300.0, 260.0);
+        vec![
+            ("playing", playing),
+            ("thinking", thinking),
+            ("won", won),
+            ("lost", lost),
+            ("drawn", drawn),
+            ("help", help),
+            ("cramped", cramped),
+            ("cramped, won", cramped_won),
+            ("cramped, help", cramped_help),
+        ]
+    }
+
+    /// The window size `every_look` drew `what` at.
+    fn size_of(what: &str) -> (f32, f32) {
+        if what.starts_with("cramped") {
+            (300.0, 260.0)
+        } else {
+            (640.0, 520.0)
+        }
+    }
+
+    /// A light palette whose hues are the dark theme's pastels, in either
+    /// surface look: a theme a user can put together, whose hues are too
+    /// pale to read as they are, so that only a word in the palette's ink of
+    /// a hue reads. The stock light palette's hues are dark enough that a
+    /// raw one would pass.
+    fn pale_light(cards: bool) -> Palette {
+        let mut p = palette(true, cards);
+        let dark = Palette::for_mode(false);
+        p.blue = dark.blue;
+        p.green = dark.green;
+        p.red = dark.red;
+        p.yellow = dark.yellow;
+        p.peach = dark.peach;
+        p.mauve = dark.mauve;
+        p.teal = dark.teal;
+        p.lavender = dark.lavender;
+        p.sapphire = dark.sapphire;
+        p
+    }
+
+    /// **The banner and the help sheet each have a ground of their own**,
+    /// the toolkit's panel, in either look: under the bordered look a plain
+    /// card has no fill, and their words would sit on the marks.
     #[test]
-    fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut game = TicTacToe::new();
-            game.theme_changed(&p);
-            game.cells[0] = Some(Mark::X);
-            game.cells[4] = Some(Mark::O);
-            let playing = game.frame(640.0, 520.0);
-            game.cells = [Some(Mark::X); CELLS];
-            game.state = GameState::Won(Mark::X, [0, 1, 2]);
-            let won = game.frame(640.0, 520.0);
-            game.state = GameState::Draw;
-            let drawn = game.frame(640.0, 520.0);
-            game.show_help = true;
-            let help = game.frame(640.0, 520.0);
-            // The header's buttons are the toolkit's blends of the palette.
-            let buttons = gamechrome::button_colours(
-                &p,
-                guitk::button::Kind::Plain,
-                Colours::of(&p).chrome.page,
-            );
-            for (what, f) in [
-                ("playing", playing),
-                ("won", won),
-                ("drawn", drawn),
-                ("help", help),
-            ] {
-                appearance::palette_check::assert_drawn_from(
-                    &p,
-                    f.commands(),
-                    &buttons,
-                    &format!("tictactoe, {what}, light: {light}"),
+    fn the_banner_and_the_help_sheet_are_grounded() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let panel = p.painted(Surface::Panel);
+            for (what, f) in every_look(&p) {
+                let (w, h) = size_of(what);
+                let l = Layout::new(w, h);
+                let want = match what {
+                    "won" | "lost" | "drawn" | "cramped, won" => l.banner(),
+                    "help" | "cramped, help" => l.help,
+                    _ => continue,
+                };
+                let grounded = f.commands().iter().any(|cmd| {
+                    matches!(cmd, RenderCommand::FillRect { x, y, width, height, color, .. }
+                        if *color == panel
+                            && (x - want.x).abs() < 0.01
+                            && (y - want.y).abs() < 0.01
+                            && (width - want.w).abs() < 0.01
+                            && (height - want.h).abs() < 0.01)
+                });
+                assert!(
+                    grounded,
+                    "{what} has no ground of its own (light: {light}, cards: {cards})"
                 );
             }
         }
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// every state it shows. It drew in its own copy of Catppuccin Mocha,
+    /// dark on a light desktop (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            // The header's buttons are the toolkit's blends of the palette,
+            // and the words written in a player's or an outcome's colour on
+            // the well or the panel are that colour moved to read there.
+            let c = Colours::of(&p);
+            let mut derived =
+                gamechrome::button_colours(&p, guitk::button::Kind::Plain, c.chrome.page);
+            for ink in [c.x, c.o, c.chrome.even] {
+                let moved = Ink::on(ink, &[c.chrome.well]);
+                derived.extend([moved.large, moved.small]);
+            }
+            for (what, f) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("tictactoe, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        let looks = LOOKS
+            .iter()
+            .map(|&(light, cards)| {
+                (
+                    format!("light: {light}, cards: {cards}"),
+                    palette(light, cards),
+                )
+            })
+            .chain(
+                [false, true]
+                    .map(|cards| (format!("pale light, cards: {cards}"), pale_light(cards))),
+            );
+        for (look, p) in looks {
+            let off = guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled: true,
+                    ..guitk::button::State::default()
+                },
+                Colours::of(&p).chrome.page,
+            );
+            let exempt = |r: &gamechrome::legibility::Read| {
+                r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "tictactoe: {bad:#?}");
     }
 
     /// X and O are never alike, whatever accent the user picks: X is the
@@ -1622,6 +1800,51 @@ mod tests {
         assert_eq!(g.cursor(), 4, "one press of Up should move exactly one row");
         tap(&mut g, Key::Up);
         assert_eq!(g.cursor(), 1);
+    }
+
+    #[test]
+    fn a_key_the_game_does_not_know_is_left_for_someone_else() {
+        let mut g = game();
+        for key in [Key::Q, Key::Tab, Key::F1] {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(key)),
+                EventResult::Ignored,
+                "{key:?} was claimed by a game that does nothing with it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_keys_that_close_the_sheet_close_it() {
+        for key in [Key::H, Key::Escape, Key::Enter, Key::Space] {
+            let mut g = game();
+            g.show_help = true;
+            probe::key(&mut g, &probe::press(key));
+            assert!(!g.show_help(), "{key:?} did not close the help sheet");
+        }
+    }
+
+    #[test]
+    fn a_click_that_is_not_a_left_press_is_ignored() {
+        let mut g = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let r = g.layout(WINDOW_WIDTH, WINDOW_HEIGHT).cell(0);
+        for kind in [
+            MouseEventKind::Move,
+            MouseEventKind::Release(MouseButton::Left),
+            MouseEventKind::Press(MouseButton::Right),
+        ] {
+            let ev = Event::Mouse(MouseEvent {
+                x: r.centre().0,
+                y: r.centre().1,
+                kind: kind.clone(),
+            });
+            assert_eq!(handle_event(&mut g, &ev), EventResult::Ignored, "{kind:?}");
+        }
+        assert_eq!(
+            g.cell(0),
+            None,
+            "a click that was not a left press played a square"
+        );
     }
 
     #[test]
@@ -2208,13 +2431,49 @@ mod tests {
         g.apply(Action::Play(4));
         settle(&mut g);
         let before = *g.cells();
-        // The move is refused, but the cursor still moves to the square you
-        // named — a refused click should show you what you asked for.
-        g.apply(Action::Play(4));
-        assert_eq!(*g.cells(), before, "square 4 was overwritten");
-        assert_eq!(g.cursor(), 4);
-        // With the cursor already there, nothing at all changes.
-        assert!(!g.apply(Action::Play(4)), "square 4 is taken");
+        // Yours and the computer's: a move on your own square would write
+        // the mark that is already there, so only the turn passing shows it,
+        // while one on the computer's would change the mark.
+        let theirs = (0..CELLS)
+            .find(|&i| g.cell(i) == Some(Mark::O))
+            .expect("the computer replied");
+        for square in [4, theirs] {
+            // The move is refused, but the cursor still moves to the square
+            // you named — a refused click should show you what you asked for.
+            g.apply(Action::Play(square));
+            assert_eq!(*g.cells(), before, "square {square} was overwritten");
+            assert_eq!(g.cursor(), square);
+            assert!(
+                g.human_turn(),
+                "a move refused on {square} handed the turn on"
+            );
+            // With the cursor already there, nothing at all changes.
+            assert!(!g.apply(Action::Play(square)), "square {square} is taken");
+            assert_eq!(*g.cells(), before);
+        }
+    }
+
+    /// **`play` keeps the rules itself.** It is where every move is made,
+    /// the computer's included, so it refuses a finished board rather than
+    /// trusting each caller to have asked first -- `apply` does ask, which
+    /// is why no test through it can tell.
+    #[test]
+    fn play_itself_refuses_a_move_on_a_finished_board() {
+        let mut g = game();
+        g.force(0, Mark::X);
+        g.force(3, Mark::O);
+        g.force(1, Mark::X);
+        g.force(4, Mark::O);
+        g.force(2, Mark::X);
+        assert!(!g.playing());
+        let before = *g.cells();
+        assert!(
+            before.iter().any(Option::is_none),
+            "the board has room left"
+        );
+        for i in 0..CELLS {
+            assert!(!g.play(i), "square {i} was played on a finished board");
+        }
         assert_eq!(*g.cells(), before);
     }
 
@@ -2345,6 +2604,25 @@ mod tests {
         assert!(g.enabled(Action::NewGame));
     }
 
+    /// **An arrow at the edge is a wall**: the cursor moves one square the
+    /// way the arrow points or, at the edge, not at all -- it neither wraps
+    /// nor slides along the edge to another square.
+    #[test]
+    fn an_arrow_at_the_edge_is_a_wall() {
+        let mut g = game();
+        let side = SIDE as i32;
+        for i in 0..CELLS {
+            g.cursor = i;
+            let (col, row) = ((i % SIDE) as i32, (i / SIDE) as i32);
+            for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+                let (c, r) = (col + dx, row + dy);
+                let inside = (0..side).contains(&c) && (0..side).contains(&r);
+                let want = if inside { (r * side + c) as usize } else { i };
+                assert_eq!(g.neighbour(dx, dy), want, "from {i} by ({dx}, {dy})");
+            }
+        }
+    }
+
     #[test]
     fn the_cursor_never_leaves_the_board() {
         let mut g = game();
@@ -2405,23 +2683,60 @@ mod tests {
 
     #[test]
     fn keys_with_a_modifier_belong_to_the_window_manager() {
-        let mut g = game();
-        probe::key(&mut g, &probe::ctrl(Key::N));
-        assert_eq!(filled(&g), 0);
-        probe::key(&mut g, &probe::ctrl(Key::Enter));
-        assert_eq!(filled(&g), 0);
+        // Ctrl, Alt and the Super key each. Enter would play a square, so a
+        // modified Enter that got through shows on the board.
+        for m in [
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                super_key: true,
+                ..Modifiers::default()
+            },
+        ] {
+            let mut g = game();
+            for key in [Key::N, Key::Enter] {
+                let ev = KeyEvent {
+                    key,
+                    modifiers: m,
+                    pressed: true,
+                    text: String::new(),
+                };
+                assert_eq!(
+                    handle_event(&mut g, &Event::Key(ev)),
+                    EventResult::Ignored,
+                    "{m:?} {key:?} was taken by the game"
+                );
+            }
+            assert_eq!(filled(&g), 0, "a modified key played a square ({m:?})");
+        }
     }
 
     #[test]
     fn the_sheet_swallows_the_keys_it_does_not_answer() {
+        // The sheet is modal: a player reading it must not be playing blind
+        // on the board behind it -- not a move, not the cursor, not a side.
         let mut g = game();
         g.apply(Action::ToggleHelp);
+        let before = (*g.cells(), g.cursor(), g.human());
+        for key in [Key::N, Key::Left, Key::Up, Key::S, Key::Q] {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(key)),
+                EventResult::Consumed,
+                "{key:?} was passed on past the sheet"
+            );
+        }
+        assert!(g.show_help(), "an ordinary key closed the sheet");
         assert_eq!(
-            probe::key(&mut g, &probe::press(Key::N)),
-            EventResult::Consumed
+            (*g.cells(), g.cursor(), g.human()),
+            before,
+            "a key reached the game through the sheet"
         );
-        assert!(g.show_help(), "N does not reach the game through the sheet");
-        assert_eq!(filled(&g), 0);
         tap(&mut g, Key::Escape);
         assert!(!g.show_help());
     }

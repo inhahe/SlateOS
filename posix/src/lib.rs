@@ -111,6 +111,11 @@
 //!   `nextafter`, `erf`, `erfc`, `lgamma`, `lgamma_r`, `tgamma`,
 //!   `j0`, `j1`, `jn`, `y0`, `y1`, `yn` (Bessel)
 //!   (and `f32` variants)
+//! - **Complex** (`<complex.h>`, C99 Annex G): `cabs`, `carg`, `cproj`,
+//!   `csqrt`, `cexp`, `clog`, `cpow`, the circular and hyperbolic functions
+//!   and their inverses (and `float` variants; FreeBSD msun's)
+//! - **Floating-point environment** (`<fenv.h>`): rounding direction and
+//!   exception flags, both units
 //! - **Wide Characters** (full UTF-8): `mblen`, `mbtowc`, `wctomb`,
 //!   `mbstowcs`, `wcstombs`, `btowc`, `wctob`, `mbsinit`, `mbrtowc`,
 //!   `wcrtomb`, `mbrlen`, `wcwidth`, `wcswidth`, `iswalnum`..`iswxdigit`,
@@ -335,6 +340,7 @@ pub mod aio;
 pub mod alloca;
 pub mod assert;
 pub mod compiler_rt;
+pub mod complex;
 pub mod crt;
 pub mod crypt;
 pub mod ctype;

@@ -175117,7 +175117,7 @@ glibc's `errno` (design-decisions §1132).
 **Tests:** `math::tests::every_answer_is_glibcs_or_within_its_error` replays
 23,113 calls answered by glibc 2.39 under WSL (`dlm/oracle/math_harness.py`).
 
-## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: OPEN (`<fenv.h>` done 2026-09-27: posix/src/fenv.rs, glibc's x86-64 fenv; the `long double` functions and `<complex.h>` remain)**
+## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: OPEN (`<fenv.h>` done 2026-09-27: posix/src/fenv.rs, glibc's x86-64 fenv; `<complex.h>` done 2026-09-28 but for its `long double` functions: posix/src/complex.rs, FreeBSD's msun; the `long double` functions remain)**
 
 **In short:** three parts of C's maths are missing from the C library, so a C
 program that uses them does not link: changing or reading the rounding mode
@@ -175147,6 +175147,12 @@ reached from Rust's standard library.
   memory operands.
 - **`<complex.h>`** -- musl's `src/complex/`: seventy functions, formulas over
   the real ones plus their special cases (Annex G).
+  **Done 2026-09-28** (`posix/src/complex.rs`) but for the 22 `long double`
+  functions, and from FreeBSD's msun rather than musl: musl's `casin`,
+  `cacos`, `casinh`, `cacosh` and `clog` are the schoolbook formulas, which
+  lose their digits near the branch points and near `|z| = 1`
+  (design-decisions §1133). The 44 `double` and `float` functions replay
+  glibc 2.39 for 44,958 calls.
 
 **Where:** `posix/src/math.rs` (and new `fenv.rs`, `complex.rs`).
 **Found by** reading the archive's symbols while replacing the maths

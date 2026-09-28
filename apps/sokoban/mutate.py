@@ -775,6 +775,8 @@ MUTATIONS = [
         ["the_board_is_drawn_with_square_cells_inside_the_body"],
     ),
     (
+        # The mat is a named rectangle so that a test can hold the pass to it.
+        # Growing it by a gap it did not reserve is the fault that naming found.
         "the mat is drawn a gap larger than the one the solve sized",
         "        fill(\n            f,\n            l.board_frame,\n            self.colours.crust,",
         "        fill(\n            f,\n            Rect::new(\n                l.board_frame.x - l.gap,\n                l.board_frame.y - l.gap,\n                l.board_frame.w + l.gap * 2.0,\n                l.board_frame.h + l.gap * 2.0,\n            ),\n            self.colours.crust,",
@@ -841,6 +843,7 @@ MUTATIONS = [
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
+        # The stripe's width has a one-point floor that does not scale.
         "the cursor stripe is as wide as its floor whatever the row is",
         "                if let Some(stripe) = Rect::new(r.x, r.y, (l.pad * 0.5).max(1.0), r.h).intersect(r)\n                {\n                    fill(f, stripe, self.colours.peach, CornerRadii::all(1.0));\n                }",
         "                fill(\n                    f,\n                    Rect::new(r.x, r.y, (l.pad * 0.5).max(1.0), r.h),\n                    self.colours.peach,\n                    CornerRadii::all(1.0),\n                );",

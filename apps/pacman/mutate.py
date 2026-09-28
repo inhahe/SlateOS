@@ -108,6 +108,8 @@ MUTATIONS = [
         ["the_frame_is_balanced_in_every_state_at_every_size"],
     ),
     (
+        # Popping a clip that was never pushed would also unbalance the frame,
+        # so the balance test fails alongside the one that owns the fault.
         "nothing is clipped to the window",
         "        f.clip(l.window);\n        fill(&mut f, l.window, c.chrome.page, CornerRadii::ZERO);",
         "        fill(&mut f, l.window, c.chrome.page, CornerRadii::ZERO);",

@@ -168611,7 +168611,7 @@ file has only its ASCII letters folded -- never a lossy decode. Seven tests and
 five mutations in `apps/filesearch/mutate.py`.
 
 ### [E] A test that forgets its scratch settings writes the developer's own -- 2026-09-25
-**Status:** OPEN -- the one leak found today is fixed; nothing stops the next
+**Status:** OPEN, but no longer unguarded -- the one leak found that day is fixed, and since then `scripts/check-scratch-config.py` (a pre-push gate) walks each crate's call graph from every settings `save()` and refuses a push whose tests can reach one without a scratch guard; it stopped one of lane E's own pushes on 2026-09-27. What is still open is the runtime guard below, which would catch what a static walk cannot see
 
 **In short:** a test that saves a setting without first taking a scratch
 configuration directory writes to the real `~/.config/slateos` of whoever runs
@@ -170478,7 +170478,7 @@ that mutate a file other than the crate root: `apps/editor` (now swept),
 result rests on the old reading; their sweeps are in lane E's queue.
 
 ### [E] "Open with" opened nothing in six of the file manager's eight programs -- 2026-09-26
-**Status:** FIXED for all six (lane E, 2026-09-26). OPEN only for a file whose name is not UTF-8, which still crashes whichever program it is sent to -- lane F's `Args` (`requests/e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`).
+**Status:** FIXED for all six (lane E, 2026-09-26), and since 2026-09-27 for a file whose name is not UTF-8 too: lane F's `oswindow::app::ArgsOs` (§1330) hands the programs their arguments as bytes, and all six -- with the editor, the image viewer, match3 and pinball -- read them through it (`b0471617a`; `requests/e-f-a-file-named-on-the-command-line-may-be-any-bytes.md`, closed).
 
 **In short:** double-clicking a file in the file manager runs the program the
 associations name with the file's path after it. Six of the eight programs the

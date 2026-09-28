@@ -384,6 +384,27 @@ gui/desktop/src/power.rs:low_battery_warned
 gui/desktop/src/resmon.rs:last_snapshot
 gui/desktop/src/window_peek.rs:last_tick_ms
 
+# gui/syntax -- NOT DEAD: read across the FFI boundary (2026-09-28, lane C).
+# `TSLexer`, `TSLanguage` and `LanguageMetadata` in src/ffi.rs are
+# `#[repr(C)]` copies of tree-sitter's own C structs (design-decisions 1437):
+# the grammars fill them in (their statics are generated into OUT_DIR, which
+# this gate does not read) and the runtime, `tree-sitter-c2rust`, reads every
+# field through the pointer it is handed -- `abi_version` to accept the
+# grammar, `lex_fn` to lex, `result_symbol` for the token a lexer found. No
+# Rust source in this tree performs those reads, so they cannot be seen here.
+# The layout test in ffi.rs pins where each field is, and
+# `the_runtime_reads_each_grammar_as_it_was_written` asks the runtime for the
+# ones at the struct's far end.
+gui/syntax/src/ffi.rs:abi_version
+gui/syntax/src/ffi.rs:external_scanner
+gui/syntax/src/ffi.rs:keyword_lex_fn
+gui/syntax/src/ffi.rs:lex_fn
+gui/syntax/src/ffi.rs:major_version
+gui/syntax/src/ffi.rs:minor_version
+gui/syntax/src/ffi.rs:patch_version
+gui/syntax/src/ffi.rs:result_symbol
+gui/syntax/src/ffi.rs:symbol_count
+
 # gui/toolkit --
 # Not yet triaged individually. Each is a value computed and discarded, and
 # none is on a path a user can currently reach.

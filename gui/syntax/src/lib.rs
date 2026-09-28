@@ -1,0 +1,368 @@
+//! Syntax highlighting for the code editor (`guitk::codeview::CodeView`):
+//! tree-sitter's grammars and runtime, as pure Rust, and a
+//! [`guitk::highlight::Highlighter`] that drives them.
+//!
+//! # What it is made of
+//!
+//! - **The runtime** is tree-sitter's, transpiled from C to Rust
+//!   (`tree-sitter-c2rust`, design-decisions §1437): the incremental parser,
+//!   its trees, and its query engine.
+//! - **The grammars** are tree-sitter's own grammars, as their authors publish
+//!   them (`grammars/<name>/`): each one's generated `parser.c` is converted to
+//!   Rust at build time (`build.rs`, `gui/tsgrammar`), and each one's external
+//!   scanner -- the part written by hand in C -- is ported by hand
+//!   (`src/grammars/`). Each grammar's own test corpus runs against it here
+//!   (`src/corpus.rs`), which is what says a converted grammar parses as the C
+//!   one does.
+//! - **The queries** are the grammars' own `highlights.scm`, whose capture
+//!   names (`@keyword`, `@function.method`) map onto the toolkit's kinds of
+//!   code ([`guitk::highlight::Highlight::for_capture`]), which a theme
+//!   colours.
+//!
+//! # Using it
+//!
+//! ```ignore
+//! let language = syntax::Language::for_file(path).or_else(|| syntax::Language::for_first_line(&first));
+//! if let Some(language) = language {
+//!     view.set_highlighter(Some(Box::new(language.highlighter()?)));
+//! }
+//! ```
+//!
+//! The highlighter re-parses only what each edit touched, a few milliseconds
+//! at a time ([`SyntaxHighlighter`]), and answers for what is on screen.
+
+mod ffi;
+mod grammars;
+mod highlighter;
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "a test: a corpus that cannot be read is a failure to report loudly"
+)]
+mod corpus;
+
+use std::path::Path;
+use std::sync::OnceLock;
+
+pub use highlighter::SyntaxHighlighter;
+
+/// Why a language cannot be highlighted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The runtime refused the grammar -- an ABI version it does not read.
+    Grammar {
+        /// The language.
+        language: &'static str,
+        /// What the runtime said.
+        message: String,
+    },
+    /// The grammar's highlight query does not compile against it.
+    Query {
+        /// The language.
+        language: &'static str,
+        /// What the query compiler said, with where.
+        message: String,
+    },
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Grammar { language, message } => {
+                write!(f, "the {language} grammar cannot be used: {message}")
+            }
+            Self::Query { language, message } => {
+                write!(
+                    f,
+                    "the {language} highlight query does not compile: {message}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// A language the highlighter knows: its grammar, its highlight query, and
+/// how its files are recognised.
+pub struct Language {
+    name: &'static str,
+    /// File name extensions, without the dot, in lower case.
+    extensions: &'static [&'static str],
+    /// Whole file names, for files with no extension that says.
+    file_names: &'static [&'static str],
+    /// The interpreters a `#!` line may name.
+    interpreters: &'static [&'static str],
+    grammar: fn() -> tree_sitter_language::LanguageFn,
+    highlights: &'static str,
+    /// Where in [`LANGUAGES`] it is: its compiled query's slot.
+    index: usize,
+}
+
+impl core::fmt::Debug for Language {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Language")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for Language {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index
+    }
+}
+
+impl Eq for Language {}
+
+/// Every language, by name.
+static LANGUAGES: [Language; 3] = [
+    Language {
+        name: "JSON",
+        extensions: &["json", "jsonc", "jsonl", "geojson", "webmanifest"],
+        file_names: &[".babelrc", ".eslintrc", ".prettierrc"],
+        interpreters: &[],
+        grammar: grammars::json::generated::language_fn,
+        highlights: grammars::json::HIGHLIGHTS,
+        index: 0,
+    },
+    Language {
+        name: "Python",
+        extensions: &["py", "pyw", "pyi"],
+        file_names: &["SConstruct", "SConscript"],
+        interpreters: &["python", "python2", "python3", "pypy", "pypy3"],
+        grammar: grammars::python::generated::language_fn,
+        highlights: grammars::python::HIGHLIGHTS,
+        index: 1,
+    },
+    Language {
+        name: "Rust",
+        extensions: &["rs"],
+        file_names: &[],
+        interpreters: &[],
+        grammar: grammars::rust::generated::language_fn,
+        highlights: grammars::rust::HIGHLIGHTS,
+        index: 2,
+    },
+];
+
+/// Each language's compiled highlight query, made the first time it is
+/// asked for.
+static QUERIES: [OnceLock<Result<tree_sitter::Query, Error>>; 3] = [const { OnceLock::new() }; 3];
+
+impl Language {
+    /// Every language the highlighter knows.
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        &LANGUAGES
+    }
+
+    /// The language called `name`, in any case.
+    #[must_use]
+    pub fn named(name: &str) -> Option<&'static Self> {
+        LANGUAGES.iter().find(|l| l.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The language of the file at `path`, by its extension or its whole
+    /// name -- compared as bytes, since a file's name need not be text.
+    #[must_use]
+    pub fn for_file(path: &Path) -> Option<&'static Self> {
+        let name = path.file_name()?.as_encoded_bytes();
+        if let Some(language) = LANGUAGES
+            .iter()
+            .find(|l| l.file_names.iter().any(|f| f.as_bytes() == name))
+        {
+            return Some(language);
+        }
+        let dot = name.iter().rposition(|&b| b == b'.')?;
+        // `.bashrc` is a name, not an extension.
+        if dot == 0 {
+            return None;
+        }
+        let extension = name.get(dot.saturating_add(1)..)?;
+        LANGUAGES.iter().find(|l| {
+            l.extensions
+                .iter()
+                .any(|e| e.as_bytes().eq_ignore_ascii_case(extension))
+        })
+    }
+
+    /// The language a script's `#!` line names: `#!/usr/bin/python3`,
+    /// `#!/usr/bin/env python3`, `#!/usr/bin/env -S python3 -u`.
+    #[must_use]
+    pub fn for_first_line(line: &str) -> Option<&'static Self> {
+        let rest = line.strip_prefix("#!")?;
+        let mut words = rest.split_whitespace();
+        let mut program = words.next()?.rsplit('/').next()?;
+        if program == "env" {
+            program = words.find(|w| !w.starts_with('-') && !w.contains('='))?;
+        }
+        // `python3.12` is `python3`.
+        let program = program.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        LANGUAGES.iter().find(|l| {
+            l.interpreters
+                .iter()
+                .any(|i| i.trim_end_matches(|c: char| c.is_ascii_digit()) == program)
+        })
+    }
+
+    /// The language's name, as a person reads it: `Rust`, `JSON`.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// A highlighter for text in this language.
+    ///
+    /// # Errors
+    ///
+    /// When the runtime refuses the grammar or its highlight query does not
+    /// compile -- which the tests check for every language, so neither
+    /// happens in a build that passed them.
+    pub fn highlighter(&'static self) -> Result<SyntaxHighlighter, Error> {
+        SyntaxHighlighter::new(self)
+    }
+
+    /// The grammar, as the runtime takes it.
+    fn ts_language(&self) -> tree_sitter::Language {
+        tree_sitter::Language::new((self.grammar)())
+    }
+
+    /// The compiled highlight query.
+    fn query(&self) -> Result<&'static tree_sitter::Query, Error> {
+        let slot = QUERIES.get(self.index).ok_or_else(|| Error::Query {
+            language: self.name,
+            message: "no slot for its query".to_owned(),
+        })?;
+        slot.get_or_init(|| {
+            tree_sitter::Query::new(&self.ts_language(), self.highlights).map_err(|e| {
+                Error::Query {
+                    language: self.name,
+                    message: format!(
+                        "line {}, column {}: {}",
+                        e.row.saturating_add(1),
+                        e.column.saturating_add(1),
+                        e.message
+                    ),
+                }
+            })
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    /// **Each language's index is its place**, so its query lands in its own
+    /// slot.
+    #[test]
+    fn each_languages_index_is_its_place() {
+        for (i, l) in LANGUAGES.iter().enumerate() {
+            assert_eq!(l.index, i, "{}", l.name);
+        }
+        assert_eq!(QUERIES.len(), LANGUAGES.len());
+    }
+
+    /// **The runtime reads each grammar as it was written**: the counts and
+    /// the fields at the far end of `TSLanguage` -- its name, its supertypes
+    /// -- come back through the runtime as the grammar's `parser.c` states
+    /// them. A mirror field out of place would scramble these first.
+    #[test]
+    fn the_runtime_reads_each_grammar_as_it_was_written() {
+        for (language, name, abi, kinds, fields) in [
+            ("JSON", None, 14, 25, 2),
+            ("Python", Some("python"), 15, 274, 32),
+            ("Rust", Some("rust"), 15, 355, 31),
+        ] {
+            let l = Language::named(language).unwrap().ts_language();
+            assert_eq!(l.abi_version(), abi, "{language}");
+            assert_eq!(l.name(), name, "{language}");
+            assert_eq!(l.node_kind_count(), kinds, "{language}");
+            assert_eq!(l.field_count(), fields, "{language}");
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&l).expect(language);
+        }
+        let rust = Language::named("rust").unwrap().ts_language();
+        let supertypes: Vec<&str> = rust
+            .supertypes()
+            .iter()
+            .map(|&id| rust.node_kind_for_id(id).unwrap_or("?"))
+            .collect();
+        assert!(supertypes.contains(&"_expression"), "{supertypes:?}");
+        assert_eq!(
+            rust.metadata().map(|m| (m.major_version, m.minor_version)),
+            Some((0, 24))
+        );
+    }
+
+    /// **Every language's highlight query compiles** against its grammar.
+    #[test]
+    fn every_highlight_query_compiles() {
+        for l in Language::all() {
+            let q = l.query().unwrap_or_else(|e| panic!("{e}"));
+            assert!(q.capture_names().len() > 3, "{}", l.name);
+        }
+    }
+
+    /// **A file is known by its extension or its name**, as bytes and in
+    /// any case; a dot file is a name, not an extension.
+    #[test]
+    fn a_file_is_known_by_its_extension_or_its_name() {
+        let found = |p: &str| Language::for_file(Path::new(p)).map(Language::name);
+        assert_eq!(found("src/main.rs"), Some("Rust"));
+        assert_eq!(found("A.PY"), Some("Python"));
+        assert_eq!(found("/etc/x/config.JSON"), Some("JSON"));
+        assert_eq!(found("SConstruct"), Some("Python"));
+        assert_eq!(found(".rs"), None);
+        assert_eq!(found("notes.txt"), None);
+        assert_eq!(found("rs"), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let odd = std::ffi::OsStr::from_bytes(b"caf\xe9.rs");
+            assert_eq!(
+                Language::for_file(Path::new(odd)).map(Language::name),
+                Some("Rust")
+            );
+        }
+    }
+
+    /// **A script is known by the interpreter its `#!` line names**, through
+    /// `env` and its options, and with a version on the end.
+    #[test]
+    fn a_script_is_known_by_its_interpreter() {
+        let found = |l: &str| Language::for_first_line(l).map(Language::name);
+        assert_eq!(found("#!/usr/bin/python3"), Some("Python"));
+        assert_eq!(found("#!/usr/bin/env python3.12"), Some("Python"));
+        assert_eq!(
+            found("#!/usr/bin/env -S PYTHONPATH=. python -u"),
+            Some("Python")
+        );
+        assert_eq!(found("#! /usr/local/bin/pypy3"), Some("Python"));
+        assert_eq!(found("#!/bin/sh"), None);
+        assert_eq!(found("import os"), None);
+        assert_eq!(found("#!"), None);
+    }
+
+    /// **Languages are found by name in any case, and are equal only to
+    /// themselves.**
+    #[test]
+    fn languages_are_found_by_name() {
+        assert_eq!(Language::named("json").map(Language::name), Some("JSON"));
+        assert!(Language::named("cobol").is_none());
+        assert_eq!(Language::named("Rust"), Language::named("RUST"));
+        assert_ne!(Language::named("Rust"), Language::named("Python"));
+    }
+}

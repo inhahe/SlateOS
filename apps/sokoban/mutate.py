@@ -546,15 +546,8 @@ MUTATIONS = [
     ),
     (
         "the crate takes the click off its own square",
-        "                if home { GREEN } else { PEACH },\n"
-        "                CornerRadii::all((l.cell * 0.12).max(1.0)),\n"
-        "            );\n"
-        "        }",
-        "                if home { GREEN } else { PEACH },\n"
-        "                CornerRadii::all((l.cell * 0.12).max(1.0)),\n"
-        "            );\n"
-        "            f.hit(Target::Undo, r);\n"
-        "        }",
+        "                    self.colours.peach\n                },\n                CornerRadii::all((l.cell * 0.12).max(1.0)),\n            );\n        }",
+        "                    self.colours.peach\n                },\n                CornerRadii::all((l.cell * 0.12).max(1.0)),\n            );\n            f.hit(Target::Undo, r);\n        }",
         ["the_crate_and_the_player_do_not_take_the_click_off_their_square"],
     ),
     (
@@ -782,21 +775,9 @@ MUTATIONS = [
         ["the_board_is_drawn_with_square_cells_inside_the_body"],
     ),
     (
-        # The mat is a named rectangle so that a test can hold the pass to it.
-        # Growing it by a gap it did not reserve is the fault that naming found.
         "the mat is drawn a gap larger than the one the solve sized",
-        "        fill(f, l.board_frame, CRUST, CornerRadii::all(l.gap.max(1.0)));",
-        "        fill(\n"
-        "            f,\n"
-        "            Rect::new(\n"
-        "                l.board_frame.x - l.gap,\n"
-        "                l.board_frame.y - l.gap,\n"
-        "                l.board_frame.w + l.gap * 2.0,\n"
-        "                l.board_frame.h + l.gap * 2.0,\n"
-        "            ),\n"
-        "            CRUST,\n"
-        "            CornerRadii::all(l.gap.max(1.0)),\n"
-        "        );",
+        "        fill(\n            f,\n            l.board_frame,\n            self.colours.crust,",
+        "        fill(\n            f,\n            Rect::new(\n                l.board_frame.x - l.gap,\n                l.board_frame.y - l.gap,\n                l.board_frame.w + l.gap * 2.0,\n                l.board_frame.h + l.gap * 2.0,\n            ),\n            self.colours.crust,",
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
@@ -860,18 +841,9 @@ MUTATIONS = [
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
-        # The stripe's width has a one-point floor that does not scale.
         "the cursor stripe is as wide as its floor whatever the row is",
-        "                if let Some(stripe) = Rect::new(r.x, r.y, (l.pad * 0.5).max(1.0), r.h).intersect(r)\n"
-        "                {\n"
-        "                    fill(f, stripe, PEACH, CornerRadii::all(1.0));\n"
-        "                }",
-        "                fill(\n"
-        "                    f,\n"
-        "                    Rect::new(r.x, r.y, (l.pad * 0.5).max(1.0), r.h),\n"
-        "                    PEACH,\n"
-        "                    CornerRadii::all(1.0),\n"
-        "                );",
+        "                if let Some(stripe) = Rect::new(r.x, r.y, (l.pad * 0.5).max(1.0), r.h).intersect(r)\n                {\n                    fill(f, stripe, self.colours.peach, CornerRadii::all(1.0));\n                }",
+        "                fill(\n                    f,\n                    Rect::new(r.x, r.y, (l.pad * 0.5).max(1.0), r.h),\n                    self.colours.peach,\n                    CornerRadii::all(1.0),\n                );",
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
@@ -949,6 +921,36 @@ MUTATIONS = [
         "            return;\n"
         "        };",
         ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the win scrim is Mocha's whatever the theme",
+        "Chrome::of(&self.palette).scrim",
+        "Color::rgba(0x11, 0x11, 0x1B, 0xB4)",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the footer's keys are the faintest grey",
+        "                    // faintest grey is 2.3:1 on a light band.\n                    color: self.colours.subtext0,",
+        "                    // faintest grey is 2.3:1 on a light band.\n                    color: self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "Undo looks live with nothing to take back",
+        "            self.button(f, r, name, size, false, live, self.colours.mantle);",
+        "            self.button(f, r, name, size, false, true, self.colours.mantle);",
+        ["undo_is_switched_off_with_nothing_to_take_back"],
     ),
 ]
 

@@ -22,6 +22,7 @@
 //! | `UCS-4` | big-endian, no mark, up to U+7FFFFFFF; `UCS-4LE` |
 //! | `WCHAR_T` | what a `wchar_t` holds: glibc's own form, UCS-4 in the machine's order, unchecked |
 //! | `UTF-7`, `UTF-7-IMAP` | RFC 2152's mail-safe Unicode, and IMAP's variant for folder names: ASCII, with runs of base64-coded UTF-16 opened by `+` (`&`); stateful, the state kept from call to call |
+//! | `CP1255` (`WINDOWS-1255`, `MS-HEBR`), `CP1258` (`WINDOWS-1258`) | Hebrew and Vietnamese: 8-bit, with combining marks.  Decoding keeps each letter back, from call to call, until it is known whether a mark follows, and writes a letter and its mark as the precomposed character when Unicode has one; a reset writes the letter kept back.  Encoding writes a precomposed character with no byte of its own as its letter and marks ([`crate::iconv_combining`], from glibc's `cp1255.c` and `cp1258.c`) |
 //!
 //! A name is read as glibc reads one: options peeled off the end -- the last
 //! `/`- or `,`-separated word, while there are two slashes -- then every
@@ -160,6 +161,15 @@ impl Form {
     }
 }
 
+/// glibc's two 8-bit sets with combining characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Combining {
+    /// `CP1255//`: Hebrew, with its points.
+    Cp1255,
+    /// `CP1258//`: Vietnamese, with its tone marks.
+    Cp1258,
+}
+
 /// The character sets this libc converts: one per glibc conversion module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Charset {
@@ -189,6 +199,11 @@ enum Charset {
     /// `UTF-7//`, or `imap`, `UTF-7-IMAP//`: stateful -- runs of base64
     /// between ASCII, with state kept between calls (see [`decode_utf7`]).
     Utf7 { imap: bool },
+    /// `CP1255//` or `CP1258//`: 8-bit, with combining marks the decoder
+    /// composes with the letter before them -- kept back, from call to call,
+    /// to see whether one follows -- and the encoder decomposes into (see
+    /// [`decode_combining`]).
+    Combining(Combining),
     /// `WCHAR_T//`: glibc's INTERNAL, the form every other set is converted
     /// through, so a conversion to or from it has one step, not two.
     Internal,
@@ -212,7 +227,8 @@ impl Charset {
             | Charset::Ascii
             | Charset::Latin1
             | Charset::Table8(_)
-            | Charset::Utf7 { .. } => 1,
+            | Charset::Utf7 { .. }
+            | Charset::Combining(_) => 1,
             Charset::Ucs2 { .. } | Charset::Unicode | Charset::Utf16(_) => 2,
             Charset::Ucs4 | Charset::Ucs4Le | Charset::Utf32(_) | Charset::Internal => 4,
         }
@@ -418,6 +434,7 @@ fn parse_spec(spec: &[u8]) -> (Option<Charset>, bool, bool) {
             .find(|(k, _)| *k == name)
             .map(|&(_, c)| c)
             .or_else(|| table8_named(name))
+            .or_else(|| combining_named(name))
     };
     (charset, translit, ignore)
 }
@@ -432,6 +449,231 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
     let len = unsafe { crate::string::strlen(p) };
     // SAFETY: `p` is valid for `len` bytes, per the strlen scan above.
     unsafe { core::slice::from_raw_parts(p, len) }
+}
+
+// ---------------------------------------------------------------------------
+// CP1255 and CP1258: 8-bit, with combining characters
+// ---------------------------------------------------------------------------
+//
+// glibc writes these two by hand (iconvdata/cp1255.c, cp1258.c), and so is
+// this: a byte table like the others, plus composition.  A Hebrew point or a
+// Vietnamese tone mark follows the letter it goes on; the decoder keeps each
+// letter back until it sees whether a mark follows, and writes the pair as
+// the one precomposed character Unicode has for it, if there is one.  The
+// encoder does the reverse: a precomposed character with no byte of its own
+// is written as its letter and marks.  The tables are glibc's, read out of
+// the C (`crate::iconv_combining`); the loops below are glibc's, line by line.
+
+/// The character sets a stripped name names, of these two.
+fn combining_named(name: &[u8]) -> Option<Charset> {
+    use crate::iconv_combining::{CP1255_NAMES, CP1258_NAMES};
+    if CP1255_NAMES.contains(&name) {
+        Some(Charset::Combining(Combining::Cp1255))
+    } else if CP1258_NAMES.contains(&name) {
+        Some(Charset::Combining(Combining::Cp1258))
+    } else {
+        None
+    }
+}
+
+/// A set's `comp_table_data`: for each combining character, the (base,
+/// composed) pairs it composes, sorted by base.
+type ComposeGroups = [(u16, &'static [(u16, u16)])];
+
+/// The composition of `last` with the mark `ch`, if glibc's table has one:
+/// `comp_table_data`, searched in the group of `ch`.
+fn compose(set: Combining, last: u32, ch: u32) -> Option<u32> {
+    use crate::iconv_combining::{CP1255_COMPOSE, CP1258_COMPOSE};
+    let (range, groups): (core::ops::Range<u32>, &ComposeGroups) = match set {
+        Combining::Cp1255 => (0x05b0..0x05c5, &CP1255_COMPOSE),
+        Combining::Cp1258 => (0x0300..0x0340, &CP1258_COMPOSE),
+    };
+    if !range.contains(&ch) {
+        return None;
+    }
+    let (_, pairs) = groups.iter().find(|&&(mark, _)| u32::from(mark) == ch)?;
+    let at = pairs
+        .binary_search_by_key(&last, |&(base, _)| u32::from(base))
+        .ok()?;
+    pairs.get(at).map(|&(_, composed)| u32::from(composed))
+}
+
+/// glibc's CP1255 and CP1258 decoders (`from_cp1255`, `from_cp1258`), over
+/// glibc's generic loop.  `held` is the character kept back -- glibc's
+/// `*statep >> 3`, 0 for none -- kept from call to call; [`Descriptor::reset`]
+/// writes it out.  A letter that a mark may follow is kept back; a mark that
+/// composes with the kept letter makes the precomposed character, written at
+/// once -- except CP1255's three that a second mark still composes with
+/// (U+FB2A, U+FB2B, U+FB49), kept back again.  Anything else writes the kept
+/// letter first, and then itself -- or, if there is room for only the one,
+/// itself in the next round, as glibc leaves it.
+fn decode_combining(
+    set: Combining,
+    input: &[u8],
+    out: &mut [u8],
+    ignore: bool,
+    held: &mut u32,
+) -> Pass {
+    use crate::iconv_combining::{CP1255_TO_UCS4, CP1258_TO_UCS4};
+    let table = match set {
+        Combining::Cp1255 => &CP1255_TO_UCS4,
+        Combining::Cp1258 => &CP1258_TO_UCS4,
+    };
+    let (mut i, mut o, mut irreversible) = (0, 0, 0);
+    let mut status = Status::EmptyInput;
+    while let Some(&byte) = input.get(i) {
+        if out.len() - o < 4 {
+            status = Status::FullOutput;
+            break;
+        }
+        let mut ch = u32::from(byte);
+        if byte >= 0x80 {
+            ch = table
+                .get(usize::from(byte - 0x80))
+                .map_or(0, |&u| u32::from(u));
+            if ch == 0 {
+                // glibc's STANDARD_FROM_LOOP_ERR_HANDLER, before anything
+                // is done with the letter kept back: it stays kept.
+                status = Status::IllegalInput;
+                if !ignore {
+                    break;
+                }
+                i += 1;
+                irreversible += 1;
+                continue;
+            }
+        }
+        let must_hold = match set {
+            Combining::Cp1255 => (0x05d0..=0x05f2).contains(&ch),
+            Combining::Cp1258 => (0x0041..=0x01b0).contains(&ch),
+        };
+        if *held != 0 {
+            if let Some(composed) = compose(set, *held, ch) {
+                if set == Combining::Cp1255 && matches!(composed, 0xfb2a | 0xfb2b | 0xfb49) {
+                    *held = composed;
+                } else {
+                    put32(out.get_mut(o..).unwrap_or_default(), composed, false);
+                    o += 4;
+                    *held = 0;
+                }
+                i += 1;
+                continue;
+            }
+            put32(out.get_mut(o..).unwrap_or_default(), *held, false);
+            o += 4;
+            *held = 0;
+            if !must_hold && out.len() - o < 4 {
+                // No room for `ch` as well: the next round, whose check says
+                // the output is full, is where it goes.
+                continue;
+            }
+        }
+        if must_hold {
+            *held = ch;
+        } else {
+            put32(out.get_mut(o..).unwrap_or_default(), ch, false);
+            o += 4;
+        }
+        i += 1;
+    }
+    Pass {
+        read: i,
+        wrote: o,
+        status,
+        irreversible,
+    }
+}
+
+/// glibc's CP1255 and CP1258 encoders (`to_cp1255`, `to_cp1258`), one
+/// character: its byte, by glibc's ranges into `from_ucs4`, or else its
+/// canonical decomposition -- a letter's byte and one or two marks' -- or
+/// `None` for a character neither covers.
+fn encode_combining(set: Combining, ch: u32) -> Option<([u8; 3], usize)> {
+    use crate::iconv_combining as t;
+    let one = |b: u8| Some(([b, 0, 0], 1));
+    let from = |table: &[u8], idx: usize, base: u32| {
+        let at = usize::try_from(ch - base).ok()? + idx;
+        table.get(at).copied().filter(|&b| b != 0)
+    };
+    match set {
+        Combining::Cp1255 => {
+            if ch < 0x80 {
+                return one(u8::try_from(ch).ok()?);
+            }
+            let res = if (0x00a0..0x00f8).contains(&ch) {
+                from(&t::CP1255_FROM_UCS4, t::CP1255_FROM_IDX_00, 0x00a0)
+            } else if ch == 0x0192 {
+                Some(0x83)
+            } else if (0x02c6..0x02dd).contains(&ch) {
+                from(&t::CP1255_FROM_UCS4, t::CP1255_FROM_IDX_02, 0x02c6)
+            } else if (0x05b0..0x05f5).contains(&ch) {
+                from(&t::CP1255_FROM_UCS4, t::CP1255_FROM_IDX_05, 0x05b0)
+            } else if (0x200e..0x203b).contains(&ch) {
+                from(&t::CP1255_FROM_UCS4, t::CP1255_FROM_IDX_20, 0x200e)
+            } else if ch == 0x20aa {
+                Some(0xa4)
+            } else if ch == 0x20ac {
+                Some(0x80)
+            } else if ch == 0x2122 {
+                Some(0x99)
+            } else {
+                None
+            };
+            if let Some(b) = res {
+                return one(b);
+            }
+            let at = t::CP1255_DECOMPOSE
+                .binary_search_by_key(&ch, |&(c, ..)| u32::from(c))
+                .ok()?;
+            let &(_, base, comb1, comb2) = t::CP1255_DECOMPOSE.get(at)?;
+            // `base` is a letter, which glibc's table gives a byte.
+            let b = t::CP1255_FROM_UCS4
+                .get(usize::from(base).checked_sub(0x05b0)? + t::CP1255_FROM_IDX_05)
+                .copied()
+                .filter(|&b| b != 0)?;
+            let mark = |k: i8| t::CP1255_COMB_TABLE.get(usize::try_from(k).ok()?).copied();
+            match comb2 {
+                k if k < 0 => Some(([b, mark(comb1)?, 0], 2)),
+                k => Some(([b, mark(comb1)?, mark(k)?], 3)),
+            }
+        }
+        Combining::Cp1258 => {
+            if ch < 0x0080 || (0x00a0..0x00c3).contains(&ch) {
+                return one(u8::try_from(ch).ok()?);
+            }
+            let res = if (0x00c4..0x0112).contains(&ch) {
+                from(&t::CP1258_FROM_UCS4, t::CP1258_FROM_IDX_00, 0x00c4)
+            } else if (0x0152..0x01b1).contains(&ch) {
+                from(&t::CP1258_FROM_UCS4, t::CP1258_FROM_IDX_01, 0x0152)
+            } else if (0x02c6..0x02dd).contains(&ch) {
+                from(&t::CP1258_FROM_UCS4, t::CP1258_FROM_IDX_02, 0x02c6)
+            } else if (0x0300..0x0324).contains(&ch) {
+                from(&t::CP1258_FROM_UCS4, t::CP1258_FROM_IDX_03, 0x0300)
+            } else if (0x0340..0x0342).contains(&ch) {
+                // The Vietnamese tone marks: glibc writes them as U+0300's
+                // and U+0301's bytes.
+                from(&t::CP1258_FROM_UCS4, t::CP1258_FROM_IDX_03, 0x0340)
+            } else if (0x2013..0x203b).contains(&ch) {
+                from(&t::CP1258_FROM_UCS4, t::CP1258_FROM_IDX_20, 0x2013)
+            } else if ch == 0x20ab {
+                Some(0xfe)
+            } else if ch == 0x20ac {
+                Some(0x80)
+            } else if ch == 0x2122 {
+                Some(0x99)
+            } else {
+                None
+            };
+            if let Some(b) = res {
+                return one(b);
+            }
+            let at = t::CP1258_DECOMPOSE
+                .binary_search_by_key(&ch, |&(c, ..)| u32::from(c))
+                .ok()?;
+            let &(_, base, comb1) = t::CP1258_DECOMPOSE.get(at)?;
+            Some(([base, comb1, 0], 2))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -693,12 +935,22 @@ fn decode_utf16(s: &[u8], swap: bool) -> Decoded {
     Decoded::Char(c, 4)
 }
 
+/// A source's state, kept from call to call: glibc's `__statep`, saved and
+/// restored as a whole where a round is decoded again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DecoderState {
+    /// A UTF-7 source's.
+    utf7: Utf7Decoder,
+    /// A CP1255 or CP1258 source's letter kept back, 0 for none.
+    held: u32,
+}
+
 /// The first step: `input` in `from`, into glibc's INTERNAL form in `out`.
 fn decode_loop(
     from: Charset,
     swap: bool,
     ignore: bool,
-    utf7: &mut Utf7Decoder,
+    st: &mut DecoderState,
     input: &[u8],
     out: &mut [u8],
 ) -> Pass {
@@ -740,7 +992,8 @@ fn decode_loop(
         }),
         Charset::Ucs4 => decode_ucs4(input, out, ignore, true),
         Charset::Ucs4Le => decode_ucs4(input, out, ignore, false),
-        Charset::Utf7 { imap } => decode_utf7(input, out, ignore, imap, utf7),
+        Charset::Utf7 { imap } => decode_utf7(input, out, ignore, imap, &mut st.utf7),
+        Charset::Combining(set) => decode_combining(set, input, out, ignore, &mut st.held),
         // [`Descriptor::convert`] runs no step for WCHAR_T; this is never
         // reached, and would fail rather than pass bytes through unread.
         Charset::Internal => Pass::stopped(Status::IllegalInput),
@@ -919,6 +1172,16 @@ fn encode_char(target: Target, c: u32, out: &mut [u8]) -> Encoded {
             None => Encoded::Unwritable,
         },
         Charset::Ascii | Charset::Latin1 => Encoded::Unwritable,
+        Charset::Combining(set) => match encode_combining(set, c) {
+            Some((bytes, n)) => match (out.get_mut(..n), bytes.get(..n)) {
+                (Some(dst), Some(src)) => {
+                    dst.copy_from_slice(src);
+                    Encoded::Wrote(n)
+                }
+                _ => Encoded::NoRoom,
+            },
+            None => Encoded::Unwritable,
+        },
         Charset::Ucs2 { reversed } => {
             if c >= 0x1_0000 {
                 Encoded::Unwritable
@@ -1621,8 +1884,8 @@ struct Descriptor {
     /// An 8-bit table target's [`reverse_index`], `reverse_len` pairs of it.
     reverse: [(u16, u8); 256],
     reverse_len: usize,
-    /// A UTF-7 source's decoder state, kept between calls.
-    utf7_dec: Utf7Decoder,
+    /// A stateful source's decoder state, kept between calls.
+    dec: DecoderState,
     /// A UTF-7 target's encoder state ([`UTF7_RUN`]), kept between calls.
     utf7_enc: u32,
 }
@@ -1710,7 +1973,7 @@ impl Descriptor {
             Err(status) => return Pass::stopped(status),
         };
         let rest = input.get(skip..).unwrap_or_default();
-        let pass = decode_loop(self.from, swap, self.ignore, &mut self.utf7_dec, rest, out);
+        let pass = decode_loop(self.from, swap, self.ignore, &mut self.dec, rest, out);
         Pass {
             read: skip + pass.read,
             ..pass
@@ -1740,12 +2003,12 @@ impl Descriptor {
         let (mut i, mut o, mut irreversible) = (skip, 0, 0);
         loop {
             let round = i;
-            let saved = self.utf7_dec;
+            let saved = self.dec;
             let first = decode_loop(
                 self.from,
                 swap,
                 self.ignore,
-                &mut self.utf7_dec,
+                &mut self.dec,
                 input.get(i..).unwrap_or_default(),
                 chunk,
             );
@@ -1758,12 +2021,12 @@ impl Descriptor {
                 irreversible += last.irreversible;
                 if last.status != Status::EmptyInput {
                     if last.read != first.wrote {
-                        self.utf7_dec = saved;
+                        self.dec = saved;
                         let again = decode_loop(
                             self.from,
                             swap,
                             self.ignore,
-                            &mut self.utf7_dec,
+                            &mut self.dec,
                             input.get(round..).unwrap_or_default(),
                             chunk.get_mut(..last.read).unwrap_or_default(),
                         );
@@ -1785,6 +2048,33 @@ impl Descriptor {
         }
     }
 
+    /// The letter a CP1255 or CP1258 source kept back, written for a reset:
+    /// as it is into a `WCHAR_T` target, else through the second step.  The
+    /// step's answer, and whether the target took the letter -- which it has
+    /// if `//IGNORE` dropped it, when the answer is still `IllegalInput`.
+    fn emit_held(&mut self, out: &mut [u8]) -> (Pass, bool) {
+        let mut unit = [0u8; 4];
+        put32(&mut unit, self.dec.held, false);
+        if self.to == Charset::Internal {
+            return match out.get_mut(..4) {
+                Some(dst) => {
+                    dst.copy_from_slice(&unit);
+                    let pass = Pass {
+                        read: 4,
+                        wrote: 4,
+                        status: Status::Ok,
+                        irreversible: 0,
+                    };
+                    (pass, true)
+                }
+                None => (Pass::stopped(Status::FullOutput), false),
+            };
+        }
+        let pass = self.encode_step(&unit, out);
+        let taken = pass.read == unit.len();
+        (pass, taken)
+    }
+
     /// One `iconv` call's conversion.
     fn convert(&mut self, input: &[u8], out: &mut [u8]) -> Pass {
         match (self.from, self.to) {
@@ -1794,27 +2084,55 @@ impl Descriptor {
         }
     }
 
-    /// The reset, as glibc's flush runs it, step by step: the first step's
-    /// state cleared (a UTF-7 source's run dropped); then a UTF-7 target's
-    /// open run closed into `out` -- or, with no `out`, dropped; and, if that
-    /// went through, the marks due again.  Returns the bytes written into
-    /// `out`, and `FullOutput` (`E2BIG`) if the close did not fit, when
-    /// nothing else is reset.
-    fn reset(&mut self, out: Option<&mut [u8]>) -> (usize, Status) {
-        self.utf7_dec = Utf7Decoder::default();
-        let mut wrote = 0;
+    /// The reset, as glibc's flush runs it, step by step.  The first step's
+    /// state: a CP1255 or CP1258 source's kept-back letter written out --
+    /// through the second step, if there is one -- or, with no `out`,
+    /// dropped (glibc's `EMIT_SHIFT_TO_INIT`); if it cannot be written the
+    /// call ends there, the letter still kept (`SAVE_RESET_STATE`).  A
+    /// UTF-7 source's run is dropped.  Then a UTF-7 target's open run closed
+    /// into what is left of `out` -- or, with no `out`, dropped; and, if
+    /// that went through, the marks due again.  Answers as glibc's flush:
+    /// the bytes written into `out`, the conversions that were irreversible
+    /// (a `//TRANSLIT` substitute for the letter), and why it stopped if it
+    /// did -- `FullOutput` (`E2BIG`), or `IllegalInput` (`EILSEQ`) for a
+    /// letter the target refused or `//IGNORE` dropped.
+    fn reset(&mut self, out: Option<&mut [u8]>) -> Pass {
+        let mut out = out;
+        let mut done = Pass::stopped(Status::Ok);
+        if self.dec.held != 0 {
+            if let Some(buf) = out.as_deref_mut() {
+                let (pass, taken) = self.emit_held(buf);
+                if !taken {
+                    return Pass { read: 0, ..pass };
+                }
+                done.wrote = pass.wrote;
+                done.irreversible = pass.irreversible;
+                if pass.status == Status::IllegalInput {
+                    self.dec = DecoderState::default();
+                    done.status = Status::IllegalInput;
+                    return done;
+                }
+            }
+        }
+        self.dec = DecoderState::default();
         if let Charset::Utf7 { imap } = self.to {
             match out {
-                Some(out) => match utf7_flush(imap, &mut self.utf7_enc, out) {
-                    Ok(n) => wrote = n,
-                    Err(status) => return (0, status),
-                },
+                Some(buf) => {
+                    let rest = buf.get_mut(done.wrote..).unwrap_or_default();
+                    match utf7_flush(imap, &mut self.utf7_enc, rest) {
+                        Ok(n) => done.wrote += n,
+                        Err(status) => {
+                            done.status = status;
+                            return done;
+                        }
+                    }
+                }
                 None => self.utf7_enc = 0,
             }
         }
         self.from_swap = None;
         self.mark_pending = true;
-        (wrote, Status::Ok)
+        done
     }
 }
 
@@ -1854,7 +2172,7 @@ fn allocate(from: Charset, to: Charset, translit: bool, ignore: bool) -> Option<
             chunk,
             reverse,
             reverse_len,
-            utf7_dec: Utf7Decoder::default(),
+            dec: DecoderState::default(),
             utf7_enc: 0,
         });
     }
@@ -2141,18 +2459,19 @@ pub unsafe extern "C" fn iconv(
         };
         // SAFETY: a live descriptor, handed to this call alone (the module
         // docs: one descriptor, one thread at a time).
-        let (wrote, status) = unsafe { (*desc).reset(out) };
+        let done = unsafe { (*desc).reset(out) };
         if !out_start.is_null() {
             // SAFETY: the caller's pointers, checked non-NULL; `wrote` is
             // within the buffer.
             unsafe {
-                *outbuf = out_start.add(wrote);
-                *outbytesleft = out_left - wrote;
+                *outbuf = out_start.add(done.wrote);
+                *outbytesleft = out_left - done.wrote;
             }
         }
-        return match status {
+        return match done.status {
             Status::FullOutput => fail(errno::E2BIG),
-            _ => 0,
+            Status::IllegalInput => fail(errno::EILSEQ),
+            _ => done.irreversible,
         };
     }
 
@@ -3164,13 +3483,9 @@ mod tests {
             run("ISO-8859-2", "UTF-8", b"\xef\xbf\xbf", 8),
             (-1, EILSEQ, 3, Vec::new())
         );
-        errno::set_errno(0);
-        assert_eq!(
-            open("CP1255", "UTF-8"),
-            ICONV_OPEN_ERR,
-            "glibc's own module, not a table"
-        );
-        assert_eq!(errno::get_errno(), EINVAL);
+        // CP1255 is glibc's own module, not one of these tables: it is
+        // iconv_combining's (`cp1255_and_cp1258_are_glibcs`).
+        assert!(table8_named(b"CP1255//").is_none());
     }
 
     #[test]
@@ -3772,6 +4087,611 @@ mod tests {
                 (r, e, left, hex(out)),
                 "{to} <- {from} {input:x?}"
             );
+        }
+    }
+
+    // -- CP1255 and CP1258: glibc's answers --
+
+    /// One call sequence glibc answered: (name, to, from, the chunks passed
+    /// call by call, the output buffer's size, how the reset is made --
+    /// `"out"` into a buffer, `"null"` with none -- and glibc's line).
+    type OracleCase = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [&'static [u8]],
+        usize,
+        &'static str,
+        &'static str,
+    );
+
+    // Generated by dlm/oracle/cp125x_harness.py from glibc 2.39's iconv under WSL:
+    // (name, to, from, chunks, outsize, reset, glibc's line).
+    const GLIBC_CP125X: &[OracleCase] = &[
+        (
+            "he_letters",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0, 0xe1, 0xe2]],
+            64,
+            "out",
+            "he_letters 0,0,3,d790d791|0,0,d792",
+        ),
+        (
+            "he_letters_null_reset",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0, 0xe1, 0xe2]],
+            64,
+            "null",
+            "he_letters_null_reset 0,0,3,d790d791|0,0,",
+        ),
+        (
+            "he_alef_qamats",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0, 0xc8]],
+            64,
+            "out",
+            "he_alef_qamats 0,0,2,efacaf|0,0,",
+        ),
+        (
+            "he_shin_shindot",
+            "UTF-8",
+            "CP1255",
+            &[&[0xf9, 0xd1]],
+            64,
+            "out",
+            "he_shin_shindot 0,0,2,|0,0,efacaa",
+        ),
+        (
+            "he_shin_shindot_dagesh",
+            "UTF-8",
+            "CP1255",
+            &[&[0xf9, 0xd1, 0xcc]],
+            64,
+            "out",
+            "he_shin_shindot_dagesh 0,0,3,efacac|0,0,",
+        ),
+        (
+            "he_shin_dagesh_shindot",
+            "UTF-8",
+            "CP1255",
+            &[&[0xf9, 0xcc, 0xd1]],
+            64,
+            "out",
+            "he_shin_dagesh_shindot 0,0,3,efacac|0,0,",
+        ),
+        (
+            "he_letter_ascii",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0, 0x61]],
+            64,
+            "out",
+            "he_letter_ascii 0,0,2,d79061|0,0,",
+        ),
+        (
+            "he_mark_alone",
+            "UTF-8",
+            "CP1255",
+            &[&[0xc8]],
+            64,
+            "out",
+            "he_mark_alone 0,0,1,d6b8|0,0,",
+        ),
+        (
+            "he_two_marks",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0, 0xc8, 0xc8]],
+            64,
+            "out",
+            "he_two_marks 0,0,3,efacafd6b8|0,0,",
+        ),
+        (
+            "he_across_calls",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0], &[0xc8]],
+            64,
+            "out",
+            "he_across_calls 0,0,1,;0,0,1,efacaf|0,0,",
+        ),
+        (
+            "he_across_calls_noncomb",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0], &[0x62]],
+            64,
+            "out",
+            "he_across_calls_noncomb 0,0,1,;0,0,1,d79062|0,0,",
+        ),
+        (
+            "he_invalid",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0, 0xca, 0xe1]],
+            64,
+            "out",
+            "he_invalid -1,EILSEQ,1,|0,0,d790",
+        ),
+        (
+            "he_invalid_ignore",
+            "UTF-8//IGNORE",
+            "CP1255",
+            &[&[0xe0, 0xca, 0xc8]],
+            64,
+            "out",
+            "he_invalid_ignore -1,EILSEQ,3,efacaf|0,0,",
+        ),
+        (
+            "he_symbols",
+            "UTF-8",
+            "CP1255",
+            &[&[0x80, 0xa4, 0x99, 0xfd, 0xfe]],
+            64,
+            "out",
+            "he_symbols 0,0,5,e282ace282aae284a2e2808ee2808f|0,0,",
+        ),
+        (
+            "he_tight3",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0, 0xe1, 0xe2, 0x61]],
+            3,
+            "out",
+            "he_tight3 -1,E2BIG,2,d790|0,0,d791",
+        ),
+        (
+            "he_tight4",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0, 0x61, 0x62]],
+            4,
+            "out",
+            "he_tight4 0,0,3,d7906162|0,0,",
+        ),
+        (
+            "he_to_wchar",
+            "WCHAR_T",
+            "CP1255",
+            &[&[0xe0, 0xc8, 0xe1]],
+            64,
+            "out",
+            "he_to_wchar 0,0,3,2ffb0000|0,0,d1050000",
+        ),
+        (
+            "he_to_wchar_tight",
+            "WCHAR_T",
+            "CP1255",
+            &[&[0x61, 0xe0, 0x62]],
+            4,
+            "out",
+            "he_to_wchar_tight -1,E2BIG,1,61000000|0,0,",
+        ),
+        (
+            "he_reset_no_room",
+            "UTF-8",
+            "CP1255",
+            &[&[0xe0]],
+            1,
+            "out",
+            "he_reset_no_room 0,0,1,|-1,E2BIG,",
+        ),
+        (
+            "he_to_ascii_held",
+            "ASCII",
+            "CP1255",
+            &[&[0x61, 0xe0]],
+            64,
+            "out",
+            "he_to_ascii_held 0,0,2,61|-1,EILSEQ,",
+        ),
+        (
+            "he_to_ascii_translit_held",
+            "ASCII//TRANSLIT",
+            "CP1255",
+            &[&[0x61, 0xe0]],
+            64,
+            "out",
+            "he_to_ascii_translit_held 0,0,2,61|1,0,3f",
+        ),
+        (
+            "he_enc_plain",
+            "CP1255",
+            "UTF-8",
+            &[&[0xd7, 0x90, 0xd7, 0x91, 0x61, 0xe2, 0x82, 0xaa]],
+            64,
+            "out",
+            "he_enc_plain 0,0,8,e0e161a4|0,0,",
+        ),
+        (
+            "he_enc_fb2c",
+            "CP1255",
+            "UTF-8",
+            &[&[0xef, 0xac, 0xac]],
+            64,
+            "out",
+            "he_enc_fb2c 0,0,3,f9ccd1|0,0,",
+        ),
+        (
+            "he_enc_fb2f",
+            "CP1255",
+            "UTF-8",
+            &[&[0xef, 0xac, 0xaf]],
+            64,
+            "out",
+            "he_enc_fb2f 0,0,3,e0c8|0,0,",
+        ),
+        (
+            "he_enc_fb4b",
+            "CP1255",
+            "UTF-8",
+            &[&[0xef, 0xad, 0x8b, 0xef, 0xad, 0x8c]],
+            64,
+            "out",
+            "he_enc_fb4b 0,0,6,e5c9e1cf|0,0,",
+        ),
+        (
+            "he_enc_unwritable",
+            "CP1255",
+            "UTF-8",
+            &[&[0x61, 0xe4, 0xb8, 0x80, 0x62]],
+            64,
+            "out",
+            "he_enc_unwritable -1,EILSEQ,1,61|0,0,",
+        ),
+        (
+            "he_enc_translit",
+            "CP1255//TRANSLIT",
+            "UTF-8",
+            &[&[0x61, 0xe4, 0xb8, 0x80, 0x62]],
+            64,
+            "out",
+            "he_enc_translit 1,0,5,613f62|0,0,",
+        ),
+        (
+            "he_enc_ignore",
+            "CP1255//IGNORE",
+            "UTF-8",
+            &[&[0x61, 0xe4, 0xb8, 0x80, 0x62]],
+            64,
+            "out",
+            "he_enc_ignore -1,EILSEQ,5,6162|0,0,",
+        ),
+        (
+            "he_enc_tight_decomp",
+            "CP1255",
+            "UTF-8",
+            &[&[0x61, 0xef, 0xac, 0xac]],
+            3,
+            "out",
+            "he_enc_tight_decomp -1,E2BIG,1,61|0,0,",
+        ),
+        (
+            "he_enc_tag",
+            "CP1255",
+            "UTF-8",
+            &[&[0x61, 0xf3, 0xa0, 0x81, 0x81, 0x62]],
+            64,
+            "out",
+            "he_enc_tag 0,0,6,6162|0,0,",
+        ),
+        (
+            "vi_a_grave",
+            "UTF-8",
+            "CP1258",
+            &[&[0x61, 0xcc]],
+            64,
+            "out",
+            "vi_a_grave 0,0,2,c3a0|0,0,",
+        ),
+        (
+            "vi_e_tilde",
+            "UTF-8",
+            "CP1258",
+            &[&[0x65, 0xde]],
+            64,
+            "out",
+            "vi_e_tilde 0,0,2,e1babd|0,0,",
+        ),
+        (
+            "vi_A_dot",
+            "UTF-8",
+            "CP1258",
+            &[&[0x41, 0xf2]],
+            64,
+            "out",
+            "vi_A_dot 0,0,2,e1baa0|0,0,",
+        ),
+        (
+            "vi_ow_hook",
+            "UTF-8",
+            "CP1258",
+            &[&[0xf5, 0xd2]],
+            64,
+            "out",
+            "vi_ow_hook 0,0,2,e1bb9f|0,0,",
+        ),
+        (
+            "vi_word",
+            "UTF-8",
+            "CP1258",
+            &[&[0x56, 0x69, 0xf2, 0x65, 0xec, 0x65, 0x74]],
+            64,
+            "out",
+            "vi_word 0,0,7,56e1bb8bc3a965|0,0,74",
+        ),
+        (
+            "vi_mark_alone",
+            "UTF-8",
+            "CP1258",
+            &[&[0xcc]],
+            64,
+            "out",
+            "vi_mark_alone 0,0,1,cc80|0,0,",
+        ),
+        (
+            "vi_nocompose",
+            "UTF-8",
+            "CP1258",
+            &[&[0x71, 0xcc]],
+            64,
+            "out",
+            "vi_nocompose 0,0,2,71cc80|0,0,",
+        ),
+        (
+            "vi_across_calls",
+            "UTF-8",
+            "CP1258",
+            &[&[0x6f], &[0xec]],
+            64,
+            "out",
+            "vi_across_calls 0,0,1,;0,0,1,c3b3|0,0,",
+        ),
+        (
+            "vi_invalid",
+            "UTF-8",
+            "CP1258",
+            &[&[0x61, 0xd0]],
+            64,
+            "out",
+            "vi_invalid 0,0,2,61|0,0,c490",
+        ),
+        (
+            "vi_symbols",
+            "UTF-8",
+            "CP1258",
+            &[&[0x80, 0xfe, 0x99, 0xa0]],
+            64,
+            "out",
+            "vi_symbols 0,0,4,e282ace282abe284a2|0,0,c2a0",
+        ),
+        (
+            "vi_last_letter_null",
+            "UTF-8",
+            "CP1258",
+            &[&[0x78, 0x79, 0x7a]],
+            64,
+            "null",
+            "vi_last_letter_null 0,0,3,7879|0,0,",
+        ),
+        (
+            "vi_enc_direct",
+            "CP1258",
+            "UTF-8",
+            &[&[0xc3, 0xa0, 0xc4, 0x82, 0xe2, 0x82, 0xab]],
+            64,
+            "out",
+            "vi_enc_direct 0,0,7,e0c3fe|0,0,",
+        ),
+        (
+            "vi_enc_decomp",
+            "CP1258",
+            "UTF-8",
+            &[&[0xe1, 0xba, 0xa1, 0xe1, 0xbb, 0x87, 0xe1, 0xbb, 0xb9]],
+            64,
+            "out",
+            "vi_enc_decomp 0,0,9,61f2eaf279de|0,0,",
+        ),
+        (
+            "vi_enc_tone_marks",
+            "CP1258",
+            "UTF-8",
+            &[&[0x61, 0xcd, 0x80, 0x65, 0xcd, 0x81]],
+            64,
+            "out",
+            "vi_enc_tone_marks 0,0,6,61cc65ec|0,0,",
+        ),
+        (
+            "vi_enc_unwritable",
+            "CP1258",
+            "UTF-8",
+            &[&[0x61, 0xd7, 0x90]],
+            64,
+            "out",
+            "vi_enc_unwritable -1,EILSEQ,1,61|0,0,",
+        ),
+        (
+            "vi_enc_tight_decomp",
+            "CP1258",
+            "UTF-8",
+            &[&[0x61, 0x62, 0xe1, 0xba, 0xa1]],
+            3,
+            "out",
+            "vi_enc_tight_decomp -1,E2BIG,2,6162|0,0,",
+        ),
+        (
+            "vi_enc_names",
+            "WINDOWS-1258",
+            "UTF-8",
+            &[&[0xe1, 0xba, 0xa1]],
+            64,
+            "out",
+            "vi_enc_names 0,0,3,61f2|0,0,",
+        ),
+        (
+            "he_names",
+            "UTF-8",
+            "MS-HEBR",
+            &[&[0xe0, 0xc8]],
+            64,
+            "out",
+            "he_names 0,0,2,efacaf|0,0,",
+        ),
+        (
+            "he_names2",
+            "UTF-8",
+            "WINDOWS-1255",
+            &[&[0xe0]],
+            64,
+            "out",
+            "he_names2 0,0,1,|0,0,d790",
+        ),
+    ];
+
+    fn hex_of(b: &[u8]) -> String {
+        use core::fmt::Write as _;
+        b.iter().fold(String::new(), |mut s, x| {
+            let _ = write!(s, "{x:02x}"); // a String takes every write
+            s
+        })
+    }
+
+    /// `errno` as the oracle prints it: its name after a -1, else 0.
+    fn errno_of(r: isize, e: i32) -> &'static str {
+        match (r, e) {
+            (-1, e) if e == EILSEQ => "EILSEQ",
+            (-1, e) if e == EINVAL => "EINVAL",
+            (-1, e) if e == E2BIG => "E2BIG",
+            (-1, _) => "other",
+            _ => "0",
+        }
+    }
+
+    /// glibc 2.39's iconv for CP1255 and CP1258 (`dlm/oracle/cp125x_harness.py`),
+    /// call by call and then the reset: every return, `errno`, byte read and
+    /// byte written -- the letters kept back across calls, and written, or
+    /// dropped, by the reset.
+    #[test]
+    fn cp1255_and_cp1258_are_glibcs() {
+        let mut failures = Vec::new();
+        for &(name, to, from, chunks, outsize, reset_kind, glibc) in GLIBC_CP125X {
+            let cd = open(to, from);
+            assert_ne!(cd, ICONV_OPEN_ERR, "{name}: {to} <- {from}");
+            let mut line = format!("{name} ");
+            for (k, chunk) in chunks.iter().enumerate() {
+                let (r, e, left, out) = call(cd, chunk, outsize);
+                if k > 0 {
+                    line.push(';');
+                }
+                line.push_str(&format!(
+                    "{r},{},{},{}",
+                    errno_of(r, e),
+                    chunk.len() - left,
+                    hex_of(&out)
+                ));
+            }
+            errno::set_errno(0);
+            if reset_kind == "out" {
+                let mut out = vec![0u8; outsize.max(1)];
+                let mut op = out.as_mut_ptr();
+                let mut ol = outsize;
+                let r = unsafe {
+                    iconv(
+                        cd,
+                        core::ptr::null_mut(),
+                        core::ptr::null_mut(),
+                        &raw mut op,
+                        &raw mut ol,
+                    )
+                } as isize;
+                let e = errno::get_errno();
+                out.truncate(outsize - ol);
+                line.push_str(&format!("|{r},{},{}", errno_of(r, e), hex_of(&out)));
+            } else {
+                let r = unsafe {
+                    iconv(
+                        cd,
+                        core::ptr::null_mut(),
+                        core::ptr::null_mut(),
+                        core::ptr::null_mut(),
+                        core::ptr::null_mut(),
+                    )
+                } as isize;
+                let e = errno::get_errno();
+                line.push_str(&format!("|{r},{},", errno_of(r, e)));
+            }
+            assert_eq!(iconv_close(cd), 0);
+            if line != glibc {
+                failures.push(format!("{name}:\n  glibc {glibc}\n  ours  {line}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Every byte either set decodes is written back as that byte, and every
+    /// decomposition's parts decode to what composes back into it -- the
+    /// tables agree with themselves, as glibc's do.
+    #[test]
+    fn cp1255_and_cp1258_round_trip() {
+        for set in [Combining::Cp1255, Combining::Cp1258] {
+            let table = match set {
+                Combining::Cp1255 => &crate::iconv_combining::CP1255_TO_UCS4,
+                Combining::Cp1258 => &crate::iconv_combining::CP1258_TO_UCS4,
+            };
+            for (k, &u) in table.iter().enumerate() {
+                if u == 0 {
+                    continue;
+                }
+                let byte = u8::try_from(k + 0x80).unwrap();
+                assert_eq!(
+                    encode_combining(set, u32::from(u)),
+                    Some(([byte, 0, 0], 1)),
+                    "{set:?} {byte:#04x} U+{u:04X}"
+                );
+            }
+        }
+        for &(composed, ..) in &crate::iconv_combining::CP1258_DECOMPOSE {
+            let (bytes, n) = encode_combining(Combining::Cp1258, u32::from(composed)).unwrap();
+            let mut held = 0;
+            let mut out = [0u8; 16];
+            let pass = decode_combining(Combining::Cp1258, &bytes[..n], &mut out, false, &mut held);
+            // A letter and a mark compose back at once; a character with a
+            // byte of its own (U+00C0 has 0xC0, which glibc's encoder finds
+            // first) decodes to itself, kept back in case a mark follows.
+            let got = if pass.wrote == 4 {
+                u32::from_ne_bytes(out[..4].try_into().unwrap())
+            } else {
+                held
+            };
+            // Not always the character itself: glibc's tables compose A8 EC
+            // to U+0385, which U+1FEE also decomposes into.  What holds is
+            // that the bytes are stable: what they decode to, they encode as.
+            assert_eq!(pass.read, n, "U+{composed:04X}");
+            assert_eq!(
+                encode_combining(Combining::Cp1258, got),
+                Some((bytes, n)),
+                "U+{composed:04X} -> U+{got:04X}"
+            );
+        }
+    }
+
+    /// The names glibc's gconv-modules gives the two.
+    #[test]
+    fn cp1255_and_cp1258_have_glibcs_names() {
+        for name in [
+            "CP1255",
+            "WINDOWS-1255",
+            "MS-HEBR",
+            "cp1255",
+            "CP1258",
+            "WINDOWS-1258",
+        ] {
+            let cd = open(name, "UTF-8");
+            assert_ne!(cd, ICONV_OPEN_ERR, "{name}");
+            assert_eq!(iconv_close(cd), 0);
         }
     }
 }

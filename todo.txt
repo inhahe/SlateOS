@@ -59035,12 +59035,14 @@ is already waiting, not whether the setter exists.
 
 - **iconv: glibc's other character sets** (posix/src/iconv.rs).  UTF-8,
   ASCII, ISO-8859-1, UTF-16, UTF-32, UCS-2, UCS-4, UNICODE, WCHAR_T, UTF-7
-  and UTF-7-IMAP, and glibc's 141 table-driven 8-bit sets
+  and UTF-7-IMAP, glibc's 141 table-driven 8-bit sets
   (posix/src/iconv_8bit.rs, generated from glibc's charmaps by
-  posix/tools/gen_iconv_8bit.py) convert as glibc 2.39's
+  posix/tools/gen_iconv_8bit.py), and CP1255 and CP1258
+  (posix/src/iconv_combining.rs, read out of glibc's cp1255.c and cp1258.c
+  by posix/tools/gen_iconv_combining.py) convert as glibc 2.39's
   (B-D-ICONV-HAD-THREE-CHARSETS); every other name is refused with EINVAL.
-  Next, by how often programs ask: the 8-bit sets glibc writes by hand --
-  CP1255 and CP1258 (combining marks: stateful), TCVN5712-1,
+  Next, by how often programs ask: the rest of the 8-bit sets glibc writes
+  by hand -- TCVN5712-1 (combining marks, as CP1258),
   ARMSCII-8, ISO_6937 and T.61 (two-byte diacritics), ISO646's national
   variants, and the rest of iconvdata/Makefile's `modules` that are neither
   generated nor multibyte; then the East Asian multibyte sets (EUC-JP,

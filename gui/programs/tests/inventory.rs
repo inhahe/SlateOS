@@ -469,3 +469,62 @@ fn section_4_the_types_left_without_a_default_have_none() {
         "the hex editor is to be offered for any file"
     );
 }
+
+// ---- section 5: file types ----
+
+/// The extensions the kernel knew and the toolkit did not are in the toolkit's
+/// table now, and the nine that wait on a decision are still out of it. The
+/// toolkit's own tests check each row's type; this checks the inventory's
+/// promise that they survived.
+#[test]
+fn section_5_the_kernels_extensions_reached_the_toolkit() {
+    use guitk::filetypes::{FileCategory, category_from_extension};
+    for ext in [
+        "a", "bat", "cc", "cmd", "cpio", "cxx", "diff", "epub", "gzip", "htm", "hxx", "jar", "lib",
+        "markdown", "mjs", "o", "patch", "psm1", "pyw", "text", "xsd", "xsl", "zstd",
+    ] {
+        assert_ne!(
+            category_from_extension(ext),
+            FileCategory::Unknown,
+            ".{ext} was carried into the toolkit and is not there"
+        );
+    }
+    for ext in [
+        "exe", "dll", "class", "wasm", "deb", "rpm", "db", "sqlite", "sqlite3",
+    ] {
+        assert_eq!(
+            category_from_extension(ext),
+            FileCategory::Unknown,
+            ".{ext} waits on a decision"
+        );
+    }
+}
+
+/// The kinds of file the kernel recognised by content, and the toolkit now
+/// does.
+#[test]
+fn section_5_the_kernels_signatures_reached_the_toolkit() {
+    use guitk::filetypes::detect_from_magic;
+    let mut tar = vec![0u8; 512];
+    tar[257..262].copy_from_slice(b"ustar");
+    let mut avi = b"RIFF\x24\x00\x00\x00AVI ".to_vec();
+    avi.extend_from_slice(&[0; 4]);
+    let cases: [(&[u8], &str); 9] = [
+        (b"\x7fELF\x02\x01\x01\x00", ".elf"),
+        (b"II*\x00\x08\x00\x00\x00", ".tiff"),
+        (b"\x28\xb5\x2f\xfd\x00\x00", ".zst"),
+        (b"\x04\x22\x4d\x18\x00\x00", ".lz4"),
+        (&tar, ".tar"),
+        (b"070701000000", ".cpio"),
+        (b"!<arch>\nfile.o", ".a"),
+        (b"MThd\x00\x00\x00\x06", ".mid"),
+        (&avi, ".avi"),
+    ];
+    for (header, want) in cases {
+        assert_eq!(
+            detect_from_magic(header).map(|info| info.extension),
+            Some(want),
+            "{want}"
+        );
+    }
+}

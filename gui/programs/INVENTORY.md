@@ -177,23 +177,49 @@ the system's `/usr/share/applications/mimeapps.list`.
 
 ## 5. File types
 
-**Extensions:** U4 (the toolkit's table) is where file types belong, and it
-lacks 33 that K4 and K5 knew. They are carried into `guitk::filetypes`:
+**Extensions:** U4 (the toolkit's table, `guitk::filetypes`) is where file types
+belong, and it lacked 33 that K4 and K5 knew. **Twenty-three are carried**,
+each with K4's type:
 
-`a`, `bat`, `cc`, `class`, `cmd`, `cpio`, `cxx`, `db`, `deb`, `diff`, `dll`,
-`epub`, `exe`, `gzip`, `htm`, `hxx`, `jar`, `lib`, `markdown`, `mjs`, `o`, `oga`,
-`patch`, `psm1`, `pyw`, `rpm`, `sqlite`, `sqlite3`, `text`, `wasm`, `xsd`, `xsl`,
-`zstd`.
+`a`, `bat`, `cc`, `cmd`, `cpio`, `cxx`, `diff`, `epub`, `gzip`, `htm`, `hxx`,
+`jar`, `lib`, `markdown`, `mjs`, `o`, `patch`, `psm1`, `pyw`, `text`, `xsd`,
+`xsl`, `zstd`.
 
-**Content signatures:** K4 recognised 20 kinds of file by their first bytes that
-the toolkit does not. Carried into the toolkit's signature table: ELF
-executables, Windows executables (`MZ`), SQLite databases, POSIX tar (`ustar` at
-257), Zstandard, LZ4, MIDI, TIFF (both byte orders), Windows icons, WebM, AVI,
-WebAssembly, Debian packages, `ar` archives, cpio archives. K4's remaining five
-were guesses from text (`application/json`, `application/xml`, `text/html`,
-`text/plain`, a `#!` script): the toolkit's `is_text_file` already makes the
-text-or-binary call, and a sniffed "HTML" or "JSON" from a file's first bytes is
-wrong often enough that the extension should win; not carried.
+**One, `oga` (Ogg audio), is held back** only because `apps/fileassoc`'s test of
+applying a program to the Music group counts the toolkit's audio types by hand
+("5 of 10"), and an eleventh would fail it; lane E is asked to derive the count
+from the table (`requests/c-e-a-test-that-counts-the-toolkits-audio-types.md`),
+and `oga` goes in when that lands.
+
+**Nine wait on a decision the toolkit had already recorded** (`known-issues.md`,
+the `filesearch` entry), and stay out, pinned by the toolkit's
+`the_kernels_types_this_table_waits_to_decide_are_still_absent`: `exe`, `dll`,
+`class`, `wasm`, `deb`, `rpm` -- programs and installers of other systems, which
+this one cannot run; the toolkit's `foreign_executables_are_absent_on_purpose`
+says to decide that first -- and `db`, `sqlite`, `sqlite3`, which need a
+"database" kind the category enum does not have.
+
+**Content signatures:** K4 recognised 20 kinds of file by their first bytes
+that the toolkit did not. **Nine kinds are carried** into the toolkit's
+signature table: ELF executables, TIFF (both byte orders), Zstandard, LZ4,
+POSIX tar (`ustar` at 257), cpio (its three ASCII forms), `ar` archives
+(static libraries), MIDI, and AVI. Not carried:
+
+| Kind | Why |
+|---|---|
+| Windows executables (`MZ`), SQLite, WebAssembly, Debian packages | the extensions they identify wait on the decision above; a signature for a type the table does not hold would answer "unknown" |
+| WebM | its signature is Matroska's (EBML); the two differ only in a document type deeper in the file than a fixed-offset pattern can see, and the toolkit already reads it as Matroska |
+| Windows icons (`00 00 01 00`) | four bytes, three of them zero, match far too much to name a file by; `.ico` still identifies an icon |
+| K4's five guesses from text (JSON, XML, HTML, plain text, `#!` scripts) | the toolkit's `is_text_file` makes the text-or-binary call, and "HTML" or "JSON" sniffed from a file's first bytes is wrong often enough that the extension should win |
+
+**Two defects in the toolkit's own table were found and fixed on the way:** a
+bare `RIFF` signature stood ahead of `WEBP` and answered WAV, so every WebP
+picture and every AVI video sniffed as audio (RIFF files are now told apart by
+their form type); and the ELF signature answered "unknown" though the table had
+held `.elf` as one of this system's own executables since 2026-09-16. The
+toolkit's extension enum (`FileExtension`, `parse_extension`), which lagged the
+table by a dozen rows and which nothing outside the file used, is gone: the
+signature table now names table rows directly.
 
 **Where K4 and U4 disagreed on a type's name**, the toolkit's spelling is the one
 the shared-mime-info database and IANA use, and it stays:

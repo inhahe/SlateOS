@@ -5,6 +5,7 @@
 //! overflow, and dark theme styling.
 
 use crate::event::{Key, KeyEvent};
+use crate::frame::Rect;
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
@@ -86,7 +87,10 @@ impl Default for TabWidth {
 // the role it always held.
 
 /// Height of the tab bar in pixels.
-const TAB_BAR_HEIGHT: f32 = 36.0;
+///
+/// Public because a caller that lays out around a bar -- the dock does, one
+/// bar per tab group -- has to know how much of its area the bar takes.
+pub const TAB_BAR_HEIGHT: f32 = 36.0;
 /// Padding inside each tab.
 const TAB_PADDING_H: f32 = 12.0;
 /// Size of the close button hit area.
@@ -97,6 +101,18 @@ const CLOSE_BUTTON_SIZE: f32 = 16.0;
 /// draw the label — and the two must agree or every tab is sized for a font it
 /// is not drawn in.
 const LABEL_FONT_SIZE: f32 = 13.0;
+
+/// Where one tab is drawn: its rectangle, and its close button's when it
+/// has one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabRect {
+    /// The tab's identifier.
+    pub id: u64,
+    /// The whole tab.
+    pub rect: Rect,
+    /// Its close button, inside `rect`; `None` for a tab that cannot close.
+    pub close: Option<Rect>,
+}
 
 /// Tab bar state and logic.
 ///
@@ -203,42 +219,61 @@ impl TabView {
         self.hover_close = close_hover;
     }
 
+    /// Where each tab is, for a bar whose top-left corner is `(bar_x, bar_y)`.
+    ///
+    /// The one statement of the bar's geometry: [`handle_click`](Self::handle_click)
+    /// asks it where the tabs are and [`render`](Self::render) draws them
+    /// where it says, so a click can never land on a tab drawn somewhere
+    /// else. A caller that needs more than a click -- a drag that picks a tab
+    /// up, a drop that inserts one between two others -- asks it too.
+    ///
+    /// Scrolled by the bar's scroll offset, so a tab scrolled out of view
+    /// has a rectangle outside the bar; clip against the bar before trusting
+    /// a hit.
+    #[must_use]
+    pub fn tab_rects(&self, bar_x: f32, bar_y: f32) -> Vec<TabRect> {
+        let mut current_x = bar_x - self.scroll_offset;
+        self.tabs
+            .iter()
+            .map(|tab| {
+                let tw = self.compute_tab_width(tab);
+                let rect = Rect::new(current_x, bar_y, tw, TAB_BAR_HEIGHT);
+                let close = tab.closeable.then(|| {
+                    Rect::new(
+                        current_x + tw - TAB_PADDING_H - CLOSE_BUTTON_SIZE,
+                        bar_y + (TAB_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0,
+                        CLOSE_BUTTON_SIZE,
+                        CLOSE_BUTTON_SIZE,
+                    )
+                });
+                current_x += tw;
+                TabRect {
+                    id: tab.id,
+                    rect,
+                    close,
+                }
+            })
+            .collect()
+    }
+
     /// Handle a mouse click at position (x, y) relative to the tab bar origin.
     pub fn handle_click(&mut self, x: f32, y: f32) -> Option<TabEvent> {
-        let bar_height = TAB_BAR_HEIGHT;
-        // Ignore clicks outside the bar vertically
-        if y < 0.0 || y > bar_height {
+        // Outside the bar vertically is outside every tab.
+        if !(0.0..TAB_BAR_HEIGHT).contains(&y) {
             return None;
         }
-
-        let click_x = x + self.scroll_offset;
-        let mut current_x: f32 = 0.0;
-
-        for tab in &self.tabs {
-            let tw = self.compute_tab_width(tab);
-            if click_x >= current_x && click_x < current_x + tw {
-                // Check if click is on close button
-                if tab.closeable {
-                    let close_x = current_x + tw - TAB_PADDING_H - CLOSE_BUTTON_SIZE;
-                    let close_y = (bar_height - CLOSE_BUTTON_SIZE) / 2.0;
-                    if click_x >= close_x
-                        && click_x <= close_x + CLOSE_BUTTON_SIZE
-                        && y >= close_y
-                        && y <= close_y + CLOSE_BUTTON_SIZE
-                    {
-                        return Some(TabEvent::CloseRequested(tab.id));
-                    }
-                }
-                // Regular tab selection
-                if self.active_id != Some(tab.id) {
-                    self.active_id = Some(tab.id);
-                    return Some(TabEvent::Selected(tab.id));
-                }
-                return None;
-            }
-            current_x += tw;
+        let hit = self
+            .tab_rects(0.0, 0.0)
+            .into_iter()
+            .find(|t| t.rect.contains(x, y))?;
+        if hit.close.is_some_and(|c| c.contains(x, y)) {
+            return Some(TabEvent::CloseRequested(hit.id));
         }
-        None
+        if self.active_id == Some(hit.id) {
+            return None;
+        }
+        self.active_id = Some(hit.id);
+        Some(TabEvent::Selected(hit.id))
     }
 
     /// Handle a keyboard event. Supports Ctrl+Tab and Ctrl+Shift+Tab for cycling.
@@ -308,10 +343,10 @@ impl TabView {
             height: bar_height,
         });
 
-        // Render each tab
-        let mut current_x = x - self.scroll_offset;
-        for tab in &self.tabs {
-            let tw = self.compute_tab_width(tab);
+        // Render each tab, where `tab_rects` says it is.
+        for (tab, place) in self.tabs.iter().zip(self.tab_rects(x, bar_y)) {
+            let current_x = place.rect.x;
+            let tw = place.rect.w;
             let is_active = self.active_id == Some(tab.id);
             let is_hovered = self.hover_tab == Some(tab.id);
 
@@ -348,7 +383,10 @@ impl TabView {
                 corner_radii,
             });
 
-            // Active tab accent underline/overline
+            // The active tab's mark, in the accent: it says which tab is
+            // selected, and the accent is the colour of selection. It was
+            // `palette.blue`, the accent's old default, which went on saying
+            // blue after the user chose another.
             if is_active {
                 let accent_y = match self.position {
                     TabPosition::Top => bar_y + bar_height - 2.0,
@@ -359,7 +397,7 @@ impl TabView {
                     y: accent_y,
                     width: tw,
                     height: 2.0,
-                    color: palette.blue,
+                    color: palette.accent,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -409,9 +447,8 @@ impl TabView {
             });
 
             // Close button
-            if tab.closeable {
-                let close_x = current_x + tw - TAB_PADDING_H - CLOSE_BUTTON_SIZE;
-                let close_y = bar_y + (bar_height - CLOSE_BUTTON_SIZE) / 2.0;
+            if let Some(close) = place.close {
+                let (close_x, close_y) = (close.x, close.y);
                 let close_color = if self.hover_close == Some(tab.id) {
                     palette.red
                 } else {
@@ -429,8 +466,6 @@ impl TabView {
                     overflow: TextOverflow::Clip,
                 });
             }
-
-            current_x += tw;
         }
 
         commands.push(RenderCommand::PopClip);
@@ -936,6 +971,124 @@ mod tests {
         // Content should start below the tab bar
         assert!((content_y - TAB_BAR_HEIGHT).abs() < f32::EPSILON);
         assert!((content_height - (300.0 - TAB_BAR_HEIGHT)).abs() < f32::EPSILON);
+    }
+
+    /// Three tabs of different label lengths, the middle one closeable no
+    /// longer, so the geometry has something to get wrong.
+    fn three_tabs() -> TabView {
+        let mut tv = TabView::new(TabPosition::Top);
+        tv.add_tab(Tab::new(1, "Short"));
+        let mut fixed = Tab::new(2, "A much longer label than the first");
+        fixed.closeable = false;
+        tv.add_tab(fixed);
+        tv.add_tab(Tab::new(3, "Third"));
+        tv
+    }
+
+    /// The tabs are drawn where `tab_rects` says they are, one after another
+    /// with nothing between them.
+    #[test]
+    fn the_tabs_are_drawn_where_the_geometry_says() {
+        let tv = three_tabs();
+        let places = tv.tab_rects(10.0, 20.0);
+        let (commands, _, _) = tv.render(&Palette::for_mode(false), 10.0, 20.0, 800.0, 300.0);
+        let backgrounds: Vec<(f32, f32)> = commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, width, height, ..
+                } if (*height - TAB_BAR_HEIGHT).abs() < f32::EPSILON && *width < 800.0 => {
+                    Some((*x, *width))
+                }
+                _ => None,
+            })
+            .collect();
+        let wanted: Vec<(f32, f32)> = places.iter().map(|t| (t.rect.x, t.rect.w)).collect();
+        assert_eq!(
+            backgrounds, wanted,
+            "a tab drawn somewhere its geometry is not"
+        );
+        for pair in places.windows(2) {
+            assert!((pair[0].rect.right() - pair[1].rect.x).abs() < f32::EPSILON);
+        }
+        assert!(
+            places[1].close.is_none(),
+            "a tab that cannot close has no button"
+        );
+        for t in [&places[0], &places[2]] {
+            let close = t.close.expect("a closeable tab has a button");
+            assert!(
+                t.rect.contains(close.x, close.y) && close.right() <= t.rect.right(),
+                "the close button is inside its tab: {t:?}"
+            );
+        }
+    }
+
+    /// A click lands on the tab the geometry puts under it, and on the close
+    /// button where the geometry puts that.
+    #[test]
+    fn a_click_is_answered_from_the_same_geometry() {
+        let mut tv = three_tabs();
+        for t in tv.tab_rects(0.0, 0.0) {
+            let (cx, cy) = (t.rect.x + 4.0, t.rect.y + t.rect.h / 2.0);
+            let got = tv.handle_click(cx, cy);
+            if t.id == 1 {
+                // Already active: a click on it changes nothing.
+                assert_eq!(got, None);
+            } else {
+                assert_eq!(got, Some(TabEvent::Selected(t.id)));
+            }
+            if let Some(close) = t.close {
+                assert_eq!(
+                    tv.handle_click(close.x + 1.0, close.y + 1.0),
+                    Some(TabEvent::CloseRequested(t.id))
+                );
+            }
+        }
+        assert_eq!(
+            tv.handle_click(5.0, TAB_BAR_HEIGHT + 1.0),
+            None,
+            "below the bar"
+        );
+    }
+
+    /// Scrolling moves every tab left by the offset, so a click still finds
+    /// the tab drawn under it.
+    #[test]
+    fn scrolling_moves_the_geometry_with_the_drawing() {
+        let mut tv = three_tabs();
+        let before = tv.tab_rects(0.0, 0.0);
+        tv.set_scroll_offset(30.0);
+        let after = tv.tab_rects(0.0, 0.0);
+        for (b, a) in before.iter().zip(&after) {
+            assert!((b.rect.x - 30.0 - a.rect.x).abs() < f32::EPSILON);
+        }
+        let second = after[1].rect;
+        assert_eq!(
+            tv.handle_click(second.x + 2.0, 10.0),
+            Some(TabEvent::Selected(2))
+        );
+    }
+
+    /// The selected tab is marked in the accent, whichever the user chose.
+    #[test]
+    fn the_active_tab_is_marked_in_the_accent() {
+        let mut palette = Palette::for_mode(false);
+        palette.accent = crate::color::Color::from_hex(0x00C0_3070);
+        let tv = three_tabs();
+        let (commands, _, _) = tv.render(&palette, 0.0, 0.0, 800.0, 300.0);
+        let marks: Vec<_> = commands
+            .iter()
+            .filter(|c| {
+                matches!(c, RenderCommand::FillRect { height, color, .. }
+                    if (*height - 2.0).abs() < f32::EPSILON && *color == palette.accent)
+            })
+            .collect();
+        assert_eq!(
+            marks.len(),
+            1,
+            "one tab is active, and its mark is the accent"
+        );
     }
 
     #[test]

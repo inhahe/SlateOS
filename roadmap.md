@@ -1968,6 +1968,15 @@ live.
   Linux (90-181 s, about 2.4% of a boot test, under load), and it has caught
   real cross-crate breaks; option A is in force, and nothing is added.
 
+- `[C]` **Dockable panels** -- done 2026-09-28. `guitk::dock`: an
+  application's panels in tab groups, the groups in nested splits, and the
+  user rearranging all of it by dragging tabs. A tab joins another group's
+  bar, splits a group on any side, or takes a column or row of the whole
+  dock. Panels open and close from a menu, the arrangement saves to one line
+  of a settings file and reads back even after a panel kind is dropped, and
+  the tab bars are the toolkit's own `TabView`, whose tab geometry became
+  public for it. **Lane E:** `requests/c-e-the-toolkit-has-a-dock.md`.
+
 - `[-]` `[C]` **The image carries the third-party notices its licences
   require** -- lane C's part done 2026-09-28 (`design-decisions.md` §1433).
   `scripts/gather-notices.py` collects every notice in the tree into one folder:

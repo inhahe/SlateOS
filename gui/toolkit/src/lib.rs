@@ -35,6 +35,7 @@ pub mod dialog;
 pub mod dirtree;
 pub mod disabled;
 pub mod dnd;
+pub mod dock;
 pub mod dropdown;
 pub mod event;
 pub mod filetypes;

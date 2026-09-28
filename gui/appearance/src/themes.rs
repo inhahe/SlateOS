@@ -65,6 +65,14 @@
 //! against one set of grounds, and mixing them into the other mode's would be
 //! neither.
 //!
+//! Two more pairs of sections colour what the desktop draws for programs:
+//! `terminal` and `terminal-light`, a terminal's sixteen colours and its own
+//! three (`guitk::palette::TERMINAL_ROLES`), and `syntax` and `syntax-light`,
+//! the colours of code in a code editor, one per kind of thing a highlighter
+//! tells apart -- `keyword`, `string`, `comment` and the rest
+//! (`guitk::highlight::Highlight`). Both default to the theme's own hues, so a
+//! theme that sets only `colors` still dresses its terminals and its code.
+//!
 //! # What a theme cannot do
 //!
 //! - **Choose the accent.** That is the user's own choice, made in Settings; a
@@ -98,7 +106,7 @@
 //! [`AppearanceSettings::read_from`]: crate::AppearanceSettings::read_from
 
 use guitk::color::Color;
-use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors};
+use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors, syntax_roles};
 use guitk::widget_style::WidgetStyle;
 use std::collections::BTreeMap;
 use std::env;
@@ -147,6 +155,13 @@ pub const TERMINAL_DARK_SECTION: &str = "terminal";
 
 /// The section holding a terminal's light-mode colours.
 pub const TERMINAL_LIGHT_SECTION: &str = "terminal-light";
+
+/// The section holding the dark-mode colours of code: one per kind of thing a
+/// highlighter tells apart (`guitk::palette::syntax_roles`).
+pub const SYNTAX_DARK_SECTION: &str = "syntax";
+
+/// The section holding the light-mode colours of code.
+pub const SYNTAX_LIGHT_SECTION: &str = "syntax-light";
 
 /// The section holding a theme's widget style: the shapes of the toolkit's
 /// controls ([`WidgetTheme`]). Named as the axis is in `meta.supports`.
@@ -380,6 +395,8 @@ pub fn parse(text: &str) -> ThemeFile {
         light: read_colors(&doc, LIGHT_SECTION, &mut warnings),
         terminal_dark: read_terminal(&doc, TERMINAL_DARK_SECTION, &mut warnings),
         terminal_light: read_terminal(&doc, TERMINAL_LIGHT_SECTION, &mut warnings),
+        syntax_dark: read_syntax(&doc, SYNTAX_DARK_SECTION, &mut warnings),
+        syntax_light: read_syntax(&doc, SYNTAX_LIGHT_SECTION, &mut warnings),
     };
     let widget_style = widgets::read(&doc, &mut warnings);
     ThemeFile {
@@ -485,6 +502,11 @@ fn read_terminal(
     warnings: &mut Warnings,
 ) -> BTreeMap<String, Color> {
     read_section(doc, section, &TERMINAL_ROLES, "terminal colour", warnings)
+}
+
+/// The colours one `syntax` section sets, by kind of code.
+fn read_syntax(doc: &Document, section: &str, warnings: &mut Warnings) -> BTreeMap<String, Color> {
+    read_section(doc, section, &syntax_roles(), "kind of code", warnings)
 }
 
 /// The colours one section sets, by name: `roles` are the names it may use,
@@ -1602,6 +1624,18 @@ colors:
                 Palette::for_mode(light).terminal,
                 "terminal, light = {light}"
             );
+            // And its syntax sections, on the same terms.
+            let syntax = file.colors.syntax_roles(light);
+            let missing: Vec<&str> = syntax_roles()
+                .into_iter()
+                .filter(|role| !syntax.contains_key(*role))
+                .collect();
+            assert_eq!(missing, Vec::<&str>::new(), "syntax, light = {light}");
+            assert_eq!(
+                themed.syntax,
+                Palette::for_mode(light).syntax,
+                "syntax, light = {light}"
+            );
         }
     }
 
@@ -1731,6 +1765,77 @@ colors:
             file.warnings
         );
         assert!(file.colors.terminal_dark.is_empty());
+    }
+
+    // ---- code ----
+
+    /// **A theme's `syntax` section sets the kinds it names**, the rest
+    /// follow the theme's hues, and light mode reads `syntax-light` -- and
+    /// whatever a theme chooses, code is drawn legibly.
+    #[test]
+    fn a_themes_syntax_section_sets_its_kinds_and_the_rest_follow_its_hues() {
+        use guitk::highlight::Highlight;
+        use guitk::theme::contrast_ratio;
+        let file = parse(
+            "colors:\n  mauve: \"#ff00ff\"\n  base: \"#101010\"\n\
+             syntax:\n  string: \"#00ff00\"\n  comment: \"#141414\"\n",
+        );
+        assert_eq!(file.warnings, Vec::<String>::new());
+        let p = Palette::for_theme(false, &file.colors);
+        assert_eq!(
+            p.syntax.get(Highlight::Keyword),
+            Color::rgb(0xff, 0, 0xff),
+            "keywords did not follow the theme's mauve"
+        );
+        assert_eq!(p.syntax.get(Highlight::String), Color::rgb(0, 0xff, 0));
+        // A comment nearly the page's own colour is held to the floor when
+        // drawn, not when read.
+        assert_eq!(
+            p.syntax.get(Highlight::Comment),
+            Color::rgb(0x14, 0x14, 0x14)
+        );
+        for kind in Highlight::ALL {
+            let ink = p.syntax_ink(kind);
+            assert!(
+                contrast_ratio(ink, p.base) >= guitk::palette::TEXT_CONTRAST_FLOOR,
+                "{kind} is unreadable: {ink:?} on {:?}",
+                p.base
+            );
+        }
+
+        let both = parse(
+            "colors:\n  red: \"#ff0000\"\ncolors-light:\n  red: \"#aa0000\"\n\
+             syntax:\n  keyword: \"#ff8800\"\nsyntax-light:\n  keyword: \"#884400\"\n",
+        );
+        assert_eq!(both.warnings, Vec::<String>::new());
+        assert_eq!(
+            Palette::for_theme(true, &both.colors)
+                .syntax
+                .get(Highlight::Keyword),
+            Color::rgb(0x88, 0x44, 0)
+        );
+        assert_eq!(
+            Palette::for_theme(false, &both.colors)
+                .syntax
+                .get(Highlight::Keyword),
+            Color::rgb(0xff, 0x88, 0)
+        );
+    }
+
+    /// **A name that is not a kind of code is reported**, and changes
+    /// nothing.
+    #[test]
+    fn a_syntax_name_that_is_no_kind_is_reported() {
+        let file = parse("syntax:\n  keywords: \"#800080\"\n  accent: \"#ff0000\"\n");
+        assert_eq!(file.warnings.len(), 2, "{:?}", file.warnings);
+        assert!(
+            file.warnings
+                .iter()
+                .all(|w| w.contains("no kind of code called")),
+            "{:?}",
+            file.warnings
+        );
+        assert!(file.colors.syntax_dark.is_empty());
     }
 
     // ---- where a user's themes are ----

@@ -46,6 +46,7 @@ pub mod fontdb;
 pub mod frame;
 pub mod grab;
 pub mod grid;
+pub mod highlight;
 pub mod history;
 pub mod idseq;
 pub mod layout;

@@ -171492,3 +171492,35 @@ old code.
 **Still true:** on a Windows host without the symbolic-link privilege a link
 cannot be *copied* -- the one action fails and says why, and a move leaves
 that link where it was. The target OS makes links like any unix.
+
+### [E] Thirteen fields in nine applications are read and never filled, so the features behind them cannot be reached -- 2026-09-27
+
+**Status:** OPEN -- found by `scripts/find-options-only-emptied.py` the day it
+was written; each row below is fixed or answered in that script's `KNOWN`
+table as it is worked through.
+
+**In short:** each of these is an `Option` the program reads -- to draw
+something, or to decide what a key does -- and only ever clears. Nothing sets
+it, so whatever it would show or allow never happens. It is the shape
+`apps/kanban` had with `selected_card`, where it made every card operation
+unreachable; here the losses are smaller and more scattered.
+
+| App | Field | What cannot happen |
+|---|---|---|
+| `diagram` | `rect_select_start`, `rect_select_end` | dragging a box to select several shapes: the rectangle is drawn from these and nothing starts one |
+| `filediff` | `dir_compare` | comparing two folders: the view draws a result nothing produces |
+| `filesearch` | `extension_filter` (the tests set it), `path_contains` | filtering results by extension or by a folder in the path |
+| `ircclient` | `password` | joining a server that wants a password (`PASS`) |
+| `magnifier` | `picked` (the tests set it) | picking a colour: the swatch and its values are drawn from it |
+| `paint` | `active_slider` | dragging the colour sliders |
+| `screenrecorder` | `active_annotation_tool`, `current_annotation`, `hovered_sidebar` | annotating a recording, and the sidebar's hover |
+| `videoplayer` | `audio_preferred_lang` | choosing an audio language: the preferences show "Any" for ever |
+| `whiteboard` | `marquee` | dragging a box to select strokes |
+
+**Why the tests did not notice:** where a test covers the feature it sets the
+field itself first (two of the rows), which is the whole defect in miniature.
+
+**The fix, per row:** give the field its writer -- the drag, the key or the
+control the rest of the feature already assumes -- with a test that reaches it
+the way a user does, then remove the row from this table; or, where the
+feature should not exist, remove the field and what reads it.
